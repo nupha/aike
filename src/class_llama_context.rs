@@ -14,7 +14,7 @@ use zuqe::{
 
 use crate::{
     USER_CLASS_DEFS,
-    class_llama_sampler::{SamplerConfig, get_sampler_config},
+    class_llama_sampler::{SamplerId, get_sampler_id, get_sampler_spec_by_id},
     worker::WorkerPool,
 };
 
@@ -92,16 +92,16 @@ impl LlamaContextState {
     fn sample_token(
         &self,
         logits: i32,
-        sampler_config: SamplerConfig,
+        sampler_spec: crate::class_llama_sampler::SamplerSpec,
         params_opt: Option<SamplingParams>,
     ) -> Result<i32, String> {
         self.with_ctx_mut(|llm_ctx| {
             let sampler = SamplerChain::new_from_vocab(
-                sampler_config.vocab_ptr as *const llama_cpp_ffi::llama_vocab,
-                sampler_config.ctx_train,
+                sampler_spec.vocab_ptr as *const llama_cpp_ffi::llama_vocab,
+                sampler_spec.ctx_train,
                 false,
             );
-            for kind in &sampler_config.kinds {
+            for kind in &sampler_spec.steps {
                 sampler.add_sampler(kind);
             }
             let token = sampler.sample_with_params(llm_ctx, logits, params_opt.as_ref());
@@ -288,7 +288,7 @@ fn sample(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     let logits = cc.arg(0).to_number(ctx)?.to_i32();
     let s = cc.arg(1);
-    let sampler_config = get_sampler_config(ctx, &s)?;
+    let sampler_id: SamplerId = get_sampler_id(ctx, &s)?;
 
     let mut params_opt: Option<SamplingParams> = None;
     if cc.length() > 2 {
@@ -351,7 +351,8 @@ fn sample(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let tx_timeout = tx.clone();
     if let Err(e) = WorkerPool::global().submit(
         move || {
-            let res = state.sample_token(logits, sampler_config, params_opt);
+            let res = get_sampler_spec_by_id(sampler_id)
+                .and_then(|sampler_spec| state.sample_token(logits, sampler_spec, params_opt));
             let _ = tx_submit.send(res);
         },
         Some(move || {
