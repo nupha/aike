@@ -255,9 +255,9 @@ fn decode(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     }
 
     let tokens = data.into_owned();
-    let (promise, tx) = Promise::create_from_sender(
+    let (promise, tx) = Promise::create_from_sender::<Result<Option<i32>, String>>(
         ctx,
-        |cx, payload: Result<Option<i32>, String>| -> JSResult {
+        |cx, payload| -> JSResult {
             match payload {
                 Ok(Some(idx)) => Ok(idx.into()),
                 Ok(None) => Ok(JSValue::NULL),
@@ -271,7 +271,7 @@ fn decode(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     let tx_submit = tx.clone();
     let tx_timeout = tx.clone();
-    if let Err(e) = WorkerPool::global().submit(
+    if let Err(e) = WorkerPool::global().add_job(
         move || {
             let res = state.decode_tokens(tokens, n_past, logits_last);
             let _ = tx_submit.send(res);
@@ -341,7 +341,7 @@ fn sample(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     }
 
     let (promise, tx) =
-        Promise::create_from_sender(ctx, |cx, payload: Result<i32, String>| -> JSResult {
+        Promise::create_from_sender::<Result<i32, String>>(ctx, |cx, payload| -> JSResult {
             match payload {
                 Ok(token) => Ok(token.into()),
                 Err(e) => {
@@ -353,7 +353,7 @@ fn sample(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     let tx_submit = tx.clone();
     let tx_timeout = tx.clone();
-    if let Err(e) = WorkerPool::global().submit(
+    if let Err(e) = WorkerPool::global().add_job(
         move || {
             let res = get_sampler_spec_by_id(sampler_id).and_then(|sampler_spec| {
                 state.sample_token(sampler_id, logits, sampler_spec, params_opt)
@@ -387,7 +387,7 @@ fn reset(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     let tx_submit = tx.clone();
     let tx_timeout = tx.clone();
-    if let Err(e) = WorkerPool::global().submit(
+    if let Err(e) = WorkerPool::global().add_job(
         move || {
             let res = state.reset();
             let _ = tx_submit.send(res);
@@ -422,7 +422,7 @@ fn get_stats(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     let tx_submit = tx.clone();
     let tx_timeout = tx.clone();
-    if let Err(e) = WorkerPool::global().submit(
+    if let Err(e) = WorkerPool::global().add_job(
         move || {
             let res = state.get_stats();
             let _ = tx_submit.send(res);
@@ -451,7 +451,7 @@ fn dispose(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     let tx_submit = tx.clone();
     let tx_timeout = tx.clone();
-    if let Err(_e) = WorkerPool::global().submit(
+    if let Err(_e) = WorkerPool::global().add_job(
         move || {
             state.dispose();
             let _ = tx_submit.send(Ok(()));

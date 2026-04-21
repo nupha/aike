@@ -167,15 +167,15 @@ impl WorkerPool {
         })
     }
 
-    pub(crate) fn submit<F, T>(&self, job: F, on_timeout: Option<T>) -> Result<(), &'static str>
+    pub(crate) fn add_job<F, T>(&self, job: F, on_timeout: Option<T>) -> Result<(), &'static str>
     where
         F: FnOnce() + Send + 'static,
         T: FnOnce() + Send + 'static,
     {
-        self.submit_boxed(Box::new(job), on_timeout.map(|t| Box::new(t) as Job))
+        self.add_job_internal(Box::new(job), on_timeout.map(|t| Box::new(t) as Job))
     }
 
-    fn submit_boxed(&self, job: Job, on_timeout: Option<Job>) -> Result<(), &'static str> {
+    fn add_job_internal(&self, job: Job, on_timeout: Option<Job>) -> Result<(), &'static str> {
         let mut st = self.inner.state.lock().unwrap();
 
         let mut job = match try_dispatch_to_idle_worker(&mut st, job) {
