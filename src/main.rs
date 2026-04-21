@@ -11,6 +11,7 @@ mod global;
 mod mod_llama;
 mod mod_os;
 mod mod_std;
+mod worker;
 
 use std::{io::Write, process::ExitCode};
 

@@ -1,7 +1,7 @@
 use std::{cell::Cell, ffi::c_void};
 
 use linkme::distributed_slice;
-use llama_cpp_ffi::{SamplerChain, SamplerKind};
+use llama_cpp_ffi::{SamplerKind, SamplingParams};
 use zuqe::{
     CallContext, ClassDef, ClassID, FieldDef, IntOrFloat, JS_PROP_ENUMERABLE, JSResult, JSValue,
     Object, Runtime, RuntimeImpl, ScopedContext,
@@ -9,10 +9,18 @@ use zuqe::{
 
 use crate::{USER_CLASS_DEFS, class_llama_model::get_llama_model};
 
-pub(super) fn get_sampler<'a>(
+#[derive(Clone, Default)]
+pub(super) struct SamplerConfig {
+    pub kinds: Vec<SamplerKind>,
+    pub defaults: SamplingParams,
+    pub vocab_ptr: usize,
+    pub ctx_train: i32,
+}
+
+pub(super) fn get_sampler_config(
     ctx: &mut ScopedContext,
-    val: &'a JSValue,
-) -> Result<&'a SamplerChain<'a>, i32> {
+    val: &JSValue,
+) -> Result<SamplerConfig, i32> {
     let opaque = val
         .retrive_object_payload(ctx, JSSamplerChain::class_id())?
         .other()
@@ -20,7 +28,7 @@ pub(super) fn get_sampler<'a>(
         .opaque();
 
     if !opaque.is_null() {
-        Ok(unsafe { &*opaque.cast::<SamplerChain>() })
+        Ok(unsafe { (&*opaque.cast::<SamplerConfig>()).clone() })
     } else {
         ctx.throw_type_error("invalid Sampler object");
         Err(-1)
@@ -30,8 +38,12 @@ pub(super) fn get_sampler<'a>(
 pub fn js_model_createSamplerChain(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let model = get_llama_model(ctx, &this)?;
-
-    let sampler = SamplerChain::new(model, false);
+    let mut config = SamplerConfig {
+        kinds: Vec::new(),
+        defaults: SamplingParams::default(),
+        vocab_ptr: model.vocab() as usize,
+        ctx_train: model.n_ctx_train(),
+    };
 
     if cc.length() > 0 {
         let arr = cc.arg(0).as_object_Array().copied().ok_or_else(|| {
@@ -110,7 +122,9 @@ pub fn js_model_createSamplerChain(ctx: &mut ScopedContext, cc: CallContext) -> 
                             }
                         }
 
-                        sampler.add_sampler(&SamplerKind::Penalties {
+                        config.defaults.repeat_penalty_window = Some(repeat_last_n);
+                        config.defaults.repeat_penalty = Some(repeat_penalty);
+                        config.kinds.push(SamplerKind::Penalties {
                             repeat_last_n,
                             repeat_penalty,
                             frequency_penalty,
@@ -126,7 +140,8 @@ pub fn js_model_createSamplerChain(ctx: &mut ScopedContext, cc: CallContext) -> 
                                 -1
                             })?
                             .to_i32();
-                        sampler.add_sampler(&SamplerKind::TopK(d));
+                        config.defaults.top_k = Some(d);
+                        config.kinds.push(SamplerKind::TopK(d));
                     }
                     "top-p" => {
                         let d = o
@@ -136,8 +151,9 @@ pub fn js_model_createSamplerChain(ctx: &mut ScopedContext, cc: CallContext) -> 
                                 ctx.throw_type_error("invalid p");
                                 -1
                             })?
-                            .to_i32();
-                        sampler.add_sampler(&SamplerKind::TopK(d));
+                            .to_f64() as f32;
+                        config.defaults.top_p = Some(d);
+                        config.kinds.push(SamplerKind::TopP(d));
                     }
                     "temperature" => {
                         let dyn_range = 0.0;
@@ -151,7 +167,8 @@ pub fn js_model_createSamplerChain(ctx: &mut ScopedContext, cc: CallContext) -> 
                             })?
                             .to_f64() as f32;
 
-                        sampler.add_sampler(&SamplerKind::Temperature {
+                        config.defaults.temperature = Some(temp);
+                        config.kinds.push(SamplerKind::Temperature {
                             temp,
                             dyn_range,
                             dyn_exponent,
@@ -169,17 +186,26 @@ pub fn js_model_createSamplerChain(ctx: &mut ScopedContext, cc: CallContext) -> 
         }
     }
 
-    sampler.add_sampler(&SamplerKind::Dist(0));
+    config.kinds.push(SamplerKind::Dist(0));
 
-    let mut obj = JSSamplerChain::new_instance(ctx, sampler)?;
+    let mut obj = JSSamplerChain::new_instance(ctx, config)?;
     obj.define_property_value_str(ctx, "model", this, JS_PROP_ENUMERABLE)?;
 
     Ok(obj.into())
 }
 
 fn add_penalties(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let this = cc.this();
-    let sampler = get_sampler(ctx, &this).unwrap();
+    let mut this = cc.this();
+    let opaque = this
+        .retrive_object_payload_mut(ctx, JSSamplerChain::class_id())?
+        .other_mut()
+        .unwrap()
+        .opaque();
+    if opaque.is_null() {
+        ctx.throw_type_error("invalid Sampler object");
+        return Err(-1);
+    }
+    let config = unsafe { &mut *opaque.cast::<SamplerConfig>() };
 
     let mut repeat_last_n = 64_i32;
     let mut repeat_penalty = 1.1;
@@ -246,7 +272,9 @@ fn add_penalties(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         }
     }
 
-    sampler.add_sampler(&SamplerKind::Penalties {
+    config.defaults.repeat_penalty_window = Some(repeat_last_n);
+    config.defaults.repeat_penalty = Some(repeat_penalty);
+    config.kinds.push(SamplerKind::Penalties {
         repeat_last_n,
         repeat_penalty,
         frequency_penalty,
@@ -260,17 +288,28 @@ const TOP_K: i32 = 1;
 const TOP_P: i32 = 2;
 
 fn add_top_k_p(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let this = cc.this();
-    let sampler = get_sampler(ctx, &this).unwrap();
+    let mut this = cc.this();
+    let opaque = this
+        .retrive_object_payload_mut(ctx, JSSamplerChain::class_id())?
+        .other_mut()
+        .unwrap()
+        .opaque();
+    if opaque.is_null() {
+        ctx.throw_type_error("invalid Sampler object");
+        return Err(-1);
+    }
+    let config = unsafe { &mut *opaque.cast::<SamplerConfig>() };
 
     let d = cc.arg(0).to_number(ctx)?.to_i32();
     match cc.magic() {
         TOP_K => {
-            sampler.add_sampler(&SamplerKind::TopK(d as _));
-            sampler.add_sampler(&SamplerKind::Dist(0));
+            config.defaults.top_k = Some(d);
+            config.kinds.push(SamplerKind::TopK(d as _));
+            config.kinds.push(SamplerKind::Dist(0));
         }
         TOP_P => {
-            sampler.add_sampler(&SamplerKind::TopP(d as f32));
+            config.defaults.top_p = Some(d as f32);
+            config.kinds.push(SamplerKind::TopP(d as f32));
         }
         _ => {
             unreachable!()
@@ -281,11 +320,21 @@ fn add_top_k_p(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 }
 
 fn add_temperature(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let this = cc.this();
-    let sampler = get_sampler(ctx, &this).unwrap();
+    let mut this = cc.this();
+    let opaque = this
+        .retrive_object_payload_mut(ctx, JSSamplerChain::class_id())?
+        .other_mut()
+        .unwrap()
+        .opaque();
+    if opaque.is_null() {
+        ctx.throw_type_error("invalid Sampler object");
+        return Err(-1);
+    }
+    let config = unsafe { &mut *opaque.cast::<SamplerConfig>() };
 
     let d = cc.arg(0).to_number(ctx)?.to_f64();
-    sampler.add_sampler(&SamplerKind::Temperature {
+    config.defaults.temperature = Some(d as f32);
+    config.kinds.push(SamplerKind::Temperature {
         temp: d as f32,
         dyn_range: 1.0,
         dyn_exponent: 1.0,
@@ -306,7 +355,7 @@ pub struct JSSamplerChain;
 impl JSSamplerChain {
     fn handle_dispose(_: &mut RuntimeImpl, opaque: *mut c_void, _: usize) {
         debug_assert!(!opaque.is_null());
-        drop(unsafe { Box::from_raw(opaque.cast::<SamplerChain>()) });
+        drop(unsafe { Box::from_raw(opaque.cast::<SamplerConfig>()) });
     }
 
     thread_local! {
@@ -329,13 +378,13 @@ impl JSSamplerChain {
         Self::CLASS_ID.with(|x| x.get())
     }
 
-    pub fn new_instance(ctx: &mut ScopedContext, sampler: SamplerChain) -> Result<Object, i32> {
+    pub fn new_instance(ctx: &mut ScopedContext, config: SamplerConfig) -> Result<Object, i32> {
         let class_id = Self::class_id();
-        let opaque = Box::into_raw(Box::new(sampler)).cast::<c_void>();
+        let opaque = Box::into_raw(Box::new(config)).cast::<c_void>();
         ctx.create_class_instance_with_opaque(class_id, opaque)
             .map_err(|e| {
                 let p = e.other().unwrap();
-                let _ = unsafe { Box::from_raw(p.opaque().cast::<SamplerChain>()) };
+                let _ = unsafe { Box::from_raw(p.opaque().cast::<SamplerConfig>()) };
                 -1
             })
     }
