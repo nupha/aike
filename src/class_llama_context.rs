@@ -9,7 +9,8 @@ use linkme::distributed_slice;
 use llama_cpp_ffi::{LlamaContext, SamplingParams};
 use zuqe::{
     CallContext, ClassDef, ClassID, FieldDef, IntOrFloat, JSResult, JSValue, Object, Runtime,
-    ScopedContext, builtins::promise::Promise,
+    ScopedContext,
+    builtins::{promise::Promise, typed_array::TypedArray},
 };
 
 use crate::{
@@ -109,6 +110,10 @@ impl LlamaContextWrap {
             llm_ctx.clear_memory(true);
             Ok(())
         })
+    }
+
+    fn embed_tokens(&self, tokens: Vec<i32>) -> Result<Vec<f32>, String> {
+        self.with_ctx_mut(|llm_ctx| llm_ctx.embed_tokens(&tokens, 0))
     }
 
     fn get_stats(&self) -> Result<ContextStatsData, String> {
@@ -436,6 +441,66 @@ fn get_stats(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     Ok(promise.into())
 }
 
+fn embed_tokens(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let mut this = cc.this();
+    let state = get_llama_context_wrap(ctx, &mut this)?;
+    let arg0 = cc.arg(0);
+    let data: Cow<'_, [i32]> = if let Some(ta) = arg0.as_object_TypedArray() {
+        if let Some(lst) = ta.as_i32_array() {
+            Cow::Borrowed(lst)
+        } else {
+            ctx.throw_type_error("expect Int32Array object");
+            return Err(-1);
+        }
+    } else if let Some(arr) = arg0.as_object_Array()
+        && arr.is_fast_array()
+    {
+        let a = arr.payload();
+        let len = a.len();
+        let mut lst = Vec::<i32>::with_capacity(len);
+        for v in a.values() {
+            let v = v.to_number(ctx)?.to_i32();
+            lst.push(v);
+        }
+        Cow::Owned(lst)
+    } else if let JSValue::Int(tt) = arg0 {
+        Cow::Borrowed(&[tt])
+    } else {
+        ctx.throw_type_error("invalid input token");
+        return Err(-1);
+    };
+
+    if data.is_empty() {
+        ctx.throw_type_error("tokens cannot be empty");
+        return Err(-1);
+    }
+    let tokens = data.into_owned();
+
+    let (promise, tx) =
+        Promise::create_from_sender::<Result<Vec<f32>, String>>(ctx, |cx, payload| -> JSResult {
+            match payload {
+                Ok(v) => TypedArray::create_from_vec_f32(cx, v).map(JSValue::from),
+                Err(e) => {
+                    cx.throw_internal_error(&e);
+                    Err(-1)
+                }
+            }
+        })?;
+    let tx_submit = tx.clone();
+    let tx_timeout = tx.clone();
+    if let Err(e) = WorkerPool::global().add_job(
+        move || {
+            let _ = tx_submit.send(state.embed_tokens(tokens));
+        },
+        Some(move || {
+            let _ = tx_timeout.send(Err("AcquireTimeout".to_string()));
+        }),
+    ) {
+        let _ = tx.send(Err(e.to_string()));
+    }
+    Ok(promise.into())
+}
+
 fn dispose(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut this = cc.this();
     let state = get_llama_context_wrap(ctx, &mut this)?;
@@ -473,6 +538,7 @@ const CLASS_CONTEXT_PROTO: &[FieldDef] = &[
     FieldDef::CALL("decode", 2, decode, 0),
     FieldDef::CALL("sample", 2, sample, 0),
     FieldDef::CALL("reset", 0, reset, 0),
+    FieldDef::CALL("embedTokens", 1, embed_tokens, 0),
     FieldDef::CALL("getStats", 0, get_stats, 0),
     FieldDef::CALL("dispose", 0, dispose, 0),
 ];
