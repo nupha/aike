@@ -6,7 +6,7 @@ use std::{
 };
 
 use linkme::distributed_slice;
-use llama_cpp_ffi::{LlamaContext, SamplerChain, SamplingParams};
+use llama_cpp_ffi::{LlamaContext, SamplingParams};
 use zuqe::{
     CallContext, ClassDef, ClassID, FieldDef, IntOrFloat, JSResult, JSValue, Object, Runtime,
     RuntimeImpl, ScopedContext, builtins::promise::Promise,
@@ -91,20 +91,22 @@ impl LlamaContextState {
 
     fn sample_token(
         &self,
+        sampler_id: SamplerId,
         logits: i32,
         sampler_spec: crate::class_llama_sampler::SamplerSpec,
         params_opt: Option<SamplingParams>,
     ) -> Result<i32, String> {
         self.with_ctx_mut(|llm_ctx| {
-            let sampler = SamplerChain::new_from_vocab(
-                sampler_spec.vocab_ptr as *const llama_cpp_ffi::llama_vocab,
+            let token = crate::worker::sample_with_cached_sampler(
+                llm_ctx,
+                sampler_id,
+                sampler_spec.rev,
+                sampler_spec.vocab_ptr,
                 sampler_spec.ctx_train,
-                false,
-            );
-            for kind in &sampler_spec.steps {
-                sampler.add_sampler(kind);
-            }
-            let token = sampler.sample_with_params(llm_ctx, logits, params_opt.as_ref());
+                &sampler_spec.steps,
+                logits,
+                params_opt.as_ref(),
+            )?;
             Ok(token)
         })
     }
@@ -351,8 +353,9 @@ fn sample(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let tx_timeout = tx.clone();
     if let Err(e) = WorkerPool::global().submit(
         move || {
-            let res = get_sampler_spec_by_id(sampler_id)
-                .and_then(|sampler_spec| state.sample_token(logits, sampler_spec, params_opt));
+            let res = get_sampler_spec_by_id(sampler_id).and_then(|sampler_spec| {
+                state.sample_token(sampler_id, logits, sampler_spec, params_opt)
+            });
             let _ = tx_submit.send(res);
         },
         Some(move || {

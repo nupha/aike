@@ -11,13 +11,17 @@ use zuqe::{
     Object, Runtime, RuntimeImpl, ScopedContext,
 };
 
-use crate::{USER_CLASS_DEFS, class_llama_model::get_llama_model};
+use crate::{
+    USER_CLASS_DEFS,
+    class_llama_model::get_llama_model,
+    worker::{self, WorkerPool},
+};
 
 pub(super) type SamplerId = usize;
 
 #[derive(Clone, Default)]
 pub(super) struct SamplerSpec {
-    pub version: u64,
+    pub rev: u64,
     pub steps: Vec<SamplerKind>,
     pub defaults: SamplingParams,
     pub vocab_ptr: usize,
@@ -78,7 +82,7 @@ pub fn js_model_createSamplerChain(ctx: &mut ScopedContext, cc: CallContext) -> 
     let this = cc.this();
     let model = get_llama_model(ctx, &this)?;
     let mut spec = SamplerSpec {
-        version: 1,
+        rev: 1,
         steps: Vec::new(),
         defaults: SamplingParams::default(),
         vocab_ptr: model.vocab() as usize,
@@ -229,6 +233,7 @@ pub fn js_model_createSamplerChain(ctx: &mut ScopedContext, cc: CallContext) -> 
     spec.steps.push(SamplerKind::Dist(0));
     let mut obj = JSSamplerChain::new_instance(ctx)?;
     let sampler_id = obj.id();
+    spec.rev = worker::next_sampler_rev(sampler_id);
     sampler_spec_lut()
         .lock()
         .map_err(|_| {
@@ -323,7 +328,7 @@ fn add_penalties(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         frequency_penalty,
         presence_penalty,
     });
-    spec.version = spec.version.saturating_add(1);
+    spec.rev = worker::next_sampler_rev(sampler_id);
 
     Ok(cc.this())
 }
@@ -357,7 +362,7 @@ fn add_top_k_p(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             unreachable!()
         }
     }
-    spec.version = spec.version.saturating_add(1);
+    spec.rev = worker::next_sampler_rev(sampler_id);
 
     Ok(cc.this())
 }
@@ -378,9 +383,34 @@ fn add_temperature(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         dyn_range: 1.0,
         dyn_exponent: 1.0,
     });
-    spec.version = spec.version.saturating_add(1);
+    spec.rev = worker::next_sampler_rev(sampler_id);
 
     Ok(cc.this())
+}
+
+#[cfg(debug_assertions)]
+mod debug_api {
+    use super::*;
+
+    pub(super) fn debug_dispose(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+        let this = cc.this();
+        let obj = this.as_object().ok_or_else(|| {
+            ctx.throw_type_error("invalid Sampler object");
+            -1
+        })?;
+        JSSamplerChain::dispose_by_id(obj.id());
+        Ok(JSValue::UNDEFINED)
+    }
+
+    pub(super) fn debug_cache_count(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+        let this = cc.this();
+        let obj = this.as_object().ok_or_else(|| {
+            ctx.throw_type_error("invalid Sampler object");
+            -1
+        })?;
+        let n = WorkerPool::global().debug_sampler_cache_count(obj.id());
+        Ok((n as i32).into())
+    }
 }
 
 const CLASS_SAMPLER_CHAIN_PROTO: &[FieldDef] = &[
@@ -388,6 +418,10 @@ const CLASS_SAMPLER_CHAIN_PROTO: &[FieldDef] = &[
     FieldDef::CALL("topK", 1, add_top_k_p, TOP_K as _),
     FieldDef::CALL("topP", 1, add_top_k_p, TOP_P as _),
     FieldDef::CALL("temperature", 1, add_temperature, 0 as _),
+    #[cfg(debug_assertions)]
+    FieldDef::CALL("_debug_dispose", 0, debug_api::debug_dispose, 0),
+    #[cfg(debug_assertions)]
+    FieldDef::CALL("_debug_cacheCount", 0, debug_api::debug_cache_count, 0),
 ];
 
 pub struct JSSamplerChain;
@@ -395,6 +429,14 @@ pub struct JSSamplerChain;
 impl JSSamplerChain {
     thread_local! {
         static CLASS_ID: Cell<ClassID> = const { Cell::new(0) };
+    }
+
+    fn dispose_by_id(id: usize) {
+        if let Ok(mut reg) = sampler_spec_lut().lock() {
+            reg.remove(&id);
+        }
+        worker::next_sampler_rev(id);
+        WorkerPool::global().purge_sampler_sync(id);
     }
 
     /// register class
@@ -408,9 +450,7 @@ impl JSSamplerChain {
     }
 
     fn handle_dispose(_: &mut RuntimeImpl, _: *mut std::ffi::c_void, id: usize) {
-        if let Ok(mut reg) = sampler_spec_lut().lock() {
-            reg.remove(&id);
-        }
+        Self::dispose_by_id(id);
     }
 
     /// get class id
