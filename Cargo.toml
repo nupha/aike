@@ -1,0 +1,31 @@
+[package]
+name = "llama-js"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+cuda = ["llama-cpp-ffi/cuda"]
+metal = ["llama-cpp-ffi/metal"]
+
+[dependencies]
+llama-cpp-ffi = { path = "../llama-cpp-ffi", features = ["cmake_static"] }
+zuqe = { path = "../../../devel/zhuque" }
+gc-lite = "0.4.1"
+serde = { version = "1.0", features = ["derive"] }
+serde_yaml = "0.9"
+serde_json = "1"
+glob = "0.3"
+colorized = "1.0"
+libc = "0.2"
+clap = { version = "4.5", features = ["derive"] }
+anyhow = { version = "1", default-features = false }
+env_logger = "0.9"
+log = "0.4"
+smallvec = "1.13"
+linkme = "0.3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+minijinja = { version = "2", features = ["serde"] }
+
+[[bin]]
+name = "llama-js"
+path = "src/main.rs"
