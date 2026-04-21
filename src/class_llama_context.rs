@@ -9,12 +9,12 @@ use linkme::distributed_slice;
 use llama_cpp_ffi::{LlamaContext, SamplingParams};
 use zuqe::{
     CallContext, ClassDef, ClassID, FieldDef, IntOrFloat, JSResult, JSValue, Object, Runtime,
-    RuntimeImpl, ScopedContext, builtins::promise::Promise,
+    ScopedContext, builtins::promise::Promise,
 };
 
 use crate::{
     USER_CLASS_DEFS,
-    class_llama_sampler::{SamplerId, get_sampler_id, get_sampler_spec_by_id},
+    class_llama_sampler::{SamplerId, SamplerSpec, get_sampler_id, get_sampler_spec_by_id},
     worker::WorkerPool,
 };
 
@@ -23,19 +23,12 @@ const PROP_BATCH_SIZE: i32 = 2;
 const PROP_SEQUENCES: i32 = 3;
 const PROP_IS_DISPOSED: i32 = 4;
 
-struct LlamaContextState {
+#[repr(transparent)]
+struct LlamaContextWrap {
     inner: Mutex<Option<LlamaContext<'static>>>,
 }
 
-#[derive(Clone, Copy)]
-struct ContextStatsData {
-    memory_used: i64,
-    kv_cache_size: i64,
-    used_tokens: i64,
-    max_tokens: i64,
-}
-
-impl LlamaContextState {
+impl LlamaContextWrap {
     fn new(llm_ctx: LlamaContext<'static>) -> Self {
         Self {
             inner: Mutex::new(Some(llm_ctx)),
@@ -48,7 +41,7 @@ impl LlamaContextState {
 
     fn with_ctx_mut<R>(
         &self,
-        f: impl FnOnce(&mut LlamaContext<'static>) -> Result<R, String>,
+        f: impl FnOnce(&mut LlamaContext) -> Result<R, String>,
     ) -> Result<R, String> {
         let mut guard = self.inner.lock().unwrap();
         let llm_ctx = guard
@@ -93,7 +86,7 @@ impl LlamaContextState {
         &self,
         sampler_id: SamplerId,
         logits: i32,
-        sampler_spec: crate::class_llama_sampler::SamplerSpec,
+        sampler_spec: SamplerSpec,
         params_opt: Option<SamplingParams>,
     ) -> Result<i32, String> {
         self.with_ctx_mut(|llm_ctx| {
@@ -125,6 +118,7 @@ impl LlamaContextState {
             let pos_max = llm_ctx.memory_seq_pos_max(0);
             let used_tokens = if pos_max >= 0 { pos_max as i64 + 1 } else { 0 };
             let max_tokens = llm_ctx.n_ctx_seq() as i64;
+
             Ok(ContextStatsData {
                 memory_used,
                 kv_cache_size,
@@ -140,10 +134,18 @@ impl LlamaContextState {
     }
 }
 
-fn get_llama_context_state(
+#[derive(Clone, Copy)]
+struct ContextStatsData {
+    memory_used: i64,
+    kv_cache_size: i64,
+    used_tokens: i64,
+    max_tokens: i64,
+}
+
+fn get_llama_context_wrap(
     ctx: &mut ScopedContext,
     val: &mut JSValue,
-) -> Result<Arc<LlamaContextState>, i32> {
+) -> Result<Arc<LlamaContextWrap>, i32> {
     let payload = val
         .retrive_object_payload(ctx, JSLlamaContext::class_id())?
         .other()
@@ -154,7 +156,7 @@ fn get_llama_context_state(
         ctx.throw_type_error("Context was disposed");
         Err(-1)
     } else {
-        Ok(unsafe { (&*opaque.cast::<Arc<LlamaContextState>>()).clone() })
+        Ok(unsafe { (&*opaque.cast::<Arc<LlamaContextWrap>>()).clone() })
     }
 }
 
@@ -162,12 +164,12 @@ fn get_prop(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut this = cc.this();
 
     if cc.magic() == PROP_IS_DISPOSED {
-        let state = get_llama_context_state(ctx, &mut this)?;
+        let state = get_llama_context_wrap(ctx, &mut this)?;
         let disposed = state.is_disposed();
         return Ok(JSValue::Bool(disposed));
     }
 
-    let state = get_llama_context_state(ctx, &mut this)?;
+    let state = get_llama_context_wrap(ctx, &mut this)?;
 
     let val: JSValue = match cc.magic() {
         PROP_CTX_SIZE => state
@@ -199,7 +201,7 @@ fn get_prop(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
 fn decode(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut this = cc.this();
-    let state = get_llama_context_state(ctx, &mut this)?;
+    let state = get_llama_context_wrap(ctx, &mut this)?;
 
     let arg0 = cc.arg(0);
     let data: Cow<'_, [i32]> = if let Some(ta) = arg0.as_object_TypedArray() {
@@ -286,7 +288,7 @@ fn decode(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
 fn sample(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut this = cc.this();
-    let state = get_llama_context_state(ctx, &mut this)?;
+    let state = get_llama_context_wrap(ctx, &mut this)?;
 
     let logits = cc.arg(0).to_number(ctx)?.to_i32();
     let s = cc.arg(1);
@@ -370,7 +372,8 @@ fn sample(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
 fn reset(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut this = cc.this();
-    let state = get_llama_context_state(ctx, &mut this)?;
+    let state = get_llama_context_wrap(ctx, &mut this)?;
+
     let (promise, tx) =
         Promise::create_from_sender(ctx, |cx, payload: Result<(), String>| -> JSResult {
             match payload {
@@ -400,7 +403,7 @@ fn reset(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
 fn get_stats(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut this = cc.this();
-    let state = get_llama_context_state(ctx, &mut this)?;
+    let state = get_llama_context_wrap(ctx, &mut this)?;
     let (promise, tx) = Promise::create_from_sender(
         ctx,
         |cx, payload: Result<ContextStatsData, String>| -> JSResult {
@@ -435,7 +438,7 @@ fn get_stats(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
 fn dispose(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut this = cc.this();
-    let state = get_llama_context_state(ctx, &mut this)?;
+    let state = get_llama_context_wrap(ctx, &mut this)?;
 
     let _ = this.set_property_str(ctx, "model", JSValue::UNDEFINED);
     let (promise, tx) =
@@ -477,12 +480,6 @@ const CLASS_CONTEXT_PROTO: &[FieldDef] = &[
 pub struct JSLlamaContext;
 
 impl JSLlamaContext {
-    fn handle_dispose(_: &mut RuntimeImpl, opaque: *mut c_void, _: usize) {
-        if !opaque.is_null() {
-            drop(unsafe { Box::from_raw(opaque.cast::<Arc<LlamaContextState>>()) });
-        }
-    }
-
     thread_local! {
         static CLASS_ID: Cell<ClassID> = const { Cell::new(0) };
     }
@@ -490,7 +487,13 @@ impl JSLlamaContext {
     /// register class
     fn register(rt: &mut Runtime) -> Result<ClassID, i32> {
         let class_id = rt.register_class(
-            ClassDef::new("Context", CLASS_CONTEXT_PROTO, None).on_dispose(Self::handle_dispose),
+            ClassDef::new("Context", CLASS_CONTEXT_PROTO, None).on_dispose(
+                |_, opaque: *mut c_void, _| {
+                    if !opaque.is_null() {
+                        drop(unsafe { Box::from_raw(opaque.cast::<Arc<LlamaContextWrap>>()) });
+                    }
+                },
+            ),
         )?;
 
         // save assigned class_id
@@ -505,14 +508,14 @@ impl JSLlamaContext {
     }
 
     pub fn new_instance(ctx: &mut ScopedContext, llm_ctx: LlamaContext) -> Result<Object, i32> {
-        let class_id = Self::class_id();
         let llm_ctx_static: LlamaContext<'static> = unsafe { std::mem::transmute(llm_ctx) };
-        let state = Arc::new(LlamaContextState::new(llm_ctx_static));
+        let state = Arc::new(LlamaContextWrap::new(llm_ctx_static));
         let opaque = Box::into_raw(Box::new(state)).cast::<c_void>();
-        ctx.create_class_instance_with_opaque(class_id, opaque)
+
+        ctx.create_class_instance_with_opaque(Self::class_id(), opaque)
             .map_err(|e| {
                 let p = e.other().unwrap();
-                let _ = unsafe { Box::from_raw(p.opaque().cast::<Arc<LlamaContextState>>()) };
+                let _ = unsafe { Box::from_raw(p.opaque().cast::<Arc<LlamaContextWrap>>()) };
                 -1
             })
     }

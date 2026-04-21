@@ -394,7 +394,7 @@ pub(crate) fn next_sampler_rev(sampler_id: usize) -> u64 {
 }
 
 pub(crate) fn sample_with_cached_sampler(
-    llm_ctx: &mut LlamaContext<'static>,
+    llm_ctx: &mut LlamaContext,
     sampler_id: usize,
     sampler_rev_at_fetch: u64,
     vocab_ptr: usize,
