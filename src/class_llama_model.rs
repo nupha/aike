@@ -771,10 +771,6 @@ fn detokenize(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut pending_bytes = Vec::new();
 
     for &token in tokens.iter() {
-        if model.is_eog(token) {
-            continue;
-        }
-
         let piece = model.token_to_piece(token);
         if piece.is_empty() {
             continue;
@@ -807,61 +803,6 @@ fn detokenize(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     ctx.create_string_from_utf8(output.into_bytes())
         .map(JSValue::String)
-}
-
-fn token_to_text(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let this = cc.this();
-    let model = get_llama_model(ctx, &this)?;
-
-    let token = cc.arg(0).to_number(ctx)?.to_i32();
-    if model.is_eog(token) {
-        return Ok(JSValue::NULL);
-    }
-
-    let piece = model.token_to_piece(token);
-    if !piece.is_empty() {
-        let gen_text = GEN_PENDING_BYTES.with(|s| {
-            let mut buf = s.borrow_mut();
-            buf.extend_from_slice(&piece);
-
-            let mut output = String::with_capacity(buf.len());
-
-            loop {
-                match std::str::from_utf8(&buf) {
-                    Ok(s) => {
-                        if !s.is_empty() {
-                            output.push_str(s);
-                        }
-                        buf.clear();
-                        break;
-                    }
-                    Err(e) => {
-                        let valid = e.valid_up_to();
-                        if valid == 0 {
-                            break;
-                        }
-
-                        let s = unsafe { std::str::from_utf8_unchecked(&buf[..valid]) };
-                        if !s.is_empty() {
-                            output.push_str(s);
-                        }
-
-                        buf.drain(valid..);
-                        if buf.is_empty() {
-                            break;
-                        }
-                    }
-                }
-            }
-
-            output
-        });
-
-        ctx.create_string_from_utf8(gen_text.into_bytes())
-            .map(JSValue::String)
-    } else {
-        Ok(JSValue::NULL)
-    }
 }
 
 fn model_get_meta(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
