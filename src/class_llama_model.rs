@@ -20,8 +20,11 @@ use zuqe::{
 };
 
 use crate::{
-    USER_CLASS_DEFS, class_llama_context::JSLlamaContext, class_llama_pipeline::JSLlamaPipeline,
-    class_llama_sampler::js_model_createSamplerChain, pipeline::PipelineEngine,
+    USER_CLASS_DEFS,
+    class_llama_context::{JSLlamaContext, parse_tokens},
+    class_llama_pipeline::JSLlamaPipeline,
+    class_llama_sampler::js_model_createSamplerChain,
+    pipeline::PipelineEngine,
 };
 
 const MODEL_PATH_HIDDEN_KEY: &str = "__modelPath";
@@ -759,6 +762,55 @@ thread_local! {
     static GEN_PENDING_BYTES: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
 }
 
+fn detokenize(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let this = cc.this();
+    let model = get_llama_model(ctx, &this)?;
+
+    let arg0 = cc.arg(0);
+    let tokens = parse_tokens(ctx, &arg0)?;
+
+    let mut output = String::new();
+    let mut pending_bytes = Vec::new();
+
+    for &token in tokens.iter() {
+        if model.is_eog(token) {
+            continue;
+        }
+
+        let piece = model.token_to_piece(token);
+        if piece.is_empty() {
+            continue;
+        }
+
+        pending_bytes.extend_from_slice(&piece);
+
+        loop {
+            match std::str::from_utf8(&pending_bytes) {
+                Ok(s) => {
+                    output.push_str(s);
+                    pending_bytes.clear();
+                    break;
+                }
+                Err(e) => {
+                    let valid = e.valid_up_to();
+                    if valid == 0 {
+                        break;
+                    }
+                    let s = unsafe { std::str::from_utf8_unchecked(&pending_bytes[..valid]) };
+                    output.push_str(s);
+                    pending_bytes.drain(..valid);
+                    if pending_bytes.is_empty() {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    ctx.create_string_from_utf8(output.into_bytes())
+        .map(JSValue::String)
+}
+
 fn token_to_text(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let model = get_llama_model(ctx, &this)?;
@@ -1140,7 +1192,7 @@ const CLASS_MODEL_PROTO_ENTRIES: &[FieldDef] = &[
     FieldDef::CALL("createPipeline", 1, js_model_createPipeline, 0),
     FieldDef::CALL("createSamplerChain", 1, js_model_createSamplerChain, 0),
     FieldDef::CALL("tokenize", 1, tokenize, 0),
-    FieldDef::CALL("detokenize", 1, token_to_text, 0),
+    FieldDef::CALL("detokenize", 1, detokenize, 0),
     FieldDef::CALL("lookupTokenText", 1, model_lookup_token_text, 0),
     FieldDef::CALL("isEog", 1, model_is_eog, 0),
     FieldDef::CALL("getMeta", 1, model_get_meta, 0),
