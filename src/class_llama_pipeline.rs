@@ -1,5 +1,4 @@
 use std::{
-    borrow::Cow,
     cell::Cell,
     ffi::c_void,
     sync::atomic::{AtomicU64, Ordering},
@@ -13,6 +12,7 @@ use zuqe::{
 
 use crate::{
     USER_CLASS_DEFS,
+    class_llama_context::parse_tokens,
     pipeline::{FinishReason, OutputMode, PipelineEngine, PipelineReply},
 };
 
@@ -32,38 +32,12 @@ fn get_pipeline<'a>(ctx: &mut ScopedContext, val: &JSValue) -> Result<&'a Pipeli
     }
 }
 
-fn parse_tokens(ctx: &mut ScopedContext, val: JSValue) -> Result<Vec<i32>, i32> {
-    let data: Cow<'_, [i32]> = if let Some(ta) = val.as_object_TypedArray() {
-        if let Some(lst) = ta.as_i32_array() {
-            Cow::Borrowed(lst)
-        } else {
-            ctx.throw_type_error("expect Int32Array object");
-            return Err(-1);
-        }
-    } else if let Some(arr) = val.as_object_Array()
-        && arr.is_fast_array()
-    {
-        let a = arr.payload();
-        let mut lst = Vec::with_capacity(a.len());
-        for v in a.values() {
-            lst.push(v.to_number(ctx)?.to_i32());
-        }
-        Cow::Owned(lst)
-    } else if let JSValue::Int(tt) = val {
-        Cow::Borrowed(&[tt])
-    } else {
-        ctx.throw_type_error("invalid input token");
-        return Err(-1);
-    };
-
-    Ok(data.into_owned())
-}
-
 fn generate(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let pipeline = get_pipeline(ctx, &this)?;
 
-    let tokens = parse_tokens(ctx, cc.arg(0))?;
+    let arg0 = cc.arg(0);
+    let tokens = parse_tokens(ctx, &arg0)?.into_owned();
     if tokens.is_empty() {
         ctx.throw_type_error("tokens cannot be empty");
         return Err(-1);

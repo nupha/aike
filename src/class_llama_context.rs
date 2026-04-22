@@ -19,6 +19,38 @@ use crate::{
     worker::WorkerPool,
 };
 
+/// 解析 JavaScript 值中的 token 数据
+/// 支持 Int32Array、普通数组(fast array)或单个整数
+/// 返回 Cow 以允许调用方决定是否需要 owned 数据
+pub(super) fn parse_tokens<'a>(
+    ctx: &mut ScopedContext,
+    val: &'a JSValue,
+) -> Result<Cow<'a, [i32]>, i32> {
+    if let Some(ta) = val.as_object_TypedArray() {
+        if let Some(lst) = ta.as_i32_array() {
+            Ok(Cow::Borrowed(lst))
+        } else {
+            ctx.throw_type_error("expect Int32Array object");
+            Err(-1)
+        }
+    } else if let Some(arr) = val.as_object_Array()
+        && arr.is_fast_array()
+    {
+        // 普通数组需要转换为 owned
+        let a = arr.payload();
+        let mut lst: Vec<i32> = Vec::with_capacity(a.len());
+        for v in a.values() {
+            lst.push(v.to_number(ctx)?.to_i32());
+        }
+        Ok(Cow::Owned(lst))
+    } else if let JSValue::Int(i) = val {
+        Ok(Cow::Owned(vec![*i]))
+    } else {
+        ctx.throw_type_error("invalid input token");
+        Err(-1)
+    }
+}
+
 const PROP_CTX_SIZE: i32 = 1;
 const PROP_BATCH_SIZE: i32 = 2;
 const PROP_SEQUENCES: i32 = 3;
@@ -79,6 +111,7 @@ impl LlamaContextWrap {
 
             batch.n_tokens = len as _;
             llm_ctx.decode()?;
+
             Ok(logits_index)
         })
     }
@@ -207,30 +240,7 @@ fn decode(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let state = get_llama_context_wrap(ctx, &mut this)?;
 
     let arg0 = cc.arg(0);
-    let data: Cow<'_, [i32]> = if let Some(ta) = arg0.as_object_TypedArray() {
-        if let Some(lst) = ta.as_i32_array() {
-            Cow::Borrowed(lst)
-        } else {
-            ctx.throw_type_error("expect Int32Array object");
-            return Err(-1);
-        }
-    } else if let Some(arr) = arg0.as_object_Array()
-        && arr.is_fast_array()
-    {
-        let a = arr.payload();
-        let len = a.len();
-        let mut lst = Vec::<i32>::with_capacity(len);
-        for v in a.values() {
-            let v = v.to_number(ctx)?.to_i32();
-            lst.push(v);
-        }
-        Cow::Owned(lst)
-    } else if let JSValue::Int(tt) = arg0 {
-        Cow::Borrowed(&[tt])
-    } else {
-        ctx.throw_type_error("invalid input token");
-        return Err(-1);
-    };
+    let tokens = parse_tokens(ctx, &arg0)?.into_owned();
 
     if cc.length() < 2 {
         ctx.throw_type_error("startPosition is required");
@@ -257,7 +267,6 @@ fn decode(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         }
     }
 
-    let tokens = data.into_owned();
     let (promise, tx) = Promise::create_with_channel::<Result<Option<i32>, String>>(
         ctx,
         |cx, payload| -> JSResult {
@@ -442,37 +451,14 @@ fn get_stats(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 fn embed_tokens(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut this = cc.this();
     let state = get_llama_context_wrap(ctx, &mut this)?;
-    let arg0 = cc.arg(0);
-    let data: Cow<'_, [i32]> = if let Some(ta) = arg0.as_object_TypedArray() {
-        if let Some(lst) = ta.as_i32_array() {
-            Cow::Borrowed(lst)
-        } else {
-            ctx.throw_type_error("expect Int32Array object");
-            return Err(-1);
-        }
-    } else if let Some(arr) = arg0.as_object_Array()
-        && arr.is_fast_array()
-    {
-        let a = arr.payload();
-        let len = a.len();
-        let mut lst = Vec::<i32>::with_capacity(len);
-        for v in a.values() {
-            let v = v.to_number(ctx)?.to_i32();
-            lst.push(v);
-        }
-        Cow::Owned(lst)
-    } else if let JSValue::Int(tt) = arg0 {
-        Cow::Borrowed(&[tt])
-    } else {
-        ctx.throw_type_error("invalid input token");
-        return Err(-1);
-    };
 
-    if data.is_empty() {
+    let arg0 = cc.arg(0);
+    let tokens = parse_tokens(ctx, &arg0)?.into_owned();
+
+    if tokens.is_empty() {
         ctx.throw_type_error("tokens cannot be empty");
         return Err(-1);
     }
-    let tokens = data.into_owned();
 
     let (promise, tx) =
         Promise::create_with_channel::<Result<Vec<f32>, String>>(ctx, |cx, payload| -> JSResult {
