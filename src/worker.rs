@@ -10,7 +10,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use llama_cpp_ffi::{LlamaContext, SamplerChain, SamplerKind, SamplingParams, llama_vocab};
+use llama_cpp_ffi::{LlamaContext, SamplerChain, SamplerKind, SamplingParams};
 
 type Job = Box<dyn FnOnce() + Send + 'static>;
 
@@ -92,7 +92,7 @@ struct SamplerCacheKey {
 }
 
 thread_local! {
-    static WORKER_SAMPLER_CACHE: RefCell<std::collections::HashMap<SamplerCacheKey, SamplerChain<'static>>> =
+    static WORKER_SAMPLER_CACHE: RefCell<std::collections::HashMap<SamplerCacheKey, SamplerChain>> =
         RefCell::new(std::collections::HashMap::new());
 }
 
@@ -397,8 +397,6 @@ pub(crate) fn sample_with_cached_sampler(
     llm_ctx: &mut LlamaContext,
     sampler_id: usize,
     sampler_rev_at_fetch: u64,
-    vocab_ptr: usize,
-    ctx_train: i32,
     steps: &[SamplerKind],
     logits: i32,
     params_opt: Option<&SamplingParams>,
@@ -420,8 +418,7 @@ pub(crate) fn sample_with_cached_sampler(
         cache.retain(|k, _| !(k.sampler_id == sampler_id && k.rev != current_rev));
 
         cache.entry(key).or_insert_with(|| {
-            let sampler =
-                SamplerChain::new_from_vocab(vocab_ptr as *const llama_vocab, ctx_train, false);
+            let mut sampler = SamplerChain::new(llm_ctx.model().clone(), false);
             for kind in steps {
                 sampler.add_sampler(kind);
             }

@@ -24,8 +24,6 @@ pub(super) struct SamplerSpec {
     pub rev: u64,
     pub steps: Vec<SamplerKind>,
     pub defaults: SamplingParams,
-    pub vocab_ptr: usize,
-    pub ctx_train: i32,
 }
 
 static SAMPLER_SPEC_LUT: OnceLock<Mutex<HashMap<SamplerId, SamplerSpec>>> = OnceLock::new();
@@ -80,13 +78,12 @@ pub(super) fn get_sampler_spec_by_id(sampler_id: SamplerId) -> Result<SamplerSpe
 
 pub fn js_model_createSamplerChain(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
-    let model = get_llama_model(ctx, &this)?;
+    let _ = get_llama_model(ctx, &this)?;
+
     let mut spec = SamplerSpec {
         rev: 1,
         steps: Vec::new(),
         defaults: SamplingParams::default(),
-        vocab_ptr: model.vocab() as usize,
-        ctx_train: model.n_ctx_train(),
     };
 
     if cc.length() > 0 {

@@ -127,7 +127,7 @@ pub struct PipelineLlamaBackend {
     /// Per-slot mirror of tokens currently resident in KV cache.
     slot_cached_tokens: Vec<Vec<Token>>,
     /// Per-slot sampler lifecycle (create on demand, reset on completion).
-    slot_samplers: Vec<Option<SamplerChain<'static>>>,
+    slot_samplers: Vec<Option<SamplerChain>>,
     /// Number of tokens queued in current decode batch.
     pending_decode_tokens: usize,
 }
@@ -150,24 +150,26 @@ impl PipelineLlamaBackend {
         }
     }
 
-    fn build_sampler_unchecked(&self, temperature: f32, top_p: f32) -> SamplerChain<'static> {
-        let sampler = SamplerChain::new(self.llm_ctx.model(), true);
-        sampler.add_sampler(&SamplerKind::Penalties {
-            repeat_last_n: 64,
-            repeat_penalty: 1.1,
-            frequency_penalty: 0.0,
-            presence_penalty: 0.0,
-        });
-        sampler.add_sampler(&SamplerKind::TopK(40));
-        sampler.add_sampler(&SamplerKind::TopP(top_p));
-        sampler.add_sampler(&SamplerKind::Temperature {
-            temp: temperature,
-            dyn_range: 0.0,
-            dyn_exponent: 0.0,
-        });
-        sampler.add_sampler(&SamplerKind::Dist(0));
-        // Safety: backend owns a 'static context/model for the full worker lifetime.
-        unsafe { std::mem::transmute::<SamplerChain<'_>, SamplerChain<'static>>(sampler) }
+    fn build_sampler_unchecked(&self, temperature: f32, top_p: f32) -> SamplerChain {
+        let mut sampler = SamplerChain::new(self.llm_ctx.model().clone(), true);
+
+        sampler
+            .add_sampler(&SamplerKind::Penalties {
+                repeat_last_n: 64,
+                repeat_penalty: 1.1,
+                frequency_penalty: 0.0,
+                presence_penalty: 0.0,
+            })
+            .add_sampler(&SamplerKind::TopK(40))
+            .add_sampler(&SamplerKind::TopP(top_p))
+            .add_sampler(&SamplerKind::Temperature {
+                temp: temperature,
+                dyn_range: 0.0,
+                dyn_exponent: 0.0,
+            })
+            .add_sampler(&SamplerKind::Dist(0));
+
+        sampler
     }
 }
 

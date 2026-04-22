@@ -95,8 +95,6 @@ impl LlamaContextWrap {
                 llm_ctx,
                 sampler_id,
                 sampler_spec.rev,
-                sampler_spec.vocab_ptr,
-                sampler_spec.ctx_train,
                 &sampler_spec.steps,
                 logits,
                 params_opt.as_ref(),
