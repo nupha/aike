@@ -1107,6 +1107,21 @@ fn model_render_template(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         .map(JSValue::String)
 }
 
+fn model_dispose(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let mut this = cc.this();
+    let payload = this
+        .retrive_object_payload_mut(ctx, JSLlamaModel::class_id())?
+        .other_mut()
+        .unwrap();
+    if !payload.opaque().is_null() {
+        unsafe {
+            let p = payload.replace_opaque(std::ptr::null_mut());
+            drop(Box::from_raw(p.cast::<LlamaModel>()));
+        }
+    }
+    Ok(JSValue::UNDEFINED)
+}
+
 const CLASS_MODEL_PROTO_ENTRIES: &[FieldDef] = &[
     FieldDef::GETSET("bosToken", Some(get_prop), None, PROP_BOS_TOKEN as _),
     FieldDef::GETSET("path", Some(get_prop), None, PROP_PATH as _),
@@ -1131,6 +1146,7 @@ const CLASS_MODEL_PROTO_ENTRIES: &[FieldDef] = &[
     FieldDef::CALL("getMeta", 1, model_get_meta, 0),
     FieldDef::CALL("getMetaKeys", 0, model_get_meta_keys, 0),
     FieldDef::CALL("renderTemplate", 2, model_render_template, 0),
+    FieldDef::CALL("dispose", 0, model_dispose, 0),
 ];
 
 fn load_model(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -1214,8 +1230,9 @@ impl JSLlamaModel {
                 ),
             )
             .on_dispose(|_, opaque: *mut c_void, _| {
-                debug_assert!(!opaque.is_null());
-                drop(unsafe { Box::from_raw(opaque.cast::<LlamaModel>()) });
+                if !opaque.is_null() {
+                    drop(unsafe { Box::from_raw(opaque.cast::<LlamaModel>()) });
+                }
             })
             .on_unregister(|| unsafe {
                 llama_cpp_ffi::llama_backend_free();
