@@ -286,8 +286,6 @@ const PROP_EOT_TOKEN: i32 = 8;
 const PROP_EOT_TEXT: i32 = 9;
 const PROP_SEP_TOKEN: i32 = 10;
 const PROP_SEP_TEXT: i32 = 11;
-const PROP_EOG_TOKEN: i32 = 12;
-const PROP_EOG_TEXT: i32 = 13;
 
 fn get_prop(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
@@ -333,9 +331,9 @@ fn get_prop(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 Ok(JSValue::NULL)
             }
         }
-        PROP_EOG_TOKEN => Ok(JSValue::Int(model.eog_token_id())),
-        PROP_EOG_TEXT => {
-            if let Some(text) = model.eog_token_text() {
+        PROP_EOT_TOKEN => Ok(JSValue::Int(model.eot_token_id())),
+        PROP_EOT_TEXT => {
+            if let Some(text) = model.eot_token_text() {
                 ctx.create_string_from_utf8(text.into_bytes())
                     .map(JSValue::String)
             } else {
@@ -1186,8 +1184,6 @@ const CLASS_MODEL_PROTO_ENTRIES: &[FieldDef] = &[
     FieldDef::GETSET("eotText", Some(get_prop), None, PROP_EOT_TEXT as _),
     FieldDef::GETSET("sepToken", Some(get_prop), None, PROP_SEP_TOKEN as _),
     FieldDef::GETSET("sepText", Some(get_prop), None, PROP_SEP_TEXT as _),
-    FieldDef::GETSET("eogToken", Some(get_prop), None, PROP_EOG_TOKEN as _),
-    FieldDef::GETSET("eogText", Some(get_prop), None, PROP_EOG_TEXT as _),
     FieldDef::CALL("createContext", 1, js_model_createContext, 0),
     FieldDef::CALL("createPipeline", 1, js_model_createPipeline, 0),
     FieldDef::CALL("createSamplerChain", 1, js_model_createSamplerChain, 0),
