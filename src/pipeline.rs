@@ -42,7 +42,7 @@ pub struct PipelineTask {
     /// Whether prompt prefix cache reuse is allowed for this task.
     pub use_cache: bool,
     /// Per-task output channel owned by the caller.
-    pub output_tx: mpsc::Sender<PipelineOutMsg>,
+    pub output_tx: mpsc::Sender<PipelineReply>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -60,32 +60,18 @@ pub enum PipelineCtrlMsg {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AckStatus {
-    Accepted,
-    Rejected { reason: String },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PipelineAck {
-    pub status: AckStatus,
-    pub active_tasks: usize,
-    pub max_parallel: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FinishReason {
     Eog,
     Length,
     PrefillOnly,
     StopSequence,
-    ControlStop,
+    Shutdown,
     Cancelled,
     Error(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PipelineOutMsg {
-    Ack(PipelineAck),
+pub enum PipelineReply {
     Token(Token),
     Tokens(Vec<Token>),
     Finished(FinishReason),
@@ -133,7 +119,7 @@ pub trait PipelineBackend: Send + 'static {
 
 pub struct PipelineLlamaBackend {
     /// Shared llama context used by decode/sample stages.
-    llm_ctx: LlamaContext<'static>,
+    llm_ctx: LlamaContext,
     /// Cached model EOG token id for fast stop checks.
     eog_token: Token,
     /// Effective max tokens per decode micro-batch.
@@ -149,7 +135,7 @@ pub struct PipelineLlamaBackend {
 unsafe impl Send for PipelineLlamaBackend {}
 
 impl PipelineLlamaBackend {
-    pub fn new(mut llm_ctx: LlamaContext<'static>, max_parallel: usize) -> Self {
+    pub fn new(mut llm_ctx: LlamaContext, max_parallel: usize) -> Self {
         let n_ubatch = (llm_ctx.n_ubatch() as usize).max(1);
         llm_ctx.init_batch(n_ubatch as i32, 0, max_parallel as i32);
         let eog_token = llm_ctx.model().eog_token_id();
@@ -340,7 +326,7 @@ struct TaskState {
     generated_tokens: Vec<Token>,
     generated_text: String,
     pending_bytes: Vec<u8>,
-    output_tx: mpsc::Sender<PipelineOutMsg>,
+    output_tx: mpsc::Sender<PipelineReply>,
 }
 
 enum SlotState {
@@ -393,8 +379,7 @@ impl PipelineEngine {
         max_parallel: usize,
         idle_sleep: Duration,
         slot_match_threshold: f32,
-        llm_ctx: LlamaContext<'static>,
-        _sampler: SamplerChain<'static>,
+        llm_ctx: LlamaContext,
     ) -> Self {
         Self::start_with_backend(
             max_parallel,
@@ -442,7 +427,7 @@ impl PipelineEngine {
         prompt_tokens: Vec<Token>,
         stop_words: Vec<String>,
         output_mode: OutputMode,
-    ) -> Result<mpsc::Receiver<PipelineOutMsg>, mpsc::SendError<PipelineTask>> {
+    ) -> Result<mpsc::Receiver<PipelineReply>, mpsc::SendError<PipelineTask>> {
         self.push_task_with_params(
             task_id,
             prompt_tokens,
@@ -469,8 +454,8 @@ impl PipelineEngine {
         temperature: f32,
         top_p: f32,
         logits_for_all_tokens: bool,
-    ) -> Result<mpsc::Receiver<PipelineOutMsg>, mpsc::SendError<PipelineTask>> {
-        let (output_tx, output_rx) = mpsc::channel::<PipelineOutMsg>();
+    ) -> Result<mpsc::Receiver<PipelineReply>, mpsc::SendError<PipelineTask>> {
+        let (output_tx, output_rx) = mpsc::channel::<PipelineReply>();
         self.input_tx.send(PipelineTask {
             config: TaskConfig {
                 task_id: task_id.into(),
@@ -579,7 +564,7 @@ fn worker_loop<B: PipelineBackend>(
             if cancelled_ids.remove(&input.config.task_id) {
                 let _ = input
                     .output_tx
-                    .send(PipelineOutMsg::Finished(FinishReason::Cancelled));
+                    .send(PipelineReply::Finished(FinishReason::Cancelled));
                 continue;
             }
 
@@ -675,7 +660,7 @@ fn handle_ctrl_messages<B: PipelineBackend>(
                     {
                         let _ = task
                             .output_tx
-                            .send(PipelineOutMsg::Finished(FinishReason::ControlStop));
+                            .send(PipelineReply::Finished(FinishReason::Shutdown));
                         backend.clear_slot(slot.seq_id);
                     }
                     slot.n_past = 0;
@@ -781,7 +766,7 @@ fn remove_cancelled_inputs(queue: &mut VecDeque<PipelineTask>, task_id: &str) {
         if input.config.task_id == task_id {
             let _ = input
                 .output_tx
-                .send(PipelineOutMsg::Finished(FinishReason::Cancelled));
+                .send(PipelineReply::Finished(FinishReason::Cancelled));
         } else {
             kept.push_back(input);
         }
@@ -797,19 +782,17 @@ enum SchedResult {
 
 fn sched<B: PipelineBackend>(
     mut input: PipelineTask,
-    max_parallel: usize,
+    _max_parallel: usize,
     slot_match_threshold: f32,
     backend: &mut B,
     slots: &mut [Slot],
 ) -> SchedResult {
     if input.prompt_tokens.is_empty() {
-        let _ = input.output_tx.send(PipelineOutMsg::Ack(PipelineAck {
-            status: AckStatus::Rejected {
-                reason: "prompt_tokens must not be empty".to_string(),
-            },
-            active_tasks: count_active_tasks(slots),
-            max_parallel,
-        }));
+        let _ = input
+            .output_tx
+            .send(PipelineReply::Finished(FinishReason::Error(
+                "prompt_tokens must not be empty".to_string(),
+            )));
         return SchedResult::Rejected;
     }
 
@@ -832,11 +815,9 @@ fn sched<B: PipelineBackend>(
         match backend.prepare_slot(seq_id, &input.prompt_tokens) {
             Ok(n) => n,
             Err(e) => {
-                let _ = input.output_tx.send(PipelineOutMsg::Ack(PipelineAck {
-                    status: AckStatus::Rejected { reason: e },
-                    active_tasks: count_active_tasks(slots),
-                    max_parallel,
-                }));
+                let _ = input
+                    .output_tx
+                    .send(PipelineReply::Finished(FinishReason::Error(e)));
                 return SchedResult::Rejected;
             }
         }
@@ -848,13 +829,11 @@ fn sched<B: PipelineBackend>(
 
     input.prompt_tokens.drain(..n_common);
     if input.prompt_tokens.is_empty() {
-        let _ = input.output_tx.send(PipelineOutMsg::Ack(PipelineAck {
-            status: AckStatus::Rejected {
-                reason: "prompt_tokens became empty after prefix match".to_string(),
-            },
-            active_tasks: count_active_tasks(slots),
-            max_parallel,
-        }));
+        let _ = input
+            .output_tx
+            .send(PipelineReply::Finished(FinishReason::Error(
+                "prompt_tokens became empty after prefix match".to_string(),
+            )));
         return SchedResult::Rejected;
     }
 
@@ -869,7 +848,6 @@ fn sched<B: PipelineBackend>(
         output_tx: input.output_tx,
     };
 
-    let output_tx = task.output_tx.clone();
     let slot = &mut slots[slot_idx];
     slot.n_past = n_common as i32;
     slot.mtime = now_unix_s();
@@ -880,11 +858,6 @@ fn sched<B: PipelineBackend>(
         task,
     };
 
-    let _ = output_tx.send(PipelineOutMsg::Ack(PipelineAck {
-        status: AckStatus::Accepted,
-        active_tasks: count_active_tasks(slots),
-        max_parallel,
-    }));
     SchedResult::Scheduled
 }
 
@@ -1051,7 +1024,7 @@ fn sampling_stage<B: PipelineBackend>(backend: &mut B, slots: &mut [Slot]) -> bo
                     match backend.sample(slot.seq_id, logits) {
                         Ok(token) => {
                             if task.config.output_mode != OutputMode::OneShot {
-                                let _ = task.output_tx.send(PipelineOutMsg::Token(token));
+                                let _ = task.output_tx.send(PipelineReply::Token(token));
                             }
                             task.generated_tokens.push(token);
                             let piece = backend.token_to_piece(token);
@@ -1114,14 +1087,19 @@ fn done_stage<B: PipelineBackend>(backend: &mut B, slots: &mut [Slot]) -> usize 
                 // Finalize output, release KV/cache state, and return slot to idle.
                 let hard_clear = matches!(
                     reason,
-                    FinishReason::Cancelled | FinishReason::ControlStop | FinishReason::Error(_)
+                    FinishReason::Cancelled | FinishReason::Shutdown | FinishReason::Error(_)
                 );
                 if task.config.output_mode == OutputMode::OneShot {
-                    let _ = task
-                        .output_tx
-                        .send(PipelineOutMsg::Tokens(task.generated_tokens.clone()));
+                    if hard_clear {
+                        let _ = task.output_tx.send(PipelineReply::Finished(reason));
+                    } else {
+                        let _ = task
+                            .output_tx
+                            .send(PipelineReply::Tokens(task.generated_tokens.clone()));
+                    }
+                } else {
+                    let _ = task.output_tx.send(PipelineReply::Finished(reason));
                 }
-                let _ = task.output_tx.send(PipelineOutMsg::Finished(reason));
                 if hard_clear {
                     backend.clear_slot(slot.seq_id);
                     slot.n_past = 0;
@@ -1417,14 +1395,14 @@ mod tests {
     }
 
     fn recv_until_finished(
-        rx: &mpsc::Receiver<PipelineOutMsg>,
+        rx: &mpsc::Receiver<PipelineReply>,
         timeout: Duration,
-    ) -> Vec<PipelineOutMsg> {
+    ) -> Vec<PipelineReply> {
         let mut out = Vec::new();
         for _ in 0..200 {
             match rx.recv_timeout(timeout) {
                 Ok(msg) => {
-                    let done = matches!(msg, PipelineOutMsg::Finished(_));
+                    let done = matches!(msg, PipelineReply::Finished(_));
                     out.push(msg);
                     if done {
                         break;
@@ -1451,11 +1429,11 @@ mod tests {
             .expect("submit t1");
 
         let out = recv_until_finished(&rx, Duration::from_millis(100));
-        assert!(out.iter().any(|m| matches!(m, PipelineOutMsg::Token(101))));
-        assert!(out.iter().any(|m| matches!(m, PipelineOutMsg::Token(102))));
+        assert!(out.iter().any(|m| matches!(m, PipelineReply::Token(101))));
+        assert!(out.iter().any(|m| matches!(m, PipelineReply::Token(102))));
         assert!(
             out.iter()
-                .any(|m| matches!(m, PipelineOutMsg::Finished(FinishReason::Eog)))
+                .any(|m| matches!(m, PipelineReply::Finished(FinishReason::Eog)))
         );
         handle.shutdown();
     }
@@ -1475,20 +1453,20 @@ mod tests {
             .expect("submit s1");
 
         let first = recv_until_finished(&rx, Duration::from_millis(50));
-        assert!(first.iter().any(|m| matches!(m, PipelineOutMsg::Token(1))));
-        assert!(!first.iter().any(|m| matches!(m, PipelineOutMsg::Token(2))));
+        assert!(first.iter().any(|m| matches!(m, PipelineReply::Token(1))));
+        assert!(!first.iter().any(|m| matches!(m, PipelineReply::Token(2))));
 
         handle.next_token_of("s1").expect("next token 2");
         let second = recv_until_finished(&rx, Duration::from_millis(100));
-        assert!(second.iter().any(|m| matches!(m, PipelineOutMsg::Token(2))));
+        assert!(second.iter().any(|m| matches!(m, PipelineReply::Token(2))));
 
         handle.next_token_of("s1").expect("next token 3");
         let third = recv_until_finished(&rx, Duration::from_millis(100));
-        assert!(third.iter().any(|m| matches!(m, PipelineOutMsg::Token(3))));
+        assert!(third.iter().any(|m| matches!(m, PipelineReply::Token(3))));
         assert!(
             third
                 .iter()
-                .any(|m| matches!(m, PipelineOutMsg::Finished(FinishReason::Eog)))
+                .any(|m| matches!(m, PipelineReply::Finished(FinishReason::Eog)))
         );
         handle.shutdown();
     }
@@ -1508,14 +1486,14 @@ mod tests {
             .expect("submit o1");
 
         let out = recv_until_finished(&rx, Duration::from_millis(100));
-        assert!(!out.iter().any(|m| matches!(m, PipelineOutMsg::Token(_))));
+        assert!(!out.iter().any(|m| matches!(m, PipelineReply::Token(_))));
         assert!(out.iter().any(|m| matches!(
             m,
-            PipelineOutMsg::Tokens(tokens) if tokens == &vec![11, 12, 13]
+            PipelineReply::Tokens(tokens) if tokens == &vec![11, 12, 13]
         )));
         assert!(
             out.iter()
-                .any(|m| matches!(m, PipelineOutMsg::Finished(FinishReason::Eog)))
+                .any(|m| matches!(m, PipelineReply::Finished(FinishReason::Eog)))
         );
         handle.shutdown();
     }
@@ -1581,7 +1559,7 @@ mod tests {
         let out = recv_until_finished(&rx, Duration::from_millis(100));
         assert!(
             out.iter()
-                .any(|m| matches!(m, PipelineOutMsg::Finished(FinishReason::Cancelled)))
+                .any(|m| matches!(m, PipelineReply::Finished(FinishReason::Cancelled)))
         );
         handle.shutdown();
     }
@@ -1607,20 +1585,13 @@ mod tests {
         let out1 = recv_until_finished(&rx1, Duration::from_millis(100));
         assert!(
             out1.iter()
-                .any(|m| matches!(m, PipelineOutMsg::Finished(FinishReason::Eog)))
+                .any(|m| matches!(m, PipelineReply::Finished(FinishReason::Eog)))
         );
 
         let out2 = recv_until_finished(&rx2, Duration::from_millis(100));
-        assert!(out2.iter().any(|m| matches!(
-            m,
-            PipelineOutMsg::Ack(PipelineAck {
-                status: AckStatus::Accepted,
-                ..
-            })
-        )));
         assert!(
             out2.iter()
-                .any(|m| matches!(m, PipelineOutMsg::Finished(FinishReason::Eog)))
+                .any(|m| matches!(m, PipelineReply::Finished(FinishReason::Eog)))
         );
         handle.shutdown();
     }
@@ -1649,7 +1620,7 @@ mod tests {
         let out2 = recv_until_finished(&rx2, Duration::from_millis(100));
         assert!(
             out2.iter()
-                .any(|m| matches!(m, PipelineOutMsg::Finished(FinishReason::Cancelled)))
+                .any(|m| matches!(m, PipelineReply::Finished(FinishReason::Cancelled)))
         );
         handle.shutdown();
     }

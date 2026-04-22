@@ -3,6 +3,7 @@ use zuqe::{FieldDef, JS_PROP_ENUMERABLE, ScopedContext};
 
 const MOD_LLAMA_ENTRIES: &[FieldDef] = &[
     FieldDef::CLASS("Model", JS_PROP_ENUMERABLE),
+    FieldDef::CLASS("Pipeline", JS_PROP_ENUMERABLE),
     FieldDef::OBJECT(
         "FileType",
         &[

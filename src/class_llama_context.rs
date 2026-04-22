@@ -26,11 +26,11 @@ const PROP_IS_DISPOSED: i32 = 4;
 
 #[repr(transparent)]
 struct LlamaContextWrap {
-    inner: Mutex<Option<LlamaContext<'static>>>,
+    inner: Mutex<Option<LlamaContext>>,
 }
 
 impl LlamaContextWrap {
-    fn new(llm_ctx: LlamaContext<'static>) -> Self {
+    fn new(llm_ctx: LlamaContext) -> Self {
         Self {
             inner: Mutex::new(Some(llm_ctx)),
         }
@@ -260,7 +260,7 @@ fn decode(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     }
 
     let tokens = data.into_owned();
-    let (promise, tx) = Promise::create_from_sender::<Result<Option<i32>, String>>(
+    let (promise, tx) = Promise::create_with_channel::<Result<Option<i32>, String>>(
         ctx,
         |cx, payload| -> JSResult {
             match payload {
@@ -346,7 +346,7 @@ fn sample(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     }
 
     let (promise, tx) =
-        Promise::create_from_sender::<Result<i32, String>>(ctx, |cx, payload| -> JSResult {
+        Promise::create_with_channel::<Result<i32, String>>(ctx, |cx, payload| -> JSResult {
             match payload {
                 Ok(token) => Ok(token.into()),
                 Err(e) => {
@@ -380,7 +380,7 @@ fn reset(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let state = get_llama_context_wrap(ctx, &mut this)?;
 
     let (promise, tx) =
-        Promise::create_from_sender(ctx, |cx, payload: Result<(), String>| -> JSResult {
+        Promise::create_with_channel(ctx, |cx, payload: Result<(), String>| -> JSResult {
             match payload {
                 Ok(()) => Ok(JSValue::UNDEFINED),
                 Err(e) => {
@@ -409,7 +409,7 @@ fn reset(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 fn get_stats(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut this = cc.this();
     let state = get_llama_context_wrap(ctx, &mut this)?;
-    let (promise, tx) = Promise::create_from_sender(
+    let (promise, tx) = Promise::create_with_channel(
         ctx,
         |cx, payload: Result<ContextStatsData, String>| -> JSResult {
             let stats = payload.map_err(|e| {
@@ -477,7 +477,7 @@ fn embed_tokens(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let tokens = data.into_owned();
 
     let (promise, tx) =
-        Promise::create_from_sender::<Result<Vec<f32>, String>>(ctx, |cx, payload| -> JSResult {
+        Promise::create_with_channel::<Result<Vec<f32>, String>>(ctx, |cx, payload| -> JSResult {
             match payload {
                 Ok(v) => TypedArray::create_from_vec_f32(cx, v).map(JSValue::from),
                 Err(e) => {
@@ -507,7 +507,7 @@ fn dispose(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     let _ = this.set_property_str(ctx, "model", JSValue::UNDEFINED);
     let (promise, tx) =
-        Promise::create_from_sender(ctx, |_cx, payload: Result<(), String>| -> JSResult {
+        Promise::create_with_channel(ctx, |_cx, payload: Result<(), String>| -> JSResult {
             match payload {
                 Ok(()) => Ok(JSValue::UNDEFINED),
                 Err(_) => Ok(JSValue::UNDEFINED),
@@ -574,8 +574,7 @@ impl JSLlamaContext {
     }
 
     pub fn new_instance(ctx: &mut ScopedContext, llm_ctx: LlamaContext) -> Result<Object, i32> {
-        let llm_ctx_static: LlamaContext<'static> = unsafe { std::mem::transmute(llm_ctx) };
-        let state = Arc::new(LlamaContextWrap::new(llm_ctx_static));
+        let state = Arc::new(LlamaContextWrap::new(llm_ctx));
         let opaque = Box::into_raw(Box::new(state)).cast::<c_void>();
 
         ctx.create_class_instance_with_opaque(Self::class_id(), opaque)

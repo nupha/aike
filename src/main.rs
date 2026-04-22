@@ -6,6 +6,7 @@
 mod class_file;
 mod class_llama_context;
 mod class_llama_model;
+mod class_llama_pipeline;
 mod class_llama_sampler;
 mod global;
 mod mod_llama;
@@ -28,6 +29,7 @@ use crate::{
     class_file::JSFile,
     class_llama_context::JSLlamaContext,
     class_llama_model::JSLlamaModel,
+    class_llama_pipeline::JSLlamaPipeline,
     class_llama_sampler::JSSamplerChain,
     global::setup_globals,
     mod_llama::init_mod_llama,
@@ -226,6 +228,7 @@ async fn main() -> ExitCode {
             cx.use_classes(&[
                 JSLlamaModel::class_id(),
                 JSLlamaContext::class_id(),
+                JSLlamaPipeline::class_id(),
                 JSSamplerChain::class_id(),
                 JSFile::class_id(),
             ])?;

@@ -2,6 +2,7 @@ use std::{
     cell::{Cell, RefCell},
     ffi::{CStr, CString, c_void},
     sync::{Mutex, OnceLock},
+    time::Duration,
 };
 
 use linkme::distributed_slice;
@@ -19,8 +20,8 @@ use zuqe::{
 };
 
 use crate::{
-    USER_CLASS_DEFS, class_llama_context::JSLlamaContext,
-    class_llama_sampler::js_model_createSamplerChain,
+    USER_CLASS_DEFS, class_llama_context::JSLlamaContext, class_llama_pipeline::JSLlamaPipeline,
+    class_llama_sampler::js_model_createSamplerChain, pipeline::PipelineEngine,
 };
 
 const MODEL_PATH_HIDDEN_KEY: &str = "__modelPath";
@@ -256,10 +257,7 @@ fn js_model_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     Ok(obj.into())
 }
 
-pub(super) fn get_llama_model<'a>(
-    ctx: &mut ScopedContext,
-    val: &'a JSValue,
-) -> Result<&'a LlamaModel, i32> {
+pub(super) fn get_llama_model(ctx: &mut ScopedContext, val: &JSValue) -> Result<LlamaModel, i32> {
     let opaque = val
         .retrive_object_payload(ctx, JSLlamaModel::class_id())?
         .other()
@@ -267,7 +265,7 @@ pub(super) fn get_llama_model<'a>(
         .opaque();
 
     if !opaque.is_null() {
-        Ok(unsafe { &*opaque.cast::<LlamaModel>() })
+        Ok(unsafe { (&*opaque.cast::<LlamaModel>()).clone() })
     } else {
         ctx.throw_type_error("invalid Model object");
         Err(-1)
@@ -354,7 +352,7 @@ fn model_is_eog(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     Ok(JSValue::Bool(model.is_eog(token)))
 }
 
-fn js_model_createContext(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+fn default_context_params() -> llama_cpp_ffi::llama_context_params {
     let mut ctx_params = LlamaContext::default_params();
     ctx_params.kv_unified = true;
     ctx_params.n_ctx = 4096;
@@ -363,13 +361,15 @@ fn js_model_createContext(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
     ctx_params.n_seq_max = 1;
     ctx_params.n_threads = 4;
     ctx_params.n_threads_batch = 8;
+    ctx_params
+}
 
-    if cc.length() > 0 {
-        let opts = cc.arg(0).as_object().copied().ok_or_else(|| {
-            ctx.throw_type_error("params must be object");
-            -1
-        })?;
-
+fn parse_context_params(
+    ctx: &mut ScopedContext,
+    opts: Option<&Object>,
+) -> Result<llama_cpp_ffi::llama_context_params, i32> {
+    let mut ctx_params = default_context_params();
+    if let Some(opts) = opts {
         let v = opts.get_property_str(ctx, "contextSize")?;
         if !v.is_undefined() {
             let n = v.to_number(ctx)?.to_i32();
@@ -611,10 +611,28 @@ fn js_model_createContext(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
         if !v.is_undefined() {
             ctx_params.kv_unified = v.to_bool()?;
         }
-    };
+    }
+    Ok(ctx_params)
+}
 
+fn js_model_createContext(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let model = get_llama_model(ctx, &this)?;
+
+    let opts = if cc.length() > 0 {
+        let v = cc.arg(0);
+        if v.is_undefined() || v.is_null() {
+            None
+        } else {
+            Some(v.as_object().copied().ok_or_else(|| {
+                ctx.throw_type_error("params must be object");
+                -1
+            })?)
+        }
+    } else {
+        None
+    };
+    let ctx_params = parse_context_params(ctx, opts.as_ref())?;
 
     let mut llm_ctx = LlamaContext::new(model, ctx_params).map_err(|e| {
         ctx.throw_internal_error(&e);
@@ -628,6 +646,93 @@ fn js_model_createContext(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
     ctx_obj.define_property_value_str(ctx, "model", this, JS_PROP_ENUMERABLE)?;
 
     Ok(ctx_obj.into())
+}
+
+fn js_model_createPipeline(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let this = cc.this();
+    let model = get_llama_model(ctx, &this)?;
+
+    let opts = if cc.length() > 0 {
+        let v = cc.arg(0);
+        if v.is_undefined() || v.is_null() {
+            None
+        } else {
+            Some(v.as_object().copied().ok_or_else(|| {
+                ctx.throw_type_error("options must be object");
+                -1
+            })?)
+        }
+    } else {
+        None
+    };
+
+    let mut max_parallel = 1usize;
+    let mut idle_sleep_ms = 1u64;
+    let mut slot_match_threshold = 0.5f32;
+    if let Some(opts) = opts.as_ref() {
+        let v = opts.get_property_str(ctx, "maxParallel")?;
+        if !v.is_undefined() {
+            let n = v.to_number(ctx)?.to_i32();
+            if n >= 1 {
+                max_parallel = n as usize;
+            } else {
+                ctx.throw_type_error("maxParallel must be >= 1");
+                return Err(-1);
+            }
+        }
+
+        let v = opts.get_property_str(ctx, "idleSleepMs")?;
+        if !v.is_undefined() {
+            let n = v.to_number(ctx)?.to_i32();
+            if n >= 0 {
+                idle_sleep_ms = n as u64;
+            } else {
+                ctx.throw_type_error("idleSleepMs must be >= 0");
+                return Err(-1);
+            }
+        }
+
+        let v = opts.get_property_str(ctx, "slotMatchThreshold")?;
+        if !v.is_undefined() {
+            let d = v.to_number(ctx)?.to_f64();
+            if (0.0..=1.0).contains(&d) {
+                slot_match_threshold = d as f32;
+            } else {
+                ctx.throw_type_error("slotMatchThreshold must be in [0, 1]");
+                return Err(-1);
+            }
+        }
+    }
+
+    let ctx_params = parse_context_params(ctx, opts.as_ref())?;
+
+    let seq_cap = ctx_params.n_seq_max.max(1) as usize;
+    if max_parallel > seq_cap {
+        eprintln!(
+            "createPipeline: maxParallel ({}) is greater than sequences ({}); clamping maxParallel to sequences",
+            max_parallel, seq_cap,
+        );
+        max_parallel = seq_cap;
+    }
+
+    let mut llm_ctx = LlamaContext::new(model, ctx_params).map_err(|e| {
+        ctx.throw_internal_error(&e);
+        -1
+    })?;
+    llm_ctx.init_batch(ctx_params.n_batch as i32, 0, ctx_params.n_seq_max as i32);
+
+    let engine = PipelineEngine::start(
+        max_parallel,
+        Duration::from_millis(idle_sleep_ms),
+        slot_match_threshold,
+        llm_ctx,
+    );
+    let mut obj = JSLlamaPipeline::new_instance(ctx, engine)?;
+
+    // Keep model alive as long as pipeline exists.
+    obj.define_property_value_str(ctx, "model", this, JS_PROP_ENUMERABLE)?;
+
+    Ok(obj.into())
 }
 
 fn tokenize(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -933,7 +1038,7 @@ fn model_render_template(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             if let Some(opts_json_str) = opts_json.as_string() {
                 let s = opts_json_str.content().encode_utf8(false).to_string();
                 if let Ok(JsonValue::Object(mut map)) = serde_json::from_str::<JsonValue>(&s) {
-                    well_known = WellKnownTemplateVars::from_opts_map(ctx, model, &mut map)?;
+                    well_known = WellKnownTemplateVars::from_opts_map(ctx, &model, &mut map)?;
                     for (k, v) in map {
                         extra_vars.insert(k, v);
                     }
@@ -942,7 +1047,7 @@ fn model_render_template(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         }
     }
 
-    let processed_template = get_preprocessed_template(ctx, &this, model)?;
+    let processed_template = get_preprocessed_template(ctx, &this, &model)?;
 
     let mut env = Environment::new();
     env.add_function("startswith", |s: String, prefix: String| -> bool {
@@ -1017,6 +1122,7 @@ const CLASS_MODEL_PROTO_ENTRIES: &[FieldDef] = &[
     FieldDef::GETSET("eogToken", Some(get_prop), None, PROP_EOG_TOKEN as _),
     FieldDef::GETSET("eogText", Some(get_prop), None, PROP_EOG_TEXT as _),
     FieldDef::CALL("createContext", 1, js_model_createContext, 0),
+    FieldDef::CALL("createPipeline", 1, js_model_createPipeline, 0),
     FieldDef::CALL("createSamplerChain", 1, js_model_createSamplerChain, 0),
     FieldDef::CALL("tokenize", 1, tokenize, 0),
     FieldDef::CALL("detokenize", 1, token_to_text, 0),
@@ -1033,7 +1139,7 @@ fn load_model(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     let model_opts = parse_model_options(ctx, &cc)?;
 
-    let (promise, tx) = Promise::create_from_sender(
+    let (promise, tx) = Promise::create_with_channel(
         ctx,
         |cx, payload: Result<(LlamaModel, String), String>| -> JSResult {
             let (model, file_name) = payload.map_err(|e| {
