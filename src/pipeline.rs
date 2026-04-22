@@ -337,14 +337,14 @@ enum SlotState {
         prompt_tokens: VecDeque<Token>,
         logits_for_all_tokens: bool,
         num_written: usize,
-        task: TaskState,
+        task_state: TaskState,
     },
     Sampling {
         logits: i32,
-        task: TaskState,
+        task_state: TaskState,
     },
     Done {
-        task: TaskState,
+        task_state: TaskState,
         reason: FinishReason,
     },
     Busy,
@@ -528,6 +528,7 @@ fn worker_loop<B: PipelineBackend>(
 ) {
     let mut slots = (0..max_parallel).map(Slot::new).collect::<Vec<_>>();
     let mut slot_cursor = 0usize;
+
     // Keep two queues so hinted tasks can be retried without starving normal tasks.
     let mut ready_inputs = VecDeque::<PipelineTask>::new();
     let mut deferred_inputs = VecDeque::<PipelineTask>::new();
@@ -559,27 +560,21 @@ fn worker_loop<B: PipelineBackend>(
                 active_counter.store(0, Ordering::Relaxed);
                 return;
             }
-            enqueue_input(input, &mut ready_inputs, &mut deferred_inputs);
+            enqueue_task(input, &mut ready_inputs, &mut deferred_inputs);
         }
 
-        while let Some(input) = pop_next_input(&mut ready_inputs, &mut deferred_inputs) {
-            if cancelled_ids.remove(&input.config.task_id) {
-                let _ = input
+        while let Some(task) = pop_next_task(&mut ready_inputs, &mut deferred_inputs) {
+            if cancelled_ids.remove(&task.config.task_id) {
+                let _ = task
                     .output_tx
                     .send(PipelineReply::Finished(FinishReason::Cancelled));
                 continue;
             }
 
-            match sched(
-                input,
-                max_parallel,
-                slot_match_threshold,
-                &mut backend,
-                &mut slots,
-            ) {
+            match sched(task, slot_match_threshold, &mut backend, &mut slots) {
                 SchedResult::Scheduled | SchedResult::Rejected => {}
                 SchedResult::Deferred(input) => {
-                    enqueue_input(input, &mut ready_inputs, &mut deferred_inputs);
+                    enqueue_task(input, &mut ready_inputs, &mut deferred_inputs);
                     break;
                 }
             }
@@ -593,19 +588,19 @@ fn worker_loop<B: PipelineBackend>(
     }
 }
 
-fn enqueue_input(
-    input: PipelineTask,
+fn enqueue_task(
+    task: PipelineTask,
     ready: &mut VecDeque<PipelineTask>,
     deferred: &mut VecDeque<PipelineTask>,
 ) {
-    if input.seq_hint.unwrap_or(0) == 0 {
-        ready.push_back(input);
+    if task.seq_hint.unwrap_or(0) == 0 {
+        ready.push_back(task);
     } else {
-        deferred.push_back(input);
+        deferred.push_back(task);
     }
 }
 
-fn pop_next_input(
+fn pop_next_task(
     ready: &mut VecDeque<PipelineTask>,
     deferred: &mut VecDeque<PipelineTask>,
 ) -> Option<PipelineTask> {
@@ -656,11 +651,11 @@ fn handle_ctrl_messages<B: PipelineBackend>(
             PipelineCtrlMsg::Shutdown => {
                 for slot in slots.iter_mut() {
                     let state = std::mem::replace(&mut slot.state, SlotState::Busy);
-                    if let SlotState::Decoding { task, .. }
-                    | SlotState::Sampling { task, .. }
-                    | SlotState::Done { task, .. } = state
+                    if let SlotState::Decoding { task_state, .. }
+                    | SlotState::Sampling { task_state, .. }
+                    | SlotState::Done { task_state, .. } = state
                     {
-                        let _ = task
+                        let _ = task_state
                             .output_tx
                             .send(PipelineReply::Finished(FinishReason::Shutdown));
                         backend.clear_slot(slot.seq_id);
@@ -678,27 +673,30 @@ fn handle_ctrl_messages<B: PipelineBackend>(
                             prompt_tokens,
                             logits_for_all_tokens,
                             num_written,
-                            mut task,
+                            mut task_state,
                         } => {
-                            if task.config.task_id == task_id
-                                && task.config.output_mode == OutputMode::Single
+                            if task_state.config.task_id == task_id
+                                && task_state.config.output_mode == OutputMode::Single
                             {
-                                task.step_budget = task.step_budget.saturating_add(1);
+                                task_state.step_budget = task_state.step_budget.saturating_add(1);
                             }
                             SlotState::Decoding {
                                 prompt_tokens,
                                 logits_for_all_tokens,
                                 num_written,
-                                task,
+                                task_state,
                             }
                         }
-                        SlotState::Sampling { logits, mut task } => {
-                            if task.config.task_id == task_id
-                                && task.config.output_mode == OutputMode::Single
+                        SlotState::Sampling {
+                            logits,
+                            mut task_state,
+                        } => {
+                            if task_state.config.task_id == task_id
+                                && task_state.config.output_mode == OutputMode::Single
                             {
-                                task.step_budget = task.step_budget.saturating_add(1);
+                                task_state.step_budget = task_state.step_budget.saturating_add(1);
                             }
-                            SlotState::Sampling { logits, task }
+                            SlotState::Sampling { logits, task_state }
                         }
                         other => other,
                     }
@@ -716,11 +714,11 @@ fn handle_ctrl_messages<B: PipelineBackend>(
                             prompt_tokens,
                             logits_for_all_tokens,
                             num_written,
-                            task,
+                            task_state,
                         } => {
-                            if task.config.task_id == task_id {
+                            if task_state.config.task_id == task_id {
                                 SlotState::Done {
-                                    task,
+                                    task_state,
                                     reason: FinishReason::Cancelled,
                                 }
                             } else {
@@ -728,28 +726,28 @@ fn handle_ctrl_messages<B: PipelineBackend>(
                                     prompt_tokens,
                                     logits_for_all_tokens,
                                     num_written,
-                                    task,
+                                    task_state,
                                 }
                             }
                         }
-                        SlotState::Sampling { logits, task } => {
-                            if task.config.task_id == task_id {
+                        SlotState::Sampling { logits, task_state } => {
+                            if task_state.config.task_id == task_id {
                                 SlotState::Done {
-                                    task,
+                                    task_state,
                                     reason: FinishReason::Cancelled,
                                 }
                             } else {
-                                SlotState::Sampling { logits, task }
+                                SlotState::Sampling { logits, task_state }
                             }
                         }
-                        SlotState::Done { task, reason } => {
-                            if task.config.task_id == task_id {
+                        SlotState::Done { task_state, reason } => {
+                            if task_state.config.task_id == task_id {
                                 SlotState::Done {
-                                    task,
+                                    task_state,
                                     reason: FinishReason::Cancelled,
                                 }
                             } else {
-                                SlotState::Done { task, reason }
+                                SlotState::Done { task_state, reason }
                             }
                         }
                         other => other,
@@ -783,14 +781,13 @@ enum SchedResult {
 }
 
 fn sched<B: PipelineBackend>(
-    mut input: PipelineTask,
-    _max_parallel: usize,
+    mut task: PipelineTask,
     slot_match_threshold: f32,
     backend: &mut B,
     slots: &mut [Slot],
 ) -> SchedResult {
-    if input.prompt_tokens.is_empty() {
-        let _ = input
+    if task.prompt_tokens.is_empty() {
+        let _ = task
             .output_tx
             .send(PipelineReply::Finished(FinishReason::Error(
                 "prompt_tokens must not be empty".to_string(),
@@ -800,24 +797,23 @@ fn sched<B: PipelineBackend>(
 
     // Slot selection follows llama-use1 semantics:
     // seq_hint first, then prefix reuse threshold, then LRU fallback.
-    let (slot_idx, allow_cache_reuse) = match pick_idle_slot(
+    let Some((slot_idx, allow_cache_reuse)) = pick_idle_slot(
         backend,
         slots,
-        input.seq_hint,
-        &input.prompt_tokens,
-        input.use_cache,
+        task.seq_hint,
+        &task.prompt_tokens,
+        task.use_cache,
         slot_match_threshold,
-    ) {
-        Some(v) => v,
-        None => return SchedResult::Deferred(input),
+    ) else {
+        return SchedResult::Deferred(task);
     };
 
     let seq_id = slots[slot_idx].seq_id;
     let n_common = if allow_cache_reuse {
-        match backend.prepare_slot(seq_id, &input.prompt_tokens) {
+        match backend.prepare_slot(seq_id, &task.prompt_tokens) {
             Ok(n) => n,
             Err(e) => {
-                let _ = input
+                let _ = task
                     .output_tx
                     .send(PipelineReply::Finished(FinishReason::Error(e)));
                 return SchedResult::Rejected;
@@ -829,9 +825,9 @@ fn sched<B: PipelineBackend>(
         0
     };
 
-    input.prompt_tokens.drain(..n_common);
-    if input.prompt_tokens.is_empty() {
-        let _ = input
+    task.prompt_tokens.drain(..n_common);
+    if task.prompt_tokens.is_empty() {
+        let _ = task
             .output_tx
             .send(PipelineReply::Finished(FinishReason::Error(
                 "prompt_tokens became empty after prefix match".to_string(),
@@ -839,25 +835,26 @@ fn sched<B: PipelineBackend>(
         return SchedResult::Rejected;
     }
 
-    let config = input.config;
+    let config = task.config;
     let is_single_mode = config.output_mode == OutputMode::Single;
-    let task = TaskState {
+
+    let task_state = TaskState {
         config,
         step_budget: if is_single_mode { 1 } else { 0 },
         generated_tokens: Vec::new(),
         generated_text: String::new(),
         pending_bytes: Vec::new(),
-        output_tx: input.output_tx,
+        output_tx: task.output_tx,
     };
 
     let slot = &mut slots[slot_idx];
     slot.n_past = n_common as i32;
     slot.mtime = now_unix_s();
     slot.state = SlotState::Decoding {
-        prompt_tokens: VecDeque::from(input.prompt_tokens),
-        logits_for_all_tokens: task.config.logits_for_all_tokens,
+        prompt_tokens: VecDeque::from(task.prompt_tokens),
+        logits_for_all_tokens: task_state.config.logits_for_all_tokens,
         num_written: 0,
-        task,
+        task_state,
     };
 
     SchedResult::Scheduled
@@ -889,7 +886,7 @@ fn decoding_stage<B: PipelineBackend>(
             mut prompt_tokens,
             logits_for_all_tokens,
             mut num_written,
-            task,
+            task_state,
         } = state
         {
             let n_tokens = prompt_tokens.len();
@@ -897,9 +894,11 @@ fn decoding_stage<B: PipelineBackend>(
 
             let mut feed_count = 0usize;
             let mut decode_err: Option<String> = None;
+
             for token in prompt_tokens.drain(..n_take) {
                 // Request logits for all prompt tokens only when explicitly needed.
-                let need_logits = task.config.logits_for_all_tokens || n_take == n_tokens;
+                let need_logits = task_state.config.logits_for_all_tokens || n_take == n_tokens;
+
                 match backend.push_decode_token(
                     slot.seq_id,
                     token,
@@ -921,7 +920,7 @@ fn decoding_stage<B: PipelineBackend>(
             if let Some(e) = decode_err {
                 backend.truncate_slot_cache(slot.seq_id, slot.n_past as usize);
                 slot.state = SlotState::Done {
-                    task,
+                    task_state,
                     reason: FinishReason::Error(e),
                 };
                 continue;
@@ -930,14 +929,14 @@ fn decoding_stage<B: PipelineBackend>(
             slot.state = if prompt_tokens.is_empty() {
                 if logits_for_all_tokens {
                     SlotState::Done {
-                        task,
+                        task_state,
                         reason: FinishReason::PrefillOnly,
                     }
                 } else {
                     has_sampling = true;
                     SlotState::Sampling {
                         logits: cnt as i32 - 1,
-                        task,
+                        task_state,
                     }
                 }
             } else {
@@ -945,7 +944,7 @@ fn decoding_stage<B: PipelineBackend>(
                     prompt_tokens,
                     logits_for_all_tokens,
                     num_written,
-                    task,
+                    task_state,
                 }
             };
 
@@ -970,12 +969,11 @@ fn decoding_stage<B: PipelineBackend>(
                     backend.truncate_slot_cache(slot.seq_id, slot.n_past as usize);
                     let old = std::mem::replace(&mut slot.state, SlotState::Busy);
                     slot.state = match old {
-                        SlotState::Decoding { task, .. } | SlotState::Sampling { task, .. } => {
-                            SlotState::Done {
-                                task,
-                                reason: FinishReason::Error(e.clone()),
-                            }
-                        }
+                        SlotState::Decoding { task_state, .. }
+                        | SlotState::Sampling { task_state, .. } => SlotState::Done {
+                            task_state,
+                            reason: FinishReason::Error(e.clone()),
+                        },
                         other => other,
                     };
                 }
@@ -997,63 +995,66 @@ fn sampling_stage<B: PipelineBackend>(backend: &mut B, slots: &mut [Slot]) -> bo
     for slot in slots.iter_mut() {
         let state = std::mem::replace(&mut slot.state, SlotState::Busy);
         slot.state = match state {
-            SlotState::Sampling { logits, mut task } => {
-                let can_sample = match task.config.output_mode {
+            SlotState::Sampling {
+                logits,
+                mut task_state,
+            } => {
+                let can_sample = match task_state.config.output_mode {
                     OutputMode::Continuous | OutputMode::OneShot => true,
-                    OutputMode::Single => task.step_budget > 0,
+                    OutputMode::Single => task_state.step_budget > 0,
                 };
 
                 if !can_sample {
-                    SlotState::Sampling { logits, task }
+                    SlotState::Sampling { logits, task_state }
                 } else {
-                    if task.config.output_mode == OutputMode::Single {
-                        task.step_budget = task.step_budget.saturating_sub(1);
+                    if task_state.config.output_mode == OutputMode::Single {
+                        task_state.step_budget = task_state.step_budget.saturating_sub(1);
                     }
 
                     did_work = true;
                     // Sampling consumes logits generated by the previous decode stage.
                     if let Err(e) = backend.ensure_slot_sampler(
                         slot.seq_id,
-                        task.config.temperature,
-                        task.config.top_p,
+                        task_state.config.temperature,
+                        task_state.config.top_p,
                     ) {
                         slot.state = SlotState::Done {
-                            task,
+                            task_state,
                             reason: FinishReason::Error(e),
                         };
                         continue;
                     }
                     match backend.sample(slot.seq_id, logits) {
                         Ok(token) => {
-                            if task.config.output_mode != OutputMode::OneShot {
-                                let _ = task.output_tx.send(PipelineReply::Token(token));
+                            if task_state.config.output_mode != OutputMode::OneShot {
+                                let _ = task_state.output_tx.send(PipelineReply::Token(token));
                             }
-                            task.generated_tokens.push(token);
+                            task_state.generated_tokens.push(token);
                             let piece = backend.token_to_piece(token);
                             append_utf8_piece(
-                                &mut task.generated_text,
-                                &mut task.pending_bytes,
+                                &mut task_state.generated_text,
+                                &mut task_state.pending_bytes,
                                 &piece,
                             );
 
                             if backend.is_eog(token) {
                                 SlotState::Done {
-                                    task,
+                                    task_state,
                                     reason: FinishReason::Eog,
                                 }
-                            } else if task.config.max_tokens > 0
-                                && task.generated_tokens.len() >= task.config.max_tokens
+                            } else if task_state.config.max_tokens > 0
+                                && task_state.generated_tokens.len() >= task_state.config.max_tokens
                             {
                                 SlotState::Done {
-                                    task,
+                                    task_state,
                                     reason: FinishReason::Length,
                                 }
                             } else if hit_stop_words(
-                                &mut task.generated_text,
-                                &task.config.stop_words,
+                                &mut task_state.generated_text,
+                                &task_state.config.stop_words,
                             ) {
                                 SlotState::Done {
-                                    task,
+                                    task_state,
                                     reason: FinishReason::StopSequence,
                                 }
                             } else {
@@ -1061,12 +1062,12 @@ fn sampling_stage<B: PipelineBackend>(backend: &mut B, slots: &mut [Slot]) -> bo
                                     prompt_tokens: VecDeque::from([token]),
                                     logits_for_all_tokens: false,
                                     num_written: 0,
-                                    task,
+                                    task_state,
                                 }
                             }
                         }
                         Err(e) => SlotState::Done {
-                            task,
+                            task_state,
                             reason: FinishReason::Error(e),
                         },
                     }
@@ -1084,23 +1085,24 @@ fn done_stage<B: PipelineBackend>(backend: &mut B, slots: &mut [Slot]) -> usize 
 
     for slot in slots.iter_mut() {
         let state = std::mem::replace(&mut slot.state, SlotState::Busy);
+
         slot.state = match state {
-            SlotState::Done { task, reason } => {
+            SlotState::Done { task_state, reason } => {
                 // Finalize output, release KV/cache state, and return slot to idle.
                 let hard_clear = matches!(
                     reason,
                     FinishReason::Cancelled | FinishReason::Shutdown | FinishReason::Error(_)
                 );
-                if task.config.output_mode == OutputMode::OneShot {
+                if task_state.config.output_mode == OutputMode::OneShot {
                     if hard_clear {
-                        let _ = task.output_tx.send(PipelineReply::Finished(reason));
+                        let _ = task_state.output_tx.send(PipelineReply::Finished(reason));
                     } else {
-                        let _ = task
+                        let _ = task_state
                             .output_tx
-                            .send(PipelineReply::Tokens(task.generated_tokens.clone()));
+                            .send(PipelineReply::Tokens(task_state.generated_tokens.clone()));
                     }
                 } else {
-                    let _ = task.output_tx.send(PipelineReply::Finished(reason));
+                    let _ = task_state.output_tx.send(PipelineReply::Finished(reason));
                 }
                 if hard_clear {
                     backend.clear_slot(slot.seq_id);
