@@ -7,13 +7,13 @@ use std::{
 use linkme::distributed_slice;
 use zuqe::{
     CallContext, ClassDef, ClassID, FieldDef, JSResult, JSValue, Object, Runtime, ScopedContext,
-    builtins::{promise::Promise, typed_array::TypedArray},
+    builtins::{iterator::AsyncIterator, promise::Promise, typed_array::TypedArray},
 };
 
 use crate::{
     USER_CLASS_DEFS,
     class_llama_context::parse_tokens,
-    pipeline::{FinishReason, OutputMode, PipelineEngine, PipelineReply},
+    pipeline::{OutputMode, PipelineEngine, PipelineReply},
 };
 
 static NEXT_TASK_ID: AtomicU64 = AtomicU64::new(1);
@@ -32,7 +32,7 @@ fn get_pipeline<'a>(ctx: &mut ScopedContext, val: &JSValue) -> Result<&'a Pipeli
     }
 }
 
-fn generate(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+fn completion(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let pipeline = get_pipeline(ctx, &this)?;
 
@@ -43,7 +43,7 @@ fn generate(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         return Err(-1);
     }
 
-    let task_id = format!("task-{}", NEXT_TASK_ID.fetch_add(1, Ordering::Relaxed));
+    let task_id = format!("{}", NEXT_TASK_ID.fetch_add(1, Ordering::Relaxed));
 
     let rx = pipeline
         .push_task(task_id, tokens, Vec::new(), OutputMode::OneShot)
@@ -57,30 +57,78 @@ fn generate(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             PipelineReply::Tokens(tokens) => {
                 TypedArray::create_from_vec_i32(cx, tokens).map(JSValue::from)
             }
-            PipelineReply::Finished(FinishReason::Error(e)) => {
+            PipelineReply::Error(e) => {
                 cx.throw_internal_error(&e);
                 Err(-1)
             }
-            PipelineReply::Finished(FinishReason::Cancelled) => {
+            PipelineReply::Cancelled => {
                 cx.throw_internal_error("task cancelled");
                 Err(-1)
             }
-            PipelineReply::Finished(FinishReason::Shutdown) => {
-                cx.throw_internal_error("pipeline stopped");
+            PipelineReply::Shutdown => {
+                cx.throw_internal_error("pipeline shutdown");
                 Err(-1)
             }
-            PipelineReply::Finished(reason) => {
-                cx.throw_internal_error(&format!("unexpected oneshot finish: {reason:?}"));
-                Err(-1)
-            }
-            PipelineReply::Token(_) => {
-                cx.throw_internal_error("unexpected token message in oneshot mode");
+            PipelineReply::Token(_)
+            | PipelineReply::StopEog
+            | PipelineReply::StopLength
+            | PipelineReply::StopPrefillOnly
+            | PipelineReply::StopWord => {
+                cx.throw_internal_error("unexpected message in oneshot mode");
                 Err(-1)
             }
         }
     })?;
 
     Ok(promise.into())
+}
+
+fn completion_iter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let this = cc.this();
+    let pipeline = get_pipeline(ctx, &this)?;
+
+    let arg0 = cc.arg(0);
+    let tokens = parse_tokens(ctx, &arg0)?.into_owned();
+    if tokens.is_empty() {
+        ctx.throw_type_error("tokens cannot be empty");
+        return Err(-1);
+    }
+
+    let task_id = format!("{}", NEXT_TASK_ID.fetch_add(1, Ordering::Relaxed));
+
+    let rx = pipeline
+        .push_task(task_id, tokens, Vec::new(), OutputMode::Continuous)
+        .map_err(|e| {
+            ctx.throw_internal_error(&e.to_string());
+            -1
+        })?;
+
+    AsyncIterator::create_with_receiver(ctx, rx, |cx, msg| -> Result<Option<JSValue>, i32> {
+        match msg {
+            PipelineReply::Token(token) => Ok(Some(JSValue::from(token))),
+            PipelineReply::StopEog
+            | PipelineReply::StopWord
+            | PipelineReply::StopLength
+            | PipelineReply::StopPrefillOnly => Ok(None),
+            PipelineReply::Tokens(_) => {
+                cx.throw_internal_error("unexpected message in continues mode");
+                Err(-1)
+            }
+            PipelineReply::Error(e) => {
+                cx.throw_internal_error(&e);
+                Err(-1)
+            }
+            PipelineReply::Cancelled => {
+                cx.throw_internal_error("task cancelled");
+                Err(-1)
+            }
+            PipelineReply::Shutdown => {
+                cx.throw_internal_error("pipeline shutdown");
+                Err(-1)
+            }
+        }
+    })
+    .map(JSValue::from)
 }
 
 fn dispose(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -99,7 +147,8 @@ fn dispose(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 }
 
 const CLASS_PIPELINE_PROTO: &[FieldDef] = &[
-    FieldDef::CALL("generate", 1, generate, 0),
+    FieldDef::CALL("completion", 1, completion, 0),
+    FieldDef::CALL("completionIter", 1, completion_iter, 0),
     FieldDef::CALL("dispose", 0, dispose, 0),
 ];
 

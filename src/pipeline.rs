@@ -3,13 +3,13 @@ use std::{
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
-        mpsc,
     },
     thread::{self, JoinHandle},
     time::Duration,
     time::SystemTime,
 };
 
+use crossbeam::channel::{Receiver, SendError, Sender};
 use llama_cpp_ffi::{LlamaContext, SamplerChain, SamplerKind};
 
 pub type Token = i32;
@@ -42,7 +42,7 @@ pub struct PipelineTask {
     /// Whether prompt prefix cache reuse is allowed for this task.
     pub use_cache: bool,
     /// Per-task output channel owned by the caller.
-    pub output_tx: mpsc::Sender<PipelineReply>,
+    pub output_tx: Sender<PipelineReply>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -60,21 +60,16 @@ pub enum PipelineCtrlMsg {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum FinishReason {
-    Eog,
-    Length,
-    PrefillOnly,
-    StopSequence,
-    Shutdown,
-    Cancelled,
-    Error(String),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PipelineReply {
     Token(Token),
     Tokens(Vec<Token>),
-    Finished(FinishReason),
+    StopEog,
+    StopLength,
+    StopPrefillOnly,
+    StopWord,
+    Cancelled,
+    Error(String),
+    Shutdown,
 }
 
 pub trait PipelineBackend: Send + 'static {
@@ -324,7 +319,7 @@ struct TaskState {
     generated_tokens: Vec<Token>,
     generated_text: String,
     pending_bytes: Vec<u8>,
-    output_tx: mpsc::Sender<PipelineReply>,
+    output_tx: Sender<PipelineReply>,
 }
 
 enum SlotState {
@@ -341,7 +336,7 @@ enum SlotState {
     },
     Done {
         task_state: TaskState,
-        reason: FinishReason,
+        reply: PipelineReply,
     },
     Busy,
 }
@@ -365,8 +360,8 @@ impl Slot {
 }
 
 pub struct PipelineEngine {
-    input_tx: mpsc::Sender<PipelineTask>,
-    ctrl_tx: mpsc::Sender<PipelineCtrlMsg>,
+    input_tx: Sender<PipelineTask>,
+    ctrl_tx: Sender<PipelineCtrlMsg>,
     active_tasks: Arc<AtomicUsize>,
     max_parallel: usize,
     join_handle: Option<JoinHandle<()>>,
@@ -393,11 +388,12 @@ impl PipelineEngine {
         slot_match_threshold: f32,
         backend: B,
     ) -> Self {
-        let (input_tx, input_rx) = mpsc::channel::<PipelineTask>();
-        let (ctrl_tx, ctrl_rx) = mpsc::channel::<PipelineCtrlMsg>();
-        let active_tasks = Arc::new(AtomicUsize::new(0));
+        let (input_tx, input_rx) = crossbeam::channel::bounded::<PipelineTask>(16);
+        let (ctrl_tx, ctrl_rx) = crossbeam::channel::bounded::<PipelineCtrlMsg>(1);
 
+        let active_tasks = Arc::new(AtomicUsize::new(0));
         let worker_active = active_tasks.clone();
+
         let worker_join = thread::spawn(move || {
             worker_loop(
                 max_parallel,
@@ -425,7 +421,7 @@ impl PipelineEngine {
         prompt_tokens: Vec<Token>,
         stop_words: Vec<String>,
         output_mode: OutputMode,
-    ) -> Result<mpsc::Receiver<PipelineReply>, mpsc::SendError<PipelineTask>> {
+    ) -> Result<Receiver<PipelineReply>, SendError<PipelineTask>> {
         self.push_task_with_params(
             task_id,
             prompt_tokens,
@@ -452,8 +448,9 @@ impl PipelineEngine {
         temperature: f32,
         top_p: f32,
         logits_for_all_tokens: bool,
-    ) -> Result<mpsc::Receiver<PipelineReply>, mpsc::SendError<PipelineTask>> {
-        let (output_tx, output_rx) = mpsc::channel::<PipelineReply>();
+    ) -> Result<Receiver<PipelineReply>, SendError<PipelineTask>> {
+        let (output_tx, output_rx) = crossbeam::channel::bounded::<PipelineReply>(1);
+
         self.input_tx.send(PipelineTask {
             config: TaskConfig {
                 task_id: task_id.into(),
@@ -475,7 +472,7 @@ impl PipelineEngine {
     pub fn next_token_of(
         &self,
         task_id: impl Into<String>,
-    ) -> Result<(), mpsc::SendError<PipelineCtrlMsg>> {
+    ) -> Result<(), SendError<PipelineCtrlMsg>> {
         self.ctrl_tx
             .send(PipelineCtrlMsg::NextTokenOf(task_id.into()))
     }
@@ -483,7 +480,7 @@ impl PipelineEngine {
     pub fn cancel_task(
         &self,
         task_id: impl Into<String>,
-    ) -> Result<(), mpsc::SendError<PipelineCtrlMsg>> {
+    ) -> Result<(), SendError<PipelineCtrlMsg>> {
         self.ctrl_tx
             .send(PipelineCtrlMsg::CancelTask(task_id.into()))
     }
@@ -518,8 +515,8 @@ fn worker_loop<B: PipelineBackend>(
     idle_sleep: Duration,
     slot_match_threshold: f32,
     mut backend: B,
-    input_rx: mpsc::Receiver<PipelineTask>,
-    ctrl_rx: mpsc::Receiver<PipelineCtrlMsg>,
+    input_rx: Receiver<PipelineTask>,
+    ctrl_rx: Receiver<PipelineCtrlMsg>,
     active_counter: Arc<AtomicUsize>,
 ) {
     let mut slots = (0..max_parallel).map(Slot::new).collect::<Vec<_>>();
@@ -561,9 +558,7 @@ fn worker_loop<B: PipelineBackend>(
 
         while let Some(task) = pop_next_task(&mut ready_inputs, &mut deferred_inputs) {
             if cancelled_ids.remove(&task.config.task_id) {
-                let _ = task
-                    .output_tx
-                    .send(PipelineReply::Finished(FinishReason::Cancelled));
+                let _ = task.output_tx.send(PipelineReply::Cancelled);
                 continue;
             }
 
@@ -635,7 +630,7 @@ fn tick<B: PipelineBackend>(backend: &mut B, slots: &mut [Slot], slot_cursor: &m
 }
 
 fn handle_ctrl_messages<B: PipelineBackend>(
-    ctrl_rx: &mpsc::Receiver<PipelineCtrlMsg>,
+    ctrl_rx: &Receiver<PipelineCtrlMsg>,
     backend: &mut B,
     slots: &mut [Slot],
     ready: &mut VecDeque<PipelineTask>,
@@ -651,9 +646,7 @@ fn handle_ctrl_messages<B: PipelineBackend>(
                     | SlotState::Sampling { task_state, .. }
                     | SlotState::Done { task_state, .. } = state
                     {
-                        let _ = task_state
-                            .output_tx
-                            .send(PipelineReply::Finished(FinishReason::Shutdown));
+                        let _ = task_state.output_tx.send(PipelineReply::Shutdown);
                         backend.clear_slot(slot.seq_id);
                     }
                     slot.n_past = 0;
@@ -705,6 +698,7 @@ fn handle_ctrl_messages<B: PipelineBackend>(
 
                 for slot in slots.iter_mut() {
                     let state = std::mem::replace(&mut slot.state, SlotState::Busy);
+
                     slot.state = match state {
                         SlotState::Decoding {
                             prompt_tokens,
@@ -715,7 +709,7 @@ fn handle_ctrl_messages<B: PipelineBackend>(
                             if task_state.config.task_id == task_id {
                                 SlotState::Done {
                                     task_state,
-                                    reason: FinishReason::Cancelled,
+                                    reply: PipelineReply::Cancelled,
                                 }
                             } else {
                                 SlotState::Decoding {
@@ -730,20 +724,20 @@ fn handle_ctrl_messages<B: PipelineBackend>(
                             if task_state.config.task_id == task_id {
                                 SlotState::Done {
                                     task_state,
-                                    reason: FinishReason::Cancelled,
+                                    reply: PipelineReply::Cancelled,
                                 }
                             } else {
                                 SlotState::Sampling { logits, task_state }
                             }
                         }
-                        SlotState::Done { task_state, reason } => {
+                        SlotState::Done { task_state, reply } => {
                             if task_state.config.task_id == task_id {
                                 SlotState::Done {
                                     task_state,
-                                    reason: FinishReason::Cancelled,
+                                    reply: PipelineReply::Cancelled,
                                 }
                             } else {
-                                SlotState::Done { task_state, reason }
+                                SlotState::Done { task_state, reply }
                             }
                         }
                         other => other,
@@ -760,9 +754,7 @@ fn remove_cancelled_inputs(queue: &mut VecDeque<PipelineTask>, task_id: &str) {
     let mut kept = VecDeque::with_capacity(queue.len());
     while let Some(input) = queue.pop_front() {
         if input.config.task_id == task_id {
-            let _ = input
-                .output_tx
-                .send(PipelineReply::Finished(FinishReason::Cancelled));
+            let _ = input.output_tx.send(PipelineReply::Cancelled);
         } else {
             kept.push_back(input);
         }
@@ -783,11 +775,9 @@ fn sched<B: PipelineBackend>(
     slots: &mut [Slot],
 ) -> SchedResult {
     if task.prompt_tokens.is_empty() {
-        let _ = task
-            .output_tx
-            .send(PipelineReply::Finished(FinishReason::Error(
-                "prompt_tokens must not be empty".to_string(),
-            )));
+        let _ = task.output_tx.send(PipelineReply::Error(
+            "prompt_tokens must not be empty".to_string(),
+        ));
         return SchedResult::Rejected;
     }
 
@@ -809,9 +799,7 @@ fn sched<B: PipelineBackend>(
         match backend.prepare_slot(seq_id, &task.prompt_tokens) {
             Ok(n) => n,
             Err(e) => {
-                let _ = task
-                    .output_tx
-                    .send(PipelineReply::Finished(FinishReason::Error(e)));
+                let _ = task.output_tx.send(PipelineReply::Error(e));
                 return SchedResult::Rejected;
             }
         }
@@ -823,11 +811,9 @@ fn sched<B: PipelineBackend>(
 
     task.prompt_tokens.drain(..n_common);
     if task.prompt_tokens.is_empty() {
-        let _ = task
-            .output_tx
-            .send(PipelineReply::Finished(FinishReason::Error(
-                "prompt_tokens became empty after prefix match".to_string(),
-            )));
+        let _ = task.output_tx.send(PipelineReply::Error(
+            "prompt_tokens became empty after prefix match".to_string(),
+        ));
         return SchedResult::Rejected;
     }
 
@@ -917,7 +903,7 @@ fn decoding_stage<B: PipelineBackend>(
                 backend.truncate_slot_cache(slot.seq_id, slot.n_past as usize);
                 slot.state = SlotState::Done {
                     task_state,
-                    reason: FinishReason::Error(e),
+                    reply: PipelineReply::Error(e),
                 };
                 continue;
             }
@@ -926,7 +912,7 @@ fn decoding_stage<B: PipelineBackend>(
                 if logits_for_all_tokens {
                     SlotState::Done {
                         task_state,
-                        reason: FinishReason::PrefillOnly,
+                        reply: PipelineReply::StopPrefillOnly,
                     }
                 } else {
                     has_sampling = true;
@@ -968,7 +954,7 @@ fn decoding_stage<B: PipelineBackend>(
                         SlotState::Decoding { task_state, .. }
                         | SlotState::Sampling { task_state, .. } => SlotState::Done {
                             task_state,
-                            reason: FinishReason::Error(e.clone()),
+                            reply: PipelineReply::Error(e.clone()),
                         },
                         other => other,
                     };
@@ -999,9 +985,10 @@ fn sampling_stage<B: PipelineBackend>(backend: &mut B, slots: &mut [Slot]) -> bo
                 let can_sample = match task_state.config.output_mode {
                     OutputMode::Continuous | OutputMode::OneShot => true,
                     OutputMode::Single => task_state.step_budget > 0,
-                };
+                } && !task_state.output_tx.is_full(); // if output_tx is full, don't sample
 
                 if !can_sample {
+                    // preserve to do sampling in next tick
                     SlotState::Sampling { logits, task_state }
                 } else {
                     if task_state.config.output_mode == OutputMode::Single {
@@ -1017,7 +1004,7 @@ fn sampling_stage<B: PipelineBackend>(backend: &mut B, slots: &mut [Slot]) -> bo
                     ) {
                         slot.state = SlotState::Done {
                             task_state,
-                            reason: FinishReason::Error(e),
+                            reply: PipelineReply::Error(e),
                         };
                         continue;
                     }
@@ -1029,14 +1016,14 @@ fn sampling_stage<B: PipelineBackend>(backend: &mut B, slots: &mut [Slot]) -> bo
                             if backend.is_eog(token) {
                                 SlotState::Done {
                                     task_state,
-                                    reason: FinishReason::Eog,
+                                    reply: PipelineReply::StopEog,
                                 }
                             } else if task_state.config.max_tokens > 0
                                 && task_state.generated_tokens.len() >= task_state.config.max_tokens
                             {
                                 SlotState::Done {
                                     task_state,
-                                    reason: FinishReason::Length,
+                                    reply: PipelineReply::StopLength,
                                 }
                             } else {
                                 // Append token to generated text first to check stop words.
@@ -1054,7 +1041,7 @@ fn sampling_stage<B: PipelineBackend>(backend: &mut B, slots: &mut [Slot]) -> bo
                                     // Stop word encountered
                                     SlotState::Done {
                                         task_state,
-                                        reason: FinishReason::StopSequence,
+                                        reply: PipelineReply::StopWord,
                                     }
                                 } else {
                                     if task_state.config.output_mode != OutputMode::OneShot {
@@ -1074,7 +1061,7 @@ fn sampling_stage<B: PipelineBackend>(backend: &mut B, slots: &mut [Slot]) -> bo
                         }
                         Err(e) => SlotState::Done {
                             task_state,
-                            reason: FinishReason::Error(e),
+                            reply: PipelineReply::Error(e),
                         },
                     }
                 }
@@ -1093,11 +1080,11 @@ fn done_stage<B: PipelineBackend>(backend: &mut B, slots: &mut [Slot]) -> usize 
         let state = std::mem::replace(&mut slot.state, SlotState::Busy);
 
         slot.state = match state {
-            SlotState::Done { task_state, reason } => {
+            SlotState::Done { task_state, reply } => {
                 // Finalize output, release KV/cache state, and return slot to idle.
                 let hard_clear = matches!(
-                    reason,
-                    FinishReason::Cancelled | FinishReason::Shutdown | FinishReason::Error(_)
+                    reply,
+                    PipelineReply::Cancelled | PipelineReply::Shutdown | PipelineReply::Error(_)
                 );
 
                 // send reply
@@ -1105,18 +1092,9 @@ fn done_stage<B: PipelineBackend>(backend: &mut B, slots: &mut [Slot]) -> usize 
                     if !hard_clear && task_state.config.output_mode == OutputMode::OneShot {
                         PipelineReply::Tokens(task_state.generated_tokens)
                     } else {
-                        PipelineReply::Finished(reason)
+                        reply
                     },
                 );
-                // if task_state.config.output_mode == OutputMode::OneShot {
-                //     let _ = task_state.output_tx.send(if hard_clear {
-                //         PipelineReply::Finished(reason)
-                //     } else {
-                //         PipelineReply::Tokens(task_state.generated_tokens)
-                //     });
-                // } else {
-                //     let _ = task_state.output_tx.send(PipelineReply::Finished(reason));
-                // }
 
                 if hard_clear {
                     backend.clear_slot(slot.seq_id);
@@ -1415,15 +1393,12 @@ mod tests {
         }
     }
 
-    fn recv_until_finished(
-        rx: &mpsc::Receiver<PipelineReply>,
-        timeout: Duration,
-    ) -> Vec<PipelineReply> {
+    fn recv_until_finished(rx: &Receiver<PipelineReply>, timeout: Duration) -> Vec<PipelineReply> {
         let mut out = Vec::new();
         for _ in 0..200 {
             match rx.recv_timeout(timeout) {
                 Ok(msg) => {
-                    let done = matches!(msg, PipelineReply::Finished(_));
+                    let done = !matches!(msg, PipelineReply::Token(_) | PipelineReply::Tokens(_));
                     out.push(msg);
                     if done {
                         break;
@@ -1452,10 +1427,7 @@ mod tests {
         let out = recv_until_finished(&rx, Duration::from_millis(100));
         assert!(out.iter().any(|m| matches!(m, PipelineReply::Token(101))));
         assert!(out.iter().any(|m| matches!(m, PipelineReply::Token(102))));
-        assert!(
-            out.iter()
-                .any(|m| matches!(m, PipelineReply::Finished(FinishReason::Eog)))
-        );
+        assert!(out.iter().any(|m| matches!(m, PipelineReply::StopEog)));
         handle.shutdown();
     }
 
@@ -1484,11 +1456,7 @@ mod tests {
         handle.next_token_of("s1").expect("next token 3");
         let third = recv_until_finished(&rx, Duration::from_millis(100));
         assert!(third.iter().any(|m| matches!(m, PipelineReply::Token(3))));
-        assert!(
-            third
-                .iter()
-                .any(|m| matches!(m, PipelineReply::Finished(FinishReason::Eog)))
-        );
+        assert!(third.iter().any(|m| matches!(m, PipelineReply::StopEog)));
         handle.shutdown();
     }
 
@@ -1512,10 +1480,7 @@ mod tests {
             m,
             PipelineReply::Tokens(tokens) if tokens == &vec![11, 12, 13]
         )));
-        assert!(
-            out.iter()
-                .any(|m| matches!(m, PipelineReply::Finished(FinishReason::Eog)))
-        );
+        assert!(out.iter().any(|m| matches!(m, PipelineReply::StopEog)));
         handle.shutdown();
     }
 
@@ -1578,10 +1543,7 @@ mod tests {
         handle.cancel_task("c1").expect("cancel c1");
 
         let out = recv_until_finished(&rx, Duration::from_millis(100));
-        assert!(
-            out.iter()
-                .any(|m| matches!(m, PipelineReply::Finished(FinishReason::Cancelled)))
-        );
+        assert!(out.iter().any(|m| matches!(m, PipelineReply::Cancelled)));
         handle.shutdown();
     }
 
@@ -1604,16 +1566,10 @@ mod tests {
             .expect("submit q2");
 
         let out1 = recv_until_finished(&rx1, Duration::from_millis(100));
-        assert!(
-            out1.iter()
-                .any(|m| matches!(m, PipelineReply::Finished(FinishReason::Eog)))
-        );
+        assert!(out1.iter().any(|m| matches!(m, PipelineReply::StopEog)));
 
         let out2 = recv_until_finished(&rx2, Duration::from_millis(100));
-        assert!(
-            out2.iter()
-                .any(|m| matches!(m, PipelineReply::Finished(FinishReason::Eog)))
-        );
+        assert!(out2.iter().any(|m| matches!(m, PipelineReply::StopEog)));
         handle.shutdown();
     }
 
@@ -1639,10 +1595,7 @@ mod tests {
         handle.cancel_task("queued").expect("cancel queued");
 
         let out2 = recv_until_finished(&rx2, Duration::from_millis(100));
-        assert!(
-            out2.iter()
-                .any(|m| matches!(m, PipelineReply::Finished(FinishReason::Cancelled)))
-        );
+        assert!(out2.iter().any(|m| matches!(m, PipelineReply::Cancelled)));
         handle.shutdown();
     }
 }
