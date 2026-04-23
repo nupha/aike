@@ -1,5 +1,5 @@
 use std::{
-    cell::{Cell, RefCell},
+    cell::Cell,
     ffi::{CStr, CString, c_void},
     sync::{Mutex, OnceLock},
     time::Duration,
@@ -131,12 +131,24 @@ fn parse_model_options(ctx: &mut ScopedContext, cc: &CallContext) -> Result<Mode
 
     let v = opts.get_property_str(ctx, "gpuLayers")?;
     if !v.is_undefined() {
-        let n = v.to_number(ctx)?.to_i32();
-        if n < -1 {
-            ctx.throw_type_error("gpuLayers must be >= -1");
-            return Err(-1);
+        if let Some(s) = v.as_string().and_then(|s| s.ascii()) {
+            match s {
+                b"auto" => out.gpu_layers = -1,
+                b"all" => out.gpu_layers = -2,
+                _ => {
+                    ctx.throw_type_error("invalid gpuLayers");
+                    return Err(-1);
+                }
+            }
+        } else {
+            let n = v.to_number(ctx)?.to_i32();
+            if n >= 0 {
+                out.gpu_layers = n;
+            } else {
+                ctx.throw_type_error("invalid gpuLayers");
+                return Err(-1);
+            }
         }
-        out.gpu_layers = Some(n);
     }
 
     let v = opts.get_property_str(ctx, "splitMode")?;
@@ -331,15 +343,6 @@ fn get_prop(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 Ok(JSValue::NULL)
             }
         }
-        PROP_EOT_TOKEN => Ok(JSValue::Int(model.eot_token_id())),
-        PROP_EOT_TEXT => {
-            if let Some(text) = model.eot_token_text() {
-                ctx.create_string_from_utf8(text.into_bytes())
-                    .map(JSValue::String)
-            } else {
-                Ok(JSValue::NULL)
-            }
-        }
         _ => {
             unreachable!()
         }
@@ -370,7 +373,9 @@ fn parse_context_params(
     opts: Option<&Object>,
 ) -> Result<llama_cpp_ffi::llama_context_params, i32> {
     let mut ctx_params = default_context_params();
+
     if let Some(opts) = opts {
+        // --- Context & Sizing ---
         let v = opts.get_property_str(ctx, "contextSize")?;
         if !v.is_undefined() {
             let n = v.to_number(ctx)?.to_i32();
@@ -389,6 +394,15 @@ fn parse_context_params(
                 return Err(-1);
             }
             ctx_params.n_batch = n as _;
+        }
+
+        let v = opts.get_property_str(ctx, "ubatchSize")?;
+        if !v.is_undefined() {
+            let n = v.to_number(ctx)?.to_i32();
+            if n <= 0 {
+                ctx.throw_type_error("ubatchSize must be greater than 0");
+                return Err(-1);
+            }
             ctx_params.n_ubatch = n as _;
         }
 
@@ -402,6 +416,7 @@ fn parse_context_params(
             ctx_params.n_seq_max = n as _;
         }
 
+        // --- Threading ---
         let v = opts.get_property_str(ctx, "threads")?;
         if !v.is_undefined() {
             let n = v.to_number(ctx)?.to_i32();
@@ -422,56 +437,7 @@ fn parse_context_params(
             ctx_params.n_threads_batch = n;
         }
 
-        let v = opts.get_property_str(ctx, "ubatchSize")?;
-        if !v.is_undefined() {
-            let n = v.to_number(ctx)?.to_i32();
-            if n <= 0 {
-                ctx.throw_type_error("ubatchSize must be greater than 0");
-                return Err(-1);
-            }
-            ctx_params.n_ubatch = n as _;
-        }
-
-        let v = opts.get_property_str(ctx, "ropeScalingType")?;
-        if !v.is_undefined() {
-            let t = if let Some(s) = v.as_string() {
-                s.content()
-                    .encode_utf8(false)
-                    .as_ref()
-                    .parse::<RopeScalingType>()
-                    .ok()
-            } else {
-                RopeScalingType::from_i32(v.to_number(ctx)?.to_i32())
-            }
-            .ok_or_else(|| {
-                ctx.throw_type_error(
-                    "ropeScalingType must be one of: unspecified | none | linear | yarn | longrope",
-                );
-                -1
-            })?;
-            ctx_params.rope_scaling_type = t as _;
-        }
-
-        let v = opts.get_property_str(ctx, "poolingType")?;
-        if !v.is_undefined() {
-            let t = if let Some(s) = v.as_string() {
-                s.content()
-                    .encode_utf8(false)
-                    .as_ref()
-                    .parse::<PoolingType>()
-                    .ok()
-            } else {
-                PoolingType::from_i32(v.to_number(ctx)?.to_i32())
-            }
-            .ok_or_else(|| {
-                ctx.throw_type_error(
-                    "poolingType must be one of: unspecified | none | mean | cls | last | rank",
-                );
-                -1
-            })?;
-            ctx_params.pooling_type = t as _;
-        }
-
+        // --- Attention ---
         let v = opts.get_property_str(ctx, "attentionType")?;
         if !v.is_undefined() {
             let t = if let Some(s) = v.as_string() {
@@ -510,6 +476,58 @@ fn parse_context_params(
             ctx_params.flash_attn_type = t as _;
         }
 
+        let v = opts.get_property_str(ctx, "swaFull")?;
+        if !v.is_undefined() {
+            ctx_params.swa_full = v.to_bool()?;
+        }
+
+        // --- Pooling & Embeddings ---
+        let v = opts.get_property_str(ctx, "poolingType")?;
+        if !v.is_undefined() {
+            let t = if let Some(s) = v.as_string() {
+                s.content()
+                    .encode_utf8(false)
+                    .as_ref()
+                    .parse::<PoolingType>()
+                    .ok()
+            } else {
+                PoolingType::from_i32(v.to_number(ctx)?.to_i32())
+            }
+            .ok_or_else(|| {
+                ctx.throw_type_error(
+                    "poolingType must be one of: unspecified | none | mean | cls | last | rank",
+                );
+                -1
+            })?;
+            ctx_params.pooling_type = t as _;
+        }
+
+        let v = opts.get_property_str(ctx, "embeddings")?;
+        if !v.is_undefined() {
+            ctx_params.embeddings = v.to_bool()?;
+        }
+
+        // --- RoPE & Scaling ---
+        let v = opts.get_property_str(ctx, "ropeScalingType")?;
+        if !v.is_undefined() {
+            let t = if let Some(s) = v.as_string() {
+                s.content()
+                    .encode_utf8(false)
+                    .as_ref()
+                    .parse::<RopeScalingType>()
+                    .ok()
+            } else {
+                RopeScalingType::from_i32(v.to_number(ctx)?.to_i32())
+            }
+            .ok_or_else(|| {
+                ctx.throw_type_error(
+                    "ropeScalingType must be one of: unspecified | none | linear | yarn | longrope",
+                );
+                -1
+            })?;
+            ctx_params.rope_scaling_type = t as _;
+        }
+
         let v = opts.get_property_str(ctx, "ropeFreqBase")?;
         if !v.is_undefined() {
             ctx_params.rope_freq_base = v.to_number(ctx)?.to_f64() as f32;
@@ -520,6 +538,7 @@ fn parse_context_params(
             ctx_params.rope_freq_scale = v.to_number(ctx)?.to_f64() as f32;
         }
 
+        // --- YaRN (RoPE extension) ---
         let v = opts.get_property_str(ctx, "yarnExtFactor")?;
         if !v.is_undefined() {
             ctx_params.yarn_ext_factor = v.to_number(ctx)?.to_f64() as f32;
@@ -550,11 +569,7 @@ fn parse_context_params(
             ctx_params.yarn_orig_ctx = n as _;
         }
 
-        let v = opts.get_property_str(ctx, "defragThreshold")?;
-        if !v.is_undefined() {
-            ctx_params.defrag_thold = v.to_number(ctx)?.to_f64() as f32;
-        }
-
+        // --- KV Cache ---
         let v = opts.get_property_str(ctx, "cacheTypeK")?;
         if !v.is_undefined() {
             let s = v.to_string(ctx)?;
@@ -583,19 +598,20 @@ fn parse_context_params(
             ctx_params.type_v = t as _;
         }
 
-        let v = opts.get_property_str(ctx, "embeddings")?;
+        let v = opts.get_property_str(ctx, "defragThreshold")?;
         if !v.is_undefined() {
-            ctx_params.embeddings = v.to_bool()?;
+            ctx_params.defrag_thold = v.to_number(ctx)?.to_f64() as f32;
         }
 
+        let v = opts.get_property_str(ctx, "kvUnified")?;
+        if !v.is_undefined() {
+            ctx_params.kv_unified = v.to_bool()?;
+        }
+
+        // --- Offloading & Performance ---
         let v = opts.get_property_str(ctx, "offloadKqv")?;
         if !v.is_undefined() {
             ctx_params.offload_kqv = v.to_bool()?;
-        }
-
-        let v = opts.get_property_str(ctx, "noPerf")?;
-        if !v.is_undefined() {
-            ctx_params.no_perf = v.to_bool()?;
         }
 
         let v = opts.get_property_str(ctx, "opOffload")?;
@@ -603,16 +619,12 @@ fn parse_context_params(
             ctx_params.op_offload = v.to_bool()?;
         }
 
-        let v = opts.get_property_str(ctx, "swaFull")?;
+        let v = opts.get_property_str(ctx, "noPerf")?;
         if !v.is_undefined() {
-            ctx_params.swa_full = v.to_bool()?;
-        }
-
-        let v = opts.get_property_str(ctx, "kvUnified")?;
-        if !v.is_undefined() {
-            ctx_params.kv_unified = v.to_bool()?;
+            ctx_params.no_perf = v.to_bool()?;
         }
     }
+
     Ok(ctx_params)
 }
 
@@ -754,10 +766,6 @@ fn tokenize(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     let res = TypedArray::create_from_vec_i32(ctx, tokens)?;
     Ok(res.into())
-}
-
-thread_local! {
-    static GEN_PENDING_BYTES: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
 }
 
 fn detokenize(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {

@@ -1,5 +1,28 @@
-use llama_cpp_ffi::{FileType, KVCacheType};
-use zuqe::{FieldDef, JS_PROP_ENUMERABLE, ScopedContext};
+use llama_cpp_ffi::{FileType, KVCacheType, list_devices};
+use zuqe::{Array, CallContext, FieldDef, JS_PROP_ENUMERABLE, JSResult, JSValue, ScopedContext};
+
+fn get_devices(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let devs = list_devices();
+
+    let mut lst = Vec::<JSValue>::with_capacity(devs.len());
+    for d in devs {
+        if let Some(d) = d {
+            let mut o = ctx.create_base_object()?;
+
+            let ty: JSValue = ctx.create_string_from_static(d.dev_type.to_str())?.into();
+            o.define_property_value_str(ctx, "type", ty, JS_PROP_ENUMERABLE)?;
+
+            let name: JSValue = ctx.create_string_from_utf8(d.name.into_bytes())?.into();
+            o.define_property_value_str(ctx, "name", name, JS_PROP_ENUMERABLE)?;
+
+            lst.push(o.into());
+        } else {
+            lst.push(JSValue::NULL);
+        }
+    }
+
+    Array::from_values(ctx, lst).map(JSValue::from)
+}
 
 const MOD_LLAMA_ENTRIES: &[FieldDef] = &[
     FieldDef::CLASS("Model", JS_PROP_ENUMERABLE),
@@ -157,6 +180,7 @@ const MOD_LLAMA_ENTRIES: &[FieldDef] = &[
         ],
         JS_PROP_ENUMERABLE,
     ),
+    FieldDef::CALL("getDevices", 0, get_devices, 0),
 ];
 
 pub fn init_mod_llama(ctx: &mut ScopedContext) -> Result<(), i32> {
