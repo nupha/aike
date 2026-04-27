@@ -309,16 +309,14 @@ struct AppState {
     engine: Arc<Engine>,
     model: LlamaModel,
     model_id: String,
-    default_max_tokens: usize,
 }
 
-fn build_router(engine: Arc<Engine>, model: LlamaModel, default_max_tokens: usize) -> Router {
+fn build_router(engine: Arc<Engine>, model: LlamaModel) -> Router {
     let model_id = engine.model_name().to_string();
     let state = AppState {
         engine,
         model,
         model_id,
-        default_max_tokens,
     };
 
     Router::new()
@@ -338,12 +336,11 @@ impl Engine {
     pub async fn http_server_with_shutdown(
         self: Arc<Self>,
         model: LlamaModel,
-        default_max_tokens: usize,
         host: &str,
         port: u16,
         shutdown_rx: tokio::sync::oneshot::Receiver<()>,
     ) -> Result<(), String> {
-        let app = build_router(self, model, default_max_tokens);
+        let app = build_router(self, model);
         let addr = format!("{host}:{port}");
         let listener = tokio::net::TcpListener::bind(&addr)
             .await
@@ -353,8 +350,8 @@ impl Engine {
 
         axum::serve(listener, app)
             .with_graceful_shutdown(async move {
-                eprintln!("[DEBUG http_server_with_shutdown] shutdown signal received");
                 let _ = shutdown_rx.await;
+                eprintln!("[DEBUG http_server_with_shutdown] shutdown signal received");
             })
             .await
             .map_err(|e| format!("server error: {e}"))
@@ -366,17 +363,14 @@ impl Engine {
 //
 
 async fn handle_root() -> impl IntoResponse {
-    eprintln!("[DEBUG handle_root]");
     Json(json!({"name":"llama-js server"}))
 }
 
 async fn handle_health() -> impl IntoResponse {
-    eprintln!("[DEBUG handle_health]");
     Json(HealthResponse { status: "ok" })
 }
 
 async fn handle_models(State(state): State<AppState>) -> impl IntoResponse {
-    eprintln!("[DEBUG handle_models]");
     let created = now_unix_s();
     let data = vec![ModelInfo {
         id: state.model_id,
@@ -394,12 +388,9 @@ async fn handle_chat_completions(
     State(state): State<AppState>,
     payload: Result<Json<serde_json::Value>, JsonRejection>,
 ) -> Response {
-    eprintln!("[DEBUG handle_chat_completions] received request");
-
     let raw = match payload {
         Ok(Json(v)) => v,
         Err(e) => {
-            eprintln!("[DEBUG handle_chat_completions] JSON parse error: {e}");
             return (
                 StatusCode::BAD_REQUEST,
                 Json(oai_error(e.to_string(), "invalid_request_error")),
@@ -408,12 +399,9 @@ async fn handle_chat_completions(
         }
     };
 
-    eprintln!("[DEBUG handle_chat_completions] raw body: {}", raw);
-
     let mut req: ChatCompletionsRequest = match serde_json::from_value(raw) {
         Ok(v) => v,
         Err(e) => {
-            eprintln!("[DEBUG handle_chat_completions] deserialize error: {e}");
             return (
                 StatusCode::BAD_REQUEST,
                 Json(oai_error(e.to_string(), "invalid_request_error")),
@@ -423,7 +411,6 @@ async fn handle_chat_completions(
     };
 
     if req.messages.is_empty() {
-        eprintln!("[DEBUG handle_chat_completions] messages is empty");
         return (
             StatusCode::BAD_REQUEST,
             Json(oai_error(
@@ -435,7 +422,7 @@ async fn handle_chat_completions(
     }
 
     if req.max_tokens.is_none() {
-        req.max_tokens = Some(state.default_max_tokens);
+        req.max_tokens = Some(state.engine.default_max_tokens());
     }
 
     let is_chat = true;
@@ -451,11 +438,6 @@ async fn handle_chat_completions(
         .and_then(|s| s.include_usage)
         .unwrap_or(false);
 
-    eprintln!(
-        "[DEBUG handle_chat_completions] stream={}, max_tokens={}, temperature={}, top_p={}, stop_words={:?}",
-        stream, max_tokens, temperature, top_p, stop_words,
-    );
-
     // Render chat template -> tokenize prompt
     let prompt_tokens = match build_chat_prompt_tokens(&state.model, &req.messages) {
         Ok(tokens) => tokens,
@@ -469,12 +451,6 @@ async fn handle_chat_completions(
         }
     };
 
-    eprintln!(
-        "[DEBUG handle_chat_completions] prompt_tokens count={}, first_few={:?}",
-        prompt_tokens.len(),
-        &prompt_tokens[..prompt_tokens.len().min(10)],
-    );
-
     let seq_hint = req
         .id_slot
         .and_then(|v| if v >= 0 { Some(v as usize) } else { None });
@@ -483,10 +459,6 @@ async fn handle_chat_completions(
     let respond_id = format!("chatcmpl-{}", Uuid::new_v4().simple());
     let task_id = format!("task-{}", Uuid::new_v4().simple());
     let n_prompt_tokens = prompt_tokens.len();
-
-    eprintln!(
-        "[DEBUG handle_chat_completions] pushing task, task_id={task_id}, seq_hint={seq_hint:?}, use_cache={use_cache}"
-    );
 
     let rx = match state.engine.push_task_with_params(
         task_id.clone(),
@@ -506,7 +478,6 @@ async fn handle_chat_completions(
     ) {
         Ok(rx) => rx,
         Err(e) => {
-            eprintln!("[DEBUG handle_chat_completions] push_task_with_params error: {e}");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(oai_error(e.to_string(), "server_error")),
@@ -514,8 +485,6 @@ async fn handle_chat_completions(
                 .into_response();
         }
     };
-
-    eprintln!("[DEBUG handle_chat_completions] task pushed, waiting for reply...");
 
     if stream {
         let (tx, rx_tokio) = tokio::sync::mpsc::unbounded_channel::<String>();
@@ -546,25 +515,13 @@ async fn handle_chat_completions(
         });
 
         match join.await {
-            Ok(Ok(res)) => {
-                eprintln!("[DEBUG handle_chat_completions] success, response: {}", res);
-                Json::<serde_json::Value>(res).into_response()
-            }
-            Ok(Err((code, body))) => {
-                eprintln!(
-                    "[DEBUG handle_chat_completions] error response: code={code}, body={:?}",
-                    body
-                );
-                (code, Json(body)).into_response()
-            }
-            Err(e) => {
-                eprintln!("[DEBUG handle_chat_completions] join error: {e}");
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(oai_error("request task failed", "server_error")),
-                )
-                    .into_response()
-            }
+            Ok(Ok(res)) => Json::<serde_json::Value>(res).into_response(),
+            Ok(Err((code, body))) => (code, Json(body)).into_response(),
+            Err(e) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(oai_error("request task failed", "server_error")),
+            )
+                .into_response(),
         }
     }
 }
@@ -632,7 +589,7 @@ async fn handle_completions(
     }
 
     if req.max_tokens.is_none() {
-        req.max_tokens = Some(state.default_max_tokens);
+        req.max_tokens = Some(state.engine.default_max_tokens());
     }
 
     let is_chat = false;
@@ -769,10 +726,6 @@ fn tokenize_prompt(model: &LlamaModel, prompt: &str) -> Result<Vec<Token>, Strin
     }
     Ok(tokens)
 }
-
-// ---------------------------------------------------------------------------
-// Channel bridges: crossbeam Receiver -> HTTP response
-// ---------------------------------------------------------------------------
 
 /// Collect all EngineReply messages for a unary (non-streaming) response.
 fn collect_unary_reply(

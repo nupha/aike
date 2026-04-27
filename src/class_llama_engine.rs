@@ -29,6 +29,8 @@ pub(super) struct EngineParams {
     pub max_parallel: usize,
     pub idle_sleep_ms: u64,
     pub slot_match_threshold: f32,
+    /// Default max tokens for generation; 0 means unlimited.
+    pub max_tokens: usize,
 }
 
 pub(super) fn parse_engine_params(
@@ -38,6 +40,7 @@ pub(super) fn parse_engine_params(
     let mut max_parallel = 1usize;
     let mut idle_sleep_ms = 1u64;
     let mut slot_match_threshold = 0.5f32;
+    let mut max_tokens = 0usize;
     if let Some(opts) = opts {
         let v = opts.get_property_str(ctx, "maxParallel")?;
         if !v.is_undefined() {
@@ -71,11 +74,22 @@ pub(super) fn parse_engine_params(
                 return Err(-1);
             }
         }
+
+        let v = opts.get_property_str(ctx, "maxTokens")?;
+        if !v.is_undefined() {
+            let n = v.to_number(ctx)?.to_i32();
+            if n < 0 {
+                ctx.throw_type_error("maxTokens must be >= 0");
+                return Err(-1);
+            }
+            max_tokens = n as usize;
+        }
     }
     Ok(EngineParams {
         max_parallel,
         idle_sleep_ms,
         slot_match_threshold,
+        max_tokens,
     })
 }
 
@@ -245,6 +259,7 @@ pub(super) fn create_engine_from_js(
         max_parallel,
         Duration::from_millis(eng_params.idle_sleep_ms),
         eng_params.slot_match_threshold,
+        eng_params.max_tokens,
         llm_ctx,
     ))
 }

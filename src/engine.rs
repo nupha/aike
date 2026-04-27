@@ -426,6 +426,8 @@ pub struct Engine {
     pub(super) max_parallel: usize,
     /// Model name derived from backend at construction time.
     model_name: String,
+    /// Default max tokens per request; 0 means unlimited.
+    default_max_tokens: usize,
     worker_join_handle: Option<JoinHandle<()>>,
 }
 
@@ -443,12 +445,14 @@ impl Engine {
         max_parallel: usize,
         idle_sleep: Duration,
         slot_match_threshold: f32,
+        default_max_tokens: usize,
         llm_ctx: LlamaContext,
     ) -> Self {
         Self::start_with_backend(
             max_parallel,
             idle_sleep,
             slot_match_threshold,
+            default_max_tokens,
             LlamaEngineBackend::new(llm_ctx, max_parallel),
         )
     }
@@ -457,6 +461,7 @@ impl Engine {
         max_parallel: usize,
         idle_sleep: Duration,
         slot_match_threshold: f32,
+        default_max_tokens: usize,
         backend: B,
     ) -> Self {
         let model_name = backend.model_name();
@@ -484,6 +489,7 @@ impl Engine {
             num_tasks,
             max_parallel,
             model_name,
+            default_max_tokens,
             worker_join_handle: Some(worker_join),
         }
     }
@@ -498,6 +504,11 @@ impl Engine {
 
     pub fn model_name(&self) -> &str {
         &self.model_name
+    }
+
+    /// Default max tokens per request; 0 means unlimited.
+    pub fn default_max_tokens(&self) -> usize {
+        self.default_max_tokens
     }
 
     pub fn push_task(
@@ -1430,7 +1441,7 @@ mod tests {
             Some(102),
             8,
         );
-        let handle = Engine::start_with_backend(1, Duration::from_millis(1), 0.5, engine);
+        let handle = Engine::start_with_backend(1, Duration::from_millis(1), 0.5, 0, engine);
         let rx = handle
             .push_task("t1", vec![1, 2, 3], Vec::new(), OutputMode::Continuous)
             .expect("submit t1");
@@ -1455,7 +1466,7 @@ mod tests {
             Some(13),
             8,
         );
-        let handle = Engine::start_with_backend(1, Duration::from_millis(1), 0.5, engine);
+        let handle = Engine::start_with_backend(1, Duration::from_millis(1), 0.5, 0, engine);
         let rx = handle
             .push_task("o1", vec![5], Vec::new(), OutputMode::OneShot)
             .expect("submit o1");
@@ -1518,7 +1529,7 @@ mod tests {
             Some(2),
             8,
         );
-        let handle = Engine::start_with_backend(1, Duration::from_millis(1), 0.5, engine);
+        let handle = Engine::start_with_backend(1, Duration::from_millis(1), 0.5, 0, engine);
 
         let rx1 = handle
             .push_task("q1", vec![10], Vec::new(), OutputMode::Continuous)
@@ -1549,7 +1560,7 @@ mod tests {
             Some(3),
             8,
         );
-        let handle = Engine::start_with_backend(1, Duration::from_millis(1), 0.5, engine);
+        let handle = Engine::start_with_backend(1, Duration::from_millis(1), 0.5, 0, engine);
 
         let rx1 = handle
             .push_task("busy", vec![10], Vec::new(), OutputMode::Continuous)

@@ -117,7 +117,6 @@ fn register_class_http_server_handle(rt: &mut Runtime) -> Result<ClassID, i32> {
 /// Options:
 ///   host: string           (default "0.0.0.0")
 ///   port: number           (default 8080)
-///   defaultMaxTokens: int  (default 4096)
 pub(super) fn engine_httpServe(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let engine = get_engine_arc(ctx, &this)?;
@@ -144,7 +143,6 @@ pub(super) fn engine_httpServe(ctx: &mut ScopedContext, cc: CallContext) -> JSRe
     // Defaults
     let mut host = "0.0.0.0".to_string();
     let mut port: u16 = 8080;
-    let mut default_max_tokens = 4096usize;
 
     if let Some(opts) = opts.as_ref() {
         let v = opts.get_property_str(ctx, "host")?;
@@ -161,16 +159,6 @@ pub(super) fn engine_httpServe(ctx: &mut ScopedContext, cc: CallContext) -> JSRe
                 return Err(-1);
             }
             port = n as u16;
-        }
-
-        let v = opts.get_property_str(ctx, "defaultMaxTokens")?;
-        if !v.is_undefined() {
-            let n = v.to_number(ctx)?.to_i32();
-            if n <= 0 {
-                ctx.throw_type_error("defaultMaxTokens must be > 0");
-                return Err(-1);
-            }
-            default_max_tokens = n as usize;
         }
     }
 
@@ -189,13 +177,9 @@ pub(super) fn engine_httpServe(ctx: &mut ScopedContext, cc: CallContext) -> JSRe
         };
 
         // start server
-        if let Err(e) = async_rt.block_on(engine.http_server_with_shutdown(
-            model,
-            default_max_tokens,
-            &host,
-            port,
-            shutdown_rx,
-        )) {
+        if let Err(e) =
+            async_rt.block_on(engine.http_server_with_shutdown(model, &host, port, shutdown_rx))
+        {
             eprintln!("httpServe: server error: {e}");
         }
     });
