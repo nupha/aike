@@ -5,14 +5,14 @@
 
 mod class_file;
 mod class_llama_context;
+mod class_llama_engine;
 mod class_llama_model;
-mod class_llama_pipeline;
 mod class_llama_sampler;
+mod engine;
 mod global;
 mod mod_llama;
 mod mod_os;
 mod mod_std;
-mod pipeline;
 mod worker;
 
 use std::{io::Write, process::ExitCode};
@@ -28,8 +28,8 @@ use zuqe::{
 use crate::{
     class_file::JSFile,
     class_llama_context::JSLlamaContext,
+    class_llama_engine::JSLlamaEngine,
     class_llama_model::JSLlamaModel,
-    class_llama_pipeline::JSLlamaPipeline,
     class_llama_sampler::JSSamplerChain,
     global::setup_globals,
     mod_llama::init_mod_llama,
@@ -228,7 +228,7 @@ async fn main() -> ExitCode {
             cx.use_classes(&[
                 JSLlamaModel::class_id(),
                 JSLlamaContext::class_id(),
-                JSLlamaPipeline::class_id(),
+                JSLlamaEngine::class_id(),
                 JSSamplerChain::class_id(),
                 JSFile::class_id(),
             ])?;

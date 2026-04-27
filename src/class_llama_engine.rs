@@ -13,28 +13,28 @@ use zuqe::{
 use crate::{
     USER_CLASS_DEFS,
     class_llama_context::parse_tokens,
-    pipeline::{OutputMode, PipelineEngine, PipelineReply},
+    engine::{EngineReply, InferenceEngine, OutputMode},
 };
 
 static NEXT_TASK_ID: AtomicU64 = AtomicU64::new(1);
 
-fn get_pipeline<'a>(ctx: &mut ScopedContext, val: &JSValue) -> Result<&'a PipelineEngine, i32> {
+fn get_engine<'a>(ctx: &mut ScopedContext, val: &JSValue) -> Result<&'a InferenceEngine, i32> {
     let payload = val
-        .retrive_object_payload(ctx, JSLlamaPipeline::class_id())?
+        .retrive_object_payload(ctx, JSLlamaEngine::class_id())?
         .other()
         .unwrap();
     let opaque = payload.opaque();
     if opaque.is_null() {
-        ctx.throw_type_error("Pipeline was disposed");
+        ctx.throw_type_error("Engine was disposed");
         Err(-1)
     } else {
-        Ok(unsafe { &*opaque.cast::<PipelineEngine>() })
+        Ok(unsafe { &*opaque.cast::<InferenceEngine>() })
     }
 }
 
 fn completion(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
-    let pipeline = get_pipeline(ctx, &this)?;
+    let engine = get_engine(ctx, &this)?;
 
     let arg0 = cc.arg(0);
     let tokens = parse_tokens(ctx, &arg0)?.into_owned();
@@ -45,7 +45,7 @@ fn completion(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     let task_id = format!("{}", NEXT_TASK_ID.fetch_add(1, Ordering::Relaxed));
 
-    let rx = pipeline
+    let rx = engine
         .push_task(task_id, tokens, Vec::new(), OutputMode::OneShot)
         .map_err(|e| {
             ctx.throw_internal_error(&e.to_string());
@@ -54,26 +54,26 @@ fn completion(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     let promise = Promise::create_with_receiver(ctx, rx, |cx, msg| -> JSResult {
         match msg {
-            PipelineReply::Tokens(tokens) => {
+            EngineReply::Tokens(tokens) => {
                 TypedArray::create_from_vec_i32(cx, tokens).map(JSValue::from)
             }
-            PipelineReply::Error(e) => {
+            EngineReply::Error(e) => {
                 cx.throw_internal_error(&e);
                 Err(-1)
             }
-            PipelineReply::Cancelled => {
+            EngineReply::Cancelled => {
                 cx.throw_internal_error("task cancelled");
                 Err(-1)
             }
-            PipelineReply::Shutdown => {
-                cx.throw_internal_error("pipeline shutdown");
+            EngineReply::Shutdown => {
+                cx.throw_internal_error("engine shutdown");
                 Err(-1)
             }
-            PipelineReply::Token(_)
-            | PipelineReply::StopEog
-            | PipelineReply::StopLength
-            | PipelineReply::StopPrefillOnly
-            | PipelineReply::StopWord => {
+            EngineReply::Token(_)
+            | EngineReply::StopEog
+            | EngineReply::StopLength
+            | EngineReply::StopPrefillOnly
+            | EngineReply::StopWord => {
                 cx.throw_internal_error("unexpected message in oneshot mode");
                 Err(-1)
             }
@@ -85,7 +85,7 @@ fn completion(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
 fn completion_iter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
-    let pipeline = get_pipeline(ctx, &this)?;
+    let engine = get_engine(ctx, &this)?;
 
     let arg0 = cc.arg(0);
     let tokens = parse_tokens(ctx, &arg0)?.into_owned();
@@ -96,7 +96,7 @@ fn completion_iter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     let task_id = format!("{}", NEXT_TASK_ID.fetch_add(1, Ordering::Relaxed));
 
-    let rx = pipeline
+    let rx = engine
         .push_task(task_id, tokens, Vec::new(), OutputMode::Continuous)
         .map_err(|e| {
             ctx.throw_internal_error(&e.to_string());
@@ -108,25 +108,25 @@ fn completion_iter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         rx,
         |cx, msg| -> Result<Option<JSValue>, i32> {
             match msg {
-                PipelineReply::Token(token) => Ok(Some(JSValue::from(token))),
-                PipelineReply::StopEog
-                | PipelineReply::StopWord
-                | PipelineReply::StopLength
-                | PipelineReply::StopPrefillOnly => Ok(None),
-                PipelineReply::Tokens(_) => {
+                EngineReply::Token(token) => Ok(Some(JSValue::from(token))),
+                EngineReply::StopEog
+                | EngineReply::StopWord
+                | EngineReply::StopLength
+                | EngineReply::StopPrefillOnly => Ok(None),
+                EngineReply::Tokens(_) => {
                     cx.throw_internal_error("unexpected message in continues mode");
                     Err(-1)
                 }
-                PipelineReply::Error(e) => {
+                EngineReply::Error(e) => {
                     cx.throw_internal_error(&e);
                     Err(-1)
                 }
-                PipelineReply::Cancelled => {
+                EngineReply::Cancelled => {
                     cx.throw_internal_error("task cancelled");
                     Err(-1)
                 }
-                PipelineReply::Shutdown => {
-                    cx.throw_internal_error("pipeline shutdown");
+                EngineReply::Shutdown => {
+                    cx.throw_internal_error("engine shutdown");
                     Err(-1)
                 }
             }
@@ -138,37 +138,37 @@ fn completion_iter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 fn dispose(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut this = cc.this();
     let payload = this
-        .retrive_object_payload_mut(ctx, JSLlamaPipeline::class_id())?
+        .retrive_object_payload_mut(ctx, JSLlamaEngine::class_id())?
         .other_mut()
         .unwrap();
     if !payload.opaque().is_null() {
         unsafe {
             let p = payload.replace_opaque(std::ptr::null_mut());
-            drop(Box::from_raw(p.cast::<PipelineEngine>()));
+            drop(Box::from_raw(p.cast::<InferenceEngine>()));
         }
     }
     Ok(JSValue::UNDEFINED)
 }
 
-const CLASS_PIPELINE_PROTO: &[FieldDef] = &[
+const CLASS_ENGINE_PROTO: &[FieldDef] = &[
     FieldDef::CALL("completion", 1, completion, 0),
     FieldDef::CALL("completionIter", 1, completion_iter, 0),
     FieldDef::CALL("dispose", 0, dispose, 0),
 ];
 
-pub struct JSLlamaPipeline;
+pub struct JSLlamaEngine;
 
-impl JSLlamaPipeline {
+impl JSLlamaEngine {
     thread_local! {
         static CLASS_ID: Cell<ClassID> = const { Cell::new(0) };
     }
 
     fn register(rt: &mut Runtime) -> Result<ClassID, i32> {
         let class_id = rt.register_class(
-            ClassDef::new("Pipeline", CLASS_PIPELINE_PROTO, None).on_dispose(
+            ClassDef::new("Engine", CLASS_ENGINE_PROTO, None).on_dispose(
                 |_, opaque: *mut c_void, _| {
                     if !opaque.is_null() {
-                        drop(unsafe { Box::from_raw(opaque.cast::<PipelineEngine>()) });
+                        drop(unsafe { Box::from_raw(opaque.cast::<InferenceEngine>()) });
                     }
                 },
             ),
@@ -184,19 +184,19 @@ impl JSLlamaPipeline {
 
     pub(super) fn new_instance(
         ctx: &mut ScopedContext,
-        engine: PipelineEngine,
+        engine: InferenceEngine,
     ) -> Result<Object, i32> {
         let opaque = Box::into_raw(Box::new(engine)).cast::<c_void>();
         ctx.create_class_instance_with_opaque(Self::class_id(), opaque)
             .map_err(|e| {
                 let p = e.other().unwrap();
-                let _ = unsafe { Box::from_raw(p.opaque().cast::<PipelineEngine>()) };
+                let _ = unsafe { Box::from_raw(p.opaque().cast::<InferenceEngine>()) };
                 -1
             })
     }
 }
 
 #[distributed_slice(USER_CLASS_DEFS)]
-fn register_class_pipeline(rt: &mut Runtime) -> Result<ClassID, i32> {
-    JSLlamaPipeline::register(rt)
+fn register_class_engine(rt: &mut Runtime) -> Result<ClassID, i32> {
+    JSLlamaEngine::register(rt)
 }

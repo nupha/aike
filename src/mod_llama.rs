@@ -26,7 +26,7 @@ fn get_devices(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
 const MOD_LLAMA_ENTRIES: &[FieldDef] = &[
     FieldDef::CLASS("Model", JS_PROP_ENUMERABLE),
-    FieldDef::CLASS("Pipeline", JS_PROP_ENUMERABLE),
+    FieldDef::CLASS("Engine", JS_PROP_ENUMERABLE),
     FieldDef::OBJECT(
         "FileType",
         &[

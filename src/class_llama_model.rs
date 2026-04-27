@@ -22,9 +22,9 @@ use zuqe::{
 use crate::{
     USER_CLASS_DEFS,
     class_llama_context::{JSLlamaContext, parse_tokens},
-    class_llama_pipeline::JSLlamaPipeline,
+    class_llama_engine::JSLlamaEngine,
     class_llama_sampler::js_model_createSamplerChain,
-    pipeline::PipelineEngine,
+    engine::InferenceEngine,
 };
 
 const MODEL_PATH_HIDDEN_KEY: &str = "__modelPath";
@@ -676,7 +676,7 @@ fn js_model_createContext(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
     Ok(ctx_obj.into())
 }
 
-fn js_model_createPipeline(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+fn js_model_createEngine(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let model = get_llama_model(ctx, &this)?;
 
@@ -737,7 +737,7 @@ fn js_model_createPipeline(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
     let seq_cap = ctx_params.n_seq_max.max(1) as usize;
     if max_parallel > seq_cap {
         eprintln!(
-            "createPipeline: maxParallel ({}) is greater than sequences ({}); clamping maxParallel to sequences",
+            "createEngine: maxParallel ({}) is greater than sequences ({}); clamping maxParallel to sequences",
             max_parallel, seq_cap,
         );
         max_parallel = seq_cap;
@@ -749,13 +749,13 @@ fn js_model_createPipeline(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
     })?;
     llm_ctx.init_batch(ctx_params.n_batch as i32, 0, ctx_params.n_seq_max as i32);
 
-    let engine = PipelineEngine::start(
+    let engine = InferenceEngine::start(
         max_parallel,
         Duration::from_millis(idle_sleep_ms),
         slot_match_threshold,
         llm_ctx,
     );
-    let mut obj = JSLlamaPipeline::new_instance(ctx, engine)?;
+    let mut obj = JSLlamaEngine::new_instance(ctx, engine)?;
 
     // Keep model alive as long as pipeline exists.
     obj.define_property_value_str(ctx, "model", this, JS_PROP_ENUMERABLE)?;
@@ -1149,7 +1149,7 @@ const CLASS_MODEL_PROTO_ENTRIES: &[FieldDef] = &[
     FieldDef::GETSET("sepToken", Some(get_prop), None, PROP_SEP_TOKEN as _),
     FieldDef::GETSET("sepText", Some(get_prop), None, PROP_SEP_TEXT as _),
     FieldDef::CALL("createContext", 1, js_model_createContext, 0),
-    FieldDef::CALL("createPipeline", 1, js_model_createPipeline, 0),
+    FieldDef::CALL("createEngine", 1, js_model_createEngine, 0),
     FieldDef::CALL("createSamplerChain", 1, js_model_createSamplerChain, 0),
     FieldDef::CALL("tokenize", 1, tokenize, 0),
     FieldDef::CALL("detokenize", 1, detokenize, 0),
