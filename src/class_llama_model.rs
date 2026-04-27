@@ -507,95 +507,110 @@ fn parse_context_params(
             ctx_params.embeddings = v.to_bool()?;
         }
 
-        // --- RoPE & Scaling ---
-        let v = opts.get_property_str(ctx, "ropeScalingType")?;
-        if !v.is_undefined() {
-            let t = if let Some(s) = v.as_string() {
-                s.content()
-                    .encode_utf8(false)
-                    .as_ref()
-                    .parse::<RopeScalingType>()
-                    .ok()
-            } else {
-                RopeScalingType::from_i32(v.to_number(ctx)?.to_i32())
-            }
-            .ok_or_else(|| {
-                ctx.throw_type_error(
-                    "ropeScalingType must be one of: unspecified | none | linear | yarn | longrope",
-                );
+        // --- RoPE & YaRN (nested under "rope") ---
+        let rope_val = opts.get_property_str(ctx, "rope")?;
+        if !rope_val.is_undefined() {
+            let rope = rope_val.as_object().ok_or_else(|| {
+                ctx.throw_type_error("rope should be an object");
                 -1
             })?;
-            ctx_params.rope_scaling_type = t as _;
-        }
 
-        let v = opts.get_property_str(ctx, "ropeFreqBase")?;
-        if !v.is_undefined() {
-            ctx_params.rope_freq_base = v.to_number(ctx)?.to_f64() as f32;
-        }
-
-        let v = opts.get_property_str(ctx, "ropeFreqScale")?;
-        if !v.is_undefined() {
-            ctx_params.rope_freq_scale = v.to_number(ctx)?.to_f64() as f32;
-        }
-
-        // --- YaRN (RoPE extension) ---
-        let v = opts.get_property_str(ctx, "yarnExtFactor")?;
-        if !v.is_undefined() {
-            ctx_params.yarn_ext_factor = v.to_number(ctx)?.to_f64() as f32;
-        }
-
-        let v = opts.get_property_str(ctx, "yarnAttnFactor")?;
-        if !v.is_undefined() {
-            ctx_params.yarn_attn_factor = v.to_number(ctx)?.to_f64() as f32;
-        }
-
-        let v = opts.get_property_str(ctx, "yarnBetaFast")?;
-        if !v.is_undefined() {
-            ctx_params.yarn_beta_fast = v.to_number(ctx)?.to_f64() as f32;
-        }
-
-        let v = opts.get_property_str(ctx, "yarnBetaSlow")?;
-        if !v.is_undefined() {
-            ctx_params.yarn_beta_slow = v.to_number(ctx)?.to_f64() as f32;
-        }
-
-        let v = opts.get_property_str(ctx, "yarnOrigContext")?;
-        if !v.is_undefined() {
-            let n = v.to_number(ctx)?.to_i32();
-            if n < 0 {
-                ctx.throw_type_error("yarnOrigContext must be >= 0");
-                return Err(-1);
+            let v = rope.get_property_str(ctx, "scalingType")?;
+            if !v.is_undefined() {
+                let t = if let Some(s) = v.as_string() {
+                    s.content()
+                        .encode_utf8(false)
+                        .as_ref()
+                        .parse::<RopeScalingType>()
+                        .ok()
+                } else {
+                    RopeScalingType::from_i32(v.to_number(ctx)?.to_i32())
+                }
+                .ok_or_else(|| {
+                    ctx.throw_type_error(
+                        "rope.scalingType must be one of: unspecified | none | linear | yarn | longrope",
+                    );
+                    -1
+                })?;
+                ctx_params.rope_scaling_type = t as _;
             }
-            ctx_params.yarn_orig_ctx = n as _;
+
+            let v = rope.get_property_str(ctx, "freqBase")?;
+            if !v.is_undefined() {
+                ctx_params.rope_freq_base = v.to_number(ctx)?.to_f64() as f32;
+            }
+
+            let v = rope.get_property_str(ctx, "freqScale")?;
+            if !v.is_undefined() {
+                ctx_params.rope_freq_scale = v.to_number(ctx)?.to_f64() as f32;
+            }
+
+            let v = rope.get_property_str(ctx, "yarnExtFactor")?;
+            if !v.is_undefined() {
+                ctx_params.yarn_ext_factor = v.to_number(ctx)?.to_f64() as f32;
+            }
+
+            let v = rope.get_property_str(ctx, "yarnAttnFactor")?;
+            if !v.is_undefined() {
+                ctx_params.yarn_attn_factor = v.to_number(ctx)?.to_f64() as f32;
+            }
+
+            let v = rope.get_property_str(ctx, "yarnBetaFast")?;
+            if !v.is_undefined() {
+                ctx_params.yarn_beta_fast = v.to_number(ctx)?.to_f64() as f32;
+            }
+
+            let v = rope.get_property_str(ctx, "yarnBetaSlow")?;
+            if !v.is_undefined() {
+                ctx_params.yarn_beta_slow = v.to_number(ctx)?.to_f64() as f32;
+            }
+
+            let v = rope.get_property_str(ctx, "yarnOrigContext")?;
+            if !v.is_undefined() {
+                let n = v.to_number(ctx)?.to_i32();
+                if n < 0 {
+                    ctx.throw_type_error("rope.yarnOrigContext must be >= 0");
+                    return Err(-1);
+                }
+                ctx_params.yarn_orig_ctx = n as _;
+            }
         }
 
-        // --- KV Cache ---
-        let v = opts.get_property_str(ctx, "cacheTypeK")?;
-        if !v.is_undefined() {
-            let s = v.to_string(ctx)?;
-            let t = s
-                .content()
-                .encode_utf8(false)
-                .parse::<KVCacheType>()
-                .map_err(|e| {
-                    ctx.throw_type_error(&e);
-                    -1
-                })?;
-            ctx_params.type_k = t as _;
-        }
+        // --- KV Cache (nested under "cache") ---
+        let cache_val = opts.get_property_str(ctx, "cache")?;
+        if !cache_val.is_undefined() {
+            let cache = cache_val.as_object().ok_or_else(|| {
+                ctx.throw_type_error("cache should be an object");
+                -1
+            })?;
 
-        let v = opts.get_property_str(ctx, "cacheTypeV")?;
-        if !v.is_undefined() {
-            let s = v.to_string(ctx)?;
-            let t = s
-                .content()
-                .encode_utf8(false)
-                .parse::<KVCacheType>()
-                .map_err(|e| {
-                    ctx.throw_type_error(&e);
-                    -1
-                })?;
-            ctx_params.type_v = t as _;
+            let v = cache.get_property_str(ctx, "k")?;
+            if !v.is_undefined() {
+                let s = v.to_string(ctx)?;
+                let t = s
+                    .content()
+                    .encode_utf8(false)
+                    .parse::<KVCacheType>()
+                    .map_err(|e| {
+                        ctx.throw_type_error(&e);
+                        -1
+                    })?;
+                ctx_params.type_k = t as _;
+            }
+
+            let v = cache.get_property_str(ctx, "v")?;
+            if !v.is_undefined() {
+                let s = v.to_string(ctx)?;
+                let t = s
+                    .content()
+                    .encode_utf8(false)
+                    .parse::<KVCacheType>()
+                    .map_err(|e| {
+                        ctx.throw_type_error(&e);
+                        -1
+                    })?;
+                ctx_params.type_v = t as _;
+            }
         }
 
         let v = opts.get_property_str(ctx, "defragThreshold")?;
