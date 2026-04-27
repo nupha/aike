@@ -7,7 +7,7 @@ use std::{
 use linkme::distributed_slice;
 use zuqe::{
     CallContext, ClassDef, ClassID, FieldDef, JSResult, JSValue, Object, Runtime, ScopedContext,
-    builtins::{iterator::AsyncIterator, promise::Promise, typed_array::TypedArray},
+    builtins::{iterator::AsyncIterableIterator, promise::Promise, typed_array::TypedArray},
 };
 
 use crate::{
@@ -103,31 +103,35 @@ fn completion_iter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             -1
         })?;
 
-    AsyncIterator::create_with_receiver(ctx, rx, |cx, msg| -> Result<Option<JSValue>, i32> {
-        match msg {
-            PipelineReply::Token(token) => Ok(Some(JSValue::from(token))),
-            PipelineReply::StopEog
-            | PipelineReply::StopWord
-            | PipelineReply::StopLength
-            | PipelineReply::StopPrefillOnly => Ok(None),
-            PipelineReply::Tokens(_) => {
-                cx.throw_internal_error("unexpected message in continues mode");
-                Err(-1)
+    AsyncIterableIterator::create_with_receiver(
+        ctx,
+        rx,
+        |cx, msg| -> Result<Option<JSValue>, i32> {
+            match msg {
+                PipelineReply::Token(token) => Ok(Some(JSValue::from(token))),
+                PipelineReply::StopEog
+                | PipelineReply::StopWord
+                | PipelineReply::StopLength
+                | PipelineReply::StopPrefillOnly => Ok(None),
+                PipelineReply::Tokens(_) => {
+                    cx.throw_internal_error("unexpected message in continues mode");
+                    Err(-1)
+                }
+                PipelineReply::Error(e) => {
+                    cx.throw_internal_error(&e);
+                    Err(-1)
+                }
+                PipelineReply::Cancelled => {
+                    cx.throw_internal_error("task cancelled");
+                    Err(-1)
+                }
+                PipelineReply::Shutdown => {
+                    cx.throw_internal_error("pipeline shutdown");
+                    Err(-1)
+                }
             }
-            PipelineReply::Error(e) => {
-                cx.throw_internal_error(&e);
-                Err(-1)
-            }
-            PipelineReply::Cancelled => {
-                cx.throw_internal_error("task cancelled");
-                Err(-1)
-            }
-            PipelineReply::Shutdown => {
-                cx.throw_internal_error("pipeline shutdown");
-                Err(-1)
-            }
-        }
-    })
+        },
+    )
     .map(JSValue::from)
 }
 
