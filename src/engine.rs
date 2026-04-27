@@ -14,7 +14,7 @@ use llama_cpp_ffi::{LlamaContext, SamplerChain, SamplerKind};
 
 pub type Token = i32;
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct TaskConfig {
     /// Stable identifier used by control commands and client-side routing.
     pub task_id: String,
@@ -62,15 +62,18 @@ pub enum EngineCtrlMsg {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StopReason {
     Eog,
-    MaxLength,
+    MaxTokens,
     PrefillOnly,
     Word(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EngineReply {
+    #[deprecated]
     Token(Token),
+    #[deprecated]
     Tokens(Vec<Token>),
+    Text(String),
     Stop(StopReason),
     Cancelled,
     Error(String),
@@ -79,7 +82,7 @@ pub enum EngineReply {
 
 pub trait EngineBackend: Send + 'static {
     /// Decode micro-batch capacity used by one llama_decode call.
-    fn n_ubatch(&self) -> usize;
+    fn ubatch_size(&self) -> usize;
     /// Measure reusable prefix length between slot cache and new prompt.
     fn common_prefix_len(&self, seq_id: usize, prompt_tokens: &[Token]) -> usize;
     /// Align backend KV/cache to selected slot and return reused prefix length.
@@ -101,7 +104,7 @@ pub trait EngineBackend: Send + 'static {
     /// Sample next token from logits index produced by decode stage.
     fn sample(&mut self, seq_id: usize, logits_idx: i32) -> Result<Token, String>;
     /// Lazily initialize slot sampler from per-task sampling params.
-    fn ensure_slot_sampler(
+    fn init_slot_sampler(
         &mut self,
         seq_id: usize,
         temperature: f32,
@@ -121,7 +124,7 @@ pub struct LlamaEngineBackend {
     /// Shared llama context used by decode/sample stages.
     llm_ctx: LlamaContext,
     /// Effective max tokens per decode micro-batch.
-    n_ubatch: usize,
+    ubatch_size: usize,
     /// Per-slot mirror of tokens currently resident in KV cache.
     slot_cached_tokens: Vec<Vec<Token>>,
     /// Per-slot sampler lifecycle (create on demand, reset on completion).
@@ -134,12 +137,12 @@ unsafe impl Send for LlamaEngineBackend {}
 
 impl LlamaEngineBackend {
     pub fn new(mut llm_ctx: LlamaContext, max_parallel: usize) -> Self {
-        let n_ubatch = (llm_ctx.n_ubatch() as usize).max(1);
-        llm_ctx.init_batch(n_ubatch as i32, 0, max_parallel as i32);
+        let ubatch_size = (llm_ctx.n_ubatch() as usize).max(1);
+        llm_ctx.init_batch(ubatch_size as i32, 0, max_parallel as i32);
 
         Self {
             llm_ctx,
-            n_ubatch,
+            ubatch_size,
             slot_cached_tokens: vec![Vec::new(); max_parallel],
             slot_samplers: (0..max_parallel).map(|_| None).collect::<Vec<_>>(),
             pending_decode_tokens: 0,
@@ -170,8 +173,8 @@ impl LlamaEngineBackend {
 }
 
 impl EngineBackend for LlamaEngineBackend {
-    fn n_ubatch(&self) -> usize {
-        self.n_ubatch
+    fn ubatch_size(&self) -> usize {
+        self.ubatch_size
     }
 
     fn common_prefix_len(&self, seq_id: usize, prompt_tokens: &[Token]) -> usize {
@@ -241,7 +244,7 @@ impl EngineBackend for LlamaEngineBackend {
         if seq_id >= self.slot_cached_tokens.len() {
             return Err(format!("invalid seq id {}", seq_id));
         }
-        if self.pending_decode_tokens >= self.n_ubatch {
+        if self.pending_decode_tokens >= self.ubatch_size {
             return Err("decode batch is full".to_string());
         }
 
@@ -279,7 +282,7 @@ impl EngineBackend for LlamaEngineBackend {
         Ok(sampler.sample_with_params(&self.llm_ctx, logits_idx, None))
     }
 
-    fn ensure_slot_sampler(
+    fn init_slot_sampler(
         &mut self,
         seq_id: usize,
         temperature: f32,
@@ -318,6 +321,7 @@ impl EngineBackend for LlamaEngineBackend {
     }
 }
 
+#[derive(Debug)]
 struct TaskState {
     config: TaskConfig,
     step_budget: usize,
@@ -327,6 +331,45 @@ struct TaskState {
     output_tx: Sender<EngineReply>,
 }
 
+impl TaskState {
+    fn append_utf8_piece(&mut self, piece: &[u8]) {
+        if piece.is_empty() {
+            return;
+        }
+
+        self.pending_bytes.extend_from_slice(piece);
+
+        loop {
+            match std::str::from_utf8(&self.pending_bytes) {
+                Ok(s) => {
+                    self.generated_text.push_str(s);
+                    self.pending_bytes.clear();
+                    break;
+                }
+                Err(e) => {
+                    let valid = e.valid_up_to();
+                    if valid == 0 {
+                        break;
+                    }
+
+                    let s = unsafe { std::str::from_utf8_unchecked(&self.pending_bytes[..valid]) };
+                    self.generated_text.push_str(s);
+                    self.pending_bytes.drain(0..valid);
+
+                    if self.pending_bytes.is_empty() {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    fn append_token<B: EngineBackend>(&mut self, backend: &B, token: Token) {
+        self.append_utf8_piece(&backend.token_to_piece(token));
+    }
+}
+
+#[derive(Debug)]
 enum SlotState {
     Idle,
     Decoding {
@@ -360,6 +403,16 @@ impl Slot {
             n_past: 0,
             mtime: 0,
             state: SlotState::Idle,
+        }
+    }
+
+    fn output_tx(&self) -> Option<&Sender<EngineReply>> {
+        match &self.state {
+            SlotState::Decoding { task_state, .. } | SlotState::Sampling { task_state, .. } => {
+                Some(&task_state.output_tx)
+            }
+            SlotState::Done { task_state, .. } => Some(&task_state.output_tx),
+            SlotState::Idle | SlotState::Busy => None,
         }
     }
 }
@@ -857,7 +910,7 @@ fn decoding_stage<B: EngineBackend>(
 
     let slots_len = slots.len();
     for offset in 0..slots_len {
-        if cnt == backend.n_ubatch() {
+        if cnt == backend.ubatch_size() {
             break;
         }
 
@@ -873,7 +926,7 @@ fn decoding_stage<B: EngineBackend>(
         } = state
         {
             let n_tokens = prompt_tokens.len();
-            let n_take = n_tokens.min(backend.n_ubatch().saturating_sub(cnt));
+            let n_take = n_tokens.min(backend.ubatch_size().saturating_sub(cnt));
 
             let mut feed_count = 0usize;
             let mut decode_err: Option<String> = None;
@@ -976,45 +1029,48 @@ fn sampling_stage<B: EngineBackend>(backend: &mut B, slots: &mut [Slot]) -> bool
     let mut did_work = false;
 
     for slot in slots.iter_mut() {
-        let state = std::mem::replace(&mut slot.state, SlotState::Busy);
+        let state0 = std::mem::replace(&mut slot.state, SlotState::Busy);
 
-        slot.state = match state {
-            SlotState::Sampling {
-                logits,
-                mut task_state,
-            } => {
-                let can_sample = match task_state.config.output_mode {
-                    OutputMode::Continuous | OutputMode::OneShot => true,
-                    OutputMode::Single => task_state.step_budget > 0,
-                } && !task_state.output_tx.is_full(); // if output_tx is full, don't sample
+        if let SlotState::Sampling {
+            logits,
+            mut task_state,
+        } = state0
+        {
+            let can_sample = match task_state.config.output_mode {
+                OutputMode::Continuous | OutputMode::OneShot => true,
+                OutputMode::Single => task_state.step_budget > 0,
+            } && !task_state.output_tx.is_full(); // if output_tx is full, don't sample
 
-                if !can_sample {
-                    // preserve to do sampling in next tick
-                    SlotState::Sampling { logits, task_state }
+            if !can_sample {
+                // restore task_state to perform sampling in next tick
+                slot.state = SlotState::Sampling { logits, task_state };
+            } else {
+                if task_state.config.output_mode == OutputMode::Single {
+                    task_state.step_budget = task_state.step_budget.saturating_sub(1);
+                }
+
+                if let Err(e) = backend.init_slot_sampler(
+                    // lazy init sampler fail
+                    slot.seq_id,
+                    task_state.config.temperature,
+                    task_state.config.top_p,
+                ) {
+                    slot.state = SlotState::Done {
+                        task_state,
+                        reply: EngineReply::Error(e),
+                    };
                 } else {
-                    if task_state.config.output_mode == OutputMode::Single {
-                        task_state.step_budget = task_state.step_budget.saturating_sub(1);
-                    }
-
                     did_work = true;
-
-                    if let Err(e) = backend.ensure_slot_sampler(
-                        slot.seq_id,
-                        task_state.config.temperature,
-                        task_state.config.top_p,
-                    ) {
-                        slot.state = SlotState::Done {
-                            task_state,
-                            reply: EngineReply::Error(e),
-                        };
-                        continue;
-                    }
 
                     match backend.sample(slot.seq_id, logits) {
                         Ok(token) => {
-                            // Check for end conditions before emitting the token.
-                            // EOG and stop-word tokens must not be included in output.
-                            if backend.is_eog(token) {
+                            let mut out_text: String = "".into();
+
+                            slot.state = if backend.is_eog(token) {
+                                out_text = std::mem::replace(
+                                    &mut task_state.generated_text,
+                                    "".to_string(),
+                                );
                                 SlotState::Done {
                                     task_state,
                                     reply: EngineReply::Stop(StopReason::Eog),
@@ -1022,34 +1078,44 @@ fn sampling_stage<B: EngineBackend>(backend: &mut B, slots: &mut [Slot]) -> bool
                             } else if task_state.config.max_tokens > 0
                                 && task_state.generated_tokens.len() >= task_state.config.max_tokens
                             {
+                                out_text = std::mem::replace(
+                                    &mut task_state.generated_text,
+                                    "".to_string(),
+                                );
                                 SlotState::Done {
                                     task_state,
-                                    reply: EngineReply::Stop(StopReason::MaxLength),
+                                    reply: EngineReply::Stop(StopReason::MaxTokens),
                                 }
                             } else {
-                                // Append token to generated text first to check stop words.
-                                let piece = backend.token_to_piece(token);
-                                append_utf8_piece(
-                                    &mut task_state.generated_text,
-                                    &mut task_state.pending_bytes,
-                                    &piece,
-                                );
+                                // Append token to task state, try detokenize token to utf8 text
+                                task_state.append_token(backend, token);
 
                                 if let Some(w) = hit_stop_words(
                                     &mut task_state.generated_text,
                                     &task_state.config.stop_words,
                                 ) {
-                                    // Stop word encountered
+                                    // Ending with stop word.
+                                    // chop the ending stop word
+                                    let new_len =
+                                        task_state.generated_text.len().saturating_sub(w.len());
+                                    task_state.generated_text.truncate(new_len);
+
+                                    out_text = std::mem::replace(
+                                        &mut task_state.generated_text,
+                                        "".to_string(),
+                                    );
+
                                     SlotState::Done {
                                         task_state,
                                         reply: EngineReply::Stop(StopReason::Word(w)),
                                     }
                                 } else {
                                     if task_state.config.output_mode != OutputMode::OneShot {
-                                        let _ =
-                                            task_state.output_tx.send(EngineReply::Token(token));
+                                        out_text = std::mem::replace(
+                                            &mut task_state.generated_text,
+                                            "".to_string(),
+                                        );
                                     }
-                                    task_state.generated_tokens.push(token);
 
                                     SlotState::Decoding {
                                         prompt_tokens: VecDeque::from([token]),
@@ -1058,17 +1124,37 @@ fn sampling_stage<B: EngineBackend>(backend: &mut B, slots: &mut [Slot]) -> bool
                                         task_state,
                                     }
                                 }
+                            };
+
+                            debug_assert!(
+                                matches!(
+                                    slot.state,
+                                    SlotState::Done { .. }
+                                        | SlotState::Sampling { .. }
+                                        | SlotState::Decoding { .. }
+                                ),
+                                "new state must be done, sampling, or decoding"
+                            );
+
+                            if !out_text.is_empty()
+                                && let Some(tx) = slot.output_tx()
+                            {
+                                let _ = tx.send(EngineReply::Text(out_text));
                             }
                         }
-                        Err(e) => SlotState::Done {
-                            task_state,
-                            reply: EngineReply::Error(e),
-                        },
+
+                        Err(e) => {
+                            slot.state = SlotState::Done {
+                                task_state,
+                                reply: EngineReply::Error(e),
+                            };
+                        }
                     }
                 }
             }
-            other => other,
-        };
+        } else {
+            slot.state = state0;
+        }
     }
 
     did_work || done_stage(backend, slots) > 0
@@ -1078,38 +1164,36 @@ fn done_stage<B: EngineBackend>(backend: &mut B, slots: &mut [Slot]) -> usize {
     let mut completed = 0usize;
 
     for slot in slots.iter_mut() {
-        let state = std::mem::replace(&mut slot.state, SlotState::Busy);
-
-        slot.state = match state {
-            SlotState::Done { task_state, reply } => {
-                // Finalize output, release KV/cache state, and return slot to idle.
-                let hard_clear = matches!(
-                    reply,
-                    EngineReply::Cancelled | EngineReply::Shutdown | EngineReply::Error(_)
-                );
-
-                // send reply
-                let _ = task_state.output_tx.send(
-                    if !hard_clear && task_state.config.output_mode == OutputMode::OneShot {
-                        EngineReply::Tokens(task_state.generated_tokens)
-                    } else {
-                        reply
-                    },
-                );
-
-                if hard_clear {
-                    backend.clear_slot(slot.seq_id);
-                    slot.n_past = 0;
-                } else {
-                    // Keep KV/cache for prompt reuse across future tasks.
-                    backend.reset_slot_runtime(slot.seq_id);
-                }
-                completed += 1;
-
-                SlotState::Idle
+        let state0 = std::mem::replace(&mut slot.state, SlotState::Busy);
+        if let SlotState::Done { task_state, reply } = state0 {
+            if !task_state.generated_text.is_empty() {
+                let _ = task_state
+                    .output_tx
+                    .send(EngineReply::Text(task_state.generated_text));
             }
-            other => other,
-        };
+
+            let should_clear = matches!(
+                reply,
+                EngineReply::Cancelled | EngineReply::Shutdown | EngineReply::Error(_)
+            );
+
+            if task_state.config.output_mode != OutputMode::OneShot {
+                let _ = task_state.output_tx.send(reply);
+            }
+
+            if should_clear {
+                backend.clear_slot(slot.seq_id);
+                slot.n_past = 0;
+            } else {
+                // Keep KV/cache for prompt reuse across future tasks.
+                backend.reset_slot_runtime(slot.seq_id);
+            }
+
+            completed += 1;
+            slot.state = SlotState::Idle;
+        } else {
+            slot.state = state0;
+        }
     }
 
     completed
@@ -1125,16 +1209,13 @@ fn count_active_tasks(slots: &[Slot]) -> usize {
 fn hit_stop_words(generated_text: &mut String, stop_words: &[String]) -> Option<String> {
     for stop in stop_words.iter().filter(|s| !s.is_empty()) {
         if generated_text.ends_with(stop) {
-            // truncate stop word in text end
-            // let new_len = generated_text.len().saturating_sub(stop.len());
-            // generated_text.truncate(new_len);
-
             return Some(stop.to_string());
         }
     }
     None
 }
 
+#[deprecated]
 fn append_utf8_piece(out_text: &mut String, pending_bytes: &mut Vec<u8>, piece: &[u8]) {
     if piece.is_empty() {
         return;
@@ -1273,7 +1354,7 @@ mod tests {
     }
 
     impl EngineBackend for MockEngine {
-        fn n_ubatch(&self) -> usize {
+        fn ubatch_size(&self) -> usize {
             self.n_ubatch
         }
 
@@ -1367,7 +1448,7 @@ mod tests {
             self.eog_token == Some(token)
         }
 
-        fn ensure_slot_sampler(
+        fn init_slot_sampler(
             &mut self,
             _seq_id: usize,
             _temperature: f32,

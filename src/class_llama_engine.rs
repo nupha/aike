@@ -55,7 +55,13 @@ fn completion(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let promise = Promise::create_with_receiver(ctx, rx, |cx, msg| -> JSResult {
         match msg {
             EngineReply::Tokens(tokens) => {
-                TypedArray::create_from_vec_i32(cx, tokens).map(JSValue::from)
+                unreachable!()
+                // TypedArray::create_from_vec_i32(cx, tokens).map(JSValue::from)
+            }
+            EngineReply::Text(text) => {
+                cx.create_string_from_utf8(text.into_bytes())
+                    .map(JSValue::from)
+                // TypedArray::create_from_vec_i32(cx, tokens).map(JSValue::from)
             }
             EngineReply::Error(e) => {
                 cx.throw_internal_error(&e);
@@ -104,8 +110,12 @@ fn completion_iter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         rx,
         |cx, msg| -> Result<Option<JSValue>, i32> {
             match msg {
-                EngineReply::Token(token) => Ok(Some(JSValue::from(token))),
+                EngineReply::Text(text) => cx
+                    .create_string_from_utf8(text.into_bytes())
+                    .map(JSValue::from)
+                    .map(Some),
                 EngineReply::Stop(_) => Ok(None),
+                EngineReply::Token(token) => Ok(Some(JSValue::from(token))),
                 EngineReply::Tokens(_) => {
                     cx.throw_internal_error("unexpected message in continues mode");
                     Err(-1)
