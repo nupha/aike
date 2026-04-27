@@ -307,6 +307,7 @@ fn render_chat_template(
 #[derive(Clone)]
 struct AppState {
     engine: Arc<Engine>,
+    #[deprecated]
     model: LlamaModel,
     model_id: String,
 }

@@ -107,7 +107,7 @@ pub(crate) struct WorkerPool {
 }
 
 impl WorkerPool {
-    pub(crate) fn global() -> &'static Self {
+    pub(crate) fn singleton() -> &'static Self {
         static POOL: OnceLock<WorkerPool> = OnceLock::new();
         POOL.get_or_init(|| {
             let cpu = std::thread::available_parallelism()
@@ -178,33 +178,39 @@ impl WorkerPool {
     fn add_job_internal(&self, job: Job, on_timeout: Option<Job>) -> Result<(), &'static str> {
         let mut st = self.inner.state.lock().unwrap();
 
-        let mut job = match try_dispatch_to_idle_worker(&mut st, job) {
-            Ok(()) => return Ok(()),
-            Err(job) => job,
-        };
+        match try_dispatch_to_idle_worker(&mut st, job) {
+            Ok(()) => Ok(()),
+            Err(job) => {
+                if st.workers.len() < st.max_workers {
+                    // spawn one more worker
+                    st.workers.push(WorkerHandle::spawn(self.inner.clone()));
 
-        if st.workers.len() < st.max_workers {
-            st.workers.push(WorkerHandle::spawn(self.inner.clone()));
-            job = match try_dispatch_to_idle_worker(&mut st, job) {
-                Ok(()) => return Ok(()),
-                Err(job) => job,
-            };
+                    let r = try_dispatch_to_idle_worker(&mut st, job);
+                    debug_assert!(r.is_ok(), "ensure there is an idle worker, can't fail");
+                    return Ok(());
+
+                    // job = match try_dispatch_to_idle_worker(&mut st, job) {
+                    //     Ok(()) => return Ok(()),
+                    //     Err(job) => job,
+                    // };
+                }
+
+                let deadline = st
+                    .acquire_timeout_ms
+                    .map(|ms| Instant::now() + Duration::from_millis(ms));
+
+                if st.pending_jobs.len() >= st.wait_queue_capacity {
+                    Err("too many pending jobs")
+                } else {
+                    st.pending_jobs.push_back(PendingJob {
+                        job,
+                        on_timeout,
+                        deadline,
+                    });
+                    Ok(())
+                }
+            }
         }
-
-        let deadline = st
-            .acquire_timeout_ms
-            .map(|ms| Instant::now() + Duration::from_millis(ms));
-
-        if st.pending_jobs.len() >= st.wait_queue_capacity {
-            return Err("QueueFull");
-        }
-
-        st.pending_jobs.push_back(PendingJob {
-            job,
-            on_timeout,
-            deadline,
-        });
-        Ok(())
     }
 
     pub(crate) fn purge_sampler_sync(&self, sampler_id: usize) {

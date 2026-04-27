@@ -405,7 +405,7 @@ mod debug_api {
             ctx.throw_type_error("invalid Sampler object");
             -1
         })?;
-        let n = WorkerPool::global().debug_sampler_cache_count(obj.id());
+        let n = WorkerPool::singleton().debug_sampler_cache_count(obj.id());
         Ok((n as i32).into())
     }
 }
@@ -433,7 +433,7 @@ impl JSSamplerChain {
             reg.remove(&id);
         }
         worker::next_sampler_rev(id);
-        WorkerPool::global().purge_sampler_sync(id);
+        WorkerPool::singleton().purge_sampler_sync(id);
     }
 
     /// register class
