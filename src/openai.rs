@@ -1,8 +1,3 @@
-//! OpenAI-compatible HTTP API server.
-//!
-//! Routes requests to the InferenceEngine backend via crossbeam channels
-//! and drives HTTP responses (SSE streaming or unary) from EngineReply.
-
 use std::{convert::Infallible, ffi::CString, sync::Arc, time::Duration};
 
 use axum::{

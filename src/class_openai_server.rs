@@ -1,9 +1,3 @@
-//! JS class HttpServerHandle and Model.httpServe() binding.
-//!
-//! Spawns a dedicated thread running an OpenAI-compatible HTTP server
-//! backed by an Engine + LlamaModel. Returns a handle that supports
-//! shutdown() / dispose() to stop the server gracefully.
-
 use std::{
     cell::Cell,
     ffi::c_void,

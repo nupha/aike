@@ -2,21 +2,79 @@ use std::{
     cell::Cell,
     ffi::c_void,
     sync::atomic::{AtomicU64, Ordering},
+    time::Duration,
 };
 
 use linkme::distributed_slice;
+use llama_cpp_ffi::LlamaContext;
 use zuqe::{
-    CallContext, ClassDef, ClassID, FieldDef, JSResult, JSValue, Object, Runtime, ScopedContext,
+    CallContext, ClassDef, ClassID, FieldDef, JS_PROP_ENUMERABLE, JSResult, JSValue, Object,
+    Runtime, ScopedContext,
     builtins::{iterator::AsyncIterableIterator, promise::Promise},
 };
 
 use crate::{
     USER_CLASS_DEFS,
     class_llama_context::parse_tokens,
+    class_llama_model::{get_llama_model, parse_context_params},
     engine::{Engine, EngineReply, OutputMode},
 };
 
 static NEXT_TASK_ID: AtomicU64 = AtomicU64::new(1);
+
+pub(super) struct EngineParams {
+    pub max_parallel: usize,
+    pub idle_sleep_ms: u64,
+    pub slot_match_threshold: f32,
+}
+
+pub(super) fn parse_engine_params(
+    ctx: &mut ScopedContext,
+    opts: Option<&Object>,
+) -> Result<EngineParams, i32> {
+    let mut max_parallel = 1usize;
+    let mut idle_sleep_ms = 1u64;
+    let mut slot_match_threshold = 0.5f32;
+    if let Some(opts) = opts {
+        let v = opts.get_property_str(ctx, "maxParallel")?;
+        if !v.is_undefined() {
+            let n = v.to_number(ctx)?.to_i32();
+            if n >= 1 {
+                max_parallel = n as usize;
+            } else {
+                ctx.throw_type_error("maxParallel must be >= 1");
+                return Err(-1);
+            }
+        }
+
+        let v = opts.get_property_str(ctx, "idleSleepMs")?;
+        if !v.is_undefined() {
+            let n = v.to_number(ctx)?.to_i32();
+            if n >= 0 {
+                idle_sleep_ms = n as u64;
+            } else {
+                ctx.throw_type_error("idleSleepMs must be >= 0");
+                return Err(-1);
+            }
+        }
+
+        let v = opts.get_property_str(ctx, "slotMatchThreshold")?;
+        if !v.is_undefined() {
+            let d = v.to_number(ctx)?.to_f64();
+            if (0.0..=1.0).contains(&d) {
+                slot_match_threshold = d as f32;
+            } else {
+                ctx.throw_type_error("slotMatchThreshold must be in [0, 1]");
+                return Err(-1);
+            }
+        }
+    }
+    Ok(EngineParams {
+        max_parallel,
+        idle_sleep_ms,
+        slot_match_threshold,
+    })
+}
 
 fn get_engine<'a>(ctx: &mut ScopedContext, val: &JSValue) -> Result<&'a Engine, i32> {
     let payload = val
@@ -140,6 +198,61 @@ fn dispose(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         }
     }
     Ok(JSValue::UNDEFINED)
+}
+
+pub(super) fn js_model_createEngine(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let this = cc.this();
+    let model = get_llama_model(ctx, &this)?;
+
+    if cc.length() < 2 {
+        ctx.throw_type_error("requires contextOptions and engineOptions arguments");
+        return Err(-1);
+    }
+
+    // arg0: context options (required, must be object)
+    let v0 = cc.arg(0);
+    let ctx_opts = v0.as_object().copied().ok_or_else(|| {
+        ctx.throw_type_error("contextOptions must be object");
+        -1
+    })?;
+    let ctx_params = parse_context_params(ctx, Some(&ctx_opts))?;
+
+    // arg1: engine options (required, must be object)
+    let v1 = cc.arg(1);
+    let eng_opts = v1.as_object().copied().ok_or_else(|| {
+        ctx.throw_type_error("engineOptions must be object");
+        -1
+    })?;
+    let engine_params = parse_engine_params(ctx, Some(&eng_opts))?;
+
+    let seq_cap = ctx_params.n_seq_max.max(1) as usize;
+    let mut max_parallel = engine_params.max_parallel;
+    if max_parallel > seq_cap {
+        eprintln!(
+            "createEngine: maxParallel ({}) is greater than sequences ({}); clamping maxParallel to sequences",
+            max_parallel, seq_cap,
+        );
+        max_parallel = seq_cap;
+    }
+
+    let mut llm_ctx = LlamaContext::new(model, ctx_params).map_err(|e| {
+        ctx.throw_internal_error(&e);
+        -1
+    })?;
+    llm_ctx.init_batch(ctx_params.n_batch as i32, 0, ctx_params.n_seq_max as i32);
+
+    let engine = Engine::start(
+        max_parallel,
+        Duration::from_millis(engine_params.idle_sleep_ms),
+        engine_params.slot_match_threshold,
+        llm_ctx,
+    );
+    let mut obj = JSLlamaEngine::new_instance(ctx, engine)?;
+
+    // Keep model alive as long as pipeline exists.
+    obj.define_property_value_str(ctx, "model", this, JS_PROP_ENUMERABLE)?;
+
+    Ok(obj.into())
 }
 
 const CLASS_ENGINE_PROTO: &[FieldDef] = &[

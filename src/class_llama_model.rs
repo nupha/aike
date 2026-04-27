@@ -2,7 +2,6 @@ use std::{
     cell::Cell,
     ffi::{CStr, CString, c_void},
     sync::{Mutex, OnceLock},
-    time::Duration,
 };
 
 use linkme::distributed_slice;
@@ -22,10 +21,9 @@ use zuqe::{
 use crate::{
     USER_CLASS_DEFS,
     class_llama_context::{JSLlamaContext, parse_tokens},
-    class_llama_engine::JSLlamaEngine,
+    class_llama_engine::js_model_createEngine,
     class_llama_sampler::js_model_createSamplerChain,
     class_openai_server::model_http_serve,
-    engine::Engine,
 };
 
 const MODEL_PATH_HIDDEN_KEY: &str = "__modelPath";
@@ -677,93 +675,6 @@ fn js_model_createContext(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
     Ok(ctx_obj.into())
 }
 
-fn js_model_createEngine(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let this = cc.this();
-    let model = get_llama_model(ctx, &this)?;
-
-    let opts = if cc.length() > 0 {
-        let v = cc.arg(0);
-        if v.is_undefined() || v.is_null() {
-            None
-        } else {
-            Some(v.as_object().copied().ok_or_else(|| {
-                ctx.throw_type_error("options must be object");
-                -1
-            })?)
-        }
-    } else {
-        None
-    };
-
-    let mut max_parallel = 1usize;
-    let mut idle_sleep_ms = 1u64;
-    let mut slot_match_threshold = 0.5f32;
-    if let Some(opts) = opts.as_ref() {
-        let v = opts.get_property_str(ctx, "maxParallel")?;
-        if !v.is_undefined() {
-            let n = v.to_number(ctx)?.to_i32();
-            if n >= 1 {
-                max_parallel = n as usize;
-            } else {
-                ctx.throw_type_error("maxParallel must be >= 1");
-                return Err(-1);
-            }
-        }
-
-        let v = opts.get_property_str(ctx, "idleSleepMs")?;
-        if !v.is_undefined() {
-            let n = v.to_number(ctx)?.to_i32();
-            if n >= 0 {
-                idle_sleep_ms = n as u64;
-            } else {
-                ctx.throw_type_error("idleSleepMs must be >= 0");
-                return Err(-1);
-            }
-        }
-
-        let v = opts.get_property_str(ctx, "slotMatchThreshold")?;
-        if !v.is_undefined() {
-            let d = v.to_number(ctx)?.to_f64();
-            if (0.0..=1.0).contains(&d) {
-                slot_match_threshold = d as f32;
-            } else {
-                ctx.throw_type_error("slotMatchThreshold must be in [0, 1]");
-                return Err(-1);
-            }
-        }
-    }
-
-    let ctx_params = parse_context_params(ctx, opts.as_ref())?;
-
-    let seq_cap = ctx_params.n_seq_max.max(1) as usize;
-    if max_parallel > seq_cap {
-        eprintln!(
-            "createEngine: maxParallel ({}) is greater than sequences ({}); clamping maxParallel to sequences",
-            max_parallel, seq_cap,
-        );
-        max_parallel = seq_cap;
-    }
-
-    let mut llm_ctx = LlamaContext::new(model, ctx_params).map_err(|e| {
-        ctx.throw_internal_error(&e);
-        -1
-    })?;
-    llm_ctx.init_batch(ctx_params.n_batch as i32, 0, ctx_params.n_seq_max as i32);
-
-    let engine = Engine::start(
-        max_parallel,
-        Duration::from_millis(idle_sleep_ms),
-        slot_match_threshold,
-        llm_ctx,
-    );
-    let mut obj = JSLlamaEngine::new_instance(ctx, engine)?;
-
-    // Keep model alive as long as pipeline exists.
-    obj.define_property_value_str(ctx, "model", this, JS_PROP_ENUMERABLE)?;
-
-    Ok(obj.into())
-}
-
 fn tokenize(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let llm_model = get_llama_model(ctx, &this)?;
@@ -1150,7 +1061,7 @@ const CLASS_MODEL_PROTO_ENTRIES: &[FieldDef] = &[
     FieldDef::GETSET("sepToken", Some(get_prop), None, PROP_SEP_TOKEN as _),
     FieldDef::GETSET("sepText", Some(get_prop), None, PROP_SEP_TEXT as _),
     FieldDef::CALL("createContext", 1, js_model_createContext, 0),
-    FieldDef::CALL("createEngine", 1, js_model_createEngine, 0),
+    FieldDef::CALL("createEngine", 2, js_model_createEngine, 0),
     FieldDef::CALL("createSamplerChain", 1, js_model_createSamplerChain, 0),
     FieldDef::CALL("tokenize", 1, tokenize, 0),
     FieldDef::CALL("detokenize", 1, detokenize, 0),

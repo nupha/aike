@@ -198,37 +198,34 @@ fn get_llama_context_wrap(
 
 fn get_prop(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut this = cc.this();
-
-    if cc.magic() == PROP_IS_DISPOSED {
-        let state = get_llama_context_wrap(ctx, &mut this)?;
-        let disposed = state.is_disposed();
-        return Ok(JSValue::Bool(disposed));
-    }
-
-    let state = get_llama_context_wrap(ctx, &mut this)?;
+    let wrap = get_llama_context_wrap(ctx, &mut this)?;
 
     let val: JSValue = match cc.magic() {
-        PROP_CTX_SIZE => state
+        PROP_CTX_SIZE => wrap
             .with_ctx_mut(|llm_ctx| Ok(llm_ctx.n_ctx()))
             .map_err(|e| {
                 ctx.throw_type_error(&e);
                 -1
             })?
             .into(),
-        PROP_BATCH_SIZE => state
+        PROP_BATCH_SIZE => wrap
             .with_ctx_mut(|llm_ctx| Ok(llm_ctx.n_ubatch()))
             .map_err(|e| {
                 ctx.throw_type_error(&e);
                 -1
             })?
             .into(),
-        PROP_SEQUENCES => state
+        PROP_SEQUENCES => wrap
             .with_ctx_mut(|llm_ctx| Ok(llm_ctx.n_seq_max()))
             .map_err(|e| {
                 ctx.throw_type_error(&e);
                 -1
             })?
             .into(),
+        PROP_IS_DISPOSED => {
+            let disposed = wrap.is_disposed();
+            JSValue::Bool(disposed)
+        }
         _ => JSValue::UNDEFINED,
     };
 
@@ -237,7 +234,7 @@ fn get_prop(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
 fn decode(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut this = cc.this();
-    let state = get_llama_context_wrap(ctx, &mut this)?;
+    let wrap = get_llama_context_wrap(ctx, &mut this)?;
 
     let arg0 = cc.arg(0);
     let tokens = parse_tokens(ctx, &arg0)?.into_owned();
@@ -285,7 +282,7 @@ fn decode(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let tx_timeout = tx.clone();
     if let Err(e) = WorkerPool::global().add_job(
         move || {
-            let res = state.decode_tokens(tokens, n_past, logits_last);
+            let res = wrap.decode_tokens(tokens, n_past, logits_last);
             let _ = tx_submit.send(res);
         },
         Some(move || {
@@ -300,7 +297,7 @@ fn decode(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
 fn sample(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut this = cc.this();
-    let state = get_llama_context_wrap(ctx, &mut this)?;
+    let wrap = get_llama_context_wrap(ctx, &mut this)?;
 
     let logits = cc.arg(0).to_number(ctx)?.to_i32();
     let s = cc.arg(1);
@@ -368,7 +365,7 @@ fn sample(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     if let Err(e) = WorkerPool::global().add_job(
         move || {
             let res = get_sampler_spec_by_id(sampler_id).and_then(|sampler_spec| {
-                state.sample_token(sampler_id, logits, sampler_spec, params_opt)
+                wrap.sample_token(sampler_id, logits, sampler_spec, params_opt)
             });
             let _ = tx_submit.send(res);
         },
@@ -384,7 +381,7 @@ fn sample(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
 fn reset(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut this = cc.this();
-    let state = get_llama_context_wrap(ctx, &mut this)?;
+    let wrap = get_llama_context_wrap(ctx, &mut this)?;
 
     let (promise, tx) =
         Promise::create_with_channel(ctx, |cx, payload: Result<(), String>| -> JSResult {
@@ -401,7 +398,7 @@ fn reset(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let tx_timeout = tx.clone();
     if let Err(e) = WorkerPool::global().add_job(
         move || {
-            let res = state.reset();
+            let res = wrap.reset();
             let _ = tx_submit.send(res);
         },
         Some(move || {
@@ -415,7 +412,8 @@ fn reset(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
 fn get_stats(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut this = cc.this();
-    let state = get_llama_context_wrap(ctx, &mut this)?;
+    let wrap = get_llama_context_wrap(ctx, &mut this)?;
+
     let (promise, tx) = Promise::create_with_channel(
         ctx,
         |cx, payload: Result<ContextStatsData, String>| -> JSResult {
@@ -436,7 +434,7 @@ fn get_stats(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let tx_timeout = tx.clone();
     if let Err(e) = WorkerPool::global().add_job(
         move || {
-            let res = state.get_stats();
+            let res = wrap.get_stats();
             let _ = tx_submit.send(res);
         },
         Some(move || {
@@ -450,7 +448,7 @@ fn get_stats(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
 fn embed_tokens(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut this = cc.this();
-    let state = get_llama_context_wrap(ctx, &mut this)?;
+    let wrap = get_llama_context_wrap(ctx, &mut this)?;
 
     let arg0 = cc.arg(0);
     let tokens = parse_tokens(ctx, &arg0)?.into_owned();
@@ -474,7 +472,7 @@ fn embed_tokens(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let tx_timeout = tx.clone();
     if let Err(e) = WorkerPool::global().add_job(
         move || {
-            let _ = tx_submit.send(state.embed_tokens(tokens));
+            let _ = tx_submit.send(wrap.embed_tokens(tokens));
         },
         Some(move || {
             let _ = tx_timeout.send(Err("AcquireTimeout".to_string()));
@@ -487,7 +485,7 @@ fn embed_tokens(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
 fn dispose(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut this = cc.this();
-    let state = get_llama_context_wrap(ctx, &mut this)?;
+    let wrap = get_llama_context_wrap(ctx, &mut this)?;
 
     let _ = this.set_property_str(ctx, "model", JSValue::UNDEFINED);
     let (promise, tx) =
@@ -502,7 +500,7 @@ fn dispose(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let tx_timeout = tx.clone();
     if let Err(_e) = WorkerPool::global().add_job(
         move || {
-            state.dispose();
+            wrap.dispose();
             let _ = tx_submit.send(Ok(()));
         },
         Some(move || {

@@ -215,10 +215,6 @@ async fn main() -> ExitCode {
         class_reg_fn(&mut rt).unwrap();
     }
 
-    // let class_id_file = JSFile::register(&mut rt).unwrap();
-    // let class_id_model = JSLlamaModel::register(&mut rt).unwrap();
-    // let class_id_context = JSLlamaContext::register(&mut rt).unwrap();
-
     let is_module =
         args.module || filename.ends_with(".mjs") || ModuleDef::detect_module(script.as_bytes());
 
@@ -319,11 +315,17 @@ async fn main() -> ExitCode {
             Ok(val) => {
                 colorize_println(val.inspect(&mut rt).unwrap(), GreenFg);
             }
-            Err(reason) => {
-                let err_msg = reason
-                    .inspect(&mut rt)
-                    .unwrap_or_else(|_| "<exception>".into());
-                colorize_println(err_msg.clone(), RedFg);
+            Err(exc) => {
+                let err_msg = ctx.with_new_scope(|mut cx| {
+                    let err = ErrorText::from(&mut cx, exc);
+                    let mut txt = err.message;
+                    if let Some(tb) = err.traceback {
+                        txt = format!("{txt}\n{tb}");
+                    }
+                    txt
+                });
+                colorize_println(err_msg, RedFg);
+
                 exit_code = ExitCode::FAILURE;
             }
         }
