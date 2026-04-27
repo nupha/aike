@@ -47,7 +47,6 @@ pub struct EngineTask {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutputMode {
     Continuous,
-    Single,
     OneShot,
 }
 
@@ -318,7 +317,6 @@ impl EngineBackend for LlamaEngineBackend {
 #[derive(Debug)]
 struct TaskState {
     config: TaskConfig,
-    step_budget: usize,
     generated_tokens: Vec<Token>,
     generated_text: String,
     pending_bytes: Vec<u8>,
@@ -597,7 +595,8 @@ fn worker_loop<B: EngineBackend>(
             }
 
             match sched(task, slot_match_threshold, &mut backend, &mut slots) {
-                SchedResult::Scheduled | SchedResult::Rejected => {}
+                SchedResult::Scheduled => {}
+                SchedResult::Rejected => {}
                 SchedResult::Deferred(input) => {
                     enqueue_task(input, &mut ready_inputs, &mut deferred_inputs);
                     break;
@@ -815,11 +814,9 @@ fn sched<B: EngineBackend>(
     }
 
     let config = task.config;
-    let is_single_mode = config.output_mode == OutputMode::Single;
 
     let task_state = TaskState {
         config,
-        step_budget: if is_single_mode { 1 } else { 0 },
         generated_tokens: Vec::new(),
         generated_text: String::new(),
         pending_bytes: Vec::new(),
@@ -979,19 +976,11 @@ fn sampling_stage<B: EngineBackend>(backend: &mut B, slots: &mut [Slot]) -> bool
             mut task_state,
         } = state0
         {
-            let can_sample = match task_state.config.output_mode {
-                OutputMode::Continuous | OutputMode::OneShot => true,
-                OutputMode::Single => task_state.step_budget > 0,
-            } && !task_state.output_tx.is_full(); // if output_tx is full, don't sample
-
-            if !can_sample {
-                // restore task_state to perform sampling in next tick
+            if task_state.output_tx.is_full() {
+                // if output_tx is full, don't sample in this tick,
+                // do perform sampling in next tick instead.
                 slot.state = SlotState::Sampling { logits, task_state };
             } else {
-                if task_state.config.output_mode == OutputMode::Single {
-                    task_state.step_budget = task_state.step_budget.saturating_sub(1);
-                }
-
                 if let Err(e) = backend.init_slot_sampler(
                     // lazy init sampler fail
                     slot.seq_id,
@@ -1109,22 +1098,29 @@ fn done_stage<B: EngineBackend>(backend: &mut B, slots: &mut [Slot]) -> usize {
     for slot in slots.iter_mut() {
         let state0 = std::mem::replace(&mut slot.state, SlotState::Busy);
         if let SlotState::Done { task_state, reply } = state0 {
-            if !task_state.generated_text.is_empty() {
-                let _ = task_state
-                    .output_tx
-                    .send(EngineReply::Text(task_state.generated_text));
-            }
-
-            let should_clear = matches!(
+            let aborted = matches!(
                 reply,
                 EngineReply::Cancelled | EngineReply::Shutdown | EngineReply::Error(_)
             );
 
-            if task_state.config.output_mode != OutputMode::OneShot {
-                let _ = task_state.output_tx.send(reply);
+            match task_state.config.output_mode {
+                OutputMode::OneShot => {
+                    // send generated text in a whole, even it's empty.
+                    if !aborted {
+                        let _ = task_state
+                            .output_tx
+                            .send(EngineReply::Text(task_state.generated_text));
+                    }
+                }
+                OutputMode::Continuous => {
+                    debug_assert!(task_state.generated_text.is_empty());
+                }
             }
 
-            if should_clear {
+            // send last reply
+            let _ = task_state.output_tx.send(reply);
+
+            if aborted {
                 backend.clear_slot(slot.seq_id);
                 slot.n_past = 0;
             } else {
@@ -1490,28 +1486,6 @@ mod tests {
         let slots = vec![Slot::new(0), Slot::new(1)];
         let picked = pick_idle_slot(&engine, &slots, Some(1), &[42], true, 0.9).expect("pick");
         assert_eq!(picked.0, 1);
-    }
-
-    #[test]
-    fn cancel_task_stops_running_job() {
-        let engine = MockEngine::new(
-            vec![MockSlotPlan {
-                outputs: vec![10, 11, 12, 13, 14],
-            }],
-            None,
-            8,
-        );
-        let handle = Engine::start_with_backend(1, Duration::from_millis(1), 0.5, engine);
-        let rx = handle
-            .push_task("c1", vec![7], Vec::new(), OutputMode::Single)
-            .expect("submit c1");
-
-        // wait at least one output to ensure task is running
-        let _ = rx.recv_timeout(Duration::from_millis(100));
-        handle.cancel_task("c1").expect("cancel c1");
-
-        let out = recv_until_finished(&rx, Duration::from_millis(100));
-        assert!(out.iter().any(|m| matches!(m, EngineReply::Cancelled)));
     }
 
     #[test]

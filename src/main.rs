@@ -8,6 +8,7 @@ mod class_llama_context;
 mod class_llama_engine;
 mod class_llama_model;
 mod class_llama_sampler;
+mod class_openai_server;
 mod engine;
 mod global;
 mod mod_llama;
@@ -32,6 +33,7 @@ use crate::{
     class_llama_engine::JSLlamaEngine,
     class_llama_model::JSLlamaModel,
     class_llama_sampler::JSSamplerChain,
+    class_openai_server::JSHttpServerHandle,
     global::setup_globals,
     mod_llama::init_mod_llama,
     mod_os::{init_mod_os, mod_os_gc_trace},
@@ -232,6 +234,7 @@ async fn main() -> ExitCode {
                 JSLlamaEngine::class_id(),
                 JSSamplerChain::class_id(),
                 JSFile::class_id(),
+                JSHttpServerHandle::class_id(),
             ])?;
 
             // register native modules

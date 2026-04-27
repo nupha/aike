@@ -24,6 +24,7 @@ use crate::{
     class_llama_context::{JSLlamaContext, parse_tokens},
     class_llama_engine::JSLlamaEngine,
     class_llama_sampler::js_model_createSamplerChain,
+    class_openai_server::model_http_serve,
     engine::Engine,
 };
 
@@ -356,7 +357,7 @@ fn model_is_eog(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     Ok(JSValue::Bool(model.is_eog(token)))
 }
 
-fn default_context_params() -> llama_cpp_ffi::llama_context_params {
+pub(super) fn default_context_params() -> llama_cpp_ffi::llama_context_params {
     let mut ctx_params = LlamaContext::default_params();
     ctx_params.kv_unified = true;
     ctx_params.n_ctx = 4096;
@@ -368,7 +369,7 @@ fn default_context_params() -> llama_cpp_ffi::llama_context_params {
     ctx_params
 }
 
-fn parse_context_params(
+pub(super) fn parse_context_params(
     ctx: &mut ScopedContext,
     opts: Option<&Object>,
 ) -> Result<llama_cpp_ffi::llama_context_params, i32> {
@@ -1158,6 +1159,7 @@ const CLASS_MODEL_PROTO_ENTRIES: &[FieldDef] = &[
     FieldDef::CALL("getMeta", 1, model_get_meta, 0),
     FieldDef::CALL("getMetaKeys", 0, model_get_meta_keys, 0),
     FieldDef::CALL("renderTemplate", 2, model_render_template, 0),
+    FieldDef::CALL("httpServe", 1, model_http_serve, 0),
     FieldDef::CALL("dispose", 0, model_dispose, 0),
 ];
 

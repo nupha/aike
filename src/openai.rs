@@ -3,15 +3,7 @@
 //! Routes requests to the InferenceEngine backend via crossbeam channels
 //! and drives HTTP responses (SSE streaming or unary) from EngineReply.
 
-use std::{
-    convert::Infallible,
-    ffi::CString,
-    sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    },
-    time::Duration,
-};
+use std::{convert::Infallible, ffi::CString, sync::Arc, time::Duration};
 
 use axum::{
     Json, Router,
@@ -21,7 +13,7 @@ use axum::{
     response::{IntoResponse, Response, Sse, sse::Event},
     routing::{get, post},
 };
-use crossbeam::channel::{Receiver, SendError, Sender};
+use crossbeam::channel::Receiver;
 use futures_util::StreamExt;
 use llama_cpp_ffi::LlamaModel;
 use minijinja::{Environment, context};
@@ -31,9 +23,7 @@ use tokio_stream::wrappers::UnboundedReceiverStream;
 use tower_http::cors::CorsLayer;
 use uuid::Uuid;
 
-use crate::engine::{
-    Engine, EngineReply, EngineTask, OutputMode, StopReason, TaskConfig, Token, now_unix_s,
-};
+use crate::engine::{Engine, EngineReply, OutputMode, StopReason, Token, now_unix_s};
 
 #[derive(Debug, Serialize)]
 struct ErrorResponse {
@@ -352,25 +342,56 @@ fn build_router(
         .layer(CorsLayer::permissive())
 }
 
-/// start http server
-pub async fn serve(
-    engine: Arc<Engine>,
-    model: LlamaModel,
-    model_id: String,
-    default_max_tokens: usize,
-    host: &str,
-    port: u16,
-) -> Result<(), String> {
-    let app = build_router(engine, model, model_id, default_max_tokens);
-    let addr = format!("{host}:{port}");
-    let listener = tokio::net::TcpListener::bind(&addr)
-        .await
-        .map_err(|e| format!("bind failed: {e}"))?;
+impl Engine {
+    /// Start http server with Engine (in current thread), blocks until shutdown signal.
+    pub async fn http_server_with_shutdown(
+        self,
+        model: LlamaModel,
+        model_id: String,
+        default_max_tokens: usize,
+        host: &str,
+        port: u16,
+        shutdown_rx: tokio::sync::oneshot::Receiver<()>,
+    ) -> Result<(), String> {
+        eprintln!("[DEBUG http_server_with_shutdown] building router...");
+        let app = build_router(Arc::new(self), model, model_id, default_max_tokens);
+        let addr = format!("{host}:{port}");
+        eprintln!("[DEBUG http_server_with_shutdown] binding to {addr}...");
+        let listener = tokio::net::TcpListener::bind(&addr)
+            .await
+            .map_err(|e| format!("bind failed: {e}"))?;
 
-    log::info!("openai server listening on {addr}");
-    axum::serve(listener, app)
-        .await
-        .map_err(|e| format!("server error: {e}"))
+        eprintln!("[DEBUG http_server_with_shutdown] listening on {addr}");
+        log::info!("openai server listening on {addr}");
+        axum::serve(listener, app)
+            .with_graceful_shutdown(async move {
+                eprintln!("[DEBUG http_server_with_shutdown] shutdown signal received");
+                let _ = shutdown_rx.await;
+            })
+            .await
+            .map_err(|e| format!("server error: {e}"))
+    }
+
+    /// start http server with Engine (in current thread)
+    pub async fn http_server(
+        self,
+        model: LlamaModel,
+        model_id: String,
+        default_max_tokens: usize,
+        host: &str,
+        port: u16,
+    ) -> Result<(), String> {
+        let app = build_router(Arc::new(self), model, model_id, default_max_tokens);
+        let addr = format!("{host}:{port}");
+        let listener = tokio::net::TcpListener::bind(&addr)
+            .await
+            .map_err(|e| format!("bind failed: {e}"))?;
+
+        log::info!("openai server listening on {addr}");
+        axum::serve(listener, app)
+            .await
+            .map_err(|e| format!("server error: {e}"))
+    }
 }
 
 //
@@ -378,14 +399,17 @@ pub async fn serve(
 //
 
 async fn handle_root() -> impl IntoResponse {
+    eprintln!("[DEBUG handle_root]");
     Json(json!({"name":"llama-js server"}))
 }
 
 async fn handle_health() -> impl IntoResponse {
+    eprintln!("[DEBUG handle_health]");
     Json(HealthResponse { status: "ok" })
 }
 
 async fn handle_models(State(state): State<AppState>) -> impl IntoResponse {
+    eprintln!("[DEBUG handle_models]");
     let created = now_unix_s();
     let data = vec![ModelInfo {
         id: state.model_id,
@@ -403,9 +427,12 @@ async fn handle_chat_completions(
     State(state): State<AppState>,
     payload: Result<Json<serde_json::Value>, JsonRejection>,
 ) -> Response {
+    eprintln!("[DEBUG handle_chat_completions] received request");
+
     let raw = match payload {
         Ok(Json(v)) => v,
         Err(e) => {
+            eprintln!("[DEBUG handle_chat_completions] JSON parse error: {e}");
             return (
                 StatusCode::BAD_REQUEST,
                 Json(oai_error(e.to_string(), "invalid_request_error")),
@@ -414,9 +441,12 @@ async fn handle_chat_completions(
         }
     };
 
+    eprintln!("[DEBUG handle_chat_completions] raw body: {}", raw);
+
     let mut req: ChatCompletionsRequest = match serde_json::from_value(raw) {
         Ok(v) => v,
         Err(e) => {
+            eprintln!("[DEBUG handle_chat_completions] deserialize error: {e}");
             return (
                 StatusCode::BAD_REQUEST,
                 Json(oai_error(e.to_string(), "invalid_request_error")),
@@ -426,6 +456,7 @@ async fn handle_chat_completions(
     };
 
     if req.messages.is_empty() {
+        eprintln!("[DEBUG handle_chat_completions] messages is empty");
         return (
             StatusCode::BAD_REQUEST,
             Json(oai_error(
@@ -453,10 +484,16 @@ async fn handle_chat_completions(
         .and_then(|s| s.include_usage)
         .unwrap_or(false);
 
+    eprintln!(
+        "[DEBUG handle_chat_completions] stream={}, max_tokens={}, temperature={}, top_p={}, stop_words={:?}",
+        stream, max_tokens, temperature, top_p, stop_words,
+    );
+
     // Render chat template -> tokenize prompt
     let prompt_tokens = match build_chat_prompt_tokens(&state.model, &req.messages) {
         Ok(tokens) => tokens,
         Err(e) => {
+            eprintln!("[DEBUG handle_chat_completions] build_chat_prompt_tokens error: {e}");
             return (
                 StatusCode::BAD_REQUEST,
                 Json(oai_error(e, "invalid_request_error")),
@@ -464,6 +501,12 @@ async fn handle_chat_completions(
                 .into_response();
         }
     };
+
+    eprintln!(
+        "[DEBUG handle_chat_completions] prompt_tokens count={}, first_few={:?}",
+        prompt_tokens.len(),
+        &prompt_tokens[..prompt_tokens.len().min(10)],
+    );
 
     let seq_hint = req
         .id_slot
@@ -474,8 +517,12 @@ async fn handle_chat_completions(
     let task_id = format!("task-{}", Uuid::new_v4().simple());
     let n_prompt_tokens = prompt_tokens.len();
 
+    eprintln!(
+        "[DEBUG handle_chat_completions] pushing task, task_id={task_id}, seq_hint={seq_hint:?}, use_cache={use_cache}"
+    );
+
     let rx = match state.engine.push_task_with_params(
-        task_id,
+        task_id.clone(),
         prompt_tokens,
         stop_words,
         if stream {
@@ -492,6 +539,7 @@ async fn handle_chat_completions(
     ) {
         Ok(rx) => rx,
         Err(e) => {
+            eprintln!("[DEBUG handle_chat_completions] push_task_with_params error: {e}");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(oai_error(e.to_string(), "server_error")),
@@ -499,6 +547,8 @@ async fn handle_chat_completions(
                 .into_response();
         }
     };
+
+    eprintln!("[DEBUG handle_chat_completions] task pushed, waiting for reply...");
 
     if stream {
         let (tx, rx_tokio) = tokio::sync::mpsc::unbounded_channel::<String>();
@@ -529,13 +579,25 @@ async fn handle_chat_completions(
         });
 
         match join.await {
-            Ok(Ok(res)) => Json::<serde_json::Value>(res).into_response(),
-            Ok(Err((code, body))) => (code, Json(body)).into_response(),
-            Err(_) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(oai_error("request task failed", "server_error")),
-            )
-                .into_response(),
+            Ok(Ok(res)) => {
+                eprintln!("[DEBUG handle_chat_completions] success, response: {}", res);
+                Json::<serde_json::Value>(res).into_response()
+            }
+            Ok(Err((code, body))) => {
+                eprintln!(
+                    "[DEBUG handle_chat_completions] error response: code={code}, body={:?}",
+                    body
+                );
+                (code, Json(body)).into_response()
+            }
+            Err(e) => {
+                eprintln!("[DEBUG handle_chat_completions] join error: {e}");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(oai_error("request task failed", "server_error")),
+                )
+                    .into_response()
+            }
         }
     }
 }
@@ -714,11 +776,18 @@ fn build_chat_prompt_tokens(
         .map_err(|e| format!("invalid template: {e}"))?;
     let eos_token = model.eos_token_text().unwrap_or_default();
 
+    eprintln!("[DEBUG build_chat_prompt_tokens] template: {tmpl_str}");
+    eprintln!("[DEBUG build_chat_prompt_tokens] eos_token: {eos_token}");
+
     // Build owned message structs so the template render can borrow them.
     let backing: Vec<(String, String)> = messages
         .iter()
         .map(|m| {
             let content = m.content.as_ref().map(|c| c.to_text()).unwrap_or_default();
+            eprintln!(
+                "[DEBUG build_chat_prompt_tokens] msg role={}, content={}",
+                m.role, content
+            );
             (m.role.clone(), content)
         })
         .collect();
@@ -728,7 +797,13 @@ fn build_chat_prompt_tokens(
         .collect();
 
     let prompt = render_chat_template(tmpl_str, &jinja_msgs, &eos_token)?;
-    tokenize_prompt(model, &prompt)
+    eprintln!("[DEBUG build_chat_prompt_tokens] rendered prompt: {prompt}");
+    let tokens = tokenize_prompt(model, &prompt)?;
+    eprintln!(
+        "[DEBUG build_chat_prompt_tokens] tokenized count={}",
+        tokens.len()
+    );
+    Ok(tokens)
 }
 
 fn tokenize_prompt(model: &LlamaModel, prompt: &str) -> Result<Vec<Token>, String> {
@@ -752,6 +827,7 @@ fn collect_unary_reply(
     respond_id: &str,
     n_prompt_tokens: usize,
 ) -> Result<serde_json::Value, (StatusCode, ErrorResponse)> {
+    eprintln!("[DEBUG collect_unary_reply] waiting for replies...");
     let mut full_text = String::new();
     let mut completion_tokens = 0usize;
     let mut finish_reason;
@@ -759,10 +835,12 @@ fn collect_unary_reply(
     loop {
         match rx.recv_timeout(Duration::from_secs(300)) {
             Ok(EngineReply::Text(t)) => {
+                eprintln!("[DEBUG collect_unary_reply] Text chunk: {t}");
                 full_text.push_str(&t);
                 completion_tokens += 1;
             }
             Ok(EngineReply::Stop(reason)) => {
+                eprintln!("[DEBUG collect_unary_reply] Stop: {reason:?}");
                 finish_reason = match reason {
                     StopReason::Eog => "stop".to_string(),
                     StopReason::MaxTokens => "length".to_string(),
@@ -772,21 +850,25 @@ fn collect_unary_reply(
                 break;
             }
             Ok(EngineReply::Cancelled) => {
+                eprintln!("[DEBUG collect_unary_reply] Cancelled");
                 return Err((StatusCode::CONFLICT, oai_error("cancelled", "cancelled")));
             }
             Ok(EngineReply::Error(e)) => {
+                eprintln!("[DEBUG collect_unary_reply] Error: {e}");
                 return Err((
                     StatusCode::INTERNAL_SERVER_ERROR,
                     oai_error(e, "server_error"),
                 ));
             }
             Ok(EngineReply::Shutdown) => {
+                eprintln!("[DEBUG collect_unary_reply] Shutdown");
                 return Err((
                     StatusCode::INTERNAL_SERVER_ERROR,
                     oai_error("engine shutdown", "server_error"),
                 ));
             }
-            Err(_) => {
+            Err(e) => {
+                eprintln!("[DEBUG collect_unary_reply] recv_timeout error: {e}");
                 return Err((
                     StatusCode::INTERNAL_SERVER_ERROR,
                     oai_error("response channel timed out", "server_error"),
