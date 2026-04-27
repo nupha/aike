@@ -69,10 +69,6 @@ pub enum StopReason {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EngineReply {
-    #[deprecated]
-    Token(Token),
-    #[deprecated]
-    Tokens(Vec<Token>),
     Text(String),
     Stop(StopReason),
     Cancelled,
@@ -1215,37 +1211,6 @@ fn hit_stop_words(generated_text: &mut String, stop_words: &[String]) -> Option<
     None
 }
 
-#[deprecated]
-fn append_utf8_piece(out_text: &mut String, pending_bytes: &mut Vec<u8>, piece: &[u8]) {
-    if piece.is_empty() {
-        return;
-    }
-    pending_bytes.extend_from_slice(piece);
-    loop {
-        match std::str::from_utf8(pending_bytes) {
-            Ok(s) => {
-                out_text.push_str(s);
-                pending_bytes.clear();
-                break;
-            }
-            Err(e) => {
-                let valid = e.valid_up_to();
-                if valid == 0 {
-                    break;
-                }
-                let valid_bytes: Vec<u8> = pending_bytes[..valid].to_vec();
-                let rest = pending_bytes[valid..].to_vec();
-                let s = unsafe { std::str::from_utf8_unchecked(&valid_bytes) };
-                out_text.push_str(s);
-                *pending_bytes = rest;
-                if pending_bytes.is_empty() {
-                    break;
-                }
-            }
-        }
-    }
-}
-
 fn now_unix_s() -> i64 {
     match SystemTime::now().duration_since(SystemTime::UNIX_EPOCH) {
         Ok(d) => d.as_secs() as i64,
@@ -1480,7 +1445,7 @@ mod tests {
         for _ in 0..200 {
             match rx.recv_timeout(timeout) {
                 Ok(msg) => {
-                    let done = !matches!(msg, EngineReply::Token(_) | EngineReply::Tokens(_));
+                    let done = !matches!(msg, EngineReply::Text(_));
                     out.push(msg);
                     if done {
                         break;
@@ -1507,8 +1472,10 @@ mod tests {
             .expect("submit t1");
 
         let out = recv_until_finished(&rx, Duration::from_millis(100));
-        assert!(out.iter().any(|m| matches!(m, EngineReply::Token(101))));
-        assert!(out.iter().any(|m| matches!(m, EngineReply::Token(102))));
+        assert!(
+            out.iter()
+                .any(|m| matches!(m, EngineReply::Text(t) if t == "101"))
+        );
         assert!(
             out.iter()
                 .any(|m| matches!(m, EngineReply::Stop(StopReason::Eog)))
@@ -1531,16 +1498,28 @@ mod tests {
             .expect("submit s1");
 
         let first = recv_until_finished(&rx, Duration::from_millis(50));
-        assert!(first.iter().any(|m| matches!(m, EngineReply::Token(1))));
-        assert!(!first.iter().any(|m| matches!(m, EngineReply::Token(2))));
+        assert!(
+            first
+                .iter()
+                .any(|m| matches!(m, EngineReply::Text(t) if t == "1"))
+        );
+        assert!(
+            !first
+                .iter()
+                .any(|m| matches!(m, EngineReply::Text(t) if t == "2"))
+        );
 
         handle.next_token_of("s1").expect("next token 2");
         let second = recv_until_finished(&rx, Duration::from_millis(100));
-        assert!(second.iter().any(|m| matches!(m, EngineReply::Token(2))));
+        assert!(
+            second
+                .iter()
+                .any(|m| matches!(m, EngineReply::Text(t) if t == "2"))
+        );
 
         handle.next_token_of("s1").expect("next token 3");
         let third = recv_until_finished(&rx, Duration::from_millis(100));
-        assert!(third.iter().any(|m| matches!(m, EngineReply::Token(3))));
+        // token 3 is EOG, no Text reply for it
         assert!(
             third
                 .iter()
@@ -1564,15 +1543,12 @@ mod tests {
             .expect("submit o1");
 
         let out = recv_until_finished(&rx, Duration::from_millis(100));
-        assert!(!out.iter().any(|m| matches!(m, EngineReply::Token(_))));
-        assert!(out.iter().any(|m| matches!(
-            m,
-            EngineReply::Tokens(tokens) if tokens == &vec![11, 12, 13]
-        )));
         assert!(
             out.iter()
-                .any(|m| matches!(m, EngineReply::Stop(StopReason::Eog)))
+                .any(|m| matches!(m, EngineReply::Text(t) if t == "1112"))
         );
+        // OneShot mode does not send Stop reply in done_stage
+        assert!(!out.iter().any(|m| matches!(m, EngineReply::Stop(_))));
         handle.shutdown();
     }
 

@@ -7,7 +7,7 @@ use std::{
 use linkme::distributed_slice;
 use zuqe::{
     CallContext, ClassDef, ClassID, FieldDef, JSResult, JSValue, Object, Runtime, ScopedContext,
-    builtins::{iterator::AsyncIterableIterator, promise::Promise, typed_array::TypedArray},
+    builtins::{iterator::AsyncIterableIterator, promise::Promise},
 };
 
 use crate::{
@@ -54,15 +54,9 @@ fn completion(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     let promise = Promise::create_with_receiver(ctx, rx, |cx, msg| -> JSResult {
         match msg {
-            EngineReply::Tokens(tokens) => {
-                unreachable!()
-                // TypedArray::create_from_vec_i32(cx, tokens).map(JSValue::from)
-            }
-            EngineReply::Text(text) => {
-                cx.create_string_from_utf8(text.into_bytes())
-                    .map(JSValue::from)
-                // TypedArray::create_from_vec_i32(cx, tokens).map(JSValue::from)
-            }
+            EngineReply::Text(text) => cx
+                .create_string_from_utf8(text.into_bytes())
+                .map(JSValue::from),
             EngineReply::Error(e) => {
                 cx.throw_internal_error(&e);
                 Err(-1)
@@ -75,7 +69,7 @@ fn completion(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 cx.throw_internal_error("engine shutdown");
                 Err(-1)
             }
-            EngineReply::Token(_) | EngineReply::Stop(_) => {
+            EngineReply::Stop(_) => {
                 cx.throw_internal_error("unexpected message in oneshot mode");
                 Err(-1)
             }
@@ -115,11 +109,6 @@ fn completion_iter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                     .map(JSValue::from)
                     .map(Some),
                 EngineReply::Stop(_) => Ok(None),
-                EngineReply::Token(token) => Ok(Some(JSValue::from(token))),
-                EngineReply::Tokens(_) => {
-                    cx.throw_internal_error("unexpected message in continues mode");
-                    Err(-1)
-                }
                 EngineReply::Error(e) => {
                     cx.throw_internal_error(&e);
                     Err(-1)
