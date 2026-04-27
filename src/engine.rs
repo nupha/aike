@@ -413,9 +413,18 @@ impl Slot {
 pub struct Engine {
     pub(super) input_tx: Sender<EngineTask>,
     pub(super) ctrl_tx: Sender<EngineCtrlMsg>,
-    pub(super) active_tasks: Arc<AtomicUsize>,
+    pub(super) num_tasks: Arc<AtomicUsize>,
     pub(super) max_parallel: usize,
     worker_join_handle: Option<JoinHandle<()>>,
+}
+
+impl Drop for Engine {
+    fn drop(&mut self) {
+        let _ = self.ctrl_tx.send(EngineCtrlMsg::Shutdown);
+        if let Some(jh) = self.worker_join_handle.take() {
+            let _ = jh.join();
+        }
+    }
 }
 
 impl Engine {
@@ -442,8 +451,8 @@ impl Engine {
         let (input_tx, input_rx) = crossbeam::channel::bounded::<EngineTask>(16);
         let (ctrl_tx, ctrl_rx) = crossbeam::channel::bounded::<EngineCtrlMsg>(1);
 
-        let active_tasks = Arc::new(AtomicUsize::new(0));
-        let worker_active = active_tasks.clone();
+        let num_tasks = Arc::new(AtomicUsize::new(0));
+        let worker_active = num_tasks.clone();
 
         let worker_join = thread::spawn(move || {
             worker_loop(
@@ -460,14 +469,14 @@ impl Engine {
         Self {
             input_tx,
             ctrl_tx,
-            active_tasks,
+            num_tasks,
             max_parallel,
             worker_join_handle: Some(worker_join),
         }
     }
 
     pub fn active_tasks(&self) -> usize {
-        self.active_tasks.load(Ordering::Relaxed)
+        self.num_tasks.load(Ordering::Relaxed)
     }
 
     pub fn max_parallel(&self) -> usize {
@@ -530,15 +539,6 @@ impl Engine {
 
     pub fn cancel_task(&self, task_id: impl Into<String>) -> Result<(), SendError<EngineCtrlMsg>> {
         self.ctrl_tx.send(EngineCtrlMsg::CancelTask(task_id.into()))
-    }
-}
-
-impl Drop for Engine {
-    fn drop(&mut self) {
-        let _ = self.ctrl_tx.send(EngineCtrlMsg::Shutdown);
-        if let Some(join_handle) = self.worker_join_handle.take() {
-            let _ = join_handle.join();
-        }
     }
 }
 

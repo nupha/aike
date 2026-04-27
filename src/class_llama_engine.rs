@@ -1,7 +1,10 @@
 use std::{
     cell::Cell,
     ffi::c_void,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Duration,
 };
 
@@ -194,10 +197,46 @@ fn dispose(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     if !payload.opaque().is_null() {
         unsafe {
             let p = payload.replace_opaque(std::ptr::null_mut());
-            drop(Box::from_raw(p.cast::<Engine>()));
+            drop(Arc::from_raw(p.cast::<Engine>()));
         }
     }
     Ok(JSValue::UNDEFINED)
+}
+
+/// Create an Engine from JS arguments (contextOptions object, engineOptions object).
+/// Parses both options, creates the underlying LlamaContext, and starts the Engine.
+pub(super) fn create_engine_from_js(
+    ctx: &mut ScopedContext,
+    model: llama_cpp_ffi::LlamaModel,
+    ctx_opts: &Object,
+    eng_opts: &Object,
+) -> Result<Engine, i32> {
+    let ctx_params = parse_context_params(ctx, Some(ctx_opts))?;
+    let eng_params = parse_engine_params(ctx, Some(eng_opts))?;
+
+    let seq_cap = ctx_params.n_seq_max.max(1) as usize;
+    let mut max_parallel = eng_params.max_parallel;
+    if max_parallel > seq_cap {
+        log::warn!(
+            "createEngine: maxParallel ({}) is greater than sequences ({}); clamping maxParallel to sequences",
+            max_parallel,
+            seq_cap,
+        );
+        max_parallel = seq_cap;
+    }
+
+    let mut llm_ctx = LlamaContext::new(model, ctx_params).map_err(|e| {
+        ctx.throw_internal_error(&e);
+        -1
+    })?;
+    llm_ctx.init_batch(ctx_params.n_batch as i32, 0, ctx_params.n_seq_max as i32);
+
+    Ok(Engine::start(
+        max_parallel,
+        Duration::from_millis(eng_params.idle_sleep_ms),
+        eng_params.slot_match_threshold,
+        llm_ctx,
+    ))
 }
 
 pub(super) fn js_model_createEngine(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -215,7 +254,6 @@ pub(super) fn js_model_createEngine(ctx: &mut ScopedContext, cc: CallContext) ->
         ctx.throw_type_error("contextOptions must be object");
         -1
     })?;
-    let ctx_params = parse_context_params(ctx, Some(&ctx_opts))?;
 
     // arg1: engine options (required, must be object)
     let v1 = cc.arg(1);
@@ -223,32 +261,10 @@ pub(super) fn js_model_createEngine(ctx: &mut ScopedContext, cc: CallContext) ->
         ctx.throw_type_error("engineOptions must be object");
         -1
     })?;
-    let engine_params = parse_engine_params(ctx, Some(&eng_opts))?;
 
-    let seq_cap = ctx_params.n_seq_max.max(1) as usize;
-    let mut max_parallel = engine_params.max_parallel;
-    if max_parallel > seq_cap {
-        eprintln!(
-            "createEngine: maxParallel ({}) is greater than sequences ({}); clamping maxParallel to sequences",
-            max_parallel, seq_cap,
-        );
-        max_parallel = seq_cap;
-    }
+    let engine = create_engine_from_js(ctx, model, &ctx_opts, &eng_opts)?;
 
-    let mut llm_ctx = LlamaContext::new(model, ctx_params).map_err(|e| {
-        ctx.throw_internal_error(&e);
-        -1
-    })?;
-    llm_ctx.init_batch(ctx_params.n_batch as i32, 0, ctx_params.n_seq_max as i32);
-
-    let engine = Engine::start(
-        max_parallel,
-        Duration::from_millis(engine_params.idle_sleep_ms),
-        engine_params.slot_match_threshold,
-        llm_ctx,
-    );
     let mut obj = JSLlamaEngine::new_instance(ctx, engine)?;
-
     // Keep model alive as long as pipeline exists.
     obj.define_property_value_str(ctx, "model", this, JS_PROP_ENUMERABLE)?;
 
@@ -273,7 +289,7 @@ impl JSLlamaEngine {
             ClassDef::new("Engine", CLASS_ENGINE_PROTO, None).on_dispose(
                 |_, opaque: *mut c_void, _| {
                     if !opaque.is_null() {
-                        drop(unsafe { Box::from_raw(opaque.cast::<Engine>()) });
+                        drop(unsafe { Arc::from_raw(opaque.cast::<Engine>()) });
                     }
                 },
             ),
@@ -288,13 +304,13 @@ impl JSLlamaEngine {
     }
 
     pub(super) fn new_instance(ctx: &mut ScopedContext, engine: Engine) -> Result<Object, i32> {
-        let eng = Box::new(engine);
-        let opaque = Box::into_raw(eng).cast::<c_void>();
+        let eng = Arc::new(engine);
+        let opaque = Arc::into_raw(eng) as *mut c_void;
 
         ctx.create_class_instance_with_opaque(Self::class_id(), opaque)
             .map_err(|e| {
                 let p = e.other().unwrap();
-                let _ = unsafe { Box::from_raw(p.opaque().cast::<Engine>()) };
+                let _ = unsafe { Arc::from_raw(p.opaque().cast::<Engine>()) };
                 -1
             })
     }
