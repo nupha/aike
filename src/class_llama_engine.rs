@@ -69,11 +69,7 @@ fn completion(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 cx.throw_internal_error("engine shutdown");
                 Err(-1)
             }
-            EngineReply::Token(_)
-            | EngineReply::StopEog
-            | EngineReply::StopLength
-            | EngineReply::StopPrefillOnly
-            | EngineReply::StopWord => {
+            EngineReply::Token(_) | EngineReply::Stop(_) => {
                 cx.throw_internal_error("unexpected message in oneshot mode");
                 Err(-1)
             }
@@ -109,10 +105,7 @@ fn completion_iter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         |cx, msg| -> Result<Option<JSValue>, i32> {
             match msg {
                 EngineReply::Token(token) => Ok(Some(JSValue::from(token))),
-                EngineReply::StopEog
-                | EngineReply::StopWord
-                | EngineReply::StopLength
-                | EngineReply::StopPrefillOnly => Ok(None),
+                EngineReply::Stop(_) => Ok(None),
                 EngineReply::Tokens(_) => {
                     cx.throw_internal_error("unexpected message in continues mode");
                     Err(-1)

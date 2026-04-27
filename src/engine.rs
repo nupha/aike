@@ -60,13 +60,18 @@ pub enum EngineCtrlMsg {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StopReason {
+    Eog,
+    MaxLength,
+    PrefillOnly,
+    Word(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EngineReply {
     Token(Token),
     Tokens(Vec<Token>),
-    StopEog,
-    StopLength,
-    StopPrefillOnly,
-    StopWord,
+    Stop(StopReason),
     Cancelled,
     Error(String),
     Shutdown,
@@ -908,7 +913,7 @@ fn decoding_stage<B: EngineBackend>(
                 if logits_for_all_tokens {
                     SlotState::Done {
                         task_state,
-                        reply: EngineReply::StopPrefillOnly,
+                        reply: EngineReply::Stop(StopReason::PrefillOnly),
                     }
                 } else {
                     has_sampling = true;
@@ -1012,14 +1017,14 @@ fn sampling_stage<B: EngineBackend>(backend: &mut B, slots: &mut [Slot]) -> bool
                             if backend.is_eog(token) {
                                 SlotState::Done {
                                     task_state,
-                                    reply: EngineReply::StopEog,
+                                    reply: EngineReply::Stop(StopReason::Eog),
                                 }
                             } else if task_state.config.max_tokens > 0
                                 && task_state.generated_tokens.len() >= task_state.config.max_tokens
                             {
                                 SlotState::Done {
                                     task_state,
-                                    reply: EngineReply::StopLength,
+                                    reply: EngineReply::Stop(StopReason::MaxLength),
                                 }
                             } else {
                                 // Append token to generated text first to check stop words.
@@ -1030,14 +1035,14 @@ fn sampling_stage<B: EngineBackend>(backend: &mut B, slots: &mut [Slot]) -> bool
                                     &piece,
                                 );
 
-                                if hit_stop_words(
+                                if let Some(w) = hit_stop_words(
                                     &mut task_state.generated_text,
                                     &task_state.config.stop_words,
                                 ) {
                                     // Stop word encountered
                                     SlotState::Done {
                                         task_state,
-                                        reply: EngineReply::StopWord,
+                                        reply: EngineReply::Stop(StopReason::Word(w)),
                                     }
                                 } else {
                                     if task_state.config.output_mode != OutputMode::OneShot {
@@ -1117,17 +1122,17 @@ fn count_active_tasks(slots: &[Slot]) -> usize {
         .count()
 }
 
-fn hit_stop_words(generated_text: &mut String, stop_words: &[String]) -> bool {
+fn hit_stop_words(generated_text: &mut String, stop_words: &[String]) -> Option<String> {
     for stop in stop_words.iter().filter(|s| !s.is_empty()) {
         if generated_text.ends_with(stop) {
             // truncate stop word in text end
             // let new_len = generated_text.len().saturating_sub(stop.len());
             // generated_text.truncate(new_len);
 
-            return true;
+            return Some(stop.to_string());
         }
     }
-    false
+    None
 }
 
 fn append_utf8_piece(out_text: &mut String, pending_bytes: &mut Vec<u8>, piece: &[u8]) {
@@ -1423,7 +1428,10 @@ mod tests {
         let out = recv_until_finished(&rx, Duration::from_millis(100));
         assert!(out.iter().any(|m| matches!(m, EngineReply::Token(101))));
         assert!(out.iter().any(|m| matches!(m, EngineReply::Token(102))));
-        assert!(out.iter().any(|m| matches!(m, EngineReply::StopEog)));
+        assert!(
+            out.iter()
+                .any(|m| matches!(m, EngineReply::Stop(StopReason::Eog)))
+        );
         handle.shutdown();
     }
 
@@ -1452,7 +1460,11 @@ mod tests {
         handle.next_token_of("s1").expect("next token 3");
         let third = recv_until_finished(&rx, Duration::from_millis(100));
         assert!(third.iter().any(|m| matches!(m, EngineReply::Token(3))));
-        assert!(third.iter().any(|m| matches!(m, EngineReply::StopEog)));
+        assert!(
+            third
+                .iter()
+                .any(|m| matches!(m, EngineReply::Stop(StopReason::Eog)))
+        );
         handle.shutdown();
     }
 
@@ -1476,7 +1488,10 @@ mod tests {
             m,
             EngineReply::Tokens(tokens) if tokens == &vec![11, 12, 13]
         )));
-        assert!(out.iter().any(|m| matches!(m, EngineReply::StopEog)));
+        assert!(
+            out.iter()
+                .any(|m| matches!(m, EngineReply::Stop(StopReason::Eog)))
+        );
         handle.shutdown();
     }
 
@@ -1562,10 +1577,16 @@ mod tests {
             .expect("submit q2");
 
         let out1 = recv_until_finished(&rx1, Duration::from_millis(100));
-        assert!(out1.iter().any(|m| matches!(m, EngineReply::StopEog)));
+        assert!(
+            out1.iter()
+                .any(|m| matches!(m, EngineReply::Stop(StopReason::Eog)))
+        );
 
         let out2 = recv_until_finished(&rx2, Duration::from_millis(100));
-        assert!(out2.iter().any(|m| matches!(m, EngineReply::StopEog)));
+        assert!(
+            out2.iter()
+                .any(|m| matches!(m, EngineReply::Stop(StopReason::Eog)))
+        );
         handle.shutdown();
     }
 
