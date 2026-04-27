@@ -117,11 +117,10 @@ fn register_class_http_server_handle(rt: &mut Runtime) -> Result<ClassID, i32> {
 /// Options:
 ///   host: string           (default "0.0.0.0")
 ///   port: number           (default 8080)
-///   modelId: string        (default "local-model")
 ///   defaultMaxTokens: int  (default 4096)
-pub fn engine_http_serve(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+pub(super) fn engine_httpServe(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
-    let engine_arc = get_engine_arc(ctx, &this)?;
+    let engine = get_engine_arc(ctx, &this)?;
 
     // Get model from engine's "model" property (set by createEngine)
     let model_val = this.get_property_str(ctx, "model")?;
@@ -145,7 +144,6 @@ pub fn engine_http_serve(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     // Defaults
     let mut host = "0.0.0.0".to_string();
     let mut port: u16 = 8080;
-    let mut model_id = String::from("local-model");
     let mut default_max_tokens = 4096usize;
 
     if let Some(opts) = opts.as_ref() {
@@ -163,12 +161,6 @@ pub fn engine_http_serve(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 return Err(-1);
             }
             port = n as u16;
-        }
-
-        let v = opts.get_property_str(ctx, "modelId")?;
-        if !v.is_undefined() {
-            let s = v.to_string(ctx)?;
-            model_id = s.content().encode_utf8(false).to_string();
         }
 
         let v = opts.get_property_str(ctx, "defaultMaxTokens")?;
@@ -197,9 +189,8 @@ pub fn engine_http_serve(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         };
 
         // start server
-        if let Err(e) = async_rt.block_on(engine_arc.http_server_with_shutdown(
+        if let Err(e) = async_rt.block_on(engine.http_server_with_shutdown(
             model,
-            model_id,
             default_max_tokens,
             &host,
             port,

@@ -111,6 +111,8 @@ pub trait EngineBackend: Send + 'static {
     fn reset_slot_runtime(&mut self, seq_id: usize);
     /// Hard-clear slot KV/cache/runtime state.
     fn clear_slot(&mut self, seq_id: usize);
+    /// Return a human-readable model name for API responses.
+    fn model_name(&self) -> String;
 }
 
 pub struct LlamaEngineBackend {
@@ -312,6 +314,13 @@ impl EngineBackend for LlamaEngineBackend {
         self.slot_cached_tokens[seq_id].clear();
         self.slot_samplers[seq_id] = None;
     }
+
+    fn model_name(&self) -> String {
+        self.llm_ctx
+            .model()
+            .meta_val_str(c"general.name")
+            .unwrap_or_else(|| self.llm_ctx.model().model_desc())
+    }
 }
 
 #[derive(Debug)]
@@ -415,6 +424,8 @@ pub struct Engine {
     pub(super) ctrl_tx: Sender<EngineCtrlMsg>,
     pub(super) num_tasks: Arc<AtomicUsize>,
     pub(super) max_parallel: usize,
+    /// Model name derived from backend at construction time.
+    model_name: String,
     worker_join_handle: Option<JoinHandle<()>>,
 }
 
@@ -448,6 +459,7 @@ impl Engine {
         slot_match_threshold: f32,
         backend: B,
     ) -> Self {
+        let model_name = backend.model_name();
         let (input_tx, input_rx) = crossbeam::channel::bounded::<EngineTask>(16);
         let (ctrl_tx, ctrl_rx) = crossbeam::channel::bounded::<EngineCtrlMsg>(1);
 
@@ -471,6 +483,7 @@ impl Engine {
             ctrl_tx,
             num_tasks,
             max_parallel,
+            model_name,
             worker_join_handle: Some(worker_join),
         }
     }
@@ -481,6 +494,10 @@ impl Engine {
 
     pub fn max_parallel(&self) -> usize {
         self.max_parallel
+    }
+
+    pub fn model_name(&self) -> &str {
+        &self.model_name
     }
 
     pub fn push_task(
@@ -1380,6 +1397,10 @@ mod tests {
                 slot.cached_tokens.clear();
                 slot.sample_idx = 0;
             }
+        }
+
+        fn model_name(&self) -> String {
+            "mock-model".to_string()
         }
     }
 

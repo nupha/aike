@@ -287,7 +287,7 @@ const CLASS_ENGINE_PROTO: &[FieldDef] = &[
     FieldDef::CALL(
         "httpServe",
         1,
-        crate::class_openai_server::engine_http_serve,
+        crate::class_openai_server::engine_httpServe,
         0,
     ),
     FieldDef::CALL("dispose", 0, dispose, 0),

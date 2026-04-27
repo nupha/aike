@@ -312,12 +312,8 @@ struct AppState {
     default_max_tokens: usize,
 }
 
-fn build_router(
-    engine: Arc<Engine>,
-    model: LlamaModel,
-    model_id: String,
-    default_max_tokens: usize,
-) -> Router {
+fn build_router(engine: Arc<Engine>, model: LlamaModel, default_max_tokens: usize) -> Router {
+    let model_id = engine.model_name().to_string();
     let state = AppState {
         engine,
         model,
@@ -342,48 +338,24 @@ impl Engine {
     pub async fn http_server_with_shutdown(
         self: Arc<Self>,
         model: LlamaModel,
-        model_id: String,
         default_max_tokens: usize,
         host: &str,
         port: u16,
         shutdown_rx: tokio::sync::oneshot::Receiver<()>,
     ) -> Result<(), String> {
-        eprintln!("[DEBUG http_server_with_shutdown] building router...");
-        let app = build_router(self, model, model_id, default_max_tokens);
+        let app = build_router(self, model, default_max_tokens);
         let addr = format!("{host}:{port}");
-        eprintln!("[DEBUG http_server_with_shutdown] binding to {addr}...");
         let listener = tokio::net::TcpListener::bind(&addr)
             .await
             .map_err(|e| format!("bind failed: {e}"))?;
 
-        eprintln!("[DEBUG http_server_with_shutdown] listening on {addr}");
         log::info!("openai server listening on {addr}");
+
         axum::serve(listener, app)
             .with_graceful_shutdown(async move {
                 eprintln!("[DEBUG http_server_with_shutdown] shutdown signal received");
                 let _ = shutdown_rx.await;
             })
-            .await
-            .map_err(|e| format!("server error: {e}"))
-    }
-
-    /// start http server with Engine (in current thread)
-    pub async fn http_server(
-        self: Arc<Self>,
-        model: LlamaModel,
-        model_id: String,
-        default_max_tokens: usize,
-        host: &str,
-        port: u16,
-    ) -> Result<(), String> {
-        let app = build_router(self, model, model_id, default_max_tokens);
-        let addr = format!("{host}:{port}");
-        let listener = tokio::net::TcpListener::bind(&addr)
-            .await
-            .map_err(|e| format!("bind failed: {e}"))?;
-
-        log::info!("openai server listening on {addr}");
-        axum::serve(listener, app)
             .await
             .map_err(|e| format!("server error: {e}"))
     }
@@ -771,18 +743,11 @@ fn build_chat_prompt_tokens(
         .map_err(|e| format!("invalid template: {e}"))?;
     let eos_token = model.eos_token_text().unwrap_or_default();
 
-    eprintln!("[DEBUG build_chat_prompt_tokens] template: {tmpl_str}");
-    eprintln!("[DEBUG build_chat_prompt_tokens] eos_token: {eos_token}");
-
     // Build owned message structs so the template render can borrow them.
     let backing: Vec<(String, String)> = messages
         .iter()
         .map(|m| {
             let content = m.content.as_ref().map(|c| c.to_text()).unwrap_or_default();
-            eprintln!(
-                "[DEBUG build_chat_prompt_tokens] msg role={}, content={}",
-                m.role, content
-            );
             (m.role.clone(), content)
         })
         .collect();
@@ -792,12 +757,7 @@ fn build_chat_prompt_tokens(
         .collect();
 
     let prompt = render_chat_template(tmpl_str, &jinja_msgs, &eos_token)?;
-    eprintln!("[DEBUG build_chat_prompt_tokens] rendered prompt: {prompt}");
     let tokens = tokenize_prompt(model, &prompt)?;
-    eprintln!(
-        "[DEBUG build_chat_prompt_tokens] tokenized count={}",
-        tokens.len()
-    );
     Ok(tokens)
 }
 
@@ -822,20 +782,17 @@ fn collect_unary_reply(
     respond_id: &str,
     n_prompt_tokens: usize,
 ) -> Result<serde_json::Value, (StatusCode, ErrorResponse)> {
-    eprintln!("[DEBUG collect_unary_reply] waiting for replies...");
     let mut full_text = String::new();
     let mut completion_tokens = 0usize;
-    let mut finish_reason;
+    let finish_reason;
 
     loop {
         match rx.recv_timeout(Duration::from_secs(300)) {
             Ok(EngineReply::Text(t)) => {
-                eprintln!("[DEBUG collect_unary_reply] Text chunk: {t}");
                 full_text.push_str(&t);
                 completion_tokens += 1;
             }
             Ok(EngineReply::Stop(reason)) => {
-                eprintln!("[DEBUG collect_unary_reply] Stop: {reason:?}");
                 finish_reason = match reason {
                     StopReason::Eog => "stop".to_string(),
                     StopReason::MaxTokens => "length".to_string(),
@@ -845,25 +802,21 @@ fn collect_unary_reply(
                 break;
             }
             Ok(EngineReply::Cancelled) => {
-                eprintln!("[DEBUG collect_unary_reply] Cancelled");
                 return Err((StatusCode::CONFLICT, oai_error("cancelled", "cancelled")));
             }
             Ok(EngineReply::Error(e)) => {
-                eprintln!("[DEBUG collect_unary_reply] Error: {e}");
                 return Err((
                     StatusCode::INTERNAL_SERVER_ERROR,
                     oai_error(e, "server_error"),
                 ));
             }
             Ok(EngineReply::Shutdown) => {
-                eprintln!("[DEBUG collect_unary_reply] Shutdown");
                 return Err((
                     StatusCode::INTERNAL_SERVER_ERROR,
                     oai_error("engine shutdown", "server_error"),
                 ));
             }
             Err(e) => {
-                eprintln!("[DEBUG collect_unary_reply] recv_timeout error: {e}");
                 return Err((
                     StatusCode::INTERNAL_SERVER_ERROR,
                     oai_error("response channel timed out", "server_error"),
