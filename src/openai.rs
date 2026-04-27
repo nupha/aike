@@ -340,7 +340,7 @@ fn build_router(
 impl Engine {
     /// Start http server with Engine (in current thread), blocks until shutdown signal.
     pub async fn http_server_with_shutdown(
-        self,
+        self: Arc<Self>,
         model: LlamaModel,
         model_id: String,
         default_max_tokens: usize,
@@ -349,7 +349,7 @@ impl Engine {
         shutdown_rx: tokio::sync::oneshot::Receiver<()>,
     ) -> Result<(), String> {
         eprintln!("[DEBUG http_server_with_shutdown] building router...");
-        let app = build_router(Arc::new(self), model, model_id, default_max_tokens);
+        let app = build_router(self, model, model_id, default_max_tokens);
         let addr = format!("{host}:{port}");
         eprintln!("[DEBUG http_server_with_shutdown] binding to {addr}...");
         let listener = tokio::net::TcpListener::bind(&addr)
@@ -369,14 +369,14 @@ impl Engine {
 
     /// start http server with Engine (in current thread)
     pub async fn http_server(
-        self,
+        self: Arc<Self>,
         model: LlamaModel,
         model_id: String,
         default_max_tokens: usize,
         host: &str,
         port: u16,
     ) -> Result<(), String> {
-        let app = build_router(Arc::new(self), model, model_id, default_max_tokens);
+        let app = build_router(self, model, model_id, default_max_tokens);
         let addr = format!("{host}:{port}");
         let listener = tokio::net::TcpListener::bind(&addr)
             .await

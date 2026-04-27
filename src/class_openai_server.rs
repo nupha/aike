@@ -2,21 +2,15 @@ use std::{
     cell::Cell,
     ffi::c_void,
     thread::{self, JoinHandle},
-    time::Duration,
 };
 
 use linkme::distributed_slice;
-use llama_cpp_ffi::LlamaContext;
 use zuqe::{
     CallContext, ClassDef, ClassID, FieldDef, JS_PROP_ENUMERABLE, JSResult, JSValue, Object,
     Runtime, ScopedContext,
 };
 
-use crate::{
-    USER_CLASS_DEFS,
-    class_llama_model::{default_context_params, get_llama_model, parse_context_params},
-    engine::Engine,
-};
+use crate::{USER_CLASS_DEFS, class_llama_engine::get_engine_arc};
 
 struct ServerState {
     shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
@@ -118,19 +112,20 @@ fn register_class_http_server_handle(rt: &mut Runtime) -> Result<ClassID, i32> {
     JSHttpServerHandle::register(rt)
 }
 
-/// Model.httpServe() – start an OpenAI-compatible HTTP server for this model.
+/// Engine.httpServe() – start an OpenAI-compatible HTTP server for this Engine.
 ///
 /// Options:
 ///   host: string           (default "0.0.0.0")
 ///   port: number           (default 8080)
 ///   modelId: string        (default "local-model")
 ///   defaultMaxTokens: int  (default 4096)
-///   maxParallel: int       (default 1)
-///   idleSleepMs: int       (default 1)
-///   ...plus all context params from createContext()
-pub fn model_http_serve(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+pub fn engine_http_serve(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
-    let model = get_llama_model(ctx, &this)?;
+    let engine_arc = get_engine_arc(ctx, &this)?;
+
+    // Get model from engine's "model" property (set by createEngine)
+    let model_val = this.get_property_str(ctx, "model")?;
+    let model = crate::class_llama_model::get_llama_model(ctx, &model_val)?;
 
     // Parse options object
     let opts = if cc.length() > 0 {
@@ -152,10 +147,6 @@ pub fn model_http_serve(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut port: u16 = 8080;
     let mut model_id = String::from("local-model");
     let mut default_max_tokens = 4096usize;
-    let mut max_parallel = 1usize;
-    let mut idle_sleep_ms = 1u64;
-    let mut slot_match_threshold = 0.5f32;
-    let mut ctx_params = default_context_params();
 
     if let Some(opts) = opts.as_ref() {
         let v = opts.get_property_str(ctx, "host")?;
@@ -189,61 +180,7 @@ pub fn model_http_serve(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             }
             default_max_tokens = n as usize;
         }
-
-        let v = opts.get_property_str(ctx, "maxParallel")?;
-        if !v.is_undefined() {
-            let n = v.to_number(ctx)?.to_i32();
-            if n >= 1 {
-                max_parallel = n as usize;
-            } else {
-                ctx.throw_type_error("maxParallel must be >= 1");
-                return Err(-1);
-            }
-        }
-
-        let v = opts.get_property_str(ctx, "idleSleepMs")?;
-        if !v.is_undefined() {
-            let n = v.to_number(ctx)?.to_i32();
-            if n >= 0 {
-                idle_sleep_ms = n as u64;
-            } else {
-                ctx.throw_type_error("idleSleepMs must be >= 0");
-                return Err(-1);
-            }
-        }
-
-        let v = opts.get_property_str(ctx, "slotMatchThreshold")?;
-        if !v.is_undefined() {
-            let d = v.to_number(ctx)?.to_f64();
-            if (0.0..=1.0).contains(&d) {
-                slot_match_threshold = d as f32;
-            } else {
-                ctx.throw_type_error("slotMatchThreshold must be in [0, 1]");
-                return Err(-1);
-            }
-        }
-
-        // Reuse context param parser from class_llama_model
-        ctx_params = parse_context_params(ctx, Some(opts))?;
     }
-
-    // Clamp max_parallel to n_seq_max
-    let seq_cap = ctx_params.n_seq_max.max(1) as usize;
-    if max_parallel > seq_cap {
-        eprintln!(
-            "httpServe: maxParallel ({}) > sequences ({}); clamping",
-            max_parallel, seq_cap,
-        );
-        max_parallel = seq_cap;
-    }
-
-    // Create LlamaContext on this thread (avoids sending !Send ctx_params
-    // across threads), then move the Send-safe context into the server thread.
-    let mut llm_ctx = LlamaContext::new(model.clone(), ctx_params).map_err(|e| {
-        ctx.throw_internal_error(&format!("httpServe: failed to create LlamaContext: {e}"));
-        -1
-    })?;
-    llm_ctx.init_batch(ctx_params.n_batch as i32, 0, ctx_params.n_seq_max as i32);
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
 
@@ -259,15 +196,8 @@ pub fn model_http_serve(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             }
         };
 
-        let engine = Engine::start(
-            max_parallel,
-            Duration::from_millis(idle_sleep_ms),
-            slot_match_threshold,
-            llm_ctx,
-        );
-
         // start server
-        if let Err(e) = async_rt.block_on(engine.http_server_with_shutdown(
+        if let Err(e) = async_rt.block_on(engine_arc.http_server_with_shutdown(
             model,
             model_id,
             default_max_tokens,
@@ -286,8 +216,8 @@ pub fn model_http_serve(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     let mut svr_handle_obj = JSHttpServerHandle::new_instance(ctx, state)?;
 
-    // Keep model alive while server handle exists
-    svr_handle_obj.define_property_value_str(ctx, "model", this, JS_PROP_ENUMERABLE)?;
+    // Keep engine alive while server handle exists
+    svr_handle_obj.define_property_value_str(ctx, "engine", this, JS_PROP_ENUMERABLE)?;
 
     Ok(svr_handle_obj.into())
 }

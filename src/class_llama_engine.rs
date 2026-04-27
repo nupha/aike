@@ -93,6 +93,16 @@ fn get_engine<'a>(ctx: &mut ScopedContext, val: &JSValue) -> Result<&'a Engine, 
     }
 }
 
+pub(super) fn get_engine_arc(ctx: &mut ScopedContext, val: &JSValue) -> Result<Arc<Engine>, i32> {
+    // opaque was created from Arc::into_raw(), so it points to the Engine
+    // inside the Arc allocation. Increment the strong count so the returned
+    // Arc can outlive the JS object.
+    let engine_ref = get_engine(ctx, val)?;
+    let ptr = engine_ref as *const Engine as *mut Engine;
+    unsafe { Arc::increment_strong_count(ptr) };
+    Ok(unsafe { Arc::from_raw(ptr) })
+}
+
 fn completion(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let engine = get_engine(ctx, &this)?;
@@ -274,6 +284,12 @@ pub(super) fn js_model_createEngine(ctx: &mut ScopedContext, cc: CallContext) ->
 const CLASS_ENGINE_PROTO: &[FieldDef] = &[
     FieldDef::CALL("completion", 1, completion, 0),
     FieldDef::CALL("completionIter", 1, completion_iter, 0),
+    FieldDef::CALL(
+        "httpServe",
+        1,
+        crate::class_openai_server::engine_http_serve,
+        0,
+    ),
     FieldDef::CALL("dispose", 0, dispose, 0),
 ];
 

@@ -23,7 +23,6 @@ use crate::{
     class_llama_context::{JSLlamaContext, parse_tokens},
     class_llama_engine::js_model_createEngine,
     class_llama_sampler::js_model_createSamplerChain,
-    class_openai_server::model_http_serve,
 };
 
 const MODEL_PATH_HIDDEN_KEY: &str = "__modelPath";
@@ -1070,7 +1069,6 @@ const CLASS_MODEL_PROTO_ENTRIES: &[FieldDef] = &[
     FieldDef::CALL("getMeta", 1, model_get_meta, 0),
     FieldDef::CALL("getMetaKeys", 0, model_get_meta_keys, 0),
     FieldDef::CALL("renderTemplate", 2, model_render_template, 0),
-    FieldDef::CALL("httpServe", 1, model_http_serve, 0),
     FieldDef::CALL("dispose", 0, model_dispose, 0),
 ];
 
