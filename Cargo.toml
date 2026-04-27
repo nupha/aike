@@ -24,8 +24,13 @@ env_logger = "0.9"
 log = "0.4"
 smallvec = "1.13"
 linkme = "0.3"
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "net", "time"] }
 minijinja = { version = "2", features = ["serde"] }
+axum = { version = "0.7", features = ["json"] }
+futures-util = "0.3"
+tokio-stream = "0.1"
+tower-http = { version = "0.5", features = ["cors"] }
+uuid = { version = "1", features = ["v4"] }
 
 [[bin]]
 name = "llama-js"

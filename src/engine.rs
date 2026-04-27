@@ -6,7 +6,6 @@ use std::{
     },
     thread::{self, JoinHandle},
     time::Duration,
-    time::SystemTime,
 };
 
 use crossbeam::channel::{Receiver, SendError, Sender};
@@ -55,7 +54,6 @@ pub enum OutputMode {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EngineCtrlMsg {
     Shutdown,
-    NextTokenOf(String),
     CancelTask(String),
 }
 
@@ -413,15 +411,16 @@ impl Slot {
     }
 }
 
-pub struct InferenceEngine {
-    input_tx: Sender<EngineTask>,
-    ctrl_tx: Sender<EngineCtrlMsg>,
-    active_tasks: Arc<AtomicUsize>,
-    max_parallel: usize,
-    join_handle: Option<JoinHandle<()>>,
+/// The engine that can do parallel inference.
+pub struct Engine {
+    pub(super) input_tx: Sender<EngineTask>,
+    pub(super) ctrl_tx: Sender<EngineCtrlMsg>,
+    pub(super) active_tasks: Arc<AtomicUsize>,
+    pub(super) max_parallel: usize,
+    worker_join_handle: Option<JoinHandle<()>>,
 }
 
-impl InferenceEngine {
+impl Engine {
     pub fn start(
         max_parallel: usize,
         idle_sleep: Duration,
@@ -465,8 +464,16 @@ impl InferenceEngine {
             ctrl_tx,
             active_tasks,
             max_parallel,
-            join_handle: Some(worker_join),
+            worker_join_handle: Some(worker_join),
         }
+    }
+
+    pub fn active_tasks(&self) -> usize {
+        self.active_tasks.load(Ordering::Relaxed)
+    }
+
+    pub fn max_parallel(&self) -> usize {
+        self.max_parallel
     }
 
     pub fn push_task(
@@ -523,38 +530,15 @@ impl InferenceEngine {
         Ok(output_rx)
     }
 
-    pub fn next_token_of(
-        &self,
-        task_id: impl Into<String>,
-    ) -> Result<(), SendError<EngineCtrlMsg>> {
-        self.ctrl_tx
-            .send(EngineCtrlMsg::NextTokenOf(task_id.into()))
-    }
-
     pub fn cancel_task(&self, task_id: impl Into<String>) -> Result<(), SendError<EngineCtrlMsg>> {
         self.ctrl_tx.send(EngineCtrlMsg::CancelTask(task_id.into()))
     }
-
-    pub fn active_tasks(&self) -> usize {
-        self.active_tasks.load(Ordering::Relaxed)
-    }
-
-    pub fn max_parallel(&self) -> usize {
-        self.max_parallel
-    }
-
-    pub fn shutdown(mut self) {
-        let _ = self.ctrl_tx.send(EngineCtrlMsg::Shutdown);
-        if let Some(join_handle) = self.join_handle.take() {
-            let _ = join_handle.join();
-        }
-    }
 }
 
-impl Drop for InferenceEngine {
+impl Drop for Engine {
     fn drop(&mut self) {
         let _ = self.ctrl_tx.send(EngineCtrlMsg::Shutdown);
-        if let Some(join_handle) = self.join_handle.take() {
+        if let Some(join_handle) = self.worker_join_handle.take() {
             let _ = join_handle.join();
         }
     }
@@ -703,43 +687,6 @@ fn handle_ctrl_messages<B: EngineBackend>(
                     slot.state = SlotState::Idle;
                 }
                 return true;
-            }
-            EngineCtrlMsg::NextTokenOf(task_id) => {
-                for slot in slots.iter_mut() {
-                    let state = std::mem::replace(&mut slot.state, SlotState::Busy);
-                    slot.state = match state {
-                        SlotState::Decoding {
-                            prompt_tokens,
-                            logits_for_all_tokens,
-                            num_written,
-                            mut task_state,
-                        } => {
-                            if task_state.config.task_id == task_id
-                                && task_state.config.output_mode == OutputMode::Single
-                            {
-                                task_state.step_budget = task_state.step_budget.saturating_add(1);
-                            }
-                            SlotState::Decoding {
-                                prompt_tokens,
-                                logits_for_all_tokens,
-                                num_written,
-                                task_state,
-                            }
-                        }
-                        SlotState::Sampling {
-                            logits,
-                            mut task_state,
-                        } => {
-                            if task_state.config.task_id == task_id
-                                && task_state.config.output_mode == OutputMode::Single
-                            {
-                                task_state.step_budget = task_state.step_budget.saturating_add(1);
-                            }
-                            SlotState::Sampling { logits, task_state }
-                        }
-                        other => other,
-                    }
-                }
             }
             EngineCtrlMsg::CancelTask(task_id) => {
                 remove_cancelled_inputs(ready, &task_id);
@@ -1211,13 +1158,6 @@ fn hit_stop_words(generated_text: &mut String, stop_words: &[String]) -> Option<
     None
 }
 
-fn now_unix_s() -> i64 {
-    match SystemTime::now().duration_since(SystemTime::UNIX_EPOCH) {
-        Ok(d) => d.as_secs() as i64,
-        Err(_) => 0,
-    }
-}
-
 fn pick_idle_slot<B: EngineBackend>(
     backend: &B,
     slots: &[Slot],
@@ -1271,6 +1211,13 @@ fn pick_idle_slot<B: EngineBackend>(
         }
     }
     Some((lru_idx, false))
+}
+
+pub(crate) fn now_unix_s() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
 }
 
 #[cfg(test)]
@@ -1466,7 +1413,7 @@ mod tests {
             Some(102),
             8,
         );
-        let handle = InferenceEngine::start_with_backend(1, Duration::from_millis(1), 0.5, engine);
+        let handle = Engine::start_with_backend(1, Duration::from_millis(1), 0.5, engine);
         let rx = handle
             .push_task("t1", vec![1, 2, 3], Vec::new(), OutputMode::Continuous)
             .expect("submit t1");
@@ -1480,52 +1427,6 @@ mod tests {
             out.iter()
                 .any(|m| matches!(m, EngineReply::Stop(StopReason::Eog)))
         );
-        handle.shutdown();
-    }
-
-    #[test]
-    fn single_mode_needs_next_token() {
-        let engine = MockEngine::new(
-            vec![MockSlotPlan {
-                outputs: vec![1, 2, 3],
-            }],
-            Some(3),
-            8,
-        );
-        let handle = InferenceEngine::start_with_backend(1, Duration::from_millis(1), 0.5, engine);
-        let rx = handle
-            .push_task("s1", vec![9], Vec::new(), OutputMode::Single)
-            .expect("submit s1");
-
-        let first = recv_until_finished(&rx, Duration::from_millis(50));
-        assert!(
-            first
-                .iter()
-                .any(|m| matches!(m, EngineReply::Text(t) if t == "1"))
-        );
-        assert!(
-            !first
-                .iter()
-                .any(|m| matches!(m, EngineReply::Text(t) if t == "2"))
-        );
-
-        handle.next_token_of("s1").expect("next token 2");
-        let second = recv_until_finished(&rx, Duration::from_millis(100));
-        assert!(
-            second
-                .iter()
-                .any(|m| matches!(m, EngineReply::Text(t) if t == "2"))
-        );
-
-        handle.next_token_of("s1").expect("next token 3");
-        let third = recv_until_finished(&rx, Duration::from_millis(100));
-        // token 3 is EOG, no Text reply for it
-        assert!(
-            third
-                .iter()
-                .any(|m| matches!(m, EngineReply::Stop(StopReason::Eog)))
-        );
-        handle.shutdown();
     }
 
     #[test]
@@ -1537,7 +1438,7 @@ mod tests {
             Some(13),
             8,
         );
-        let handle = InferenceEngine::start_with_backend(1, Duration::from_millis(1), 0.5, engine);
+        let handle = Engine::start_with_backend(1, Duration::from_millis(1), 0.5, engine);
         let rx = handle
             .push_task("o1", vec![5], Vec::new(), OutputMode::OneShot)
             .expect("submit o1");
@@ -1549,7 +1450,6 @@ mod tests {
         );
         // OneShot mode does not send Stop reply in done_stage
         assert!(!out.iter().any(|m| matches!(m, EngineReply::Stop(_))));
-        handle.shutdown();
     }
 
     #[test]
@@ -1601,7 +1501,7 @@ mod tests {
             None,
             8,
         );
-        let handle = InferenceEngine::start_with_backend(1, Duration::from_millis(1), 0.5, engine);
+        let handle = Engine::start_with_backend(1, Duration::from_millis(1), 0.5, engine);
         let rx = handle
             .push_task("c1", vec![7], Vec::new(), OutputMode::Single)
             .expect("submit c1");
@@ -1612,7 +1512,6 @@ mod tests {
 
         let out = recv_until_finished(&rx, Duration::from_millis(100));
         assert!(out.iter().any(|m| matches!(m, EngineReply::Cancelled)));
-        handle.shutdown();
     }
 
     #[test]
@@ -1624,7 +1523,7 @@ mod tests {
             Some(2),
             8,
         );
-        let handle = InferenceEngine::start_with_backend(1, Duration::from_millis(1), 0.5, engine);
+        let handle = Engine::start_with_backend(1, Duration::from_millis(1), 0.5, engine);
 
         let rx1 = handle
             .push_task("q1", vec![10], Vec::new(), OutputMode::Continuous)
@@ -1644,7 +1543,6 @@ mod tests {
             out2.iter()
                 .any(|m| matches!(m, EngineReply::Stop(StopReason::Eog)))
         );
-        handle.shutdown();
     }
 
     #[test]
@@ -1656,7 +1554,7 @@ mod tests {
             Some(3),
             8,
         );
-        let handle = InferenceEngine::start_with_backend(1, Duration::from_millis(1), 0.5, engine);
+        let handle = Engine::start_with_backend(1, Duration::from_millis(1), 0.5, engine);
 
         let rx1 = handle
             .push_task("busy", vec![10], Vec::new(), OutputMode::Continuous)
@@ -1670,6 +1568,5 @@ mod tests {
 
         let out2 = recv_until_finished(&rx2, Duration::from_millis(100));
         assert!(out2.iter().any(|m| matches!(m, EngineReply::Cancelled)));
-        handle.shutdown();
     }
 }

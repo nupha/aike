@@ -24,7 +24,7 @@ use crate::{
     class_llama_context::{JSLlamaContext, parse_tokens},
     class_llama_engine::JSLlamaEngine,
     class_llama_sampler::js_model_createSamplerChain,
-    engine::InferenceEngine,
+    engine::Engine,
 };
 
 const MODEL_PATH_HIDDEN_KEY: &str = "__modelPath";
@@ -749,7 +749,7 @@ fn js_model_createEngine(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     })?;
     llm_ctx.init_batch(ctx_params.n_batch as i32, 0, ctx_params.n_seq_max as i32);
 
-    let engine = InferenceEngine::start(
+    let engine = Engine::start(
         max_parallel,
         Duration::from_millis(idle_sleep_ms),
         slot_match_threshold,

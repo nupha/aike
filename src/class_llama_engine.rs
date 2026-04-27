@@ -13,12 +13,12 @@ use zuqe::{
 use crate::{
     USER_CLASS_DEFS,
     class_llama_context::parse_tokens,
-    engine::{EngineReply, InferenceEngine, OutputMode},
+    engine::{Engine, EngineReply, OutputMode},
 };
 
 static NEXT_TASK_ID: AtomicU64 = AtomicU64::new(1);
 
-fn get_engine<'a>(ctx: &mut ScopedContext, val: &JSValue) -> Result<&'a InferenceEngine, i32> {
+fn get_engine<'a>(ctx: &mut ScopedContext, val: &JSValue) -> Result<&'a Engine, i32> {
     let payload = val
         .retrive_object_payload(ctx, JSLlamaEngine::class_id())?
         .other()
@@ -28,7 +28,7 @@ fn get_engine<'a>(ctx: &mut ScopedContext, val: &JSValue) -> Result<&'a Inferenc
         ctx.throw_type_error("Engine was disposed");
         Err(-1)
     } else {
-        Ok(unsafe { &*opaque.cast::<InferenceEngine>() })
+        Ok(unsafe { &*opaque.cast::<Engine>() })
     }
 }
 
@@ -136,7 +136,7 @@ fn dispose(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     if !payload.opaque().is_null() {
         unsafe {
             let p = payload.replace_opaque(std::ptr::null_mut());
-            drop(Box::from_raw(p.cast::<InferenceEngine>()));
+            drop(Box::from_raw(p.cast::<Engine>()));
         }
     }
     Ok(JSValue::UNDEFINED)
@@ -160,7 +160,7 @@ impl JSLlamaEngine {
             ClassDef::new("Engine", CLASS_ENGINE_PROTO, None).on_dispose(
                 |_, opaque: *mut c_void, _| {
                     if !opaque.is_null() {
-                        drop(unsafe { Box::from_raw(opaque.cast::<InferenceEngine>()) });
+                        drop(unsafe { Box::from_raw(opaque.cast::<Engine>()) });
                     }
                 },
             ),
@@ -174,15 +174,14 @@ impl JSLlamaEngine {
         Self::CLASS_ID.with(|x| x.get())
     }
 
-    pub(super) fn new_instance(
-        ctx: &mut ScopedContext,
-        engine: InferenceEngine,
-    ) -> Result<Object, i32> {
-        let opaque = Box::into_raw(Box::new(engine)).cast::<c_void>();
+    pub(super) fn new_instance(ctx: &mut ScopedContext, engine: Engine) -> Result<Object, i32> {
+        let eng = Box::new(engine);
+        let opaque = Box::into_raw(eng).cast::<c_void>();
+
         ctx.create_class_instance_with_opaque(Self::class_id(), opaque)
             .map_err(|e| {
                 let p = e.other().unwrap();
-                let _ = unsafe { Box::from_raw(p.opaque().cast::<InferenceEngine>()) };
+                let _ = unsafe { Box::from_raw(p.opaque().cast::<Engine>()) };
                 -1
             })
     }
