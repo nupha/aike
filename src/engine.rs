@@ -159,13 +159,10 @@ impl Slot {
 /// `Arc<Engine>` across threads, while only the worker thread mutates
 /// the LlamaContext and slot state.
 pub struct Engine {
-    //
-    // Shared/immutable (safe to access from any thread via Arc<Engine>)
-    //
-    pub(super) input_tx: Sender<EngineTask>,
-    pub(super) ctrl_tx: Sender<EngineCtrlMsg>,
-    pub(super) num_tasks: Arc<AtomicUsize>,
-    pub(super) max_parallel: usize,
+    input_tx: Sender<EngineTask>,
+    ctrl_tx: Sender<EngineCtrlMsg>,
+    num_tasks: Arc<AtomicUsize>,
+    max_parallel: usize,
     model_name: String,
     default_max_tokens: usize,
     ubatch_size: usize,
