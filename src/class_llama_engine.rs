@@ -234,7 +234,7 @@ pub(super) fn create_engine_from_js(
     model: llama_cpp_ffi::LlamaModel,
     ctx_opts: &Object,
     eng_opts: &Object,
-) -> Result<Engine, i32> {
+) -> Result<Arc<Engine>, i32> {
     let ctx_params = parse_context_params(ctx, Some(ctx_opts))?;
     let eng_params = parse_engine_params(ctx, Some(eng_opts))?;
 
@@ -273,14 +273,12 @@ pub(super) fn js_model_createEngine(ctx: &mut ScopedContext, cc: CallContext) ->
         return Err(-1);
     }
 
-    // arg0: context options (required, must be object)
     let v0 = cc.arg(0);
     let ctx_opts = v0.as_object().copied().ok_or_else(|| {
         ctx.throw_type_error("contextOptions must be object");
         -1
     })?;
 
-    // arg1: engine options (required, must be object)
     let v1 = cc.arg(1);
     let eng_opts = v1.as_object().copied().ok_or_else(|| {
         ctx.throw_type_error("engineOptions must be object");
@@ -334,9 +332,11 @@ impl JSLlamaEngine {
         Self::CLASS_ID.with(|x| x.get())
     }
 
-    pub(super) fn new_instance(ctx: &mut ScopedContext, engine: Engine) -> Result<Object, i32> {
-        let eng = Arc::new(engine);
-        let opaque = Arc::into_raw(eng) as *mut c_void;
+    pub(super) fn new_instance(
+        ctx: &mut ScopedContext,
+        engine: Arc<Engine>,
+    ) -> Result<Object, i32> {
+        let opaque = Arc::into_raw(engine) as *mut c_void;
 
         ctx.create_class_instance_with_opaque(Self::class_id(), opaque)
             .map_err(|e| {

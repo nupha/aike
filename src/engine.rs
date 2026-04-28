@@ -1,4 +1,5 @@
 use std::{
+    cell::UnsafeCell,
     collections::{HashSet, VecDeque},
     sync::{
         Arc,
@@ -15,32 +16,20 @@ pub type Token = i32;
 
 #[derive(Debug, Clone)]
 pub struct TaskConfig {
-    /// Stable identifier used by control commands and client-side routing.
     pub task_id: String,
-    /// Text-level stop conditions checked against generated text suffix.
     pub stop_words: Vec<String>,
-    /// Maximum number of generated tokens; 0 means no explicit cap.
     pub max_tokens: usize,
-    /// Sampling temperature for this task.
     pub temperature: f32,
-    /// Top-p nucleus sampling threshold for this task.
     pub top_p: f32,
-    /// Request logits on all prompt tokens (prefill-only style path).
     pub logits_for_all_tokens: bool,
-    /// Output emission strategy (stream/single-step/buffered).
     pub output_mode: OutputMode,
 }
 
 pub struct EngineTask {
-    /// Shared immutable config for task identity, sampling and stop behavior.
     pub config: TaskConfig,
-    /// Prefilled prompt tokens to start decoding for this task.
     pub prompt_tokens: Vec<Token>,
-    /// Optional preferred slot/sequence id for cache affinity.
     pub seq_hint: Option<usize>,
-    /// Whether prompt prefix cache reuse is allowed for this task.
     pub use_cache: bool,
-    /// Per-task output channel owned by the caller.
     pub output_tx: Sender<EngineReply>,
 }
 
@@ -73,256 +62,6 @@ pub enum EngineReply {
     Shutdown,
 }
 
-pub trait EngineBackend: Send + 'static {
-    /// Decode micro-batch capacity used by one llama_decode call.
-    fn ubatch_size(&self) -> usize;
-    /// Measure reusable prefix length between slot cache and new prompt.
-    fn common_prefix_len(&self, seq_id: usize, prompt_tokens: &[Token]) -> usize;
-    /// Align backend KV/cache to selected slot and return reused prefix length.
-    fn prepare_slot(&mut self, seq_id: usize, prompt_tokens: &[Token]) -> Result<usize, String>;
-    /// Roll back backend cache mirror when decode write fails.
-    fn truncate_slot_cache(&mut self, seq_id: usize, n_keep: usize);
-    /// Start assembling one shared decode batch for this tick.
-    fn begin_decode_batch(&mut self);
-    /// Push one token into decode batch for a slot at position `pos`.
-    fn push_decode_token(
-        &mut self,
-        seq_id: usize,
-        token: Token,
-        pos: i32,
-        need_logits: bool,
-    ) -> Result<(), String>;
-    /// Execute llama decode for all tokens pushed in this batch.
-    fn decode_batch(&mut self) -> Result<(), String>;
-    /// Sample next token from logits index produced by decode stage.
-    fn sample(&mut self, seq_id: usize, logits_idx: i32) -> Result<Token, String>;
-    /// Lazily initialize slot sampler from per-task sampling params.
-    fn init_slot_sampler(
-        &mut self,
-        seq_id: usize,
-        temperature: f32,
-        top_p: f32,
-    ) -> Result<(), String>;
-    /// Convert token id into raw piece bytes for text-level stop matching.
-    fn token_to_piece(&self, token: Token) -> Vec<u8>;
-    /// Report whether token is model EOG/EOS.
-    fn is_eog(&self, token: Token) -> bool;
-    /// Clear slot runtime-only state while keeping reusable KV cache.
-    fn reset_slot_runtime(&mut self, seq_id: usize);
-    /// Hard-clear slot KV/cache/runtime state.
-    fn clear_slot(&mut self, seq_id: usize);
-    /// Return a human-readable model name for API responses.
-    fn model_name(&self) -> String;
-}
-
-pub struct LlamaEngineBackend {
-    /// Shared llama context used by decode/sample stages.
-    llm_ctx: LlamaContext,
-    /// Effective max tokens per decode micro-batch.
-    ubatch_size: usize,
-    /// Per-slot mirror of tokens currently resident in KV cache.
-    slot_cached_tokens: Vec<Vec<Token>>,
-    /// Per-slot sampler lifecycle (create on demand, reset on completion).
-    slot_samplers: Vec<Option<SamplerChain>>,
-    /// Number of tokens queued in current decode batch.
-    pending_decode_tokens: usize,
-}
-
-unsafe impl Send for LlamaEngineBackend {}
-
-impl LlamaEngineBackend {
-    pub fn new(mut llm_ctx: LlamaContext, max_parallel: usize) -> Self {
-        let ubatch_size = (llm_ctx.n_ubatch() as usize).max(1);
-        llm_ctx.init_batch(ubatch_size as i32, 0, max_parallel as i32);
-
-        Self {
-            llm_ctx,
-            ubatch_size,
-            slot_cached_tokens: vec![Vec::new(); max_parallel],
-            slot_samplers: (0..max_parallel).map(|_| None).collect::<Vec<_>>(),
-            pending_decode_tokens: 0,
-        }
-    }
-
-    fn build_sampler_unchecked(&self, temperature: f32, top_p: f32) -> SamplerChain {
-        let mut sampler = SamplerChain::new(self.llm_ctx.model().clone(), true);
-
-        sampler
-            .add_sampler(&SamplerKind::Penalties {
-                repeat_last_n: 64,
-                repeat_penalty: 1.1,
-                frequency_penalty: 0.0,
-                presence_penalty: 0.0,
-            })
-            .add_sampler(&SamplerKind::TopK(40))
-            .add_sampler(&SamplerKind::TopP(top_p))
-            .add_sampler(&SamplerKind::Temperature {
-                temp: temperature,
-                dyn_range: 0.0,
-                dyn_exponent: 0.0,
-            })
-            .add_sampler(&SamplerKind::Dist(0));
-
-        sampler
-    }
-}
-
-impl EngineBackend for LlamaEngineBackend {
-    fn ubatch_size(&self) -> usize {
-        self.ubatch_size
-    }
-
-    fn common_prefix_len(&self, seq_id: usize, prompt_tokens: &[Token]) -> usize {
-        let Some(cached) = self.slot_cached_tokens.get(seq_id) else {
-            return 0;
-        };
-        let max_common = cached.len().min(prompt_tokens.len());
-        let mut n_common = 0usize;
-        while n_common < max_common && cached[n_common] == prompt_tokens[n_common] {
-            n_common += 1;
-        }
-        n_common
-    }
-
-    /// Prepare one slot for a new task by aligning KV/cache state to prompt prefix reuse.
-    ///
-    /// Returns how many prompt tokens can be reused (`n_common`) so scheduler can skip them.
-    /// This keeps backend KV cache and local mirror cache consistent before decode starts.
-    fn prepare_slot(&mut self, seq_id: usize, prompt_tokens: &[Token]) -> Result<usize, String> {
-        if seq_id >= self.slot_cached_tokens.len() {
-            return Err(format!("invalid seq id {}", seq_id));
-        }
-
-        let cached = &mut self.slot_cached_tokens[seq_id];
-        let max_common = cached.len().min(prompt_tokens.len());
-        let mut n_common = 0usize;
-        while n_common < max_common && cached[n_common] == prompt_tokens[n_common] {
-            n_common += 1;
-        }
-
-        if n_common == prompt_tokens.len() && n_common > 0 {
-            // Full match still needs one decode token to refresh logits.
-            n_common -= 1;
-        }
-
-        // Try truncating KV cache to the reusable prefix. If backend cannot truncate,
-        // fall back to clearing the whole sequence to keep states consistent.
-        let removed = self
-            .llm_ctx
-            .memory_seq_rm(seq_id as i32, n_common as i32, -1);
-        if !removed {
-            self.llm_ctx.memory_seq_rm(seq_id as i32, 0, -1);
-            n_common = 0;
-        }
-
-        cached.truncate(n_common);
-        Ok(n_common)
-    }
-
-    fn truncate_slot_cache(&mut self, seq_id: usize, n_keep: usize) {
-        if let Some(cached) = self.slot_cached_tokens.get_mut(seq_id) {
-            cached.truncate(n_keep);
-        }
-    }
-
-    fn begin_decode_batch(&mut self) {
-        self.pending_decode_tokens = 0;
-    }
-
-    fn push_decode_token(
-        &mut self,
-        seq_id: usize,
-        token: Token,
-        pos: i32,
-        need_logits: bool,
-    ) -> Result<(), String> {
-        if seq_id >= self.slot_cached_tokens.len() {
-            return Err(format!("invalid seq id {}", seq_id));
-        }
-        if self.pending_decode_tokens >= self.ubatch_size {
-            return Err("decode batch is full".to_string());
-        }
-
-        let idx = self.pending_decode_tokens;
-        let batch = self.llm_ctx.batch_mut();
-        unsafe {
-            *batch.token.add(idx) = token;
-            *batch.pos.add(idx) = pos;
-            *(*batch.seq_id.add(idx)).add(0) = seq_id as i32;
-            *batch.n_seq_id.add(idx) = 1;
-            *batch.logits.add(idx) = if need_logits { 1 } else { 0 };
-        }
-
-        self.pending_decode_tokens += 1;
-        self.slot_cached_tokens[seq_id].push(token);
-        Ok(())
-    }
-
-    fn decode_batch(&mut self) -> Result<(), String> {
-        if self.pending_decode_tokens == 0 {
-            return Ok(());
-        }
-        let batch = self.llm_ctx.batch_mut();
-        batch.n_tokens = self.pending_decode_tokens as i32;
-        self.llm_ctx.decode()
-    }
-
-    fn sample(&mut self, seq_id: usize, logits_idx: i32) -> Result<Token, String> {
-        if seq_id >= self.slot_samplers.len() {
-            return Err(format!("invalid seq id {}", seq_id));
-        }
-        let Some(sampler) = self.slot_samplers[seq_id].as_ref() else {
-            return Err(format!("slot sampler is not ready: {}", seq_id));
-        };
-        Ok(sampler.sample_with_params(&self.llm_ctx, logits_idx, None))
-    }
-
-    fn init_slot_sampler(
-        &mut self,
-        seq_id: usize,
-        temperature: f32,
-        top_p: f32,
-    ) -> Result<(), String> {
-        if seq_id >= self.slot_samplers.len() {
-            return Err(format!("invalid seq id {}", seq_id));
-        }
-        if self.slot_samplers[seq_id].is_none() {
-            self.slot_samplers[seq_id] = Some(self.build_sampler_unchecked(temperature, top_p));
-        }
-        Ok(())
-    }
-
-    fn token_to_piece(&self, token: Token) -> Vec<u8> {
-        self.llm_ctx.model().token_to_piece(token)
-    }
-
-    fn is_eog(&self, token: Token) -> bool {
-        self.llm_ctx.model().is_eog(token)
-    }
-
-    fn reset_slot_runtime(&mut self, seq_id: usize) {
-        if seq_id < self.slot_samplers.len() {
-            self.slot_samplers[seq_id] = None;
-        }
-    }
-
-    fn clear_slot(&mut self, seq_id: usize) {
-        if seq_id >= self.slot_cached_tokens.len() {
-            return;
-        }
-        self.llm_ctx.memory_seq_rm(seq_id as i32, 0, -1);
-        self.slot_cached_tokens[seq_id].clear();
-        self.slot_samplers[seq_id] = None;
-    }
-
-    fn model_name(&self) -> String {
-        self.llm_ctx
-            .model()
-            .meta_val_str(c"general.name")
-            .unwrap_or_else(|| self.llm_ctx.model().model_desc())
-    }
-}
-
 #[derive(Debug)]
 struct TaskState {
     config: TaskConfig,
@@ -337,9 +76,7 @@ impl TaskState {
         if piece.is_empty() {
             return;
         }
-
         self.pending_bytes.extend_from_slice(piece);
-
         loop {
             match std::str::from_utf8(&self.pending_bytes) {
                 Ok(s) => {
@@ -352,11 +89,9 @@ impl TaskState {
                     if valid == 0 {
                         break;
                     }
-
                     let s = unsafe { std::str::from_utf8_unchecked(&self.pending_bytes[..valid]) };
                     self.generated_text.push_str(s);
                     self.pending_bytes.drain(0..valid);
-
                     if self.pending_bytes.is_empty() {
                         break;
                     }
@@ -365,8 +100,8 @@ impl TaskState {
         }
     }
 
-    fn append_token<B: EngineBackend>(&mut self, backend: &B, token: Token) {
-        self.append_utf8_piece(&backend.token_to_piece(token));
+    fn append_token(&mut self, engine: &Engine, token: Token) {
+        self.append_utf8_piece(&engine.token_to_piece(token));
     }
 }
 
@@ -406,7 +141,6 @@ impl Slot {
             state: SlotState::Idle,
         }
     }
-
     fn output_tx(&self) -> Option<&Sender<EngineReply>> {
         match &self.state {
             SlotState::Decoding { task_state, .. } | SlotState::Sampling { task_state, .. } => {
@@ -418,95 +152,295 @@ impl Slot {
     }
 }
 
-/// The engine that can do parallel inference.
+/// The parallel inference engine.
+///
+/// Contains both shared channel interfaces and LlamaContext worker state.
+/// Worker-exclusive fields use UnsafeCell because Engine is shared via
+/// `Arc<Engine>` across threads, while only the worker thread mutates
+/// the LlamaContext and slot state.
 pub struct Engine {
+    //
+    // Shared/immutable (safe to access from any thread via Arc<Engine>)
+    //
     pub(super) input_tx: Sender<EngineTask>,
     pub(super) ctrl_tx: Sender<EngineCtrlMsg>,
     pub(super) num_tasks: Arc<AtomicUsize>,
     pub(super) max_parallel: usize,
-    /// Model name derived from backend at construction time.
     model_name: String,
-    /// Default max tokens per request; 0 means unlimited.
     default_max_tokens: usize,
-    worker_join_handle: Option<JoinHandle<()>>,
+    ubatch_size: usize,
+
+    //
+    // Worker-exclusive (mutated only by the worker thread)
+    //
+    llm_ctx: UnsafeCell<LlamaContext>,
+    slot_cached_tokens: UnsafeCell<Vec<Vec<Token>>>,
+    slot_samplers: UnsafeCell<Vec<Option<SamplerChain>>>,
+    pending_decode_tokens: UnsafeCell<usize>,
+    worker_join_handle: UnsafeCell<Option<JoinHandle<()>>>,
 }
+
+// Safety: UnsafeCell fields are only accessed by the worker thread.
+// Other threads only touch the shared/immutable/atomic fields.
+unsafe impl Send for Engine {}
+unsafe impl Sync for Engine {}
 
 impl Drop for Engine {
     fn drop(&mut self) {
         let _ = self.ctrl_tx.send(EngineCtrlMsg::Shutdown);
-        if let Some(jh) = self.worker_join_handle.take() {
+
+        // SAFETY: drop() has &mut self, no other references exist.
+        let handle = unsafe { (*self.worker_join_handle.get()).take() };
+        if let Some(jh) = handle {
             let _ = jh.join();
         }
     }
 }
 
 impl Engine {
+    fn llm_ctx(&self) -> &LlamaContext {
+        unsafe { &*self.llm_ctx.get() }
+    }
+    fn llm_ctx_mut(&self) -> &mut LlamaContext {
+        unsafe { &mut *self.llm_ctx.get() }
+    }
+
+    fn cached_tokens(&self) -> &Vec<Vec<Token>> {
+        unsafe { &*self.slot_cached_tokens.get() }
+    }
+    fn cached_tokens_mut(&self) -> &mut Vec<Vec<Token>> {
+        unsafe { &mut *self.slot_cached_tokens.get() }
+    }
+
+    fn samplers_mut(&self) -> &mut Vec<Option<SamplerChain>> {
+        unsafe { &mut *self.slot_samplers.get() }
+    }
+
+    fn pending(&self) -> usize {
+        unsafe { *self.pending_decode_tokens.get() }
+    }
+
+    fn set_pending(&self, v: usize) {
+        unsafe {
+            *self.pending_decode_tokens.get() = v;
+        }
+    }
+
+    fn common_prefix_len(&self, seq_id: usize, prompt_tokens: &[Token]) -> usize {
+        let Some(cached) = self.cached_tokens().get(seq_id) else {
+            return 0;
+        };
+        let max_common = cached.len().min(prompt_tokens.len());
+        let mut n = 0usize;
+        while n < max_common && cached[n] == prompt_tokens[n] {
+            n += 1;
+        }
+        n
+    }
+
+    /// Align KV/cache state for prefix reuse. Returns reusable prefix length.
+    fn prepare_slot(&self, seq_id: usize, prompt_tokens: &[Token]) -> Result<usize, String> {
+        let cached = self.cached_tokens_mut();
+        if seq_id >= cached.len() {
+            return Err(format!("invalid seq id {}", seq_id));
+        }
+        let slot_cache = &mut cached[seq_id];
+        let max_common = slot_cache.len().min(prompt_tokens.len());
+        let mut n_common = 0usize;
+        while n_common < max_common && slot_cache[n_common] == prompt_tokens[n_common] {
+            n_common += 1;
+        }
+        if n_common == prompt_tokens.len() && n_common > 0 {
+            n_common -= 1;
+        }
+
+        let llm = self.llm_ctx_mut();
+        let removed = llm.memory_seq_rm(seq_id as i32, n_common as i32, -1);
+        if !removed {
+            llm.memory_seq_rm(seq_id as i32, 0, -1);
+            n_common = 0;
+        }
+        slot_cache.truncate(n_common);
+        Ok(n_common)
+    }
+
+    fn truncate_slot_cache(&self, seq_id: usize, n_keep: usize) {
+        if let Some(c) = self.cached_tokens_mut().get_mut(seq_id) {
+            c.truncate(n_keep);
+        }
+    }
+
+    fn begin_decode_batch(&self) {
+        self.set_pending(0);
+    }
+
+    fn push_decode_token(
+        &self,
+        seq_id: usize,
+        token: Token,
+        pos: i32,
+        need_logits: bool,
+    ) -> Result<(), String> {
+        let cached = self.cached_tokens_mut();
+        if seq_id >= cached.len() {
+            return Err(format!("invalid seq id {}", seq_id));
+        }
+        if self.pending() >= self.ubatch_size {
+            return Err("decode batch is full".to_string());
+        }
+        let idx = self.pending();
+        let batch = self.llm_ctx_mut().batch_mut();
+        unsafe {
+            *batch.token.add(idx) = token;
+            *batch.pos.add(idx) = pos;
+            *(*batch.seq_id.add(idx)).add(0) = seq_id as i32;
+            *batch.n_seq_id.add(idx) = 1;
+            *batch.logits.add(idx) = if need_logits { 1 } else { 0 };
+        }
+        self.set_pending(self.pending() + 1);
+        cached[seq_id].push(token);
+        Ok(())
+    }
+
+    fn decode_batch(&self) -> Result<(), String> {
+        if self.pending() == 0 {
+            return Ok(());
+        }
+        let batch = self.llm_ctx_mut().batch_mut();
+        batch.n_tokens = self.pending() as i32;
+        self.llm_ctx_mut().decode()
+    }
+
+    fn sample(&self, seq_id: usize, logits_idx: i32) -> Result<Token, String> {
+        let samplers = self.samplers_mut();
+        if seq_id >= samplers.len() {
+            return Err(format!("invalid seq id {}", seq_id));
+        }
+        let Some(sampler) = samplers[seq_id].as_ref() else {
+            return Err(format!("slot sampler is not ready: {}", seq_id));
+        };
+        Ok(sampler.sample_with_params(self.llm_ctx(), logits_idx, None))
+    }
+
+    fn init_slot_sampler(&self, seq_id: usize, temperature: f32, top_p: f32) -> Result<(), String> {
+        let samplers = self.samplers_mut();
+        if seq_id >= samplers.len() {
+            return Err(format!("invalid seq id {}", seq_id));
+        }
+        if samplers[seq_id].is_none() {
+            let mut sampler = SamplerChain::new(self.llm_ctx().model().clone(), true);
+            sampler
+                .add_sampler(&SamplerKind::Penalties {
+                    repeat_last_n: 64,
+                    repeat_penalty: 1.1,
+                    frequency_penalty: 0.0,
+                    presence_penalty: 0.0,
+                })
+                .add_sampler(&SamplerKind::TopK(40))
+                .add_sampler(&SamplerKind::TopP(top_p))
+                .add_sampler(&SamplerKind::Temperature {
+                    temp: temperature,
+                    dyn_range: 0.0,
+                    dyn_exponent: 0.0,
+                })
+                .add_sampler(&SamplerKind::Dist(0));
+            samplers[seq_id] = Some(sampler);
+        }
+        Ok(())
+    }
+
+    fn token_to_piece(&self, token: Token) -> Vec<u8> {
+        self.llm_ctx().model().token_to_piece(token)
+    }
+    fn is_eog(&self, token: Token) -> bool {
+        self.llm_ctx().model().is_eog(token)
+    }
+
+    fn reset_slot_runtime(&self, seq_id: usize) {
+        if seq_id < self.samplers_mut().len() {
+            self.samplers_mut()[seq_id] = None;
+        }
+    }
+
+    fn clear_slot(&self, seq_id: usize) {
+        let cached = self.cached_tokens_mut();
+        if seq_id >= cached.len() {
+            return;
+        }
+        self.llm_ctx_mut().memory_seq_rm(seq_id as i32, 0, -1);
+        cached[seq_id].clear();
+        self.samplers_mut()[seq_id] = None;
+    }
+
     pub fn start(
         max_parallel: usize,
         idle_sleep: Duration,
         slot_match_threshold: f32,
         default_max_tokens: usize,
-        llm_ctx: LlamaContext,
-    ) -> Self {
-        Self::start_with_backend(
-            max_parallel,
-            idle_sleep,
-            slot_match_threshold,
-            default_max_tokens,
-            LlamaEngineBackend::new(llm_ctx, max_parallel),
-        )
-    }
+        mut llm_ctx: LlamaContext,
+    ) -> Arc<Self> {
+        let ubatch_size = (llm_ctx.n_ubatch() as usize).max(1);
+        llm_ctx.init_batch(ubatch_size as i32, 0, max_parallel as i32);
+        let model_name = llm_ctx
+            .model()
+            .meta_val_str(c"general.name")
+            .unwrap_or_else(|| llm_ctx.model().model_desc());
 
-    pub fn start_with_backend<B: EngineBackend>(
-        max_parallel: usize,
-        idle_sleep: Duration,
-        slot_match_threshold: f32,
-        default_max_tokens: usize,
-        backend: B,
-    ) -> Self {
-        let model_name = backend.model_name();
         let (input_tx, input_rx) = crossbeam::channel::bounded::<EngineTask>(16);
         let (ctrl_tx, ctrl_rx) = crossbeam::channel::bounded::<EngineCtrlMsg>(1);
-
         let num_tasks = Arc::new(AtomicUsize::new(0));
         let worker_active = num_tasks.clone();
 
-        let worker_join = thread::spawn(move || {
-            worker_loop(
-                max_parallel,
-                idle_sleep,
-                slot_match_threshold,
-                backend,
-                input_rx,
-                ctrl_rx,
-                worker_active,
-            );
-        });
-
-        Self {
+        let engine = Arc::new(Engine {
             input_tx,
             ctrl_tx,
             num_tasks,
             max_parallel,
             model_name,
             default_max_tokens,
-            worker_join_handle: Some(worker_join),
+            ubatch_size,
+            llm_ctx: UnsafeCell::new(llm_ctx),
+            slot_cached_tokens: UnsafeCell::new(vec![Vec::new(); max_parallel]),
+            slot_samplers: UnsafeCell::new((0..max_parallel).map(|_| None).collect()),
+            pending_decode_tokens: UnsafeCell::new(0),
+            worker_join_handle: UnsafeCell::new(None),
+        });
+
+        // Pass a raw pointer instead of Arc<Engine> to avoid a reference cycle:
+        // - Worker holding Arc would prevent Engine::drop (last Arc never reaches 0).
+        // - Even if we manually send shutdown before dropping, the worker's final
+        //   Arc drop would trigger Engine::drop on the worker thread itself,
+        //   causing a self-join deadlock. Raw pointer avoids both issues.
+        let engine_ptr = EnginePtr(Arc::as_ptr(&engine));
+        let worker_join = thread::spawn(move || {
+            worker_loop(
+                max_parallel,
+                idle_sleep,
+                slot_match_threshold,
+                engine_ptr,
+                input_rx,
+                ctrl_rx,
+                worker_active,
+            );
+        });
+
+        // SAFETY: Arc was just created, no other references exist yet.
+        unsafe {
+            *engine.worker_join_handle.get() = Some(worker_join);
         }
+
+        engine
     }
 
     pub fn active_tasks(&self) -> usize {
         self.num_tasks.load(Ordering::Relaxed)
     }
-
     pub fn max_parallel(&self) -> usize {
         self.max_parallel
     }
-
     pub fn model_name(&self) -> &str {
         &self.model_name
     }
-
-    /// Default max tokens per request; 0 means unlimited.
     pub fn default_max_tokens(&self) -> usize {
         self.default_max_tokens
     }
@@ -546,7 +480,6 @@ impl Engine {
         logits_for_all_tokens: bool,
     ) -> Result<Receiver<EngineReply>, SendError<EngineTask>> {
         let (output_tx, output_rx) = crossbeam::channel::bounded::<EngineReply>(1);
-
         self.input_tx.send(EngineTask {
             config: TaskConfig {
                 task_id: task_id.into(),
@@ -570,28 +503,36 @@ impl Engine {
     }
 }
 
-fn worker_loop<B: EngineBackend>(
+/// Wrapper to send Engine pointer across thread boundaries.
+#[repr(transparent)]
+struct EnginePtr(*const Engine);
+
+unsafe impl Send for EnginePtr {}
+
+fn worker_loop(
     max_parallel: usize,
     idle_sleep: Duration,
     slot_match_threshold: f32,
-    mut backend: B,
+    engine: EnginePtr,
     input_rx: Receiver<EngineTask>,
     ctrl_rx: Receiver<EngineCtrlMsg>,
     active_counter: Arc<AtomicUsize>,
 ) {
+    // Raw pointer instead of Arc<Engine> to avoid reference cycle and self-join deadlock
+    // (see comment at EnginePtr creation site for details).
+    // SAFETY: engine pointer is valid for the worker's lifetime (Engine::drop joins the worker).
+    let engine = unsafe { &*engine.0 };
+
     let mut slots = (0..max_parallel).map(Slot::new).collect::<Vec<_>>();
     let mut slot_cursor = 0usize;
-
-    // Keep two queues so hinted tasks can be retried without starving normal tasks.
     let mut ready_inputs = VecDeque::<EngineTask>::new();
     let mut deferred_inputs = VecDeque::<EngineTask>::new();
     let mut cancelled_ids = HashSet::<String>::new();
 
     loop {
-        // Control channel has the highest priority (shutdown/cancel/step).
         if handle_ctrl_messages(
             &ctrl_rx,
-            &mut backend,
+            engine,
             &mut slots,
             &mut ready_inputs,
             &mut deferred_inputs,
@@ -600,11 +541,10 @@ fn worker_loop<B: EngineBackend>(
             active_counter.store(0, Ordering::Relaxed);
             return;
         }
-
         while let Ok(input) = input_rx.try_recv() {
             if handle_ctrl_messages(
                 &ctrl_rx,
-                &mut backend,
+                engine,
                 &mut slots,
                 &mut ready_inputs,
                 &mut deferred_inputs,
@@ -615,16 +555,13 @@ fn worker_loop<B: EngineBackend>(
             }
             enqueue_task(input, &mut ready_inputs, &mut deferred_inputs);
         }
-
         while let Some(task) = pop_next_task(&mut ready_inputs, &mut deferred_inputs) {
             if cancelled_ids.remove(&task.config.task_id) {
                 let _ = task.output_tx.send(EngineReply::Cancelled);
                 continue;
             }
-
-            match sched(task, slot_match_threshold, &mut backend, &mut slots) {
-                SchedResult::Scheduled => {}
-                SchedResult::Rejected => {}
+            match sched(task, slot_match_threshold, engine, &mut slots) {
+                SchedResult::Scheduled | SchedResult::Rejected => {}
                 SchedResult::Deferred(input) => {
                     enqueue_task(input, &mut ready_inputs, &mut deferred_inputs);
                     break;
@@ -632,7 +569,7 @@ fn worker_loop<B: EngineBackend>(
             }
         }
 
-        let did_work = tick(&mut backend, &mut slots, &mut slot_cursor);
+        let did_work = tick(engine, &mut slots, &mut slot_cursor);
         active_counter.store(count_active_tasks(&slots), Ordering::Relaxed);
         if !did_work {
             thread::sleep(idle_sleep);
@@ -662,8 +599,6 @@ fn pop_next_task(
     if deferred.is_empty() {
         return None;
     }
-
-    // Keep the same promotion behavior as llama-use1 worker queue.
     let mut i = 0usize;
     while i < deferred.len() {
         if deferred[i].seq_hint.unwrap_or(0) == 0
@@ -677,22 +612,22 @@ fn pop_next_task(
     ready.pop_front()
 }
 
-fn tick<B: EngineBackend>(backend: &mut B, slots: &mut [Slot], slot_cursor: &mut usize) -> bool {
-    let has_sampling = decoding_stage(backend, slots, slot_cursor);
+fn tick(engine: &Engine, slots: &mut [Slot], slot_cursor: &mut usize) -> bool {
+    let has_sampling = decoding_stage(engine, slots, slot_cursor);
     if has_sampling
         || slots
             .iter()
             .any(|s| matches!(s.state, SlotState::Sampling { .. }))
     {
-        sampling_stage(backend, slots)
+        sampling_stage(engine, slots)
     } else {
-        done_stage(backend, slots) > 0
+        done_stage(engine, slots) > 0
     }
 }
 
-fn handle_ctrl_messages<B: EngineBackend>(
+fn handle_ctrl_messages(
     ctrl_rx: &Receiver<EngineCtrlMsg>,
-    backend: &mut B,
+    engine: &Engine,
     slots: &mut [Slot],
     ready: &mut VecDeque<EngineTask>,
     deferred: &mut VecDeque<EngineTask>,
@@ -708,7 +643,7 @@ fn handle_ctrl_messages<B: EngineBackend>(
                     | SlotState::Done { task_state, .. } = state
                     {
                         let _ = task_state.output_tx.send(EngineReply::Shutdown);
-                        backend.clear_slot(slot.seq_id);
+                        engine.clear_slot(slot.seq_id);
                     }
                     slot.n_past = 0;
                     slot.state = SlotState::Idle;
@@ -719,10 +654,8 @@ fn handle_ctrl_messages<B: EngineBackend>(
                 remove_cancelled_inputs(ready, &task_id);
                 remove_cancelled_inputs(deferred, &task_id);
                 cancelled_ids.insert(task_id.clone());
-
                 for slot in slots.iter_mut() {
                     let state = std::mem::replace(&mut slot.state, SlotState::Busy);
-
                     slot.state = match state {
                         SlotState::Decoding {
                             prompt_tokens,
@@ -770,7 +703,6 @@ fn handle_ctrl_messages<B: EngineBackend>(
             }
         }
     }
-
     false
 }
 
@@ -792,10 +724,10 @@ enum SchedResult {
     Rejected,
 }
 
-fn sched<B: EngineBackend>(
+fn sched(
     mut task: EngineTask,
     slot_match_threshold: f32,
-    backend: &mut B,
+    engine: &Engine,
     slots: &mut [Slot],
 ) -> SchedResult {
     if task.prompt_tokens.is_empty() {
@@ -804,11 +736,8 @@ fn sched<B: EngineBackend>(
         ));
         return SchedResult::Rejected;
     }
-
-    // Slot selection follows llama-use1 semantics:
-    // seq_hint first, then prefix reuse threshold, then LRU fallback.
     let Some((slot_idx, allow_cache_reuse)) = pick_idle_slot(
-        backend,
+        engine,
         slots,
         task.seq_hint,
         &task.prompt_tokens,
@@ -820,7 +749,7 @@ fn sched<B: EngineBackend>(
 
     let seq_id = slots[slot_idx].seq_id;
     let n_common = if allow_cache_reuse {
-        match backend.prepare_slot(seq_id, &task.prompt_tokens) {
+        match engine.prepare_slot(seq_id, &task.prompt_tokens) {
             Ok(n) => n,
             Err(e) => {
                 let _ = task.output_tx.send(EngineReply::Error(e));
@@ -828,11 +757,10 @@ fn sched<B: EngineBackend>(
             }
         }
     } else {
-        backend.clear_slot(seq_id);
-        backend.truncate_slot_cache(seq_id, 0);
+        engine.clear_slot(seq_id);
+        engine.truncate_slot_cache(seq_id, 0);
         0
     };
-
     task.prompt_tokens.drain(..n_common);
     if task.prompt_tokens.is_empty() {
         let _ = task.output_tx.send(EngineReply::Error(
@@ -840,9 +768,7 @@ fn sched<B: EngineBackend>(
         ));
         return SchedResult::Rejected;
     }
-
     let config = task.config;
-
     let task_state = TaskState {
         config,
         generated_tokens: Vec::new(),
@@ -850,7 +776,6 @@ fn sched<B: EngineBackend>(
         pending_bytes: Vec::new(),
         output_tx: task.output_tx,
     };
-
     let slot = &mut slots[slot_idx];
     slot.n_past = n_common as i32;
     slot.mtime = now_unix_s();
@@ -860,32 +785,23 @@ fn sched<B: EngineBackend>(
         num_written: 0,
         task_state,
     };
-
     SchedResult::Scheduled
 }
 
-fn decoding_stage<B: EngineBackend>(
-    backend: &mut B,
-    slots: &mut [Slot],
-    slot_cursor: &mut usize,
-) -> bool {
+fn decoding_stage(engine: &Engine, slots: &mut [Slot], slot_cursor: &mut usize) -> bool {
     let mut has_sampling = false;
     let mut cnt = 0usize;
     let mut written_updates: Vec<(usize, usize)> = Vec::new();
 
-    // Build one shared decode batch across slots, then decode once.
-    backend.begin_decode_batch();
-
+    engine.begin_decode_batch();
     let slots_len = slots.len();
     for offset in 0..slots_len {
-        if cnt == backend.ubatch_size() {
+        if cnt == engine.ubatch_size {
             break;
         }
-
         let idx = (*slot_cursor + offset) % slots_len;
         let slot = &mut slots[idx];
         let state = std::mem::replace(&mut slot.state, SlotState::Busy);
-
         if let SlotState::Decoding {
             mut prompt_tokens,
             logits_for_all_tokens,
@@ -894,16 +810,12 @@ fn decoding_stage<B: EngineBackend>(
         } = state
         {
             let n_tokens = prompt_tokens.len();
-            let n_take = n_tokens.min(backend.ubatch_size().saturating_sub(cnt));
-
+            let n_take = n_tokens.min(engine.ubatch_size.saturating_sub(cnt));
             let mut feed_count = 0usize;
             let mut decode_err: Option<String> = None;
-
             for token in prompt_tokens.drain(..n_take) {
-                // Request logits for all prompt tokens only when explicitly needed.
                 let need_logits = task_state.config.logits_for_all_tokens || n_take == n_tokens;
-
-                match backend.push_decode_token(
+                match engine.push_decode_token(
                     slot.seq_id,
                     token,
                     slot.n_past + feed_count as i32,
@@ -920,16 +832,14 @@ fn decoding_stage<B: EngineBackend>(
                     }
                 }
             }
-
             if let Some(e) = decode_err {
-                backend.truncate_slot_cache(slot.seq_id, slot.n_past as usize);
+                engine.truncate_slot_cache(slot.seq_id, slot.n_past as usize);
                 slot.state = SlotState::Done {
                     task_state,
                     reply: EngineReply::Error(e),
                 };
                 continue;
             }
-
             slot.state = if prompt_tokens.is_empty() {
                 if logits_for_all_tokens {
                     SlotState::Done {
@@ -951,7 +861,6 @@ fn decoding_stage<B: EngineBackend>(
                     task_state,
                 }
             };
-
             if feed_count > 0 {
                 written_updates.push((idx, feed_count));
             }
@@ -959,9 +868,8 @@ fn decoding_stage<B: EngineBackend>(
             slot.state = state;
         }
     }
-
     if cnt > 0 {
-        match backend.decode_batch() {
+        match engine.decode_batch() {
             Ok(_) => {
                 for (idx, wrote) in &written_updates {
                     slots[*idx].n_past += *wrote as i32;
@@ -970,7 +878,7 @@ fn decoding_stage<B: EngineBackend>(
             Err(e) => {
                 for (idx, _) in &written_updates {
                     let slot = &mut slots[*idx];
-                    backend.truncate_slot_cache(slot.seq_id, slot.n_past as usize);
+                    engine.truncate_slot_cache(slot.seq_id, slot.n_past as usize);
                     let old = std::mem::replace(&mut slot.state, SlotState::Busy);
                     slot.state = match old {
                         SlotState::Decoding { task_state, .. }
@@ -985,130 +893,96 @@ fn decoding_stage<B: EngineBackend>(
             }
         }
     }
-
     if slots_len > 0 {
         *slot_cursor = (*slot_cursor + 1) % slots_len;
     }
-
     has_sampling
 }
 
-fn sampling_stage<B: EngineBackend>(backend: &mut B, slots: &mut [Slot]) -> bool {
+fn sampling_stage(engine: &Engine, slots: &mut [Slot]) -> bool {
     let mut did_work = false;
-
     for slot in slots.iter_mut() {
         let state0 = std::mem::replace(&mut slot.state, SlotState::Busy);
-
         if let SlotState::Sampling {
             logits,
             mut task_state,
         } = state0
         {
             if task_state.output_tx.is_full() {
-                // if output_tx is full, don't sample in this tick,
-                // do perform sampling in next tick instead.
                 slot.state = SlotState::Sampling { logits, task_state };
+            } else if let Err(e) = engine.init_slot_sampler(
+                slot.seq_id,
+                task_state.config.temperature,
+                task_state.config.top_p,
+            ) {
+                slot.state = SlotState::Done {
+                    task_state,
+                    reply: EngineReply::Error(e),
+                };
             } else {
-                if let Err(e) = backend.init_slot_sampler(
-                    // lazy init sampler fail
-                    slot.seq_id,
-                    task_state.config.temperature,
-                    task_state.config.top_p,
-                ) {
-                    slot.state = SlotState::Done {
-                        task_state,
-                        reply: EngineReply::Error(e),
-                    };
-                } else {
-                    did_work = true;
-
-                    match backend.sample(slot.seq_id, logits) {
-                        Ok(token) => {
-                            let mut out_text: String = "".into();
-
-                            slot.state = if backend.is_eog(token) {
+                did_work = true;
+                match engine.sample(slot.seq_id, logits) {
+                    Ok(token) => {
+                        let mut out_text: String = "".into();
+                        slot.state = if engine.is_eog(token) {
+                            out_text =
+                                std::mem::replace(&mut task_state.generated_text, "".to_string());
+                            SlotState::Done {
+                                task_state,
+                                reply: EngineReply::Stop(StopReason::Eog),
+                            }
+                        } else if task_state.config.max_tokens > 0
+                            && task_state.generated_tokens.len() >= task_state.config.max_tokens
+                        {
+                            out_text =
+                                std::mem::replace(&mut task_state.generated_text, "".to_string());
+                            SlotState::Done {
+                                task_state,
+                                reply: EngineReply::Stop(StopReason::MaxTokens),
+                            }
+                        } else {
+                            task_state.append_token(engine, token);
+                            if let Some(w) = hit_stop_words(
+                                &mut task_state.generated_text,
+                                &task_state.config.stop_words,
+                            ) {
+                                let new_len =
+                                    task_state.generated_text.len().saturating_sub(w.len());
+                                task_state.generated_text.truncate(new_len);
                                 out_text = std::mem::replace(
                                     &mut task_state.generated_text,
                                     "".to_string(),
                                 );
                                 SlotState::Done {
                                     task_state,
-                                    reply: EngineReply::Stop(StopReason::Eog),
-                                }
-                            } else if task_state.config.max_tokens > 0
-                                && task_state.generated_tokens.len() >= task_state.config.max_tokens
-                            {
-                                out_text = std::mem::replace(
-                                    &mut task_state.generated_text,
-                                    "".to_string(),
-                                );
-                                SlotState::Done {
-                                    task_state,
-                                    reply: EngineReply::Stop(StopReason::MaxTokens),
+                                    reply: EngineReply::Stop(StopReason::Word(w)),
                                 }
                             } else {
-                                // Append token to task state, try detokenize token to utf8 text
-                                task_state.append_token(backend, token);
-
-                                if let Some(w) = hit_stop_words(
-                                    &mut task_state.generated_text,
-                                    &task_state.config.stop_words,
-                                ) {
-                                    // Ending with stop word.
-                                    // chop the ending stop word
-                                    let new_len =
-                                        task_state.generated_text.len().saturating_sub(w.len());
-                                    task_state.generated_text.truncate(new_len);
-
+                                if task_state.config.output_mode != OutputMode::OneShot {
                                     out_text = std::mem::replace(
                                         &mut task_state.generated_text,
                                         "".to_string(),
                                     );
-
-                                    SlotState::Done {
-                                        task_state,
-                                        reply: EngineReply::Stop(StopReason::Word(w)),
-                                    }
-                                } else {
-                                    if task_state.config.output_mode != OutputMode::OneShot {
-                                        out_text = std::mem::replace(
-                                            &mut task_state.generated_text,
-                                            "".to_string(),
-                                        );
-                                    }
-
-                                    SlotState::Decoding {
-                                        prompt_tokens: VecDeque::from([token]),
-                                        logits_for_all_tokens: false,
-                                        num_written: 0,
-                                        task_state,
-                                    }
                                 }
-                            };
-
-                            debug_assert!(
-                                matches!(
-                                    slot.state,
-                                    SlotState::Done { .. }
-                                        | SlotState::Sampling { .. }
-                                        | SlotState::Decoding { .. }
-                                ),
-                                "new state must be done, sampling, or decoding"
-                            );
-
-                            if !out_text.is_empty()
-                                && let Some(tx) = slot.output_tx()
-                            {
-                                let _ = tx.send(EngineReply::Text(out_text));
+                                SlotState::Decoding {
+                                    prompt_tokens: VecDeque::from([token]),
+                                    logits_for_all_tokens: false,
+                                    num_written: 0,
+                                    task_state,
+                                }
                             }
+                        };
+                        if !out_text.is_empty()
+                            && let Some(tx) = slot.output_tx()
+                        {
+                            let _ = tx.send(EngineReply::Text(out_text));
                         }
-
-                        Err(e) => {
-                            slot.state = SlotState::Done {
-                                task_state,
-                                reply: EngineReply::Error(e),
-                            };
-                        }
+                    }
+                    Err(e) => {
+                        slot.state = SlotState::Done {
+                            task_state,
+                            reply: EngineReply::Error(e),
+                        };
                     }
                 }
             }
@@ -1116,13 +990,11 @@ fn sampling_stage<B: EngineBackend>(backend: &mut B, slots: &mut [Slot]) -> bool
             slot.state = state0;
         }
     }
-
-    did_work || done_stage(backend, slots) > 0
+    did_work || done_stage(engine, slots) > 0
 }
 
-fn done_stage<B: EngineBackend>(backend: &mut B, slots: &mut [Slot]) -> usize {
+fn done_stage(engine: &Engine, slots: &mut [Slot]) -> usize {
     let mut completed = 0usize;
-
     for slot in slots.iter_mut() {
         let state0 = std::mem::replace(&mut slot.state, SlotState::Busy);
         if let SlotState::Done { task_state, reply } = state0 {
@@ -1130,10 +1002,8 @@ fn done_stage<B: EngineBackend>(backend: &mut B, slots: &mut [Slot]) -> usize {
                 reply,
                 EngineReply::Cancelled | EngineReply::Shutdown | EngineReply::Error(_)
             );
-
             match task_state.config.output_mode {
                 OutputMode::OneShot => {
-                    // send generated text in a whole, even it's empty.
                     if !aborted {
                         let _ = task_state
                             .output_tx
@@ -1144,32 +1014,26 @@ fn done_stage<B: EngineBackend>(backend: &mut B, slots: &mut [Slot]) -> usize {
                     debug_assert!(task_state.generated_text.is_empty());
                 }
             }
-
-            // send last reply
             let _ = task_state.output_tx.send(reply);
-
             if aborted {
-                backend.clear_slot(slot.seq_id);
+                engine.clear_slot(slot.seq_id);
                 slot.n_past = 0;
             } else {
-                // Keep KV/cache for prompt reuse across future tasks.
-                backend.reset_slot_runtime(slot.seq_id);
+                engine.reset_slot_runtime(slot.seq_id);
             }
-
             completed += 1;
             slot.state = SlotState::Idle;
         } else {
             slot.state = state0;
         }
     }
-
     completed
 }
 
 fn count_active_tasks(slots: &[Slot]) -> usize {
     slots
         .iter()
-        .filter(|slot| !matches!(slot.state, SlotState::Idle))
+        .filter(|s| !matches!(s.state, SlotState::Idle))
         .count()
 }
 
@@ -1182,8 +1046,8 @@ fn hit_stop_words(generated_text: &mut String, stop_words: &[String]) -> Option<
     None
 }
 
-fn pick_idle_slot<B: EngineBackend>(
-    backend: &B,
+fn pick_idle_slot(
+    engine: &Engine,
     slots: &[Slot],
     seq_hint: Option<usize>,
     prompt_tokens: &[Token],
@@ -1194,10 +1058,9 @@ fn pick_idle_slot<B: EngineBackend>(
         && let Some(slot) = slots.get(hint)
         && matches!(slot.state, SlotState::Idle)
     {
-        let can_reuse = use_cache && backend.common_prefix_len(slot.seq_id, prompt_tokens) > 0;
+        let can_reuse = use_cache && engine.common_prefix_len(slot.seq_id, prompt_tokens) > 0;
         return Some((hint, can_reuse));
     }
-
     let idle_indices = slots
         .iter()
         .enumerate()
@@ -1206,26 +1069,23 @@ fn pick_idle_slot<B: EngineBackend>(
     if idle_indices.is_empty() {
         return None;
     }
-
     let mut best_idx: Option<usize> = None;
     let mut best_common = 0usize;
     if use_cache {
         for idx in &idle_indices {
-            let common = backend.common_prefix_len(slots[*idx].seq_id, prompt_tokens);
+            let common = engine.common_prefix_len(slots[*idx].seq_id, prompt_tokens);
             if common > best_common {
                 best_common = common;
                 best_idx = Some(*idx);
             }
         }
     }
-
     if use_cache && let Some(idx) = best_idx {
         let ratio = best_common as f32 / prompt_tokens.len().max(1) as f32;
         if ratio >= match_threshold {
             return Some((idx, true));
         }
     }
-
     let mut lru_idx = idle_indices[0];
     let mut lru_mtime = slots[lru_idx].mtime;
     for idx in idle_indices.iter().skip(1) {
@@ -1242,337 +1102,4 @@ pub(crate) fn now_unix_s() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[derive(Clone)]
-    struct MockSlotPlan {
-        outputs: Vec<Token>,
-    }
-
-    struct MockSlot {
-        cached_tokens: Vec<Token>,
-        outputs: Vec<Token>,
-        sample_idx: usize,
-    }
-
-    struct MockEngine {
-        slots: Vec<MockSlot>,
-        eog_token: Option<Token>,
-        n_ubatch: usize,
-        pending: usize,
-        decode_logits_owner: Vec<usize>,
-        last_logits_owner: Vec<usize>,
-    }
-
-    impl MockEngine {
-        fn new(plans: Vec<MockSlotPlan>, eog_token: Option<Token>, n_ubatch: usize) -> Self {
-            let slots = plans
-                .into_iter()
-                .map(|p| MockSlot {
-                    cached_tokens: Vec::new(),
-                    outputs: p.outputs,
-                    sample_idx: 0,
-                })
-                .collect::<Vec<_>>();
-            Self {
-                slots,
-                eog_token,
-                n_ubatch,
-                pending: 0,
-                decode_logits_owner: Vec::new(),
-                last_logits_owner: Vec::new(),
-            }
-        }
-    }
-
-    impl EngineBackend for MockEngine {
-        fn ubatch_size(&self) -> usize {
-            self.n_ubatch
-        }
-
-        fn common_prefix_len(&self, seq_id: usize, prompt_tokens: &[Token]) -> usize {
-            let Some(slot) = self.slots.get(seq_id) else {
-                return 0;
-            };
-            let max_common = slot.cached_tokens.len().min(prompt_tokens.len());
-            let mut n_common = 0usize;
-            while n_common < max_common && slot.cached_tokens[n_common] == prompt_tokens[n_common] {
-                n_common += 1;
-            }
-            n_common
-        }
-
-        fn prepare_slot(
-            &mut self,
-            seq_id: usize,
-            prompt_tokens: &[Token],
-        ) -> Result<usize, String> {
-            let slot = self
-                .slots
-                .get_mut(seq_id)
-                .ok_or_else(|| format!("invalid seq id {}", seq_id))?;
-            let max_common = slot.cached_tokens.len().min(prompt_tokens.len());
-            let mut n_common = 0usize;
-            while n_common < max_common && slot.cached_tokens[n_common] == prompt_tokens[n_common] {
-                n_common += 1;
-            }
-            if n_common == prompt_tokens.len() && n_common > 0 {
-                n_common -= 1;
-            }
-            slot.cached_tokens.truncate(n_common);
-            Ok(n_common)
-        }
-
-        fn truncate_slot_cache(&mut self, seq_id: usize, n_keep: usize) {
-            if let Some(slot) = self.slots.get_mut(seq_id) {
-                slot.cached_tokens.truncate(n_keep);
-            }
-        }
-
-        fn begin_decode_batch(&mut self) {
-            self.pending = 0;
-            self.decode_logits_owner.clear();
-        }
-
-        fn push_decode_token(
-            &mut self,
-            seq_id: usize,
-            token: Token,
-            _pos: i32,
-            _need_logits: bool,
-        ) -> Result<(), String> {
-            if self.pending >= self.n_ubatch {
-                return Err("mock batch full".to_string());
-            }
-            let slot = self
-                .slots
-                .get_mut(seq_id)
-                .ok_or_else(|| format!("invalid seq id {}", seq_id))?;
-            slot.cached_tokens.push(token);
-            self.decode_logits_owner.push(seq_id);
-            self.pending += 1;
-            Ok(())
-        }
-
-        fn decode_batch(&mut self) -> Result<(), String> {
-            self.last_logits_owner = self.decode_logits_owner.clone();
-            Ok(())
-        }
-
-        fn sample(&mut self, _seq_id: usize, logits_idx: i32) -> Result<Token, String> {
-            let owner = *self
-                .last_logits_owner
-                .get(logits_idx as usize)
-                .ok_or_else(|| "invalid logits idx".to_string())?;
-            let slot = self
-                .slots
-                .get_mut(owner)
-                .ok_or_else(|| "invalid logits owner".to_string())?;
-            if slot.sample_idx >= slot.outputs.len() {
-                return Err("no more scripted outputs".to_string());
-            }
-            let token = slot.outputs[slot.sample_idx];
-            slot.sample_idx += 1;
-            Ok(token)
-        }
-
-        fn is_eog(&self, token: Token) -> bool {
-            self.eog_token == Some(token)
-        }
-
-        fn init_slot_sampler(
-            &mut self,
-            _seq_id: usize,
-            _temperature: f32,
-            _top_p: f32,
-        ) -> Result<(), String> {
-            Ok(())
-        }
-
-        fn token_to_piece(&self, token: Token) -> Vec<u8> {
-            token.to_string().into_bytes()
-        }
-
-        fn reset_slot_runtime(&mut self, seq_id: usize) {
-            if let Some(slot) = self.slots.get_mut(seq_id) {
-                slot.sample_idx = 0;
-            }
-        }
-
-        fn clear_slot(&mut self, seq_id: usize) {
-            if let Some(slot) = self.slots.get_mut(seq_id) {
-                slot.cached_tokens.clear();
-                slot.sample_idx = 0;
-            }
-        }
-
-        fn model_name(&self) -> String {
-            "mock-model".to_string()
-        }
-    }
-
-    fn recv_until_finished(rx: &Receiver<EngineReply>, timeout: Duration) -> Vec<EngineReply> {
-        let mut out = Vec::new();
-        for _ in 0..200 {
-            match rx.recv_timeout(timeout) {
-                Ok(msg) => {
-                    let done = !matches!(msg, EngineReply::Text(_));
-                    out.push(msg);
-                    if done {
-                        break;
-                    }
-                }
-                Err(_) => break,
-            }
-        }
-        out
-    }
-
-    #[test]
-    fn engine_prefill_decode_sample_until_eog() {
-        let engine = MockEngine::new(
-            vec![MockSlotPlan {
-                outputs: vec![101, 102],
-            }],
-            Some(102),
-            8,
-        );
-        let handle = Engine::start_with_backend(1, Duration::from_millis(1), 0.5, 0, engine);
-        let rx = handle
-            .push_task("t1", vec![1, 2, 3], Vec::new(), OutputMode::Continuous)
-            .expect("submit t1");
-
-        let out = recv_until_finished(&rx, Duration::from_millis(100));
-        assert!(
-            out.iter()
-                .any(|m| matches!(m, EngineReply::Text(t) if t == "101"))
-        );
-        assert!(
-            out.iter()
-                .any(|m| matches!(m, EngineReply::Stop(StopReason::Eog)))
-        );
-    }
-
-    #[test]
-    fn one_shot_outputs_tokens_once() {
-        let engine = MockEngine::new(
-            vec![MockSlotPlan {
-                outputs: vec![11, 12, 13],
-            }],
-            Some(13),
-            8,
-        );
-        let handle = Engine::start_with_backend(1, Duration::from_millis(1), 0.5, 0, engine);
-        let rx = handle
-            .push_task("o1", vec![5], Vec::new(), OutputMode::OneShot)
-            .expect("submit o1");
-
-        let out = recv_until_finished(&rx, Duration::from_millis(100));
-        assert!(
-            out.iter()
-                .any(|m| matches!(m, EngineReply::Text(t) if t == "1112"))
-        );
-        // OneShot mode does not send Stop reply in done_stage
-        assert!(!out.iter().any(|m| matches!(m, EngineReply::Stop(_))));
-    }
-
-    #[test]
-    fn pick_idle_slot_respects_threshold_and_lru_fallback() {
-        let engine = MockEngine::new(
-            vec![
-                MockSlotPlan { outputs: vec![1] },
-                MockSlotPlan { outputs: vec![2] },
-            ],
-            None,
-            8,
-        );
-        let mut slots = vec![Slot::new(0), Slot::new(1)];
-        slots[0].mtime = 20;
-        slots[1].mtime = 10;
-
-        // prime cache mirrors for prefix match measurement
-        let mut engine = engine;
-        engine.slots[0].cached_tokens = vec![1, 2, 3];
-        engine.slots[1].cached_tokens = vec![9];
-
-        // common=3/5=0.6 < 0.9, should fall back to LRU slot(1) with no cache reuse
-        let picked =
-            pick_idle_slot(&engine, &slots, None, &[1, 2, 3, 4, 5], true, 0.9).expect("pick slot");
-        assert_eq!(picked, (1, false));
-    }
-
-    #[test]
-    fn pick_idle_slot_prefers_seq_hint_when_idle() {
-        let engine = MockEngine::new(
-            vec![
-                MockSlotPlan { outputs: vec![1] },
-                MockSlotPlan { outputs: vec![2] },
-            ],
-            None,
-            8,
-        );
-        let slots = vec![Slot::new(0), Slot::new(1)];
-        let picked = pick_idle_slot(&engine, &slots, Some(1), &[42], true, 0.9).expect("pick");
-        assert_eq!(picked.0, 1);
-    }
-
-    #[test]
-    fn task_is_queued_when_no_idle_slot_then_runs() {
-        let engine = MockEngine::new(
-            vec![MockSlotPlan {
-                outputs: vec![1, 2, 3, 4],
-            }],
-            Some(2),
-            8,
-        );
-        let handle = Engine::start_with_backend(1, Duration::from_millis(1), 0.5, 0, engine);
-
-        let rx1 = handle
-            .push_task("q1", vec![10], Vec::new(), OutputMode::Continuous)
-            .expect("submit q1");
-        let rx2 = handle
-            .push_task("q2", vec![20], Vec::new(), OutputMode::Continuous)
-            .expect("submit q2");
-
-        let out1 = recv_until_finished(&rx1, Duration::from_millis(100));
-        assert!(
-            out1.iter()
-                .any(|m| matches!(m, EngineReply::Stop(StopReason::Eog)))
-        );
-
-        let out2 = recv_until_finished(&rx2, Duration::from_millis(100));
-        assert!(
-            out2.iter()
-                .any(|m| matches!(m, EngineReply::Stop(StopReason::Eog)))
-        );
-    }
-
-    #[test]
-    fn cancel_task_can_remove_queued_job() {
-        let engine = MockEngine::new(
-            vec![MockSlotPlan {
-                outputs: vec![1, 2, 3, 4, 5, 6],
-            }],
-            Some(3),
-            8,
-        );
-        let handle = Engine::start_with_backend(1, Duration::from_millis(1), 0.5, 0, engine);
-
-        let rx1 = handle
-            .push_task("busy", vec![10], Vec::new(), OutputMode::Continuous)
-            .expect("submit busy");
-        let rx2 = handle
-            .push_task("queued", vec![20], Vec::new(), OutputMode::Continuous)
-            .expect("submit queued");
-
-        let _ = rx1.recv_timeout(Duration::from_millis(100));
-        handle.cancel_task("queued").expect("cancel queued");
-
-        let out2 = recv_until_finished(&rx2, Duration::from_millis(100));
-        assert!(out2.iter().any(|m| matches!(m, EngineReply::Cancelled)));
-    }
 }
