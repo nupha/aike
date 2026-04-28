@@ -16,6 +16,7 @@ use zuqe::{
 use crate::{
     USER_CLASS_DEFS,
     class_llama_context::parse_tokens,
+    class_openai_server::js_engine_httpServe,
     engine::{Engine, EngineReply, OutputMode},
 };
 
@@ -99,7 +100,7 @@ pub(super) fn get_engine_arc(ctx: &mut ScopedContext, val: &JSValue) -> Result<A
     Ok(unsafe { Arc::from_raw(ptr) })
 }
 
-fn completion(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+fn js_engine_completion(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let engine = get_engine(ctx, &this)?;
 
@@ -146,7 +147,7 @@ fn completion(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     Ok(promise.into())
 }
 
-fn completion_iter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+fn js_engine_completionIter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let engine = get_engine(ctx, &this)?;
 
@@ -194,20 +195,20 @@ fn completion_iter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     .map(JSValue::from)
 }
 
-fn stop_serve(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+fn js_engine_stopServe(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let engine = get_engine(ctx, &this)?;
     engine.request_stop();
     Ok(JSValue::UNDEFINED)
 }
 
-fn is_serving_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+fn js_engine_isServing(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let engine = get_engine(ctx, &this)?;
     Ok(JSValue::Bool(engine.is_serving()))
 }
 
-fn dispose(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+fn js_engine_dispose(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut this = cc.this();
     let payload = this
         .retrive_object_payload_mut(ctx, JSLlamaEngine::class_id())?
@@ -223,17 +224,12 @@ fn dispose(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 }
 
 const CLASS_ENGINE_PROTO: &[FieldDef] = &[
-    FieldDef::CALL("completion", 1, completion, 0),
-    FieldDef::CALL("completionIter", 1, completion_iter, 0),
-    FieldDef::CALL(
-        "httpServe",
-        1,
-        crate::class_openai_server::engine_httpServe,
-        0,
-    ),
-    FieldDef::CALL("stopServe", 0, stop_serve, 0),
-    FieldDef::GETSET("isServing", Some(is_serving_getter), None, 0),
-    FieldDef::CALL("dispose", 0, dispose, 0),
+    FieldDef::CALL("completion", 1, js_engine_completion, 0),
+    FieldDef::CALL("completionIter", 1, js_engine_completionIter, 0),
+    FieldDef::CALL("httpServe", 1, js_engine_httpServe, 0),
+    FieldDef::CALL("stopServe", 0, js_engine_stopServe, 0),
+    FieldDef::GETSET("isServing", Some(js_engine_isServing), None, 0),
+    FieldDef::CALL("dispose", 0, js_engine_dispose, 0),
 ];
 
 pub struct JSLlamaEngine;

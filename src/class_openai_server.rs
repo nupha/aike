@@ -5,7 +5,7 @@ use zuqe::{
 
 use crate::class_llama_engine::get_engine_arc;
 
-pub(super) fn engine_httpServe(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+pub(super) fn js_engine_httpServe(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let engine = get_engine_arc(ctx, &this)?;
 
