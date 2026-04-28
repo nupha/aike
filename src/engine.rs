@@ -161,8 +161,7 @@ impl Slot {
 pub struct Engine {
     input_tx: Sender<EngineTask>,
     ctrl_tx: Sender<EngineCtrlMsg>,
-    num_tasks: Arc<AtomicUsize>,
-    max_parallel: usize,
+    num_tasks: AtomicUsize,
     model_name: String,
     default_max_tokens: usize,
     ubatch_size: usize,
@@ -380,9 +379,11 @@ impl Engine {
         slot_match_threshold: f32,
         default_max_tokens: usize,
     ) -> Arc<Self> {
-        let max_parallel = llm_ctx.n_seq_max().max(1) as usize;
+        let num_parallel = llm_ctx.n_seq_max().max(1) as usize;
         let ubatch_size = (llm_ctx.n_ubatch() as usize).max(1);
+
         llm_ctx.init_batch(ubatch_size as i32, 0, llm_ctx.n_seq_max());
+
         let model_name = llm_ctx
             .model()
             .meta_val_str(c"general.name")
@@ -390,22 +391,19 @@ impl Engine {
 
         let (input_tx, input_rx) = crossbeam::channel::bounded::<EngineTask>(16);
         let (ctrl_tx, ctrl_rx) = crossbeam::channel::bounded::<EngineCtrlMsg>(1);
-        let num_tasks = Arc::new(AtomicUsize::new(0));
-        let worker_active = num_tasks.clone();
 
         let engine = Arc::new(Engine {
             input_tx,
             ctrl_tx,
-            num_tasks,
-            max_parallel,
+            num_tasks: AtomicUsize::new(0),
             model_name,
             default_max_tokens,
             ubatch_size,
             is_serving: AtomicBool::new(false),
             shutdown_tx: Mutex::new(None),
             llm_ctx: UnsafeCell::new(llm_ctx),
-            slot_cached_tokens: UnsafeCell::new(vec![Vec::new(); max_parallel]),
-            slot_samplers: UnsafeCell::new((0..max_parallel).map(|_| None).collect()),
+            slot_cached_tokens: UnsafeCell::new(vec![Vec::new(); num_parallel]),
+            slot_samplers: UnsafeCell::new((0..num_parallel).map(|_| None).collect()),
             pending_decode_tokens: UnsafeCell::new(0),
             worker_join_handle: UnsafeCell::new(None),
         });
@@ -418,13 +416,12 @@ impl Engine {
         let engine_ptr = EnginePtr(Arc::as_ptr(&engine));
         let worker_join = thread::spawn(move || {
             worker_loop(
-                max_parallel,
+                num_parallel,
                 idle_sleep,
                 slot_match_threshold,
                 engine_ptr,
                 input_rx,
                 ctrl_rx,
-                worker_active,
             );
         });
 
@@ -439,12 +436,11 @@ impl Engine {
     pub fn active_tasks(&self) -> usize {
         self.num_tasks.load(Ordering::Relaxed)
     }
-    pub fn max_parallel(&self) -> usize {
-        self.max_parallel
-    }
+
     pub fn model_name(&self) -> &str {
         &self.model_name
     }
+
     pub fn default_max_tokens(&self) -> usize {
         self.default_max_tokens
     }
@@ -546,7 +542,6 @@ fn worker_loop(
     engine: EnginePtr,
     input_rx: Receiver<EngineTask>,
     ctrl_rx: Receiver<EngineCtrlMsg>,
-    active_counter: Arc<AtomicUsize>,
 ) {
     // Raw pointer instead of Arc<Engine> to avoid reference cycle and self-join deadlock
     // (see comment at EnginePtr creation site for details).
@@ -555,8 +550,10 @@ fn worker_loop(
 
     let mut slots = (0..max_parallel).map(Slot::new).collect::<Vec<_>>();
     let mut slot_cursor = 0usize;
+
     let mut ready_inputs = VecDeque::<EngineTask>::new();
     let mut deferred_inputs = VecDeque::<EngineTask>::new();
+
     let mut cancelled_ids = HashSet::<String>::new();
 
     loop {
@@ -568,9 +565,10 @@ fn worker_loop(
             &mut deferred_inputs,
             &mut cancelled_ids,
         ) {
-            active_counter.store(0, Ordering::Relaxed);
+            engine.num_tasks.store(0, Ordering::Relaxed);
             return;
         }
+
         while let Ok(input) = input_rx.try_recv() {
             if handle_ctrl_messages(
                 &ctrl_rx,
@@ -580,11 +578,12 @@ fn worker_loop(
                 &mut deferred_inputs,
                 &mut cancelled_ids,
             ) {
-                active_counter.store(0, Ordering::Relaxed);
+                engine.num_tasks.store(0, Ordering::Relaxed);
                 return;
             }
             enqueue_task(input, &mut ready_inputs, &mut deferred_inputs);
         }
+
         while let Some(task) = pop_next_task(&mut ready_inputs, &mut deferred_inputs) {
             if cancelled_ids.remove(&task.config.task_id) {
                 let _ = task.output_tx.send(EngineReply::Cancelled);
@@ -600,7 +599,11 @@ fn worker_loop(
         }
 
         let did_work = tick(engine, &mut slots, &mut slot_cursor);
-        active_counter.store(count_active_tasks(&slots), Ordering::Relaxed);
+
+        engine
+            .num_tasks
+            .store(count_active_tasks(&slots), Ordering::Relaxed);
+
         if !did_work {
             thread::sleep(idle_sleep);
         }
