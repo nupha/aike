@@ -353,6 +353,7 @@ impl Engine {
     fn token_to_piece(&self, token: Token) -> Vec<u8> {
         self.llm_ctx().model().token_to_piece(token)
     }
+
     fn is_eog(&self, token: Token) -> bool {
         self.llm_ctx().model().is_eog(token)
     }
@@ -408,21 +409,24 @@ impl Engine {
             worker_join_handle: UnsafeCell::new(None),
         });
 
-        // Pass a raw pointer instead of Arc<Engine> to avoid a reference cycle:
-        // - Worker holding Arc would prevent Engine::drop (last Arc never reaches 0).
-        // - Even if we manually send shutdown before dropping, the worker's final
-        //   Arc drop would trigger Engine::drop on the worker thread itself,
-        //   causing a self-join deadlock. Raw pointer avoids both issues.
-        let engine_ptr = EnginePtr(Arc::as_ptr(&engine));
-        let worker_join = thread::spawn(move || {
-            worker_loop(
-                num_parallel,
-                idle_sleep,
-                slot_match_threshold,
-                engine_ptr,
-                input_rx,
-                ctrl_rx,
-            );
+        let worker_join = thread::spawn({
+            // Pass a raw pointer instead of Arc<Engine> to avoid a reference cycle:
+            // - Worker holding Arc would prevent Engine::drop (last Arc never reaches 0).
+            // - Even if we manually send shutdown before dropping, the worker's final
+            //   Arc drop would trigger Engine::drop on the worker thread itself,
+            //   causing a self-join deadlock. Raw pointer avoids both issues.
+            let engine_ptr = EnginePtr(Arc::as_ptr(&engine));
+
+            move || {
+                worker_loop(
+                    engine_ptr,
+                    num_parallel,
+                    idle_sleep,
+                    slot_match_threshold,
+                    input_rx,
+                    ctrl_rx,
+                );
+            }
         });
 
         // SAFETY: Arc was just created, no other references exist yet.
@@ -527,19 +531,494 @@ impl Engine {
     pub fn cancel_task(&self, task_id: impl Into<String>) -> Result<(), SendError<EngineCtrlMsg>> {
         self.ctrl_tx.send(EngineCtrlMsg::CancelTask(task_id.into()))
     }
+
+    fn decoding_stage(&self, slots: &mut [Slot], slot_cursor: &mut usize) -> bool {
+        let mut has_sampling = false;
+        let mut cnt = 0usize;
+        let mut written_updates: Vec<(usize, usize)> = Vec::new();
+
+        self.begin_decode_batch();
+
+        let slots_len = slots.len();
+        for offset in 0..slots_len {
+            if cnt == self.ubatch_size {
+                break;
+            }
+
+            let idx = (*slot_cursor + offset) % slots_len;
+            let slot = &mut slots[idx];
+            let state0 = std::mem::replace(&mut slot.state, SlotState::Busy);
+
+            if let SlotState::Decoding {
+                mut prompt_tokens,
+                logits_for_all_tokens,
+                mut num_written,
+                task_state,
+            } = state0
+            {
+                let n_tokens = prompt_tokens.len();
+                let n_take = n_tokens.min(self.ubatch_size.saturating_sub(cnt));
+                let mut feed_count = 0usize;
+                let mut decode_err: Option<String> = None;
+                for token in prompt_tokens.drain(..n_take) {
+                    let need_logits = task_state.config.logits_for_all_tokens || n_take == n_tokens;
+                    match self.push_decode_token(
+                        slot.seq_id,
+                        token,
+                        slot.n_past + feed_count as i32,
+                        need_logits,
+                    ) {
+                        Ok(()) => {
+                            num_written += 1;
+                            feed_count += 1;
+                            cnt += 1;
+                        }
+                        Err(e) => {
+                            decode_err = Some(e);
+                            break;
+                        }
+                    }
+                }
+                if let Some(e) = decode_err {
+                    self.truncate_slot_cache(slot.seq_id, slot.n_past as usize);
+                    slot.state = SlotState::Done {
+                        task_state,
+                        reply: EngineReply::Error(e),
+                    };
+                    continue;
+                }
+                slot.state = if prompt_tokens.is_empty() {
+                    if logits_for_all_tokens {
+                        SlotState::Done {
+                            task_state,
+                            reply: EngineReply::Stop(StopReason::PrefillOnly),
+                        }
+                    } else {
+                        has_sampling = true;
+                        SlotState::Sampling {
+                            logits: cnt as i32 - 1,
+                            task_state,
+                        }
+                    }
+                } else {
+                    SlotState::Decoding {
+                        prompt_tokens,
+                        logits_for_all_tokens,
+                        num_written,
+                        task_state,
+                    }
+                };
+                if feed_count > 0 {
+                    written_updates.push((idx, feed_count));
+                }
+            } else {
+                slot.state = state0;
+            }
+        }
+
+        if cnt > 0 {
+            match self.decode_batch() {
+                Ok(_) => {
+                    for (idx, wrote) in &written_updates {
+                        slots[*idx].n_past += *wrote as i32;
+                    }
+                }
+                Err(e) => {
+                    for (idx, _) in &written_updates {
+                        let slot = &mut slots[*idx];
+                        self.truncate_slot_cache(slot.seq_id, slot.n_past as usize);
+                        let old = std::mem::replace(&mut slot.state, SlotState::Busy);
+                        slot.state = match old {
+                            SlotState::Decoding { task_state, .. }
+                            | SlotState::Sampling { task_state, .. } => SlotState::Done {
+                                task_state,
+                                reply: EngineReply::Error(e.clone()),
+                            },
+                            other => other,
+                        };
+                    }
+                    has_sampling = false;
+                }
+            }
+        }
+
+        if slots_len > 0 {
+            *slot_cursor = (*slot_cursor + 1) % slots_len;
+        }
+
+        has_sampling
+    }
+
+    fn sampling_stage(&self, slots: &mut [Slot]) -> bool {
+        let mut did_work = false;
+
+        for slot in slots.iter_mut() {
+            let state0 = std::mem::replace(&mut slot.state, SlotState::Busy);
+            if let SlotState::Sampling {
+                logits,
+                mut task_state,
+            } = state0
+            {
+                if task_state.output_tx.is_full() {
+                    slot.state = SlotState::Sampling { logits, task_state };
+                } else if let Err(e) = self.init_slot_sampler(
+                    slot.seq_id,
+                    task_state.config.temperature,
+                    task_state.config.top_p,
+                ) {
+                    slot.state = SlotState::Done {
+                        task_state,
+                        reply: EngineReply::Error(e),
+                    };
+                } else {
+                    did_work = true;
+                    match self.sample(slot.seq_id, logits) {
+                        Ok(token) => {
+                            let mut out_text: String = "".into();
+                            slot.state = if self.is_eog(token) {
+                                out_text = std::mem::replace(
+                                    &mut task_state.generated_text,
+                                    "".to_string(),
+                                );
+                                SlotState::Done {
+                                    task_state,
+                                    reply: EngineReply::Stop(StopReason::Eog),
+                                }
+                            } else if task_state.config.max_tokens > 0
+                                && task_state.generated_tokens.len() >= task_state.config.max_tokens
+                            {
+                                out_text = std::mem::replace(
+                                    &mut task_state.generated_text,
+                                    "".to_string(),
+                                );
+                                SlotState::Done {
+                                    task_state,
+                                    reply: EngineReply::Stop(StopReason::MaxTokens),
+                                }
+                            } else {
+                                task_state.append_token(self, token);
+                                if let Some(w) = hit_stop_words(
+                                    &mut task_state.generated_text,
+                                    &task_state.config.stop_words,
+                                ) {
+                                    let new_len =
+                                        task_state.generated_text.len().saturating_sub(w.len());
+                                    task_state.generated_text.truncate(new_len);
+                                    out_text = std::mem::replace(
+                                        &mut task_state.generated_text,
+                                        "".to_string(),
+                                    );
+                                    SlotState::Done {
+                                        task_state,
+                                        reply: EngineReply::Stop(StopReason::Word(w)),
+                                    }
+                                } else {
+                                    if task_state.config.output_mode != OutputMode::OneShot {
+                                        out_text = std::mem::replace(
+                                            &mut task_state.generated_text,
+                                            "".to_string(),
+                                        );
+                                    }
+                                    SlotState::Decoding {
+                                        prompt_tokens: VecDeque::from([token]),
+                                        logits_for_all_tokens: false,
+                                        num_written: 0,
+                                        task_state,
+                                    }
+                                }
+                            };
+                            if !out_text.is_empty()
+                                && let Some(tx) = slot.output_tx()
+                            {
+                                let _ = tx.send(EngineReply::Text(out_text));
+                            }
+                        }
+                        Err(e) => {
+                            slot.state = SlotState::Done {
+                                task_state,
+                                reply: EngineReply::Error(e),
+                            };
+                        }
+                    }
+                }
+            } else {
+                slot.state = state0;
+            }
+        }
+
+        did_work || self.done_stage(slots) > 0
+    }
+
+    fn done_stage(&self, slots: &mut [Slot]) -> usize {
+        let mut completed = 0usize;
+
+        for slot in slots {
+            let state0 = std::mem::replace(&mut slot.state, SlotState::Busy);
+            if let SlotState::Done { task_state, reply } = state0 {
+                let aborted = matches!(
+                    reply,
+                    EngineReply::Cancelled | EngineReply::Shutdown | EngineReply::Error(_)
+                );
+                match task_state.config.output_mode {
+                    OutputMode::OneShot => {
+                        if !aborted {
+                            let _ = task_state
+                                .output_tx
+                                .send(EngineReply::Text(task_state.generated_text));
+                        }
+                    }
+                    OutputMode::Continuous => {
+                        debug_assert!(task_state.generated_text.is_empty());
+                    }
+                }
+                let _ = task_state.output_tx.send(reply);
+                if aborted {
+                    self.clear_slot(slot.seq_id);
+                    slot.n_past = 0;
+                } else {
+                    self.reset_slot_runtime(slot.seq_id);
+                }
+                completed += 1;
+                slot.state = SlotState::Idle;
+            } else {
+                slot.state = state0;
+            }
+        }
+
+        completed
+    }
+
+    fn tick(&self, slots: &mut [Slot], slot_cursor: &mut usize) -> bool {
+        let has_sampling = self.decoding_stage(slots, slot_cursor);
+
+        if has_sampling
+            || slots
+                .iter()
+                .any(|s| matches!(s.state, SlotState::Sampling { .. }))
+        {
+            self.sampling_stage(slots)
+        } else {
+            self.done_stage(slots) > 0
+        }
+    }
+
+    fn handle_ctrl_messages(
+        &self,
+        ctrl_rx: &Receiver<EngineCtrlMsg>,
+        slots: &mut [Slot],
+        ready: &mut VecDeque<EngineTask>,
+        deferred: &mut VecDeque<EngineTask>,
+        cancelled_ids: &mut HashSet<String>,
+    ) -> bool {
+        while let Ok(ctrl) = ctrl_rx.try_recv() {
+            match ctrl {
+                EngineCtrlMsg::Shutdown => {
+                    for slot in slots.iter_mut() {
+                        let state0 = std::mem::replace(&mut slot.state, SlotState::Busy);
+
+                        if let SlotState::Decoding { task_state, .. }
+                        | SlotState::Sampling { task_state, .. }
+                        | SlotState::Done { task_state, .. } = state0
+                        {
+                            let _ = task_state.output_tx.send(EngineReply::Shutdown);
+                            self.clear_slot(slot.seq_id);
+                        }
+                        slot.n_past = 0;
+                        slot.state = SlotState::Idle;
+                    }
+                    return true;
+                }
+                EngineCtrlMsg::CancelTask(task_id) => {
+                    remove_cancelled_inputs(ready, &task_id);
+                    remove_cancelled_inputs(deferred, &task_id);
+                    cancelled_ids.insert(task_id.clone());
+
+                    for slot in slots.iter_mut() {
+                        let state0 = std::mem::replace(&mut slot.state, SlotState::Busy);
+
+                        slot.state = match state0 {
+                            SlotState::Decoding {
+                                prompt_tokens,
+                                logits_for_all_tokens,
+                                num_written,
+                                task_state,
+                            } => {
+                                if task_state.config.task_id == task_id {
+                                    SlotState::Done {
+                                        task_state,
+                                        reply: EngineReply::Cancelled,
+                                    }
+                                } else {
+                                    SlotState::Decoding {
+                                        prompt_tokens,
+                                        logits_for_all_tokens,
+                                        num_written,
+                                        task_state,
+                                    }
+                                }
+                            }
+                            SlotState::Sampling { logits, task_state } => {
+                                if task_state.config.task_id == task_id {
+                                    SlotState::Done {
+                                        task_state,
+                                        reply: EngineReply::Cancelled,
+                                    }
+                                } else {
+                                    SlotState::Sampling { logits, task_state }
+                                }
+                            }
+                            SlotState::Done { task_state, reply } => {
+                                if task_state.config.task_id == task_id {
+                                    SlotState::Done {
+                                        task_state,
+                                        reply: EngineReply::Cancelled,
+                                    }
+                                } else {
+                                    SlotState::Done { task_state, reply }
+                                }
+                            }
+                            other => other,
+                        };
+                    }
+                }
+            }
+        }
+
+        false
+    }
+
+    fn pick_idle_slot(
+        &self,
+        slots: &[Slot],
+        seq_hint: Option<usize>,
+        prompt_tokens: &[Token],
+        use_cache: bool,
+        match_threshold: f32,
+    ) -> Option<(usize, bool)> {
+        if let Some(hint) = seq_hint
+            && let Some(slot) = slots.get(hint)
+            && matches!(slot.state, SlotState::Idle)
+        {
+            let can_reuse = use_cache && self.common_prefix_len(slot.seq_id, prompt_tokens) > 0;
+            return Some((hint, can_reuse));
+        }
+        let idle_indices = slots
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, s)| matches!(s.state, SlotState::Idle).then_some(idx))
+            .collect::<Vec<_>>();
+        if idle_indices.is_empty() {
+            return None;
+        }
+
+        let mut best_idx: Option<usize> = None;
+        let mut best_common = 0usize;
+        if use_cache {
+            for idx in &idle_indices {
+                let common = self.common_prefix_len(slots[*idx].seq_id, prompt_tokens);
+                if common > best_common {
+                    best_common = common;
+                    best_idx = Some(*idx);
+                }
+            }
+        }
+        if use_cache && let Some(idx) = best_idx {
+            let ratio = best_common as f32 / prompt_tokens.len().max(1) as f32;
+            if ratio >= match_threshold {
+                return Some((idx, true));
+            }
+        }
+
+        let mut lru_idx = idle_indices[0];
+        let mut lru_mtime = slots[lru_idx].mtime;
+        for idx in idle_indices.iter().skip(1) {
+            if slots[*idx].mtime < lru_mtime {
+                lru_mtime = slots[*idx].mtime;
+                lru_idx = *idx;
+            }
+        }
+
+        Some((lru_idx, false))
+    }
+
+    fn sched_task(
+        &self,
+        task: EngineTask,
+        slots: &mut [Slot],
+        prefix_match_threshold: f32,
+    ) -> SchedResult {
+        if task.prompt_tokens.is_empty() {
+            let _ = task.output_tx.send(EngineReply::Error(
+                "prompt_tokens must not be empty".to_string(),
+            ));
+            return SchedResult::Rejected;
+        }
+        let Some((slot_idx, allow_cache_reuse)) = self.pick_idle_slot(
+            slots,
+            task.seq_hint,
+            &task.prompt_tokens,
+            task.use_cache,
+            prefix_match_threshold,
+        ) else {
+            return SchedResult::Deferred(task);
+        };
+
+        let seq_id = slots[slot_idx].seq_id;
+        let n_common = if allow_cache_reuse {
+            match self.prepare_slot(seq_id, &task.prompt_tokens) {
+                Ok(n) => n,
+                Err(e) => {
+                    let _ = task.output_tx.send(EngineReply::Error(e));
+                    return SchedResult::Rejected;
+                }
+            }
+        } else {
+            self.clear_slot(seq_id);
+            self.truncate_slot_cache(seq_id, 0);
+            0
+        };
+
+        let mut task = task;
+        task.prompt_tokens.drain(..n_common);
+        if task.prompt_tokens.is_empty() {
+            let _ = task.output_tx.send(EngineReply::Error(
+                "prompt_tokens became empty after prefix match".to_string(),
+            ));
+            return SchedResult::Rejected;
+        }
+
+        let task_state = TaskState {
+            config: task.config,
+            generated_tokens: Vec::new(),
+            generated_text: String::new(),
+            pending_bytes: Vec::new(),
+            output_tx: task.output_tx,
+        };
+
+        let slot = &mut slots[slot_idx];
+        slot.n_past = n_common as i32;
+        slot.mtime = now_unix_s();
+        slot.state = SlotState::Decoding {
+            prompt_tokens: VecDeque::from(task.prompt_tokens),
+            logits_for_all_tokens: task_state.config.logits_for_all_tokens,
+            num_written: 0,
+            task_state,
+        };
+
+        SchedResult::Scheduled
+    }
 }
 
 /// Wrapper to send Engine pointer across thread boundaries.
 #[repr(transparent)]
 struct EnginePtr(*const Engine);
-
 unsafe impl Send for EnginePtr {}
 
 fn worker_loop(
+    engine: EnginePtr,
     max_parallel: usize,
     idle_sleep: Duration,
     slot_match_threshold: f32,
-    engine: EnginePtr,
     input_rx: Receiver<EngineTask>,
     ctrl_rx: Receiver<EngineCtrlMsg>,
 ) {
@@ -557,9 +1036,8 @@ fn worker_loop(
     let mut cancelled_ids = HashSet::<String>::new();
 
     loop {
-        if handle_ctrl_messages(
+        if engine.handle_ctrl_messages(
             &ctrl_rx,
-            engine,
             &mut slots,
             &mut ready_inputs,
             &mut deferred_inputs,
@@ -570,9 +1048,8 @@ fn worker_loop(
         }
 
         while let Ok(input) = input_rx.try_recv() {
-            if handle_ctrl_messages(
+            if engine.handle_ctrl_messages(
                 &ctrl_rx,
-                engine,
                 &mut slots,
                 &mut ready_inputs,
                 &mut deferred_inputs,
@@ -587,22 +1064,26 @@ fn worker_loop(
         while let Some(task) = pop_next_task(&mut ready_inputs, &mut deferred_inputs) {
             if cancelled_ids.remove(&task.config.task_id) {
                 let _ = task.output_tx.send(EngineReply::Cancelled);
-                continue;
-            }
-            match sched(task, slot_match_threshold, engine, &mut slots) {
-                SchedResult::Scheduled | SchedResult::Rejected => {}
-                SchedResult::Deferred(input) => {
-                    enqueue_task(input, &mut ready_inputs, &mut deferred_inputs);
-                    break;
+            } else {
+                match engine.sched_task(task, &mut slots, slot_match_threshold) {
+                    SchedResult::Scheduled | SchedResult::Rejected => {}
+                    SchedResult::Deferred(input) => {
+                        enqueue_task(input, &mut ready_inputs, &mut deferred_inputs);
+                        break;
+                    }
                 }
             }
         }
 
-        let did_work = tick(engine, &mut slots, &mut slot_cursor);
+        let did_work = engine.tick(&mut slots, &mut slot_cursor);
 
-        engine
-            .num_tasks
-            .store(count_active_tasks(&slots), Ordering::Relaxed);
+        engine.num_tasks.store(
+            slots
+                .iter()
+                .filter(|s| !matches!(s.state, SlotState::Idle))
+                .count(),
+            Ordering::Relaxed,
+        );
 
         if !did_work {
             thread::sleep(idle_sleep);
@@ -645,100 +1126,6 @@ fn pop_next_task(
     ready.pop_front()
 }
 
-fn tick(engine: &Engine, slots: &mut [Slot], slot_cursor: &mut usize) -> bool {
-    let has_sampling = decoding_stage(engine, slots, slot_cursor);
-    if has_sampling
-        || slots
-            .iter()
-            .any(|s| matches!(s.state, SlotState::Sampling { .. }))
-    {
-        sampling_stage(engine, slots)
-    } else {
-        done_stage(engine, slots) > 0
-    }
-}
-
-fn handle_ctrl_messages(
-    ctrl_rx: &Receiver<EngineCtrlMsg>,
-    engine: &Engine,
-    slots: &mut [Slot],
-    ready: &mut VecDeque<EngineTask>,
-    deferred: &mut VecDeque<EngineTask>,
-    cancelled_ids: &mut HashSet<String>,
-) -> bool {
-    while let Ok(ctrl) = ctrl_rx.try_recv() {
-        match ctrl {
-            EngineCtrlMsg::Shutdown => {
-                for slot in slots.iter_mut() {
-                    let state = std::mem::replace(&mut slot.state, SlotState::Busy);
-                    if let SlotState::Decoding { task_state, .. }
-                    | SlotState::Sampling { task_state, .. }
-                    | SlotState::Done { task_state, .. } = state
-                    {
-                        let _ = task_state.output_tx.send(EngineReply::Shutdown);
-                        engine.clear_slot(slot.seq_id);
-                    }
-                    slot.n_past = 0;
-                    slot.state = SlotState::Idle;
-                }
-                return true;
-            }
-            EngineCtrlMsg::CancelTask(task_id) => {
-                remove_cancelled_inputs(ready, &task_id);
-                remove_cancelled_inputs(deferred, &task_id);
-                cancelled_ids.insert(task_id.clone());
-                for slot in slots.iter_mut() {
-                    let state = std::mem::replace(&mut slot.state, SlotState::Busy);
-                    slot.state = match state {
-                        SlotState::Decoding {
-                            prompt_tokens,
-                            logits_for_all_tokens,
-                            num_written,
-                            task_state,
-                        } => {
-                            if task_state.config.task_id == task_id {
-                                SlotState::Done {
-                                    task_state,
-                                    reply: EngineReply::Cancelled,
-                                }
-                            } else {
-                                SlotState::Decoding {
-                                    prompt_tokens,
-                                    logits_for_all_tokens,
-                                    num_written,
-                                    task_state,
-                                }
-                            }
-                        }
-                        SlotState::Sampling { logits, task_state } => {
-                            if task_state.config.task_id == task_id {
-                                SlotState::Done {
-                                    task_state,
-                                    reply: EngineReply::Cancelled,
-                                }
-                            } else {
-                                SlotState::Sampling { logits, task_state }
-                            }
-                        }
-                        SlotState::Done { task_state, reply } => {
-                            if task_state.config.task_id == task_id {
-                                SlotState::Done {
-                                    task_state,
-                                    reply: EngineReply::Cancelled,
-                                }
-                            } else {
-                                SlotState::Done { task_state, reply }
-                            }
-                        }
-                        other => other,
-                    };
-                }
-            }
-        }
-    }
-    false
-}
-
 fn remove_cancelled_inputs(queue: &mut VecDeque<EngineTask>, task_id: &str) {
     let mut kept = VecDeque::with_capacity(queue.len());
     while let Some(input) = queue.pop_front() {
@@ -757,319 +1144,6 @@ enum SchedResult {
     Rejected,
 }
 
-fn sched(
-    mut task: EngineTask,
-    slot_match_threshold: f32,
-    engine: &Engine,
-    slots: &mut [Slot],
-) -> SchedResult {
-    if task.prompt_tokens.is_empty() {
-        let _ = task.output_tx.send(EngineReply::Error(
-            "prompt_tokens must not be empty".to_string(),
-        ));
-        return SchedResult::Rejected;
-    }
-    let Some((slot_idx, allow_cache_reuse)) = pick_idle_slot(
-        engine,
-        slots,
-        task.seq_hint,
-        &task.prompt_tokens,
-        task.use_cache,
-        slot_match_threshold,
-    ) else {
-        return SchedResult::Deferred(task);
-    };
-
-    let seq_id = slots[slot_idx].seq_id;
-    let n_common = if allow_cache_reuse {
-        match engine.prepare_slot(seq_id, &task.prompt_tokens) {
-            Ok(n) => n,
-            Err(e) => {
-                let _ = task.output_tx.send(EngineReply::Error(e));
-                return SchedResult::Rejected;
-            }
-        }
-    } else {
-        engine.clear_slot(seq_id);
-        engine.truncate_slot_cache(seq_id, 0);
-        0
-    };
-    task.prompt_tokens.drain(..n_common);
-    if task.prompt_tokens.is_empty() {
-        let _ = task.output_tx.send(EngineReply::Error(
-            "prompt_tokens became empty after prefix match".to_string(),
-        ));
-        return SchedResult::Rejected;
-    }
-    let config = task.config;
-    let task_state = TaskState {
-        config,
-        generated_tokens: Vec::new(),
-        generated_text: String::new(),
-        pending_bytes: Vec::new(),
-        output_tx: task.output_tx,
-    };
-    let slot = &mut slots[slot_idx];
-    slot.n_past = n_common as i32;
-    slot.mtime = now_unix_s();
-    slot.state = SlotState::Decoding {
-        prompt_tokens: VecDeque::from(task.prompt_tokens),
-        logits_for_all_tokens: task_state.config.logits_for_all_tokens,
-        num_written: 0,
-        task_state,
-    };
-    SchedResult::Scheduled
-}
-
-fn decoding_stage(engine: &Engine, slots: &mut [Slot], slot_cursor: &mut usize) -> bool {
-    let mut has_sampling = false;
-    let mut cnt = 0usize;
-    let mut written_updates: Vec<(usize, usize)> = Vec::new();
-
-    engine.begin_decode_batch();
-    let slots_len = slots.len();
-    for offset in 0..slots_len {
-        if cnt == engine.ubatch_size {
-            break;
-        }
-        let idx = (*slot_cursor + offset) % slots_len;
-        let slot = &mut slots[idx];
-        let state = std::mem::replace(&mut slot.state, SlotState::Busy);
-        if let SlotState::Decoding {
-            mut prompt_tokens,
-            logits_for_all_tokens,
-            mut num_written,
-            task_state,
-        } = state
-        {
-            let n_tokens = prompt_tokens.len();
-            let n_take = n_tokens.min(engine.ubatch_size.saturating_sub(cnt));
-            let mut feed_count = 0usize;
-            let mut decode_err: Option<String> = None;
-            for token in prompt_tokens.drain(..n_take) {
-                let need_logits = task_state.config.logits_for_all_tokens || n_take == n_tokens;
-                match engine.push_decode_token(
-                    slot.seq_id,
-                    token,
-                    slot.n_past + feed_count as i32,
-                    need_logits,
-                ) {
-                    Ok(()) => {
-                        num_written += 1;
-                        feed_count += 1;
-                        cnt += 1;
-                    }
-                    Err(e) => {
-                        decode_err = Some(e);
-                        break;
-                    }
-                }
-            }
-            if let Some(e) = decode_err {
-                engine.truncate_slot_cache(slot.seq_id, slot.n_past as usize);
-                slot.state = SlotState::Done {
-                    task_state,
-                    reply: EngineReply::Error(e),
-                };
-                continue;
-            }
-            slot.state = if prompt_tokens.is_empty() {
-                if logits_for_all_tokens {
-                    SlotState::Done {
-                        task_state,
-                        reply: EngineReply::Stop(StopReason::PrefillOnly),
-                    }
-                } else {
-                    has_sampling = true;
-                    SlotState::Sampling {
-                        logits: cnt as i32 - 1,
-                        task_state,
-                    }
-                }
-            } else {
-                SlotState::Decoding {
-                    prompt_tokens,
-                    logits_for_all_tokens,
-                    num_written,
-                    task_state,
-                }
-            };
-            if feed_count > 0 {
-                written_updates.push((idx, feed_count));
-            }
-        } else {
-            slot.state = state;
-        }
-    }
-    if cnt > 0 {
-        match engine.decode_batch() {
-            Ok(_) => {
-                for (idx, wrote) in &written_updates {
-                    slots[*idx].n_past += *wrote as i32;
-                }
-            }
-            Err(e) => {
-                for (idx, _) in &written_updates {
-                    let slot = &mut slots[*idx];
-                    engine.truncate_slot_cache(slot.seq_id, slot.n_past as usize);
-                    let old = std::mem::replace(&mut slot.state, SlotState::Busy);
-                    slot.state = match old {
-                        SlotState::Decoding { task_state, .. }
-                        | SlotState::Sampling { task_state, .. } => SlotState::Done {
-                            task_state,
-                            reply: EngineReply::Error(e.clone()),
-                        },
-                        other => other,
-                    };
-                }
-                has_sampling = false;
-            }
-        }
-    }
-    if slots_len > 0 {
-        *slot_cursor = (*slot_cursor + 1) % slots_len;
-    }
-    has_sampling
-}
-
-fn sampling_stage(engine: &Engine, slots: &mut [Slot]) -> bool {
-    let mut did_work = false;
-    for slot in slots.iter_mut() {
-        let state0 = std::mem::replace(&mut slot.state, SlotState::Busy);
-        if let SlotState::Sampling {
-            logits,
-            mut task_state,
-        } = state0
-        {
-            if task_state.output_tx.is_full() {
-                slot.state = SlotState::Sampling { logits, task_state };
-            } else if let Err(e) = engine.init_slot_sampler(
-                slot.seq_id,
-                task_state.config.temperature,
-                task_state.config.top_p,
-            ) {
-                slot.state = SlotState::Done {
-                    task_state,
-                    reply: EngineReply::Error(e),
-                };
-            } else {
-                did_work = true;
-                match engine.sample(slot.seq_id, logits) {
-                    Ok(token) => {
-                        let mut out_text: String = "".into();
-                        slot.state = if engine.is_eog(token) {
-                            out_text =
-                                std::mem::replace(&mut task_state.generated_text, "".to_string());
-                            SlotState::Done {
-                                task_state,
-                                reply: EngineReply::Stop(StopReason::Eog),
-                            }
-                        } else if task_state.config.max_tokens > 0
-                            && task_state.generated_tokens.len() >= task_state.config.max_tokens
-                        {
-                            out_text =
-                                std::mem::replace(&mut task_state.generated_text, "".to_string());
-                            SlotState::Done {
-                                task_state,
-                                reply: EngineReply::Stop(StopReason::MaxTokens),
-                            }
-                        } else {
-                            task_state.append_token(engine, token);
-                            if let Some(w) = hit_stop_words(
-                                &mut task_state.generated_text,
-                                &task_state.config.stop_words,
-                            ) {
-                                let new_len =
-                                    task_state.generated_text.len().saturating_sub(w.len());
-                                task_state.generated_text.truncate(new_len);
-                                out_text = std::mem::replace(
-                                    &mut task_state.generated_text,
-                                    "".to_string(),
-                                );
-                                SlotState::Done {
-                                    task_state,
-                                    reply: EngineReply::Stop(StopReason::Word(w)),
-                                }
-                            } else {
-                                if task_state.config.output_mode != OutputMode::OneShot {
-                                    out_text = std::mem::replace(
-                                        &mut task_state.generated_text,
-                                        "".to_string(),
-                                    );
-                                }
-                                SlotState::Decoding {
-                                    prompt_tokens: VecDeque::from([token]),
-                                    logits_for_all_tokens: false,
-                                    num_written: 0,
-                                    task_state,
-                                }
-                            }
-                        };
-                        if !out_text.is_empty()
-                            && let Some(tx) = slot.output_tx()
-                        {
-                            let _ = tx.send(EngineReply::Text(out_text));
-                        }
-                    }
-                    Err(e) => {
-                        slot.state = SlotState::Done {
-                            task_state,
-                            reply: EngineReply::Error(e),
-                        };
-                    }
-                }
-            }
-        } else {
-            slot.state = state0;
-        }
-    }
-    did_work || done_stage(engine, slots) > 0
-}
-
-fn done_stage(engine: &Engine, slots: &mut [Slot]) -> usize {
-    let mut completed = 0usize;
-    for slot in slots.iter_mut() {
-        let state0 = std::mem::replace(&mut slot.state, SlotState::Busy);
-        if let SlotState::Done { task_state, reply } = state0 {
-            let aborted = matches!(
-                reply,
-                EngineReply::Cancelled | EngineReply::Shutdown | EngineReply::Error(_)
-            );
-            match task_state.config.output_mode {
-                OutputMode::OneShot => {
-                    if !aborted {
-                        let _ = task_state
-                            .output_tx
-                            .send(EngineReply::Text(task_state.generated_text));
-                    }
-                }
-                OutputMode::Continuous => {
-                    debug_assert!(task_state.generated_text.is_empty());
-                }
-            }
-            let _ = task_state.output_tx.send(reply);
-            if aborted {
-                engine.clear_slot(slot.seq_id);
-                slot.n_past = 0;
-            } else {
-                engine.reset_slot_runtime(slot.seq_id);
-            }
-            completed += 1;
-            slot.state = SlotState::Idle;
-        } else {
-            slot.state = state0;
-        }
-    }
-    completed
-}
-
-fn count_active_tasks(slots: &[Slot]) -> usize {
-    slots
-        .iter()
-        .filter(|s| !matches!(s.state, SlotState::Idle))
-        .count()
-}
-
 fn hit_stop_words(generated_text: &mut String, stop_words: &[String]) -> Option<String> {
     for stop in stop_words.iter().filter(|s| !s.is_empty()) {
         if generated_text.ends_with(stop) {
@@ -1077,57 +1151,6 @@ fn hit_stop_words(generated_text: &mut String, stop_words: &[String]) -> Option<
         }
     }
     None
-}
-
-fn pick_idle_slot(
-    engine: &Engine,
-    slots: &[Slot],
-    seq_hint: Option<usize>,
-    prompt_tokens: &[Token],
-    use_cache: bool,
-    match_threshold: f32,
-) -> Option<(usize, bool)> {
-    if let Some(hint) = seq_hint
-        && let Some(slot) = slots.get(hint)
-        && matches!(slot.state, SlotState::Idle)
-    {
-        let can_reuse = use_cache && engine.common_prefix_len(slot.seq_id, prompt_tokens) > 0;
-        return Some((hint, can_reuse));
-    }
-    let idle_indices = slots
-        .iter()
-        .enumerate()
-        .filter_map(|(idx, s)| matches!(s.state, SlotState::Idle).then_some(idx))
-        .collect::<Vec<_>>();
-    if idle_indices.is_empty() {
-        return None;
-    }
-    let mut best_idx: Option<usize> = None;
-    let mut best_common = 0usize;
-    if use_cache {
-        for idx in &idle_indices {
-            let common = engine.common_prefix_len(slots[*idx].seq_id, prompt_tokens);
-            if common > best_common {
-                best_common = common;
-                best_idx = Some(*idx);
-            }
-        }
-    }
-    if use_cache && let Some(idx) = best_idx {
-        let ratio = best_common as f32 / prompt_tokens.len().max(1) as f32;
-        if ratio >= match_threshold {
-            return Some((idx, true));
-        }
-    }
-    let mut lru_idx = idle_indices[0];
-    let mut lru_mtime = slots[lru_idx].mtime;
-    for idx in idle_indices.iter().skip(1) {
-        if slots[*idx].mtime < lru_mtime {
-            lru_mtime = slots[*idx].mtime;
-            lru_idx = *idx;
-        }
-    }
-    Some((lru_idx, false))
 }
 
 pub(crate) fn now_unix_s() -> i64 {

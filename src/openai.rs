@@ -510,7 +510,7 @@ async fn handle_chat_completions(
         match join.await {
             Ok(Ok(res)) => Json::<serde_json::Value>(res).into_response(),
             Ok(Err((code, body))) => (code, Json(body)).into_response(),
-            Err(e) => (
+            Err(_) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(oai_error("request task failed", "server_error")),
             )
@@ -762,7 +762,7 @@ fn collect_unary_reply(
                     oai_error("engine shutdown", "server_error"),
                 ));
             }
-            Err(e) => {
+            Err(_) => {
                 return Err((
                     StatusCode::INTERNAL_SERVER_ERROR,
                     oai_error("response channel timed out", "server_error"),
