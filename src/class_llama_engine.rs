@@ -22,7 +22,6 @@ use crate::{
 static NEXT_TASK_ID: AtomicU64 = AtomicU64::new(1);
 
 pub(super) struct EngineParams {
-    pub max_parallel: usize,
     pub idle_sleep_ms: u64,
     pub slot_match_threshold: f32,
     /// Default max tokens for generation; 0 means unlimited.
@@ -33,22 +32,10 @@ pub(super) fn parse_engine_params(
     ctx: &mut ScopedContext,
     opts: Option<&Object>,
 ) -> Result<EngineParams, i32> {
-    let mut max_parallel = 1usize;
     let mut idle_sleep_ms = 1u64;
     let mut slot_match_threshold = 0.5f32;
     let mut max_tokens = 0usize;
     if let Some(opts) = opts {
-        let v = opts.get_property_str(ctx, "maxParallel")?;
-        if !v.is_undefined() {
-            let n = v.to_number(ctx)?.to_i32();
-            if n >= 1 {
-                max_parallel = n as usize;
-            } else {
-                ctx.throw_type_error("maxParallel must be >= 1");
-                return Err(-1);
-            }
-        }
-
         let v = opts.get_property_str(ctx, "idleSleepMs")?;
         if !v.is_undefined() {
             let n = v.to_number(ctx)?.to_i32();
@@ -82,7 +69,6 @@ pub(super) fn parse_engine_params(
         }
     }
     Ok(EngineParams {
-        max_parallel,
         idle_sleep_ms,
         slot_match_threshold,
         max_tokens,

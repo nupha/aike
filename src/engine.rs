@@ -370,14 +370,14 @@ impl Engine {
     }
 
     pub fn start(
-        max_parallel: usize,
+        mut llm_ctx: LlamaContext,
         idle_sleep: Duration,
         slot_match_threshold: f32,
         default_max_tokens: usize,
-        mut llm_ctx: LlamaContext,
     ) -> Arc<Self> {
+        let max_parallel = llm_ctx.n_seq_max().max(1) as usize;
         let ubatch_size = (llm_ctx.n_ubatch() as usize).max(1);
-        llm_ctx.init_batch(ubatch_size as i32, 0, max_parallel as i32);
+        llm_ctx.init_batch(ubatch_size as i32, 0, llm_ctx.n_seq_max());
         let model_name = llm_ctx
             .model()
             .meta_val_str(c"general.name")

@@ -9,8 +9,8 @@ use std::{
 use linkme::distributed_slice;
 use llama_cpp_ffi::{LlamaContext, SamplingParams};
 use zuqe::{
-    CallContext, ClassDef, ClassID, FieldDef, IntOrFloat, JS_PROP_ENUMERABLE, JSResult, JSValue,
-    Object, Runtime, ScopedContext,
+    Atom, CallContext, ClassDef, ClassID, FieldDef, IntOrFloat, JS_PROP_ENUMERABLE, JS_PROP_FORCE,
+    JSResult, JSValue, Object, Runtime, ScopedContext,
     builtins::{promise::Promise, typed_array::TypedArray},
 };
 
@@ -69,10 +69,6 @@ impl LlamaContextWrap {
         Self {
             inner: Mutex::new(Some(llm_ctx)),
         }
-    }
-
-    fn is_disposed(&self) -> bool {
-        self.inner.lock().unwrap().is_none()
     }
 
     fn with_ctx_mut<R>(
@@ -199,8 +195,45 @@ fn get_llama_context_wrap(
     }
 }
 
+fn take_llame_context(
+    ctx: &mut ScopedContext,
+    mut this: JSValue,
+) -> Result<Option<(LlamaContext, JSValue)>, i32> {
+    let p = unsafe {
+        let payload = this
+            .retrive_object_payload_mut(ctx, JSLlamaContext::class_id())?
+            .other_mut()
+            .unwrap();
+
+        payload.replace_opaque(std::ptr::null_mut())
+    };
+
+    if !p.is_null() {
+        let model_val = this.get_property_str(ctx, "model")?;
+        this.delete_property_str(ctx, "model", JS_PROP_FORCE)?; // force delete
+
+        let llm_ctx = unsafe {
+            let a = Box::from_raw(p.cast::<Arc<LlamaContextWrap>>());
+            a.inner.lock().unwrap().take().unwrap()
+        };
+        Ok(Some((llm_ctx, model_val)))
+    } else {
+        Ok(None)
+    }
+}
+
 fn js_context_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut this = cc.this();
+
+    if cc.magic() == PROP_IS_DISPOSED {
+        let p = this
+            .retrive_object_payload_mut(ctx, JSLlamaContext::class_id())?
+            .other_mut()
+            .unwrap()
+            .opaque();
+        return Ok(JSValue::Bool(p.is_null()));
+    }
+
     let llm_ctx_wrap = get_llama_context_wrap(ctx, &mut this)?;
 
     let val: JSValue = match cc.magic() {
@@ -225,10 +258,7 @@ fn js_context_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 -1
             })?
             .into(),
-        PROP_IS_DISPOSED => {
-            let disposed = llm_ctx_wrap.is_disposed();
-            JSValue::Bool(disposed)
-        }
+
         _ => JSValue::UNDEFINED,
     };
 
@@ -487,8 +517,6 @@ fn js_context_embedTokens(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
 }
 
 fn js_context_createEngine(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let mut this = cc.this();
-
     // Parse engine options first, before taking the LlamaContext.
     let opts = if cc.length() > 0 {
         let v = cc.arg(0);
@@ -505,82 +533,31 @@ fn js_context_createEngine(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
     };
     let eng_params = parse_engine_params(ctx, opts.as_ref())?;
 
-    // Take LlamaContext out of the wrap.
-    let wrap = {
-        let payload = this
-            .retrive_object_payload_mut(ctx, JSLlamaContext::class_id())?
-            .other_mut()
-            .unwrap();
-        let opaque = payload.opaque();
-        if opaque.is_null() {
-            ctx.throw_type_error("Context was disposed");
-            return Err(-1);
+    // take LlamaContext out of the this object
+    if let Some((llm_ctx, model_val)) = take_llame_context(ctx, cc.this())? {
+        if llm_ctx.n_seq_max() == 1 {
+            log::warn!("createEngine: context sequences is 1, only one parallel slot available");
         }
-        unsafe { (&*opaque.cast::<Arc<LlamaContextWrap>>()).clone() }
-    };
-    let llm_ctx = wrap.inner.lock().unwrap().take().ok_or_else(|| {
-        ctx.throw_type_error("Context was disposed");
-        -1
-    })?;
 
-    let seq_cap = llm_ctx.n_seq_max().max(1) as usize;
-    let mut max_parallel = eng_params.max_parallel;
-    if max_parallel > seq_cap {
-        log::warn!(
-            "createEngine: maxParallel ({}) is greater than sequences ({}); clamping maxParallel to sequences",
-            max_parallel,
-            seq_cap,
+        let engine = Engine::start(
+            llm_ctx,
+            Duration::from_millis(eng_params.idle_sleep_ms),
+            eng_params.slot_match_threshold,
+            eng_params.max_tokens,
         );
-        max_parallel = seq_cap;
+        let mut engine_obj = JSLlamaEngine::new_instance(ctx, engine)?;
+        let _ = engine_obj.define_property_value_str(ctx, "model", model_val, JS_PROP_ENUMERABLE);
+
+        Ok(engine_obj.into())
+    } else {
+        ctx.throw_type_error("Context was disposed");
+        Err(-1)
     }
-
-    let engine = Engine::start(
-        max_parallel,
-        Duration::from_millis(eng_params.idle_sleep_ms),
-        eng_params.slot_match_threshold,
-        eng_params.max_tokens,
-        llm_ctx,
-    );
-
-    let model_val = this.get_property_str(ctx, "model")?;
-    let _ = this.set_property_str(ctx, "model", JSValue::UNDEFINED);
-
-    let mut engine_obj = JSLlamaEngine::new_instance(ctx, engine)?;
-    if !model_val.is_undefined() {
-        engine_obj.define_property_value_str(ctx, "model", model_val, JS_PROP_ENUMERABLE)?;
-    }
-
-    Ok(engine_obj.into())
 }
 
 fn js_context_dispose(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let mut this = cc.this();
-    let llm_ctx_wrap = get_llama_context_wrap(ctx, &mut this)?;
-
-    let _ = this.set_property_str(ctx, "model", JSValue::UNDEFINED);
-    let (promise, tx) =
-        Promise::create_with_channel(ctx, |_cx, payload: Result<(), String>| -> JSResult {
-            match payload {
-                Ok(()) => Ok(JSValue::UNDEFINED),
-                Err(_) => Ok(JSValue::UNDEFINED),
-            }
-        })?;
-
-    let tx_submit = tx.clone();
-    let tx_timeout = tx.clone();
-    if let Err(_e) = WorkerPool::singleton().add_job(
-        move || {
-            llm_ctx_wrap.dispose();
-            let _ = tx_submit.send(Ok(()));
-        },
-        Some(move || {
-            let _ = tx_timeout.send(Ok(()));
-        }),
-    ) {
-        let _ = tx.send(Ok(()));
-    }
-
-    Ok(promise.into())
+    take_llame_context(ctx, cc.this())?;
+    Ok(JSValue::UNDEFINED)
 }
 
 const CLASS_CONTEXT_PROTO: &[FieldDef] = &[
