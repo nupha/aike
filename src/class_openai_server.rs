@@ -1,6 +1,7 @@
-use std::sync::{Arc, Mutex};
-
-use zuqe::{CallContext, JSResult, JSValue, ScopedContext, builtins::promise::Promise};
+use zuqe::{
+    CallContext, JSResult, JSValue, ScopedContext,
+    builtins::promise::{Promise, PromiseResultSlot},
+};
 
 use crate::{class_llama_engine::get_engine_arc, class_llama_model::get_llama_model};
 
@@ -66,28 +67,26 @@ pub(super) fn engine_httpServe(ctx: &mut ScopedContext, cc: CallContext) -> JSRe
     engine.set_shutdown_tx(Some(shutdown_tx));
     engine.set_serving(true);
 
-    let result_slot = Arc::new(Mutex::new(None::<Result<(), String>>));
+    let result_slot = PromiseResultSlot::<Result<(), String>>::new();
 
-    let promise = Promise::create_with_job(ctx, {
-        let res = result_slot.clone();
-        move |cx| match res.lock().unwrap().take() {
-            Some(Ok(())) => Ok(Some(JSValue::UNDEFINED)),
-            Some(Err(e)) => {
+    let promise =
+        Promise::create_with_result_slot(ctx, result_slot.clone(), |cx, res| match res {
+            Ok(()) => Ok(JSValue::UNDEFINED),
+            Err(e) => {
                 cx.throw_internal_error(&e);
                 Err(-1)
             }
-            None => Ok(None),
-        }
-    })?;
+        })?;
 
     tokio::spawn(async move {
-        let engine_for_server = engine.clone();
-        let res = engine_for_server
+        let res = engine
+            .clone()
             .http_server_with_shutdown(model, &host, port, shutdown_rx)
             .await;
+
         engine.set_serving(false);
         engine.set_shutdown_tx(None);
-        *result_slot.lock().unwrap() = Some(res);
+        let _ = result_slot.commit(res);
     });
 
     Ok(promise.into())
