@@ -8,6 +8,7 @@ mod class_llama_context;
 mod class_llama_engine;
 mod class_llama_model;
 mod class_llama_sampler;
+mod client;
 mod engine;
 mod global;
 mod mod_llama;
