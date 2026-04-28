@@ -1037,12 +1037,14 @@ fn js_model_dispose(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         .retrive_object_payload_mut(ctx, JSLlamaModel::class_id())?
         .other_mut()
         .unwrap();
+
     if !payload.opaque().is_null() {
         unsafe {
             let p = payload.replace_opaque(std::ptr::null_mut());
             drop(Box::from_raw(p.cast::<LlamaModel>()));
         }
     }
+
     Ok(JSValue::UNDEFINED)
 }
 

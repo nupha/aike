@@ -9,7 +9,7 @@ use std::{
 use linkme::distributed_slice;
 use llama_cpp_ffi::{LlamaContext, SamplingParams};
 use zuqe::{
-    Atom, CallContext, ClassDef, ClassID, FieldDef, IntOrFloat, JS_PROP_ENUMERABLE, JS_PROP_FORCE,
+    CallContext, ClassDef, ClassID, FieldDef, IntOrFloat, JS_PROP_ENUMERABLE, JS_PROP_FORCE,
     JSResult, JSValue, Object, Runtime, ScopedContext,
     builtins::{promise::Promise, typed_array::TypedArray},
 };
@@ -161,11 +161,6 @@ impl LlamaContextWrap {
                 max_tokens,
             })
         })
-    }
-
-    fn dispose(&self) {
-        let mut guard = self.inner.lock().unwrap();
-        guard.take();
     }
 }
 
