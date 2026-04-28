@@ -7,11 +7,11 @@ mod class_file;
 mod class_llama_context;
 mod class_llama_engine;
 mod class_llama_model;
+mod class_llama_openai;
 mod class_llama_sampler;
 mod client;
 mod engine;
 mod global;
-mod llama_class_openai;
 mod mod_llama;
 mod mod_os;
 mod mod_std;
@@ -33,9 +33,9 @@ use crate::{
     class_llama_context::JSLlamaContext,
     class_llama_engine::JSLlamaEngine,
     class_llama_model::JSLlamaModel,
+    class_llama_openai::JSOpenAI,
     class_llama_sampler::JSSamplerChain,
     global::setup_globals,
-    llama_class_openai::JSOpenAI,
     mod_llama::init_mod_llama,
     mod_os::{init_mod_os, mod_os_gc_trace},
     mod_std::init_mod_std,
