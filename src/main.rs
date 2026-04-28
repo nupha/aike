@@ -8,7 +8,6 @@ mod class_llama_context;
 mod class_llama_engine;
 mod class_llama_model;
 mod class_llama_sampler;
-mod class_openai_server;
 mod engine;
 mod global;
 mod mod_llama;
