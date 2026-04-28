@@ -1,7 +1,7 @@
 use llama_cpp_ffi::{FileType, KVCacheType, list_devices};
 use zuqe::{Array, CallContext, FieldDef, JS_PROP_ENUMERABLE, JSResult, JSValue, ScopedContext};
 
-fn get_devices(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+fn get_devices(ctx: &mut ScopedContext, _: CallContext) -> JSResult {
     let devs = list_devices();
 
     let mut lst = Vec::<JSValue>::with_capacity(devs.len());

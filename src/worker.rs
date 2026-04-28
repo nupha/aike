@@ -188,11 +188,6 @@ impl WorkerPool {
                     let r = try_dispatch_to_idle_worker(&mut st, job);
                     debug_assert!(r.is_ok(), "ensure there is an idle worker, can't fail");
                     return Ok(());
-
-                    // job = match try_dispatch_to_idle_worker(&mut st, job) {
-                    //     Ok(()) => return Ok(()),
-                    //     Err(job) => job,
-                    // };
                 }
 
                 let deadline = st

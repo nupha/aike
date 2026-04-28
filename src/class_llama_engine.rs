@@ -100,7 +100,10 @@ pub(super) fn get_engine_arc(ctx: &mut ScopedContext, val: &JSValue) -> Result<A
     Ok(unsafe { Arc::from_raw(ptr) })
 }
 
-fn js_engine_completion(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+const MAGIC_GENERATE: i32 = 0;
+const MAGIC_GENERATE_STREAM: i32 = 1;
+
+fn js_engine_generate(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let engine = get_engine(ctx, &this)?;
 
@@ -112,71 +115,26 @@ fn js_engine_completion(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     }
 
     let task_id = format!("{}", NEXT_TASK_ID.fetch_add(1, Ordering::Relaxed));
+    let mode = if cc.magic() == MAGIC_GENERATE {
+        OutputMode::OneShot
+    } else {
+        OutputMode::Continuous
+    };
 
     let rx = engine
-        .push_task(task_id, tokens, Vec::new(), OutputMode::OneShot)
+        .push_task(task_id, tokens, Vec::new(), mode)
         .map_err(|e| {
             ctx.throw_internal_error(&e.to_string());
             -1
         })?;
 
-    let promise = Promise::create_with_receiver(ctx, rx, |cx, msg| -> JSResult {
-        match msg {
-            EngineReply::Text(text) => cx
-                .create_string_from_utf8(text.into_bytes())
-                .map(JSValue::from),
-            EngineReply::Error(e) => {
-                cx.throw_internal_error(&e);
-                Err(-1)
-            }
-            EngineReply::Cancelled => {
-                cx.throw_internal_error("task cancelled");
-                Err(-1)
-            }
-            EngineReply::Shutdown => {
-                cx.throw_internal_error("engine shutdown");
-                Err(-1)
-            }
-            EngineReply::Stop(_) => {
-                cx.throw_internal_error("unexpected message in oneshot mode");
-                Err(-1)
-            }
-        }
-    })?;
-
-    Ok(promise.into())
-}
-
-fn js_engine_completionIter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let this = cc.this();
-    let engine = get_engine(ctx, &this)?;
-
-    let arg0 = cc.arg(0);
-    let tokens = parse_tokens(ctx, &arg0)?.into_owned();
-    if tokens.is_empty() {
-        ctx.throw_type_error("tokens cannot be empty");
-        return Err(-1);
-    }
-
-    let task_id = format!("{}", NEXT_TASK_ID.fetch_add(1, Ordering::Relaxed));
-
-    let rx = engine
-        .push_task(task_id, tokens, Vec::new(), OutputMode::Continuous)
-        .map_err(|e| {
-            ctx.throw_internal_error(&e.to_string());
-            -1
-        })?;
-
-    AsyncIterableIterator::create_with_receiver(
-        ctx,
-        rx,
-        |cx, msg| -> Result<Option<JSValue>, i32> {
+    if cc.magic() == MAGIC_GENERATE {
+        // generate()
+        let promise = Promise::create_with_receiver(ctx, rx, |cx, msg| -> JSResult {
             match msg {
                 EngineReply::Text(text) => cx
                     .create_string_from_utf8(text.into_bytes())
-                    .map(JSValue::from)
-                    .map(Some),
-                EngineReply::Stop(_) => Ok(None),
+                    .map(JSValue::from),
                 EngineReply::Error(e) => {
                     cx.throw_internal_error(&e);
                     Err(-1)
@@ -189,10 +147,42 @@ fn js_engine_completionIter(ctx: &mut ScopedContext, cc: CallContext) -> JSResul
                     cx.throw_internal_error("engine shutdown");
                     Err(-1)
                 }
+                EngineReply::Stop(_) => {
+                    cx.throw_internal_error("unexpected message in oneshot mode");
+                    Err(-1)
+                }
             }
-        },
-    )
-    .map(JSValue::from)
+        })?;
+        Ok(promise.into())
+    } else {
+        // generateStream()
+        AsyncIterableIterator::create_with_receiver(
+            ctx,
+            rx,
+            |cx, msg| -> Result<Option<JSValue>, i32> {
+                match msg {
+                    EngineReply::Text(text) => cx
+                        .create_string_from_utf8(text.into_bytes())
+                        .map(JSValue::from)
+                        .map(Some),
+                    EngineReply::Stop(_) => Ok(None),
+                    EngineReply::Error(e) => {
+                        cx.throw_internal_error(&e);
+                        Err(-1)
+                    }
+                    EngineReply::Cancelled => {
+                        cx.throw_internal_error("task cancelled");
+                        Err(-1)
+                    }
+                    EngineReply::Shutdown => {
+                        cx.throw_internal_error("engine shutdown");
+                        Err(-1)
+                    }
+                }
+            },
+        )
+        .map(JSValue::from)
+    }
 }
 
 fn js_engine_stopServe(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -224,8 +214,13 @@ fn js_engine_dispose(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 }
 
 const CLASS_ENGINE_PROTO: &[FieldDef] = &[
-    FieldDef::CALL("completion", 1, js_engine_completion, 0),
-    FieldDef::CALL("completionIter", 1, js_engine_completionIter, 0),
+    FieldDef::CALL("generate", 1, js_engine_generate, MAGIC_GENERATE as i16),
+    FieldDef::CALL(
+        "generateStream",
+        1,
+        js_engine_generate,
+        MAGIC_GENERATE_STREAM as i16,
+    ),
     FieldDef::CALL("httpServe", 1, js_engine_httpServe, 0),
     FieldDef::CALL("stopServe", 0, js_engine_stopServe, 0),
     FieldDef::GETSET("isServing", Some(js_engine_isServing), None, 0),
