@@ -5,21 +5,17 @@ use std::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
-    time::Duration,
 };
 
 use linkme::distributed_slice;
-use llama_cpp_ffi::LlamaContext;
 use zuqe::{
-    CallContext, ClassDef, ClassID, FieldDef, JS_PROP_ENUMERABLE, JSResult, JSValue, Object,
-    Runtime, ScopedContext,
+    CallContext, ClassDef, ClassID, FieldDef, JSResult, JSValue, Object, Runtime, ScopedContext,
     builtins::{iterator::AsyncIterableIterator, promise::Promise},
 };
 
 use crate::{
     USER_CLASS_DEFS,
     class_llama_context::parse_tokens,
-    class_llama_model::{get_llama_model, parse_context_params},
     engine::{Engine, EngineReply, OutputMode},
 };
 
@@ -225,73 +221,6 @@ fn dispose(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         }
     }
     Ok(JSValue::UNDEFINED)
-}
-
-/// Create an Engine from JS arguments (contextOptions object, engineOptions object).
-/// Parses both options, creates the underlying LlamaContext, and starts the Engine.
-pub(super) fn create_engine_from_js(
-    ctx: &mut ScopedContext,
-    model: llama_cpp_ffi::LlamaModel,
-    ctx_opts: &Object,
-    eng_opts: &Object,
-) -> Result<Arc<Engine>, i32> {
-    let ctx_params = parse_context_params(ctx, Some(ctx_opts))?;
-    let eng_params = parse_engine_params(ctx, Some(eng_opts))?;
-
-    let seq_cap = ctx_params.n_seq_max.max(1) as usize;
-    let mut max_parallel = eng_params.max_parallel;
-    if max_parallel > seq_cap {
-        log::warn!(
-            "createEngine: maxParallel ({}) is greater than sequences ({}); clamping maxParallel to sequences",
-            max_parallel,
-            seq_cap,
-        );
-        max_parallel = seq_cap;
-    }
-
-    let mut llm_ctx = LlamaContext::new(model, ctx_params).map_err(|e| {
-        ctx.throw_internal_error(&e);
-        -1
-    })?;
-    llm_ctx.init_batch(ctx_params.n_batch as i32, 0, ctx_params.n_seq_max as i32);
-
-    Ok(Engine::start(
-        max_parallel,
-        Duration::from_millis(eng_params.idle_sleep_ms),
-        eng_params.slot_match_threshold,
-        eng_params.max_tokens,
-        llm_ctx,
-    ))
-}
-
-pub(super) fn js_model_createEngine(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let this = cc.this();
-    let model = get_llama_model(ctx, &this)?;
-
-    if cc.length() < 2 {
-        ctx.throw_type_error("requires contextOptions and engineOptions arguments");
-        return Err(-1);
-    }
-
-    let v0 = cc.arg(0);
-    let ctx_opts = v0.as_object().copied().ok_or_else(|| {
-        ctx.throw_type_error("contextOptions must be object");
-        -1
-    })?;
-
-    let v1 = cc.arg(1);
-    let eng_opts = v1.as_object().copied().ok_or_else(|| {
-        ctx.throw_type_error("engineOptions must be object");
-        -1
-    })?;
-
-    let engine = create_engine_from_js(ctx, model, &ctx_opts, &eng_opts)?;
-
-    let mut obj = JSLlamaEngine::new_instance(ctx, engine)?;
-    // Keep model alive as long as pipeline exists.
-    obj.define_property_value_str(ctx, "model", this, JS_PROP_ENUMERABLE)?;
-
-    Ok(obj.into())
 }
 
 const CLASS_ENGINE_PROTO: &[FieldDef] = &[

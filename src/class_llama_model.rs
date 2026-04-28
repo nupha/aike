@@ -21,7 +21,6 @@ use zuqe::{
 use crate::{
     USER_CLASS_DEFS,
     class_llama_context::{JSLlamaContext, parse_tokens},
-    class_llama_engine::js_model_createEngine,
     class_llama_sampler::js_model_createSamplerChain,
 };
 
@@ -297,7 +296,7 @@ const PROP_EOT_TEXT: i32 = 9;
 const PROP_SEP_TOKEN: i32 = 10;
 const PROP_SEP_TEXT: i32 = 11;
 
-fn get_prop(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+fn js_mode_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let model = get_llama_model(ctx, &this)?;
 
@@ -347,7 +346,7 @@ fn get_prop(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     }
 }
 
-fn model_is_eog(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+fn js_model_isEog(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let model = get_llama_model(ctx, &this)?;
     let token = cc.arg(0).to_number(ctx)?.to_i32();
@@ -674,7 +673,7 @@ fn js_model_createContext(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
     Ok(ctx_obj.into())
 }
 
-fn tokenize(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+fn js_model_tokenize(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let llm_model = get_llama_model(ctx, &this)?;
     let text = cc.arg(0).to_string(ctx)?;
@@ -694,7 +693,7 @@ fn tokenize(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     Ok(res.into())
 }
 
-fn detokenize(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+fn js_model_detokenize(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let model = get_llama_model(ctx, &this)?;
 
@@ -739,7 +738,7 @@ fn detokenize(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         .map(JSValue::String)
 }
 
-fn model_get_meta(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+fn js_model_getMeta(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let model = get_llama_model(ctx, &this)?;
     let key = cc.arg(0).to_string(ctx)?;
@@ -756,7 +755,7 @@ fn model_get_meta(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     }
 }
 
-fn model_get_meta_keys(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+fn js_model_getMetaKeys(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let model = get_llama_model(ctx, &this)?;
     let count = model.meta_count();
@@ -775,7 +774,7 @@ fn model_get_meta_keys(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     Array::from_values(ctx, lst).map(JSValue::from)
 }
 
-fn model_lookup_token_text(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+fn js_model_lookupTokenText(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let model = get_llama_model(ctx, &this)?;
     let token = cc.arg(0).to_number(ctx)?.to_i32();
@@ -898,7 +897,7 @@ fn get_preprocessed_template(
     Ok(processed)
 }
 
-fn model_render_template(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+fn js_model_renderTemplate(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let model = get_llama_model(ctx, &this)?;
 
@@ -1032,7 +1031,7 @@ fn model_render_template(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         .map(JSValue::String)
 }
 
-fn model_dispose(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+fn js_model_dispose(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut this = cc.this();
     let payload = this
         .retrive_object_payload_mut(ctx, JSLlamaModel::class_id())?
@@ -1048,31 +1047,40 @@ fn model_dispose(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 }
 
 const CLASS_MODEL_PROTO_ENTRIES: &[FieldDef] = &[
-    FieldDef::GETSET("bosToken", Some(get_prop), None, PROP_BOS_TOKEN as _),
-    FieldDef::GETSET("path", Some(get_prop), None, PROP_PATH as _),
-    FieldDef::GETSET("parameters", Some(get_prop), None, PROP_PARAMETERS as _),
-    FieldDef::GETSET("vocabSize", Some(get_prop), None, PROP_VOCAB_SIZE as _),
-    FieldDef::GETSET("bosText", Some(get_prop), None, PROP_BOS_TEXT as _),
-    FieldDef::GETSET("eosToken", Some(get_prop), None, PROP_EOS_TOKEN as _),
-    FieldDef::GETSET("eosText", Some(get_prop), None, PROP_EOS_TEXT as _),
-    FieldDef::GETSET("eotToken", Some(get_prop), None, PROP_EOT_TOKEN as _),
-    FieldDef::GETSET("eotText", Some(get_prop), None, PROP_EOT_TEXT as _),
-    FieldDef::GETSET("sepToken", Some(get_prop), None, PROP_SEP_TOKEN as _),
-    FieldDef::GETSET("sepText", Some(get_prop), None, PROP_SEP_TEXT as _),
+    FieldDef::GETSET("bosToken", Some(js_mode_getter), None, PROP_BOS_TOKEN as _),
+    FieldDef::GETSET("path", Some(js_mode_getter), None, PROP_PATH as _),
+    FieldDef::GETSET(
+        "parameters",
+        Some(js_mode_getter),
+        None,
+        PROP_PARAMETERS as _,
+    ),
+    FieldDef::GETSET(
+        "vocabSize",
+        Some(js_mode_getter),
+        None,
+        PROP_VOCAB_SIZE as _,
+    ),
+    FieldDef::GETSET("bosText", Some(js_mode_getter), None, PROP_BOS_TEXT as _),
+    FieldDef::GETSET("eosToken", Some(js_mode_getter), None, PROP_EOS_TOKEN as _),
+    FieldDef::GETSET("eosText", Some(js_mode_getter), None, PROP_EOS_TEXT as _),
+    FieldDef::GETSET("eotToken", Some(js_mode_getter), None, PROP_EOT_TOKEN as _),
+    FieldDef::GETSET("eotText", Some(js_mode_getter), None, PROP_EOT_TEXT as _),
+    FieldDef::GETSET("sepToken", Some(js_mode_getter), None, PROP_SEP_TOKEN as _),
+    FieldDef::GETSET("sepText", Some(js_mode_getter), None, PROP_SEP_TEXT as _),
     FieldDef::CALL("createContext", 1, js_model_createContext, 0),
-    FieldDef::CALL("createEngine", 2, js_model_createEngine, 0),
     FieldDef::CALL("createSamplerChain", 1, js_model_createSamplerChain, 0),
-    FieldDef::CALL("tokenize", 1, tokenize, 0),
-    FieldDef::CALL("detokenize", 1, detokenize, 0),
-    FieldDef::CALL("lookupTokenText", 1, model_lookup_token_text, 0),
-    FieldDef::CALL("isEog", 1, model_is_eog, 0),
-    FieldDef::CALL("getMeta", 1, model_get_meta, 0),
-    FieldDef::CALL("getMetaKeys", 0, model_get_meta_keys, 0),
-    FieldDef::CALL("renderTemplate", 2, model_render_template, 0),
-    FieldDef::CALL("dispose", 0, model_dispose, 0),
+    FieldDef::CALL("tokenize", 1, js_model_tokenize, 0),
+    FieldDef::CALL("detokenize", 1, js_model_detokenize, 0),
+    FieldDef::CALL("lookupTokenText", 1, js_model_lookupTokenText, 0),
+    FieldDef::CALL("isEog", 1, js_model_isEog, 0),
+    FieldDef::CALL("getMeta", 1, js_model_getMeta, 0),
+    FieldDef::CALL("getMetaKeys", 0, js_model_getMetaKeys, 0),
+    FieldDef::CALL("renderTemplate", 2, js_model_renderTemplate, 0),
+    FieldDef::CALL("dispose", 0, js_model_dispose, 0),
 ];
 
-fn load_model(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+fn js_model_load(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let v = cc.arg(0).to_string(ctx)?;
     let file_name = v.content().encode_utf8(false).to_string();
 
@@ -1108,7 +1116,7 @@ fn load_model(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     Ok(promise.into())
 }
 
-const CLASS_MODEL_ENTRIES: &[FieldDef] = &[FieldDef::CALL("load", 1, load_model, 0)];
+const CLASS_MODEL_ENTRIES: &[FieldDef] = &[FieldDef::CALL("load", 1, js_model_load, 0)];
 
 pub struct JSLlamaModel;
 

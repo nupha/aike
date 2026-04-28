@@ -3,20 +3,22 @@ use std::{
     cell::Cell,
     ffi::c_void,
     sync::{Arc, Mutex},
+    time::Duration,
 };
 
 use linkme::distributed_slice;
 use llama_cpp_ffi::{LlamaContext, SamplingParams};
 use zuqe::{
-    CallContext, ClassDef, ClassID, FieldDef, IntOrFloat, JSResult, JSValue, Object, Runtime,
-    ScopedContext,
+    CallContext, ClassDef, ClassID, FieldDef, IntOrFloat, JS_PROP_ENUMERABLE, JSResult, JSValue,
+    Object, Runtime, ScopedContext,
     builtins::{promise::Promise, typed_array::TypedArray},
 };
 
 use crate::{
     USER_CLASS_DEFS,
+    class_llama_engine::{JSLlamaEngine, parse_engine_params},
     class_llama_sampler::{SamplerId, SamplerSpec, get_sampler_id, get_sampler_spec_by_id},
-    engine::Token,
+    engine::{Engine, Token},
     worker::WorkerPool,
 };
 
@@ -197,7 +199,7 @@ fn get_llama_context_wrap(
     }
 }
 
-fn get_prop(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+fn js_context_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut this = cc.this();
     let llm_ctx_wrap = get_llama_context_wrap(ctx, &mut this)?;
 
@@ -233,7 +235,7 @@ fn get_prop(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     Ok(val)
 }
 
-fn decode(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+fn js_context_decode(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut this = cc.this();
     let llm_ctx_wrap = get_llama_context_wrap(ctx, &mut this)?;
 
@@ -295,7 +297,7 @@ fn decode(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     Ok(promise.into())
 }
 
-fn sample(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+fn js_context_sample(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut this = cc.this();
     let llm_ctx_wrap = get_llama_context_wrap(ctx, &mut this)?;
 
@@ -380,7 +382,7 @@ fn sample(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     Ok(promise.into())
 }
 
-fn reset(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+fn js_context_reset(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut this = cc.this();
     let llm_ctx_wrap = get_llama_context_wrap(ctx, &mut this)?;
 
@@ -411,7 +413,7 @@ fn reset(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     Ok(promise.into())
 }
 
-fn get_stats(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+fn js_context_getStats(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut this = cc.this();
     let llm_ctx_wrap = get_llama_context_wrap(ctx, &mut this)?;
 
@@ -447,7 +449,7 @@ fn get_stats(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     Ok(promise.into())
 }
 
-fn embed_tokens(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+fn js_context_embedTokens(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut this = cc.this();
     let llm_ctx_wrap = get_llama_context_wrap(ctx, &mut this)?;
 
@@ -484,7 +486,74 @@ fn embed_tokens(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     Ok(promise.into())
 }
 
-fn dispose(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+fn js_context_createEngine(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let mut this = cc.this();
+
+    // Parse engine options first, before taking the LlamaContext.
+    let opts = if cc.length() > 0 {
+        let v = cc.arg(0);
+        if v.is_undefined() || v.is_null() {
+            None
+        } else {
+            Some(v.as_object().copied().ok_or_else(|| {
+                ctx.throw_type_error("engineOptions must be object");
+                -1
+            })?)
+        }
+    } else {
+        None
+    };
+    let eng_params = parse_engine_params(ctx, opts.as_ref())?;
+
+    // Take LlamaContext out of the wrap.
+    let wrap = {
+        let payload = this
+            .retrive_object_payload_mut(ctx, JSLlamaContext::class_id())?
+            .other_mut()
+            .unwrap();
+        let opaque = payload.opaque();
+        if opaque.is_null() {
+            ctx.throw_type_error("Context was disposed");
+            return Err(-1);
+        }
+        unsafe { (&*opaque.cast::<Arc<LlamaContextWrap>>()).clone() }
+    };
+    let llm_ctx = wrap.inner.lock().unwrap().take().ok_or_else(|| {
+        ctx.throw_type_error("Context was disposed");
+        -1
+    })?;
+
+    let seq_cap = llm_ctx.n_seq_max().max(1) as usize;
+    let mut max_parallel = eng_params.max_parallel;
+    if max_parallel > seq_cap {
+        log::warn!(
+            "createEngine: maxParallel ({}) is greater than sequences ({}); clamping maxParallel to sequences",
+            max_parallel,
+            seq_cap,
+        );
+        max_parallel = seq_cap;
+    }
+
+    let engine = Engine::start(
+        max_parallel,
+        Duration::from_millis(eng_params.idle_sleep_ms),
+        eng_params.slot_match_threshold,
+        eng_params.max_tokens,
+        llm_ctx,
+    );
+
+    let model_val = this.get_property_str(ctx, "model")?;
+    let _ = this.set_property_str(ctx, "model", JSValue::UNDEFINED);
+
+    let mut engine_obj = JSLlamaEngine::new_instance(ctx, engine)?;
+    if !model_val.is_undefined() {
+        engine_obj.define_property_value_str(ctx, "model", model_val, JS_PROP_ENUMERABLE)?;
+    }
+
+    Ok(engine_obj.into())
+}
+
+fn js_context_dispose(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut this = cc.this();
     let llm_ctx_wrap = get_llama_context_wrap(ctx, &mut this)?;
 
@@ -515,15 +584,31 @@ fn dispose(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 }
 
 const CLASS_CONTEXT_PROTO: &[FieldDef] = &[
-    FieldDef::GETSET("contextSize", Some(get_prop), None, PROP_CTX_SIZE as _),
-    FieldDef::GETSET("batchSize", Some(get_prop), None, PROP_BATCH_SIZE as _),
-    FieldDef::GETSET("isDisposed", Some(get_prop), None, PROP_IS_DISPOSED as _),
-    FieldDef::CALL("decode", 2, decode, 0),
-    FieldDef::CALL("sample", 2, sample, 0),
-    FieldDef::CALL("reset", 0, reset, 0),
-    FieldDef::CALL("embedTokens", 1, embed_tokens, 0),
-    FieldDef::CALL("getStats", 0, get_stats, 0),
-    FieldDef::CALL("dispose", 0, dispose, 0),
+    FieldDef::GETSET(
+        "contextSize",
+        Some(js_context_getter),
+        None,
+        PROP_CTX_SIZE as _,
+    ),
+    FieldDef::GETSET(
+        "batchSize",
+        Some(js_context_getter),
+        None,
+        PROP_BATCH_SIZE as _,
+    ),
+    FieldDef::GETSET(
+        "isDisposed",
+        Some(js_context_getter),
+        None,
+        PROP_IS_DISPOSED as _,
+    ),
+    FieldDef::CALL("decode", 2, js_context_decode, 0),
+    FieldDef::CALL("sample", 2, js_context_sample, 0),
+    FieldDef::CALL("reset", 0, js_context_reset, 0),
+    FieldDef::CALL("embedTokens", 1, js_context_embedTokens, 0),
+    FieldDef::CALL("getStats", 0, js_context_getStats, 0),
+    FieldDef::CALL("createEngine", 1, js_context_createEngine, 0),
+    FieldDef::CALL("dispose", 0, js_context_dispose, 0),
 ];
 
 pub struct JSLlamaContext;
