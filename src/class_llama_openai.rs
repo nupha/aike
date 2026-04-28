@@ -12,21 +12,18 @@ use liter_llm::{
     DefaultClient, LlmClient,
 };
 use zuqe::{
-    Array, CallContext, ClassCtorDef, ClassDef, ClassID, FieldDef, JSResult, JSValue, Object,
-    Runtime, ScopedContext,
+    Array, CallContext, ClassCtorDef, ClassDef, ClassID, FieldDef, JSResult, JSValue, Runtime,
+    ScopedContext,
     builtins::{iterator::AsyncIterableIterator, promise::Promise},
 };
 
 use crate::USER_CLASS_DEFS;
 
-// ---------------------------------------------------------------------------
-// Constructor: new OpenAI({apiKey, baseUrl, model?, timeout?})
-// ---------------------------------------------------------------------------
-
+/// Constructor: new OpenAI({apiKey, baseUrl, model?, timeout?})
 fn js_openai_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let opts = cc.arg(0);
     let opts_obj = opts.as_object().copied().ok_or_else(|| {
-        ctx.throw_type_error("OpenAI requires options object: {apiKey, baseUrl}");
+        ctx.throw_type_error("OpenAI requires options object");
         -1
     })?;
 
@@ -34,7 +31,7 @@ fn js_openai_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         .get_property_str(ctx, "apiKey")?
         .as_string()
         .map(|s| s.content().encode_utf8(false).to_string())
-        .unwrap_or_else(|| "no-key".to_string());
+        .unwrap_or_else(|| "".to_string());
 
     let mut config_builder = ClientConfigBuilder::new(&api_key);
 
@@ -50,22 +47,20 @@ fn js_openai_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         config_builder = config_builder.timeout(Duration::from_secs(secs));
     }
 
-    let config = config_builder.build();
-
     // Optional default model
     let default_model: Option<String> = opts_obj
         .get_property_str(ctx, "model")?
         .as_string()
         .map(|s| s.content().encode_utf8(false).to_string());
 
-    let client = DefaultClient::new(config, default_model.as_deref()).map_err(|e| {
-        ctx.throw_internal_error(&format!("failed to create OpenAI client: {e}"));
-        -1
-    })?;
+    let client =
+        DefaultClient::new(config_builder.build(), default_model.as_deref()).map_err(|e| {
+            ctx.throw_internal_error(&format!("failed to create OpenAI client: {e}"));
+            -1
+        })?;
 
-    let opaque = Arc::into_raw(Arc::new(client)) as *mut c_void;
-
-    ctx.create_class_instance_with_opaque(JSOpenAI::class_id(), opaque)
+    let opaque = Arc::into_raw(Arc::new(client)).cast::<c_void>();
+    ctx.create_class_instance_with_opaque(JSOpenAI::class_id(), opaque as _)
         .map_err(|e| {
             let p = e.other().unwrap();
             let _ = unsafe { Arc::from_raw(p.opaque().cast::<DefaultClient>()) };
@@ -74,10 +69,7 @@ fn js_openai_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         .map(|obj| obj.into())
 }
 
-// ---------------------------------------------------------------------------
-// Get Arc<DefaultClient> from JS value (bumps strong count)
-// ---------------------------------------------------------------------------
-
+/// Get Arc<DefaultClient> from JS value (bumps strong count)
 fn get_client_arc(ctx: &mut ScopedContext, val: &JSValue) -> Result<Arc<DefaultClient>, i32> {
     let payload = val
         .retrive_object_payload(ctx, JSOpenAI::class_id())?
@@ -95,10 +87,7 @@ fn get_client_arc(ctx: &mut ScopedContext, val: &JSValue) -> Result<Arc<DefaultC
     }
 }
 
-// ---------------------------------------------------------------------------
-// Parse JS messages array → Vec<Message>
-// ---------------------------------------------------------------------------
-
+/// Parse JS messages array → Vec<Message>
 fn parse_messages(ctx: &mut ScopedContext, val: &JSValue) -> Result<Vec<Message>, i32> {
     let arr = val.as_object_Array().copied().ok_or_else(|| {
         ctx.throw_type_error("messages must be an array");
@@ -174,10 +163,7 @@ enum ChatReply {
     Error(String),
 }
 
-// ---------------------------------------------------------------------------
-// chatCompletions(messages, {model?, stream?, temperature?, maxTokens?, topP?, stop?})
-// ---------------------------------------------------------------------------
-
+/// chatCompletions(messages, {model?, stream?, temperature?, maxTokens?, topP?, stop?})
 fn js_openai_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let client = get_client_arc(ctx, &this)?;
@@ -258,13 +244,14 @@ fn js_openai_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
     };
 
     if stream {
-        // --- Streaming: AsyncIterableIterator ---
+        // Streaming: AsyncIterableIterator
         let (tx, rx) = crossbeam::channel::bounded::<ChatReply>(1);
 
         tokio::spawn(async move {
             match client.chat_stream(req).await {
                 Ok(stream) => {
                     use futures_util::StreamExt;
+
                     let mut pin = std::pin::pin!(stream);
                     while let Some(result) = pin.next().await {
                         match result {
@@ -303,7 +290,7 @@ fn js_openai_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
         )
         .map(JSValue::from)
     } else {
-        // --- Non-streaming: Promise ---
+        // Non-streaming: Promise
         let (tx, rx) = crossbeam::channel::bounded::<Result<ChatCompletionResponse, String>>(1);
 
         tokio::spawn(async move {
@@ -324,10 +311,7 @@ fn js_openai_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
     }
 }
 
-// ---------------------------------------------------------------------------
-// dispose
-// ---------------------------------------------------------------------------
-
+/// dispose
 fn js_openai_dispose(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut this = cc.this();
     let payload = this
@@ -342,10 +326,6 @@ fn js_openai_dispose(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     }
     Ok(JSValue::UNDEFINED)
 }
-
-// ---------------------------------------------------------------------------
-// Response / Chunk → JS object conversion via serde_json
-// ---------------------------------------------------------------------------
 
 /// Convert ChatCompletionResponse to a JS object.
 fn response_to_js(ctx: &mut ScopedContext, resp: &ChatCompletionResponse) -> JSResult {
