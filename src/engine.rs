@@ -2,8 +2,8 @@ use std::{
     cell::UnsafeCell,
     collections::{HashSet, VecDeque},
     sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     thread::{self, JoinHandle},
     time::Duration,
@@ -166,6 +166,11 @@ pub struct Engine {
     model_name: String,
     default_max_tokens: usize,
     ubatch_size: usize,
+
+    /// Whether the HTTP server is currently running.
+    is_serving: AtomicBool,
+    /// Shutdown sender for the active HTTP server (if any).
+    shutdown_tx: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
 
     //
     // Worker-exclusive (mutated only by the worker thread)
@@ -396,6 +401,8 @@ impl Engine {
             model_name,
             default_max_tokens,
             ubatch_size,
+            is_serving: AtomicBool::new(false),
+            shutdown_tx: Mutex::new(None),
             llm_ctx: UnsafeCell::new(llm_ctx),
             slot_cached_tokens: UnsafeCell::new(vec![Vec::new(); max_parallel]),
             slot_samplers: UnsafeCell::new((0..max_parallel).map(|_| None).collect()),
@@ -440,6 +447,24 @@ impl Engine {
     }
     pub fn default_max_tokens(&self) -> usize {
         self.default_max_tokens
+    }
+
+    pub fn is_serving(&self) -> bool {
+        self.is_serving.load(Ordering::Relaxed)
+    }
+
+    pub fn set_serving(&self, serving: bool) {
+        self.is_serving.store(serving, Ordering::Relaxed);
+    }
+
+    pub fn set_shutdown_tx(&self, tx: Option<tokio::sync::oneshot::Sender<()>>) {
+        *self.shutdown_tx.lock().unwrap() = tx;
+    }
+
+    pub fn request_stop(&self) {
+        if let Some(tx) = self.shutdown_tx.lock().unwrap().take() {
+            let _ = tx.send(());
+        }
     }
 
     pub fn push_task(

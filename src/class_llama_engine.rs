@@ -194,6 +194,19 @@ fn completion_iter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     .map(JSValue::from)
 }
 
+fn stop_serve(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let this = cc.this();
+    let engine = get_engine(ctx, &this)?;
+    engine.request_stop();
+    Ok(JSValue::UNDEFINED)
+}
+
+fn is_serving_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let this = cc.this();
+    let engine = get_engine(ctx, &this)?;
+    Ok(JSValue::Bool(engine.is_serving()))
+}
+
 fn dispose(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut this = cc.this();
     let payload = this
@@ -218,6 +231,8 @@ const CLASS_ENGINE_PROTO: &[FieldDef] = &[
         crate::class_openai_server::engine_httpServe,
         0,
     ),
+    FieldDef::CALL("stopServe", 0, stop_serve, 0),
+    FieldDef::GETSET("isServing", Some(is_serving_getter), None, 0),
     FieldDef::CALL("dispose", 0, dispose, 0),
 ];
 
