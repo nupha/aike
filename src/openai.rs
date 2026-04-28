@@ -305,43 +305,36 @@ fn render_chat_template(
 }
 
 #[derive(Clone)]
+#[repr(transparent)]
 struct AppState {
     engine: Arc<Engine>,
-    #[deprecated]
-    model: LlamaModel,
-    model_id: String,
-}
-
-fn build_router(engine: Arc<Engine>, model: LlamaModel) -> Router {
-    let model_id = engine.model_name().to_string();
-    let state = AppState {
-        engine,
-        model,
-        model_id,
-    };
-
-    Router::new()
-        .route("/", get(handle_root))
-        .route("/health", get(handle_health))
-        .route("/models", get(handle_models))
-        .route("/v1/health", get(handle_health))
-        .route("/v1/models", get(handle_models))
-        .route("/v1/chat/completions", post(handle_chat_completions))
-        .route("/v1/completions", post(handle_completions))
-        .with_state(state)
-        .layer(CorsLayer::permissive())
 }
 
 impl Engine {
+    fn build_router(self: Arc<Self>) -> Router {
+        let state = AppState { engine: self };
+
+        Router::new()
+            .route("/", get(handle_root))
+            .route("/health", get(handle_health))
+            .route("/models", get(handle_models))
+            .route("/v1/health", get(handle_health))
+            .route("/v1/models", get(handle_models))
+            .route("/v1/chat/completions", post(handle_chat_completions))
+            .route("/v1/completions", post(handle_completions))
+            .with_state(state)
+            .layer(CorsLayer::permissive())
+    }
+
     /// Start http server with Engine (in current thread), blocks until shutdown signal.
     pub async fn http_server_with_shutdown(
         self: Arc<Self>,
-        model: LlamaModel,
         host: &str,
         port: u16,
         shutdown_rx: tokio::sync::oneshot::Receiver<()>,
     ) -> Result<(), String> {
-        let app = build_router(self, model);
+        let app = self.build_router();
+
         let addr = format!("{host}:{port}");
         let listener = tokio::net::TcpListener::bind(&addr)
             .await
@@ -374,7 +367,7 @@ async fn handle_health() -> impl IntoResponse {
 async fn handle_models(State(state): State<AppState>) -> impl IntoResponse {
     let created = now_unix_s();
     let data = vec![ModelInfo {
-        id: state.model_id,
+        id: state.engine.model_name().to_string(),
         object: "model",
         created,
         owned_by: "local",
@@ -428,7 +421,6 @@ async fn handle_chat_completions(
 
     let is_chat = true;
     let stream = req.stream;
-    let model_id = state.model_id.clone();
     let max_tokens = req.max_tokens.unwrap_or(0);
     let temperature = req.temperature;
     let top_p = req.top_p;
@@ -440,17 +432,18 @@ async fn handle_chat_completions(
         .unwrap_or(false);
 
     // Render chat template -> tokenize prompt
-    let prompt_tokens = match build_chat_prompt_tokens(&state.model, &req.messages) {
-        Ok(tokens) => tokens,
-        Err(e) => {
-            eprintln!("[DEBUG handle_chat_completions] build_chat_prompt_tokens error: {e}");
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(oai_error(e, "invalid_request_error")),
-            )
-                .into_response();
-        }
-    };
+    let prompt_tokens =
+        match build_chat_prompt_tokens(state.engine.llm_ctx().model(), &req.messages) {
+            Ok(tokens) => tokens,
+            Err(e) => {
+                eprintln!("[DEBUG handle_chat_completions] build_chat_prompt_tokens error: {e}");
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(oai_error(e, "invalid_request_error")),
+                )
+                    .into_response();
+            }
+        };
 
     let seq_hint = req
         .id_slot
@@ -488,15 +481,14 @@ async fn handle_chat_completions(
     };
 
     if stream {
-        let (tx, rx_tokio) = tokio::sync::mpsc::unbounded_channel::<String>();
-
         // Bridge crossbeam Receiver -> tokio mpsc for SSE
+        let (tx, rx_tokio) = tokio::sync::mpsc::unbounded_channel::<String>();
         let _ = tokio::task::spawn_blocking(move || {
             bridge_engine_reply_to_sse(
                 rx,
                 tx,
                 is_chat,
-                &model_id,
+                state.engine.model_name(),
                 &respond_id,
                 include_usage,
                 n_prompt_tokens,
@@ -511,10 +503,10 @@ async fn handle_chat_completions(
             .into_response()
     } else {
         // Unary: collect all EngineReply, build final OAI response
-        let join = tokio::task::spawn_blocking(move || {
-            collect_unary_reply(rx, is_chat, &model_id, &respond_id, n_prompt_tokens)
+        let join = tokio::task::spawn_blocking({
+            let model_id = state.engine.model_name().to_string();
+            move || collect_unary_reply(rx, is_chat, &model_id, &respond_id, n_prompt_tokens)
         });
-
         match join.await {
             Ok(Ok(res)) => Json::<serde_json::Value>(res).into_response(),
             Ok(Err((code, body))) => (code, Json(body)).into_response(),
@@ -595,7 +587,6 @@ async fn handle_completions(
 
     let is_chat = false;
     let stream = req.stream;
-    let model_id = state.model_id.clone();
     let max_tokens = req.max_tokens.unwrap_or(0);
     let temperature = req.temperature;
     let top_p = req.top_p;
@@ -603,7 +594,7 @@ async fn handle_completions(
 
     // Tokenize the first prompt
     let prompt_text = req.prompt.first().cloned().unwrap_or_default();
-    let prompt_tokens = match tokenize_prompt(&state.model, &prompt_text) {
+    let prompt_tokens = match tokenize_prompt(state.engine.llm_ctx().model(), &prompt_text) {
         Ok(tokens) => tokens,
         Err(e) => {
             return (
@@ -657,7 +648,7 @@ async fn handle_completions(
                 rx,
                 tx,
                 is_chat,
-                &model_id,
+                state.engine.model_name(),
                 &respond_id,
                 false,
                 n_prompt_tokens,
@@ -671,6 +662,7 @@ async fn handle_completions(
             .keep_alive(axum::response::sse::KeepAlive::new().interval(Duration::from_secs(15)))
             .into_response()
     } else {
+        let model_id = state.engine.model_name().to_string();
         let join = tokio::task::spawn_blocking(move || {
             collect_unary_reply(rx, is_chat, &model_id, &respond_id, n_prompt_tokens)
         });
@@ -748,10 +740,10 @@ fn collect_unary_reply(
             }
             Ok(EngineReply::Stop(reason)) => {
                 finish_reason = match reason {
-                    StopReason::Eog => "stop".to_string(),
                     StopReason::MaxTokens => "length".to_string(),
-                    StopReason::Word(_) => "stop".to_string(),
-                    StopReason::PrefillOnly => "stop".to_string(),
+                    StopReason::Eog | StopReason::Word(_) | StopReason::PrefillOnly => {
+                        "stop".to_string()
+                    }
                 };
                 break;
             }

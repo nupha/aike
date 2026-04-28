@@ -200,7 +200,7 @@ impl Drop for Engine {
 }
 
 impl Engine {
-    fn llm_ctx(&self) -> &LlamaContext {
+    pub(super) fn llm_ctx(&self) -> &LlamaContext {
         unsafe { &*self.llm_ctx.get() }
     }
     fn llm_ctx_mut(&self) -> &mut LlamaContext {
@@ -453,12 +453,20 @@ impl Engine {
         self.is_serving.load(Ordering::Relaxed)
     }
 
-    pub fn set_serving(&self, serving: bool) {
-        self.is_serving.store(serving, Ordering::Relaxed);
+    /// Mark engine as serving and store the shutdown sender.
+    /// Panics in debug builds if already serving.
+    pub fn set_serving(&self, tx: tokio::sync::oneshot::Sender<()>) {
+        debug_assert!(!self.is_serving(), "engine is already serving");
+        self.is_serving.store(true, Ordering::Relaxed);
+        *self.shutdown_tx.lock().unwrap() = Some(tx);
     }
 
-    pub fn set_shutdown_tx(&self, tx: Option<tokio::sync::oneshot::Sender<()>>) {
-        *self.shutdown_tx.lock().unwrap() = tx;
+    /// Mark engine as not serving and clear the shutdown sender.
+    /// Panics in debug builds if not currently serving.
+    pub fn unset_serving(&self) {
+        debug_assert!(self.is_serving(), "engine is not serving");
+        self.is_serving.store(false, Ordering::Relaxed);
+        *self.shutdown_tx.lock().unwrap() = None;
     }
 
     pub fn request_stop(&self) {

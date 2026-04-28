@@ -3,25 +3,16 @@ use zuqe::{
     builtins::promise::{Promise, PromiseResultSlot},
 };
 
-use crate::{class_llama_engine::get_engine_arc, class_llama_model::get_llama_model};
+use crate::class_llama_engine::get_engine_arc;
 
-/// Engine.httpServe() – start an OpenAI-compatible HTTP server for this Engine.
-///
-/// Returns a Promise that resolves when the server shuts down.
-/// The server runs on the existing tokio runtime (no extra thread).
-///
-/// Options:
-///   host: string           (default "0.0.0.0")
-///   port: number           (default 8080)
 pub(super) fn engine_httpServe(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let engine = get_engine_arc(ctx, &this)?;
 
-    // Get model from engine's "model" property (set by createEngine)
-    let model_val = this.get_property_str(ctx, "model")?;
-    let model = get_llama_model(ctx, &model_val)?;
-
     // Parse options object
+    let mut host = "0.0.0.0".to_string();
+    let mut port: u16 = 8080;
+
     let opts = if cc.length() > 0 {
         let v = cc.arg(0);
         if v.is_undefined() || v.is_null() {
@@ -35,11 +26,6 @@ pub(super) fn engine_httpServe(ctx: &mut ScopedContext, cc: CallContext) -> JSRe
     } else {
         None
     };
-
-    // Defaults
-    let mut host = "0.0.0.0".to_string();
-    let mut port: u16 = 8080;
-
     if let Some(opts) = opts.as_ref() {
         let v = opts.get_property_str(ctx, "host")?;
         if !v.is_undefined() {
@@ -64,8 +50,7 @@ pub(super) fn engine_httpServe(ctx: &mut ScopedContext, cc: CallContext) -> JSRe
     }
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
-    engine.set_shutdown_tx(Some(shutdown_tx));
-    engine.set_serving(true);
+    engine.set_serving(shutdown_tx);
 
     let result_slot = PromiseResultSlot::<Result<(), String>>::new();
 
@@ -81,11 +66,10 @@ pub(super) fn engine_httpServe(ctx: &mut ScopedContext, cc: CallContext) -> JSRe
     tokio::spawn(async move {
         let res = engine
             .clone()
-            .http_server_with_shutdown(model, &host, port, shutdown_rx)
+            .http_server_with_shutdown(&host, port, shutdown_rx)
             .await;
 
-        engine.set_serving(false);
-        engine.set_shutdown_tx(None);
+        engine.unset_serving();
         let _ = result_slot.commit(res);
     });
 
