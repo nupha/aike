@@ -6,7 +6,7 @@ use std::{cell::Cell, ffi::c_void, sync::Arc, time::Duration};
 use linkme::distributed_slice;
 use liter_llm::types::common::{
     AssistantMessage, ChatCompletionTool, Message, ResponseFormat, StopSequence, SystemMessage,
-    ToolChoice, ToolChoiceMode, ToolMessage, ToolType, UserContent, UserMessage,
+    ToolChoice, ToolChoiceMode, ToolMessage, UserContent, UserMessage,
 };
 use liter_llm::{
     ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, ClientConfigBuilder,

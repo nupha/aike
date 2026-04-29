@@ -22,6 +22,7 @@ use crate::{
     USER_CLASS_DEFS,
     class_llama_context::{JSLlamaContext, parse_tokens},
     class_llama_sampler::js_model_createSamplerChain,
+    helpers::{JinjaMessage, create_minijinja_env, preprocess_chat_template},
 };
 
 const MODEL_PATH_HIDDEN_KEY: &str = "__modelPath";
@@ -786,12 +787,6 @@ fn js_model_lookupTokenText(ctx: &mut ScopedContext, cc: CallContext) -> JSResul
     }
 }
 
-#[derive(Serialize)]
-struct JinjaMessage {
-    role: String,
-    content: String,
-}
-
 #[derive(Debug)]
 struct WellKnownTemplateVars {
     tools: JsonValue,
@@ -861,11 +856,6 @@ impl WellKnownTemplateVars {
             )?,
         })
     }
-}
-
-fn preprocess_chat_template(src: &str) -> String {
-    src.replace("content.startswith(", "startswith(content, ")
-        .replace("content.endswith(", "endswith(content, ")
 }
 
 fn get_preprocessed_template(
@@ -973,13 +963,7 @@ fn js_model_renderTemplate(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
 
     let processed_template = get_preprocessed_template(ctx, &this, &model)?;
 
-    let mut env = Environment::new();
-    env.add_function("startswith", |s: String, prefix: String| -> bool {
-        s.starts_with(&prefix)
-    });
-    env.add_function("endswith", |s: String, suffix: String| -> bool {
-        s.ends_with(&suffix)
-    });
+    let mut env = create_minijinja_env();
     env.add_template("chat", &processed_template).map_err(|e| {
         ctx.throw_internal_error(&format!("invalid chat template: {e}"));
         -1

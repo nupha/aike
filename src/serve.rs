@@ -11,7 +11,7 @@ use axum::{
 use crossbeam::channel::Receiver;
 use futures_util::StreamExt;
 use llama_cpp_ffi::LlamaModel;
-use minijinja::{Environment, context};
+use minijinja::context;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio_stream::wrappers::UnboundedReceiverStream;
@@ -19,6 +19,7 @@ use tower_http::cors::CorsLayer;
 use uuid::Uuid;
 
 use crate::engine::{Engine, EngineReply, OutputMode, StopReason, Token, now_unix_s};
+use crate::helpers::{JinjaMessage, create_minijinja_env, preprocess_chat_template};
 
 #[derive(Debug, Serialize)]
 struct ErrorResponse {
@@ -265,31 +266,13 @@ struct Usage {
     total_tokens: usize,
 }
 
-#[derive(Serialize)]
-struct JinjaMessage<'a> {
-    role: &'a str,
-    content: &'a str,
-}
-
-/// Preprocess chat template for minijinja compatibility.
-fn preprocess_chat_template(src: &str) -> String {
-    src.replace("content.startswith(", "startswith(content, ")
-        .replace("content.endswith(", "endswith(content, ")
-}
-
 fn render_chat_template(
-    template_src: &str,
+    tmpl: &str,
     messages: &[JinjaMessage],
     eos_token: &str,
 ) -> Result<String, String> {
-    let tmpl_str = preprocess_chat_template(template_src);
-    let mut env = Environment::new();
-    env.add_function("startswith", |s: String, prefix: String| -> bool {
-        s.starts_with(&prefix)
-    });
-    env.add_function("endswith", |s: String, suffix: String| -> bool {
-        s.ends_with(&suffix)
-    });
+    let tmpl_str = preprocess_chat_template(tmpl);
+    let mut env = create_minijinja_env();
     env.add_template("chat", &tmpl_str)
         .map_err(|e| format!("invalid chat template: {e}"))?;
     let tmpl = env.get_template("chat").map_err(|e| format!("{e}"))?;
@@ -327,7 +310,7 @@ impl Engine {
     }
 
     /// Start http server with Engine (in current thread), blocks until shutdown signal.
-    pub async fn http_server_with_shutdown(
+    pub async fn http_serve(
         self: Arc<Self>,
         host: &str,
         port: u16,
@@ -340,7 +323,7 @@ impl Engine {
             .await
             .map_err(|e| format!("bind failed: {e}"))?;
 
-        log::info!("openai server listening on {addr}");
+        log::info!("Engine http server listening on {addr}");
 
         axum::serve(listener, app)
             .with_graceful_shutdown(async move {
@@ -679,16 +662,12 @@ async fn handle_completions(
     }
 }
 
-//
-// Prompt building helpers
-//
-
 fn build_chat_prompt_tokens(
     model: &LlamaModel,
     messages: &[ChatMessage],
 ) -> Result<Vec<Token>, String> {
     let tmpl = model.chat_template().ok_or("model has no chat template")?;
-    let tmpl_str = tmpl
+    let tmpl = tmpl
         .to_str()
         .map_err(|e| format!("invalid template: {e}"))?;
     let eos_token = model.eos_token_text().unwrap_or_default();
@@ -701,12 +680,13 @@ fn build_chat_prompt_tokens(
             (m.role.clone(), content)
         })
         .collect();
-    let jinja_msgs: Vec<JinjaMessage<'_>> = backing
-        .iter()
+
+    let jinja_msgs: Vec<JinjaMessage> = backing
+        .into_iter()
         .map(|(role, content)| JinjaMessage { role, content })
         .collect();
 
-    let prompt = render_chat_template(tmpl_str, &jinja_msgs, &eos_token)?;
+    let prompt = render_chat_template(tmpl, &jinja_msgs, &eos_token)?;
     let tokens = tokenize_prompt(model, &prompt)?;
     Ok(tokens)
 }

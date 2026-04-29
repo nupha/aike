@@ -246,10 +246,7 @@ fn js_engine_httpServe(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         })?;
 
     tokio::spawn(async move {
-        let res = engine
-            .clone()
-            .http_server_with_shutdown(&host, port, shutdown_rx)
-            .await;
+        let res = engine.clone().http_serve(&host, port, shutdown_rx).await;
 
         engine.unset_serving();
         let _ = result_slot.commit(res);

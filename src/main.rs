@@ -12,10 +12,11 @@ mod class_llama_sampler;
 mod client;
 mod engine;
 mod global;
+mod helpers;
 mod mod_llama;
 mod mod_os;
 mod mod_std;
-mod openai;
+mod serve;
 mod worker;
 
 use std::{io::Write, process::ExitCode};
