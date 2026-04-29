@@ -10,7 +10,7 @@ use std::{
 };
 
 use crossbeam::channel::{Receiver, SendError, Sender};
-use llama_cpp_ffi::{LlamaContext, SamplerChain, SamplerKind};
+use llama_cpp_ffi::{LlamaContext, LlamaModel, SamplerChain, SamplerKind};
 
 pub type Token = i32;
 
@@ -165,6 +165,7 @@ pub struct Engine {
     input_tx: Sender<EngineTask>,
     ctrl_tx: Sender<EngineCtrlMsg>,
     num_tasks: AtomicUsize,
+    model: LlamaModel,
     model_name: String,
     default_max_tokens: usize,
     ubatch_size: usize,
@@ -202,9 +203,20 @@ unsafe impl Send for Engine {}
 unsafe impl Sync for Engine {}
 
 impl Engine {
-    pub(super) fn llm_ctx(&self) -> &LlamaContext {
+    pub fn module_name(&self) -> &str {
+        &self.model_name
+    }
+
+    pub fn model(&self) -> &LlamaModel {
+        &self.model
+    }
+
+    /// Private: access the UnsafeCell<LlamaContext> in worker thread only
+    fn llm_ctx(&self) -> &LlamaContext {
         unsafe { &*self.llm_ctx.get() }
     }
+
+    /// Private: access the UnsafeCell<LlamaContext> in worker thread only
     fn llm_ctx_mut(&self) -> &mut LlamaContext {
         unsafe { &mut *self.llm_ctx.get() }
     }
@@ -212,6 +224,7 @@ impl Engine {
     fn cached_tokens(&self) -> &Vec<Vec<Token>> {
         unsafe { &*self.slot_cached_tokens.get() }
     }
+
     fn cached_tokens_mut(&self) -> &mut Vec<Vec<Token>> {
         unsafe { &mut *self.slot_cached_tokens.get() }
     }
@@ -288,12 +301,13 @@ impl Engine {
         let cached = self.cached_tokens_mut();
         if seq_id >= cached.len() {
             return Err(format!("invalid seq id {}", seq_id));
-        }
-        if self.pending() >= self.ubatch_size {
+        } else if self.pending() >= self.ubatch_size {
             return Err("decode batch is full".to_string());
         }
+
         let idx = self.pending();
         let batch = self.llm_ctx_mut().batch_mut();
+
         unsafe {
             *batch.token.add(idx) = token;
             *batch.pos.add(idx) = pos;
@@ -301,18 +315,20 @@ impl Engine {
             *batch.n_seq_id.add(idx) = 1;
             *batch.logits.add(idx) = if need_logits { 1 } else { 0 };
         }
+
         self.set_pending(self.pending() + 1);
         cached[seq_id].push(token);
         Ok(())
     }
 
     fn decode_batch(&self) -> Result<(), String> {
-        if self.pending() == 0 {
-            return Ok(());
+        if self.pending() > 0 {
+            let lcx = self.llm_ctx_mut();
+            lcx.batch_mut().n_tokens = self.pending() as i32;
+            lcx.decode()
+        } else {
+            Ok(())
         }
-        let batch = self.llm_ctx_mut().batch_mut();
-        batch.n_tokens = self.pending() as i32;
-        self.llm_ctx_mut().decode()
     }
 
     fn sample(&self, seq_id: usize, logits_idx: i32) -> Result<Token, String> {
@@ -369,12 +385,11 @@ impl Engine {
 
     fn clear_slot(&self, seq_id: usize) {
         let cached = self.cached_tokens_mut();
-        if seq_id >= cached.len() {
-            return;
+        if seq_id < cached.len() {
+            self.llm_ctx_mut().memory_seq_rm(seq_id as i32, 0, -1);
+            cached[seq_id].clear();
+            self.samplers_mut()[seq_id] = None;
         }
-        self.llm_ctx_mut().memory_seq_rm(seq_id as i32, 0, -1);
-        cached[seq_id].clear();
-        self.samplers_mut()[seq_id] = None;
     }
 
     pub fn start(
@@ -383,15 +398,14 @@ impl Engine {
         slot_match_threshold: f32,
         default_max_tokens: usize,
     ) -> Arc<Self> {
+        let model = llm_ctx.model().clone();
+        let model_name = model
+            .meta_val_str(c"general.name")
+            .unwrap_or_else(|| model.model_desc());
+
         let num_parallel = llm_ctx.n_seq_max().max(1) as usize;
         let ubatch_size = (llm_ctx.n_ubatch() as usize).max(1);
-
         llm_ctx.init_batch(ubatch_size as i32, 0, llm_ctx.n_seq_max());
-
-        let model_name = llm_ctx
-            .model()
-            .meta_val_str(c"general.name")
-            .unwrap_or_else(|| llm_ctx.model().model_desc());
 
         let (input_tx, input_rx) = crossbeam::channel::bounded::<EngineTask>(16);
         let (ctrl_tx, ctrl_rx) = crossbeam::channel::bounded::<EngineCtrlMsg>(1);
@@ -400,6 +414,7 @@ impl Engine {
             input_tx,
             ctrl_tx,
             num_tasks: AtomicUsize::new(0),
+            model,
             model_name,
             default_max_tokens,
             ubatch_size,

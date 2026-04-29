@@ -223,7 +223,7 @@ async fn handle_chat_completions(
         .max_tokens
         .unwrap_or(state.engine.default_max_tokens() as u64) as usize;
 
-    let prompt_tokens = match build_chat_prompt_tokens(state.engine.llm_ctx().model(), &req) {
+    let prompt_tokens = match build_chat_prompt_tokens(state.engine.model(), &req) {
         Ok(tokens) => tokens,
         Err(e) => {
             return (
