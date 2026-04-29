@@ -13,7 +13,6 @@ zuqe = { path = "../../../devel/zhuque", features = [
     "crossbeam_channel",
     "serde_json_support",
 ] }
-gc-lite = "0.4.1"
 crossbeam = "0.8"
 serde = { version = "1.0", features = ["derive"] }
 serde_yaml = "0.9"

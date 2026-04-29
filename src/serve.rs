@@ -12,11 +12,13 @@ use crossbeam::channel::Receiver;
 use futures_util::StreamExt;
 use liter_llm::{
     ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, Choice, FinishReason,
-    StreamChoice, StreamDelta,
-    types::common::{AssistantMessage, ContentPart, Message, StopSequence, Usage, UserContent},
+    ReasoningEffort, StreamChoice, StreamDelta,
+    types::common::{
+        AssistantMessage, ContentPart, Message, ResponseFormat, StopSequence, ToolChoice,
+        ToolChoiceMode, Usage, UserContent,
+    },
 };
 use llama_cpp_ffi::LlamaModel;
-use minijinja::context;
 use serde::Serialize;
 use serde_json::json;
 use tokio_stream::wrappers::UnboundedReceiverStream;
@@ -25,7 +27,7 @@ use uuid::Uuid;
 
 use crate::{
     engine::{Engine, EngineReply, OutputMode, StopReason, Token, now_unix_s},
-    helpers::{JinjaMessage, create_minijinja_env, preprocess_chat_template},
+    helpers::{JinjaMessage, TemplateContext, create_minijinja_env, preprocess_chat_template},
 };
 
 #[derive(Debug, Serialize)]
@@ -66,24 +68,13 @@ struct ModelInfo {
 const DEFAULT_TEMPERATURE: f64 = 0.75;
 const DEFAULT_TOP_P: f64 = 1.0;
 
-fn render_chat_template(
-    tmpl: &str,
-    messages: &[JinjaMessage],
-    eos_token: &str,
-) -> Result<String, String> {
+fn render_chat_template(tmpl: &str, ctx: &TemplateContext) -> Result<String, String> {
     let tmpl_str = preprocess_chat_template(tmpl);
+
     let mut env = create_minijinja_env();
     env.add_template("chat", &tmpl_str)
         .map_err(|e| format!("invalid chat template: {e}"))?;
     let tmpl = env.get_template("chat").map_err(|e| format!("{e}"))?;
-    let ctx = context! {
-        messages => messages,
-        tools => None::<Vec<()>>,
-        add_generation_prompt => true,
-        enable_thinking => Some(false),
-        add_vision_id => false,
-        eos_token => eos_token,
-    };
     tmpl.render(ctx).map_err(|e| format!("{e}"))
 }
 
@@ -203,6 +194,8 @@ async fn handle_chat_completions(
         }
     };
 
+    println!("[O.o] request: {req:#?}");
+
     if req.messages.is_empty() {
         return (
             StatusCode::BAD_REQUEST,
@@ -218,8 +211,8 @@ async fn handle_chat_completions(
     let temperature = req.temperature.unwrap_or(DEFAULT_TEMPERATURE) as f32;
     let top_p = req.top_p.unwrap_or(DEFAULT_TOP_P) as f32;
     let stop_words: Vec<String> = match req.stop {
-        Some(StopSequence::Single(s)) => vec![s],
-        Some(StopSequence::Multiple(v)) => v,
+        Some(StopSequence::Single(ref s)) => vec![s.clone()],
+        Some(StopSequence::Multiple(ref v)) => v.clone(),
         None => vec![],
     };
     let include_usage = req
@@ -231,18 +224,16 @@ async fn handle_chat_completions(
         .max_tokens
         .unwrap_or(state.engine.default_max_tokens() as u64) as usize;
 
-    let prompt_tokens =
-        match build_chat_prompt_tokens(state.engine.llm_ctx().model(), &req.messages) {
-            Ok(tokens) => tokens,
-            Err(e) => {
-                eprintln!("[DEBUG handle_chat_completions] build_chat_prompt_tokens error: {e}");
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(oai_error(e, "invalid_request_error")),
-                )
-                    .into_response();
-            }
-        };
+    let prompt_tokens = match build_chat_prompt_tokens(state.engine.llm_ctx().model(), &req) {
+        Ok(tokens) => tokens,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(oai_error(e, "invalid_request_error")),
+            )
+                .into_response();
+        }
+    };
 
     let seq_hint = id_slot.and_then(|v| if v >= 0 { Some(v as usize) } else { None });
     let use_cache = cache_prompt;
@@ -324,20 +315,24 @@ async fn handle_chat_completions(
 
 fn build_chat_prompt_tokens(
     model: &LlamaModel,
-    messages: &[Message],
+    req: &ChatCompletionRequest,
 ) -> Result<Vec<Token>, String> {
+    debug_assert!(!req.messages.is_empty());
+
     let tmpl = model.chat_template().ok_or("model has no chat template")?;
     let tmpl = tmpl
         .to_str()
         .map_err(|e| format!("invalid template: {e}"))?;
+
     let eos_token = model.eos_token_text().unwrap_or_default();
+    let bos_token = model.bos_token_text().unwrap_or_default();
 
     // Convert liter_llm::Message to (role, content) pairs for template rendering
-    let backing = messages
+    let backing = req
+        .messages
         .iter()
         .map(message_to_role_content)
         .collect::<Vec<_>>();
-
     let jinja_msgs: Vec<JinjaMessage> = backing
         .into_iter()
         .map(|(role, content)| JinjaMessage {
@@ -346,9 +341,57 @@ fn build_chat_prompt_tokens(
         })
         .collect();
 
-    let prompt = render_chat_template(tmpl, &jinja_msgs, &eos_token)?;
+    // Build template context from request params (mirrors oaicompat_chat_params_parse)
+    let mut tmpl_ctx = TemplateContext::new(&jinja_msgs, eos_token, bos_token);
+
+    // tools
+    if let Some(Ok(tools)) = req.tools.as_ref().map(serde_json::to_value) {
+        tmpl_ctx.tools = Some(tools);
+    }
+
+    // tool_choice → string representation
+    if let Some(ref tc) = req.tool_choice {
+        tmpl_ctx.tool_choice = Some(tool_choice_to_string(tc));
+    }
+
+    // parallel_tool_calls
+    tmpl_ctx.parallel_tool_calls = req.parallel_tool_calls;
+
+    // enable_thinking: derive from reasoning_effort if present
+    if let Some(ref effort) = req.reasoning_effort {
+        tmpl_ctx.enable_thinking = !matches!(effort, ReasoningEffort::Low);
+    }
+
+    // response_format → json_schema
+    if let Some(ref rf) = req.response_format {
+        match rf {
+            ResponseFormat::JsonObject => {
+                // json_object without explicit schema
+            }
+            ResponseFormat::JsonSchema { json_schema } => {
+                tmpl_ctx.json_schema = Some(json_schema.schema.to_string());
+            }
+            ResponseFormat::Text => {}
+        }
+    }
+
+    let prompt = render_chat_template(tmpl, &tmpl_ctx)?;
+
     let tokens = tokenize_prompt(model, &prompt)?;
     Ok(tokens)
+}
+
+/// Convert ToolChoice enum to string for jinja template context.
+fn tool_choice_to_string(tc: &ToolChoice) -> String {
+    match tc {
+        ToolChoice::Mode(mode) => match mode {
+            ToolChoiceMode::Auto => "auto",
+            ToolChoiceMode::Required => "required",
+            ToolChoiceMode::None => "none",
+        }
+        .to_string(),
+        ToolChoice::Specific(s) => s.function.name.clone(),
+    }
 }
 
 /// Extract (role, content_text) from a liter_llm::Message for template rendering.

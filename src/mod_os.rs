@@ -7,11 +7,11 @@ use std::{
     ffi::c_void,
 };
 
-use gc_lite::{GcTrace, GcTraceCtx};
 use smallvec::SmallVec;
 use zuqe::{
     Array, CallContext, FieldDef, JS_PROP_C_W_E, JS_PROP_CONFIGURABLE, JSResult, JSValue,
     ScopedContext,
+    gc_lite::{GcTrace, GcTraceCtx},
 };
 
 // Declare windows crt functions
