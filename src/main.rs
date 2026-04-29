@@ -4,10 +4,10 @@
 #![allow(non_snake_case)]
 
 mod class_file;
+mod class_llama_client;
 mod class_llama_context;
 mod class_llama_engine;
 mod class_llama_model;
-mod class_llama_openai;
 mod class_llama_sampler;
 mod client;
 mod engine;
@@ -30,10 +30,10 @@ use zuqe::{
 
 use crate::{
     class_file::JSFile,
+    class_llama_client::JSOpenAI,
     class_llama_context::JSLlamaContext,
     class_llama_engine::JSLlamaEngine,
     class_llama_model::JSLlamaModel,
-    class_llama_openai::JSOpenAI,
     class_llama_sampler::JSSamplerChain,
     global::setup_globals,
     mod_llama::init_mod_llama,

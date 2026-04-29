@@ -9,7 +9,10 @@ metal = ["llama-cpp-ffi/metal"]
 
 [dependencies]
 llama-cpp-ffi = { path = "../llama-cpp-ffi", features = ["cmake_static"] }
-zuqe = { path = "../../../devel/zhuque", features = ["crossbeam_channel"] }
+zuqe = { path = "../../../devel/zhuque", features = [
+    "crossbeam_channel",
+    "serde_json_support",
+] }
 gc-lite = "0.4.1"
 crossbeam = "0.8"
 serde = { version = "1.0", features = ["derive"] }

@@ -5,14 +5,15 @@ use std::{cell::Cell, ffi::c_void, sync::Arc, time::Duration};
 
 use linkme::distributed_slice;
 use liter_llm::types::common::{
-    AssistantMessage, Message, StopSequence, SystemMessage, UserContent, UserMessage,
+    AssistantMessage, ChatCompletionTool, Message, ResponseFormat, StopSequence, SystemMessage,
+    ToolChoice, ToolChoiceMode, ToolMessage, ToolType, UserContent, UserMessage,
 };
 use liter_llm::{
     ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, ClientConfigBuilder,
-    DefaultClient, LlmClient,
+    DefaultClient, LlmClient, ReasoningEffort, StreamOptions,
 };
 use zuqe::{
-    Array, CallContext, ClassCtorDef, ClassDef, ClassID, FieldDef, JSResult, JSValue, Runtime,
+    CallContext, ClassCtorDef, ClassDef, ClassID, FieldDef, JSResult, JSValue, Runtime,
     ScopedContext,
     builtins::{iterator::AsyncIterableIterator, promise::Promise},
 };
@@ -94,6 +95,11 @@ fn parse_messages(ctx: &mut ScopedContext, val: &JSValue) -> Result<Vec<Message>
         -1
     })?;
 
+    if arr.payload().is_empty() {
+        ctx.throw_type_error("messages must not be empty");
+        return Err(-1);
+    }
+
     let mut messages = Vec::with_capacity(arr.payload().len());
     for item in arr.payload().values() {
         let obj = item.as_object().copied().ok_or_else(|| {
@@ -143,6 +149,18 @@ fn parse_messages(ctx: &mut ScopedContext, val: &JSValue) -> Result<Vec<Message>
                 refusal: None,
                 function_call: None,
             }),
+            "tool" => {
+                let tc_id = obj
+                    .get_property_str(ctx, "tool_call_id")?
+                    .as_string()
+                    .map(|s| s.content().encode_utf8(false).to_string())
+                    .unwrap_or_default();
+                Message::Tool(ToolMessage {
+                    content: content.into(),
+                    tool_call_id: tc_id,
+                    name: None,
+                })
+            }
             _ => {
                 ctx.throw_type_error(&format!("unsupported role: {role}"));
                 return Err(-1);
@@ -153,9 +171,86 @@ fn parse_messages(ctx: &mut ScopedContext, val: &JSValue) -> Result<Vec<Message>
     Ok(messages)
 }
 
-// ---------------------------------------------------------------------------
-// Channel message type for streaming bridge
-// ---------------------------------------------------------------------------
+/// Parse JS tools array → Vec<ChatCompletionTool>
+fn parse_tools(ctx: &mut ScopedContext, val: &JSValue) -> Result<Vec<ChatCompletionTool>, i32> {
+    let arr = val.as_object_Array().copied().ok_or_else(|| {
+        ctx.throw_type_error("tools must be an array");
+        -1
+    })?;
+
+    // Convert JS array to serde_json::Value array, then deserialize
+    let mut tools_json = Vec::with_capacity(arr.payload().len());
+    for item in arr.payload().values() {
+        let json_val = item.to_serde_json(ctx).map_err(|_| {
+            ctx.throw_type_error("failed to serialize tool definition");
+            -1
+        })?;
+        tools_json.push(json_val);
+    }
+
+    serde_json::from_value::<Vec<ChatCompletionTool>>(serde_json::Value::Array(tools_json)).map_err(
+        |e| {
+            ctx.throw_type_error(&format!("invalid tool definition: {e}"));
+            -1
+        },
+    )
+}
+
+/// Parse JS tool_choice → ToolChoice
+fn parse_tool_choice(ctx: &mut ScopedContext, val: &JSValue) -> Result<ToolChoice, i32> {
+    if let Some(s) = val.as_string() {
+        let mode = s.content().encode_utf8(false);
+        match mode.as_ref() {
+            "auto" => Ok(ToolChoice::Mode(ToolChoiceMode::Auto)),
+            "required" => Ok(ToolChoice::Mode(ToolChoiceMode::Required)),
+            "none" => Ok(ToolChoice::Mode(ToolChoiceMode::None)),
+            _ => {
+                ctx.throw_type_error(&format!("invalid tool_choice: {mode}"));
+                Err(-1)
+            }
+        }
+    } else {
+        // Object form: {type: "function", function: {name: "xxx"}}
+        let json_val = val.to_serde_json(ctx).map_err(|_| {
+            ctx.throw_type_error("failed to serialize tool_choice");
+            -1
+        })?;
+        serde_json::from_value::<ToolChoice>(json_val).map_err(|e| {
+            ctx.throw_type_error(&format!("invalid tool_choice: {e}"));
+            -1
+        })
+    }
+}
+
+/// Parse JS response_format → ResponseFormat
+fn parse_response_format(ctx: &mut ScopedContext, val: &JSValue) -> Result<ResponseFormat, i32> {
+    let json_val = val.to_serde_json(ctx).map_err(|_| {
+        ctx.throw_type_error("failed to serialize response_format");
+        -1
+    })?;
+    serde_json::from_value::<ResponseFormat>(json_val).map_err(|e| {
+        ctx.throw_type_error(&format!("invalid response_format: {e}"));
+        -1
+    })
+}
+
+/// Parse JS reasoning_effort string → ReasoningEffort
+fn parse_reasoning_effort(ctx: &mut ScopedContext, val: &JSValue) -> Result<ReasoningEffort, i32> {
+    let s = val.as_string().ok_or_else(|| {
+        ctx.throw_type_error("reasoningEffort must be a string");
+        -1
+    })?;
+    let v = s.content().encode_utf8(false);
+    match v.as_ref() {
+        "low" => Ok(ReasoningEffort::Low),
+        "medium" => Ok(ReasoningEffort::Medium),
+        "high" => Ok(ReasoningEffort::High),
+        _ => {
+            ctx.throw_type_error(&format!("invalid reasoningEffort: {v}"));
+            Err(-1)
+        }
+    }
+}
 
 enum ChatReply {
     Chunk(ChatCompletionChunk),
@@ -163,74 +258,176 @@ enum ChatReply {
     Error(String),
 }
 
-/// chatCompletions(messages, {model?, stream?, temperature?, maxTokens?, topP?, stop?})
-fn js_openai_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+/// chat({messages, model?, stream?, temperature?, maxTokens?, topP?, stop?,
+///       n?, presencePenalty?, frequencyPenalty?, logitBias?, user?,
+///       tools?, toolChoice?, parallelToolCalls?, responseFormat?,
+///       streamOptions?, seed?, reasoningEffort?})
+fn js_openai_chat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let client = get_client_arc(ctx, &this)?;
 
-    // Parse messages (arg 0)
-    let messages = parse_messages(ctx, &cc.arg(0))?;
+    // Single object argument
+    let opts = cc.arg(0).as_object().copied().ok_or_else(|| {
+        ctx.throw_type_error("chat() requires an options object");
+        -1
+    })?;
 
-    // Parse options (arg 1)
-    let opts_val = cc.arg(1);
-    let opts = if opts_val.is_undefined() || opts_val.is_null() {
-        None
-    } else {
-        Some(opts_val.as_object().copied().ok_or_else(|| {
-            ctx.throw_type_error("options must be object");
-            -1
-        })?)
-    };
+    // Parse messages (required)
+    let messages_val = opts.get_property_str(ctx, "messages")?;
+    let messages = parse_messages(ctx, &messages_val)?;
 
+    // Optional params with camelCase JS naming
     let mut model = String::from("default");
     let mut stream = false;
     let mut temperature: Option<f64> = None;
     let mut max_tokens: Option<u64> = None;
     let mut top_p: Option<f64> = None;
     let mut stop: Option<StopSequence> = None;
+    let mut n: Option<u32> = None;
+    let mut presence_penalty: Option<f64> = None;
+    let mut frequency_penalty: Option<f64> = None;
+    let mut logit_bias: Option<std::collections::BTreeMap<String, f64>> = None;
+    let mut user: Option<String> = None;
+    let mut tools: Option<Vec<ChatCompletionTool>> = None;
+    let mut tool_choice: Option<ToolChoice> = None;
+    let mut parallel_tool_calls: Option<bool> = None;
+    let mut response_format: Option<ResponseFormat> = None;
+    let mut stream_options: Option<StreamOptions> = None;
+    let mut seed: Option<i64> = None;
+    let mut reasoning_effort: Option<ReasoningEffort> = None;
 
-    if let Some(opts) = opts.as_ref() {
-        let v = opts.get_property_str(ctx, "model")?;
+    // model
+    let v = opts.get_property_str(ctx, "model")?;
+    if let Some(s) = v.as_string() {
+        model = s.content().encode_utf8(false).to_string();
+    }
+
+    // stream
+    let v = opts.get_property_str(ctx, "stream")?;
+    if !v.is_undefined() {
+        stream = v.to_bool()?;
+    }
+
+    // temperature
+    let v = opts.get_property_str(ctx, "temperature")?;
+    if !v.is_undefined() {
+        temperature = Some(v.to_number(ctx)?.to_f64());
+    }
+
+    // maxTokens
+    let v = opts.get_property_str(ctx, "maxTokens")?;
+    if !v.is_undefined() {
+        max_tokens = Some(v.to_number(ctx)?.to_f64() as u64);
+    }
+
+    // topP
+    let v = opts.get_property_str(ctx, "topP")?;
+    if !v.is_undefined() {
+        top_p = Some(v.to_number(ctx)?.to_f64());
+    }
+
+    // stop
+    let v = opts.get_property_str(ctx, "stop")?;
+    if !v.is_undefined() {
         if let Some(s) = v.as_string() {
-            model = s.content().encode_utf8(false).to_string();
-        }
-
-        let v = opts.get_property_str(ctx, "stream")?;
-        if !v.is_undefined() {
-            stream = v.to_bool()?;
-        }
-
-        let v = opts.get_property_str(ctx, "temperature")?;
-        if !v.is_undefined() {
-            temperature = Some(v.to_number(ctx)?.to_f64());
-        }
-
-        let v = opts.get_property_str(ctx, "maxTokens")?;
-        if !v.is_undefined() {
-            max_tokens = Some(v.to_number(ctx)?.to_f64() as u64);
-        }
-
-        let v = opts.get_property_str(ctx, "topP")?;
-        if !v.is_undefined() {
-            top_p = Some(v.to_number(ctx)?.to_f64());
-        }
-
-        let v = opts.get_property_str(ctx, "stop")?;
-        if !v.is_undefined() {
-            if let Some(s) = v.as_string() {
-                stop = Some(StopSequence::Single(
-                    s.content().encode_utf8(false).to_string(),
-                ));
-            } else if let Some(arr) = v.as_object_Array() {
-                let mut words = Vec::with_capacity(arr.payload().len());
-                for item in arr.payload().values() {
-                    if let Some(s) = item.as_string() {
-                        words.push(s.content().encode_utf8(false).to_string());
-                    }
+            stop = Some(StopSequence::Single(
+                s.content().encode_utf8(false).to_string(),
+            ));
+        } else if let Some(arr) = v.as_object_Array() {
+            let mut words = Vec::with_capacity(arr.payload().len());
+            for item in arr.payload().values() {
+                if let Some(s) = item.as_string() {
+                    words.push(s.content().encode_utf8(false).to_string());
                 }
-                stop = Some(StopSequence::Multiple(words));
             }
+            stop = Some(StopSequence::Multiple(words));
         }
+    }
+
+    // n
+    let v = opts.get_property_str(ctx, "n")?;
+    if !v.is_undefined() {
+        n = Some(v.to_number(ctx)?.to_f64() as u32);
+    }
+
+    // presencePenalty
+    let v = opts.get_property_str(ctx, "presencePenalty")?;
+    if !v.is_undefined() {
+        presence_penalty = Some(v.to_number(ctx)?.to_f64());
+    }
+
+    // frequencyPenalty
+    let v = opts.get_property_str(ctx, "frequencyPenalty")?;
+    if !v.is_undefined() {
+        frequency_penalty = Some(v.to_number(ctx)?.to_f64());
+    }
+
+    // logitBias
+    let v = opts.get_property_str(ctx, "logitBias")?;
+    if !v.is_undefined() {
+        let json_val = v.to_serde_json(ctx).map_err(|_| {
+            ctx.throw_type_error("logitBias must be an object");
+            -1
+        })?;
+        logit_bias = serde_json::from_value(json_val).map_err(|e| {
+            ctx.throw_type_error(&format!("invalid logitBias: {e}"));
+            -1
+        })?;
+    }
+
+    // user
+    let v = opts.get_property_str(ctx, "user")?;
+    if let Some(s) = v.as_string() {
+        user = Some(s.content().encode_utf8(false).to_string());
+    }
+
+    // tools
+    let v = opts.get_property_str(ctx, "tools")?;
+    if !v.is_undefined() {
+        tools = Some(parse_tools(ctx, &v)?);
+    }
+
+    // toolChoice
+    let v = opts.get_property_str(ctx, "toolChoice")?;
+    if !v.is_undefined() {
+        tool_choice = Some(parse_tool_choice(ctx, &v)?);
+    }
+
+    // parallelToolCalls
+    let v = opts.get_property_str(ctx, "parallelToolCalls")?;
+    if !v.is_undefined() {
+        parallel_tool_calls = Some(v.to_bool()?);
+    }
+
+    // responseFormat
+    let v = opts.get_property_str(ctx, "responseFormat")?;
+    if !v.is_undefined() {
+        response_format = Some(parse_response_format(ctx, &v)?);
+    }
+
+    // streamOptions
+    let v = opts.get_property_str(ctx, "streamOptions")?;
+    if !v.is_undefined() {
+        let json_val = v.to_serde_json(ctx).map_err(|_| {
+            ctx.throw_type_error("streamOptions must be an object");
+            -1
+        })?;
+        stream_options = serde_json::from_value(json_val).map_err(|e| {
+            ctx.throw_type_error(&format!("invalid streamOptions: {e}"));
+            -1
+        })?;
+    }
+
+    // seed
+    let v = opts.get_property_str(ctx, "seed")?;
+    if !v.is_undefined() {
+        seed = Some(v.to_number(ctx)?.to_f64() as i64);
+    }
+
+    // reasoningEffort
+    let v = opts.get_property_str(ctx, "reasoningEffort")?;
+    if !v.is_undefined() {
+        reasoning_effort = Some(parse_reasoning_effort(ctx, &v)?);
     }
 
     let req = ChatCompletionRequest {
@@ -239,7 +436,19 @@ fn js_openai_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
         temperature,
         max_tokens,
         top_p,
+        n,
         stop,
+        presence_penalty,
+        frequency_penalty,
+        logit_bias,
+        user,
+        tools,
+        tool_choice,
+        parallel_tool_calls,
+        response_format,
+        stream_options,
+        seed,
+        reasoning_effort,
         ..Default::default()
     };
 
@@ -333,7 +542,7 @@ fn response_to_js(ctx: &mut ScopedContext, resp: &ChatCompletionResponse) -> JSR
         ctx.throw_internal_error(&format!("serialize response failed: {e}"));
         -1
     })?;
-    json_value_to_js(ctx, &val)
+    JSValue::from_serde_json(ctx, &val)
 }
 
 /// Convert ChatCompletionChunk to a JS object.
@@ -342,49 +551,11 @@ fn chunk_to_js(ctx: &mut ScopedContext, chunk: &ChatCompletionChunk) -> JSResult
         ctx.throw_internal_error(&format!("serialize chunk failed: {e}"));
         -1
     })?;
-    json_value_to_js(ctx, &val)
-}
-
-/// Recursively convert a serde_json::Value to a JS value.
-fn json_value_to_js(ctx: &mut ScopedContext, val: &serde_json::Value) -> Result<JSValue, i32> {
-    match val {
-        serde_json::Value::Null => Ok(JSValue::NULL),
-        serde_json::Value::Bool(b) => Ok(JSValue::Bool(*b)),
-        serde_json::Value::Number(n) => {
-            // Prefer i32 for small integers, f64 otherwise
-            if let Some(i) = n.as_i64() {
-                if i >= i32::MIN as i64 && i <= i32::MAX as i64 {
-                    Ok(JSValue::Int(i as i32))
-                } else {
-                    Ok((i as f64).into())
-                }
-            } else {
-                Ok(n.as_f64().unwrap_or(0.0).into())
-            }
-        }
-        serde_json::Value::String(s) => ctx
-            .create_string_from_utf8(s.clone().into_bytes())
-            .map(JSValue::String),
-        serde_json::Value::Array(arr) => {
-            let mut values = Vec::with_capacity(arr.len());
-            for item in arr {
-                values.push(json_value_to_js(ctx, item)?);
-            }
-            Array::from_values(ctx, values).map(JSValue::from)
-        }
-        serde_json::Value::Object(map) => {
-            let mut obj = ctx.create_base_object()?;
-            for (k, v) in map {
-                let js_val = json_value_to_js(ctx, v)?;
-                obj.set_property_str(ctx, k, js_val)?;
-            }
-            Ok(obj.into())
-        }
-    }
+    JSValue::from_serde_json(ctx, &val)
 }
 
 const CLASS_OPENAI_PROTO: &[FieldDef] = &[
-    FieldDef::CALL("chatCompletions", 2, js_openai_chatCompletions, 0),
+    FieldDef::CALL("chat", 1, js_openai_chat, 0),
     FieldDef::CALL("dispose", 0, js_openai_dispose, 0),
 ];
 
