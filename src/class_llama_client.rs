@@ -61,7 +61,7 @@ fn js_openai_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         })?;
 
     let opaque = Arc::into_raw(Arc::new(client)).cast::<c_void>();
-    ctx.create_class_instance_with_opaque(JSOpenAI::class_id(), opaque as _)
+    ctx.create_class_instance_with_opaque(JSLlamaClient::class_id(), opaque as _)
         .map_err(|e| {
             let p = e.other().unwrap();
             let _ = unsafe { Arc::from_raw(p.opaque().cast::<DefaultClient>()) };
@@ -73,7 +73,7 @@ fn js_openai_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 /// Get Arc<DefaultClient> from JS value (bumps strong count)
 fn get_client_arc(ctx: &mut ScopedContext, val: &JSValue) -> Result<Arc<DefaultClient>, i32> {
     let payload = val
-        .retrive_object_payload(ctx, JSOpenAI::class_id())?
+        .retrive_object_payload(ctx, JSLlamaClient::class_id())?
         .other()
         .unwrap();
     let opaque = payload.opaque();
@@ -524,7 +524,7 @@ fn js_openai_chat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 fn js_openai_dispose(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut this = cc.this();
     let payload = this
-        .retrive_object_payload_mut(ctx, JSOpenAI::class_id())?
+        .retrive_object_payload_mut(ctx, JSLlamaClient::class_id())?
         .other_mut()
         .unwrap();
     if !payload.opaque().is_null() {
@@ -559,9 +559,9 @@ const CLASS_OPENAI_PROTO: &[FieldDef] = &[
     FieldDef::CALL("dispose", 0, js_openai_dispose, 0),
 ];
 
-pub struct JSOpenAI;
+pub struct JSLlamaClient;
 
-impl JSOpenAI {
+impl JSLlamaClient {
     thread_local! {
         static CLASS_ID: Cell<ClassID> = const { Cell::new(0) };
     }
@@ -569,7 +569,7 @@ impl JSOpenAI {
     fn register(rt: &mut Runtime) -> Result<ClassID, i32> {
         let class_id = rt.register_class(
             ClassDef::new(
-                "OpenAI",
+                "Client",
                 CLASS_OPENAI_PROTO,
                 Some(ClassCtorDef::new(js_openai_constructor, 1, false)),
             )
@@ -591,5 +591,5 @@ impl JSOpenAI {
 
 #[distributed_slice(USER_CLASS_DEFS)]
 fn register_class_openai(rt: &mut Runtime) -> Result<ClassID, i32> {
-    JSOpenAI::register(rt)
+    JSLlamaClient::register(rt)
 }

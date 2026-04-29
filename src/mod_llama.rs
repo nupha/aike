@@ -26,7 +26,7 @@ fn get_devices(ctx: &mut ScopedContext, _: CallContext) -> JSResult {
 
 const MOD_LLAMA_ENTRIES: &[FieldDef] = &[
     FieldDef::CLASS("Model", JS_PROP_ENUMERABLE),
-    FieldDef::CLASS("OpenAI", JS_PROP_ENUMERABLE),
+    FieldDef::CLASS("Client", JS_PROP_ENUMERABLE),
     FieldDef::OBJECT(
         "FileType",
         &[

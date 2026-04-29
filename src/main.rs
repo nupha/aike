@@ -30,7 +30,7 @@ use zuqe::{
 
 use crate::{
     class_file::JSFile,
-    class_llama_client::JSOpenAI,
+    class_llama_client::JSLlamaClient,
     class_llama_context::JSLlamaContext,
     class_llama_engine::JSLlamaEngine,
     class_llama_model::JSLlamaModel,
@@ -229,8 +229,8 @@ async fn main() -> ExitCode {
                 JSLlamaModel::class_id(),
                 JSLlamaContext::class_id(),
                 JSLlamaEngine::class_id(),
+                JSLlamaClient::class_id(),
                 JSSamplerChain::class_id(),
-                JSOpenAI::class_id(),
                 JSFile::class_id(),
             ])?;
 
