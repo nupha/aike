@@ -21,7 +21,7 @@ use zuqe::{
 use crate::USER_CLASS_DEFS;
 
 /// Constructor: new OpenAI({apiKey, baseUrl, model?, timeout?})
-fn js_openai_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+fn js_client_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let opts = cc.arg(0);
     let opts_obj = opts.as_object().copied().ok_or_else(|| {
         ctx.throw_type_error("OpenAI requires options object");
@@ -262,7 +262,7 @@ enum ChatReply {
 ///       n?, presencePenalty?, frequencyPenalty?, logitBias?, user?,
 ///       tools?, toolChoice?, parallelToolCalls?, responseFormat?,
 ///       streamOptions?, seed?, reasoningEffort?})
-fn js_openai_chat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+fn js_client_chat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let client = get_client_arc(ctx, &this)?;
 
@@ -521,7 +521,7 @@ fn js_openai_chat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 }
 
 /// dispose
-fn js_openai_dispose(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+fn js_client_dispose(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut this = cc.this();
     let payload = this
         .retrive_object_payload_mut(ctx, JSLlamaClient::class_id())?
@@ -554,9 +554,9 @@ fn chunk_to_js(ctx: &mut ScopedContext, chunk: &ChatCompletionChunk) -> JSResult
     JSValue::from_serde_json(ctx, &val)
 }
 
-const CLASS_OPENAI_PROTO: &[FieldDef] = &[
-    FieldDef::CALL("chat", 1, js_openai_chat, 0),
-    FieldDef::CALL("dispose", 0, js_openai_dispose, 0),
+const CLASS_CLIENT_PROTO: &[FieldDef] = &[
+    FieldDef::CALL("chat", 1, js_client_chat, 0),
+    FieldDef::CALL("dispose", 0, js_client_dispose, 0),
 ];
 
 pub struct JSLlamaClient;
@@ -570,8 +570,8 @@ impl JSLlamaClient {
         let class_id = rt.register_class(
             ClassDef::new(
                 "Client",
-                CLASS_OPENAI_PROTO,
-                Some(ClassCtorDef::new(js_openai_constructor, 1, false)),
+                CLASS_CLIENT_PROTO,
+                Some(ClassCtorDef::new(js_client_constructor, 1, false)),
             )
             .on_dispose(|_, opaque: *mut c_void, _| {
                 if !opaque.is_null() {
