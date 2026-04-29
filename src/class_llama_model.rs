@@ -9,8 +9,6 @@ use llama_cpp_ffi::{
     AttentionType, BackendDevice, FlashAttentionType, KVCacheType, LlamaContext, LlamaModel,
     ModelOptions, PoolingType, RopeScalingType, SplitMode,
 };
-use minijinja::Environment;
-use serde::Serialize;
 use serde_json::Value as JsonValue;
 use zuqe::{
     Array, CallContext, ClassCtorDef, ClassDef, ClassID, FieldDef, JS_PROP_ENUMERABLE, JSResult,

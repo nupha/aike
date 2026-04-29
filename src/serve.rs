@@ -113,7 +113,7 @@ impl Engine {
         port: u16,
         shutdown_rx: tokio::sync::oneshot::Receiver<()>,
     ) -> Result<(), String> {
-        let app = self.build_router();
+        let router = self.build_router();
 
         let addr = format!("{host}:{port}");
         let listener = tokio::net::TcpListener::bind(&addr)
@@ -122,7 +122,7 @@ impl Engine {
 
         log::info!("Engine http server listening on {addr}");
 
-        axum::serve(listener, app)
+        axum::serve(listener, router)
             .with_graceful_shutdown(async move {
                 let _ = shutdown_rx.await;
                 eprintln!("[DEBUG http_server_with_shutdown] shutdown signal received");
@@ -300,7 +300,15 @@ async fn handle_chat_completions(
         // Unary: collect all EngineReply, build final response
         let join = tokio::task::spawn_blocking({
             let model_id = state.engine.model_name().to_string();
-            move || collect_unary_reply(engine_rx, &model_id, &respond_id, n_prompt_tokens)
+            move || {
+                oneshot_reply(
+                    engine_rx,
+                    &model_id,
+                    &respond_id,
+                    include_usage,
+                    n_prompt_tokens,
+                )
+            }
         });
         match join.await {
             Ok(Ok(res)) => Json::<serde_json::Value>(res).into_response(),
@@ -325,11 +333,17 @@ fn build_chat_prompt_tokens(
     let eos_token = model.eos_token_text().unwrap_or_default();
 
     // Convert liter_llm::Message to (role, content) pairs for template rendering
-    let backing: Vec<(String, String)> = messages.iter().map(message_to_role_content).collect();
+    let backing = messages
+        .iter()
+        .map(message_to_role_content)
+        .collect::<Vec<_>>();
 
     let jinja_msgs: Vec<JinjaMessage> = backing
         .into_iter()
-        .map(|(role, content)| JinjaMessage { role, content })
+        .map(|(role, content)| JinjaMessage {
+            role: role.into(),
+            content,
+        })
         .collect();
 
     let prompt = render_chat_template(tmpl, &jinja_msgs, &eos_token)?;
@@ -338,7 +352,7 @@ fn build_chat_prompt_tokens(
 }
 
 /// Extract (role, content_text) from a liter_llm::Message for template rendering.
-fn message_to_role_content(msg: &Message) -> (String, String) {
+fn message_to_role_content(msg: &Message) -> (&str, String) {
     let role = match msg {
         Message::System(_) => "system",
         Message::User(_) => "user",
@@ -365,7 +379,7 @@ fn message_to_role_content(msg: &Message) -> (String, String) {
         Message::Developer(m) => m.content.clone(),
         Message::Function(m) => m.content.clone(),
     };
-    (role.to_string(), content)
+    (role, content)
 }
 
 fn tokenize_prompt(model: &LlamaModel, prompt: &str) -> Result<Vec<Token>, String> {
@@ -378,10 +392,11 @@ fn tokenize_prompt(model: &LlamaModel, prompt: &str) -> Result<Vec<Token>, Strin
 }
 
 /// Collect all EngineReply messages for a unary (non-streaming) response.
-fn collect_unary_reply(
+fn oneshot_reply(
     rx: Receiver<EngineReply>,
     model_id: &str,
     respond_id: &str,
+    include_usage: bool,
     n_prompt_tokens: usize,
 ) -> Result<serde_json::Value, (StatusCode, ErrorResponse)> {
     let mut full_text = String::new();
@@ -440,11 +455,15 @@ fn collect_unary_reply(
             },
             finish_reason: Some(finish_reason),
         }],
-        usage: Some(Usage {
-            prompt_tokens: n_prompt_tokens as u64,
-            completion_tokens: completion_tokens as u64,
-            total_tokens: (n_prompt_tokens + completion_tokens) as u64,
-        }),
+        usage: if include_usage {
+            Some(Usage {
+                prompt_tokens: n_prompt_tokens as u64,
+                completion_tokens: completion_tokens as u64,
+                total_tokens: (n_prompt_tokens + completion_tokens) as u64,
+            })
+        } else {
+            None
+        },
         ..Default::default()
     })
     .unwrap_or(serde_json::Value::Null))
