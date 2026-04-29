@@ -281,7 +281,7 @@ async fn handle_chat_completions(
         // Bridge crossbeam Receiver -> tokio mpsc for SSE
         let (tx, rx_tokio) = tokio::sync::mpsc::unbounded_channel::<String>();
         let _ = tokio::task::spawn_blocking(move || {
-            bridge_engine_reply_to_sse(
+            stream_reply_to_sse(
                 engine_rx,
                 tx,
                 state.engine.model_name(),
@@ -400,23 +400,44 @@ fn oneshot_reply(
     n_prompt_tokens: usize,
 ) -> Result<serde_json::Value, (StatusCode, ErrorResponse)> {
     let mut full_text = String::new();
-    let mut completion_tokens = 0usize;
-    let finish_reason;
 
     loop {
         match rx.recv_timeout(Duration::from_secs(300)) {
             Ok(EngineReply::Text(t)) => {
                 full_text.push_str(&t);
-                completion_tokens += 1;
             }
-            Ok(EngineReply::Stop(reason)) => {
-                finish_reason = match reason {
+            Ok(EngineReply::Stop(reason, n_completion_tokens)) => {
+                let finish_reason = match reason {
                     StopReason::MaxTokens => FinishReason::Length,
                     StopReason::Eog | StopReason::Word(_) | StopReason::PrefillOnly => {
                         FinishReason::Stop
                     }
                 };
-                break;
+                return Ok(serde_json::to_value(ChatCompletionResponse {
+                    id: respond_id.to_string(),
+                    object: "chat.completion".to_string(),
+                    created: now_unix_s() as u64,
+                    model: model_id.to_string(),
+                    choices: vec![Choice {
+                        index: 0,
+                        message: AssistantMessage {
+                            content: Some(full_text),
+                            ..Default::default()
+                        },
+                        finish_reason: Some(finish_reason),
+                    }],
+                    usage: if include_usage {
+                        Some(Usage {
+                            prompt_tokens: n_prompt_tokens as u64,
+                            completion_tokens: n_completion_tokens as u64,
+                            total_tokens: (n_prompt_tokens + n_completion_tokens) as u64,
+                        })
+                    } else {
+                        None
+                    },
+                    ..Default::default()
+                })
+                .unwrap_or(serde_json::Value::Null));
             }
             Ok(EngineReply::Cancelled) => {
                 return Err((StatusCode::CONFLICT, oai_error("cancelled", "cancelled")));
@@ -441,36 +462,10 @@ fn oneshot_reply(
             }
         }
     }
-
-    Ok(serde_json::to_value(ChatCompletionResponse {
-        id: respond_id.to_string(),
-        object: "chat.completion".to_string(),
-        created: now_unix_s() as u64,
-        model: model_id.to_string(),
-        choices: vec![Choice {
-            index: 0,
-            message: AssistantMessage {
-                content: Some(full_text),
-                ..Default::default()
-            },
-            finish_reason: Some(finish_reason),
-        }],
-        usage: if include_usage {
-            Some(Usage {
-                prompt_tokens: n_prompt_tokens as u64,
-                completion_tokens: completion_tokens as u64,
-                total_tokens: (n_prompt_tokens + completion_tokens) as u64,
-            })
-        } else {
-            None
-        },
-        ..Default::default()
-    })
-    .unwrap_or(serde_json::Value::Null))
 }
 
 /// Bridge crossbeam Receiver to tokio mpsc for SSE streaming.
-fn bridge_engine_reply_to_sse(
+fn stream_reply_to_sse(
     rx: Receiver<EngineReply>,
     tx: tokio::sync::mpsc::UnboundedSender<String>,
     model_id: &str,
@@ -478,17 +473,16 @@ fn bridge_engine_reply_to_sse(
     include_usage: bool,
     n_prompt_tokens: usize,
 ) {
-    let mut completion_tokens = 0usize;
-    let mut sent_start = false;
+    let mut sent_started = false;
 
     loop {
         match rx.recv_timeout(Duration::from_secs(300)) {
             Ok(EngineReply::Text(t)) => {
                 let created = now_unix_s() as u64;
 
-                if !sent_start {
+                if !sent_started {
                     // First chunk: emit role delta
-                    sent_start = true;
+                    sent_started = true;
 
                     let first = ChatCompletionChunk {
                         id: respond_id.to_string(),
@@ -509,8 +503,6 @@ fn bridge_engine_reply_to_sse(
                     let _ = tx.send(serde_json::to_string(&first).unwrap_or_default());
                 }
 
-                completion_tokens += 1;
-
                 let chunk = ChatCompletionChunk {
                     id: respond_id.to_string(),
                     object: "chat.completion.chunk".to_string(),
@@ -529,24 +521,7 @@ fn bridge_engine_reply_to_sse(
                 };
                 let _ = tx.send(serde_json::to_string(&chunk).unwrap_or_default());
             }
-            Ok(EngineReply::Stop(reason)) => {
-                let fr = match reason {
-                    StopReason::Eog | StopReason::Word(_) | StopReason::PrefillOnly => {
-                        FinishReason::Stop
-                    }
-                    StopReason::MaxTokens => FinishReason::Length,
-                };
-
-                let usage = if include_usage {
-                    Some(Usage {
-                        prompt_tokens: n_prompt_tokens as u64,
-                        completion_tokens: completion_tokens as u64,
-                        total_tokens: (n_prompt_tokens + completion_tokens) as u64,
-                    })
-                } else {
-                    None
-                };
-
+            Ok(EngineReply::Stop(reason, n_completion_tokens)) => {
                 let last = ChatCompletionChunk {
                     id: respond_id.to_string(),
                     object: "chat.completion.chunk".to_string(),
@@ -555,9 +530,22 @@ fn bridge_engine_reply_to_sse(
                     choices: vec![StreamChoice {
                         index: 0,
                         delta: StreamDelta::default(),
-                        finish_reason: Some(fr),
+                        finish_reason: Some(match reason {
+                            StopReason::Eog | StopReason::Word(_) | StopReason::PrefillOnly => {
+                                FinishReason::Stop
+                            }
+                            StopReason::MaxTokens => FinishReason::Length,
+                        }),
                     }],
-                    usage,
+                    usage: if include_usage {
+                        Some(Usage {
+                            prompt_tokens: n_prompt_tokens as u64,
+                            completion_tokens: n_completion_tokens as u64,
+                            total_tokens: (n_prompt_tokens + n_completion_tokens) as u64,
+                        })
+                    } else {
+                        None
+                    },
                     ..Default::default()
                 };
                 let _ = tx.send(serde_json::to_string(&last).unwrap_or_default());

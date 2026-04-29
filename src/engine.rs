@@ -56,7 +56,7 @@ pub enum StopReason {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EngineReply {
     Text(String),
-    Stop(StopReason),
+    Stop(StopReason, usize), // (reason, n_completion_tokens)
     Cancelled,
     Error(String),
     Shutdown,
@@ -65,7 +65,7 @@ pub enum EngineReply {
 #[derive(Debug)]
 struct TaskState {
     config: TaskConfig,
-    generated_tokens: Vec<Token>,
+    n_completion_tokens: usize,
     generated_text: String,
     pending_bytes: Vec<u8>,
     output_tx: Sender<EngineReply>,
@@ -76,7 +76,9 @@ impl TaskState {
         if piece.is_empty() {
             return;
         }
+
         self.pending_bytes.extend_from_slice(piece);
+
         loop {
             match std::str::from_utf8(&self.pending_bytes) {
                 Ok(s) => {
@@ -101,6 +103,7 @@ impl TaskState {
     }
 
     fn append_token(&mut self, engine: &Engine, token: Token) {
+        self.n_completion_tokens += 1;
         self.append_utf8_piece(&engine.token_to_piece(token));
     }
 }
@@ -181,11 +184,6 @@ pub struct Engine {
     worker_join_handle: UnsafeCell<Option<JoinHandle<()>>>,
 }
 
-// Safety: UnsafeCell fields are only accessed by the worker thread.
-// Other threads only touch the shared/immutable/atomic fields.
-unsafe impl Send for Engine {}
-unsafe impl Sync for Engine {}
-
 impl Drop for Engine {
     fn drop(&mut self) {
         let _ = self.ctrl_tx.send(EngineCtrlMsg::Shutdown);
@@ -197,6 +195,11 @@ impl Drop for Engine {
         }
     }
 }
+
+// Safety: UnsafeCell fields are only accessed by the worker thread.
+// Other threads only touch the shared/immutable/atomic fields.
+unsafe impl Send for Engine {}
+unsafe impl Sync for Engine {}
 
 impl Engine {
     pub(super) fn llm_ctx(&self) -> &LlamaContext {
@@ -591,7 +594,7 @@ impl Engine {
                     if logits_for_all_tokens {
                         SlotState::Done {
                             task_state,
-                            reply: EngineReply::Stop(StopReason::PrefillOnly),
+                            reply: EngineReply::Stop(StopReason::PrefillOnly, 0),
                         }
                     } else {
                         has_sampling = true;
@@ -672,6 +675,7 @@ impl Engine {
                     };
                 } else {
                     did_work = true;
+
                     match self.sample(slot.seq_id, logits) {
                         Ok(token) => {
                             let mut out_text: String = "".into();
@@ -680,23 +684,26 @@ impl Engine {
                                     &mut task_state.generated_text,
                                     "".to_string(),
                                 );
+                                let n = task_state.n_completion_tokens;
                                 SlotState::Done {
                                     task_state,
-                                    reply: EngineReply::Stop(StopReason::Eog),
+                                    reply: EngineReply::Stop(StopReason::Eog, n),
                                 }
                             } else if task_state.config.max_tokens > 0
-                                && task_state.generated_tokens.len() >= task_state.config.max_tokens
+                                && task_state.n_completion_tokens >= task_state.config.max_tokens
                             {
                                 out_text = std::mem::replace(
                                     &mut task_state.generated_text,
                                     "".to_string(),
                                 );
+                                let n = task_state.n_completion_tokens;
                                 SlotState::Done {
                                     task_state,
-                                    reply: EngineReply::Stop(StopReason::MaxTokens),
+                                    reply: EngineReply::Stop(StopReason::MaxTokens, n),
                                 }
                             } else {
                                 task_state.append_token(self, token);
+
                                 if let Some(w) = hit_stop_words(
                                     &mut task_state.generated_text,
                                     &task_state.config.stop_words,
@@ -708,9 +715,10 @@ impl Engine {
                                         &mut task_state.generated_text,
                                         "".to_string(),
                                     );
+                                    let n = task_state.n_completion_tokens;
                                     SlotState::Done {
                                         task_state,
-                                        reply: EngineReply::Stop(StopReason::Word(w)),
+                                        reply: EngineReply::Stop(StopReason::Word(w), n),
                                     }
                                 } else {
                                     if task_state.config.output_mode != OutputMode::OneShot {
@@ -727,6 +735,7 @@ impl Engine {
                                     }
                                 }
                             };
+
                             if !out_text.is_empty()
                                 && let Some(tx) = slot.output_tx()
                             {
@@ -989,7 +998,7 @@ impl Engine {
 
         let task_state = TaskState {
             config: task.config,
-            generated_tokens: Vec::new(),
+            n_completion_tokens: 0,
             generated_text: String::new(),
             pending_bytes: Vec::new(),
             output_tx: task.output_tx,

@@ -149,7 +149,7 @@ fn js_engine_generate(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                     cx.throw_internal_error("engine shutdown");
                     Err(-1)
                 }
-                EngineReply::Stop(_) => {
+                EngineReply::Stop(_, _) => {
                     cx.throw_internal_error("unexpected message in oneshot mode");
                     Err(-1)
                 }
@@ -167,7 +167,7 @@ fn js_engine_generate(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                         .create_string_from_utf8(text.into_bytes())
                         .map(JSValue::from)
                         .map(Some),
-                    EngineReply::Stop(_) => Ok(None),
+                    EngineReply::Stop(_, _) => Ok(None),
                     EngineReply::Error(e) => {
                         cx.throw_internal_error(&e);
                         Err(-1)
