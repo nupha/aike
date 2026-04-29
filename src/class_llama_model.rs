@@ -20,11 +20,11 @@ use crate::{
     USER_CLASS_DEFS,
     class_llama_context::{JSLlamaContext, parse_tokens},
     class_llama_sampler::js_model_createSamplerChain,
-    helpers::{JinjaMessage, create_minijinja_env, preprocess_chat_template},
+    helpers::{JinjaMessage, TemplateContext, create_minijinja_env},
 };
 
 const MODEL_PATH_HIDDEN_KEY: &str = "__modelPath";
-const MODEL_CHAT_TEMPLATE_PREPROCESSED_KEY: &str = "__chatTemplatePreprocessed";
+const MODEL_CHAT_TEMPLATE_KEY: &str = "__chatTemplate";
 static LLAMA_LOG_BUFFER: OnceLock<Mutex<String>> = OnceLock::new();
 
 fn llama_log_buffer() -> &'static Mutex<String> {
@@ -785,83 +785,12 @@ fn js_model_lookupTokenText(ctx: &mut ScopedContext, cc: CallContext) -> JSResul
     }
 }
 
-#[derive(Debug)]
-struct WellKnownTemplateVars {
-    tools: JsonValue,
-    add_generation_prompt: bool,
-    enable_thinking: bool,
-    add_vision_id: bool,
-    eos_token: String,
-    bos_token: String,
-}
-
-impl WellKnownTemplateVars {
-    fn from_opts_map(
-        ctx: &mut ScopedContext,
-        model: &LlamaModel,
-        opts_map: &mut serde_json::Map<String, JsonValue>,
-    ) -> Result<Self, i32> {
-        fn pop_bool(
-            ctx: &mut ScopedContext,
-            m: &mut serde_json::Map<String, JsonValue>,
-            key: &str,
-            default: bool,
-        ) -> Result<bool, i32> {
-            match m.remove(key) {
-                Some(JsonValue::Bool(b)) => Ok(b),
-                Some(_) => {
-                    ctx.throw_type_error(&format!("renderTemplate options.{key} must be boolean"));
-                    Err(-1)
-                }
-                None => Ok(default),
-            }
-        }
-
-        fn pop_string(
-            ctx: &mut ScopedContext,
-            m: &mut serde_json::Map<String, JsonValue>,
-            key: &str,
-            default: String,
-        ) -> Result<String, i32> {
-            match m.remove(key) {
-                Some(JsonValue::String(s)) => Ok(s),
-                Some(_) => {
-                    ctx.throw_type_error(&format!("renderTemplate options.{key} must be string"));
-                    Err(-1)
-                }
-                None => Ok(default),
-            }
-        }
-
-        let tools = opts_map.remove("tools").unwrap_or(JsonValue::Null);
-
-        Ok(Self {
-            tools,
-            add_generation_prompt: pop_bool(ctx, opts_map, "add_generation_prompt", true)?,
-            enable_thinking: pop_bool(ctx, opts_map, "enable_thinking", false)?,
-            add_vision_id: pop_bool(ctx, opts_map, "add_vision_id", false)?,
-            eos_token: pop_string(
-                ctx,
-                opts_map,
-                "eos_token",
-                model.eos_token_text().unwrap_or_default(),
-            )?,
-            bos_token: pop_string(
-                ctx,
-                opts_map,
-                "bos_token",
-                model.bos_token_text().unwrap_or_default(),
-            )?,
-        })
-    }
-}
-
-fn get_preprocessed_template(
+fn get_chat_template(
     ctx: &mut ScopedContext,
     this: &JSValue,
     model: &LlamaModel,
 ) -> Result<String, i32> {
-    let cached = this.get_property_str(ctx, MODEL_CHAT_TEMPLATE_PREPROCESSED_KEY)?;
+    let cached = this.get_property_str(ctx, MODEL_CHAT_TEMPLATE_KEY)?;
     if let Some(s) = cached.as_string() {
         return Ok(s.content().encode_utf8(false).to_string());
     }
@@ -871,18 +800,17 @@ fn get_preprocessed_template(
         ctx.throw_internal_error("model meta tokenizer.chat_template not found");
         -1
     })?;
-    let processed = preprocess_chat_template(&raw);
 
     let mut this_obj = this.as_object().copied().ok_or_else(|| {
         ctx.throw_type_error("invalid Model object");
         -1
     })?;
     let v = ctx
-        .create_string_from_utf8(processed.clone().into_bytes())
+        .create_string_from_utf8(raw.clone().into_bytes())
         .map(JSValue::String)?;
-    this_obj.define_property_value_str(ctx, MODEL_CHAT_TEMPLATE_PREPROCESSED_KEY, v, 0)?;
+    this_obj.define_property_value_str(ctx, MODEL_CHAT_TEMPLATE_KEY, v, 0)?;
 
-    Ok(processed)
+    Ok(raw)
 }
 
 fn js_model_renderTemplate(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -926,14 +854,12 @@ fn js_model_renderTemplate(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
         messages.push(JinjaMessage { role, content });
     }
 
-    let mut well_known = WellKnownTemplateVars {
-        tools: JsonValue::Null,
-        add_generation_prompt: true,
-        enable_thinking: false,
-        add_vision_id: false,
-        eos_token: model.eos_token_text().unwrap_or_default(),
-        bos_token: model.bos_token_text().unwrap_or_default(),
-    };
+    // Parse options into TemplateContext
+    let mut ctx_obj = TemplateContext::new(
+        &messages,
+        model.eos_token_text().unwrap_or_default(),
+        model.bos_token_text().unwrap_or_default(),
+    );
     let mut extra_vars = serde_json::Map::<String, JsonValue>::new();
 
     if cc.length() > 1 {
@@ -950,7 +876,62 @@ fn js_model_renderTemplate(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
             if let Some(opts_json_str) = opts_json.as_string() {
                 let s = opts_json_str.content().encode_utf8(false).to_string();
                 if let Ok(JsonValue::Object(mut map)) = serde_json::from_str::<JsonValue>(&s) {
-                    well_known = WellKnownTemplateVars::from_opts_map(ctx, &model, &mut map)?;
+                    // Extract well-known template variables
+                    fn pop_bool(
+                        ctx: &mut ScopedContext,
+                        m: &mut serde_json::Map<String, JsonValue>,
+                        key: &str,
+                        default: bool,
+                    ) -> Result<bool, i32> {
+                        match m.remove(key) {
+                            Some(JsonValue::Bool(b)) => Ok(b),
+                            Some(_) => {
+                                ctx.throw_type_error(&format!(
+                                    "renderTemplate options.{key} must be boolean"
+                                ));
+                                Err(-1)
+                            }
+                            None => Ok(default),
+                        }
+                    }
+
+                    fn pop_string(
+                        ctx: &mut ScopedContext,
+                        m: &mut serde_json::Map<String, JsonValue>,
+                        key: &str,
+                        default: String,
+                    ) -> Result<String, i32> {
+                        match m.remove(key) {
+                            Some(JsonValue::String(s)) => Ok(s),
+                            Some(_) => {
+                                ctx.throw_type_error(&format!(
+                                    "renderTemplate options.{key} must be string"
+                                ));
+                                Err(-1)
+                            }
+                            None => Ok(default),
+                        }
+                    }
+
+                    ctx_obj.tools = map.remove("tools");
+                    ctx_obj.add_generation_prompt =
+                        pop_bool(ctx, &mut map, "add_generation_prompt", true)?;
+                    ctx_obj.enable_thinking = pop_bool(ctx, &mut map, "enable_thinking", false)?;
+                    ctx_obj.add_vision_id = pop_bool(ctx, &mut map, "add_vision_id", false)?;
+                    ctx_obj.eos_token = pop_string(
+                        ctx,
+                        &mut map,
+                        "eos_token",
+                        model.eos_token_text().unwrap_or_default(),
+                    )?;
+                    ctx_obj.bos_token = pop_string(
+                        ctx,
+                        &mut map,
+                        "bos_token",
+                        model.bos_token_text().unwrap_or_default(),
+                    )?;
+
+                    // Remaining keys go to extra_vars
                     for (k, v) in map {
                         extra_vars.insert(k, v);
                     }
@@ -959,57 +940,23 @@ fn js_model_renderTemplate(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
         }
     }
 
-    let processed_template = get_preprocessed_template(ctx, &this, &model)?;
-
+    let tmpl = get_chat_template(ctx, &this, &model)?;
     let mut env = create_minijinja_env();
-    env.add_template("chat", &processed_template).map_err(|e| {
+
+    env.add_template("chat", &tmpl).map_err(|e| {
         ctx.throw_internal_error(&format!("invalid chat template: {e}"));
         -1
     })?;
-    let tmpl = env.get_template("chat").map_err(|e| {
-        ctx.throw_internal_error(&format!("get template failed: {e}"));
-        -1
-    })?;
 
-    let mut render_vars = serde_json::Map::<String, JsonValue>::new();
-    render_vars.insert(
-        "messages".to_string(),
-        serde_json::to_value(&messages).map_err(|e| {
-            ctx.throw_internal_error(&format!("serialize messages failed: {e}"));
+    let text = env
+        .get_template("chat")
+        .and_then(|t| t.render(&ctx_obj))
+        .map_err(|e| {
+            ctx.throw_internal_error(&format!("can't render template: {e}"));
             -1
-        })?,
-    );
-    render_vars.insert("tools".to_string(), well_known.tools);
-    render_vars.insert(
-        "add_generation_prompt".to_string(),
-        JsonValue::Bool(well_known.add_generation_prompt),
-    );
-    render_vars.insert(
-        "enable_thinking".to_string(),
-        JsonValue::Bool(well_known.enable_thinking),
-    );
-    render_vars.insert(
-        "add_vision_id".to_string(),
-        JsonValue::Bool(well_known.add_vision_id),
-    );
-    render_vars.insert(
-        "eos_token".to_string(),
-        JsonValue::String(well_known.eos_token),
-    );
-    render_vars.insert(
-        "bos_token".to_string(),
-        JsonValue::String(well_known.bos_token),
-    );
-    for (k, v) in extra_vars {
-        render_vars.insert(k, v);
-    }
+        })?;
 
-    let out = tmpl.render(&render_vars).map_err(|e| {
-        ctx.throw_internal_error(&format!("render chat template failed: {e}"));
-        -1
-    })?;
-
-    ctx.create_string_from_utf8(out.into_bytes())
+    ctx.create_string_from_utf8(text.into_bytes())
         .map(JSValue::String)
 }
 

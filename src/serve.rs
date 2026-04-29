@@ -27,7 +27,7 @@ use uuid::Uuid;
 
 use crate::{
     engine::{Engine, EngineReply, OutputMode, StopReason, Token, now_unix_s},
-    helpers::{JinjaMessage, TemplateContext, create_minijinja_env, preprocess_chat_template},
+    helpers::{JinjaMessage, TemplateContext, create_minijinja_env},
 };
 
 #[derive(Debug, Serialize)]
@@ -69,13 +69,14 @@ const DEFAULT_TEMPERATURE: f64 = 0.75;
 const DEFAULT_TOP_P: f64 = 1.0;
 
 fn render_chat_template(tmpl: &str, ctx: &TemplateContext) -> Result<String, String> {
-    let tmpl_str = preprocess_chat_template(tmpl);
-
     let mut env = create_minijinja_env();
-    env.add_template("chat", &tmpl_str)
-        .map_err(|e| format!("invalid chat template: {e}"))?;
-    let tmpl = env.get_template("chat").map_err(|e| format!("{e}"))?;
-    tmpl.render(ctx).map_err(|e| format!("{e}"))
+
+    env.add_template("chat", tmpl)
+        .map_err(|e| format!("can't load template: {e}"))?;
+
+    env.get_template("chat")
+        .and_then(|t| t.render(ctx))
+        .map_err(|e| format!("{e}"))
 }
 
 #[derive(Clone)]
@@ -193,8 +194,6 @@ async fn handle_chat_completions(
                 .into_response();
         }
     };
-
-    println!("[O.o] request: {req:#?}");
 
     if req.messages.is_empty() {
         return (

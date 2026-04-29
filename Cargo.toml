@@ -34,6 +34,8 @@ tokio = { version = "1", features = [
     "time",
 ] }
 minijinja = { version = "2", features = ["serde"] }
+minijinja-contrib = { version = "2", features = ["pycompat"] }
+chrono = "0.4"
 axum = { version = "0.7", features = ["json"] }
 futures-util = "0.3"
 tokio-stream = "0.1"

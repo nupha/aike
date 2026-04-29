@@ -1,4 +1,5 @@
 use minijinja::Environment;
+use minijinja_contrib::pycompat;
 use serde::Serialize;
 use serde_json::Value as JsonValue;
 
@@ -54,87 +55,108 @@ impl<'a> TemplateContext<'a> {
     }
 }
 
-pub(crate) fn preprocess_chat_template(src: &str) -> String {
-    src.replace("content.startswith(", "startswith(content, ")
-        .replace("content.endswith(", "endswith(content, ")
-}
-
 pub(crate) fn create_minijinja_env() -> Environment<'static> {
     let mut env = Environment::new();
-    env.add_function("startswith", |s: String, prefix: String| -> bool {
-        s.starts_with(&prefix)
-    });
-    env.add_function("endswith", |s: String, suffix: String| -> bool {
-        s.ends_with(&suffix)
+
+    // Use pycompat callback for dot method syntax (obj.method()).
+    // Handles 25+ Python methods: str.startswith/endswith/find/strip/split/..., dict.get/items/..., list.count
+    env.set_unknown_method_callback(pycompat::unknown_method_callback);
+
+    // -- Global functions (mirrors llama.cpp jinja/global_builtins) --
+    // Note: range() and namespace() are already provided by minijinja builtins.
+
+    // raise_exception(msg): throw a Jinja exception (llama.cpp: throws raised_exception)
+    env.add_function(
+        "raise_exception",
+        |msg: String| -> Result<minijinja::Value, minijinja::Error> {
+            Err(minijinja::Error::new(
+                minijinja::ErrorKind::InvalidOperation,
+                format!("Jinja Exception: {msg}"),
+            ))
+        },
+    );
+
+    // strftime_now(format): format current local time (llama.cpp: uses C strftime)
+    env.add_function("strftime_now", |format: String| -> String {
+        chrono::Local::now().format(&format).to_string()
     });
 
-    // tojson filter: serialize value to JSON string (mirrors Jinja2's tojson)
+    // tojson as global function
+    env.add_function("tojson", |value: minijinja::Value| -> String {
+        serde_json::to_string(&value).unwrap_or_default()
+    });
+
+    // -- Filters NOT covered by pycompat or minijinja builtins --
+    // pycompat handles dot methods: startswith/endswith/strip/lstrip/rstrip/split/replace/...
+    // minijinja builtins provide pipe filters: trim/upper/lower/title/capitalize/replace/length/...
+
+    // rsplit: split from right (not in pycompat)
+    env.add_filter(
+        "rsplit",
+        |s: String, sep: Option<String>, maxsplit: Option<i64>| -> Vec<String> {
+            let delim = sep.as_deref().unwrap_or(" ");
+            match maxsplit {
+                Some(n) if n > 0 => s
+                    .rsplitn(n as usize + 1, delim)
+                    .map(|p| p.to_string())
+                    .collect(),
+                _ => s.rsplit(delim).map(|p| p.to_string()).collect(),
+            }
+        },
+    );
+
+    // tojson filter (override built-in to match llama.cpp serialization)
     env.add_filter("tojson", |value: minijinja::Value| -> String {
         serde_json::to_string(&value).unwrap_or_default()
     });
+
+    // append: append item to array
+    env.add_filter(
+        "append",
+        |arr: minijinja::Value, item: minijinja::Value| -> minijinja::Value {
+            let mut items: Vec<minijinja::Value> = Vec::new();
+            if let Ok(iter) = arr.try_iter() {
+                for v in iter {
+                    items.push(v);
+                }
+            }
+            items.push(item);
+            minijinja::Value::from_serialize(&items)
+        },
+    );
+
+    // pop: get element from array by index (default: last)
+    env.add_filter(
+        "pop",
+        |arr: minijinja::Value, index: Option<i64>| -> minijinja::Value {
+            let len = arr.len().unwrap_or(0);
+            if len == 0 {
+                return minijinja::Value::from(());
+            }
+            let idx = index.unwrap_or(-1);
+            let real = if idx < 0 { len as i64 + idx } else { idx };
+            if real < 0 || real as usize >= len {
+                minijinja::Value::from(())
+            } else {
+                arr.get_item_by_index(real as usize)
+                    .unwrap_or_else(|_| minijinja::Value::from(()))
+            }
+        },
+    );
+
+    // get: get value from object by key with optional default
+    env.add_filter(
+        "get",
+        |obj: minijinja::Value,
+         key: String,
+         default: Option<minijinja::Value>|
+         -> minijinja::Value {
+            obj.get_attr(&key)
+                .ok()
+                .filter(|v| !v.is_undefined())
+                .unwrap_or_else(|| default.unwrap_or_else(|| minijinja::Value::from(())))
+        },
+    );
+
     env
 }
-
-// ============================================================================
-// Builtin Jinja Filters (from llama.cpp/common/jinja/value.cpp)
-// ============================================================================
-//
-// llama.cpp implements its own Jinja2 subset engine.  Filters are registered
-// per-value-type via get_builtins().  Below is the complete list extracted
-// from value.cpp + runtime.cpp.
-//
-// -- Global functions (callable without pipe) --------------------------------
-//   raise_exception(msg)         throw a Jinja exception
-//   namespace(key=val, ...)      create an object from kwargs
-//   strftime_now(format)         format current time
-//   range([start,] stop[, step]) integer range array
-//   tojson(value)                serialize to JSON string
-//
-// -- int filters -------------------------------------------------------------
-//   | default   | abs   | float   | tojson   | string
-//
-// -- float filters -----------------------------------------------------------
-//   | default   | abs   | int   | tojson   | string
-//
-// -- string filters ----------------------------------------------------------
-//   | default       | upper       | lower        | strip (=trim)  | rstrip
-//   | lstrip        | title       | capitalize   | length         | startswith
-//   | endswith      | split       | rsplit       | replace        | int
-//   | float         | string      | slice        | safe           | tojson
-//   | indent(width, first, blank)               | join (not impl)
-//
-// -- bool filters ------------------------------------------------------------
-//   | default   | int   | float   | string   | tojson
-//
-// -- array filters -----------------------------------------------------------
-//   | default   | list      | first     | last      | length
-//   | slice     | select    | selectattr | reject   | rejectattr
-//   | join      | string    | tojson     | map      | append
-//   | pop       | sort      | reverse    | unique (not impl)
-//
-// -- object filters ----------------------------------------------------------
-//   | get(key[, default])  | keys      | values    | items
-//   | tojson               | string    | length    | dictsort
-//   | join (not impl)
-//
-// -- none filters ------------------------------------------------------------
-//   | default   | tojson   | string   | safe      | strip
-//   | items / map / reject / rejectattr / select / selectattr / unique  -> empty array
-//
-// -- undefined filters -------------------------------------------------------
-//   | default       | capitalize / lower / upper / title / strip / replace
-//   | safe / string / truncate / wordcount          -> empty string
-//   | first / last / max / min                      -> undefined
-//   | length / sum                                  -> 0
-//   | items / list / map / reject / rejectattr / select / selectattr
-//   | sort / reverse / unique                       -> empty array
-//
-// -- test expressions ("value is <test>") ------------------------------------
-//   boolean   callable   odd   even   false   true   divisibleby
-//   string    integer    float   number   iterable   sequence
-//   mapping   lower   upper   none   defined   undefined
-//   eq / equalto   ge   gt / greaterthan   lt / lessthan   ne
-//   in   sameas (not impl)   escaped (not impl)   filter (not impl)
-//
-// Note: "trim" is an alias for "strip" (handled in runtime.cpp)
-// ============================================================================
