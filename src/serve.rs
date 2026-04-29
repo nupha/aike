@@ -10,16 +10,23 @@ use axum::{
 };
 use crossbeam::channel::Receiver;
 use futures_util::StreamExt;
+use liter_llm::{
+    ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, Choice, FinishReason,
+    StreamChoice, StreamDelta,
+    types::common::{AssistantMessage, ContentPart, Message, StopSequence, Usage, UserContent},
+};
 use llama_cpp_ffi::LlamaModel;
 use minijinja::context;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::json;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tower_http::cors::CorsLayer;
 use uuid::Uuid;
 
-use crate::engine::{Engine, EngineReply, OutputMode, StopReason, Token, now_unix_s};
-use crate::helpers::{JinjaMessage, create_minijinja_env, preprocess_chat_template};
+use crate::{
+    engine::{Engine, EngineReply, OutputMode, StopReason, Token, now_unix_s},
+    helpers::{JinjaMessage, create_minijinja_env, preprocess_chat_template},
+};
 
 #[derive(Debug, Serialize)]
 struct ErrorResponse {
@@ -49,17 +56,6 @@ fn oai_error(message: impl Into<String>, type_: impl Into<String>) -> ErrorRespo
 }
 
 #[derive(Serialize)]
-struct HealthResponse {
-    status: &'static str,
-}
-
-#[derive(Serialize)]
-struct ModelsResponse {
-    object: &'static str,
-    data: Vec<ModelInfo>,
-}
-
-#[derive(Serialize)]
 struct ModelInfo {
     id: String,
     object: &'static str,
@@ -67,204 +63,8 @@ struct ModelInfo {
     owned_by: &'static str,
 }
 
-#[derive(Deserialize)]
-struct ChatCompletionsRequest {
-    #[serde(default)]
-    model: Option<String>,
-    messages: Vec<ChatMessage>,
-    #[serde(default)]
-    stream: bool,
-    #[serde(default)]
-    stream_options: Option<StreamOptions>,
-    #[serde(default = "default_temperature")]
-    temperature: f32,
-    #[serde(default = "default_top_p")]
-    top_p: f32,
-    #[serde(default)]
-    max_tokens: Option<usize>,
-    #[serde(default)]
-    stop: Vec<String>,
-    #[serde(default)]
-    id_slot: Option<i32>,
-    #[serde(default)]
-    cache_prompt: bool,
-}
-
-#[derive(Deserialize)]
-struct ChatMessage {
-    role: String,
-    #[serde(default)]
-    content: Option<MessageContent>,
-}
-
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum MessageContent {
-    Text(String),
-    Parts(Vec<ContentPart>),
-    Null,
-}
-
-#[derive(Deserialize)]
-struct ContentPart {
-    #[serde(rename = "type")]
-    type_: String,
-    #[serde(default)]
-    text: Option<String>,
-}
-
-impl MessageContent {
-    fn to_text(&self) -> String {
-        match self {
-            MessageContent::Text(s) => s.clone(),
-            MessageContent::Parts(parts) => {
-                let mut out = String::new();
-                for p in parts {
-                    if p.type_ == "text" {
-                        if let Some(t) = &p.text {
-                            out.push_str(t);
-                        }
-                    }
-                }
-                out
-            }
-            MessageContent::Null => String::new(),
-        }
-    }
-}
-
-#[derive(Debug, Deserialize)]
-struct StreamOptions {
-    #[serde(default)]
-    include_usage: Option<bool>,
-}
-
-fn default_temperature() -> f32 {
-    1.0
-}
-fn default_top_p() -> f32 {
-    1.0
-}
-
-#[derive(Deserialize)]
-struct CompletionsRequest {
-    #[serde(default)]
-    model: Option<String>,
-    prompt: Vec<String>,
-    #[serde(default)]
-    stream: bool,
-    #[serde(default)]
-    echo: Option<bool>,
-    #[serde(default)]
-    best_of: Option<u32>,
-    #[serde(default)]
-    suffix: Option<String>,
-    #[serde(default = "default_temperature")]
-    temperature: f32,
-    #[serde(default = "default_top_p")]
-    top_p: f32,
-    #[serde(default)]
-    max_tokens: Option<usize>,
-    #[serde(default)]
-    stop: Vec<String>,
-    #[serde(default)]
-    id_slot: Option<i32>,
-    #[serde(default)]
-    cache_prompt: bool,
-}
-
-// --- Response types ---
-
-#[derive(Debug, Serialize)]
-struct ChatCompletionsResponse {
-    id: String,
-    object: &'static str,
-    created: i64,
-    model: String,
-    choices: Vec<ChatChoice>,
-    usage: Usage,
-}
-
-#[derive(Debug, Serialize)]
-struct ChatChoice {
-    index: u32,
-    message: AssistantMessage,
-    finish_reason: String,
-}
-
-#[derive(Debug, Serialize)]
-struct AssistantMessage {
-    role: &'static str,
-    content: String,
-}
-
-#[derive(Debug, Serialize)]
-struct ChatCompletionsChunk {
-    id: String,
-    object: &'static str,
-    created: i64,
-    model: String,
-    choices: Vec<ChatChunkChoice>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    usage: Option<Usage>,
-}
-
-#[derive(Debug, Serialize)]
-struct ChatChunkChoice {
-    index: u32,
-    delta: ChatDelta,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    finish_reason: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-struct ChatDelta {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    role: Option<&'static str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    content: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-struct CompletionsResponse {
-    id: String,
-    object: &'static str,
-    created: i64,
-    model: String,
-    choices: Vec<CompletionChoice>,
-    usage: Usage,
-}
-
-#[derive(Debug, Serialize)]
-struct CompletionChoice {
-    index: u32,
-    text: String,
-    finish_reason: String,
-}
-
-#[derive(Debug, Serialize)]
-struct CompletionChunk {
-    id: String,
-    object: &'static str,
-    created: i64,
-    model: String,
-    choices: Vec<CompletionChunkChoice>,
-}
-
-#[derive(Debug, Serialize)]
-struct CompletionChunkChoice {
-    index: u32,
-    text: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    finish_reason: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-struct Usage {
-    prompt_tokens: usize,
-    completion_tokens: usize,
-    total_tokens: usize,
-}
+const DEFAULT_TEMPERATURE: f64 = 0.75;
+const DEFAULT_TOP_P: f64 = 1.0;
 
 fn render_chat_template(
     tmpl: &str,
@@ -295,8 +95,6 @@ struct AppState {
 
 impl Engine {
     fn build_router(self: Arc<Self>) -> Router {
-        let state = AppState { engine: self };
-
         Router::new()
             .route("/", get(handle_root))
             .route("/health", get(handle_health))
@@ -304,8 +102,7 @@ impl Engine {
             .route("/v1/health", get(handle_health))
             .route("/v1/models", get(handle_models))
             .route("/v1/chat/completions", post(handle_chat_completions))
-            .route("/v1/completions", post(handle_completions))
-            .with_state(state)
+            .with_state(AppState { engine: self })
             .layer(CorsLayer::permissive())
     }
 
@@ -340,32 +137,34 @@ impl Engine {
 //
 
 async fn handle_root() -> impl IntoResponse {
-    Json(json!({"name":"llama-js server"}))
+    Json(json!({"name":"llm server"}))
 }
 
 async fn handle_health() -> impl IntoResponse {
-    Json(HealthResponse { status: "ok" })
+    Json(serde_json::json!({
+        "status": "ok",
+    }))
 }
 
 async fn handle_models(State(state): State<AppState>) -> impl IntoResponse {
-    let created = now_unix_s();
     let data = vec![ModelInfo {
         id: state.engine.model_name().to_string(),
         object: "model",
-        created,
+        created: now_unix_s(),
         owned_by: "local",
     }];
-    Json(ModelsResponse {
-        object: "list",
-        data,
-    })
+
+    Json(serde_json::json!({
+        "object": "list",
+        "data": data,
+    }))
 }
 
 async fn handle_chat_completions(
     State(state): State<AppState>,
     payload: Result<Json<serde_json::Value>, JsonRejection>,
 ) -> Response {
-    let raw = match payload {
+    let mut raw = match payload {
         Ok(Json(v)) => v,
         Err(e) => {
             return (
@@ -376,7 +175,24 @@ async fn handle_chat_completions(
         }
     };
 
-    let mut req: ChatCompletionsRequest = match serde_json::from_value(raw) {
+    // Extract server-specific fields before deserializing (ChatCompletionRequest uses deny_unknown_fields)
+    let id_slot = raw
+        .get("id_slot")
+        .and_then(|v| v.as_i64())
+        .map(|v| v as i32);
+    let cache_prompt = raw
+        .get("cache_prompt")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    // Strip unknown fields so ChatCompletionRequest won't reject them
+    if let Some(obj) = raw.as_object_mut() {
+        obj.remove("id_slot");
+        obj.remove("cache_prompt");
+    }
+
+    // parse request
+    let req: ChatCompletionRequest = match serde_json::from_value(raw) {
         Ok(v) => v,
         Err(e) => {
             return (
@@ -398,23 +214,23 @@ async fn handle_chat_completions(
             .into_response();
     }
 
-    if req.max_tokens.is_none() {
-        req.max_tokens = Some(state.engine.default_max_tokens());
-    }
-
-    let is_chat = true;
-    let stream = req.stream;
-    let max_tokens = req.max_tokens.unwrap_or(0);
-    let temperature = req.temperature;
-    let top_p = req.top_p;
-    let stop_words = req.stop.clone();
+    let stream = req.stream.unwrap_or(false);
+    let temperature = req.temperature.unwrap_or(DEFAULT_TEMPERATURE) as f32;
+    let top_p = req.top_p.unwrap_or(DEFAULT_TOP_P) as f32;
+    let stop_words: Vec<String> = match req.stop {
+        Some(StopSequence::Single(s)) => vec![s],
+        Some(StopSequence::Multiple(v)) => v,
+        None => vec![],
+    };
     let include_usage = req
         .stream_options
         .as_ref()
         .and_then(|s| s.include_usage)
         .unwrap_or(false);
+    let max_tokens = req
+        .max_tokens
+        .unwrap_or(state.engine.default_max_tokens() as u64) as usize;
 
-    // Render chat template -> tokenize prompt
     let prompt_tokens =
         match build_chat_prompt_tokens(state.engine.llm_ctx().model(), &req.messages) {
             Ok(tokens) => tokens,
@@ -428,16 +244,14 @@ async fn handle_chat_completions(
             }
         };
 
-    let seq_hint = req
-        .id_slot
-        .and_then(|v| if v >= 0 { Some(v as usize) } else { None });
-    let use_cache = req.cache_prompt;
+    let seq_hint = id_slot.and_then(|v| if v >= 0 { Some(v as usize) } else { None });
+    let use_cache = cache_prompt;
 
     let respond_id = format!("chatcmpl-{}", Uuid::new_v4().simple());
     let task_id = format!("task-{}", Uuid::new_v4().simple());
     let n_prompt_tokens = prompt_tokens.len();
 
-    let rx = match state.engine.push_task_with_params(
+    let engine_rx = match state.engine.push_task_with_params(
         task_id.clone(),
         prompt_tokens,
         stop_words,
@@ -468,9 +282,8 @@ async fn handle_chat_completions(
         let (tx, rx_tokio) = tokio::sync::mpsc::unbounded_channel::<String>();
         let _ = tokio::task::spawn_blocking(move || {
             bridge_engine_reply_to_sse(
-                rx,
+                engine_rx,
                 tx,
-                is_chat,
                 state.engine.model_name(),
                 &respond_id,
                 include_usage,
@@ -480,179 +293,18 @@ async fn handle_chat_completions(
 
         let s = UnboundedReceiverStream::new(rx_tokio)
             .map(|data| Ok::<Event, Infallible>(Event::default().data(data)));
-
         Sse::new(s)
-            .keep_alive(axum::response::sse::KeepAlive::new().interval(Duration::from_secs(15)))
+            .keep_alive(axum::response::sse::KeepAlive::new().interval(Duration::from_secs(30)))
             .into_response()
     } else {
-        // Unary: collect all EngineReply, build final OAI response
+        // Unary: collect all EngineReply, build final response
         let join = tokio::task::spawn_blocking({
             let model_id = state.engine.model_name().to_string();
-            move || collect_unary_reply(rx, is_chat, &model_id, &respond_id, n_prompt_tokens)
+            move || collect_unary_reply(engine_rx, &model_id, &respond_id, n_prompt_tokens)
         });
         match join.await {
             Ok(Ok(res)) => Json::<serde_json::Value>(res).into_response(),
-            Ok(Err((code, body))) => (code, Json(body)).into_response(),
-            Err(_) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(oai_error("request task failed", "server_error")),
-            )
-                .into_response(),
-        }
-    }
-}
-
-async fn handle_completions(
-    State(state): State<AppState>,
-    payload: Result<Json<serde_json::Value>, JsonRejection>,
-) -> Response {
-    let raw = match payload {
-        Ok(Json(v)) => v,
-        Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(oai_error(e.to_string(), "invalid_request_error")),
-            )
-                .into_response();
-        }
-    };
-
-    let mut req: CompletionsRequest = match serde_json::from_value(raw) {
-        Ok(v) => v,
-        Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(oai_error(e.to_string(), "invalid_request_error")),
-            )
-                .into_response();
-        }
-    };
-
-    if req.prompt.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(oai_error("\"prompt\" is required", "invalid_request_error")),
-        )
-            .into_response();
-    }
-
-    if req.echo.unwrap_or(false) {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(oai_error("echo is not supported", "invalid_request_error")),
-        )
-            .into_response();
-    }
-    if req.best_of.is_some() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(oai_error(
-                "best_of is not supported",
-                "invalid_request_error",
-            )),
-        )
-            .into_response();
-    }
-    if req.suffix.is_some() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(oai_error(
-                "suffix is not supported",
-                "invalid_request_error",
-            )),
-        )
-            .into_response();
-    }
-
-    if req.max_tokens.is_none() {
-        req.max_tokens = Some(state.engine.default_max_tokens());
-    }
-
-    let is_chat = false;
-    let stream = req.stream;
-    let max_tokens = req.max_tokens.unwrap_or(0);
-    let temperature = req.temperature;
-    let top_p = req.top_p;
-    let stop_words = req.stop.clone();
-
-    // Tokenize the first prompt
-    let prompt_text = req.prompt.first().cloned().unwrap_or_default();
-    let prompt_tokens = match tokenize_prompt(state.engine.llm_ctx().model(), &prompt_text) {
-        Ok(tokens) => tokens,
-        Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(oai_error(e, "invalid_request_error")),
-            )
-                .into_response();
-        }
-    };
-
-    let seq_hint = req
-        .id_slot
-        .and_then(|v| if v >= 0 { Some(v as usize) } else { None });
-    let use_cache = req.cache_prompt;
-
-    let respond_id = format!("cmpl-{}", Uuid::new_v4().simple());
-    let task_id = format!("task-{}", Uuid::new_v4().simple());
-    let n_prompt_tokens = prompt_tokens.len();
-
-    let rx = match state.engine.push_task_with_params(
-        task_id,
-        prompt_tokens,
-        stop_words,
-        if stream {
-            OutputMode::Continuous
-        } else {
-            OutputMode::OneShot
-        },
-        seq_hint,
-        use_cache,
-        max_tokens,
-        temperature,
-        top_p,
-        false,
-    ) {
-        Ok(rx) => rx,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(oai_error(e.to_string(), "server_error")),
-            )
-                .into_response();
-        }
-    };
-
-    if stream {
-        let (tx, rx_tokio) = tokio::sync::mpsc::unbounded_channel::<String>();
-
-        let _ = tokio::task::spawn_blocking(move || {
-            bridge_engine_reply_to_sse(
-                rx,
-                tx,
-                is_chat,
-                state.engine.model_name(),
-                &respond_id,
-                false,
-                n_prompt_tokens,
-            );
-        });
-
-        let s = UnboundedReceiverStream::new(rx_tokio)
-            .map(|data| Ok::<Event, Infallible>(Event::default().data(data)));
-
-        Sse::new(s)
-            .keep_alive(axum::response::sse::KeepAlive::new().interval(Duration::from_secs(15)))
-            .into_response()
-    } else {
-        let model_id = state.engine.model_name().to_string();
-        let join = tokio::task::spawn_blocking(move || {
-            collect_unary_reply(rx, is_chat, &model_id, &respond_id, n_prompt_tokens)
-        });
-
-        match join.await {
-            Ok(Ok(res)) => Json::<serde_json::Value>(res).into_response(),
-            Ok(Err((code, body))) => (code, Json(body)).into_response(),
+            Ok(Err((code, err_info))) => (code, Json(err_info)).into_response(),
             Err(_) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(oai_error("request task failed", "server_error")),
@@ -664,7 +316,7 @@ async fn handle_completions(
 
 fn build_chat_prompt_tokens(
     model: &LlamaModel,
-    messages: &[ChatMessage],
+    messages: &[Message],
 ) -> Result<Vec<Token>, String> {
     let tmpl = model.chat_template().ok_or("model has no chat template")?;
     let tmpl = tmpl
@@ -672,14 +324,8 @@ fn build_chat_prompt_tokens(
         .map_err(|e| format!("invalid template: {e}"))?;
     let eos_token = model.eos_token_text().unwrap_or_default();
 
-    // Build owned message structs so the template render can borrow them.
-    let backing: Vec<(String, String)> = messages
-        .iter()
-        .map(|m| {
-            let content = m.content.as_ref().map(|c| c.to_text()).unwrap_or_default();
-            (m.role.clone(), content)
-        })
-        .collect();
+    // Convert liter_llm::Message to (role, content) pairs for template rendering
+    let backing: Vec<(String, String)> = messages.iter().map(message_to_role_content).collect();
 
     let jinja_msgs: Vec<JinjaMessage> = backing
         .into_iter()
@@ -689,6 +335,37 @@ fn build_chat_prompt_tokens(
     let prompt = render_chat_template(tmpl, &jinja_msgs, &eos_token)?;
     let tokens = tokenize_prompt(model, &prompt)?;
     Ok(tokens)
+}
+
+/// Extract (role, content_text) from a liter_llm::Message for template rendering.
+fn message_to_role_content(msg: &Message) -> (String, String) {
+    let role = match msg {
+        Message::System(_) => "system",
+        Message::User(_) => "user",
+        Message::Assistant(_) => "assistant",
+        Message::Tool(_) => "tool",
+        Message::Developer(_) => "developer",
+        Message::Function(_) => "function",
+    };
+    let content = match msg {
+        Message::System(m) => m.content.clone(),
+        Message::User(m) => match &m.content {
+            UserContent::Text(s) => s.clone(),
+            UserContent::Parts(parts) => parts
+                .iter()
+                .filter_map(|p| match p {
+                    ContentPart::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join(""),
+        },
+        Message::Assistant(m) => m.content.clone().unwrap_or_default(),
+        Message::Tool(m) => m.content.clone(),
+        Message::Developer(m) => m.content.clone(),
+        Message::Function(m) => m.content.clone(),
+    };
+    (role.to_string(), content)
 }
 
 fn tokenize_prompt(model: &LlamaModel, prompt: &str) -> Result<Vec<Token>, String> {
@@ -703,7 +380,6 @@ fn tokenize_prompt(model: &LlamaModel, prompt: &str) -> Result<Vec<Token>, Strin
 /// Collect all EngineReply messages for a unary (non-streaming) response.
 fn collect_unary_reply(
     rx: Receiver<EngineReply>,
-    is_chat: bool,
     model_id: &str,
     respond_id: &str,
     n_prompt_tokens: usize,
@@ -720,9 +396,9 @@ fn collect_unary_reply(
             }
             Ok(EngineReply::Stop(reason)) => {
                 finish_reason = match reason {
-                    StopReason::MaxTokens => "length".to_string(),
+                    StopReason::MaxTokens => FinishReason::Length,
                     StopReason::Eog | StopReason::Word(_) | StopReason::PrefillOnly => {
-                        "stop".to_string()
+                        FinishReason::Stop
                     }
                 };
                 break;
@@ -751,53 +427,33 @@ fn collect_unary_reply(
         }
     }
 
-    let usage = Usage {
-        prompt_tokens: n_prompt_tokens,
-        completion_tokens,
-        total_tokens: n_prompt_tokens + completion_tokens,
-    };
-
-    let created = now_unix_s();
-
-    if is_chat {
-        Ok(serde_json::to_value(ChatCompletionsResponse {
-            id: respond_id.to_string(),
-            object: "chat.completion",
-            created,
-            model: model_id.to_string(),
-            choices: vec![ChatChoice {
-                index: 0,
-                message: AssistantMessage {
-                    role: "assistant",
-                    content: full_text,
-                },
-                finish_reason,
-            }],
-            usage,
-        })
-        .unwrap_or(serde_json::Value::Null))
-    } else {
-        Ok(serde_json::to_value(CompletionsResponse {
-            id: respond_id.to_string(),
-            object: "text_completion",
-            created,
-            model: model_id.to_string(),
-            choices: vec![CompletionChoice {
-                index: 0,
-                text: full_text,
-                finish_reason,
-            }],
-            usage,
-        })
-        .unwrap_or(serde_json::Value::Null))
-    }
+    Ok(serde_json::to_value(ChatCompletionResponse {
+        id: respond_id.to_string(),
+        object: "chat.completion".to_string(),
+        created: now_unix_s() as u64,
+        model: model_id.to_string(),
+        choices: vec![Choice {
+            index: 0,
+            message: AssistantMessage {
+                content: Some(full_text),
+                ..Default::default()
+            },
+            finish_reason: Some(finish_reason),
+        }],
+        usage: Some(Usage {
+            prompt_tokens: n_prompt_tokens as u64,
+            completion_tokens: completion_tokens as u64,
+            total_tokens: (n_prompt_tokens + completion_tokens) as u64,
+        }),
+        ..Default::default()
+    })
+    .unwrap_or(serde_json::Value::Null))
 }
 
 /// Bridge crossbeam Receiver to tokio mpsc for SSE streaming.
 fn bridge_engine_reply_to_sse(
     rx: Receiver<EngineReply>,
     tx: tokio::sync::mpsc::UnboundedSender<String>,
-    is_chat: bool,
     model_id: &str,
     respond_id: &str,
     include_usage: bool,
@@ -809,108 +465,83 @@ fn bridge_engine_reply_to_sse(
     loop {
         match rx.recv_timeout(Duration::from_secs(300)) {
             Ok(EngineReply::Text(t)) => {
-                if !sent_start && is_chat {
+                let created = now_unix_s() as u64;
+
+                if !sent_start {
                     // First chunk: emit role delta
                     sent_start = true;
-                    let first = ChatCompletionsChunk {
+
+                    let first = ChatCompletionChunk {
                         id: respond_id.to_string(),
-                        object: "chat.completion.chunk",
-                        created: now_unix_s(),
+                        object: "chat.completion.chunk".to_string(),
+                        created,
                         model: model_id.to_string(),
-                        choices: vec![ChatChunkChoice {
+                        choices: vec![StreamChoice {
                             index: 0,
-                            delta: ChatDelta {
-                                role: Some("assistant"),
+                            delta: StreamDelta {
+                                role: Some("assistant".to_string()),
                                 content: None,
+                                ..Default::default()
                             },
                             finish_reason: None,
                         }],
-                        usage: None,
+                        ..Default::default()
                     };
                     let _ = tx.send(serde_json::to_string(&first).unwrap_or_default());
                 }
 
                 completion_tokens += 1;
 
-                if is_chat {
-                    let chunk = ChatCompletionsChunk {
-                        id: respond_id.to_string(),
-                        object: "chat.completion.chunk",
-                        created: now_unix_s(),
-                        model: model_id.to_string(),
-                        choices: vec![ChatChunkChoice {
-                            index: 0,
-                            delta: ChatDelta {
-                                role: None,
-                                content: Some(t),
-                            },
-                            finish_reason: None,
-                        }],
-                        usage: None,
-                    };
-                    let _ = tx.send(serde_json::to_string(&chunk).unwrap_or_default());
-                } else {
-                    let chunk = CompletionChunk {
-                        id: respond_id.to_string(),
-                        object: "text_completion",
-                        created: now_unix_s(),
-                        model: model_id.to_string(),
-                        choices: vec![CompletionChunkChoice {
-                            index: 0,
-                            text: t,
-                            finish_reason: None,
-                        }],
-                    };
-                    let _ = tx.send(serde_json::to_string(&chunk).unwrap_or_default());
-                }
+                let chunk = ChatCompletionChunk {
+                    id: respond_id.to_string(),
+                    object: "chat.completion.chunk".to_string(),
+                    created,
+                    model: model_id.to_string(),
+                    choices: vec![StreamChoice {
+                        index: 0,
+                        delta: StreamDelta {
+                            role: None,
+                            content: Some(t),
+                            ..Default::default()
+                        },
+                        finish_reason: None,
+                    }],
+                    ..Default::default()
+                };
+                let _ = tx.send(serde_json::to_string(&chunk).unwrap_or_default());
             }
             Ok(EngineReply::Stop(reason)) => {
                 let fr = match reason {
-                    StopReason::Eog | StopReason::Word(_) | StopReason::PrefillOnly => "stop",
-                    StopReason::MaxTokens => "length",
+                    StopReason::Eog | StopReason::Word(_) | StopReason::PrefillOnly => {
+                        FinishReason::Stop
+                    }
+                    StopReason::MaxTokens => FinishReason::Length,
                 };
 
-                let usage_val = if include_usage {
+                let usage = if include_usage {
                     Some(Usage {
-                        prompt_tokens: n_prompt_tokens,
-                        completion_tokens,
-                        total_tokens: n_prompt_tokens + completion_tokens,
+                        prompt_tokens: n_prompt_tokens as u64,
+                        completion_tokens: completion_tokens as u64,
+                        total_tokens: (n_prompt_tokens + completion_tokens) as u64,
                     })
                 } else {
                     None
                 };
 
-                if is_chat {
-                    let last = ChatCompletionsChunk {
-                        id: respond_id.to_string(),
-                        object: "chat.completion.chunk",
-                        created: now_unix_s(),
-                        model: model_id.to_string(),
-                        choices: vec![ChatChunkChoice {
-                            index: 0,
-                            delta: ChatDelta {
-                                role: None,
-                                content: None,
-                            },
-                            finish_reason: Some(fr.to_string()),
-                        }],
-                        usage: usage_val,
-                    };
-                    let _ = tx.send(serde_json::to_string(&last).unwrap_or_default());
-                } else {
-                    let last = CompletionChunk {
-                        id: respond_id.to_string(),
-                        object: "text_completion",
-                        created: now_unix_s(),
-                        model: model_id.to_string(),
-                        choices: vec![CompletionChunkChoice {
-                            index: 0,
-                            text: String::new(),
-                            finish_reason: Some(fr.to_string()),
-                        }],
-                    };
-                    let _ = tx.send(serde_json::to_string(&last).unwrap_or_default());
-                }
+                let last = ChatCompletionChunk {
+                    id: respond_id.to_string(),
+                    object: "chat.completion.chunk".to_string(),
+                    created: now_unix_s() as u64,
+                    model: model_id.to_string(),
+                    choices: vec![StreamChoice {
+                        index: 0,
+                        delta: StreamDelta::default(),
+                        finish_reason: Some(fr),
+                    }],
+                    usage,
+                    ..Default::default()
+                };
+                let _ = tx.send(serde_json::to_string(&last).unwrap_or_default());
 
                 let _ = tx.send("[DONE]".to_string());
                 break;
