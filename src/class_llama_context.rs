@@ -7,7 +7,7 @@ use std::{
 };
 
 use linkme::distributed_slice;
-use llama_cpp_ffi::{LlamaContext, SampleOverrides};
+use llama_cpp_ffi::LlamaContext;
 use zuqe::{
     CallContext, ClassDef, ClassID, FieldDef, IntOrFloat, JS_PROP_ENUMERABLE, JS_PROP_FORCE,
     JSResult, JSValue, Object, Runtime, ScopedContext,
@@ -120,7 +120,6 @@ impl LlamaContextWrap {
         sampler_id: SamplerId,
         logits: i32,
         sampler_spec: SamplerSpec,
-        params_opt: Option<SampleOverrides>,
     ) -> Result<i32, String> {
         self.with_ctx_mut(|llm_ctx| {
             let token = crate::worker::sample_with_cached_sampler(
@@ -129,7 +128,6 @@ impl LlamaContextWrap {
                 sampler_spec.rev,
                 &sampler_spec.steps,
                 logits,
-                params_opt.as_ref(),
             )?;
             Ok(token)
         })
@@ -330,52 +328,6 @@ fn js_context_sample(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let s = cc.arg(1);
     let sampler_id: SamplerId = get_sampler_id(ctx, &s)?;
 
-    let mut params_opt: Option<SampleOverrides> = None;
-    if cc.length() > 2 {
-        let p = cc.arg(2);
-        if !p.is_undefined() {
-            let obj = p.as_object().copied().ok_or_else(|| {
-                ctx.throw_type_error("params must be object");
-                -1
-            })?;
-            let mut params = SampleOverrides::default();
-
-            let v = obj.get_property_str(ctx, "temperature")?;
-            if !v.is_undefined() {
-                let t = v.to_number(ctx)?.to_f64() as f32;
-                params.temperature = Some(t);
-            }
-
-            let v = obj.get_property_str(ctx, "topP")?;
-            if !v.is_undefined() {
-                let p = v.to_number(ctx)?.to_f64() as f32;
-                params.top_p = Some(p);
-            }
-
-            let v = obj.get_property_str(ctx, "topK")?;
-            if !v.is_undefined() {
-                let k = v.to_number(ctx)?.to_i32();
-                params.top_k = Some(k);
-            }
-
-            let v = obj.get_property_str(ctx, "repeatPenalty")?;
-            if !v.is_undefined() {
-                let rp = v.to_number(ctx)?.to_f64() as f32;
-                params.repeat_penalty = Some(rp);
-            }
-
-            let v = obj.get_property_str(ctx, "repeatPenaltyWindow")?;
-            if !v.is_undefined() {
-                let rw = v.to_number(ctx)?.to_i32();
-                params.repeat_penalty_window = Some(rw);
-            }
-
-            if !params.is_empty() {
-                params_opt = Some(params);
-            }
-        }
-    }
-
     let (promise, tx) =
         Promise::create_with_channel::<Result<Token, String>>(ctx, |cx, data| -> JSResult {
             match data {
@@ -393,7 +345,7 @@ fn js_context_sample(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     if let Err(e) = WorkerPool::singleton().add_job(
         move || {
             let res = get_sampler_spec_by_id(sampler_id).and_then(|sampler_spec| {
-                llm_ctx_wrap.sample_token(sampler_id, logits, sampler_spec, params_opt)
+                llm_ctx_wrap.sample_token(sampler_id, logits, sampler_spec)
             });
             let _ = tx_submit.send(res);
         },
@@ -575,7 +527,7 @@ const CLASS_CONTEXT_PROTO: &[FieldDef] = &[
         PROP_IS_DISPOSED as _,
     ),
     FieldDef::CALL("decode", 2, js_context_decode, 0),
-    FieldDef::CALL("sample", 2, js_context_sample, 0),
+    FieldDef::CALL("sample", 1, js_context_sample, 0),
     FieldDef::CALL("reset", 0, js_context_reset, 0),
     FieldDef::CALL("embedTokens", 1, js_context_embedTokens, 0),
     FieldDef::CALL("getStats", 0, js_context_getStats, 0),

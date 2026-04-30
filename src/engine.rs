@@ -339,10 +339,12 @@ impl Engine {
         if seq_id >= samplers.len() {
             return Err(format!("invalid seq id {}", seq_id));
         }
-        let Some(sampler) = samplers[seq_id].as_ref() else {
-            return Err(format!("slot sampler is not ready: {}", seq_id));
-        };
-        Ok(sampler.sample_with_overrides(self.llm_ctx(), logits_idx, None))
+
+        if let Some(sampler) = samplers[seq_id].as_mut() {
+            Ok(sampler.sample(self.llm_ctx(), logits_idx))
+        } else {
+            Err(format!("slot sampler is not ready: {}", seq_id))
+        }
     }
 
     fn init_slot_sampler(&self, seq_id: usize, temperature: f32, top_p: f32) -> Result<(), String> {
@@ -351,23 +353,23 @@ impl Engine {
             return Err(format!("invalid seq id {}", seq_id));
         }
         if samplers[seq_id].is_none() {
-            let mut sampler = SamplerChain::new(self.llm_ctx().model().clone(), true);
-            sampler
-                .add_sampler(&SamplerKind::Penalties {
-                    repeat_last_n: 64,
-                    repeat_penalty: 1.1,
-                    frequency_penalty: 0.0,
-                    presence_penalty: 0.0,
-                })
-                .add_sampler(&SamplerKind::TopK(40))
-                .add_sampler(&SamplerKind::TopP(top_p))
-                .add_sampler(&SamplerKind::Temperature {
-                    temp: temperature,
-                    dyn_range: 0.0,
-                    dyn_exponent: 0.0,
-                })
-                .add_sampler(&SamplerKind::Dist(0));
-            samplers[seq_id] = Some(sampler);
+            let sc = SamplerChain::new(self.llm_ctx().model().clone(), true);
+            sc.add_sampler(&SamplerKind::Penalties {
+                repeat_last_n: 64,
+                repeat_penalty: 1.1,
+                frequency_penalty: 0.0,
+                presence_penalty: 0.0,
+            })
+            .add_sampler(&SamplerKind::TopK(40))
+            .add_sampler(&SamplerKind::TopP(top_p))
+            .add_sampler(&SamplerKind::Temperature {
+                temp: temperature,
+                dyn_range: 0.0,
+                dyn_exponent: 0.0,
+            })
+            .add_sampler(&SamplerKind::Dist(0));
+
+            samplers[seq_id] = Some(sc);
         }
         Ok(())
     }

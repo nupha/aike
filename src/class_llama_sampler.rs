@@ -5,7 +5,7 @@ use std::{
 };
 
 use linkme::distributed_slice;
-use llama_cpp_ffi::{SampleOverrides, SamplerKind};
+use llama_cpp_ffi::SamplerKind;
 use zuqe::{
     CallContext, ClassDef, ClassID, FieldDef, IntOrFloat, JS_PROP_ENUMERABLE, JSResult, JSValue,
     Object, Runtime, RuntimeImpl, ScopedContext,
@@ -23,7 +23,6 @@ pub(super) type SamplerId = usize;
 pub(super) struct SamplerSpec {
     pub rev: u64,
     pub steps: Vec<SamplerKind>,
-    pub defaults: SampleOverrides,
 }
 
 static SAMPLER_SPEC_LUT: OnceLock<Mutex<HashMap<SamplerId, SamplerSpec>>> = OnceLock::new();
@@ -83,7 +82,6 @@ pub fn js_model_createSamplerChain(ctx: &mut ScopedContext, cc: CallContext) -> 
     let mut spec = SamplerSpec {
         rev: 1,
         steps: Vec::new(),
-        defaults: SampleOverrides::default(),
     };
 
     if cc.length() > 0 {
@@ -163,8 +161,6 @@ pub fn js_model_createSamplerChain(ctx: &mut ScopedContext, cc: CallContext) -> 
                             }
                         }
 
-                        spec.defaults.repeat_penalty_window = Some(repeat_last_n);
-                        spec.defaults.repeat_penalty = Some(repeat_penalty);
                         spec.steps.push(SamplerKind::Penalties {
                             repeat_last_n,
                             repeat_penalty,
@@ -181,7 +177,6 @@ pub fn js_model_createSamplerChain(ctx: &mut ScopedContext, cc: CallContext) -> 
                                 -1
                             })?
                             .to_i32();
-                        spec.defaults.top_k = Some(d);
                         spec.steps.push(SamplerKind::TopK(d));
                     }
                     "top-p" => {
@@ -193,7 +188,6 @@ pub fn js_model_createSamplerChain(ctx: &mut ScopedContext, cc: CallContext) -> 
                                 -1
                             })?
                             .to_f64() as f32;
-                        spec.defaults.top_p = Some(d);
                         spec.steps.push(SamplerKind::TopP(d));
                     }
                     "temperature" => {
@@ -208,7 +202,6 @@ pub fn js_model_createSamplerChain(ctx: &mut ScopedContext, cc: CallContext) -> 
                             })?
                             .to_f64() as f32;
 
-                        spec.defaults.temperature = Some(temp);
                         spec.steps.push(SamplerKind::Temperature {
                             temp,
                             dyn_range,
@@ -317,8 +310,6 @@ fn add_penalties(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         }
     }
 
-    spec.defaults.repeat_penalty_window = Some(repeat_last_n);
-    spec.defaults.repeat_penalty = Some(repeat_penalty);
     spec.steps.push(SamplerKind::Penalties {
         repeat_last_n,
         repeat_penalty,
@@ -346,13 +337,11 @@ fn add_top_k_p(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     match cc.magic() {
         TOP_K => {
             let d = n.to_i32();
-            spec.defaults.top_k = Some(d);
             spec.steps.push(SamplerKind::TopK(d));
             spec.steps.push(SamplerKind::Dist(0));
         }
         TOP_P => {
             let d = n.to_f64() as f32;
-            spec.defaults.top_p = Some(d);
             spec.steps.push(SamplerKind::TopP(d));
         }
         _ => {
@@ -374,7 +363,6 @@ fn add_temperature(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let spec = get_sampler_spec_mut(ctx, &mut reg, sampler_id)?;
 
     let d = cc.arg(0).to_number(ctx)?.to_f64();
-    spec.defaults.temperature = Some(d as f32);
     spec.steps.push(SamplerKind::Temperature {
         temp: d as f32,
         dyn_range: 1.0,

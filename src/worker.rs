@@ -10,7 +10,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use llama_cpp_ffi::{LlamaContext, SampleOverrides, SamplerChain, SamplerKind};
+use llama_cpp_ffi::{LlamaContext, SamplerChain, SamplerKind};
 
 type Job = Box<dyn FnOnce() + Send + 'static>;
 
@@ -400,7 +400,6 @@ pub(crate) fn sample_with_cached_sampler(
     sampler_rev_at_fetch: u64,
     steps: &[SamplerKind],
     logits: i32,
-    params_opt: Option<&SampleOverrides>,
 ) -> Result<i32, String> {
     let current_rev = current_sampler_rev(sampler_id);
     if current_rev != sampler_rev_at_fetch {
@@ -419,7 +418,7 @@ pub(crate) fn sample_with_cached_sampler(
         cache.retain(|k, _| !(k.sampler_id == sampler_id && k.rev != current_rev));
 
         cache.entry(key).or_insert_with(|| {
-            let mut sampler = SamplerChain::new(llm_ctx.model().clone(), false);
+            let sampler = SamplerChain::new(llm_ctx.model().clone(), false);
             for kind in steps {
                 sampler.add_sampler(kind);
             }
@@ -427,10 +426,10 @@ pub(crate) fn sample_with_cached_sampler(
         });
 
         let sampler = cache
-            .get(&key)
+            .get_mut(&key)
             .ok_or_else(|| "sampler cache miss".to_string())?;
 
-        Ok(sampler.sample_with_overrides(llm_ctx, logits, params_opt))
+        Ok(sampler.sample(llm_ctx, logits))
     })
 }
 
