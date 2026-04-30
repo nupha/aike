@@ -5,7 +5,7 @@ use std::{
 };
 
 use linkme::distributed_slice;
-use llama_cpp_ffi::{SamplerKind, SamplingParams};
+use llama_cpp_ffi::{SampleOverrides, SamplerKind};
 use zuqe::{
     CallContext, ClassDef, ClassID, FieldDef, IntOrFloat, JS_PROP_ENUMERABLE, JSResult, JSValue,
     Object, Runtime, RuntimeImpl, ScopedContext,
@@ -23,7 +23,7 @@ pub(super) type SamplerId = usize;
 pub(super) struct SamplerSpec {
     pub rev: u64,
     pub steps: Vec<SamplerKind>,
-    pub defaults: SamplingParams,
+    pub defaults: SampleOverrides,
 }
 
 static SAMPLER_SPEC_LUT: OnceLock<Mutex<HashMap<SamplerId, SamplerSpec>>> = OnceLock::new();
@@ -83,7 +83,7 @@ pub fn js_model_createSamplerChain(ctx: &mut ScopedContext, cc: CallContext) -> 
     let mut spec = SamplerSpec {
         rev: 1,
         steps: Vec::new(),
-        defaults: SamplingParams::default(),
+        defaults: SampleOverrides::default(),
     };
 
     if cc.length() > 0 {

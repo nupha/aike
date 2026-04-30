@@ -217,6 +217,7 @@ impl Engine {
     }
 
     /// Private: access the UnsafeCell<LlamaContext> in worker thread only
+    #[allow(clippy::mut_from_ref)]
     fn llm_ctx_mut(&self) -> &mut LlamaContext {
         unsafe { &mut *self.llm_ctx.get() }
     }
@@ -225,10 +226,12 @@ impl Engine {
         unsafe { &*self.slot_cached_tokens.get() }
     }
 
+    #[allow(clippy::mut_from_ref)]
     fn cached_tokens_mut(&self) -> &mut Vec<Vec<Token>> {
         unsafe { &mut *self.slot_cached_tokens.get() }
     }
 
+    #[allow(clippy::mut_from_ref)]
     fn samplers_mut(&self) -> &mut Vec<Option<SamplerChain>> {
         unsafe { &mut *self.slot_samplers.get() }
     }
@@ -339,7 +342,7 @@ impl Engine {
         let Some(sampler) = samplers[seq_id].as_ref() else {
             return Err(format!("slot sampler is not ready: {}", seq_id));
         };
-        Ok(sampler.sample_with_params(self.llm_ctx(), logits_idx, None))
+        Ok(sampler.sample_with_overrides(self.llm_ctx(), logits_idx, None))
     }
 
     fn init_slot_sampler(&self, seq_id: usize, temperature: f32, top_p: f32) -> Result<(), String> {

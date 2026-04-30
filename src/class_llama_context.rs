@@ -7,7 +7,7 @@ use std::{
 };
 
 use linkme::distributed_slice;
-use llama_cpp_ffi::{LlamaContext, SamplingParams};
+use llama_cpp_ffi::{LlamaContext, SampleOverrides};
 use zuqe::{
     CallContext, ClassDef, ClassID, FieldDef, IntOrFloat, JS_PROP_ENUMERABLE, JS_PROP_FORCE,
     JSResult, JSValue, Object, Runtime, ScopedContext,
@@ -120,7 +120,7 @@ impl LlamaContextWrap {
         sampler_id: SamplerId,
         logits: i32,
         sampler_spec: SamplerSpec,
-        params_opt: Option<SamplingParams>,
+        params_opt: Option<SampleOverrides>,
     ) -> Result<i32, String> {
         self.with_ctx_mut(|llm_ctx| {
             let token = crate::worker::sample_with_cached_sampler(
@@ -330,7 +330,7 @@ fn js_context_sample(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let s = cc.arg(1);
     let sampler_id: SamplerId = get_sampler_id(ctx, &s)?;
 
-    let mut params_opt: Option<SamplingParams> = None;
+    let mut params_opt: Option<SampleOverrides> = None;
     if cc.length() > 2 {
         let p = cc.arg(2);
         if !p.is_undefined() {
@@ -338,7 +338,7 @@ fn js_context_sample(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 ctx.throw_type_error("params must be object");
                 -1
             })?;
-            let mut params = SamplingParams::default();
+            let mut params = SampleOverrides::default();
 
             let v = obj.get_property_str(ctx, "temperature")?;
             if !v.is_undefined() {
