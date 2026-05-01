@@ -418,11 +418,11 @@ pub(crate) fn sample_with_cached_sampler(
         cache.retain(|k, _| !(k.sampler_id == sampler_id && k.rev != current_rev));
 
         cache.entry(key).or_insert_with(|| {
-            let sampler = SamplerChain::new(llm_ctx.model().clone(), false);
+            let mut sc = SamplerChain::new(llm_ctx.model().clone(), false);
             for kind in steps {
-                sampler.add_sampler(kind);
+                sc.add_sampler(kind);
             }
-            sampler
+            sc
         });
 
         let sampler = cache

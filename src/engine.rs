@@ -353,7 +353,7 @@ impl Engine {
             return Err(format!("invalid seq id {}", seq_id));
         }
         if samplers[seq_id].is_none() {
-            let sc = SamplerChain::new(self.llm_ctx().model().clone(), true);
+            let mut sc = SamplerChain::new(self.llm_ctx().model().clone(), true);
             sc.add_sampler(&SamplerKind::Penalties {
                 repeat_last_n: 64,
                 repeat_penalty: 1.1,
