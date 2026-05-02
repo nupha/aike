@@ -24,16 +24,68 @@ pub struct GrammarConfig {
     pub tool_choice: LarkToolChoice,
 }
 
+static NEXT_TASK_ID: AtomicUsize = AtomicUsize::new(1);
+
 #[derive(Debug, Clone)]
 pub struct TaskConfig {
-    pub task_id: String,
-    pub stop_words: Vec<String>,
-    pub max_tokens: usize,
-    pub temperature: f32,
-    pub top_p: f32,
-    pub logits_for_all_tokens: bool,
-    pub grammar: Option<GrammarConfig>,
-    pub output_mode: OutputMode,
+    task_id: usize,
+    grammar: Option<GrammarConfig>,
+    stop_words: Vec<String>,
+    max_tokens: usize,
+    temperature: f32,
+    top_p: f32,
+    logits_for_all_tokens: bool,
+    output_mode: OutputMode,
+}
+
+impl TaskConfig {
+    pub fn new() -> Self {
+        Self {
+            task_id: NEXT_TASK_ID.fetch_add(1, Ordering::Relaxed),
+            stop_words: Vec::new(),
+            max_tokens: 0,
+            temperature: 1.0,
+            top_p: 1.0,
+            logits_for_all_tokens: false,
+            grammar: None,
+            output_mode: OutputMode::OneShot,
+        }
+    }
+
+    pub fn stop_words(mut self, v: Vec<String>) -> Self {
+        self.stop_words = v;
+        self
+    }
+
+    pub fn max_tokens(mut self, v: usize) -> Self {
+        self.max_tokens = v;
+        self
+    }
+
+    pub fn temperature(mut self, v: f32) -> Self {
+        self.temperature = v;
+        self
+    }
+
+    pub fn top_p(mut self, v: f32) -> Self {
+        self.top_p = v;
+        self
+    }
+
+    pub fn logits_for_all_tokens(mut self, v: bool) -> Self {
+        self.logits_for_all_tokens = v;
+        self
+    }
+
+    pub fn grammar(mut self, g: GrammarConfig) -> Self {
+        self.grammar = Some(g);
+        self
+    }
+
+    pub fn output_mode(mut self, v: OutputMode) -> Self {
+        self.output_mode = v;
+        self
+    }
 }
 
 pub struct EngineTask {
@@ -50,10 +102,10 @@ pub enum OutputMode {
     OneShot,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EngineCtrlMsg {
     Shutdown,
-    CancelTask(String),
+    CancelTask(usize),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -541,54 +593,23 @@ impl Engine {
 
     pub fn push_task(
         &self,
-        task_id: impl Into<String>,
         prompt_tokens: Vec<Token>,
-        stop_words: Vec<String>,
-        output_mode: OutputMode,
+        config: TaskConfig,
     ) -> Result<Receiver<EngineReply>, SendError<Box<EngineTask>>> {
-        self.push_task_with_params(
-            task_id,
-            prompt_tokens,
-            stop_words,
-            output_mode,
-            None,
-            true,
-            0,
-            1.0,
-            1.0,
-            false,
-            None,
-        )
+        self.push_task_with_params(prompt_tokens, config, None, true)
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub fn push_task_with_params(
         &self,
-        task_id: impl Into<String>,
         prompt_tokens: Vec<Token>,
-        stop_words: Vec<String>,
-        output_mode: OutputMode,
+        config: TaskConfig,
         seq_hint: Option<usize>,
         use_cache: bool,
-        max_tokens: usize,
-        temperature: f32,
-        top_p: f32,
-        logits_for_all_tokens: bool,
-        grammar: Option<GrammarConfig>,
     ) -> Result<Receiver<EngineReply>, SendError<Box<EngineTask>>> {
         let (output_tx, output_rx) = crossbeam::channel::bounded::<EngineReply>(1);
 
         let task = Box::new(EngineTask {
-            config: TaskConfig {
-                task_id: task_id.into(),
-                stop_words,
-                max_tokens,
-                temperature,
-                top_p,
-                logits_for_all_tokens,
-                grammar,
-                output_mode,
-            },
+            config,
             prompt_tokens,
             seq_hint,
             use_cache,
@@ -599,8 +620,8 @@ impl Engine {
         Ok(output_rx)
     }
 
-    pub fn cancel_task(&self, task_id: impl Into<String>) -> Result<(), SendError<EngineCtrlMsg>> {
-        self.ctrl_tx.send(EngineCtrlMsg::CancelTask(task_id.into()))
+    pub fn cancel_task(&self, task_id: usize) -> Result<(), SendError<EngineCtrlMsg>> {
+        self.ctrl_tx.send(EngineCtrlMsg::CancelTask(task_id))
     }
 
     fn decoding_stage(&self, slots: &mut [Slot], slot_cursor: &mut usize) -> bool {
@@ -888,7 +909,7 @@ impl Engine {
         slots: &mut [Slot],
         ready: &mut VecDeque<Box<EngineTask>>,
         deferred: &mut VecDeque<Box<EngineTask>>,
-        cancelled_ids: &mut HashSet<String>,
+        cancelled_ids: &mut HashSet<usize>,
     ) -> bool {
         while let Ok(ctrl) = ctrl_rx.try_recv() {
             match ctrl {
@@ -909,9 +930,9 @@ impl Engine {
                     return true;
                 }
                 EngineCtrlMsg::CancelTask(task_id) => {
-                    remove_cancelled_inputs(ready, &task_id);
-                    remove_cancelled_inputs(deferred, &task_id);
-                    cancelled_ids.insert(task_id.clone());
+                    remove_cancelled_inputs(ready, task_id);
+                    remove_cancelled_inputs(deferred, task_id);
+                    cancelled_ids.insert(task_id);
 
                     for slot in slots.iter_mut() {
                         let state0 = std::mem::replace(&mut slot.state, SlotState::Busy);
@@ -1113,7 +1134,7 @@ fn worker_loop(
     let mut ready_inputs = VecDeque::<Box<EngineTask>>::new();
     let mut deferred_inputs = VecDeque::<Box<EngineTask>>::new();
 
-    let mut cancelled_ids = HashSet::<String>::new();
+    let mut cancelled_ids = HashSet::<usize>::new();
 
     loop {
         if engine.handle_ctrl_messages(
@@ -1206,7 +1227,7 @@ fn pop_next_task(
     ready.pop_front()
 }
 
-fn remove_cancelled_inputs(queue: &mut VecDeque<Box<EngineTask>>, task_id: &str) {
+fn remove_cancelled_inputs(queue: &mut VecDeque<Box<EngineTask>>, task_id: usize) {
     let mut kept = VecDeque::with_capacity(queue.len());
     while let Some(input) = queue.pop_front() {
         if input.config.task_id == task_id {

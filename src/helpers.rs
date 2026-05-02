@@ -1,3 +1,5 @@
+use liter_llm::ChatCompletionTool;
+use llama_cpp_ffi::LarkToolChoice;
 use minijinja::Environment;
 use minijinja_contrib::pycompat;
 use serde::Serialize;
@@ -159,4 +161,75 @@ pub(crate) fn create_minijinja_env() -> Environment<'static> {
     );
 
     env
+}
+
+/// Compile tool definitions into a Lark grammar string for llguidance.
+///
+/// The grammar constrains the model output to valid JSON matching the tool schemas.
+/// Each tool's parameters are embedded as `%json {schema}` directives.
+/// The grammar allows free text interleaved with tool calls.
+pub(crate) fn compile_tools_lark_grammar(
+    tools: &[ChatCompletionTool],
+    tool_choice: LarkToolChoice,
+) -> String {
+    debug_assert!(!tools.is_empty());
+    debug_assert!(tool_choice != LarkToolChoice::None);
+
+    let mut rules = String::new();
+    let mut tool_alternatives = Vec::new();
+
+    for tool in tools {
+        let name = &tool.function.name;
+        let params = tool
+            .function
+            .parameters
+            .as_ref()
+            .cloned()
+            .unwrap_or(serde_json::json!({"type": "object", "properties": {}}));
+
+        // Wrap the original parameters schema inside a {"name": const, "arguments": {...}} envelope.
+        // This matches the standard Qwen/Hermes tool call JSON format:
+        //   {"name": "function_name", "arguments": {...}}
+        let wrapped = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "name": {"const": name},
+                "arguments": params
+            },
+            "required": ["name", "arguments"]
+        });
+        rules.push_str(&format!("json_body_{name}: %json {wrapped}\n"));
+
+        // Use lazy TEXT so that when the model emits "<tool_call>",
+        // TEXT stops matching and the parser switches to the tool path.
+        rules.push_str(&format!("tool_{name}_hd[lazy]: TEXT \"<tool_call>\"\n"));
+        rules.push_str(&format!(
+            "tool_{name}: tool_{name}_hd json_body_{name} \"</tool_call>\"\n"
+        ));
+        tool_alternatives.push(format!("tool_{name}"));
+    }
+
+    let tool_alternatives = tool_alternatives.join(" | ");
+
+    match tool_choice {
+        LarkToolChoice::Required => {
+            // force tool call, no free text
+            format!(
+                "start: ({tool_alternatives})+\n\
+                 TEXT: /(.|\\n)*/\n\
+                 {rules}"
+            )
+        }
+        LarkToolChoice::Auto | LarkToolChoice::None => {
+            // allow free text or tool calls, interleaved.
+            // Uses lazy TEXT so that when the model emits "<tool_call>",
+            // TEXT stops matching and the parser switches to tool_xxx.
+            format!(
+                "start: ({tool_alternatives})* f_end\n\
+                 f_end: TEXT\n\
+                 TEXT: /(.|\\n)*/\n\
+                 {rules}"
+            )
+        }
+    }
 }

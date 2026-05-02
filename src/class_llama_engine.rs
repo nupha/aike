@@ -1,11 +1,4 @@
-use std::{
-    cell::Cell,
-    ffi::c_void,
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
-};
+use std::{cell::Cell, ffi::c_void, sync::Arc};
 
 use linkme::distributed_slice;
 use zuqe::{
@@ -19,10 +12,8 @@ use zuqe::{
 use crate::{
     USER_CLASS_DEFS,
     class_llama_context::parse_tokens,
-    engine::{Engine, EngineReply, OutputMode},
+    engine::{Engine, EngineReply, OutputMode, TaskConfig},
 };
-
-static NEXT_TASK_ID: AtomicU64 = AtomicU64::new(1);
 
 pub(super) struct EngineParams {
     pub idle_sleep_ms: u64,
@@ -116,7 +107,6 @@ fn js_engine_generate(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         return Err(-1);
     }
 
-    let task_id = format!("{}", NEXT_TASK_ID.fetch_add(1, Ordering::Relaxed));
     let mode = if cc.magic() == MAGIC_GENERATE {
         OutputMode::OneShot
     } else {
@@ -124,7 +114,7 @@ fn js_engine_generate(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     };
 
     let rx = engine
-        .push_task(task_id, tokens, Vec::new(), mode)
+        .push_task(tokens, TaskConfig::new().output_mode(mode))
         .map_err(|e| {
             ctx.throw_internal_error(&e.to_string());
             -1
