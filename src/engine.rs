@@ -341,7 +341,7 @@ impl Engine {
         }
 
         if let Some(sampler) = samplers[seq_id].as_mut() {
-            Ok(sampler.sample(self.llm_ctx(), logits_idx))
+            Ok(sampler.sample(self.llm_ctx(), logits_idx, None))
         } else {
             Err(format!("slot sampler is not ready: {}", seq_id))
         }
