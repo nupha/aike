@@ -10,9 +10,19 @@ use std::{
 };
 
 use crossbeam::channel::{Receiver, SendError, Sender};
-use llama_cpp_ffi::{LlamaContext, LlamaModel, SamplerChain, SamplerKind};
+use llama_cpp_ffi::{
+    GrammarController, LarkToolChoice, LlamaContext, LlamaModel, SamplerChain, SamplerKind,
+};
 
 pub type Token = i32;
+
+/// Grammar constraint configuration for tool calling.
+
+#[derive(Debug, Clone)]
+pub struct GrammarConfig {
+    pub lark_grammar: String,
+    pub tool_choice: LarkToolChoice,
+}
 
 #[derive(Debug, Clone)]
 pub struct TaskConfig {
@@ -22,6 +32,7 @@ pub struct TaskConfig {
     pub temperature: f32,
     pub top_p: f32,
     pub logits_for_all_tokens: bool,
+    pub grammar: Option<GrammarConfig>,
     pub output_mode: OutputMode,
 }
 
@@ -162,7 +173,7 @@ impl Slot {
 /// `Arc<Engine>` across threads, while only the worker thread mutates
 /// the LlamaContext and slot state.
 pub struct Engine {
-    input_tx: Sender<EngineTask>,
+    input_tx: Sender<Box<EngineTask>>,
     ctrl_tx: Sender<EngineCtrlMsg>,
     num_tasks: AtomicUsize,
     model: LlamaModel,
@@ -347,13 +358,31 @@ impl Engine {
         }
     }
 
-    fn init_slot_sampler(&self, seq_id: usize, temperature: f32, top_p: f32) -> Result<(), String> {
+    fn accept_token(&self, seq_id: usize, token: Token) {
+        let samplers = self.samplers_mut();
+        if seq_id < samplers.len()
+            && let Some(sampler) = samplers[seq_id].as_mut()
+        {
+            sampler.accept(token, true);
+        }
+    }
+
+    /// lazy initialize slot sampler
+    fn init_slot_sampler(
+        &self,
+        seq_id: usize,
+        temperature: f32,
+        top_p: f32,
+        grammar: Option<&GrammarConfig>,
+    ) -> Result<(), String> {
         let samplers = self.samplers_mut();
         if seq_id >= samplers.len() {
             return Err(format!("invalid seq id {}", seq_id));
         }
+
         if samplers[seq_id].is_none() {
             let mut sc = SamplerChain::new(self.llm_ctx().model().clone(), true);
+
             sc.add_sampler(&SamplerKind::Penalties {
                 repeat_last_n: 64,
                 repeat_penalty: 1.1,
@@ -369,8 +398,25 @@ impl Engine {
             })
             .add_sampler(&SamplerKind::Dist(0));
 
+            if let Some(g) = grammar {
+                // use grammar
+                if let Err(e) = sc.set_lark_grammar(&g.lark_grammar) {
+                    log::warn!("failed to set grammar: {}", e);
+                } else {
+                    let mut ctrl = GrammarController::new();
+                    ctrl.set_tool_choice(g.tool_choice);
+                    eprintln!(
+                        "[DEBUG] grammar set: tool_choice={:?}, should_apply={}",
+                        g.tool_choice,
+                        ctrl.should_apply(),
+                    );
+                    sc.set_controller(ctrl);
+                }
+            }
+
             samplers[seq_id] = Some(sc);
         }
+
         Ok(())
     }
 
@@ -412,7 +458,7 @@ impl Engine {
         let ubatch_size = (llm_ctx.n_ubatch() as usize).max(1);
         llm_ctx.init_batch(ubatch_size as i32, 0, llm_ctx.n_seq_max());
 
-        let (input_tx, input_rx) = crossbeam::channel::bounded::<EngineTask>(16);
+        let (input_tx, input_rx) = crossbeam::channel::bounded::<Box<EngineTask>>(16);
         let (ctrl_tx, ctrl_rx) = crossbeam::channel::bounded::<EngineCtrlMsg>(1);
 
         let engine = Arc::new(Engine {
@@ -504,7 +550,7 @@ impl Engine {
         prompt_tokens: Vec<Token>,
         stop_words: Vec<String>,
         output_mode: OutputMode,
-    ) -> Result<Receiver<EngineReply>, SendError<EngineTask>> {
+    ) -> Result<Receiver<EngineReply>, SendError<Box<EngineTask>>> {
         self.push_task_with_params(
             task_id,
             prompt_tokens,
@@ -516,9 +562,11 @@ impl Engine {
             1.0,
             1.0,
             false,
+            None,
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn push_task_with_params(
         &self,
         task_id: impl Into<String>,
@@ -531,9 +579,11 @@ impl Engine {
         temperature: f32,
         top_p: f32,
         logits_for_all_tokens: bool,
-    ) -> Result<Receiver<EngineReply>, SendError<EngineTask>> {
+        grammar: Option<GrammarConfig>,
+    ) -> Result<Receiver<EngineReply>, SendError<Box<EngineTask>>> {
         let (output_tx, output_rx) = crossbeam::channel::bounded::<EngineReply>(1);
-        self.input_tx.send(EngineTask {
+
+        let task = Box::new(EngineTask {
             config: TaskConfig {
                 task_id: task_id.into(),
                 stop_words,
@@ -541,13 +591,16 @@ impl Engine {
                 temperature,
                 top_p,
                 logits_for_all_tokens,
+                grammar,
                 output_mode,
             },
             prompt_tokens,
             seq_hint,
             use_cache,
             output_tx,
-        })?;
+        });
+        self.input_tx.send(task)?;
+
         Ok(output_rx)
     }
 
@@ -688,6 +741,7 @@ impl Engine {
                     slot.seq_id,
                     task_state.config.temperature,
                     task_state.config.top_p,
+                    task_state.config.grammar.as_ref(),
                 ) {
                     slot.state = SlotState::Done {
                         task_state,
@@ -698,6 +752,8 @@ impl Engine {
 
                     match self.sample(slot.seq_id, logits) {
                         Ok(token) => {
+                            self.accept_token(slot.seq_id, token);
+
                             let mut out_text: String = "".into();
                             slot.state = if self.is_eog(token) {
                                 out_text = std::mem::replace(
@@ -835,8 +891,8 @@ impl Engine {
         &self,
         ctrl_rx: &Receiver<EngineCtrlMsg>,
         slots: &mut [Slot],
-        ready: &mut VecDeque<EngineTask>,
-        deferred: &mut VecDeque<EngineTask>,
+        ready: &mut VecDeque<Box<EngineTask>>,
+        deferred: &mut VecDeque<Box<EngineTask>>,
         cancelled_ids: &mut HashSet<String>,
     ) -> bool {
         while let Ok(ctrl) = ctrl_rx.try_recv() {
@@ -972,7 +1028,7 @@ impl Engine {
 
     fn sched_task(
         &self,
-        task: EngineTask,
+        task: Box<EngineTask>,
         slots: &mut [Slot],
         prefix_match_threshold: f32,
     ) -> SchedResult {
@@ -1048,7 +1104,7 @@ fn worker_loop(
     max_parallel: usize,
     idle_sleep: Duration,
     slot_match_threshold: f32,
-    input_rx: Receiver<EngineTask>,
+    input_rx: Receiver<Box<EngineTask>>,
     ctrl_rx: Receiver<EngineCtrlMsg>,
 ) {
     // Raw pointer instead of Arc<Engine> to avoid reference cycle and self-join deadlock
@@ -1059,8 +1115,8 @@ fn worker_loop(
     let mut slots = (0..max_parallel).map(Slot::new).collect::<Vec<_>>();
     let mut slot_cursor = 0usize;
 
-    let mut ready_inputs = VecDeque::<EngineTask>::new();
-    let mut deferred_inputs = VecDeque::<EngineTask>::new();
+    let mut ready_inputs = VecDeque::<Box<EngineTask>>::new();
+    let mut deferred_inputs = VecDeque::<Box<EngineTask>>::new();
 
     let mut cancelled_ids = HashSet::<String>::new();
 
@@ -1121,9 +1177,9 @@ fn worker_loop(
 }
 
 fn enqueue_task(
-    task: EngineTask,
-    ready: &mut VecDeque<EngineTask>,
-    deferred: &mut VecDeque<EngineTask>,
+    task: Box<EngineTask>,
+    ready: &mut VecDeque<Box<EngineTask>>,
+    deferred: &mut VecDeque<Box<EngineTask>>,
 ) {
     if task.seq_hint.unwrap_or(0) == 0 {
         ready.push_back(task);
@@ -1133,9 +1189,9 @@ fn enqueue_task(
 }
 
 fn pop_next_task(
-    ready: &mut VecDeque<EngineTask>,
-    deferred: &mut VecDeque<EngineTask>,
-) -> Option<EngineTask> {
+    ready: &mut VecDeque<Box<EngineTask>>,
+    deferred: &mut VecDeque<Box<EngineTask>>,
+) -> Option<Box<EngineTask>> {
     if let Some(v) = ready.pop_front() {
         return Some(v);
     }
@@ -1155,7 +1211,7 @@ fn pop_next_task(
     ready.pop_front()
 }
 
-fn remove_cancelled_inputs(queue: &mut VecDeque<EngineTask>, task_id: &str) {
+fn remove_cancelled_inputs(queue: &mut VecDeque<Box<EngineTask>>, task_id: &str) {
     let mut kept = VecDeque::with_capacity(queue.len());
     while let Some(input) = queue.pop_front() {
         if input.config.task_id == task_id {
@@ -1169,7 +1225,7 @@ fn remove_cancelled_inputs(queue: &mut VecDeque<EngineTask>, task_id: &str) {
 
 enum SchedResult {
     Scheduled,
-    Deferred(EngineTask),
+    Deferred(Box<EngineTask>),
     Rejected,
 }
 

@@ -7,8 +7,12 @@ edition = "2024"
 cuda = ["llama-cpp-ffi/cuda"]
 metal = ["llama-cpp-ffi/metal"]
 
+
 [dependencies]
-llama-cpp-ffi = { path = "../llama-cpp-ffi", features = ["cmake_static"] }
+llama-cpp-ffi = { path = "../llama-cpp-ffi", features = [
+    "cmake_static",
+    "grammar_lark",
+] }
 zuqe = { path = "../../../devel/zhuque", features = [
     "crossbeam_channel",
     "serde_json_support",

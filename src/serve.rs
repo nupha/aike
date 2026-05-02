@@ -11,14 +11,14 @@ use axum::{
 use crossbeam::channel::Receiver;
 use futures_util::StreamExt;
 use liter_llm::{
-    ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, Choice, FinishReason,
-    ReasoningEffort, StreamChoice, StreamDelta,
+    ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, ChatCompletionTool, Choice,
+    FinishReason, ReasoningEffort, StreamChoice, StreamDelta,
     types::common::{
         AssistantMessage, ContentPart, Message, ResponseFormat, StopSequence, ToolChoice,
         ToolChoiceMode, Usage, UserContent,
     },
 };
-use llama_cpp_ffi::LlamaModel;
+use llama_cpp_ffi::{LarkToolChoice, LlamaModel};
 use serde::Serialize;
 use serde_json::json;
 use tokio_stream::wrappers::UnboundedReceiverStream;
@@ -26,7 +26,7 @@ use tower_http::cors::CorsLayer;
 use uuid::Uuid;
 
 use crate::{
-    engine::{Engine, EngineReply, OutputMode, StopReason, Token, now_unix_s},
+    engine::{Engine, EngineReply, GrammarConfig, OutputMode, StopReason, Token, now_unix_s},
     helpers::{JinjaMessage, TemplateContext, create_minijinja_env},
 };
 
@@ -241,6 +241,28 @@ async fn handle_chat_completions(
     let task_id = format!("task-{}", Uuid::new_v4().simple());
     let n_prompt_tokens = prompt_tokens.len();
 
+    // build grammar if has tools param.
+    let grammar = req.tools.as_ref().and_then(|tools| {
+        let tool_choice = req
+            .tool_choice
+            .as_ref()
+            .map(to_lark_tool_choice)
+            .unwrap_or(LarkToolChoice::Auto);
+
+        if tool_choice != LarkToolChoice::None && !tools.is_empty() {
+            let lark_grammar = compile_tool_grammar(tools, tool_choice);
+            println!("[O.o] ==== tools:\n{:?}", tools);
+            println!("[O.o] ==== lark:\n{}", lark_grammar);
+
+            Some(GrammarConfig {
+                lark_grammar,
+                tool_choice,
+            })
+        } else {
+            None
+        }
+    });
+
     let engine_rx = match state.engine.push_task_with_params(
         task_id.clone(),
         prompt_tokens,
@@ -256,6 +278,7 @@ async fn handle_chat_completions(
         temperature,
         top_p,
         false,
+        grammar,
     ) {
         Ok(rx) => rx,
         Err(e) => {
@@ -390,6 +413,71 @@ fn tool_choice_to_string(tc: &ToolChoice) -> String {
         }
         .to_string(),
         ToolChoice::Specific(s) => s.function.name.clone(),
+    }
+}
+
+/// Map liter_llm ToolChoice to LarkToolChoice for grammar controller.
+fn to_lark_tool_choice(tc: &ToolChoice) -> LarkToolChoice {
+    match tc {
+        ToolChoice::Mode(mode) => match mode {
+            ToolChoiceMode::Auto => LarkToolChoice::Auto,
+            ToolChoiceMode::Required => LarkToolChoice::Required,
+            ToolChoiceMode::None => LarkToolChoice::None,
+        },
+        ToolChoice::Specific(_) => LarkToolChoice::Required,
+    }
+}
+
+/// Compile tool definitions into a Lark grammar string for llguidance.
+///
+/// The grammar constrains the model output to valid JSON matching the tool schemas.
+/// Each tool's parameters are embedded as `%json {schema}` directives.
+/// The grammar allows free text interleaved with tool calls.
+fn compile_tool_grammar(tools: &[ChatCompletionTool], tool_choice: LarkToolChoice) -> String {
+    let mut rules = String::new();
+    let mut tool_alternatives = Vec::new();
+
+    for tool in tools {
+        let name = &tool.function.name;
+        let params = tool
+            .function
+            .parameters
+            .as_ref()
+            .cloned()
+            .unwrap_or(serde_json::json!({"type": "object", "properties": {}}));
+
+        rules.push_str(&format!("json_body_{name}: %json {params}\n"));
+        // Use lazy TEXT so that when the model emits "<tool_call>",
+        // TEXT stops matching and the parser switches to the tool path.
+        rules.push_str(&format!("tool_{name}_hd[lazy]: TEXT \"<tool_call>\"\n"));
+        rules.push_str(&format!(
+            "tool_{name}: tool_{name}_hd json_body_{name} \"</tool_call>\"\n"
+        ));
+        tool_alternatives.push(format!("tool_{name}"));
+    }
+
+    let tool_alternatives = tool_alternatives.join(" | ");
+
+    match tool_choice {
+        LarkToolChoice::Required => {
+            // force tool call, no free text
+            format!(
+                "start: ({tool_alternatives})+\n\
+                 TEXT: /(.|\\n)*/\n\
+                 {rules}"
+            )
+        }
+        LarkToolChoice::Auto | LarkToolChoice::None => {
+            // allow free text or tool calls, interleaved.
+            // Uses lazy TEXT so that when the model emits "<tool_call>",
+            // TEXT stops matching and the parser switches to tool_xxx.
+            format!(
+                "start: ({tool_alternatives})* f_end\n\
+                 f_end: TEXT\n\
+                 TEXT: /(.|\\n)*/\n\
+                 {rules}"
+            )
+        }
     }
 }
 

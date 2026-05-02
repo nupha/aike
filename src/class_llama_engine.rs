@@ -132,29 +132,30 @@ fn js_engine_generate(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     if cc.magic() == MAGIC_GENERATE {
         // generate()
-        let promise = Promise::create_with_receiver(ctx, rx, |cx, msg| -> JSResult {
-            match msg {
-                EngineReply::Text(text) => cx
-                    .create_string_from_utf8(text.into_bytes())
-                    .map(JSValue::from),
-                EngineReply::Error(e) => {
-                    cx.throw_internal_error(&e);
-                    Err(-1)
+        let promise =
+            Promise::create_with_receiver::<EngineReply>(ctx, rx, |cx, msg| -> JSResult {
+                match msg {
+                    EngineReply::Text(text) => cx
+                        .create_string_from_utf8(text.into_bytes())
+                        .map(JSValue::from),
+                    EngineReply::Error(e) => {
+                        cx.throw_internal_error(&e);
+                        Err(-1)
+                    }
+                    EngineReply::Cancelled => {
+                        cx.throw_internal_error("task cancelled");
+                        Err(-1)
+                    }
+                    EngineReply::Shutdown => {
+                        cx.throw_internal_error("engine shutdown");
+                        Err(-1)
+                    }
+                    EngineReply::Stop(_, _) => {
+                        cx.throw_internal_error("unexpected message in oneshot mode");
+                        Err(-1)
+                    }
                 }
-                EngineReply::Cancelled => {
-                    cx.throw_internal_error("task cancelled");
-                    Err(-1)
-                }
-                EngineReply::Shutdown => {
-                    cx.throw_internal_error("engine shutdown");
-                    Err(-1)
-                }
-                EngineReply::Stop(_, _) => {
-                    cx.throw_internal_error("unexpected message in oneshot mode");
-                    Err(-1)
-                }
-            }
-        })?;
+            })?;
         Ok(promise.into())
     } else {
         // generateStream()
