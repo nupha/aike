@@ -371,7 +371,6 @@ mod tests {
     /// Check if the local server is reachable; skip test if not.
     async fn ensure_server(client: &DefaultClient) {
         if client.list_models().await.is_err() {
-            eprintln!("SKIP: server not reachable at localhost:8080");
             std::process::exit(0);
         }
     }

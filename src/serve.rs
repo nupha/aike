@@ -446,7 +446,19 @@ fn compile_tool_grammar(tools: &[ChatCompletionTool], tool_choice: LarkToolChoic
             .cloned()
             .unwrap_or(serde_json::json!({"type": "object", "properties": {}}));
 
-        rules.push_str(&format!("json_body_{name}: %json {params}\n"));
+        // Wrap the original parameters schema inside a {"name": const, "arguments": {...}} envelope.
+        // This matches the standard Qwen/Hermes tool call JSON format:
+        //   {"name": "function_name", "arguments": {...}}
+        let wrapped = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "name": {"const": name},
+                "arguments": params
+            },
+            "required": ["name", "arguments"]
+        });
+        rules.push_str(&format!("json_body_{name}: %json {wrapped}\n"));
+
         // Use lazy TEXT so that when the model emits "<tool_call>",
         // TEXT stops matching and the parser switches to the tool path.
         rules.push_str(&format!("tool_{name}_hd[lazy]: TEXT \"<tool_call>\"\n"));

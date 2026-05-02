@@ -405,11 +405,6 @@ impl Engine {
                 } else {
                     let mut ctrl = GrammarController::new();
                     ctrl.set_tool_choice(g.tool_choice);
-                    eprintln!(
-                        "[DEBUG] grammar set: tool_choice={:?}, should_apply={}",
-                        g.tool_choice,
-                        ctrl.should_apply(),
-                    );
                     sc.set_controller(ctrl);
                 }
             }
