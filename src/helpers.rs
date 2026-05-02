@@ -1,9 +1,18 @@
-use liter_llm::ChatCompletionTool;
-use llama_cpp_ffi::LarkToolChoice;
+use std::ffi::CString;
+
+use liter_llm::{
+    ChatCompletionTool, ReasoningEffort,
+    types::common::{
+        ContentPart, Message, ResponseFormat, ToolChoice, ToolChoiceMode, UserContent,
+    },
+};
+use llama_cpp_ffi::{LarkToolChoice, LlamaModel};
 use minijinja::Environment;
 use minijinja_contrib::pycompat;
 use serde::Serialize;
 use serde_json::Value as JsonValue;
+
+use crate::engine::Token;
 
 #[derive(Debug, Serialize)]
 pub(crate) struct JinjaMessage {
@@ -161,6 +170,152 @@ pub(crate) fn create_minijinja_env() -> Environment<'static> {
     );
 
     env
+}
+
+pub(crate) fn render_chat_template(tmpl: &str, ctx: &TemplateContext) -> Result<String, String> {
+    let mut env = create_minijinja_env();
+
+    env.add_template("chat", tmpl)
+        .map_err(|e| format!("can't load template: {e}"))?;
+
+    env.get_template("chat")
+        .and_then(|t| t.render(ctx))
+        .map_err(|e| format!("{e}"))
+}
+
+/// Convert ToolChoice enum to string for jinja template context.
+pub(crate) fn tool_choice_to_string(tc: &ToolChoice) -> String {
+    match tc {
+        ToolChoice::Mode(mode) => match mode {
+            ToolChoiceMode::Auto => "auto",
+            ToolChoiceMode::Required => "required",
+            ToolChoiceMode::None => "none",
+        }
+        .to_string(),
+        ToolChoice::Specific(s) => s.function.name.clone(),
+    }
+}
+
+/// Map liter_llm ToolChoice to LarkToolChoice for grammar controller.
+pub(crate) fn to_lark_tool_choice(tc: &ToolChoice) -> LarkToolChoice {
+    match tc {
+        ToolChoice::Mode(mode) => match mode {
+            ToolChoiceMode::Auto => LarkToolChoice::Auto,
+            ToolChoiceMode::Required => LarkToolChoice::Required,
+            ToolChoiceMode::None => LarkToolChoice::None,
+        },
+        ToolChoice::Specific(_) => LarkToolChoice::Required,
+    }
+}
+
+/// Extract (role, content_text) from a liter_llm::Message for template rendering.
+pub(crate) fn message_to_role_content(msg: &Message) -> (&str, String) {
+    let role = match msg {
+        Message::System(_) => "system",
+        Message::User(_) => "user",
+        Message::Assistant(_) => "assistant",
+        Message::Tool(_) => "tool",
+        Message::Developer(_) => "developer",
+        Message::Function(_) => "function",
+    };
+    let content = match msg {
+        Message::System(m) => m.content.clone(),
+        Message::User(m) => match &m.content {
+            UserContent::Text(s) => s.clone(),
+            UserContent::Parts(parts) => parts
+                .iter()
+                .filter_map(|p| match p {
+                    ContentPart::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join(""),
+        },
+        Message::Assistant(m) => m.content.clone().unwrap_or_default(),
+        Message::Tool(m) => m.content.clone(),
+        Message::Developer(m) => m.content.clone(),
+        Message::Function(m) => m.content.clone(),
+    };
+    (role, content)
+}
+
+/// Tokenize a prompt string using model, return error if zero tokens.
+pub(crate) fn tokenize_prompt(model: &LlamaModel, prompt: &str) -> Result<Vec<Token>, String> {
+    let c_prompt = CString::new(prompt).map_err(|_| "prompt contains NUL")?;
+    let tokens = model.tokenize(&c_prompt, false, true);
+    if tokens.is_empty() {
+        return Err("prompt tokenized to zero tokens".to_string());
+    }
+    Ok(tokens)
+}
+
+/// Build prompt tokens for chat completion. Mirrors serve.rs build_chat_prompt_tokens
+/// but takes separate parameters instead of ChatCompletionRequest.
+pub(crate) fn build_chat_prompt_tokens(
+    model: &LlamaModel,
+    messages: &[Message],
+    tools: Option<&[ChatCompletionTool]>,
+    tool_choice: Option<&ToolChoice>,
+    parallel_tool_calls: Option<bool>,
+    reasoning_effort: Option<&ReasoningEffort>,
+    response_format: Option<&ResponseFormat>,
+) -> Result<Vec<Token>, String> {
+    let tmpl = model.chat_template().ok_or("model has no chat template")?;
+    let tmpl = tmpl
+        .to_str()
+        .map_err(|e| format!("invalid template: {e}"))?;
+
+    let eos_token = model.eos_token_text().unwrap_or_default();
+    let bos_token = model.bos_token_text().unwrap_or_default();
+
+    // Convert Message → (role, content) → JinjaMessage
+    let backing = messages
+        .iter()
+        .map(message_to_role_content)
+        .collect::<Vec<_>>();
+    let jinja_msgs: Vec<JinjaMessage> = backing
+        .into_iter()
+        .map(|(role, content)| JinjaMessage {
+            role: role.into(),
+            content,
+        })
+        .collect();
+
+    let mut tmpl_ctx = TemplateContext::new(&jinja_msgs, eos_token, bos_token);
+
+    // tools
+    if let Some(tools) = tools {
+        if let Ok(val) = serde_json::to_value(tools) {
+            tmpl_ctx.tools = Some(val);
+        }
+    }
+
+    // tool_choice
+    if let Some(tc) = tool_choice {
+        tmpl_ctx.tool_choice = Some(tool_choice_to_string(tc));
+    }
+
+    // parallel_tool_calls
+    tmpl_ctx.parallel_tool_calls = parallel_tool_calls;
+
+    // reasoning_effort → enable_thinking
+    if let Some(effort) = reasoning_effort {
+        tmpl_ctx.enable_thinking = !matches!(effort, ReasoningEffort::Low);
+    }
+
+    // response_format → json_schema
+    if let Some(rf) = response_format {
+        match rf {
+            ResponseFormat::JsonObject => {}
+            ResponseFormat::JsonSchema { json_schema } => {
+                tmpl_ctx.json_schema = Some(json_schema.schema.to_string());
+            }
+            ResponseFormat::Text => {}
+        }
+    }
+
+    let prompt = render_chat_template(tmpl, &tmpl_ctx)?;
+    tokenize_prompt(model, &prompt)
 }
 
 /// Compile tool definitions into a Lark grammar string for llguidance.

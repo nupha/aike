@@ -1,4 +1,4 @@
-use std::{convert::Infallible, ffi::CString, sync::Arc, time::Duration};
+use std::{convert::Infallible, sync::Arc, time::Duration};
 
 use axum::{
     Json, Router,
@@ -13,10 +13,7 @@ use futures_util::StreamExt;
 use liter_llm::{
     ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, Choice, FinishReason,
     ReasoningEffort, StreamChoice, StreamDelta,
-    types::common::{
-        AssistantMessage, ContentPart, Message, ResponseFormat, StopSequence, ToolChoice,
-        ToolChoiceMode, Usage, UserContent,
-    },
+    types::common::{AssistantMessage, StopSequence, Usage},
 };
 use llama_cpp_ffi::{LarkToolChoice, LlamaModel};
 use serde::Serialize;
@@ -29,7 +26,7 @@ use crate::{
     engine::{
         Engine, EngineReply, GrammarConfig, OutputMode, StopReason, TaskConfig, Token, now_unix_s,
     },
-    helpers::{JinjaMessage, TemplateContext, compile_tools_lark_grammar, create_minijinja_env},
+    helpers::{build_chat_prompt_tokens, compile_tools_lark_grammar, to_lark_tool_choice},
 };
 
 #[derive(Debug, Serialize)]
@@ -69,17 +66,6 @@ struct ModelInfo {
 
 const DEFAULT_TEMPERATURE: f64 = 0.75;
 const DEFAULT_TOP_P: f64 = 1.0;
-
-fn render_chat_template(tmpl: &str, ctx: &TemplateContext) -> Result<String, String> {
-    let mut env = create_minijinja_env();
-
-    env.add_template("chat", tmpl)
-        .map_err(|e| format!("can't load template: {e}"))?;
-
-    env.get_template("chat")
-        .and_then(|t| t.render(ctx))
-        .map_err(|e| format!("{e}"))
-}
 
 #[derive(Clone)]
 #[repr(transparent)]
@@ -225,7 +211,7 @@ async fn handle_chat_completions(
         .max_tokens
         .unwrap_or(state.engine.default_max_tokens() as u64) as usize;
 
-    let prompt_tokens = match build_chat_prompt_tokens(state.engine.model(), &req) {
+    let prompt_tokens = match build_chat_prompt_tokens_from_request(state.engine.model(), &req) {
         Ok(tokens) => tokens,
         Err(e) => {
             return (
@@ -333,137 +319,22 @@ async fn handle_chat_completions(
     }
 }
 
-fn build_chat_prompt_tokens(
+fn build_chat_prompt_tokens_from_request(
     model: &LlamaModel,
     req: &ChatCompletionRequest,
 ) -> Result<Vec<Token>, String> {
     debug_assert!(!req.messages.is_empty());
 
-    let tmpl = model.chat_template().ok_or("model has no chat template")?;
-    let tmpl = tmpl
-        .to_str()
-        .map_err(|e| format!("invalid template: {e}"))?;
-
-    let eos_token = model.eos_token_text().unwrap_or_default();
-    let bos_token = model.bos_token_text().unwrap_or_default();
-
-    // Convert liter_llm::Message to (role, content) pairs for template rendering
-    let backing = req
-        .messages
-        .iter()
-        .map(message_to_role_content)
-        .collect::<Vec<_>>();
-    let jinja_msgs: Vec<JinjaMessage> = backing
-        .into_iter()
-        .map(|(role, content)| JinjaMessage {
-            role: role.into(),
-            content,
-        })
-        .collect();
-
-    // Build template context from request params (mirrors oaicompat_chat_params_parse)
-    let mut tmpl_ctx = TemplateContext::new(&jinja_msgs, eos_token, bos_token);
-
-    // tools
-    if let Some(Ok(tools)) = req.tools.as_ref().map(serde_json::to_value) {
-        tmpl_ctx.tools = Some(tools);
-    }
-
-    // tool_choice → string representation
-    if let Some(ref tc) = req.tool_choice {
-        tmpl_ctx.tool_choice = Some(tool_choice_to_string(tc));
-    }
-
-    // parallel_tool_calls
-    tmpl_ctx.parallel_tool_calls = req.parallel_tool_calls;
-
-    // enable_thinking: derive from reasoning_effort if present
-    if let Some(ref effort) = req.reasoning_effort {
-        tmpl_ctx.enable_thinking = !matches!(effort, ReasoningEffort::Low);
-    }
-
-    // response_format → json_schema
-    if let Some(ref rf) = req.response_format {
-        match rf {
-            ResponseFormat::JsonObject => {
-                // json_object without explicit schema
-            }
-            ResponseFormat::JsonSchema { json_schema } => {
-                tmpl_ctx.json_schema = Some(json_schema.schema.to_string());
-            }
-            ResponseFormat::Text => {}
-        }
-    }
-
-    let prompt = render_chat_template(tmpl, &tmpl_ctx)?;
-
-    let tokens = tokenize_prompt(model, &prompt)?;
-    Ok(tokens)
-}
-
-/// Convert ToolChoice enum to string for jinja template context.
-fn tool_choice_to_string(tc: &ToolChoice) -> String {
-    match tc {
-        ToolChoice::Mode(mode) => match mode {
-            ToolChoiceMode::Auto => "auto",
-            ToolChoiceMode::Required => "required",
-            ToolChoiceMode::None => "none",
-        }
-        .to_string(),
-        ToolChoice::Specific(s) => s.function.name.clone(),
-    }
-}
-
-/// Map liter_llm ToolChoice to LarkToolChoice for grammar controller.
-fn to_lark_tool_choice(tc: &ToolChoice) -> LarkToolChoice {
-    match tc {
-        ToolChoice::Mode(mode) => match mode {
-            ToolChoiceMode::Auto => LarkToolChoice::Auto,
-            ToolChoiceMode::Required => LarkToolChoice::Required,
-            ToolChoiceMode::None => LarkToolChoice::None,
-        },
-        ToolChoice::Specific(_) => LarkToolChoice::Required,
-    }
-}
-
-/// Extract (role, content_text) from a liter_llm::Message for template rendering.
-fn message_to_role_content(msg: &Message) -> (&str, String) {
-    let role = match msg {
-        Message::System(_) => "system",
-        Message::User(_) => "user",
-        Message::Assistant(_) => "assistant",
-        Message::Tool(_) => "tool",
-        Message::Developer(_) => "developer",
-        Message::Function(_) => "function",
-    };
-    let content = match msg {
-        Message::System(m) => m.content.clone(),
-        Message::User(m) => match &m.content {
-            UserContent::Text(s) => s.clone(),
-            UserContent::Parts(parts) => parts
-                .iter()
-                .filter_map(|p| match p {
-                    ContentPart::Text { text } => Some(text.as_str()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-                .join(""),
-        },
-        Message::Assistant(m) => m.content.clone().unwrap_or_default(),
-        Message::Tool(m) => m.content.clone(),
-        Message::Developer(m) => m.content.clone(),
-        Message::Function(m) => m.content.clone(),
-    };
-    (role, content)
-}
-
-fn tokenize_prompt(model: &LlamaModel, prompt: &str) -> Result<Vec<Token>, String> {
-    let c_prompt = CString::new(prompt).map_err(|_| "prompt contains NUL")?;
-    let tokens = model.tokenize(&c_prompt, false, true);
-    if tokens.is_empty() {
-        return Err("prompt tokenized to zero tokens".to_string());
-    }
-    Ok(tokens)
+    // Delegate to shared build_chat_prompt_tokens
+    build_chat_prompt_tokens(
+        model,
+        &req.messages,
+        req.tools.as_deref(),
+        req.tool_choice.as_ref(),
+        req.parallel_tool_calls,
+        req.reasoning_effort.as_ref(),
+        req.response_format.as_ref(),
+    )
 }
 
 /// Collect all EngineReply messages for a unary (non-streaming) response.

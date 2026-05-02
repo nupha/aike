@@ -89,7 +89,7 @@ fn get_client_arc(ctx: &mut ScopedContext, val: &JSValue) -> Result<Arc<DefaultC
 }
 
 /// Parse JS messages array → Vec<Message>
-fn parse_messages(ctx: &mut ScopedContext, val: &JSValue) -> Result<Vec<Message>, i32> {
+pub(crate) fn parse_messages(ctx: &mut ScopedContext, val: &JSValue) -> Result<Vec<Message>, i32> {
     let arr = val.as_object_Array().copied().ok_or_else(|| {
         ctx.throw_type_error("messages must be an array");
         -1
@@ -172,7 +172,10 @@ fn parse_messages(ctx: &mut ScopedContext, val: &JSValue) -> Result<Vec<Message>
 }
 
 /// Parse JS tools array → Vec<ChatCompletionTool>
-fn parse_tools(ctx: &mut ScopedContext, val: &JSValue) -> Result<Vec<ChatCompletionTool>, i32> {
+pub(crate) fn parse_tools(
+    ctx: &mut ScopedContext,
+    val: &JSValue,
+) -> Result<Vec<ChatCompletionTool>, i32> {
     let arr = val.as_object_Array().copied().ok_or_else(|| {
         ctx.throw_type_error("tools must be an array");
         -1
@@ -197,7 +200,7 @@ fn parse_tools(ctx: &mut ScopedContext, val: &JSValue) -> Result<Vec<ChatComplet
 }
 
 /// Parse JS tool_choice → ToolChoice
-fn parse_tool_choice(ctx: &mut ScopedContext, val: &JSValue) -> Result<ToolChoice, i32> {
+pub(crate) fn parse_tool_choice(ctx: &mut ScopedContext, val: &JSValue) -> Result<ToolChoice, i32> {
     if let Some(s) = val.as_string() {
         let mode = s.content().encode_utf8(false);
         match mode.as_ref() {
@@ -223,7 +226,10 @@ fn parse_tool_choice(ctx: &mut ScopedContext, val: &JSValue) -> Result<ToolChoic
 }
 
 /// Parse JS response_format → ResponseFormat
-fn parse_response_format(ctx: &mut ScopedContext, val: &JSValue) -> Result<ResponseFormat, i32> {
+pub(crate) fn parse_response_format(
+    ctx: &mut ScopedContext,
+    val: &JSValue,
+) -> Result<ResponseFormat, i32> {
     let json_val = val.to_serde_json(ctx).map_err(|_| {
         ctx.throw_type_error("failed to serialize response_format");
         -1
@@ -235,7 +241,10 @@ fn parse_response_format(ctx: &mut ScopedContext, val: &JSValue) -> Result<Respo
 }
 
 /// Parse JS reasoning_effort string → ReasoningEffort
-fn parse_reasoning_effort(ctx: &mut ScopedContext, val: &JSValue) -> Result<ReasoningEffort, i32> {
+pub(crate) fn parse_reasoning_effort(
+    ctx: &mut ScopedContext,
+    val: &JSValue,
+) -> Result<ReasoningEffort, i32> {
     let s = val.as_string().ok_or_else(|| {
         ctx.throw_type_error("reasoningEffort must be a string");
         -1
@@ -537,7 +546,7 @@ fn js_client_dispose(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 }
 
 /// Convert ChatCompletionResponse to a JS object.
-fn response_to_js(ctx: &mut ScopedContext, resp: &ChatCompletionResponse) -> JSResult {
+pub(crate) fn response_to_js(ctx: &mut ScopedContext, resp: &ChatCompletionResponse) -> JSResult {
     let val = serde_json::to_value(resp).map_err(|e| {
         ctx.throw_internal_error(&format!("serialize response failed: {e}"));
         -1
@@ -546,7 +555,7 @@ fn response_to_js(ctx: &mut ScopedContext, resp: &ChatCompletionResponse) -> JSR
 }
 
 /// Convert ChatCompletionChunk to a JS object.
-fn chunk_to_js(ctx: &mut ScopedContext, chunk: &ChatCompletionChunk) -> JSResult {
+pub(crate) fn chunk_to_js(ctx: &mut ScopedContext, chunk: &ChatCompletionChunk) -> JSResult {
     let val = serde_json::to_value(chunk).map_err(|e| {
         ctx.throw_internal_error(&format!("serialize chunk failed: {e}"));
         -1
