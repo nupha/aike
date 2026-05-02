@@ -291,7 +291,7 @@ async fn handle_chat_completions(
     if stream {
         // Bridge crossbeam Receiver -> tokio mpsc for SSE
         let (tx, rx_tokio) = tokio::sync::mpsc::unbounded_channel::<String>();
-        let _ = tokio::task::spawn_blocking(move || {
+        tokio::task::spawn_blocking(move || {
             stream_reply_to_sse(
                 engine_rx,
                 tx,

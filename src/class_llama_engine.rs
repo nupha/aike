@@ -93,10 +93,10 @@ pub(super) fn get_engine_arc(ctx: &mut ScopedContext, val: &JSValue) -> Result<A
     Ok(unsafe { Arc::from_raw(ptr) })
 }
 
-const MAGIC_GENERATE: i32 = 0;
-const MAGIC_GENERATE_STREAM: i32 = 1;
+const MAGIC_CHAT: i32 = 0;
+const MAGIC_CHAT_STREAM: i32 = 1;
 
-fn js_engine_generate(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+fn js_engine_chat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let engine = get_engine(ctx, &this)?;
 
@@ -107,7 +107,7 @@ fn js_engine_generate(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         return Err(-1);
     }
 
-    let mode = if cc.magic() == MAGIC_GENERATE {
+    let mode = if cc.magic() == MAGIC_CHAT {
         OutputMode::OneShot
     } else {
         OutputMode::Continuous
@@ -120,7 +120,7 @@ fn js_engine_generate(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             -1
         })?;
 
-    if cc.magic() == MAGIC_GENERATE {
+    if cc.magic() == MAGIC_CHAT {
         // generate()
         let promise =
             Promise::create_with_receiver::<EngineReply>(ctx, rx, |cx, msg| -> JSResult {
@@ -275,13 +275,8 @@ fn js_engine_dispose(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 }
 
 const CLASS_ENGINE_PROTO: &[FieldDef] = &[
-    FieldDef::CALL("generate", 1, js_engine_generate, MAGIC_GENERATE as i16),
-    FieldDef::CALL(
-        "generateStream",
-        1,
-        js_engine_generate,
-        MAGIC_GENERATE_STREAM as i16,
-    ),
+    FieldDef::CALL("chat", 1, js_engine_chat, MAGIC_CHAT as i16),
+    FieldDef::CALL("chatStream", 1, js_engine_chat, MAGIC_CHAT_STREAM as i16),
     FieldDef::CALL("httpServe", 1, js_engine_httpServe, 0),
     FieldDef::CALL("stopServe", 0, js_engine_stopServe, 0),
     FieldDef::GETSET("isServing", Some(js_engine_isServing), None, 0),
