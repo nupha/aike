@@ -5,7 +5,7 @@ use std::{
 };
 
 use crossbeam::channel::{Receiver, SendError, Sender};
-use llama_cpp_ffi::{GrammarController, LlamaContext, LlamaModel, SamplerChain, SamplerKind};
+use llama_cpp_ffi::{LlamaContext, LlamaModel, SamplerChain, SamplerKind};
 
 use super::{
     task::{EngineCtrlMsg, EngineReply, EngineTask, GrammarConfig, TaskConfig, TaskState, Token},
@@ -223,12 +223,12 @@ impl Engine {
         if seq_id < samplers.len()
             && let Some(sampler) = samplers[seq_id].as_mut()
         {
-            sampler.accept(token, true);
+            sampler.accept(token);
         }
     }
 
     /// lazy initialize slot sampler
-    pub(crate) fn init_slot_sampler(
+    pub(super) fn init_slot_sampler(
         &mut self,
         seq_id: usize,
         temperature: f32,
@@ -263,9 +263,7 @@ impl Engine {
                 if let Err(e) = sc.set_lark_grammar(&g.lark_grammar) {
                     log::warn!("failed to set grammar: {}", e);
                 } else {
-                    let mut ctrl = GrammarController::new();
-                    ctrl.set_tool_choice(g.tool_choice);
-                    sc.set_controller(ctrl);
+                    sc.set_tool_choice(g.tool_choice);
                 }
             }
 

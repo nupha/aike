@@ -1,7 +1,6 @@
 use std::collections::{HashSet, VecDeque};
 
 use crossbeam::channel::{Receiver, Sender};
-use llama_cpp_ffi::LarkToolChoice;
 
 use crate::helpers::now_unix_s;
 
@@ -16,7 +15,7 @@ pub type Token = i32;
 #[derive(Debug, Clone)]
 pub struct GrammarConfig {
     pub(crate) lark_grammar: String,
-    pub(crate) tool_choice: LarkToolChoice,
+    pub(crate) tool_choice: llama_cpp_ffi::ToolChoice,
 }
 
 static NEXT_TASK_ID: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);

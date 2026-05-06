@@ -10,7 +10,7 @@ use liter_llm::{
     ReasoningEffort, StreamChoice, StreamDelta, ToolCall, ToolType,
     types::common::{AssistantMessage, ChatCompletionTool, ResponseFormat, ToolChoice, Usage},
 };
-use llama_cpp_ffi::LarkToolChoice;
+use llama_cpp_ffi::ToolChoice as LarkToolChoice;
 use zuqe::{
     CallContext, ClassDef, ClassID, FieldDef, JSResult, JSValue, Object, Runtime, ScopedContext,
     builtins::{
@@ -27,14 +27,11 @@ use crate::{
     },
     class_llama_context::parse_tokens,
     engine::{Engine, EngineReply, GrammarConfig, OutputMode, StopReason, TaskConfig},
-    helpers::{
-        build_chat_prompt_tokens, compile_tools_lark_grammar, now_unix_s, to_lark_tool_choice,
-    },
+    helpers::{build_chat_prompt_tokens, compile_tools_grammar, now_unix_s, to_lark_tool_choice},
 };
 
 pub(crate) const ERR_CANCELLED: &str = "cancelled";
 pub(crate) const ERR_ENGINE_SHUTDOWN: &str = "engine shutdown";
-pub(crate) const ERR_CHANNEL_CLOSED: &str = "response channel closed unexpectedly";
 
 pub(super) struct EngineParams {
     pub idle_sleep_ms: u64,
@@ -208,8 +205,10 @@ fn js_engine_generate(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 }
 
 /// Collect all EngineReply messages for non-streaming chat, building a ChatCompletionResponse json.
+/// If `timeout` elapses without a message, returns a timeout error.
 pub(super) fn collect_chat_response(
     rx: crossbeam::channel::Receiver<EngineReply>,
+    timeout: std::time::Duration,
     respond_id: &str,
     model_name: &str,
     include_usage: bool,
@@ -218,7 +217,7 @@ pub(super) fn collect_chat_response(
     let mut full_text = String::new();
 
     loop {
-        match rx.recv() {
+        match rx.recv_timeout(timeout) {
             Ok(EngineReply::Text(t)) => full_text.push_str(&t),
             Ok(EngineReply::Stop(reason, n_completion_tokens)) => {
                 let finish_reason = match reason {
@@ -262,7 +261,7 @@ pub(super) fn collect_chat_response(
             Ok(EngineReply::Cancelled) => return Err(ERR_CANCELLED.to_string()),
             Ok(EngineReply::Error(e)) => return Err(e),
             Ok(EngineReply::Shutdown) => return Err(ERR_ENGINE_SHUTDOWN.to_string()),
-            Err(_) => return Err(ERR_CHANNEL_CLOSED.to_string()),
+            Err(_) => return Err("stream timed out".to_string()),
         }
     }
 }
@@ -309,54 +308,38 @@ fn parse_tool_calls_from_text(text: &str) -> Option<Vec<ToolCall>> {
     if !calls.is_empty() { Some(calls) } else { None }
 }
 
-enum ChatStreamItem {
+pub(crate) enum ChatStreamItem {
     Chunk(ChatCompletionChunk),
     Done,
     Error(String),
 }
 
-/// Bridge crossbeam Receiver<EngineReply> → crossbeam Receiver<ChatStreamItem> for streaming.
+/// Bridge crossbeam Receiver<EngineReply> for streaming.
 /// Emits role delta as first chunk, content deltas for Text, and finish chunk for Stop.
-fn bridge_chat_stream(
+/// Calls `on_item` for each ChatStreamItem produced.
+/// If `timeout` elapses without a message, emits an error and stops.
+pub(crate) fn bridge_chat_stream<F>(
     rx: crossbeam::channel::Receiver<EngineReply>,
+    timeout: std::time::Duration,
     respond_id: &str,
     model_name: &str,
     include_usage: bool,
     n_prompt_tokens: usize,
-) -> crossbeam::channel::Receiver<ChatStreamItem> {
-    let (tx, out_rx) = crossbeam::channel::bounded::<ChatStreamItem>(8);
+    mut on_item: F,
+) where
+    F: FnMut(ChatStreamItem) -> bool,
+{
     let respond_id = respond_id.to_string();
     let model_name = model_name.to_string();
-
-    std::thread::spawn(move || {
-        let mut sent_started = false;
-        loop {
-            match rx.recv() {
-                Ok(EngineReply::Text(t)) => {
-                    let created = now_unix_s() as u64;
-                    if !sent_started {
-                        sent_started = true;
-                        let first = ChatCompletionChunk {
-                            id: respond_id.clone(),
-                            object: "chat.completion.chunk".to_string(),
-                            created,
-                            model: model_name.clone(),
-                            choices: vec![StreamChoice {
-                                index: 0,
-                                delta: StreamDelta {
-                                    role: Some("assistant".to_string()),
-                                    content: None,
-                                    ..Default::default()
-                                },
-                                finish_reason: None,
-                            }],
-                            ..Default::default()
-                        };
-                        if tx.send(ChatStreamItem::Chunk(first)).is_err() {
-                            break;
-                        }
-                    }
-                    let chunk = ChatCompletionChunk {
+    let mut sent_started = false;
+    loop {
+        match rx.recv_timeout(timeout) {
+            Ok(EngineReply::Text(t)) => {
+                let created = now_unix_s() as u64;
+                if !sent_started {
+                    // First chunk: emit role delta
+                    sent_started = true;
+                    let first = ChatCompletionChunk {
                         id: respond_id.clone(),
                         object: "chat.completion.chunk".to_string(),
                         created,
@@ -364,70 +347,87 @@ fn bridge_chat_stream(
                         choices: vec![StreamChoice {
                             index: 0,
                             delta: StreamDelta {
-                                role: None,
-                                content: Some(t),
+                                role: Some("assistant".to_string()),
+                                content: None,
                                 ..Default::default()
                             },
                             finish_reason: None,
                         }],
                         ..Default::default()
                     };
-                    if tx.send(ChatStreamItem::Chunk(chunk)).is_err() {
+                    if !on_item(ChatStreamItem::Chunk(first)) {
                         break;
                     }
                 }
-                Ok(EngineReply::Stop(reason, n_completion_tokens)) => {
-                    let last = ChatCompletionChunk {
-                        id: respond_id.clone(),
-                        object: "chat.completion.chunk".to_string(),
-                        created: now_unix_s() as u64,
-                        model: model_name.clone(),
-                        choices: vec![StreamChoice {
-                            index: 0,
-                            delta: StreamDelta::default(),
-                            finish_reason: Some(match reason {
-                                StopReason::Eog | StopReason::Word(_) | StopReason::PrefillOnly => {
-                                    FinishReason::Stop
-                                }
-                                StopReason::MaxTokens => FinishReason::Length,
-                            }),
-                        }],
-                        usage: if include_usage {
-                            Some(Usage {
-                                prompt_tokens: n_prompt_tokens as u64,
-                                completion_tokens: n_completion_tokens as u64,
-                                total_tokens: (n_prompt_tokens + n_completion_tokens) as u64,
-                            })
-                        } else {
-                            None
+                let chunk = ChatCompletionChunk {
+                    id: respond_id.clone(),
+                    object: "chat.completion.chunk".to_string(),
+                    created,
+                    model: model_name.clone(),
+                    choices: vec![StreamChoice {
+                        index: 0,
+                        delta: StreamDelta {
+                            role: None,
+                            content: Some(t),
+                            ..Default::default()
                         },
-                        ..Default::default()
-                    };
-                    let _ = tx.send(ChatStreamItem::Chunk(last));
-                    let _ = tx.send(ChatStreamItem::Done);
-                    break;
-                }
-                Ok(EngineReply::Cancelled) => {
-                    let _ = tx.send(ChatStreamItem::Error(ERR_CANCELLED.to_string()));
-                    break;
-                }
-                Ok(EngineReply::Error(e)) => {
-                    let _ = tx.send(ChatStreamItem::Error(e));
-                    break;
-                }
-                Ok(EngineReply::Shutdown) => {
-                    let _ = tx.send(ChatStreamItem::Error(ERR_ENGINE_SHUTDOWN.to_string()));
-                    break;
-                }
-                Err(_) => {
-                    let _ = tx.send(ChatStreamItem::Error("stream closed".to_string()));
+                        finish_reason: None,
+                    }],
+                    ..Default::default()
+                };
+                if !on_item(ChatStreamItem::Chunk(chunk)) {
                     break;
                 }
             }
+            Ok(EngineReply::Stop(reason, n_completion_tokens)) => {
+                let last = ChatCompletionChunk {
+                    id: respond_id.clone(),
+                    object: "chat.completion.chunk".to_string(),
+                    created: now_unix_s() as u64,
+                    model: model_name.clone(),
+                    choices: vec![StreamChoice {
+                        index: 0,
+                        delta: StreamDelta::default(),
+                        finish_reason: Some(match reason {
+                            StopReason::Eog | StopReason::Word(_) | StopReason::PrefillOnly => {
+                                FinishReason::Stop
+                            }
+                            StopReason::MaxTokens => FinishReason::Length,
+                        }),
+                    }],
+                    usage: if include_usage {
+                        Some(Usage {
+                            prompt_tokens: n_prompt_tokens as u64,
+                            completion_tokens: n_completion_tokens as u64,
+                            total_tokens: (n_prompt_tokens + n_completion_tokens) as u64,
+                        })
+                    } else {
+                        None
+                    },
+                    ..Default::default()
+                };
+                on_item(ChatStreamItem::Chunk(last));
+                on_item(ChatStreamItem::Done);
+                break;
+            }
+            Ok(EngineReply::Cancelled) => {
+                on_item(ChatStreamItem::Error(ERR_CANCELLED.to_string()));
+                break;
+            }
+            Ok(EngineReply::Error(e)) => {
+                on_item(ChatStreamItem::Error(e));
+                break;
+            }
+            Ok(EngineReply::Shutdown) => {
+                on_item(ChatStreamItem::Error(ERR_ENGINE_SHUTDOWN.to_string()));
+                break;
+            }
+            Err(_) => {
+                on_item(ChatStreamItem::Error("stream timed out".to_string()));
+                break;
+            }
         }
-    });
-
-    out_rx
+    }
 }
 
 fn js_engine_chat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -440,9 +440,8 @@ fn js_engine_chat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     // Parse options (optional, arg 1)
     let mut stream = false;
-    let mut temperature = 0.75f32;
-    let mut max_tokens = engine.lock().unwrap().default_max_tokens();
-    let mut top_p = 1.0f32;
+    let mut temperature = 0.75_f32;
+    let mut top_p = 1.0_f32;
     let mut stop: Vec<String> = Vec::new();
     let mut tools: Option<Vec<ChatCompletionTool>> = None;
     let mut tool_choice: Option<ToolChoice> = None;
@@ -452,6 +451,7 @@ fn js_engine_chat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut id_slot: Option<usize> = None;
     let mut cache_prompt = false;
     let mut include_usage = false;
+    let mut max_tokens = engine.lock().unwrap().default_max_tokens();
 
     if cc.length() > 1 {
         let opts_val = cc.arg(1);
@@ -591,9 +591,10 @@ fn js_engine_chat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             .as_ref()
             .map(to_lark_tool_choice)
             .unwrap_or(LarkToolChoice::Auto);
+
         if tc != LarkToolChoice::None {
             task_config = task_config.grammar(GrammarConfig {
-                lark_grammar: compile_tools_lark_grammar(tools, tc),
+                lark_grammar: compile_tools_grammar(tools, tc),
                 tool_choice: tc,
             });
         }
@@ -626,16 +627,32 @@ fn js_engine_chat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             })?;
 
         std::thread::spawn(move || {
-            let result =
-                collect_chat_response(rx, &respond_id, &model_name, include_usage, n_prompt_tokens);
+            let result = collect_chat_response(
+                rx,
+                std::time::Duration::from_secs(u64::MAX),
+                &respond_id,
+                &model_name,
+                include_usage,
+                n_prompt_tokens,
+            );
             let _ = result_slot.commit(result);
         });
 
         Ok(promise.into())
     } else {
         // Streaming: AsyncIterableIterator
-        let bridge_rx =
-            bridge_chat_stream(rx, &respond_id, &model_name, include_usage, n_prompt_tokens);
+        let (bridge_tx, bridge_rx) = crossbeam::channel::bounded::<ChatStreamItem>(8);
+        std::thread::spawn(move || {
+            bridge_chat_stream(
+                rx,
+                std::time::Duration::from_secs(u64::MAX),
+                &respond_id,
+                &model_name,
+                include_usage,
+                n_prompt_tokens,
+                |item| bridge_tx.send(item).is_ok(),
+            );
+        });
 
         AsyncIterableIterator::create_with_receiver(
             ctx,

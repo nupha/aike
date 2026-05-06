@@ -6,7 +6,7 @@ use liter_llm::{
         ContentPart, Message, ResponseFormat, ToolChoice, ToolChoiceMode, UserContent,
     },
 };
-use llama_cpp_ffi::{LarkToolChoice, LlamaModel};
+use llama_cpp_ffi::{LlamaModel, ToolChoice as LarkToolChoice};
 use minijinja::Environment;
 use minijinja_contrib::pycompat;
 use serde::Serialize;
@@ -330,7 +330,7 @@ pub(crate) fn build_chat_prompt_tokens(
 ///   {"name": "function_name", "arguments": {"city": "Shanghai"}}
 /// where `arguments` is a JSON object constrained by the params schema.
 /// The parser will later serialize `arguments` to a JSON string for the OpenAI format.
-pub(crate) fn compile_tools_lark_grammar(
+pub(crate) fn compile_tools_grammar(
     tools: &[ChatCompletionTool],
     tool_choice: LarkToolChoice,
 ) -> String {
@@ -382,7 +382,7 @@ pub(crate) fn compile_tools_lark_grammar(
                  {rules}"
             )
         }
-        LarkToolChoice::Auto | LarkToolChoice::None => {
+        LarkToolChoice::Auto => {
             // allow free text or tool calls, interleaved.
             // Uses lazy TEXT so that when the model emits "<tool_call>",
             // TEXT stops matching and the parser switches to tool_xxx.
@@ -392,6 +392,9 @@ pub(crate) fn compile_tools_lark_grammar(
                  TEXT: /(.|\\n)*/\n\
                  {rules}"
             )
+        }
+        LarkToolChoice::None => {
+            unreachable!();
         }
     }
 }
