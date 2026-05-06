@@ -1,5 +1,15 @@
-use crossbeam::channel::Sender;
+use std::collections::{HashSet, VecDeque};
+
+use crossbeam::channel::{Receiver, Sender};
 use llama_cpp_ffi::LarkToolChoice;
+
+use crate::helpers::now_unix_s;
+
+use super::{
+    context::Engine,
+    slot::{Slot, SlotState},
+    worker::remove_cancelled_inputs,
+};
 
 pub type Token = i32;
 
@@ -155,4 +165,194 @@ pub enum SchedResult {
     Scheduled,
     Deferred(Box<EngineTask>),
     Rejected,
+}
+
+impl Engine {
+    pub(crate) fn handle_ctrl_messages(
+        &mut self,
+        ctrl_rx: &Receiver<EngineCtrlMsg>,
+        slots: &mut [Slot],
+        ready: &mut VecDeque<Box<EngineTask>>,
+        deferred: &mut VecDeque<Box<EngineTask>>,
+        cancelled_ids: &mut HashSet<usize>,
+    ) -> bool {
+        while let Ok(ctrl) = ctrl_rx.try_recv() {
+            match ctrl {
+                EngineCtrlMsg::Shutdown => {
+                    for slot in slots.iter_mut() {
+                        let state0 = std::mem::replace(&mut slot.state, SlotState::Busy);
+
+                        if let SlotState::Decoding { task_state, .. }
+                        | SlotState::Sampling { task_state, .. }
+                        | SlotState::Done { task_state, .. } = state0
+                        {
+                            let _ = task_state.output_tx.send(EngineReply::Shutdown);
+                            self.clear_slot(slot.seq_id);
+                        }
+                        slot.n_past = 0;
+                        slot.state = SlotState::Idle;
+                    }
+                    return true;
+                }
+                EngineCtrlMsg::CancelTask(task_id) => {
+                    remove_cancelled_inputs(ready, task_id);
+                    remove_cancelled_inputs(deferred, task_id);
+                    cancelled_ids.insert(task_id);
+
+                    for slot in slots.iter_mut() {
+                        let state0 = std::mem::replace(&mut slot.state, SlotState::Busy);
+
+                        slot.state = match state0 {
+                            SlotState::Decoding {
+                                prompt_tokens,
+                                logits_for_all_tokens,
+                                num_written,
+                                task_state,
+                            } => {
+                                if task_state.config.task_id == task_id {
+                                    SlotState::Done {
+                                        task_state,
+                                        reply: EngineReply::Cancelled,
+                                    }
+                                } else {
+                                    SlotState::Decoding {
+                                        prompt_tokens,
+                                        logits_for_all_tokens,
+                                        num_written,
+                                        task_state,
+                                    }
+                                }
+                            }
+                            SlotState::Sampling { logits, task_state } => {
+                                if task_state.config.task_id == task_id {
+                                    SlotState::Done {
+                                        task_state,
+                                        reply: EngineReply::Cancelled,
+                                    }
+                                } else {
+                                    SlotState::Sampling { logits, task_state }
+                                }
+                            }
+                            SlotState::Done { task_state, reply } => {
+                                if task_state.config.task_id == task_id {
+                                    SlotState::Done {
+                                        task_state,
+                                        reply: EngineReply::Cancelled,
+                                    }
+                                } else {
+                                    SlotState::Done { task_state, reply }
+                                }
+                            }
+                            other => other,
+                        };
+                    }
+                }
+            }
+        }
+
+        false
+    }
+
+    pub(crate) fn pick_idle_slot(
+        &self,
+        slots: &[Slot],
+        seq_hint: Option<usize>,
+        prompt_tokens: &[Token],
+        use_cache: bool,
+        match_threshold: f32,
+    ) -> Option<(usize, bool)> {
+        if let Some(hint) = seq_hint
+            && let Some(slot) = slots.get(hint)
+            && matches!(slot.state, SlotState::Idle)
+        {
+            let can_reuse = use_cache && self.common_prefix_len(slot.seq_id, prompt_tokens) > 0;
+            return Some((hint, can_reuse));
+        }
+        let idle_indices = slots
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, s)| matches!(s.state, SlotState::Idle).then_some(idx))
+            .collect::<Vec<_>>();
+        if idle_indices.is_empty() {
+            return None;
+        }
+
+        let mut lru_idx = idle_indices[0];
+        let mut lru_mtime = slots[lru_idx].mtime;
+        for idx in idle_indices.iter().skip(1) {
+            if slots[*idx].mtime < lru_mtime {
+                lru_mtime = slots[*idx].mtime;
+                lru_idx = *idx;
+            }
+        }
+
+        Some((lru_idx, false))
+    }
+
+    pub(crate) fn sched_task(
+        &mut self,
+        task: Box<EngineTask>,
+        slots: &mut [Slot],
+        prefix_match_threshold: f32,
+    ) -> SchedResult {
+        if task.prompt_tokens.is_empty() {
+            let _ = task.output_tx.send(EngineReply::Error(
+                "prompt_tokens must not be empty".to_string(),
+            ));
+            return SchedResult::Rejected;
+        }
+        let Some((slot_idx, allow_cache_reuse)) = self.pick_idle_slot(
+            slots,
+            task.seq_hint,
+            &task.prompt_tokens,
+            task.use_cache,
+            prefix_match_threshold,
+        ) else {
+            return SchedResult::Deferred(task);
+        };
+
+        let seq_id = slots[slot_idx].seq_id;
+        let n_common = if allow_cache_reuse {
+            match self.prepare_slot(seq_id, &task.prompt_tokens) {
+                Ok(n) => n,
+                Err(e) => {
+                    let _ = task.output_tx.send(EngineReply::Error(e));
+                    return SchedResult::Rejected;
+                }
+            }
+        } else {
+            self.clear_slot(seq_id);
+            self.truncate_slot_cache(seq_id, 0);
+            0
+        };
+
+        let mut task = task;
+        task.prompt_tokens.drain(..n_common);
+        if task.prompt_tokens.is_empty() {
+            let _ = task.output_tx.send(EngineReply::Error(
+                "prompt_tokens became empty after prefix match".to_string(),
+            ));
+            return SchedResult::Rejected;
+        }
+
+        let task_state = TaskState {
+            config: task.config,
+            n_completion_tokens: 0,
+            generated_text: String::new(),
+            pending_bytes: Vec::new(),
+            output_tx: task.output_tx,
+        };
+
+        let slot = &mut slots[slot_idx];
+        slot.n_past = n_common as i32;
+        slot.mtime = now_unix_s();
+        slot.state = SlotState::Decoding {
+            prompt_tokens: VecDeque::from(task.prompt_tokens),
+            logits_for_all_tokens: task_state.config.logits_for_all_tokens,
+            num_written: 0,
+            task_state,
+        };
+
+        SchedResult::Scheduled
+    }
 }
