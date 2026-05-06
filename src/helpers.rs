@@ -284,10 +284,10 @@ pub(crate) fn build_chat_prompt_tokens(
     let mut tmpl_ctx = TemplateContext::new(&jinja_msgs, eos_token, bos_token);
 
     // tools
-    if let Some(tools) = tools {
-        if let Ok(val) = serde_json::to_value(tools) {
-            tmpl_ctx.tools = Some(val);
-        }
+    if let Some(tools) = tools
+        && let Ok(val) = serde_json::to_value(tools)
+    {
+        tmpl_ctx.tools = Some(val);
     }
 
     // tool_choice
