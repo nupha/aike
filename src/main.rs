@@ -3,6 +3,7 @@
 
 #![allow(non_snake_case)]
 
+mod chat_response;
 mod class_file;
 mod class_llama_client;
 mod class_llama_context;
