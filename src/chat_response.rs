@@ -152,6 +152,13 @@ impl ChatResponseParser {
         }
     }
 
+    pub fn end(mut self) {
+        if let State::MaybeCall(s) = self.state {
+            self.out.push(ChatElement::Text(s));
+        }
+        self.state = State::Text;
+    }
+
     pub fn output(&self) -> &[ChatElement] {
         &self.out
     }

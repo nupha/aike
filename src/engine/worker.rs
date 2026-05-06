@@ -123,11 +123,11 @@ pub fn pop_next_task(
 
 pub(super) fn remove_cancelled_inputs(queue: &mut VecDeque<Box<EngineTask>>, task_id: usize) {
     let mut kept = VecDeque::with_capacity(queue.len());
-    while let Some(input) = queue.pop_front() {
-        if input.config.task_id == task_id {
-            let _ = input.output_tx.send(EngineReply::Cancelled);
+    while let Some(task) = queue.pop_front() {
+        if task.config.task_id == task_id {
+            let _ = task.output_tx.send(EngineReply::Cancelled);
         } else {
-            kept.push_back(input);
+            kept.push_back(task);
         }
     }
     *queue = kept;
@@ -265,12 +265,14 @@ impl Engine {
 
         for slot in slots.iter_mut() {
             let state0 = std::mem::replace(&mut slot.state, SlotState::Busy);
+
             if let SlotState::Sampling {
                 logits,
                 mut task_state,
             } = state0
             {
                 if task_state.output_tx.is_full() {
+                    // do sampling in next tick
                     slot.state = SlotState::Sampling { logits, task_state };
                 } else if let Err(e) = self.init_slot_sampler(
                     slot.seq_id,

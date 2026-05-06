@@ -641,7 +641,7 @@ fn js_engine_chat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         Ok(promise.into())
     } else {
         // Streaming: AsyncIterableIterator
-        let (bridge_tx, bridge_rx) = crossbeam::channel::bounded::<ChatStreamItem>(8);
+        let (bridge_tx, bridge_rx) = crossbeam::channel::bounded::<ChatStreamItem>(32);
         std::thread::spawn(move || {
             bridge_chat_stream(
                 rx,
