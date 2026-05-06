@@ -429,7 +429,7 @@ pub(crate) fn sample_with_cached_sampler(
             .get_mut(&key)
             .ok_or_else(|| "sampler cache miss".to_string())?;
 
-        Ok(sampler.sample(llm_ctx, logits))
+        Ok(sampler.sample(llm_ctx.as_ptr(), logits))
     })
 }
 

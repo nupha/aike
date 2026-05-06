@@ -1,4 +1,8 @@
-use std::{convert::Infallible, sync::Arc, time::Duration};
+use std::{
+    convert::Infallible,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use axum::{
     Json, Router,
@@ -70,11 +74,11 @@ const DEFAULT_TOP_P: f64 = 1.0;
 #[derive(Clone)]
 #[repr(transparent)]
 struct AppState {
-    engine: Arc<Engine>,
+    engine: Arc<Mutex<Engine>>,
 }
 
 impl Engine {
-    fn build_router(self: Arc<Self>) -> Router {
+    fn build_router(engine: Arc<Mutex<Self>>) -> Router {
         Router::new()
             .route("/", get(handle_root))
             .route("/health", get(handle_health))
@@ -82,18 +86,18 @@ impl Engine {
             .route("/v1/health", get(handle_health))
             .route("/v1/models", get(handle_models))
             .route("/v1/chat/completions", post(handle_chat_completions))
-            .with_state(AppState { engine: self })
+            .with_state(AppState { engine })
             .layer(CorsLayer::permissive())
     }
 
     /// Start http server with Engine (in current thread), blocks until shutdown signal.
     pub async fn http_serve(
-        self: Arc<Self>,
+        engine: Arc<Mutex<Self>>,
         host: &str,
         port: u16,
         shutdown_rx: tokio::sync::oneshot::Receiver<()>,
     ) -> Result<(), String> {
-        let router = self.build_router();
+        let router = Self::build_router(engine.clone());
 
         let addr = format!("{host}:{port}");
         let listener = tokio::net::TcpListener::bind(&addr)
@@ -128,7 +132,7 @@ async fn handle_health() -> impl IntoResponse {
 
 async fn handle_models(State(state): State<AppState>) -> impl IntoResponse {
     let data = vec![ModelInfo {
-        id: state.engine.model_name().to_string(),
+        id: state.engine.lock().unwrap().model_name().to_string(),
         object: "model",
         created: now_unix_s(),
         owned_by: "local",
@@ -207,20 +211,22 @@ async fn handle_chat_completions(
         .as_ref()
         .and_then(|s| s.include_usage)
         .unwrap_or(false);
-    let max_tokens = req
-        .max_tokens
-        .unwrap_or(state.engine.default_max_tokens() as u64) as usize;
 
-    let prompt_tokens = match build_chat_prompt_tokens_from_request(state.engine.model(), &req) {
-        Ok(tokens) => tokens,
-        Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(oai_error(e, "invalid_request_error")),
-            )
-                .into_response();
-        }
-    };
+    let max_tokens =
+        req.max_tokens
+            .unwrap_or(state.engine.lock().unwrap().default_max_tokens() as u64) as usize;
+
+    let prompt_tokens =
+        match build_chat_prompt_tokens_from_request(state.engine.lock().unwrap().model(), &req) {
+            Ok(tokens) => tokens,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(oai_error(e, "invalid_request_error")),
+                )
+                    .into_response();
+            }
+        };
 
     let seq_hint = id_slot.and_then(|v| if v >= 0 { Some(v as usize) } else { None });
     let use_cache = cache_prompt;
@@ -259,20 +265,21 @@ async fn handle_chat_completions(
         }
     }
 
-    let engine_rx =
-        match state
-            .engine
-            .push_task_with_params(prompt_tokens, task_config, seq_hint, use_cache)
-        {
-            Ok(rx) => rx,
-            Err(e) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(oai_error(e.to_string(), "server_error")),
-                )
-                    .into_response();
-            }
-        };
+    let engine_rx = match state.engine.lock().unwrap().push_task_with_params(
+        prompt_tokens,
+        task_config,
+        seq_hint,
+        use_cache,
+    ) {
+        Ok(rx) => rx,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(oai_error(e.to_string(), "server_error")),
+            )
+                .into_response();
+        }
+    };
 
     if stream {
         // Bridge crossbeam Receiver -> tokio mpsc for SSE
@@ -281,7 +288,7 @@ async fn handle_chat_completions(
             stream_reply_to_sse(
                 engine_rx,
                 tx,
-                state.engine.model_name(),
+                state.engine.lock().unwrap().model_name(),
                 &respond_id,
                 include_usage,
                 n_prompt_tokens,
@@ -296,7 +303,7 @@ async fn handle_chat_completions(
     } else {
         // Unary: collect all EngineReply, build final response
         let join = tokio::task::spawn_blocking({
-            let model_id = state.engine.model_name().to_string();
+            let model_id = state.engine.lock().unwrap().model_name().to_string();
             move || {
                 oneshot_reply(
                     engine_rx,

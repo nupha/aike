@@ -1,4 +1,8 @@
-use std::{cell::Cell, ffi::c_void, sync::Arc};
+use std::{
+    cell::Cell,
+    ffi::c_void,
+    sync::{Arc, Mutex},
+};
 
 use linkme::distributed_slice;
 use liter_llm::{
@@ -82,7 +86,7 @@ pub(super) fn parse_engine_params(
     })
 }
 
-fn get_engine<'a>(ctx: &mut ScopedContext, val: &JSValue) -> Result<&'a Engine, i32> {
+fn get_engine<'a>(ctx: &mut ScopedContext, val: &JSValue) -> Result<&'a Mutex<Engine>, i32> {
     let payload = val
         .retrive_object_payload(ctx, JSLlamaEngine::class_id())?
         .other()
@@ -92,16 +96,20 @@ fn get_engine<'a>(ctx: &mut ScopedContext, val: &JSValue) -> Result<&'a Engine, 
         ctx.throw_type_error("Engine was disposed");
         Err(-1)
     } else {
-        Ok(unsafe { &*opaque.cast::<Engine>() })
+        let k = unsafe { &*opaque.cast::<Mutex<Engine>>() };
+        Ok(k)
     }
 }
 
-pub(super) fn get_engine_arc(ctx: &mut ScopedContext, val: &JSValue) -> Result<Arc<Engine>, i32> {
+pub(super) fn get_engine_arc(
+    ctx: &mut ScopedContext,
+    val: &JSValue,
+) -> Result<Arc<Mutex<Engine>>, i32> {
     // opaque was created from Arc::into_raw(), so it points to the Engine
     // inside the Arc allocation. Increment the strong count so the returned
     // Arc can outlive the JS object.
     let engine_ref = get_engine(ctx, val)?;
-    let ptr = engine_ref as *const Engine as *mut Engine;
+    let ptr = engine_ref as *const Mutex<Engine>;
     unsafe { Arc::increment_strong_count(ptr) };
     Ok(unsafe { Arc::from_raw(ptr) })
 }
@@ -129,6 +137,8 @@ fn js_engine_generate(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     };
 
     let rx = engine
+        .lock()
+        .unwrap()
         .push_task(tokens, TaskConfig::new().output_mode(mode))
         .map_err(|e| {
             ctx.throw_internal_error(&e.to_string());
@@ -427,7 +437,7 @@ fn js_engine_chat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     // Parse options (optional, arg 1)
     let mut stream = false;
     let mut temperature = 0.75f32;
-    let mut max_tokens = engine.default_max_tokens();
+    let mut max_tokens = engine.lock().unwrap().default_max_tokens();
     let mut top_p = 1.0f32;
     let mut stop: Vec<String> = Vec::new();
     let mut tools: Option<Vec<ChatCompletionTool>> = None;
@@ -546,7 +556,7 @@ fn js_engine_chat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     // Build prompt tokens
     let prompt_tokens = build_chat_prompt_tokens(
-        engine.model(),
+        engine.lock().unwrap().model(),
         &messages,
         tools.as_deref(),
         tool_choice.as_ref(),
@@ -587,10 +597,12 @@ fn js_engine_chat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     let n_prompt_tokens = prompt_tokens.len();
     let respond_id = format!("chatcmpl-{}", uuid::Uuid::new_v4().simple());
-    let model_name = engine.model_name().to_string();
+    let model_name = engine.lock().unwrap().model_name().to_string();
     let mode = cc.magic();
 
     let rx = engine
+        .lock()
+        .unwrap()
         .push_task_with_params(prompt_tokens, task_config, id_slot, cache_prompt)
         .map_err(|e| {
             ctx.throw_internal_error(&e.to_string());
@@ -678,13 +690,13 @@ fn js_engine_httpServe(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         }
     }
 
-    if engine.is_serving() {
+    if engine.lock().unwrap().is_serving() {
         ctx.throw_type_error("engine is already serving");
         return Err(-1);
     }
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
-    engine.set_serving(shutdown_tx);
+    engine.lock().unwrap().set_serving(shutdown_tx);
 
     let result_slot = PromiseResultSlot::<Result<(), String>>::new();
 
@@ -698,9 +710,9 @@ fn js_engine_httpServe(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         })?;
 
     tokio::spawn(async move {
-        let res = engine.clone().http_serve(&host, port, shutdown_rx).await;
+        let res = Engine::http_serve(engine.clone(), &host, port, shutdown_rx).await;
 
-        engine.unset_serving();
+        engine.lock().unwrap().unset_serving();
         let _ = result_slot.commit(res);
     });
 
@@ -710,14 +722,14 @@ fn js_engine_httpServe(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 fn js_engine_stopServe(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let engine = get_engine(ctx, &this)?;
-    engine.request_stop();
+    engine.lock().unwrap().request_stop();
     Ok(JSValue::UNDEFINED)
 }
 
 fn js_engine_isServing(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let engine = get_engine(ctx, &this)?;
-    Ok(JSValue::Bool(engine.is_serving()))
+    Ok(JSValue::Bool(engine.lock().unwrap().is_serving()))
 }
 
 fn js_engine_dispose(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -779,14 +791,14 @@ impl JSLlamaEngine {
 
     pub(super) fn new_instance(
         ctx: &mut ScopedContext,
-        engine: Arc<Engine>,
+        engine: Arc<Mutex<Engine>>,
     ) -> Result<Object, i32> {
         let opaque = Arc::into_raw(engine) as *mut c_void;
 
         ctx.create_class_instance_with_opaque(Self::class_id(), opaque)
             .map_err(|e| {
                 let p = e.other().unwrap();
-                let _ = unsafe { Arc::from_raw(p.opaque().cast::<Engine>()) };
+                let _ = unsafe { Arc::from_raw(p.opaque().cast::<Mutex<Engine>>()) };
                 -1
             })
     }
