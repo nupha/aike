@@ -316,12 +316,13 @@ impl Engine {
                                 self.append_token(&mut task_state, token);
 
                                 if let Some(w) = hit_stop_words(
-                                    &mut task_state.generated_text,
+                                    &task_state.generated_text,
                                     &task_state.config.stop_words,
                                 ) {
                                     let new_len =
                                         task_state.generated_text.len().saturating_sub(w.len());
                                     task_state.generated_text.truncate(new_len);
+
                                     out_text = std::mem::replace(
                                         &mut task_state.generated_text,
                                         "".to_string(),

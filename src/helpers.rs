@@ -122,52 +122,52 @@ pub(crate) fn create_minijinja_env() -> Environment<'static> {
     });
 
     // append: append item to array
-    env.add_filter(
-        "append",
-        |arr: minijinja::Value, item: minijinja::Value| -> minijinja::Value {
-            let mut items: Vec<minijinja::Value> = Vec::new();
-            if let Ok(iter) = arr.try_iter() {
-                for v in iter {
-                    items.push(v);
-                }
-            }
-            items.push(item);
-            minijinja::Value::from_serialize(&items)
-        },
-    );
+    // env.add_filter(
+    //     "append",
+    //     |arr: minijinja::Value, item: minijinja::Value| -> minijinja::Value {
+    //         let mut items: Vec<minijinja::Value> = Vec::new();
+    //         if let Ok(iter) = arr.try_iter() {
+    //             for v in iter {
+    //                 items.push(v);
+    //             }
+    //         }
+    //         items.push(item);
+    //         minijinja::Value::from_serialize(&items)
+    //     },
+    // );
 
     // pop: get element from array by index (default: last)
-    env.add_filter(
-        "pop",
-        |arr: minijinja::Value, index: Option<i64>| -> minijinja::Value {
-            let len = arr.len().unwrap_or(0);
-            if len == 0 {
-                return minijinja::Value::from(());
-            }
-            let idx = index.unwrap_or(-1);
-            let real = if idx < 0 { len as i64 + idx } else { idx };
-            if real < 0 || real as usize >= len {
-                minijinja::Value::from(())
-            } else {
-                arr.get_item_by_index(real as usize)
-                    .unwrap_or_else(|_| minijinja::Value::from(()))
-            }
-        },
-    );
+    // env.add_filter(
+    //     "pop",
+    //     |arr: minijinja::Value, index: Option<i64>| -> minijinja::Value {
+    //         let len = arr.len().unwrap_or(0);
+    //         if len == 0 {
+    //             return minijinja::Value::from(());
+    //         }
+    //         let idx = index.unwrap_or(-1);
+    //         let real = if idx < 0 { len as i64 + idx } else { idx };
+    //         if real < 0 || real as usize >= len {
+    //             minijinja::Value::from(())
+    //         } else {
+    //             arr.get_item_by_index(real as usize)
+    //                 .unwrap_or_else(|_| minijinja::Value::from(()))
+    //         }
+    //     },
+    // );
 
     // get: get value from object by key with optional default
-    env.add_filter(
-        "get",
-        |obj: minijinja::Value,
-         key: String,
-         default: Option<minijinja::Value>|
-         -> minijinja::Value {
-            obj.get_attr(&key)
-                .ok()
-                .filter(|v| !v.is_undefined())
-                .unwrap_or_else(|| default.unwrap_or_else(|| minijinja::Value::from(())))
-        },
-    );
+    // env.add_filter(
+    //     "get",
+    //     |obj: minijinja::Value,
+    //      key: String,
+    //      default: Option<minijinja::Value>|
+    //      -> minijinja::Value {
+    //         obj.get_attr(&key)
+    //             .ok()
+    //             .filter(|v| !v.is_undefined())
+    //             .unwrap_or_else(|| default.unwrap_or_else(|| minijinja::Value::from(())))
+    //     },
+    // );
 
     env
 }
@@ -315,6 +315,8 @@ pub(crate) fn build_chat_prompt_tokens(
     }
 
     let prompt = render_chat_template(tmpl, &tmpl_ctx)?;
+    println!("[O.o]============== prompt============\n{}", prompt);
+
     tokenize_prompt(model, &prompt)
 }
 
