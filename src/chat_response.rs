@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-use liter_llm::FunctionCall;
+use liter_llm::{FunctionCall, ToolCall, ToolType};
 
 #[derive(Debug)]
 pub enum ChatElement {
     Text(String),
     Reasoning(String),
-    Call(FunctionCall),
+    Call(ToolCall),
 }
 
 pub struct ChatResponseParser {
@@ -104,7 +104,11 @@ impl ChatResponseParser {
                     remaining = &remaining[pos + "</tool_call>".len()..];
 
                     if let Ok(fc) = serde_json::from_str::<FunctionCall>(s) {
-                        self.out.push(ChatElement::Call(fc));
+                        self.out.push(ChatElement::Call(ToolCall {
+                            id: format!("call_{}", uuid::Uuid::new_v4().simple()),
+                            call_type: ToolType::Function,
+                            function: fc,
+                        }));
                     } else {
                         // not a valid function call
                         self.out.push(ChatElement::Text(std::mem::take(s)));
@@ -226,8 +230,8 @@ mod tests {
         assert_eq!(p.output().len(), 1);
         match &p.output()[0] {
             ChatElement::Call(fc) => {
-                assert_eq!(fc.name, "get_weather");
-                assert_eq!(fc.arguments, "{}");
+                assert_eq!(fc.function.name, "get_weather");
+                assert_eq!(fc.function.arguments, "{}");
             }
             _ => panic!("expected Call element"),
         }
@@ -268,8 +272,8 @@ mod tests {
         assert_eq!(p.output().len(), 2);
         match &p.output()[0] {
             ChatElement::Call(fc) => {
-                assert_eq!(fc.name, "search");
-                assert_eq!(fc.arguments, "{}");
+                assert_eq!(fc.function.name, "search");
+                assert_eq!(fc.function.arguments, "{}");
             }
             _ => panic!("expected Call element"),
         }
@@ -297,8 +301,8 @@ mod tests {
         }
         match &p.output()[2] {
             ChatElement::Call(fc) => {
-                assert_eq!(fc.name, "calc");
-                assert_eq!(fc.arguments, "{}");
+                assert_eq!(fc.function.name, "calc");
+                assert_eq!(fc.function.arguments, "{}");
             }
             _ => panic!("expected Call element"),
         }
@@ -340,7 +344,7 @@ mod tests {
         assert_eq!(p.output().len(), 1);
         match &p.output()[0] {
             ChatElement::Call(fc) => {
-                assert_eq!(fc.name, "<think>");
+                assert_eq!(fc.function.name, "<think>");
             }
             _ => panic!("expected Call element"),
         }
