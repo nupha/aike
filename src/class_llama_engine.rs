@@ -6,9 +6,9 @@ use std::{
 
 use linkme::distributed_slice;
 use liter_llm::{
-    ChatCompletionChunk, ChatCompletionResponse, Choice, FinishReason, FunctionCall,
-    ReasoningEffort, StreamChoice, StreamDelta, ToolCall, ToolType,
-    types::common::{AssistantMessage, ChatCompletionTool, ResponseFormat, ToolChoice, Usage},
+    ChatCompletionChunk, ChatCompletionResponse, Choice, FinishReason, FunctionCall, StreamChoice,
+    StreamDelta, ToolCall, ToolType,
+    types::common::{AssistantMessage, Usage},
 };
 use llama_cpp_ffi::ToolChoice as LarkToolChoice;
 use zuqe::{
@@ -21,10 +21,7 @@ use zuqe::{
 
 use crate::{
     USER_CLASS_DEFS,
-    class_llama_client::{
-        chunk_to_js, parse_messages, parse_reasoning_effort, parse_response_format,
-        parse_tool_choice, parse_tools,
-    },
+    class_llama_client::{ChatOptions, chunk_to_js, parse_chat_options, parse_messages},
     class_llama_context::parse_tokens,
     engine::{Engine, EngineReply, GrammarConfig, OutputMode, StopReason, TaskConfig},
     helpers::{build_chat_prompt_tokens, compile_tools_grammar, now_unix_s, to_lark_tool_choice},
@@ -332,6 +329,7 @@ pub(crate) fn bridge_chat_stream<F>(
     let respond_id = respond_id.to_string();
     let model_name = model_name.to_string();
     let mut sent_started = false;
+
     loop {
         match rx.recv_timeout(timeout) {
             Ok(EngineReply::Text(t)) => {
@@ -439,42 +437,35 @@ fn js_engine_chat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let messages = parse_messages(ctx, &messages_val)?;
 
     // Parse options (optional, arg 1)
-    let mut stream = false;
-    let mut temperature = 0.75_f32;
-    let mut top_p = 1.0_f32;
-    let mut stop: Vec<String> = Vec::new();
-    let mut tools: Option<Vec<ChatCompletionTool>> = None;
-    let mut tool_choice: Option<ToolChoice> = None;
-    let mut parallel_tool_calls: Option<bool> = None;
-    let mut response_format: Option<ResponseFormat> = None;
-    let mut reasoning_effort: Option<ReasoningEffort> = None;
     let mut id_slot: Option<usize> = None;
     let mut cache_prompt = false;
     let mut include_usage = false;
     let mut max_tokens = engine.lock().unwrap().default_max_tokens();
 
+    let mut opts = ChatOptions {
+        stream: false,
+        temperature: None,
+        max_tokens: None,
+        top_p: None,
+        stop: None,
+        tools: None,
+        tool_choice: None,
+        parallel_tool_calls: None,
+        response_format: None,
+        reasoning_effort: None,
+    };
     if cc.length() > 1 {
-        let opts_val = cc.arg(1);
-        if !opts_val.is_undefined() && !opts_val.is_null() {
-            let opts = opts_val.as_object().copied().ok_or_else(|| {
+        let val = cc.arg(1);
+        if !val.is_undefined() && !val.is_null() {
+            let opts_obj = val.as_object().copied().ok_or_else(|| {
                 ctx.throw_type_error("options must be object");
                 -1
             })?;
 
-            // stream
-            let v = opts.get_property_str(ctx, "stream")?;
-            if !v.is_undefined() {
-                stream = v.to_bool()?;
-            }
+            opts = parse_chat_options(ctx, &opts_obj)?;
 
-            // temperature
-            let v = opts.get_property_str(ctx, "temperature")?;
-            if !v.is_undefined() {
-                temperature = v.to_number(ctx)?.to_f64() as f32;
-            }
-
-            // maxTokens
-            let v = opts.get_property_str(ctx, "maxTokens")?;
+            // maxTokens (engine-specific: has default, validates >= 0)
+            let v = opts_obj.get_property_str(ctx, "maxTokens")?;
             if !v.is_undefined() {
                 let n = v.to_number(ctx)?.to_i32();
                 if n < 0 {
@@ -484,59 +475,8 @@ fn js_engine_chat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 max_tokens = n as usize;
             }
 
-            // topP
-            let v = opts.get_property_str(ctx, "topP")?;
-            if !v.is_undefined() {
-                top_p = v.to_number(ctx)?.to_f64() as f32;
-            }
-
-            // stop
-            let v = opts.get_property_str(ctx, "stop")?;
-            if !v.is_undefined() {
-                if v.is_string() {
-                    let s = v.to_string(ctx)?;
-                    stop.push(s.content().encode_utf8(false).to_string());
-                } else if let Some(arr) = v.as_object_Array() {
-                    for item in arr.payload().values() {
-                        if let Some(s) = item.as_string() {
-                            stop.push(s.content().encode_utf8(false).to_string());
-                        }
-                    }
-                }
-            }
-
-            // tools
-            let v = opts.get_property_str(ctx, "tools")?;
-            if !v.is_undefined() {
-                tools = Some(parse_tools(ctx, &v)?);
-            }
-
-            // toolChoice
-            let v = opts.get_property_str(ctx, "toolChoice")?;
-            if !v.is_undefined() {
-                tool_choice = Some(parse_tool_choice(ctx, &v)?);
-            }
-
-            // parallelToolCalls
-            let v = opts.get_property_str(ctx, "parallelToolCalls")?;
-            if !v.is_undefined() {
-                parallel_tool_calls = Some(v.to_bool()?);
-            }
-
-            // responseFormat
-            let v = opts.get_property_str(ctx, "responseFormat")?;
-            if !v.is_undefined() {
-                response_format = Some(parse_response_format(ctx, &v)?);
-            }
-
-            // reasoningEffort
-            let v = opts.get_property_str(ctx, "reasoningEffort")?;
-            if !v.is_undefined() {
-                reasoning_effort = Some(parse_reasoning_effort(ctx, &v)?);
-            }
-
             // idSlot
-            let v = opts.get_property_str(ctx, "idSlot")?;
+            let v = opts_obj.get_property_str(ctx, "idSlot")?;
             if !v.is_undefined() {
                 let n = v.to_number(ctx)?.to_i32();
                 if n >= 0 {
@@ -545,13 +485,13 @@ fn js_engine_chat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             }
 
             // cachePrompt
-            let v = opts.get_property_str(ctx, "cachePrompt")?;
+            let v = opts_obj.get_property_str(ctx, "cachePrompt")?;
             if !v.is_undefined() {
                 cache_prompt = v.to_bool()?;
             }
 
             // includeUsage
-            let v = opts.get_property_str(ctx, "includeUsage")?;
+            let v = opts_obj.get_property_str(ctx, "includeUsage")?;
             if !v.is_undefined() {
                 include_usage = v.to_bool()?;
             }
@@ -562,11 +502,11 @@ fn js_engine_chat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let prompt_tokens = build_chat_prompt_tokens(
         engine.lock().unwrap().model(),
         &messages,
-        tools.as_deref(),
-        tool_choice.as_ref(),
-        parallel_tool_calls,
-        reasoning_effort.as_ref(),
-        response_format.as_ref(),
+        opts.tools.as_deref(),
+        opts.tool_choice.as_ref(),
+        opts.parallel_tool_calls,
+        opts.reasoning_effort.as_ref(),
+        opts.response_format.as_ref(),
     )
     .map_err(|e| {
         ctx.throw_internal_error(&format!("build prompt tokens failed: {e}"));
@@ -575,19 +515,20 @@ fn js_engine_chat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     // Build TaskConfig
     let mut task_config = TaskConfig::new()
-        .stop_words(stop)
+        .stop_words(opts.stop.unwrap_or_default())
         .max_tokens(max_tokens)
-        .temperature(temperature)
-        .top_p(top_p)
-        .output_mode(if stream {
+        .temperature(opts.temperature.unwrap_or(0.75) as f32)
+        .top_p(opts.top_p.unwrap_or(1.0) as f32)
+        .output_mode(if opts.stream {
             OutputMode::Continuous
         } else {
             OutputMode::OneShot
         });
 
     // tools → grammar
-    if let Some(tools) = tools.as_ref().filter(|t| !t.is_empty()) {
-        let tc = tool_choice
+    if let Some(tools) = opts.tools.as_ref().filter(|t| !t.is_empty()) {
+        let tc = opts
+            .tool_choice
             .as_ref()
             .map(to_lark_tool_choice)
             .unwrap_or(LarkToolChoice::Auto);

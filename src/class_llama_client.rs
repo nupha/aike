@@ -13,7 +13,7 @@ use liter_llm::{
     },
 };
 use zuqe::{
-    CallContext, ClassCtorDef, ClassDef, ClassID, FieldDef, JSResult, JSValue, Runtime,
+    CallContext, ClassCtorDef, ClassDef, ClassID, FieldDef, JSResult, JSValue, Object, Runtime,
     ScopedContext,
     builtins::{iterator::AsyncIterableIterator, promise::Promise},
 };
@@ -262,6 +262,121 @@ pub(crate) fn parse_reasoning_effort(
     }
 }
 
+/// Parsed common chat options shared between Engine.chat() and Client.chat().
+pub(crate) struct ChatOptions {
+    pub stream: bool,
+    pub temperature: Option<f64>,
+    pub max_tokens: Option<i64>,
+    pub top_p: Option<f64>,
+    pub stop: Option<Vec<String>>,
+    pub tools: Option<Vec<ChatCompletionTool>>,
+    pub tool_choice: Option<ToolChoice>,
+    pub parallel_tool_calls: Option<bool>,
+    pub response_format: Option<ResponseFormat>,
+    pub reasoning_effort: Option<ReasoningEffort>,
+}
+
+/// Parse common chat options from a JS object.
+/// Extracts the subset of fields shared by Engine.chat() and Client.chat().
+pub(crate) fn parse_chat_options(
+    ctx: &mut ScopedContext,
+    opts: &Object,
+) -> Result<ChatOptions, i32> {
+    let mut stream = false;
+    let mut temperature: Option<f64> = None;
+    let mut max_tokens: Option<i64> = None;
+    let mut top_p: Option<f64> = None;
+    let mut stop: Option<Vec<String>> = None;
+    let mut tools: Option<Vec<ChatCompletionTool>> = None;
+    let mut tool_choice: Option<ToolChoice> = None;
+    let mut parallel_tool_calls: Option<bool> = None;
+    let mut response_format: Option<ResponseFormat> = None;
+    let mut reasoning_effort: Option<ReasoningEffort> = None;
+
+    // stream
+    let v = opts.get_property_str(ctx, "stream")?;
+    if !v.is_undefined() {
+        stream = v.to_bool()?;
+    }
+
+    // temperature
+    let v = opts.get_property_str(ctx, "temperature")?;
+    if !v.is_undefined() {
+        temperature = Some(v.to_number(ctx)?.to_f64());
+    }
+
+    // maxTokens
+    let v = opts.get_property_str(ctx, "maxTokens")?;
+    if !v.is_undefined() {
+        max_tokens = Some(v.to_number(ctx)?.to_i32() as i64);
+    }
+
+    // topP
+    let v = opts.get_property_str(ctx, "topP")?;
+    if !v.is_undefined() {
+        top_p = Some(v.to_number(ctx)?.to_f64());
+    }
+
+    // stop
+    let v = opts.get_property_str(ctx, "stop")?;
+    if !v.is_undefined() {
+        if let Some(s) = v.as_string() {
+            stop = Some(vec![s.content().encode_utf8(false).to_string()]);
+        } else if let Some(arr) = v.as_object_Array() {
+            let mut words = Vec::with_capacity(arr.payload().len());
+            for item in arr.payload().values() {
+                if let Some(s) = item.as_string() {
+                    words.push(s.content().encode_utf8(false).to_string());
+                }
+            }
+            stop = Some(words);
+        }
+    }
+
+    // tools
+    let v = opts.get_property_str(ctx, "tools")?;
+    if !v.is_undefined() {
+        tools = Some(parse_tools(ctx, &v)?);
+    }
+
+    // toolChoice
+    let v = opts.get_property_str(ctx, "toolChoice")?;
+    if !v.is_undefined() {
+        tool_choice = Some(parse_tool_choice(ctx, &v)?);
+    }
+
+    // parallelToolCalls
+    let v = opts.get_property_str(ctx, "parallelToolCalls")?;
+    if !v.is_undefined() {
+        parallel_tool_calls = Some(v.to_bool()?);
+    }
+
+    // responseFormat
+    let v = opts.get_property_str(ctx, "responseFormat")?;
+    if !v.is_undefined() {
+        response_format = Some(parse_response_format(ctx, &v)?);
+    }
+
+    // reasoningEffort
+    let v = opts.get_property_str(ctx, "reasoningEffort")?;
+    if !v.is_undefined() {
+        reasoning_effort = Some(parse_reasoning_effort(ctx, &v)?);
+    }
+
+    Ok(ChatOptions {
+        stream,
+        temperature,
+        max_tokens,
+        top_p,
+        stop,
+        tools,
+        tool_choice,
+        parallel_tool_calls,
+        response_format,
+        reasoning_effort,
+    })
+}
+
 enum ChatReply {
     Chunk(ChatCompletionChunk),
     Done,
@@ -286,72 +401,23 @@ fn js_client_chat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let messages_val = opts.get_property_str(ctx, "messages")?;
     let messages = parse_messages(ctx, &messages_val)?;
 
-    // Optional params with camelCase JS naming
+    // Parse common chat options
+    let common = parse_chat_options(ctx, &opts)?;
+
+    // Client-specific options
     let mut model = String::from("default");
-    let mut stream = false;
-    let mut temperature: Option<f64> = None;
-    let mut max_tokens: Option<u64> = None;
-    let mut top_p: Option<f64> = None;
-    let mut stop: Option<StopSequence> = None;
     let mut n: Option<u32> = None;
     let mut presence_penalty: Option<f64> = None;
     let mut frequency_penalty: Option<f64> = None;
     let mut logit_bias: Option<std::collections::BTreeMap<String, f64>> = None;
     let mut user: Option<String> = None;
-    let mut tools: Option<Vec<ChatCompletionTool>> = None;
-    let mut tool_choice: Option<ToolChoice> = None;
-    let mut parallel_tool_calls: Option<bool> = None;
-    let mut response_format: Option<ResponseFormat> = None;
     let mut stream_options: Option<StreamOptions> = None;
     let mut seed: Option<i64> = None;
-    let mut reasoning_effort: Option<ReasoningEffort> = None;
 
     // model
     let v = opts.get_property_str(ctx, "model")?;
     if let Some(s) = v.as_string() {
         model = s.content().encode_utf8(false).to_string();
-    }
-
-    // stream
-    let v = opts.get_property_str(ctx, "stream")?;
-    if !v.is_undefined() {
-        stream = v.to_bool()?;
-    }
-
-    // temperature
-    let v = opts.get_property_str(ctx, "temperature")?;
-    if !v.is_undefined() {
-        temperature = Some(v.to_number(ctx)?.to_f64());
-    }
-
-    // maxTokens
-    let v = opts.get_property_str(ctx, "maxTokens")?;
-    if !v.is_undefined() {
-        max_tokens = Some(v.to_number(ctx)?.to_f64() as u64);
-    }
-
-    // topP
-    let v = opts.get_property_str(ctx, "topP")?;
-    if !v.is_undefined() {
-        top_p = Some(v.to_number(ctx)?.to_f64());
-    }
-
-    // stop
-    let v = opts.get_property_str(ctx, "stop")?;
-    if !v.is_undefined() {
-        if let Some(s) = v.as_string() {
-            stop = Some(StopSequence::Single(
-                s.content().encode_utf8(false).to_string(),
-            ));
-        } else if let Some(arr) = v.as_object_Array() {
-            let mut words = Vec::with_capacity(arr.payload().len());
-            for item in arr.payload().values() {
-                if let Some(s) = item.as_string() {
-                    words.push(s.content().encode_utf8(false).to_string());
-                }
-            }
-            stop = Some(StopSequence::Multiple(words));
-        }
     }
 
     // n
@@ -391,30 +457,6 @@ fn js_client_chat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         user = Some(s.content().encode_utf8(false).to_string());
     }
 
-    // tools
-    let v = opts.get_property_str(ctx, "tools")?;
-    if !v.is_undefined() {
-        tools = Some(parse_tools(ctx, &v)?);
-    }
-
-    // toolChoice
-    let v = opts.get_property_str(ctx, "toolChoice")?;
-    if !v.is_undefined() {
-        tool_choice = Some(parse_tool_choice(ctx, &v)?);
-    }
-
-    // parallelToolCalls
-    let v = opts.get_property_str(ctx, "parallelToolCalls")?;
-    if !v.is_undefined() {
-        parallel_tool_calls = Some(v.to_bool()?);
-    }
-
-    // responseFormat
-    let v = opts.get_property_str(ctx, "responseFormat")?;
-    if !v.is_undefined() {
-        response_format = Some(parse_response_format(ctx, &v)?);
-    }
-
     // streamOptions
     let v = opts.get_property_str(ctx, "streamOptions")?;
     if !v.is_undefined() {
@@ -434,11 +476,22 @@ fn js_client_chat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         seed = Some(v.to_number(ctx)?.to_f64() as i64);
     }
 
-    // reasoningEffort
-    let v = opts.get_property_str(ctx, "reasoningEffort")?;
-    if !v.is_undefined() {
-        reasoning_effort = Some(parse_reasoning_effort(ctx, &v)?);
-    }
+    // Map common options to client types
+    let temperature = common.temperature;
+    let max_tokens = common.max_tokens.map(|v| v as u64);
+    let top_p = common.top_p;
+    let stop = common.stop.map(|words| {
+        if words.len() == 1 {
+            StopSequence::Single(words.into_iter().next().unwrap())
+        } else {
+            StopSequence::Multiple(words)
+        }
+    });
+    let tools = common.tools;
+    let tool_choice = common.tool_choice;
+    let parallel_tool_calls = common.parallel_tool_calls;
+    let response_format = common.response_format;
+    let reasoning_effort = common.reasoning_effort;
 
     let req = ChatCompletionRequest {
         model,
@@ -462,7 +515,7 @@ fn js_client_chat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         ..Default::default()
     };
 
-    if stream {
+    if common.stream {
         // Streaming: AsyncIterableIterator
         let (tx, rx) = crossbeam::channel::bounded::<ChatReply>(1);
 
