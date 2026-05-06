@@ -323,6 +323,11 @@ pub(crate) fn build_chat_prompt_tokens(
 /// The grammar constrains the model output to valid JSON matching the tool schemas.
 /// Each tool's parameters are embedded as `%json {schema}` directives.
 /// The grammar allows free text interleaved with tool calls.
+///
+/// The generated JSON follows the standard Qwen/Hermes tool call JSON format:
+///   {"name": "function_name", "arguments": {"city": "Shanghai"}}
+/// where `arguments` is a JSON object constrained by the params schema.
+/// The parser will later serialize `arguments` to a JSON string for the OpenAI format.
 pub(crate) fn compile_tools_lark_grammar(
     tools: &[ChatCompletionTool],
     tool_choice: LarkToolChoice,

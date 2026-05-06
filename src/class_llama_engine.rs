@@ -2,8 +2,8 @@ use std::{cell::Cell, ffi::c_void, sync::Arc};
 
 use linkme::distributed_slice;
 use liter_llm::{
-    ChatCompletionChunk, ChatCompletionResponse, Choice, FinishReason, ReasoningEffort,
-    StreamChoice, StreamDelta,
+    ChatCompletionChunk, ChatCompletionResponse, Choice, FinishReason, FunctionCall,
+    ReasoningEffort, StreamChoice, StreamDelta, ToolCall, ToolType,
     types::common::{AssistantMessage, ChatCompletionTool, ResponseFormat, ToolChoice, Usage},
 };
 use llama_cpp_ffi::LarkToolChoice;
@@ -191,7 +191,7 @@ fn js_engine_generate(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     }
 }
 
-/// Collect all EngineReply messages for non-streaming chat, building a ChatCompletionResponse.
+/// Collect all EngineReply messages for non-streaming chat, building a ChatCompletionResponse json.
 fn collect_chat_response(
     rx: crossbeam::channel::Receiver<EngineReply>,
     respond_id: &str,
@@ -200,6 +200,7 @@ fn collect_chat_response(
     n_prompt_tokens: usize,
 ) -> Result<serde_json::Value, String> {
     let mut full_text = String::new();
+
     loop {
         match rx.recv() {
             Ok(EngineReply::Text(t)) => full_text.push_str(&t),
@@ -210,6 +211,10 @@ fn collect_chat_response(
                         FinishReason::Stop
                     }
                 };
+
+                // Detect tool calls in the generated text (e.g. <tool_call>...</tool_call>)
+                let tool_calls = parse_tool_calls_from_text(&full_text);
+
                 let resp = ChatCompletionResponse {
                     id: respond_id.to_string(),
                     object: "chat.completion".to_string(),
@@ -219,6 +224,7 @@ fn collect_chat_response(
                         index: 0,
                         message: AssistantMessage {
                             content: Some(full_text),
+                            tool_calls,
                             ..Default::default()
                         },
                         finish_reason: Some(finish_reason),
@@ -234,6 +240,7 @@ fn collect_chat_response(
                     },
                     ..Default::default()
                 };
+
                 return serde_json::to_value(resp).map_err(|e| e.to_string());
             }
             Ok(EngineReply::Cancelled) => return Err("cancelled".to_string()),
@@ -242,6 +249,48 @@ fn collect_chat_response(
             Err(_) => return Err("response channel closed unexpectedly".to_string()),
         }
     }
+}
+
+/// Parse tool calls from generated text that contains `<tool_call>...</tool_call>` tags.
+/// Returns `None` if no tool calls are found.
+///
+/// The model outputs `arguments` as a JSON object (Qwen/Hermes format):
+///   {"name": "get_weather", "arguments": {"city": "Shanghai"}}
+/// We serialize the `arguments` object to a JSON string to match the OpenAI
+/// `FunctionCall` format where `arguments` is a string.
+fn parse_tool_calls_from_text(text: &str) -> Option<Vec<ToolCall>> {
+    let mut calls = Vec::<ToolCall>::new();
+    let mut remaining = text;
+
+    while let Some(start) = remaining.find("<tool_call>") {
+        let content_start = start + "<tool_call>".len();
+        let end = remaining[content_start..].find("</tool_call>")?;
+        let json_str = &remaining[content_start..content_start + end];
+
+        // First parse as generic Value to handle arguments as JSON object
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(json_str) {
+            let name = value["name"].as_str().map(|s| s.to_string());
+            let args_value = value["arguments"].clone();
+
+            if let Some(name) = name {
+                // Stringify the arguments object to a JSON string
+                let Ok(arguments) = serde_json::to_string(&args_value) else {
+                    eprint!("[warn] bad arguments in tool_call: {}", args_value);
+                    return None;
+                };
+
+                calls.push(ToolCall {
+                    id: format!("call_{}", uuid::Uuid::new_v4().simple()),
+                    call_type: ToolType::Function,
+                    function: FunctionCall { name, arguments },
+                });
+            }
+        }
+
+        remaining = &remaining[content_start + end + "</tool_call>".len()..];
+    }
+
+    if !calls.is_empty() { Some(calls) } else { None }
 }
 
 enum ChatStreamItem {
@@ -535,6 +584,9 @@ fn js_engine_chat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     }
 
     let n_prompt_tokens = prompt_tokens.len();
+    let respond_id = format!("chatcmpl-{}", uuid::Uuid::new_v4().simple());
+    let model_name = engine.model_name().to_string();
+    let mode = cc.magic();
 
     let rx = engine
         .push_task_with_params(prompt_tokens, task_config, id_slot, cache_prompt)
@@ -543,10 +595,6 @@ fn js_engine_chat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             -1
         })?;
 
-    let respond_id = format!("chatcmpl-{}", uuid::Uuid::new_v4().simple());
-    let model_name = engine.model_name().to_string();
-
-    let mode = cc.magic();
     if mode == MAGIC_CHAT {
         // Non-streaming: Promise
         let result_slot = PromiseResultSlot::<Result<serde_json::Value, String>>::new();

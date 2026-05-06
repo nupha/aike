@@ -20,8 +20,8 @@ pub type Token = i32;
 
 #[derive(Debug, Clone)]
 pub struct GrammarConfig {
-    pub lark_grammar: String,
-    pub tool_choice: LarkToolChoice,
+    pub(crate) lark_grammar: String,
+    pub(crate) tool_choice: LarkToolChoice,
 }
 
 static NEXT_TASK_ID: AtomicUsize = AtomicUsize::new(1);

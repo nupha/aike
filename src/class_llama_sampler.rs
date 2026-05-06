@@ -370,7 +370,35 @@ fn add_temperature(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     });
     spec.rev = worker::next_sampler_rev(sampler_id);
 
-    Ok(cc.this())
+    Ok(this)
+}
+
+fn add_grammar(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let this = cc.this();
+    let sampler_id = get_sampler_id(ctx, &this)?;
+
+    let g = cc.arg(0);
+    if g.is_undefined_or_null() {
+        ctx.throw_type_error("grammar should be string");
+        return Err(-1);
+    }
+    let s = g.to_string(ctx)?;
+    if s.is_empty() {
+        ctx.throw_type_error("empty grammar");
+        return Err(-1);
+    }
+
+    let grammer = s.content().encode_utf8(false).to_string();
+    todo!();
+    // if let Err(e) = sc.set_lark_grammar(&grammar) {
+    //     log::warn!("failed to set grammar: {}", e);
+    // } else {
+    //     let mut ctrl = GrammarController::new();
+    //     ctrl.set_tool_choice(g.tool_choice);
+    //     sc.set_controller(ctrl);
+    // }
+
+    Ok(this)
 }
 
 #[cfg(debug_assertions)]
