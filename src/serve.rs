@@ -15,9 +15,8 @@ use axum::{
 use crossbeam::channel::Receiver;
 use futures_util::StreamExt;
 use liter_llm::{
-    ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, Choice, FinishReason,
-    StreamChoice, StreamDelta,
-    types::common::{AssistantMessage, StopSequence, Usage},
+    ChatCompletionChunk, ChatCompletionRequest, FinishReason, StreamChoice, StreamDelta,
+    types::common::{StopSequence, Usage},
 };
 use llama_cpp_ffi::{LarkToolChoice, LlamaModel};
 use serde::Serialize;
@@ -27,6 +26,7 @@ use tower_http::cors::CorsLayer;
 use uuid::Uuid;
 
 use crate::{
+    class_llama_engine::{ERR_CANCELLED, ERR_ENGINE_SHUTDOWN, collect_chat_response},
     engine::{Engine, EngineReply, GrammarConfig, OutputMode, StopReason, TaskConfig, Token},
     helpers::{
         build_chat_prompt_tokens, compile_tools_lark_grammar, now_unix_s, to_lark_tool_choice,
@@ -304,16 +304,29 @@ async fn handle_chat_completions(
         // Unary: collect all EngineReply, build final response
         let join = tokio::task::spawn_blocking({
             let model_id = state.engine.lock().unwrap().model_name().to_string();
+
             move || {
-                oneshot_reply(
+                collect_chat_response(
                     engine_rx,
-                    &model_id,
                     &respond_id,
+                    &model_id,
                     include_usage,
                     n_prompt_tokens,
                 )
+                .map_err(|e| match e.as_str() {
+                    ERR_CANCELLED => (StatusCode::CONFLICT, oai_error(ERR_CANCELLED, "cancelled")),
+                    ERR_ENGINE_SHUTDOWN => (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        oai_error(ERR_ENGINE_SHUTDOWN, "server_error"),
+                    ),
+                    _ => (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        oai_error(e, "server_error"),
+                    ),
+                })
             }
         });
+
         match join.await {
             Ok(Ok(res)) => Json::<serde_json::Value>(res).into_response(),
             Ok(Err((code, err_info))) => (code, Json(err_info)).into_response(),
@@ -342,79 +355,6 @@ fn build_chat_prompt_tokens_from_request(
         req.reasoning_effort.as_ref(),
         req.response_format.as_ref(),
     )
-}
-
-/// Collect all EngineReply messages for a unary (non-streaming) response.
-fn oneshot_reply(
-    rx: Receiver<EngineReply>,
-    model_id: &str,
-    respond_id: &str,
-    include_usage: bool,
-    n_prompt_tokens: usize,
-) -> Result<serde_json::Value, (StatusCode, ErrorResponse)> {
-    let mut full_text = String::new();
-
-    loop {
-        match rx.recv_timeout(Duration::from_secs(300)) {
-            Ok(EngineReply::Text(t)) => {
-                full_text.push_str(&t);
-            }
-            Ok(EngineReply::Stop(reason, n_completion_tokens)) => {
-                let finish_reason = match reason {
-                    StopReason::MaxTokens => FinishReason::Length,
-                    StopReason::Eog | StopReason::Word(_) | StopReason::PrefillOnly => {
-                        FinishReason::Stop
-                    }
-                };
-                return Ok(serde_json::to_value(ChatCompletionResponse {
-                    id: respond_id.to_string(),
-                    object: "chat.completion".to_string(),
-                    created: now_unix_s() as u64,
-                    model: model_id.to_string(),
-                    choices: vec![Choice {
-                        index: 0,
-                        message: AssistantMessage {
-                            content: Some(full_text),
-                            ..Default::default()
-                        },
-                        finish_reason: Some(finish_reason),
-                    }],
-                    usage: if include_usage {
-                        Some(Usage {
-                            prompt_tokens: n_prompt_tokens as u64,
-                            completion_tokens: n_completion_tokens as u64,
-                            total_tokens: (n_prompt_tokens + n_completion_tokens) as u64,
-                        })
-                    } else {
-                        None
-                    },
-                    ..Default::default()
-                })
-                .unwrap_or(serde_json::Value::Null));
-            }
-            Ok(EngineReply::Cancelled) => {
-                return Err((StatusCode::CONFLICT, oai_error("cancelled", "cancelled")));
-            }
-            Ok(EngineReply::Error(e)) => {
-                return Err((
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    oai_error(e, "server_error"),
-                ));
-            }
-            Ok(EngineReply::Shutdown) => {
-                return Err((
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    oai_error("engine shutdown", "server_error"),
-                ));
-            }
-            Err(_) => {
-                return Err((
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    oai_error("response channel timed out", "server_error"),
-                ));
-            }
-        }
-    }
 }
 
 /// Bridge crossbeam Receiver to tokio mpsc for SSE streaming.
@@ -508,7 +448,8 @@ fn stream_reply_to_sse(
             }
             Ok(EngineReply::Cancelled) => {
                 let _ = tx.send(
-                    serde_json::to_string(&oai_error("cancelled", "cancelled")).unwrap_or_default(),
+                    serde_json::to_string(&oai_error(ERR_CANCELLED, "cancelled"))
+                        .unwrap_or_default(),
                 );
                 let _ = tx.send("[DONE]".to_string());
                 break;
@@ -521,7 +462,7 @@ fn stream_reply_to_sse(
             }
             Ok(EngineReply::Shutdown) => {
                 let _ = tx.send(
-                    serde_json::to_string(&oai_error("engine shutdown", "server_error"))
+                    serde_json::to_string(&oai_error(ERR_ENGINE_SHUTDOWN, "server_error"))
                         .unwrap_or_default(),
                 );
                 let _ = tx.send("[DONE]".to_string());

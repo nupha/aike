@@ -32,6 +32,10 @@ use crate::{
     },
 };
 
+pub(crate) const ERR_CANCELLED: &str = "cancelled";
+pub(crate) const ERR_ENGINE_SHUTDOWN: &str = "engine shutdown";
+pub(crate) const ERR_CHANNEL_CLOSED: &str = "response channel closed unexpectedly";
+
 pub(super) struct EngineParams {
     pub idle_sleep_ms: u64,
     pub slot_match_threshold: f32,
@@ -162,7 +166,7 @@ fn js_engine_generate(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                         Err(-1)
                     }
                     EngineReply::Shutdown => {
-                        cx.throw_internal_error("engine shutdown");
+                        cx.throw_internal_error(ERR_ENGINE_SHUTDOWN);
                         Err(-1)
                     }
                     EngineReply::Stop(_, _) => {
@@ -193,7 +197,7 @@ fn js_engine_generate(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                         Err(-1)
                     }
                     EngineReply::Shutdown => {
-                        cx.throw_internal_error("engine shutdown");
+                        cx.throw_internal_error(ERR_ENGINE_SHUTDOWN);
                         Err(-1)
                     }
                 }
@@ -204,7 +208,7 @@ fn js_engine_generate(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 }
 
 /// Collect all EngineReply messages for non-streaming chat, building a ChatCompletionResponse json.
-fn collect_chat_response(
+pub(super) fn collect_chat_response(
     rx: crossbeam::channel::Receiver<EngineReply>,
     respond_id: &str,
     model_name: &str,
@@ -255,10 +259,10 @@ fn collect_chat_response(
 
                 return serde_json::to_value(resp).map_err(|e| e.to_string());
             }
-            Ok(EngineReply::Cancelled) => return Err("cancelled".to_string()),
+            Ok(EngineReply::Cancelled) => return Err(ERR_CANCELLED.to_string()),
             Ok(EngineReply::Error(e)) => return Err(e),
-            Ok(EngineReply::Shutdown) => return Err("engine shutdown".to_string()),
-            Err(_) => return Err("response channel closed unexpectedly".to_string()),
+            Ok(EngineReply::Shutdown) => return Err(ERR_ENGINE_SHUTDOWN.to_string()),
+            Err(_) => return Err(ERR_CHANNEL_CLOSED.to_string()),
         }
     }
 }
@@ -404,7 +408,7 @@ fn bridge_chat_stream(
                     break;
                 }
                 Ok(EngineReply::Cancelled) => {
-                    let _ = tx.send(ChatStreamItem::Error("cancelled".to_string()));
+                    let _ = tx.send(ChatStreamItem::Error(ERR_CANCELLED.to_string()));
                     break;
                 }
                 Ok(EngineReply::Error(e)) => {
@@ -412,7 +416,7 @@ fn bridge_chat_stream(
                     break;
                 }
                 Ok(EngineReply::Shutdown) => {
-                    let _ = tx.send(ChatStreamItem::Error("engine shutdown".to_string()));
+                    let _ = tx.send(ChatStreamItem::Error(ERR_ENGINE_SHUTDOWN.to_string()));
                     break;
                 }
                 Err(_) => {
