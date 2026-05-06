@@ -131,18 +131,18 @@ pub(crate) fn parse_messages(ctx: &mut ScopedContext, val: &JSValue) -> Result<V
 
         let msg = match role.as_str() {
             "system" => Message::System(SystemMessage {
-                content: content.into(),
+                content,
                 name: None,
             }),
             "user" => Message::User(UserMessage {
-                content: UserContent::Text(content.into()),
+                content: UserContent::Text(content),
                 name: None,
             }),
             "assistant" => Message::Assistant(AssistantMessage {
                 content: if content.is_empty() {
                     None
                 } else {
-                    Some(content.into())
+                    Some(content)
                 },
                 name: None,
                 tool_calls: None,
@@ -156,7 +156,7 @@ pub(crate) fn parse_messages(ctx: &mut ScopedContext, val: &JSValue) -> Result<V
                     .map(|s| s.content().encode_utf8(false).to_string())
                     .unwrap_or_default();
                 Message::Tool(ToolMessage {
-                    content: content.into(),
+                    content,
                     tool_call_id: tc_id,
                     name: None,
                 })
@@ -168,6 +168,7 @@ pub(crate) fn parse_messages(ctx: &mut ScopedContext, val: &JSValue) -> Result<V
         };
         messages.push(msg);
     }
+
     Ok(messages)
 }
 
