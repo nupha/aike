@@ -22,8 +22,10 @@ use crate::{
         parse_tool_choice, parse_tools,
     },
     class_llama_context::parse_tokens,
-    engine::{Engine, EngineReply, GrammarConfig, OutputMode, StopReason, TaskConfig, now_unix_s},
-    helpers::{build_chat_prompt_tokens, compile_tools_lark_grammar, to_lark_tool_choice},
+    engine::{Engine, EngineReply, GrammarConfig, OutputMode, StopReason, TaskConfig},
+    helpers::{
+        build_chat_prompt_tokens, compile_tools_lark_grammar, now_unix_s, to_lark_tool_choice,
+    },
 };
 
 pub(super) struct EngineParams {

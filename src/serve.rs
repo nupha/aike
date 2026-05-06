@@ -12,7 +12,7 @@ use crossbeam::channel::Receiver;
 use futures_util::StreamExt;
 use liter_llm::{
     ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, Choice, FinishReason,
-    ReasoningEffort, StreamChoice, StreamDelta,
+    StreamChoice, StreamDelta,
     types::common::{AssistantMessage, StopSequence, Usage},
 };
 use llama_cpp_ffi::{LarkToolChoice, LlamaModel};
@@ -23,10 +23,10 @@ use tower_http::cors::CorsLayer;
 use uuid::Uuid;
 
 use crate::{
-    engine::{
-        Engine, EngineReply, GrammarConfig, OutputMode, StopReason, TaskConfig, Token, now_unix_s,
+    engine::{Engine, EngineReply, GrammarConfig, OutputMode, StopReason, TaskConfig, Token},
+    helpers::{
+        build_chat_prompt_tokens, compile_tools_lark_grammar, now_unix_s, to_lark_tool_choice,
     },
-    helpers::{build_chat_prompt_tokens, compile_tools_lark_grammar, to_lark_tool_choice},
 };
 
 #[derive(Debug, Serialize)]

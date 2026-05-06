@@ -10,213 +10,18 @@ use std::{
 };
 
 use crossbeam::channel::{Receiver, SendError, Sender};
-use llama_cpp_ffi::{
-    GrammarController, LarkToolChoice, LlamaContext, LlamaModel, SamplerChain, SamplerKind,
+use llama_cpp_ffi::{GrammarController, LlamaContext, LlamaModel, SamplerChain, SamplerKind};
+
+use crate::helpers::now_unix_s;
+
+use super::{
+    slot::{Slot, SlotState},
+    task::{
+        EngineCtrlMsg, EngineReply, EngineTask, GrammarConfig, OutputMode, SchedResult, StopReason,
+        TaskConfig, TaskState, Token,
+    },
+    worker::{EnginePtr, hit_stop_words, remove_cancelled_inputs, worker_loop},
 };
-
-pub type Token = i32;
-
-/// Grammar constraint configuration for tool calling.
-
-#[derive(Debug, Clone)]
-pub struct GrammarConfig {
-    pub(crate) lark_grammar: String,
-    pub(crate) tool_choice: LarkToolChoice,
-}
-
-static NEXT_TASK_ID: AtomicUsize = AtomicUsize::new(1);
-
-#[derive(Debug, Clone)]
-pub struct TaskConfig {
-    task_id: usize,
-    grammar: Option<GrammarConfig>,
-    stop_words: Vec<String>,
-    max_tokens: usize,
-    temperature: f32,
-    top_p: f32,
-    logits_for_all_tokens: bool,
-    output_mode: OutputMode,
-}
-
-impl TaskConfig {
-    pub fn new() -> Self {
-        Self {
-            task_id: NEXT_TASK_ID.fetch_add(1, Ordering::Relaxed),
-            stop_words: Vec::new(),
-            max_tokens: 0,
-            temperature: 1.0,
-            top_p: 1.0,
-            logits_for_all_tokens: false,
-            grammar: None,
-            output_mode: OutputMode::OneShot,
-        }
-    }
-
-    pub fn stop_words(mut self, v: Vec<String>) -> Self {
-        self.stop_words = v;
-        self
-    }
-
-    pub fn max_tokens(mut self, v: usize) -> Self {
-        self.max_tokens = v;
-        self
-    }
-
-    pub fn temperature(mut self, v: f32) -> Self {
-        self.temperature = v;
-        self
-    }
-
-    pub fn top_p(mut self, v: f32) -> Self {
-        self.top_p = v;
-        self
-    }
-
-    pub fn logits_for_all_tokens(mut self, v: bool) -> Self {
-        self.logits_for_all_tokens = v;
-        self
-    }
-
-    pub fn grammar(mut self, g: GrammarConfig) -> Self {
-        self.grammar = Some(g);
-        self
-    }
-
-    pub fn output_mode(mut self, v: OutputMode) -> Self {
-        self.output_mode = v;
-        self
-    }
-}
-
-pub struct EngineTask {
-    pub config: TaskConfig,
-    pub prompt_tokens: Vec<Token>,
-    pub seq_hint: Option<usize>,
-    pub use_cache: bool,
-    pub output_tx: Sender<EngineReply>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OutputMode {
-    Continuous,
-    OneShot,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EngineCtrlMsg {
-    Shutdown,
-    CancelTask(usize),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum StopReason {
-    Eog,
-    MaxTokens,
-    PrefillOnly,
-    Word(String),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum EngineReply {
-    Text(String),
-    Stop(StopReason, usize), // (reason, n_completion_tokens)
-    Cancelled,
-    Error(String),
-    Shutdown,
-}
-
-#[derive(Debug)]
-struct TaskState {
-    config: TaskConfig,
-    n_completion_tokens: usize,
-    generated_text: String,
-    pending_bytes: Vec<u8>,
-    output_tx: Sender<EngineReply>,
-}
-
-impl TaskState {
-    fn append_utf8_piece(&mut self, piece: &[u8]) {
-        if piece.is_empty() {
-            return;
-        }
-
-        self.pending_bytes.extend_from_slice(piece);
-
-        loop {
-            match std::str::from_utf8(&self.pending_bytes) {
-                Ok(s) => {
-                    self.generated_text.push_str(s);
-                    self.pending_bytes.clear();
-                    break;
-                }
-                Err(e) => {
-                    let valid = e.valid_up_to();
-                    if valid == 0 {
-                        break;
-                    }
-                    let s = unsafe { std::str::from_utf8_unchecked(&self.pending_bytes[..valid]) };
-                    self.generated_text.push_str(s);
-                    self.pending_bytes.drain(0..valid);
-                    if self.pending_bytes.is_empty() {
-                        break;
-                    }
-                }
-            }
-        }
-    }
-
-    fn append_token(&mut self, engine: &Engine, token: Token) {
-        self.n_completion_tokens += 1;
-        self.append_utf8_piece(&engine.token_to_piece(token));
-    }
-}
-
-#[derive(Debug)]
-enum SlotState {
-    Idle,
-    Decoding {
-        prompt_tokens: VecDeque<Token>,
-        logits_for_all_tokens: bool,
-        num_written: usize,
-        task_state: TaskState,
-    },
-    Sampling {
-        logits: i32,
-        task_state: TaskState,
-    },
-    Done {
-        task_state: TaskState,
-        reply: EngineReply,
-    },
-    Busy,
-}
-
-struct Slot {
-    seq_id: usize,
-    n_past: i32,
-    mtime: i64,
-    state: SlotState,
-}
-
-impl Slot {
-    fn new(seq_id: usize) -> Self {
-        Self {
-            seq_id,
-            n_past: 0,
-            mtime: 0,
-            state: SlotState::Idle,
-        }
-    }
-    fn output_tx(&self) -> Option<&Sender<EngineReply>> {
-        match &self.state {
-            SlotState::Decoding { task_state, .. } | SlotState::Sampling { task_state, .. } => {
-                Some(&task_state.output_tx)
-            }
-            SlotState::Done { task_state, .. } => Some(&task_state.output_tx),
-            SlotState::Idle | SlotState::Busy => None,
-        }
-    }
-}
 
 /// The parallel inference engine.
 ///
@@ -225,27 +30,27 @@ impl Slot {
 /// `Arc<Engine>` across threads, while only the worker thread mutates
 /// the LlamaContext and slot state.
 pub struct Engine {
-    input_tx: Sender<Box<EngineTask>>,
-    ctrl_tx: Sender<EngineCtrlMsg>,
-    num_tasks: AtomicUsize,
-    model: LlamaModel,
-    model_name: String,
-    default_max_tokens: usize,
-    ubatch_size: usize,
+    pub(crate) input_tx: Sender<Box<EngineTask>>,
+    pub(crate) ctrl_tx: Sender<EngineCtrlMsg>,
+    pub(crate) num_tasks: AtomicUsize,
+    pub(crate) model: LlamaModel,
+    pub(crate) model_name: String,
+    pub(crate) default_max_tokens: usize,
+    pub(crate) ubatch_size: usize,
 
     /// Whether the HTTP server is currently running.
-    is_serving: AtomicBool,
+    pub(crate) is_serving: AtomicBool,
     /// Shutdown sender for the active HTTP server (if any).
-    shutdown_tx: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    pub(crate) shutdown_tx: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
 
     //
     // Worker-exclusive (mutated only by the worker thread)
     //
-    llm_ctx: UnsafeCell<LlamaContext>,
-    slot_cached_tokens: UnsafeCell<Vec<Vec<Token>>>,
-    slot_samplers: UnsafeCell<Vec<Option<SamplerChain>>>,
-    pending_decode_tokens: UnsafeCell<usize>,
-    worker_join_handle: UnsafeCell<Option<JoinHandle<()>>>,
+    pub(crate) llm_ctx: UnsafeCell<LlamaContext>,
+    pub(crate) slot_cached_tokens: UnsafeCell<Vec<Vec<Token>>>,
+    pub(crate) slot_samplers: UnsafeCell<Vec<Option<SamplerChain>>>,
+    pub(crate) pending_decode_tokens: UnsafeCell<usize>,
+    pub(crate) worker_join_handle: UnsafeCell<Option<JoinHandle<()>>>,
 }
 
 impl Drop for Engine {
@@ -266,7 +71,7 @@ unsafe impl Send for Engine {}
 unsafe impl Sync for Engine {}
 
 impl Engine {
-    pub fn module_name(&self) -> &str {
+    pub fn model_name(&self) -> &str {
         &self.model_name
     }
 
@@ -275,43 +80,44 @@ impl Engine {
     }
 
     /// Private: access the UnsafeCell<LlamaContext> in worker thread only
-    fn llm_ctx(&self) -> &LlamaContext {
+    pub(crate) fn llm_ctx(&self) -> &LlamaContext {
         unsafe { &*self.llm_ctx.get() }
     }
 
     /// Private: access the UnsafeCell<LlamaContext> in worker thread only
     #[allow(clippy::mut_from_ref)]
-    fn llm_ctx_mut(&self) -> &mut LlamaContext {
+    pub(crate) fn llm_ctx_mut(&self) -> &mut LlamaContext {
         unsafe { &mut *self.llm_ctx.get() }
     }
 
-    fn cached_tokens(&self) -> &Vec<Vec<Token>> {
+    pub(crate) fn cached_tokens(&self) -> &Vec<Vec<Token>> {
         unsafe { &*self.slot_cached_tokens.get() }
     }
 
     #[allow(clippy::mut_from_ref)]
-    fn cached_tokens_mut(&self) -> &mut Vec<Vec<Token>> {
+    pub(crate) fn cached_tokens_mut(&self) -> &mut Vec<Vec<Token>> {
         unsafe { &mut *self.slot_cached_tokens.get() }
     }
 
     #[allow(clippy::mut_from_ref)]
-    fn samplers_mut(&self) -> &mut Vec<Option<SamplerChain>> {
+    pub(crate) fn samplers_mut(&self) -> &mut Vec<Option<SamplerChain>> {
         unsafe { &mut *self.slot_samplers.get() }
     }
 
-    fn pending(&self) -> usize {
+    pub(crate) fn pending(&self) -> usize {
         unsafe { *self.pending_decode_tokens.get() }
     }
 
-    fn set_pending(&self, v: usize) {
+    pub(crate) fn set_pending(&self, v: usize) {
         unsafe {
             *self.pending_decode_tokens.get() = v;
         }
     }
 
-    fn common_prefix_len(&self, seq_id: usize, prompt_tokens: &[Token]) -> usize {
-        let Some(cached) = self.cached_tokens().get(seq_id) else {
-            return 0;
+    pub(crate) fn common_prefix_len(&self, seq_id: usize, prompt_tokens: &[Token]) -> usize {
+        let cached: &Vec<Token> = match self.cached_tokens().get(seq_id) {
+            Some(c) => c,
+            None => return 0,
         };
         let max_common = cached.len().min(prompt_tokens.len());
         let mut n = 0usize;
@@ -322,7 +128,11 @@ impl Engine {
     }
 
     /// Align KV/cache state for prefix reuse. Returns reusable prefix length.
-    fn prepare_slot(&self, seq_id: usize, prompt_tokens: &[Token]) -> Result<usize, String> {
+    pub(crate) fn prepare_slot(
+        &self,
+        seq_id: usize,
+        prompt_tokens: &[Token],
+    ) -> Result<usize, String> {
         let cached = self.cached_tokens_mut();
         if seq_id >= cached.len() {
             return Err(format!("invalid seq id {}", seq_id));
@@ -347,17 +157,18 @@ impl Engine {
         Ok(n_common)
     }
 
-    fn truncate_slot_cache(&self, seq_id: usize, n_keep: usize) {
-        if let Some(c) = self.cached_tokens_mut().get_mut(seq_id) {
+    pub(crate) fn truncate_slot_cache(&self, seq_id: usize, n_keep: usize) {
+        let cached: &mut Vec<Vec<Token>> = self.cached_tokens_mut();
+        if let Some(c) = cached.get_mut(seq_id) {
             c.truncate(n_keep);
         }
     }
 
-    fn begin_decode_batch(&self) {
+    pub(crate) fn begin_decode_batch(&self) {
         self.set_pending(0);
     }
 
-    fn push_decode_token(
+    pub(crate) fn push_decode_token(
         &self,
         seq_id: usize,
         token: Token,
@@ -387,7 +198,7 @@ impl Engine {
         Ok(())
     }
 
-    fn decode_batch(&self) -> Result<(), String> {
+    pub(crate) fn decode_batch(&self) -> Result<(), String> {
         if self.pending() > 0 {
             let lcx = self.llm_ctx_mut();
             lcx.batch_mut().n_tokens = self.pending() as i32;
@@ -397,7 +208,7 @@ impl Engine {
         }
     }
 
-    fn sample(&self, seq_id: usize, logits_idx: i32) -> Result<Token, String> {
+    pub(crate) fn sample(&self, seq_id: usize, logits_idx: i32) -> Result<Token, String> {
         let samplers = self.samplers_mut();
         if seq_id >= samplers.len() {
             return Err(format!("invalid seq id {}", seq_id));
@@ -410,7 +221,7 @@ impl Engine {
         }
     }
 
-    fn accept_token(&self, seq_id: usize, token: Token) {
+    pub(crate) fn accept_token(&self, seq_id: usize, token: Token) {
         let samplers = self.samplers_mut();
         if seq_id < samplers.len()
             && let Some(sampler) = samplers[seq_id].as_mut()
@@ -420,7 +231,7 @@ impl Engine {
     }
 
     /// lazy initialize slot sampler
-    fn init_slot_sampler(
+    pub(crate) fn init_slot_sampler(
         &self,
         seq_id: usize,
         temperature: f32,
@@ -467,27 +278,32 @@ impl Engine {
         Ok(())
     }
 
-    fn token_to_piece(&self, token: Token) -> Vec<u8> {
+    pub(crate) fn token_to_piece(&self, token: Token) -> Vec<u8> {
         self.llm_ctx().model().token_to_piece(token)
     }
 
-    fn is_eog(&self, token: Token) -> bool {
+    pub(crate) fn is_eog(&self, token: Token) -> bool {
         self.llm_ctx().model().is_eog(token)
     }
 
-    fn reset_slot_runtime(&self, seq_id: usize) {
+    pub(crate) fn reset_slot_runtime(&self, seq_id: usize) {
         if seq_id < self.samplers_mut().len() {
             self.samplers_mut()[seq_id] = None;
         }
     }
 
-    fn clear_slot(&self, seq_id: usize) {
+    pub(crate) fn clear_slot(&self, seq_id: usize) {
         let cached = self.cached_tokens_mut();
         if seq_id < cached.len() {
             self.llm_ctx_mut().memory_seq_rm(seq_id as i32, 0, -1);
             cached[seq_id].clear();
             self.samplers_mut()[seq_id] = None;
         }
+    }
+
+    pub(crate) fn append_token(&self, task_state: &mut TaskState, token: Token) {
+        task_state.n_completion_tokens += 1;
+        task_state.append_utf8_piece(&self.token_to_piece(token));
     }
 
     pub fn start(
@@ -557,10 +373,6 @@ impl Engine {
         self.num_tasks.load(Ordering::Relaxed)
     }
 
-    pub fn model_name(&self) -> &str {
-        &self.model_name
-    }
-
     pub fn default_max_tokens(&self) -> usize {
         self.default_max_tokens
     }
@@ -624,7 +436,7 @@ impl Engine {
         self.ctrl_tx.send(EngineCtrlMsg::CancelTask(task_id))
     }
 
-    fn decoding_stage(&self, slots: &mut [Slot], slot_cursor: &mut usize) -> bool {
+    pub(crate) fn decoding_stage(&self, slots: &mut [Slot], slot_cursor: &mut usize) -> bool {
         let mut has_sampling = false;
         let mut cnt = 0usize;
         let mut written_updates: Vec<(usize, usize)> = Vec::new();
@@ -741,7 +553,7 @@ impl Engine {
         has_sampling
     }
 
-    fn sampling_stage(&self, slots: &mut [Slot]) -> bool {
+    pub(crate) fn sampling_stage(&self, slots: &mut [Slot]) -> bool {
         let mut did_work = false;
 
         for slot in slots.iter_mut() {
@@ -794,7 +606,7 @@ impl Engine {
                                     reply: EngineReply::Stop(StopReason::MaxTokens, n),
                                 }
                             } else {
-                                task_state.append_token(self, token);
+                                self.append_token(&mut task_state, token);
 
                                 if let Some(w) = hit_stop_words(
                                     &mut task_state.generated_text,
@@ -850,7 +662,7 @@ impl Engine {
         did_work || self.done_stage(slots) > 0
     }
 
-    fn done_stage(&self, slots: &mut [Slot]) -> usize {
+    pub(crate) fn done_stage(&self, slots: &mut [Slot]) -> usize {
         let mut completed = 0usize;
 
         for slot in slots {
@@ -889,7 +701,7 @@ impl Engine {
         completed
     }
 
-    fn tick(&self, slots: &mut [Slot], slot_cursor: &mut usize) -> bool {
+    pub(crate) fn tick(&self, slots: &mut [Slot], slot_cursor: &mut usize) -> bool {
         let has_sampling = self.decoding_stage(slots, slot_cursor);
 
         if has_sampling
@@ -903,7 +715,7 @@ impl Engine {
         }
     }
 
-    fn handle_ctrl_messages(
+    pub(crate) fn handle_ctrl_messages(
         &self,
         ctrl_rx: &Receiver<EngineCtrlMsg>,
         slots: &mut [Slot],
@@ -988,7 +800,7 @@ impl Engine {
         false
     }
 
-    fn pick_idle_slot(
+    pub(crate) fn pick_idle_slot(
         &self,
         slots: &[Slot],
         seq_hint: Option<usize>,
@@ -1042,7 +854,7 @@ impl Engine {
         Some((lru_idx, false))
     }
 
-    fn sched_task(
+    pub(crate) fn sched_task(
         &self,
         task: Box<EngineTask>,
         slots: &mut [Slot],
@@ -1108,155 +920,4 @@ impl Engine {
 
         SchedResult::Scheduled
     }
-}
-
-/// Wrapper to send Engine pointer across thread boundaries.
-#[repr(transparent)]
-struct EnginePtr(*const Engine);
-unsafe impl Send for EnginePtr {}
-
-fn worker_loop(
-    engine: EnginePtr,
-    max_parallel: usize,
-    idle_sleep: Duration,
-    slot_match_threshold: f32,
-    input_rx: Receiver<Box<EngineTask>>,
-    ctrl_rx: Receiver<EngineCtrlMsg>,
-) {
-    // Raw pointer instead of Arc<Engine> to avoid reference cycle and self-join deadlock
-    // (see comment at EnginePtr creation site for details).
-    // SAFETY: engine pointer is valid for the worker's lifetime (Engine::drop joins the worker).
-    let engine = unsafe { &*engine.0 };
-
-    let mut slots = (0..max_parallel).map(Slot::new).collect::<Vec<_>>();
-    let mut slot_cursor = 0usize;
-
-    let mut ready_inputs = VecDeque::<Box<EngineTask>>::new();
-    let mut deferred_inputs = VecDeque::<Box<EngineTask>>::new();
-
-    let mut cancelled_ids = HashSet::<usize>::new();
-
-    loop {
-        if engine.handle_ctrl_messages(
-            &ctrl_rx,
-            &mut slots,
-            &mut ready_inputs,
-            &mut deferred_inputs,
-            &mut cancelled_ids,
-        ) {
-            engine.num_tasks.store(0, Ordering::Relaxed);
-            return;
-        }
-
-        while let Ok(input) = input_rx.try_recv() {
-            if engine.handle_ctrl_messages(
-                &ctrl_rx,
-                &mut slots,
-                &mut ready_inputs,
-                &mut deferred_inputs,
-                &mut cancelled_ids,
-            ) {
-                engine.num_tasks.store(0, Ordering::Relaxed);
-                return;
-            }
-            enqueue_task(input, &mut ready_inputs, &mut deferred_inputs);
-        }
-
-        while let Some(task) = pop_next_task(&mut ready_inputs, &mut deferred_inputs) {
-            if cancelled_ids.remove(&task.config.task_id) {
-                let _ = task.output_tx.send(EngineReply::Cancelled);
-            } else {
-                match engine.sched_task(task, &mut slots, slot_match_threshold) {
-                    SchedResult::Scheduled | SchedResult::Rejected => {}
-                    SchedResult::Deferred(input) => {
-                        enqueue_task(input, &mut ready_inputs, &mut deferred_inputs);
-                        break;
-                    }
-                }
-            }
-        }
-
-        let did_work = engine.tick(&mut slots, &mut slot_cursor);
-
-        engine.num_tasks.store(
-            slots
-                .iter()
-                .filter(|s| !matches!(s.state, SlotState::Idle))
-                .count(),
-            Ordering::Relaxed,
-        );
-
-        if !did_work {
-            thread::sleep(idle_sleep);
-        }
-    }
-}
-
-fn enqueue_task(
-    task: Box<EngineTask>,
-    ready: &mut VecDeque<Box<EngineTask>>,
-    deferred: &mut VecDeque<Box<EngineTask>>,
-) {
-    if task.seq_hint.unwrap_or(0) == 0 {
-        ready.push_back(task);
-    } else {
-        deferred.push_back(task);
-    }
-}
-
-fn pop_next_task(
-    ready: &mut VecDeque<Box<EngineTask>>,
-    deferred: &mut VecDeque<Box<EngineTask>>,
-) -> Option<Box<EngineTask>> {
-    if let Some(v) = ready.pop_front() {
-        return Some(v);
-    }
-    if deferred.is_empty() {
-        return None;
-    }
-    let mut i = 0usize;
-    while i < deferred.len() {
-        if deferred[i].seq_hint.unwrap_or(0) == 0
-            && let Some(v) = deferred.remove(i)
-        {
-            ready.push_back(v);
-            continue;
-        }
-        i += 1;
-    }
-    ready.pop_front()
-}
-
-fn remove_cancelled_inputs(queue: &mut VecDeque<Box<EngineTask>>, task_id: usize) {
-    let mut kept = VecDeque::with_capacity(queue.len());
-    while let Some(input) = queue.pop_front() {
-        if input.config.task_id == task_id {
-            let _ = input.output_tx.send(EngineReply::Cancelled);
-        } else {
-            kept.push_back(input);
-        }
-    }
-    *queue = kept;
-}
-
-enum SchedResult {
-    Scheduled,
-    Deferred(Box<EngineTask>),
-    Rejected,
-}
-
-fn hit_stop_words(generated_text: &mut String, stop_words: &[String]) -> Option<String> {
-    for stop in stop_words.iter().filter(|s| !s.is_empty()) {
-        if generated_text.ends_with(stop) {
-            return Some(stop.to_string());
-        }
-    }
-    None
-}
-
-pub(crate) fn now_unix_s() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64
 }

@@ -393,3 +393,10 @@ pub(crate) fn compile_tools_lark_grammar(
         }
     }
 }
+
+pub(crate) fn now_unix_s() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
+}
