@@ -15,13 +15,55 @@ use crate::{
 };
 
 #[derive(Debug)]
-pub(crate) enum ChatElement {
+pub(crate) enum ChatPart {
     Text(String),
-    Reasoning(String),
+    Think(String),
     Call(ToolCall),
 }
 
-// TODO: combine ChatStreamItem with ChatElement
+impl ChatPart {
+    pub fn into_chunk_delta(self) -> StreamDelta {
+        match self {
+            Self::Text(t) => StreamDelta {
+                content: Some(t),
+                ..Default::default()
+            },
+            Self::Think(t) => StreamDelta {
+                content: Some(t), // should use reasoning_content
+                ..Default::default()
+            },
+            Self::Call(tool_call) => StreamDelta {
+                tool_calls: Some(vec![StreamToolCall {
+                    index: 0,
+                    id: Some(tool_call.id),
+                    call_type: Some(tool_call.call_type),
+                    function: Some(StreamFunctionCall {
+                        name: Some(tool_call.function.name),
+                        arguments: Some(tool_call.function.arguments),
+                    }),
+                }]),
+                ..Default::default()
+            },
+        }
+    }
+
+    pub fn into_chunk(self, id: String, model: String, created: u64) -> ChatCompletionChunk {
+        ChatCompletionChunk {
+            id,
+            created,
+            model,
+            object: "chat.completion.chunk".to_string(),
+            choices: vec![StreamChoice {
+                delta: self.into_chunk_delta(),
+                index: 0,
+                finish_reason: None,
+            }],
+            ..Default::default()
+        }
+    }
+}
+
+// TODO: combine ChatStreamItem with ChatPart
 pub(crate) enum ChatStreamItem {
     Chunk(ChatCompletionChunk),
     Done,
@@ -30,7 +72,7 @@ pub(crate) enum ChatStreamItem {
 
 pub struct ChatResponseParser {
     state: State,
-    out: VecDeque<ChatElement>,
+    out: VecDeque<ChatPart>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -73,63 +115,119 @@ impl ChatResponseParser {
 
         while !remaining.is_empty() {
             // Find the earliest occurrence among all special tags
-            let think_pos = remaining.find(Tag::Think.as_str());
-            let close_think_pos = remaining.find(Tag::CloseThink.as_str());
-            let tool_call_pos = remaining.find(Tag::ToolCall.as_str());
-            let close_tool_call_pos = remaining.find(Tag::CloseToolCall.as_str());
+            let mut think_pos: Option<usize> = None;
+            let mut close_think_pos: Option<usize> = None;
+            let mut tool_call_pos: Option<usize> = None;
+            let mut close_tool_call_pos: Option<usize> = None;
+
+            match self.state {
+                State::Text => {
+                    think_pos = remaining.find(Tag::Think.as_str());
+                    tool_call_pos = remaining.find(Tag::ToolCall.as_str());
+                }
+                State::Thinking => {
+                    close_think_pos = remaining.find(Tag::CloseThink.as_str());
+                }
+                State::MaybeCall(_) => {
+                    close_tool_call_pos = remaining.find(Tag::CloseToolCall.as_str());
+                }
+            }
 
             // Pick the earliest tag (smallest position)
             let mut found_tag: Option<(usize, Tag)> = None;
-            if let Some(p) = think_pos {
-                found_tag = Some((p, Tag::Think));
-            }
-            if let Some(p) = close_think_pos
-                && found_tag.is_none_or(|(e, _)| p < e)
-            {
-                found_tag = Some((p, Tag::CloseThink));
-            }
-            if let Some(p) = tool_call_pos
-                && found_tag.is_none_or(|(e, _)| p < e)
-            {
-                found_tag = Some((p, Tag::ToolCall));
-            }
-            if let Some(p) = close_tool_call_pos
-                && found_tag.is_none_or(|(e, _)| p < e)
-            {
-                found_tag = Some((p, Tag::CloseToolCall));
+
+            for (p, t) in [
+                (think_pos, Tag::Think),
+                (close_think_pos, Tag::CloseThink),
+                (tool_call_pos, Tag::ToolCall),
+                (close_tool_call_pos, Tag::CloseToolCall),
+            ] {
+                if let Some(p) = p {
+                    match found_tag {
+                        None => {
+                            found_tag = Some((p, t));
+                        }
+                        Some((p0, _)) if p0 > p => {
+                            found_tag = Some((p, t));
+                        }
+                        _ => {}
+                    }
+                }
             }
 
             match (found_tag, &mut self.state) {
-                // STATE TRANSITIONS
+                // STATE TRANSITIONS: THINKING
                 (Some((pos, Tag::Think)), State::Text) => {
                     self.state = State::Thinking;
-                    self.out
-                        .push_back(ChatElement::Text(remaining[..pos].to_string()));
+                    if pos > 0 {
+                        self.out
+                            .push_back(ChatPart::Text(remaining[..pos].to_string()));
+                    }
                     remaining = &remaining[pos + Tag::Think.as_str().len()..];
-                }
-                (Some((pos, Tag::ToolCall)), State::Text) => {
-                    self.state = State::MaybeCall(remaining[..pos].to_string());
-                    remaining = &remaining[pos + Tag::ToolCall.as_str().len()..];
                 }
                 (Some((pos, Tag::CloseThink)), State::Thinking) => {
                     self.state = State::Text;
-                    self.out
-                        .push_back(ChatElement::Reasoning(remaining[..pos].to_string()));
-                    remaining = &remaining[pos + "</think>".len()..];
+                    if pos > 0 {
+                        self.out
+                            .push_back(ChatPart::Think(remaining[..pos].to_string()));
+                    }
+                    remaining = &remaining[pos + Tag::CloseThink.as_str().len()..];
+                }
+
+                // STATE TRANSITIONS: CALL
+                (Some((pos, Tag::ToolCall)), State::Text) => {
+                    if pos > 0 {
+                        self.out
+                            .push_back(ChatPart::Text(remaining[..pos].to_string()));
+                    }
+                    remaining = &remaining[pos + Tag::ToolCall.as_str().len()..];
+                    self.state = State::MaybeCall(String::new());
                 }
                 (Some((pos, Tag::CloseToolCall)), State::MaybeCall(s)) => {
                     s.push_str(&remaining[..pos]);
-                    remaining = &remaining[pos + "</tool_call>".len()..];
+                    remaining = &remaining[pos + Tag::CloseToolCall.as_str().len()..];
 
-                    if let Ok(fc) = serde_json::from_str::<FunctionCall>(s) {
-                        self.out.push_back(ChatElement::Call(ToolCall {
+                    // Note: we use lark grammar to restrict engine generation, in this case
+                    // <tool_call> arguments could be a json schema object rather than a string.
+                    // while openai compatibile services returns <tool_call> arguments as string.
+                    // we must accept both object and string for arguments
+                    if let Ok(value) = serde_json::from_str::<serde_json::Value>(s) {
+                        let obj = match value.as_object() {
+                            Some(obj) if obj.len() == 2 => obj,
+                            _ => {
+                                // must be an object with exactly 'name' and 'arguments' fields
+                                self.out.push_back(ChatPart::Text(std::mem::take(s)));
+                                return;
+                            }
+                        };
+
+                        let name = match obj.get("name").and_then(|v| v.as_str()) {
+                            Some(n) => n.to_string(),
+                            None => {
+                                // missing 'name' field
+                                self.out.push_back(ChatPart::Text(std::mem::take(s)));
+                                return;
+                            }
+                        };
+
+                        let arguments = match obj.get("arguments") {
+                            Some(serde_json::Value::String(s)) => s.clone(),
+                            Some(other) => serde_json::to_string(other).unwrap_or_default(),
+                            None => {
+                                // missing 'arguments' field
+                                self.out.push_back(ChatPart::Text(std::mem::take(s)));
+                                return;
+                            }
+                        };
+
+                        self.out.push_back(ChatPart::Call(ToolCall {
                             id: format!("call_{}", uuid::Uuid::new_v4().simple()),
                             call_type: ToolType::Function,
-                            function: fc,
+                            function: FunctionCall { name, arguments },
                         }));
                     } else {
-                        // not a valid function call
-                        self.out.push_back(ChatElement::Text(std::mem::take(s)));
+                        // not a valid json call
+                        self.out.push_back(ChatPart::Text(std::mem::take(s)));
                     }
 
                     self.state = State::Text;
@@ -139,13 +237,13 @@ impl ChatResponseParser {
                 (Some((pos, t)), State::Text) => {
                     let p = pos + t.as_str().len();
                     self.out
-                        .push_back(ChatElement::Text(remaining[..p].to_string()));
+                        .push_back(ChatPart::Text(remaining[..p].to_string()));
                     remaining = &remaining[p..];
                 }
                 (Some((pos, t)), State::Thinking) => {
                     let p = pos + t.as_str().len();
                     self.out
-                        .push_back(ChatElement::Reasoning(remaining[..p].to_string()));
+                        .push_back(ChatPart::Think(remaining[..p].to_string()));
                     remaining = &remaining[p..];
                 }
                 (Some((pos, t)), State::MaybeCall(s)) => {
@@ -156,15 +254,17 @@ impl ChatResponseParser {
 
                 // NO TAG
                 (None, State::Text) => {
-                    self.out.push_back(ChatElement::Text(remaining.to_string()));
+                    debug_assert!(!remaining.is_empty());
+                    self.out.push_back(ChatPart::Text(remaining.to_string()));
                     remaining = "";
                 }
                 (None, State::Thinking) => {
-                    self.out
-                        .push_back(ChatElement::Reasoning(remaining.to_string()));
+                    debug_assert!(!remaining.is_empty());
+                    self.out.push_back(ChatPart::Think(remaining.to_string()));
                     remaining = "";
                 }
                 (None, State::MaybeCall(s)) => {
+                    debug_assert!(!remaining.is_empty());
                     s.push_str(remaining);
                     remaining = "";
                 }
@@ -175,15 +275,15 @@ impl ChatResponseParser {
     pub fn end(&mut self) {
         if let State::MaybeCall(s) = std::mem::replace(&mut self.state, State::Text) {
             self.out
-                .push_back(ChatElement::Text(format!("{}{s}", Tag::ToolCall.as_str())));
+                .push_back(ChatPart::Text(format!("{}{s}", Tag::ToolCall.as_str())));
         }
     }
 
-    pub fn output(&self) -> &VecDeque<ChatElement> {
+    pub fn output(&self) -> &VecDeque<ChatPart> {
         &self.out
     }
 
-    pub fn next(&mut self) -> Option<ChatElement> {
+    pub fn next(&mut self) -> Option<ChatPart> {
         self.out.pop_front()
     }
 
@@ -229,13 +329,11 @@ pub(crate) fn chat_response_listener<F>(
                         created,
                         model: model_name.clone(),
                         choices: vec![StreamChoice {
-                            index: 0,
                             delta: StreamDelta {
                                 role: Some("assistant".to_string()),
-                                content: None,
                                 ..Default::default()
                             },
-                            finish_reason: None,
+                            ..Default::default()
                         }],
                         ..Default::default()
                     };
@@ -244,96 +342,25 @@ pub(crate) fn chat_response_listener<F>(
                     }
                 }
 
-                // parse response
+                // parse response into parts
                 parser.push_str(&t);
 
-                while let Some(el) = parser.next() {
-                    let delta = match el {
-                        ChatElement::Text(t) => StreamDelta {
-                            content: Some(t),
-                            ..Default::default()
-                        },
-                        ChatElement::Reasoning(t) => StreamDelta {
-                            content: Some(t), // should use reasoning_content
-                            ..Default::default()
-                        },
-                        ChatElement::Call(tool_call) => StreamDelta {
-                            tool_calls: Some(vec![StreamToolCall {
-                                index: 0,
-                                id: Some(tool_call.id),
-                                call_type: Some(tool_call.call_type),
-                                function: Some(StreamFunctionCall {
-                                    name: Some(tool_call.function.name),
-                                    arguments: Some(tool_call.function.arguments),
-                                }),
-                            }]),
-                            ..Default::default()
-                        },
-                    };
-
-                    let chunk = ChatCompletionChunk {
-                        id: respond_id.clone(),
-                        object: "chat.completion.chunk".to_string(),
-                        created,
-                        model: model_name.clone(),
-                        choices: vec![StreamChoice {
-                            index: 0,
-                            delta,
-                            finish_reason: None,
-                        }],
-                        ..Default::default()
-                    };
+                while let Some(part) = parser.next() {
+                    let chunk = part.into_chunk(respond_id.clone(), model_name.clone(), created);
                     if !on_item(ChatStreamItem::Chunk(chunk)) {
                         break;
                     }
                 }
-
-                // let chunk = ChatCompletionChunk {
-                //     id: respond_id.clone(),
-                //     object: "chat.completion.chunk".to_string(),
-                //     created,
-                //     model: model_name.clone(),
-                //     choices: vec![StreamChoice {
-                //         index: 0,
-                //         delta: StreamDelta {
-                //             role: None,
-                //             content: Some(t),
-                //             ..Default::default()
-                //         },
-                //         finish_reason: None,
-                //     }],
-                //     ..Default::default()
-                // };
-                // if !on_item(ChatStreamItem::Chunk(chunk)) {
-                //     break;
-                // }
             }
             Ok(EngineReply::Stop(reason, n_completion_tokens)) => {
+                let created = now_unix_s() as u64;
+
                 // to flush unfinished <tool_call> as normal text
                 parser.end();
-                if let Some(el) = parser.next() {
-                    if let ChatElement::Text(s) = el {
-                        let delta = StreamDelta {
-                            content: Some(s),
-                            ..Default::default()
-                        };
-                        let chunk = ChatCompletionChunk {
-                            id: respond_id.clone(),
-                            object: "chat.completion.chunk".to_string(),
-                            created: now_unix_s() as u64,
-                            model: model_name.clone(),
-                            choices: vec![StreamChoice {
-                                index: 0,
-                                delta,
-                                finish_reason: None,
-                            }],
-                            ..Default::default()
-                        };
-                        if !on_item(ChatStreamItem::Chunk(chunk)) {
-                            break;
-                        }
-                    } else {
-                        unreachable!();
+                while let Some(el) = parser.next() {
+                    let chunk = el.into_chunk(respond_id.clone(), model_name.clone(), created);
+                    if !on_item(ChatStreamItem::Chunk(chunk)) {
+                        break;
                     }
                 }
 
@@ -341,7 +368,7 @@ pub(crate) fn chat_response_listener<F>(
                 let last = ChatCompletionChunk {
                     id: respond_id.clone(),
                     object: "chat.completion.chunk".to_string(),
-                    created: now_unix_s() as u64,
+                    created,
                     model: model_name.clone(),
                     choices: vec![StreamChoice {
                         index: 0,
@@ -396,7 +423,7 @@ mod tests {
         p.output()
             .iter()
             .filter_map(|e| match e {
-                ChatElement::Text(s) => Some(s.as_str()),
+                ChatPart::Text(s) => Some(s.as_str()),
                 _ => None,
             })
             .collect()
@@ -406,7 +433,7 @@ mod tests {
         p.output()
             .iter()
             .filter_map(|e| match e {
-                ChatElement::Reasoning(s) => Some(s.as_str()),
+                ChatPart::Think(s) => Some(s.as_str()),
                 _ => None,
             })
             .collect()
@@ -452,7 +479,7 @@ mod tests {
         assert_eq!(text_output(&p), "");
         assert_eq!(p.output().len(), 1);
         match &p.output()[0] {
-            ChatElement::Call(fc) => {
+            ChatPart::Call(fc) => {
                 assert_eq!(fc.function.name, "get_weather");
                 assert_eq!(fc.function.arguments, "{}");
             }
@@ -494,7 +521,7 @@ mod tests {
         assert_eq!(text_output(&p), " b");
         assert_eq!(p.output().len(), 2);
         match &p.output()[0] {
-            ChatElement::Call(fc) => {
+            ChatPart::Call(fc) => {
                 assert_eq!(fc.function.name, "search");
                 assert_eq!(fc.function.arguments, "{}");
             }
@@ -515,15 +542,15 @@ mod tests {
         assert_eq!(text_output(&p), "");
         assert_eq!(p.output().len(), 3);
         match &p.output()[0] {
-            ChatElement::Text(s) => assert_eq!(s, ""),
+            ChatPart::Text(s) => assert_eq!(s, ""),
             _ => panic!("expected Text element"),
         }
         match &p.output()[1] {
-            ChatElement::Reasoning(s) => assert_eq!(s, "reasoning"),
+            ChatPart::Think(s) => assert_eq!(s, "reasoning"),
             _ => panic!("expected Reasoning element"),
         }
         match &p.output()[2] {
-            ChatElement::Call(fc) => {
+            ChatPart::Call(fc) => {
                 assert_eq!(fc.function.name, "calc");
                 assert_eq!(fc.function.arguments, "{}");
             }
@@ -566,7 +593,7 @@ mod tests {
         p.push_str(r#"<tool_call>{"name":"<think>","arguments":"{}"}</tool_call>"#);
         assert_eq!(p.output().len(), 1);
         match &p.output()[0] {
-            ChatElement::Call(fc) => {
+            ChatPart::Call(fc) => {
                 assert_eq!(fc.function.name, "<think>");
             }
             _ => panic!("expected Call element"),
