@@ -4,12 +4,12 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use linkme::distributed_slice;
-use liter_llm::{
-    ChatCompletionRequest, ChatCompletionResponse, Choice, FinishReason, FunctionCall,
-    StopSequence, ToolCall, ToolType,
-    types::common::{AssistantMessage, Usage},
+use async_openai::types::{
+    ChatChoice, ChatCompletionMessageToolCall, ChatCompletionResponseMessage,
+    ChatCompletionToolType, CompletionUsage, CreateChatCompletionResponse,
+    CreateChatCompletionStreamResponse, FinishReason, FunctionCall,
 };
+use linkme::distributed_slice;
 use llama_cpp_ffi::ToolChoice as LarkToolChoice;
 use zuqe::{
     CallContext, ClassDef, ClassID, FieldDef, JSResult, JSValue, Object, Runtime, ScopedContext,
@@ -22,7 +22,7 @@ use zuqe::{
 use crate::{
     USER_CLASS_DEFS,
     chat_response::{ChatResponseParser, ChatStreamItem, chat_response_listener},
-    class_llama_client::{chunk_to_js, parse_chat_request, parse_messages},
+    class_llama_client::{ParsedChatOptions, chunk_to_js, parse_chat_options, parse_messages},
     engine::{Engine, EngineReply, GrammarConfig, OutputMode, StopReason, TaskConfig},
     helpers::{build_chat_prompt_tokens, compile_tools_grammar, now_unix_s, to_lark_tool_choice},
 };
@@ -33,7 +33,6 @@ pub(crate) const ERR_ENGINE_SHUTDOWN: &str = "engine shutdown";
 pub(super) struct EngineParams {
     pub idle_sleep_ms: u64,
     pub slot_match_threshold: f32,
-    /// Default max tokens for generation; 0 means unlimited.
     pub max_tokens: usize,
 }
 
@@ -45,6 +44,7 @@ pub(super) fn parse_engine_params(
     let mut slot_match_threshold = 0.5f32;
     let mut max_tokens = 0usize;
     if let Some(opts) = opts {
+        // idleSleepMs
         let v = opts.get_property_str(ctx, "idleSleepMs")?;
         if !v.is_undefined() {
             let n = v.to_number(ctx)?.to_i32();
@@ -56,6 +56,7 @@ pub(super) fn parse_engine_params(
             }
         }
 
+        // slotMatchThreshold
         let v = opts.get_property_str(ctx, "slotMatchThreshold")?;
         if !v.is_undefined() {
             let d = v.to_number(ctx)?.to_f64();
@@ -67,6 +68,7 @@ pub(super) fn parse_engine_params(
             }
         }
 
+        // maxTokens
         let v = opts.get_property_str(ctx, "maxTokens")?;
         if !v.is_undefined() {
             let n = v.to_number(ctx)?.to_i32();
@@ -115,8 +117,7 @@ pub(super) fn get_engine_arc(
 pub(super) const MAGIC_CHAT_ONCE: i32 = 2;
 pub(super) const MAGIC_CHAT_STREAM: i32 = 3;
 
-/// Collect all EngineReply messages for non-streaming chat, building a ChatCompletionResponse json.
-/// If `timeout` elapses without a message, returns a timeout error.
+/// Collect all EngineReply messages for non-streaming chat, building a CreateChatCompletionResponse json.
 pub(super) fn collect_chat_response(
     rx: crossbeam::channel::Receiver<EngineReply>,
     timeout: std::time::Duration,
@@ -141,30 +142,38 @@ pub(super) fn collect_chat_response(
                 // Detect tool calls in the generated text (e.g. <tool_call>...</tool_call>)
                 let tool_calls = parse_tool_calls_from_text(&full_text);
 
-                let resp = ChatCompletionResponse {
+                // Build response
+                let resp = CreateChatCompletionResponse {
                     id: respond_id.to_string(),
                     object: "chat.completion".to_string(),
-                    created: now_unix_s() as u64,
+                    created: now_unix_s() as u32,
                     model: model_name.to_string(),
-                    choices: vec![Choice {
+                    choices: vec![ChatChoice {
                         index: 0,
-                        message: AssistantMessage {
+                        message: ChatCompletionResponseMessage {
                             content: Some(full_text),
                             tool_calls,
-                            ..Default::default()
+                            role: async_openai::types::Role::Assistant,
+                            refusal: None,
+                            function_call: None,
+                            audio: None,
                         },
                         finish_reason: Some(finish_reason),
+                        logprobs: None,
                     }],
                     usage: if include_usage {
-                        Some(Usage {
-                            prompt_tokens: n_prompt_tokens as u64,
-                            completion_tokens: n_completion_tokens as u64,
-                            total_tokens: (n_prompt_tokens + n_completion_tokens) as u64,
+                        Some(CompletionUsage {
+                            prompt_tokens: n_prompt_tokens as u32,
+                            completion_tokens: n_completion_tokens as u32,
+                            total_tokens: (n_prompt_tokens + n_completion_tokens) as u32,
+                            completion_tokens_details: None,
+                            prompt_tokens_details: None,
                         })
                     } else {
                         None
                     },
-                    ..Default::default()
+                    system_fingerprint: None,
+                    service_tier: None,
                 };
 
                 return serde_json::to_value(resp).map_err(|e| e.to_string());
@@ -178,14 +187,8 @@ pub(super) fn collect_chat_response(
 }
 
 /// Parse tool calls from generated text that contains `<tool_call>...</tool_call>` tags.
-/// Returns `None` if no tool calls are found.
-///
-/// The model outputs `arguments` as a JSON object (Qwen/Hermes format):
-///   {"name": "get_weather", "arguments": {"city": "Shanghai"}}
-/// We serialize the `arguments` object to a JSON string to match the OpenAI
-/// `FunctionCall` format where `arguments` is a string.
-fn parse_tool_calls_from_text(text: &str) -> Option<Vec<ToolCall>> {
-    let mut calls = Vec::<ToolCall>::new();
+fn parse_tool_calls_from_text(text: &str) -> Option<Vec<ChatCompletionMessageToolCall>> {
+    let mut calls = Vec::<ChatCompletionMessageToolCall>::new();
     let mut remaining = text;
 
     while let Some(start) = remaining.find("<tool_call>") {
@@ -205,9 +208,9 @@ fn parse_tool_calls_from_text(text: &str) -> Option<Vec<ToolCall>> {
                     return None;
                 };
 
-                calls.push(ToolCall {
+                calls.push(ChatCompletionMessageToolCall {
                     id: format!("call_{}", uuid::Uuid::new_v4().simple()),
-                    call_type: ToolType::Function,
+                    r#type: ChatCompletionToolType::Function,
                     function: FunctionCall { name, arguments },
                 });
             }
@@ -223,17 +226,36 @@ fn js_engine_chat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let engine = get_engine(ctx, &this)?;
 
-    // Parse messages (required, arg 0)
+    // Parse messages (required)
     let messages_val = cc.arg(0);
     let messages = parse_messages(ctx, &messages_val)?;
 
-    // Parse options (optional, arg 1)
     let mut id_slot: Option<usize> = None;
     let mut cache_prompt = false;
     let mut include_usage = false;
     let mut max_tokens = engine.lock().unwrap().default_max_tokens();
 
-    let mut req = ChatCompletionRequest::default();
+    let mut parsed = ParsedChatOptions {
+        model: String::new(),
+        temperature: None,
+        max_tokens: None,
+        top_p: None,
+        n: None,
+        stop: None,
+        presence_penalty: None,
+        frequency_penalty: None,
+        logit_bias: None,
+        user: None,
+        tools: None,
+        tool_choice: None,
+        parallel_tool_calls: None,
+        response_format: None,
+        stream_options: None,
+        seed: None,
+        reasoning_effort: None,
+    };
+
+    // Parse options (optional)
     if cc.length() > 1 {
         let val = cc.arg(1);
         if !val.is_undefined() && !val.is_null() {
@@ -242,9 +264,8 @@ fn js_engine_chat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 -1
             })?;
 
-            req = parse_chat_request(ctx, &opts_obj)?;
+            parsed = parse_chat_options(ctx, &opts_obj)?;
 
-            // maxTokens (engine-specific: has default, validates >= 0)
             let v = opts_obj.get_property_str(ctx, "maxTokens")?;
             if !v.is_undefined() {
                 let n = v.to_number(ctx)?.to_i32();
@@ -255,7 +276,6 @@ fn js_engine_chat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 max_tokens = n as usize;
             }
 
-            // idSlot
             let v = opts_obj.get_property_str(ctx, "idSlot")?;
             if !v.is_undefined() {
                 let n = v.to_number(ctx)?.to_i32();
@@ -264,13 +284,11 @@ fn js_engine_chat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 }
             }
 
-            // cachePrompt
             let v = opts_obj.get_property_str(ctx, "cachePrompt")?;
             if !v.is_undefined() {
                 cache_prompt = v.to_bool()?;
             }
 
-            // includeUsage
             let v = opts_obj.get_property_str(ctx, "includeUsage")?;
             if !v.is_undefined() {
                 include_usage = v.to_bool()?;
@@ -278,45 +296,40 @@ fn js_engine_chat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         }
     }
 
-    // Build prompt tokens
     let prompt_tokens = build_chat_prompt_tokens(
         engine.lock().unwrap().model(),
         &messages,
-        req.tools.as_deref(),
-        req.tool_choice.as_ref(),
-        req.parallel_tool_calls,
-        req.reasoning_effort.as_ref(),
-        req.response_format.as_ref(),
+        parsed.tools.as_deref(),
+        parsed.tool_choice.as_ref(),
+        parsed.parallel_tool_calls,
+        parsed.reasoning_effort.as_ref(),
+        parsed.response_format.as_ref(),
     )
     .map_err(|e| {
         ctx.throw_internal_error(&format!("build prompt tokens failed: {e}"));
         -1
     })?;
 
+    // Build prompt tokens
     let is_stream = cc.magic() == MAGIC_CHAT_STREAM;
 
-    // Build TaskConfig
+    // Build task config
     let mut task_config = TaskConfig::new()
         .max_tokens(max_tokens)
-        .temperature(req.temperature.unwrap_or(0.75) as f32)
-        .top_p(req.top_p.unwrap_or(1.0) as f32)
+        .temperature(parsed.temperature.unwrap_or(0.75) as f32)
+        .top_p(parsed.top_p.unwrap_or(1.0) as f32)
         .output_mode(if is_stream {
             OutputMode::Continuous
         } else {
             OutputMode::OneShot
         });
 
-    // stop words
-    if let Some(sw) = req.stop {
-        task_config = task_config.stop_words(match sw {
-            StopSequence::Single(w) => vec![w],
-            StopSequence::Multiple(w) => w,
-        });
+    if let Some(stop_words) = parsed.stop.as_ref().filter(|w| !w.is_empty()) {
+        task_config = task_config.stop_words(stop_words.clone());
     }
 
-    // tools → grammar
-    if let Some(tools) = req.tools.as_ref().filter(|t| !t.is_empty()) {
-        let tc = req
+    if let Some(tools) = parsed.tools.as_ref().filter(|t| !t.is_empty()) {
+        let tc = parsed
             .tool_choice
             .as_ref()
             .map(to_lark_tool_choice)
@@ -334,6 +347,7 @@ fn js_engine_chat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let respond_id = format!("chatcmpl-{}", uuid::Uuid::new_v4().simple());
     let model_name = engine.lock().unwrap().model_name().to_string();
 
+    // Push task to engine
     let rx = engine
         .lock()
         .unwrap()
@@ -344,7 +358,7 @@ fn js_engine_chat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         })?;
 
     let mut parser = ChatResponseParser::new();
-    if req.reasoning_effort.is_some() {
+    if parsed.reasoning_effort.is_some() {
         parser.push_str("<think>");
     }
 
@@ -411,10 +425,10 @@ fn js_engine_httpServe(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let engine = get_engine_arc(ctx, &this)?;
 
-    // Parse options object
     let mut host = "0.0.0.0".to_string();
     let mut port: u16 = 8080;
 
+    // Parse options
     let opts = if cc.length() > 0 {
         let v = cc.arg(0);
         if v.is_undefined() || v.is_null() {
@@ -454,6 +468,7 @@ fn js_engine_httpServe(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
     engine.lock().unwrap().set_serving(shutdown_tx);
 
+    // Start HTTP server
     let result_slot = PromiseResultSlot::<Result<(), String>>::new();
 
     let promise =
@@ -466,7 +481,7 @@ fn js_engine_httpServe(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         })?;
 
     tokio::spawn(async move {
-        let res = Engine::http_serve(engine.clone(), &host, port, shutdown_rx).await;
+        let res = crate::serve::http_serve(engine.clone(), &host, port, shutdown_rx).await;
 
         engine.lock().unwrap().unset_serving();
         let _ = result_slot.commit(res);
@@ -510,13 +525,6 @@ const CLASS_ENGINE_PROTO: &[FieldDef] = &[
     FieldDef::CALL("stopServe", 0, js_engine_stopServe, 0),
     FieldDef::GETSET("isServing", Some(js_engine_isServing), None, 0),
     FieldDef::CALL("dispose", 0, js_engine_dispose, 0),
-    // FieldDef::CALL("generate", 1, js_engine_generate, MAGIC_GENERATE as i16),
-    // FieldDef::CALL(
-    //     "generateStream",
-    //     1,
-    //     js_engine_generate,
-    //     MAGIC_GENERATE_STREAM as i16,
-    // ),
 ];
 
 pub struct JSLlamaEngine;

@@ -42,10 +42,11 @@ minijinja-contrib = { version = "2", features = ["pycompat"] }
 chrono = "0.4"
 axum = { version = "0.7", features = ["json"] }
 futures-util = "0.3"
+async-stream = "0.3"
 tokio-stream = "0.1"
 tower-http = { version = "0.5", features = ["cors"] }
 uuid = { version = "1", features = ["v4"] }
-liter-llm = { version = "1", features = ["native-http"] }
+async-openai = "0.29"
 reqwest = { version = "0.12", features = ["json"] }
 
 [[bin]]

@@ -1,42 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-use liter_llm::types::common::{
-    AssistantMessage, Message, SystemMessage, UserContent, UserMessage,
-};
-
-/// Build a user text message.
-pub fn user_msg(text: &str) -> Message {
-    Message::User(UserMessage {
-        content: UserContent::Text(text.into()),
-        name: None,
-    })
-}
-
-/// Build a system message.
-pub fn system_msg(text: &str) -> Message {
-    Message::System(SystemMessage {
-        content: text.into(),
-        name: None,
-    })
-}
-
-/// Build an assistant message (useful for multi-turn context).
-pub fn assistant_msg(text: &str) -> Message {
-    Message::Assistant(AssistantMessage {
-        content: Some(text.into()),
-        name: None,
-        tool_calls: None,
-        refusal: None,
-        function_call: None,
-    })
-}
-
 /// Extract thinking content enclosed in `<think>...</think>` tags from raw response text.
 ///
 /// Returns `(thinking, answer)` where `thinking` is the content inside the
 /// think tags (None if absent) and `answer` is the text after the closing tag.
-/// This is a manual helper — liter-llm does NOT parse think tags automatically.
+/// async-openai does NOT parse think tags automatically — this is a manual helper.
 pub fn extract_think(raw: &str) -> (Option<String>, &str) {
     let open = "<think>";
     let close = "</think>";
@@ -54,25 +23,19 @@ pub fn extract_think(raw: &str) -> (Option<String>, &str) {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
-    use liter_llm::{
-        ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, ClientConfigBuilder,
-        DefaultClient, FinishReason, FunctionCall, LlmClient, ToolCall, ToolType,
+    use async_openai::{
+        Client,
+        config::OpenAIConfig,
+        types::{
+            ChatCompletionRequestAssistantMessage, ChatCompletionRequestAssistantMessageContent,
+            ChatCompletionRequestMessage, ChatCompletionRequestSystemMessage,
+            ChatCompletionRequestSystemMessageContent, ChatCompletionRequestUserMessage,
+            ChatCompletionRequestUserMessageContent, CreateChatCompletionRequestArgs,
+            CreateChatCompletionResponse, CreateChatCompletionStreamResponse, FinishReason,
+        },
     };
 
     use super::*;
-
-    #[test]
-    fn build_messages() {
-        let msgs = vec![
-            system_msg("You are helpful."),
-            user_msg("Hello!"),
-            assistant_msg("Hi there!"),
-            user_msg("How are you?"),
-        ];
-        assert_eq!(msgs.len(), 4);
-    }
 
     // --- Response deserialization unit tests ---
 
@@ -107,7 +70,7 @@ mod tests {
             }
         });
 
-        let resp: ChatCompletionResponse =
+        let resp: CreateChatCompletionResponse =
             serde_json::from_value(json).expect("deserialize response");
 
         assert_eq!(resp.choices.len(), 1);
@@ -121,7 +84,10 @@ mod tests {
             .expect("tool_calls should be parsed");
         assert_eq!(tc.len(), 1);
         assert_eq!(tc[0].id, "call_abc");
-        assert_eq!(tc[0].call_type, ToolType::Function);
+        assert_eq!(
+            tc[0].r#type,
+            async_openai::types::ChatCompletionToolType::Function
+        );
         assert_eq!(tc[0].function.name, "get_weather");
         assert_eq!(tc[0].function.arguments, r#"{"city":"Beijing"}"#);
 
@@ -169,7 +135,7 @@ mod tests {
             "usage": null
         });
 
-        let resp: ChatCompletionResponse =
+        let resp: CreateChatCompletionResponse =
             serde_json::from_value(json).expect("deserialize response");
         let tc = resp.choices[0].message.tool_calls.as_ref().unwrap();
         assert_eq!(tc.len(), 2);
@@ -203,7 +169,7 @@ mod tests {
             }]
         });
 
-        let resp: ChatCompletionResponse =
+        let resp: CreateChatCompletionResponse =
             serde_json::from_value(json).expect("deserialize response");
         let msg = &resp.choices[0].message;
         // Both content and tool_calls are present
@@ -215,7 +181,7 @@ mod tests {
     }
 
     /// Thinking content (e.g. Qwen3 <think>...</think>) is NOT automatically
-    /// parsed by liter-llm. It appears as raw text in the `content` field.
+    /// parsed by async-openai. It appears as raw text in the `content` field.
     /// The caller must extract it manually.
     #[test]
     fn response_thinking_content_in_content_field() {
@@ -234,7 +200,7 @@ mod tests {
             }]
         });
 
-        let resp: ChatCompletionResponse =
+        let resp: CreateChatCompletionResponse =
             serde_json::from_value(json).expect("deserialize response");
         let msg = &resp.choices[0].message;
 
@@ -295,7 +261,8 @@ mod tests {
             }]
         });
 
-        let chunk: ChatCompletionChunk = serde_json::from_value(json).expect("deserialize chunk");
+        let chunk: CreateChatCompletionStreamResponse =
+            serde_json::from_value(json).expect("deserialize chunk");
         let stc = chunk.choices[0]
             .delta
             .tool_calls
@@ -330,71 +297,52 @@ mod tests {
         );
     }
 
-    /// Verify AssistantMessage with tool_calls round-trips through serialization.
-    #[test]
-    fn assistant_message_tool_calls_roundtrip() {
-        let msg = AssistantMessage {
-            content: None,
-            name: None,
-            tool_calls: Some(vec![ToolCall {
-                id: "call_42".into(),
-                call_type: ToolType::Function,
-                function: FunctionCall {
-                    name: "calculator".into(),
-                    arguments: "{\"expr\":\"2+2\"}".into(),
-                },
-            }]),
-            refusal: None,
-            function_call: None,
-        };
-        let json = serde_json::to_string(&msg).unwrap();
-        let back: AssistantMessage = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.tool_calls.unwrap()[0].function.name, "calculator");
-    }
-
-    /// Build a `DefaultClient` targeting a local OpenAI-compatible server.
-    fn local_client(port: u16, model: &str) -> anyhow::Result<DefaultClient> {
-        let config = ClientConfigBuilder::new("no-key")
-            .base_url(&format!("http://localhost:{port}/v1"))
-            .timeout(Duration::from_secs(120))
-            .build();
-        DefaultClient::new(config, Some(model)).map_err(|e| anyhow::anyhow!("{e}"))
-    }
-
     /// Build a client targeting localhost:8080.
     /// Set env OPENAI_MODEL to override the model name.
-    fn make_client() -> DefaultClient {
-        let model = std::env::var("OPENAI_MODEL").unwrap_or_else(|_| "default".into());
-        local_client(8080, &model).expect("failed to create DefaultClient")
+    fn make_client() -> Client<OpenAIConfig> {
+        let config = OpenAIConfig::new()
+            .with_api_key("no-key")
+            .with_api_base("http://localhost:8080/v1");
+        Client::with_config(config)
     }
 
     /// Check if the local server is reachable; skip test if not.
-    async fn ensure_server(client: &DefaultClient) {
-        if client.list_models().await.is_err() {
+    async fn ensure_server(client: &Client<OpenAIConfig>) {
+        if client.models().list().await.is_err() {
             std::process::exit(0);
         }
     }
 
     #[tokio::test]
-    #[ignore] // requires running llama-js server on localhost:8080
+    #[ignore]
     async fn chat_non_stream() {
         let client = make_client();
         ensure_server(&client).await;
 
-        let messages = vec![
-            system_msg("You are a helpful assistant. Reply concisely."),
-            user_msg("Answer in one sentence: what is 1+1?"),
-        ];
+        let request = CreateChatCompletionRequestArgs::default()
+            .model("default")
+            .messages(vec![
+                ChatCompletionRequestMessage::System(ChatCompletionRequestSystemMessage {
+                    content: ChatCompletionRequestSystemMessageContent::Text(
+                        "You are a helpful assistant. Reply concisely.".into(),
+                    ),
+                    ..Default::default()
+                }),
+                ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
+                    content: ChatCompletionRequestUserMessageContent::Text(
+                        "Answer in one sentence: what is 1+1?".into(),
+                    ),
+                    ..Default::default()
+                }),
+            ])
+            .temperature(0.2)
+            .max_tokens(32u32)
+            .build()
+            .expect("build request");
 
-        let model = std::env::var("OPENAI_MODEL").unwrap_or_else(|_| "default".into());
         let resp = client
-            .chat(ChatCompletionRequest {
-                model,
-                messages,
-                temperature: Some(0.2),
-                max_tokens: Some(32),
-                ..Default::default()
-            })
+            .chat()
+            .create(request)
             .await
             .expect("chat request failed");
 
@@ -427,20 +375,30 @@ mod tests {
         let client = make_client();
         ensure_server(&client).await;
 
-        let messages = vec![
-            system_msg("You are a helpful assistant. Reply concisely."),
-            user_msg("Answer in one sentence: what is 2+2?"),
-        ];
+        let request = CreateChatCompletionRequestArgs::default()
+            .model("default")
+            .messages(vec![
+                ChatCompletionRequestMessage::System(ChatCompletionRequestSystemMessage {
+                    content: ChatCompletionRequestSystemMessageContent::Text(
+                        "You are a helpful assistant. Reply concisely.".into(),
+                    ),
+                    ..Default::default()
+                }),
+                ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
+                    content: ChatCompletionRequestUserMessageContent::Text(
+                        "Answer in one sentence: what is 2+2?".into(),
+                    ),
+                    ..Default::default()
+                }),
+            ])
+            .temperature(0.2)
+            .max_tokens(32u32)
+            .build()
+            .expect("build request");
 
-        let model = std::env::var("OPENAI_MODEL").unwrap_or_else(|_| "default".into());
         let stream = client
-            .chat_stream(ChatCompletionRequest {
-                model,
-                messages,
-                temperature: Some(0.2),
-                max_tokens: Some(32),
-                ..Default::default()
-            })
+            .chat()
+            .create_stream(request)
             .await
             .expect("stream request failed");
 
@@ -485,25 +443,28 @@ mod tests {
         let client = make_client();
         ensure_server(&client).await;
 
-        let model = std::env::var("OPENAI_MODEL").unwrap_or_else(|_| "default".into());
-        let messages = vec![
-            Message::System(SystemMessage {
-                content: "You are a helpful assistant. Reply concisely.".into(),
-                name: None,
-            }),
-            Message::User(UserMessage {
-                content: UserContent::Text(
-                    "Answer in one word: what color is the sky on a clear day?".into(),
-                ),
-                name: None,
-            }),
-        ];
+        let request = CreateChatCompletionRequestArgs::default()
+            .model("default")
+            .messages(vec![
+                ChatCompletionRequestMessage::System(ChatCompletionRequestSystemMessage {
+                    content: ChatCompletionRequestSystemMessageContent::Text(
+                        "You are a helpful assistant. Reply concisely.".into(),
+                    ),
+                    ..Default::default()
+                }),
+                ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
+                    content: ChatCompletionRequestUserMessageContent::Text(
+                        "Answer in one word: what color is the sky on a clear day?".into(),
+                    ),
+                    ..Default::default()
+                }),
+            ])
+            .build()
+            .expect("build request");
+
         let resp = client
-            .chat(ChatCompletionRequest {
-                model,
-                messages,
-                ..Default::default()
-            })
+            .chat()
+            .create(request)
             .await
             .expect("ask request failed");
         let text = resp
@@ -522,14 +483,22 @@ mod tests {
         let client = make_client();
         ensure_server(&client).await;
 
-        let model = std::env::var("OPENAI_MODEL").unwrap_or_else(|_| "default".into());
-        let messages = vec![user_msg("Say hello in 5 words or less.")];
+        let request = CreateChatCompletionRequestArgs::default()
+            .model("default")
+            .messages(vec![ChatCompletionRequestMessage::User(
+                ChatCompletionRequestUserMessage {
+                    content: ChatCompletionRequestUserMessageContent::Text(
+                        "Say hello in 5 words or less.".into(),
+                    ),
+                    ..Default::default()
+                },
+            )])
+            .build()
+            .expect("build request");
+
         let stream = client
-            .chat_stream(ChatCompletionRequest {
-                model,
-                messages,
-                ..Default::default()
-            })
+            .chat()
+            .create_stream(request)
             .await
             .expect("stream_collect request failed");
         let mut output = String::new();

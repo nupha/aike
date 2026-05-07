@@ -1,11 +1,9 @@
-// SPDX-License-Identifier: Apache-2.0
-// SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
-
 use std::collections::VecDeque;
 
-use liter_llm::{
-    ChatCompletionChunk, FinishReason, FunctionCall, StreamChoice, StreamDelta, StreamFunctionCall,
-    StreamToolCall, ToolCall, ToolType, Usage,
+use async_openai::types::{
+    ChatChoiceStream, ChatCompletionMessageToolCall, ChatCompletionMessageToolCallChunk,
+    ChatCompletionStreamResponseDelta, ChatCompletionToolType, CompletionUsage,
+    CreateChatCompletionStreamResponse, FinishReason, FunctionCall, FunctionCallStream,
 };
 
 use crate::{
@@ -18,54 +16,70 @@ use crate::{
 pub(crate) enum ChatPart {
     Text(String),
     Think(String),
-    Call(ToolCall),
+    Call(ChatCompletionMessageToolCall),
 }
 
 impl ChatPart {
-    pub fn into_chunk_delta(self) -> StreamDelta {
+    pub fn into_chunk_delta(self) -> ChatCompletionStreamResponseDelta {
         match self {
-            Self::Text(t) => StreamDelta {
+            Self::Text(t) => ChatCompletionStreamResponseDelta {
                 content: Some(t),
-                ..Default::default()
+                role: None,
+                tool_calls: None,
+                refusal: None,
+                function_call: None,
             },
-            Self::Think(t) => StreamDelta {
-                content: Some(t), // should use reasoning_content
-                ..Default::default()
+            Self::Think(t) => ChatCompletionStreamResponseDelta {
+                content: Some(t),
+                role: None,
+                tool_calls: None,
+                refusal: None,
+                function_call: None,
             },
-            Self::Call(tool_call) => StreamDelta {
-                tool_calls: Some(vec![StreamToolCall {
+            Self::Call(tool_call) => ChatCompletionStreamResponseDelta {
+                content: None,
+                role: None,
+                tool_calls: Some(vec![ChatCompletionMessageToolCallChunk {
                     index: 0,
                     id: Some(tool_call.id),
-                    call_type: Some(tool_call.call_type),
-                    function: Some(StreamFunctionCall {
+                    r#type: Some(tool_call.r#type),
+                    function: Some(FunctionCallStream {
                         name: Some(tool_call.function.name),
                         arguments: Some(tool_call.function.arguments),
                     }),
                 }]),
-                ..Default::default()
+                refusal: None,
+                function_call: None,
             },
         }
     }
 
-    pub fn into_chunk(self, id: String, model: String, created: u64) -> ChatCompletionChunk {
-        ChatCompletionChunk {
+    pub fn into_chunk(
+        self,
+        id: String,
+        model: String,
+        created: u32,
+    ) -> CreateChatCompletionStreamResponse {
+        CreateChatCompletionStreamResponse {
             id,
             created,
             model,
             object: "chat.completion.chunk".to_string(),
-            choices: vec![StreamChoice {
+            choices: vec![ChatChoiceStream {
                 delta: self.into_chunk_delta(),
                 index: 0,
                 finish_reason: None,
+                logprobs: None,
             }],
-            ..Default::default()
+            system_fingerprint: None,
+            service_tier: None,
+            usage: None,
         }
     }
 }
 
-// TODO: combine ChatStreamItem with ChatPart
 pub(crate) enum ChatStreamItem {
-    Chunk(ChatCompletionChunk),
+    Chunk(CreateChatCompletionStreamResponse),
     Done,
     Error(String),
 }
@@ -114,7 +128,6 @@ impl ChatResponseParser {
         let mut remaining = chunk;
 
         while !remaining.is_empty() {
-            // Find the earliest occurrence among all special tags
             let mut think_pos: Option<usize> = None;
             let mut close_think_pos: Option<usize> = None;
             let mut tool_call_pos: Option<usize> = None;
@@ -133,7 +146,6 @@ impl ChatResponseParser {
                 }
             }
 
-            // Pick the earliest tag (smallest position)
             let mut found_tag: Option<(usize, Tag)> = None;
 
             for (p, t) in [
@@ -156,7 +168,6 @@ impl ChatResponseParser {
             }
 
             match (found_tag, &mut self.state) {
-                // STATE TRANSITIONS: THINKING
                 (Some((pos, Tag::Think)), State::Text) => {
                     self.state = State::Thinking;
                     if pos > 0 {
@@ -173,8 +184,6 @@ impl ChatResponseParser {
                     }
                     remaining = &remaining[pos + Tag::CloseThink.as_str().len()..];
                 }
-
-                // STATE TRANSITIONS: CALL
                 (Some((pos, Tag::ToolCall)), State::Text) => {
                     if pos > 0 {
                         self.out
@@ -187,15 +196,10 @@ impl ChatResponseParser {
                     s.push_str(&remaining[..pos]);
                     remaining = &remaining[pos + Tag::CloseToolCall.as_str().len()..];
 
-                    // Note: we use lark grammar to restrict engine generation, in this case
-                    // <tool_call> arguments could be a json schema object rather than a string.
-                    // while openai compatibile services returns <tool_call> arguments as string.
-                    // we must accept both object and string for arguments
                     if let Ok(value) = serde_json::from_str::<serde_json::Value>(s) {
                         let obj = match value.as_object() {
                             Some(obj) if obj.len() == 2 => obj,
                             _ => {
-                                // must be an object with exactly 'name' and 'arguments' fields
                                 self.out.push_back(ChatPart::Text(std::mem::take(s)));
                                 return;
                             }
@@ -204,7 +208,6 @@ impl ChatResponseParser {
                         let name = match obj.get("name").and_then(|v| v.as_str()) {
                             Some(n) => n.to_string(),
                             None => {
-                                // missing 'name' field
                                 self.out.push_back(ChatPart::Text(std::mem::take(s)));
                                 return;
                             }
@@ -214,26 +217,23 @@ impl ChatResponseParser {
                             Some(serde_json::Value::String(s)) => s.clone(),
                             Some(other) => serde_json::to_string(other).unwrap_or_default(),
                             None => {
-                                // missing 'arguments' field
                                 self.out.push_back(ChatPart::Text(std::mem::take(s)));
                                 return;
                             }
                         };
 
-                        self.out.push_back(ChatPart::Call(ToolCall {
-                            id: format!("call_{}", uuid::Uuid::new_v4().simple()),
-                            call_type: ToolType::Function,
-                            function: FunctionCall { name, arguments },
-                        }));
+                        self.out
+                            .push_back(ChatPart::Call(ChatCompletionMessageToolCall {
+                                id: format!("call_{}", uuid::Uuid::new_v4().simple()),
+                                r#type: ChatCompletionToolType::Function,
+                                function: FunctionCall { name, arguments },
+                            }));
                     } else {
-                        // not a valid json call
                         self.out.push_back(ChatPart::Text(std::mem::take(s)));
                     }
 
                     self.state = State::Text;
                 }
-
-                // STATE AS-IS
                 (Some((pos, t)), State::Text) => {
                     let p = pos + t.as_str().len();
                     self.out
@@ -251,8 +251,6 @@ impl ChatResponseParser {
                     s.push_str(&remaining[..p]);
                     remaining = &remaining[p..];
                 }
-
-                // NO TAG
                 (None, State::Text) => {
                     debug_assert!(!remaining.is_empty());
                     self.out.push_back(ChatPart::Text(remaining.to_string()));
@@ -272,7 +270,6 @@ impl ChatResponseParser {
         }
     }
 
-    /// end parsing
     pub fn end(&mut self) {
         if let State::MaybeCall(s) = std::mem::replace(&mut self.state, State::Text) {
             self.out
@@ -280,14 +277,11 @@ impl ChatResponseParser {
         }
     }
 
-    /// get next parsed char response part
     pub fn next(&mut self) -> Option<ChatPart> {
         self.out.pop_front()
     }
 }
 
-/// Reading messages from Receiver<EngineReply>, parse and call `on_item` on each parsed elements.
-/// If `timeout` elapses without a message, emits an error and stops.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn chat_response_listener<F>(
     rx: crossbeam::channel::Receiver<EngineReply>,
@@ -308,31 +302,36 @@ pub(crate) fn chat_response_listener<F>(
     loop {
         match rx.recv_timeout(timeout) {
             Ok(EngineReply::Text(t)) => {
-                let created = now_unix_s() as u64;
+                let created = now_unix_s() as u32;
 
                 if !sent_started {
-                    // Send first chunk to identify role
                     sent_started = true;
-                    let first = ChatCompletionChunk {
+                    let first = CreateChatCompletionStreamResponse {
                         id: respond_id.clone(),
                         object: "chat.completion.chunk".to_string(),
                         created,
                         model: model_name.clone(),
-                        choices: vec![StreamChoice {
-                            delta: StreamDelta {
-                                role: Some("assistant".to_string()),
-                                ..Default::default()
+                        choices: vec![ChatChoiceStream {
+                            delta: ChatCompletionStreamResponseDelta {
+                                content: None,
+                                role: Some(async_openai::types::Role::Assistant),
+                                tool_calls: None,
+                                refusal: None,
+                                function_call: None,
                             },
-                            ..Default::default()
+                            index: 0,
+                            finish_reason: None,
+                            logprobs: None,
                         }],
-                        ..Default::default()
+                        system_fingerprint: None,
+                        service_tier: None,
+                        usage: None,
                     };
                     if !on_item(ChatStreamItem::Chunk(first)) {
                         break;
                     }
                 }
 
-                // parse response into parts
                 parser.push_str(&t);
 
                 while let Some(part) = parser.next() {
@@ -343,9 +342,8 @@ pub(crate) fn chat_response_listener<F>(
                 }
             }
             Ok(EngineReply::Stop(reason, n_completion_tokens)) => {
-                let created = now_unix_s() as u64;
+                let created = now_unix_s() as u32;
 
-                // to flush unfinished <tool_call> as normal text
                 parser.end();
                 while let Some(el) = parser.next() {
                     let chunk = el.into_chunk(respond_id.clone(), model_name.clone(), created);
@@ -354,32 +352,41 @@ pub(crate) fn chat_response_listener<F>(
                     }
                 }
 
-                // the last chunk indicates finish reason and optionally usage
-                let last = ChatCompletionChunk {
+                let last = CreateChatCompletionStreamResponse {
                     id: respond_id.clone(),
                     object: "chat.completion.chunk".to_string(),
                     created,
                     model: model_name.clone(),
-                    choices: vec![StreamChoice {
+                    choices: vec![ChatChoiceStream {
                         index: 0,
-                        delta: StreamDelta::default(),
+                        delta: ChatCompletionStreamResponseDelta {
+                            content: None,
+                            role: None,
+                            tool_calls: None,
+                            refusal: None,
+                            function_call: None,
+                        },
                         finish_reason: Some(match reason {
                             StopReason::Eog | StopReason::Word(_) | StopReason::PrefillOnly => {
                                 FinishReason::Stop
                             }
                             StopReason::MaxTokens => FinishReason::Length,
                         }),
+                        logprobs: None,
                     }],
                     usage: if include_usage {
-                        Some(Usage {
-                            prompt_tokens: n_prompt_tokens as u64,
-                            completion_tokens: n_completion_tokens as u64,
-                            total_tokens: (n_prompt_tokens + n_completion_tokens) as u64,
+                        Some(CompletionUsage {
+                            prompt_tokens: n_prompt_tokens as u32,
+                            completion_tokens: n_completion_tokens as u32,
+                            total_tokens: (n_prompt_tokens + n_completion_tokens) as u32,
+                            completion_tokens_details: None,
+                            prompt_tokens_details: None,
                         })
                     } else {
                         None
                     },
-                    ..Default::default()
+                    system_fingerprint: None,
+                    service_tier: None,
                 };
                 on_item(ChatStreamItem::Chunk(last));
                 on_item(ChatStreamItem::Done);
@@ -463,8 +470,6 @@ mod tests {
     #[test]
     fn tool_call_valid_json() {
         let mut p = ChatResponseParser::new();
-        // No text before <tool_call> — the MaybeCall buffer is empty,
-        // so the JSON parses correctly as FunctionCall
         p.push_str(r#"<tool_call>{"name":"get_weather","arguments":"{}"}</tool_call>"#);
         assert_eq!(p.state, State::Text);
         assert_eq!(text_output(&p), "");
@@ -483,7 +488,6 @@ mod tests {
         let mut p = ChatResponseParser::new();
         p.push_str("bad: <tool_call>{invalid}</tool_call>");
         assert_eq!(p.state, State::Text);
-        // Invalid JSON: tags are stripped, text before + content becomes Text
         assert_eq!(text_output(&p), "bad: {invalid}");
     }
 
@@ -492,9 +496,7 @@ mod tests {
         let mut p = ChatResponseParser::new();
         p.push_str("start <tool_call>{\"key\"");
         assert_eq!(p.state, State::MaybeCall("{\"key\"".to_string()));
-        // Text before <tool_call> is emitted immediately
         assert_eq!(text_output(&p), "start ");
-        // No </tool_call> tag, so parser stays in MaybeCall
         p.push_str(": invalid}");
         assert_eq!(p.state, State::MaybeCall("{\"key\": invalid}".to_string()));
     }
@@ -502,14 +504,12 @@ mod tests {
     #[test]
     fn tool_call_multiple_chunks_valid() {
         let mut p = ChatResponseParser::new();
-        // No text before <tool_call>
         p.push_str(r#"<tool_call>{"name":"#);
         assert_eq!(p.state, State::MaybeCall(r#"{"name":"#.to_string()));
         assert_eq!(text_output(&p), "");
         p.push_str(r#""search""#);
         p.push_str(r#","arguments":"{}"}</tool_call> b"#);
         assert_eq!(p.state, State::Text);
-        // Text after </tool_call> is emitted as Text
         assert_eq!(text_output(&p), " b");
         assert_eq!(p.out.len(), 2);
         match &p.out[0] {
@@ -528,7 +528,6 @@ mod tests {
             r#"<think>reasoning</think> <tool_call>{"name":"calc","arguments":"{}"}</tool_call>"#,
         );
         assert_eq!(reasoning_output(&p), "reasoning");
-        // The space between </think> and <tool_call> is emitted as Text
         assert_eq!(text_output(&p), " ");
         assert_eq!(p.out.len(), 3);
         match &p.out[0] {
@@ -579,7 +578,6 @@ mod tests {
     #[test]
     fn tool_call_nested_think_inside() {
         let mut p = ChatResponseParser::new();
-        // No text before <tool_call>
         p.push_str(r#"<tool_call>{"name":"<think>","arguments":"{}"}</tool_call>"#);
         assert_eq!(p.out.len(), 1);
         match &p.out[0] {
