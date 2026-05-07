@@ -297,12 +297,8 @@ pub(crate) fn build_chat_prompt_tokens(
 
     // parallel_tool_calls
     tmpl_ctx.parallel_tool_calls = parallel_tool_calls;
-
     // reasoning_effort → enable_thinking
-    if let Some(effort) = reasoning_effort {
-        tmpl_ctx.enable_thinking = !matches!(effort, ReasoningEffort::Low);
-    }
-
+    tmpl_ctx.enable_thinking = reasoning_effort.is_some();
     // response_format → json_schema
     if let Some(rf) = response_format {
         match rf {

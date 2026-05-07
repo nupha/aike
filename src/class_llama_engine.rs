@@ -21,11 +21,10 @@ use zuqe::{
 
 use crate::{
     USER_CLASS_DEFS,
-    chat_response::ChatStreamItem,
+    chat_response::{ChatResponseParser, ChatStreamItem, chat_reply_listener},
     class_llama_client::{chunk_to_js, parse_chat_request, parse_messages},
     engine::{Engine, EngineReply, GrammarConfig, OutputMode, StopReason, TaskConfig},
     helpers::{build_chat_prompt_tokens, compile_tools_grammar, now_unix_s, to_lark_tool_choice},
-    serve::chat_stream_listener,
 };
 
 pub(crate) const ERR_CANCELLED: &str = "cancelled";
@@ -344,24 +343,30 @@ fn js_engine_chat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             -1
         })?;
 
+    let mut parser = ChatResponseParser::new();
+    if req.reasoning_effort.is_some() {
+        parser.push_str("<think>");
+    }
+
     if is_stream {
         // Streaming: AsyncIterableIterator
-        let (bridge_tx, bridge_rx) = crossbeam::channel::bounded::<ChatStreamItem>(8);
+        let (stream_tx, stream_rx) = crossbeam::channel::bounded::<ChatStreamItem>(8);
         std::thread::spawn(move || {
-            chat_stream_listener(
+            chat_reply_listener(
                 rx,
                 std::time::Duration::from_secs(u64::MAX),
                 &respond_id,
                 &model_name,
                 include_usage,
                 n_prompt_tokens,
-                |item| bridge_tx.send(item).is_ok(),
+                parser,
+                |item| stream_tx.send(item).is_ok(),
             );
         });
 
-        AsyncIterableIterator::create_with_receiver(
+        AsyncIterableIterator::create_with_receiver::<ChatStreamItem>(
             ctx,
-            bridge_rx,
+            stream_rx,
             |cx, msg| -> Result<Option<JSValue>, i32> {
                 match msg {
                     ChatStreamItem::Chunk(chunk) => chunk_to_js(cx, &chunk).map(Some),

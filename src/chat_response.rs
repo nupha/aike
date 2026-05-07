@@ -1,10 +1,21 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-use liter_llm::{ChatCompletionChunk, FunctionCall, ToolCall, ToolType};
+use std::collections::VecDeque;
+
+use liter_llm::{
+    ChatCompletionChunk, FinishReason, FunctionCall, StreamChoice, StreamDelta, StreamFunctionCall,
+    StreamToolCall, ToolCall, ToolType, Usage,
+};
+
+use crate::{
+    class_llama_engine::{ERR_CANCELLED, ERR_ENGINE_SHUTDOWN},
+    engine::{EngineReply, StopReason},
+    helpers::now_unix_s,
+};
 
 #[derive(Debug)]
-pub enum ChatElement {
+pub(crate) enum ChatElement {
     Text(String),
     Reasoning(String),
     Call(ToolCall),
@@ -19,7 +30,7 @@ pub(crate) enum ChatStreamItem {
 
 pub struct ChatResponseParser {
     state: State,
-    out: Vec<ChatElement>,
+    out: VecDeque<ChatElement>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -29,36 +40,36 @@ enum State {
     MaybeCall(String),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Tag {
+    Think,
+    CloseThink,
+    ToolCall,
+    CloseToolCall,
+}
+
+impl Tag {
+    pub const fn as_str(&self) -> &str {
+        match self {
+            Tag::Think => "<think>",
+            Tag::CloseThink => "</think>",
+            Tag::ToolCall => "<tool_call>",
+            Tag::CloseToolCall => "</tool_call>",
+        }
+    }
+}
+
 impl ChatResponseParser {
     pub fn new() -> Self {
         Self {
             state: State::Text,
-            out: Vec::new(),
+            out: VecDeque::new(),
         }
     }
 
     /// Push a chunk of streaming text into the parser.
     pub fn push_str(&mut self, input: &str) {
         let mut remaining = input;
-
-        #[derive(Debug, Clone, Copy, PartialEq)]
-        enum Tag {
-            Think,
-            CloseThink,
-            ToolCall,
-            CloseToolCall,
-        }
-
-        impl Tag {
-            pub const fn as_str(&self) -> &str {
-                match self {
-                    Tag::Think => "<think>",
-                    Tag::CloseThink => "</think>",
-                    Tag::ToolCall => "<tool_call>",
-                    Tag::CloseToolCall => "</tool_call>",
-                }
-            }
-        }
 
         while !remaining.is_empty() {
             // Find the earliest occurrence among all special tags
@@ -93,7 +104,7 @@ impl ChatResponseParser {
                 (Some((pos, Tag::Think)), State::Text) => {
                     self.state = State::Thinking;
                     self.out
-                        .push(ChatElement::Text(remaining[..pos].to_string()));
+                        .push_back(ChatElement::Text(remaining[..pos].to_string()));
                     remaining = &remaining[pos + Tag::Think.as_str().len()..];
                 }
                 (Some((pos, Tag::ToolCall)), State::Text) => {
@@ -103,7 +114,7 @@ impl ChatResponseParser {
                 (Some((pos, Tag::CloseThink)), State::Thinking) => {
                     self.state = State::Text;
                     self.out
-                        .push(ChatElement::Reasoning(remaining[..pos].to_string()));
+                        .push_back(ChatElement::Reasoning(remaining[..pos].to_string()));
                     remaining = &remaining[pos + "</think>".len()..];
                 }
                 (Some((pos, Tag::CloseToolCall)), State::MaybeCall(s)) => {
@@ -111,14 +122,14 @@ impl ChatResponseParser {
                     remaining = &remaining[pos + "</tool_call>".len()..];
 
                     if let Ok(fc) = serde_json::from_str::<FunctionCall>(s) {
-                        self.out.push(ChatElement::Call(ToolCall {
+                        self.out.push_back(ChatElement::Call(ToolCall {
                             id: format!("call_{}", uuid::Uuid::new_v4().simple()),
                             call_type: ToolType::Function,
                             function: fc,
                         }));
                     } else {
                         // not a valid function call
-                        self.out.push(ChatElement::Text(std::mem::take(s)));
+                        self.out.push_back(ChatElement::Text(std::mem::take(s)));
                     }
 
                     self.state = State::Text;
@@ -127,13 +138,14 @@ impl ChatResponseParser {
                 // STATE AS-IS
                 (Some((pos, t)), State::Text) => {
                     let p = pos + t.as_str().len();
-                    self.out.push(ChatElement::Text(remaining[..p].to_string()));
+                    self.out
+                        .push_back(ChatElement::Text(remaining[..p].to_string()));
                     remaining = &remaining[p..];
                 }
                 (Some((pos, t)), State::Thinking) => {
                     let p = pos + t.as_str().len();
                     self.out
-                        .push(ChatElement::Reasoning(remaining[..p].to_string()));
+                        .push_back(ChatElement::Reasoning(remaining[..p].to_string()));
                     remaining = &remaining[p..];
                 }
                 (Some((pos, t)), State::MaybeCall(s)) => {
@@ -144,11 +156,12 @@ impl ChatResponseParser {
 
                 // NO TAG
                 (None, State::Text) => {
-                    self.out.push(ChatElement::Text(remaining.to_string()));
+                    self.out.push_back(ChatElement::Text(remaining.to_string()));
                     remaining = "";
                 }
                 (None, State::Thinking) => {
-                    self.out.push(ChatElement::Reasoning(remaining.to_string()));
+                    self.out
+                        .push_back(ChatElement::Reasoning(remaining.to_string()));
                     remaining = "";
                 }
                 (None, State::MaybeCall(s)) => {
@@ -159,15 +172,19 @@ impl ChatResponseParser {
         }
     }
 
-    pub fn end(mut self) {
-        if let State::MaybeCall(s) = self.state {
-            self.out.push(ChatElement::Text(s));
+    pub fn end(&mut self) {
+        if let State::MaybeCall(s) = std::mem::replace(&mut self.state, State::Text) {
+            self.out
+                .push_back(ChatElement::Text(format!("{}{s}", Tag::ToolCall.as_str())));
         }
-        self.state = State::Text;
     }
 
-    pub fn output(&self) -> &[ChatElement] {
+    pub fn output(&self) -> &VecDeque<ChatElement> {
         &self.out
+    }
+
+    pub fn next(&mut self) -> Option<ChatElement> {
+        self.out.pop_front()
     }
 
     pub fn state(&self) -> &str {
@@ -175,6 +192,197 @@ impl ChatResponseParser {
             State::Text => "Text",
             State::Thinking => "Thinking",
             State::MaybeCall(_) => "MaybeCall",
+        }
+    }
+}
+
+/// Parse message recevied from Receiver<EngineReply> and call on_item on parsed elements
+/// If `timeout` elapses without a message, emits an error and stops.
+pub(crate) fn chat_reply_listener<F>(
+    rx: crossbeam::channel::Receiver<EngineReply>,
+    timeout: std::time::Duration,
+    respond_id: &str,
+    model_name: &str,
+    include_usage: bool,
+    n_prompt_tokens: usize,
+    mut parser: ChatResponseParser,
+    mut on_item: F,
+) where
+    F: FnMut(ChatStreamItem) -> bool,
+{
+    let respond_id = respond_id.to_string();
+    let model_name = model_name.to_string();
+    let mut sent_started = false;
+
+    loop {
+        match rx.recv_timeout(timeout) {
+            Ok(EngineReply::Text(t)) => {
+                let created = now_unix_s() as u64;
+
+                if !sent_started {
+                    // Send first chunk to identify role
+                    sent_started = true;
+                    let first = ChatCompletionChunk {
+                        id: respond_id.clone(),
+                        object: "chat.completion.chunk".to_string(),
+                        created,
+                        model: model_name.clone(),
+                        choices: vec![StreamChoice {
+                            index: 0,
+                            delta: StreamDelta {
+                                role: Some("assistant".to_string()),
+                                content: None,
+                                ..Default::default()
+                            },
+                            finish_reason: None,
+                        }],
+                        ..Default::default()
+                    };
+                    if !on_item(ChatStreamItem::Chunk(first)) {
+                        break;
+                    }
+                }
+
+                // parse response
+                parser.push_str(&t);
+
+                while let Some(el) = parser.next() {
+                    let delta = match el {
+                        ChatElement::Text(t) => StreamDelta {
+                            content: Some(t),
+                            ..Default::default()
+                        },
+                        ChatElement::Reasoning(t) => StreamDelta {
+                            content: Some(t), // should use reasoning_content
+                            ..Default::default()
+                        },
+                        ChatElement::Call(tool_call) => StreamDelta {
+                            tool_calls: Some(vec![StreamToolCall {
+                                index: 0,
+                                id: Some(tool_call.id),
+                                call_type: Some(tool_call.call_type),
+                                function: Some(StreamFunctionCall {
+                                    name: Some(tool_call.function.name),
+                                    arguments: Some(tool_call.function.arguments),
+                                }),
+                            }]),
+                            ..Default::default()
+                        },
+                    };
+
+                    let chunk = ChatCompletionChunk {
+                        id: respond_id.clone(),
+                        object: "chat.completion.chunk".to_string(),
+                        created,
+                        model: model_name.clone(),
+                        choices: vec![StreamChoice {
+                            index: 0,
+                            delta,
+                            finish_reason: None,
+                        }],
+                        ..Default::default()
+                    };
+                    if !on_item(ChatStreamItem::Chunk(chunk)) {
+                        break;
+                    }
+                }
+
+                // let chunk = ChatCompletionChunk {
+                //     id: respond_id.clone(),
+                //     object: "chat.completion.chunk".to_string(),
+                //     created,
+                //     model: model_name.clone(),
+                //     choices: vec![StreamChoice {
+                //         index: 0,
+                //         delta: StreamDelta {
+                //             role: None,
+                //             content: Some(t),
+                //             ..Default::default()
+                //         },
+                //         finish_reason: None,
+                //     }],
+                //     ..Default::default()
+                // };
+                // if !on_item(ChatStreamItem::Chunk(chunk)) {
+                //     break;
+                // }
+            }
+            Ok(EngineReply::Stop(reason, n_completion_tokens)) => {
+                // to flush unfinished <tool_call> as normal text
+                parser.end();
+                if let Some(el) = parser.next() {
+                    if let ChatElement::Text(s) = el {
+                        let delta = StreamDelta {
+                            content: Some(s),
+                            ..Default::default()
+                        };
+                        let chunk = ChatCompletionChunk {
+                            id: respond_id.clone(),
+                            object: "chat.completion.chunk".to_string(),
+                            created: now_unix_s() as u64,
+                            model: model_name.clone(),
+                            choices: vec![StreamChoice {
+                                index: 0,
+                                delta,
+                                finish_reason: None,
+                            }],
+                            ..Default::default()
+                        };
+                        if !on_item(ChatStreamItem::Chunk(chunk)) {
+                            break;
+                        }
+                    } else {
+                        unreachable!();
+                    }
+                }
+
+                // the last chunk indicates finish reason and optionally usage
+                let last = ChatCompletionChunk {
+                    id: respond_id.clone(),
+                    object: "chat.completion.chunk".to_string(),
+                    created: now_unix_s() as u64,
+                    model: model_name.clone(),
+                    choices: vec![StreamChoice {
+                        index: 0,
+                        delta: StreamDelta::default(),
+                        finish_reason: Some(match reason {
+                            StopReason::Eog | StopReason::Word(_) | StopReason::PrefillOnly => {
+                                FinishReason::Stop
+                            }
+                            StopReason::MaxTokens => FinishReason::Length,
+                        }),
+                    }],
+                    usage: if include_usage {
+                        Some(Usage {
+                            prompt_tokens: n_prompt_tokens as u64,
+                            completion_tokens: n_completion_tokens as u64,
+                            total_tokens: (n_prompt_tokens + n_completion_tokens) as u64,
+                        })
+                    } else {
+                        None
+                    },
+                    ..Default::default()
+                };
+                on_item(ChatStreamItem::Chunk(last));
+                on_item(ChatStreamItem::Done);
+                break;
+            }
+            Ok(EngineReply::Cancelled) => {
+                on_item(ChatStreamItem::Error(ERR_CANCELLED.to_string()));
+                break;
+            }
+            Ok(EngineReply::Error(e)) => {
+                on_item(ChatStreamItem::Error(e));
+                break;
+            }
+            Ok(EngineReply::Shutdown) => {
+                on_item(ChatStreamItem::Error(ERR_ENGINE_SHUTDOWN.to_string()));
+                break;
+            }
+            Err(_) => {
+                on_item(ChatStreamItem::Error("stream timed out".to_string()));
+                break;
+            }
         }
     }
 }
