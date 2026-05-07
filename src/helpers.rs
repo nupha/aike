@@ -373,12 +373,23 @@ pub(crate) fn compile_tools_grammar(
 
     let tool_alternatives = tool_alternatives.join(" | ");
 
+    // code_block rule: triple backticks with arbitrary content.
+    // Must appear before tool_xxx in the start rule so that when the model
+    // emits "```", the parser enters the code_block branch instead of
+    // treating it as free text. Inside code blocks, any text (including
+    // "<tool_call>") is allowed without grammar constraints.
+    const CODE_BLOCK_RULE: &str = "\
+code_block: \"```\" CODE_CONTENT \"```\"\n\
+CODE_CONTENT: /(.|\\n)*?/\n\
+";
+
     match tool_choice {
         LarkToolChoice::Required => {
             // force tool call, no free text
             format!(
-                "start: ({tool_alternatives})+\n\
+                "start: (code_block | {tool_alternatives})+\n\
                  TEXT: /(.|\\n)*/\n\
+                 {CODE_BLOCK_RULE}\
                  {rules}"
             )
         }
@@ -386,10 +397,13 @@ pub(crate) fn compile_tools_grammar(
             // allow free text or tool calls, interleaved.
             // Uses lazy TEXT so that when the model emits "<tool_call>",
             // TEXT stops matching and the parser switches to tool_xxx.
+            // code_block is placed before tool_xxx so that "```" is
+            // captured as a code block rather than free text.
             format!(
-                "start: ({tool_alternatives})* f_end\n\
+                "start: (code_block | {tool_alternatives})* f_end\n\
                  f_end: TEXT\n\
                  TEXT: /(.|\\n)*/\n\
+                 {CODE_BLOCK_RULE}\
                  {rules}"
             )
         }
@@ -398,6 +412,75 @@ pub(crate) fn compile_tools_grammar(
         }
     }
 }
+
+// pub(crate) fn compile_tools_grammar(
+//     tools: &[ChatCompletionTool],
+//     tool_choice: LarkToolChoice,
+// ) -> String {
+//     debug_assert!(!tools.is_empty());
+//     debug_assert!(tool_choice != LarkToolChoice::None);
+
+//     let mut rules = String::new();
+//     let mut tool_alternatives = Vec::new();
+
+//     for tool in tools {
+//         let name = &tool.function.name;
+//         let params = tool
+//             .function
+//             .parameters
+//             .as_ref()
+//             .cloned()
+//             .unwrap_or(serde_json::json!({"type": "object", "properties": {}}));
+
+//         // Wrap the original parameters schema inside a {"name": const, "arguments": {...}} envelope.
+//         // This matches the standard Qwen/Hermes tool call JSON format:
+//         //   {"name": "function_name", "arguments": {...}}
+//         let wrapped = serde_json::json!({
+//             "type": "object",
+//             "properties": {
+//                 "name": {"const": name},
+//                 "arguments": params
+//             },
+//             "required": ["name", "arguments"]
+//         });
+//         rules.push_str(&format!("json_body_{name}: %json {wrapped}\n"));
+
+//         // Use lazy TEXT so that when the model emits "<tool_call>",
+//         // TEXT stops matching and the parser switches to the tool path.
+//         rules.push_str(&format!("tool_{name}_hd[lazy]: TEXT \"<tool_call>\"\n"));
+//         rules.push_str(&format!(
+//             "tool_{name}: tool_{name}_hd json_body_{name} \"</tool_call>\"\n"
+//         ));
+//         tool_alternatives.push(format!("tool_{name}"));
+//     }
+
+//     let tool_alternatives = tool_alternatives.join(" | ");
+
+//     match tool_choice {
+//         LarkToolChoice::Required => {
+//             // force tool call, no free text
+//             format!(
+//                 "start: ({tool_alternatives})+\n\
+//                  TEXT: /(.|\\n)*/\n\
+//                  {rules}"
+//             )
+//         }
+//         LarkToolChoice::Auto => {
+//             // allow free text or tool calls, interleaved.
+//             // Uses lazy TEXT so that when the model emits "<tool_call>",
+//             // TEXT stops matching and the parser switches to tool_xxx.
+//             format!(
+//                 "start: ({tool_alternatives})* f_end\n\
+//                  f_end: TEXT\n\
+//                  TEXT: /(.|\\n)*/\n\
+//                  {rules}"
+//             )
+//         }
+//         LarkToolChoice::None => {
+//             unreachable!();
+//         }
+//     }
+// }
 
 pub(crate) fn now_unix_s() -> i64 {
     std::time::SystemTime::now()
