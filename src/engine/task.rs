@@ -38,7 +38,7 @@ impl TaskConfig {
             task_id: NEXT_TASK_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             stop_words: Vec::new(),
             max_tokens: 0,
-            temperature: 1.0,
+            temperature: 0.75,
             top_p: 1.0,
             logits_for_all_tokens: false,
             grammar: None,

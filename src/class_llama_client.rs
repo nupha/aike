@@ -262,36 +262,37 @@ pub(crate) fn parse_reasoning_effort(
     }
 }
 
-/// Parsed common chat options shared between Engine.chat() and Client.chat().
-pub(crate) struct ChatOptions {
-    pub stream: bool,
-    pub temperature: Option<f64>,
-    pub max_tokens: Option<i64>,
-    pub top_p: Option<f64>,
-    pub stop: Option<Vec<String>>,
-    pub tools: Option<Vec<ChatCompletionTool>>,
-    pub tool_choice: Option<ToolChoice>,
-    pub parallel_tool_calls: Option<bool>,
-    pub response_format: Option<ResponseFormat>,
-    pub reasoning_effort: Option<ReasoningEffort>,
-}
-
-/// Parse common chat options from a JS object.
-/// Extracts the subset of fields shared by Engine.chat() and Client.chat().
-pub(crate) fn parse_chat_options(
+/// Parse common chat options from a JS object into a ChatCompletionRequest.
+/// All parsed fields are set on the returned request; caller fills in messages and
+/// any engine-specific fields (idSlot, cachePrompt, includeUsage) separately.
+pub(crate) fn parse_chat_request(
     ctx: &mut ScopedContext,
     opts: &Object,
-) -> Result<ChatOptions, i32> {
+) -> Result<ChatCompletionRequest, i32> {
+    let mut model = String::new();
     let mut stream = false;
     let mut temperature: Option<f64> = None;
-    let mut max_tokens: Option<i64> = None;
+    let mut max_tokens: Option<u64> = None;
     let mut top_p: Option<f64> = None;
-    let mut stop: Option<Vec<String>> = None;
+    let mut n: Option<u32> = None;
+    let mut stop: Option<StopSequence> = None;
+    let mut presence_penalty: Option<f64> = None;
+    let mut frequency_penalty: Option<f64> = None;
+    let mut logit_bias: Option<std::collections::BTreeMap<String, f64>> = None;
+    let mut user: Option<String> = None;
     let mut tools: Option<Vec<ChatCompletionTool>> = None;
     let mut tool_choice: Option<ToolChoice> = None;
     let mut parallel_tool_calls: Option<bool> = None;
     let mut response_format: Option<ResponseFormat> = None;
+    let mut stream_options: Option<StreamOptions> = None;
+    let mut seed: Option<i64> = None;
     let mut reasoning_effort: Option<ReasoningEffort> = None;
+
+    // model
+    let v = opts.get_property_str(ctx, "model")?;
+    if let Some(s) = v.as_string() {
+        model = s.content().encode_utf8(false).to_string();
+    }
 
     // stream
     let v = opts.get_property_str(ctx, "stream")?;
@@ -308,7 +309,7 @@ pub(crate) fn parse_chat_options(
     // maxTokens
     let v = opts.get_property_str(ctx, "maxTokens")?;
     if !v.is_undefined() {
-        max_tokens = Some(v.to_number(ctx)?.to_i32() as i64);
+        max_tokens = Some(v.to_number(ctx)?.to_f64() as u64);
     }
 
     // topP
@@ -317,11 +318,19 @@ pub(crate) fn parse_chat_options(
         top_p = Some(v.to_number(ctx)?.to_f64());
     }
 
+    // n
+    let v = opts.get_property_str(ctx, "n")?;
+    if !v.is_undefined() {
+        n = Some(v.to_number(ctx)?.to_f64() as u32);
+    }
+
     // stop
     let v = opts.get_property_str(ctx, "stop")?;
     if !v.is_undefined() {
         if let Some(s) = v.as_string() {
-            stop = Some(vec![s.content().encode_utf8(false).to_string()]);
+            stop = Some(StopSequence::Single(
+                s.content().encode_utf8(false).to_string(),
+            ));
         } else if let Some(arr) = v.as_object_Array() {
             let mut words = Vec::with_capacity(arr.payload().len());
             for item in arr.payload().values() {
@@ -329,101 +338,12 @@ pub(crate) fn parse_chat_options(
                     words.push(s.content().encode_utf8(false).to_string());
                 }
             }
-            stop = Some(words);
+            stop = if words.len() == 1 {
+                Some(StopSequence::Single(words.into_iter().next().unwrap()))
+            } else {
+                Some(StopSequence::Multiple(words))
+            };
         }
-    }
-
-    // tools
-    let v = opts.get_property_str(ctx, "tools")?;
-    if !v.is_undefined() {
-        tools = Some(parse_tools(ctx, &v)?);
-    }
-
-    // toolChoice
-    let v = opts.get_property_str(ctx, "toolChoice")?;
-    if !v.is_undefined() {
-        tool_choice = Some(parse_tool_choice(ctx, &v)?);
-    }
-
-    // parallelToolCalls
-    let v = opts.get_property_str(ctx, "parallelToolCalls")?;
-    if !v.is_undefined() {
-        parallel_tool_calls = Some(v.to_bool()?);
-    }
-
-    // responseFormat
-    let v = opts.get_property_str(ctx, "responseFormat")?;
-    if !v.is_undefined() {
-        response_format = Some(parse_response_format(ctx, &v)?);
-    }
-
-    // reasoningEffort
-    let v = opts.get_property_str(ctx, "reasoningEffort")?;
-    if !v.is_undefined() {
-        reasoning_effort = Some(parse_reasoning_effort(ctx, &v)?);
-    }
-
-    Ok(ChatOptions {
-        stream,
-        temperature,
-        max_tokens,
-        top_p,
-        stop,
-        tools,
-        tool_choice,
-        parallel_tool_calls,
-        response_format,
-        reasoning_effort,
-    })
-}
-
-enum ChatReply {
-    Chunk(ChatCompletionChunk),
-    Done,
-    Error(String),
-}
-
-/// chat({messages, model?, stream?, temperature?, maxTokens?, topP?, stop?,
-///       n?, presencePenalty?, frequencyPenalty?, logitBias?, user?,
-///       tools?, toolChoice?, parallelToolCalls?, responseFormat?,
-///       streamOptions?, seed?, reasoningEffort?})
-fn js_client_chat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let this = cc.this();
-    let client = get_client_arc(ctx, &this)?;
-
-    // Single object argument
-    let opts = cc.arg(0).as_object().copied().ok_or_else(|| {
-        ctx.throw_type_error("chat() requires an options object");
-        -1
-    })?;
-
-    // Parse messages (required)
-    let messages_val = opts.get_property_str(ctx, "messages")?;
-    let messages = parse_messages(ctx, &messages_val)?;
-
-    // Parse common chat options
-    let common = parse_chat_options(ctx, &opts)?;
-
-    // Client-specific options
-    let mut model = String::from("default");
-    let mut n: Option<u32> = None;
-    let mut presence_penalty: Option<f64> = None;
-    let mut frequency_penalty: Option<f64> = None;
-    let mut logit_bias: Option<std::collections::BTreeMap<String, f64>> = None;
-    let mut user: Option<String> = None;
-    let mut stream_options: Option<StreamOptions> = None;
-    let mut seed: Option<i64> = None;
-
-    // model
-    let v = opts.get_property_str(ctx, "model")?;
-    if let Some(s) = v.as_string() {
-        model = s.content().encode_utf8(false).to_string();
-    }
-
-    // n
-    let v = opts.get_property_str(ctx, "n")?;
-    if !v.is_undefined() {
-        n = Some(v.to_number(ctx)?.to_f64() as u32);
     }
 
     // presencePenalty
@@ -457,6 +377,30 @@ fn js_client_chat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         user = Some(s.content().encode_utf8(false).to_string());
     }
 
+    // tools
+    let v = opts.get_property_str(ctx, "tools")?;
+    if !v.is_undefined() {
+        tools = Some(parse_tools(ctx, &v)?);
+    }
+
+    // toolChoice
+    let v = opts.get_property_str(ctx, "toolChoice")?;
+    if !v.is_undefined() {
+        tool_choice = Some(parse_tool_choice(ctx, &v)?);
+    }
+
+    // parallelToolCalls
+    let v = opts.get_property_str(ctx, "parallelToolCalls")?;
+    if !v.is_undefined() {
+        parallel_tool_calls = Some(v.to_bool()?);
+    }
+
+    // responseFormat
+    let v = opts.get_property_str(ctx, "responseFormat")?;
+    if !v.is_undefined() {
+        response_format = Some(parse_response_format(ctx, &v)?);
+    }
+
     // streamOptions
     let v = opts.get_property_str(ctx, "streamOptions")?;
     if !v.is_undefined() {
@@ -476,26 +420,16 @@ fn js_client_chat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         seed = Some(v.to_number(ctx)?.to_f64() as i64);
     }
 
-    // Map common options to client types
-    let temperature = common.temperature;
-    let max_tokens = common.max_tokens.map(|v| v as u64);
-    let top_p = common.top_p;
-    let stop = common.stop.map(|words| {
-        if words.len() == 1 {
-            StopSequence::Single(words.into_iter().next().unwrap())
-        } else {
-            StopSequence::Multiple(words)
-        }
-    });
-    let tools = common.tools;
-    let tool_choice = common.tool_choice;
-    let parallel_tool_calls = common.parallel_tool_calls;
-    let response_format = common.response_format;
-    let reasoning_effort = common.reasoning_effort;
+    // reasoningEffort
+    let v = opts.get_property_str(ctx, "reasoningEffort")?;
+    if !v.is_undefined() {
+        reasoning_effort = Some(parse_reasoning_effort(ctx, &v)?);
+    }
 
-    let req = ChatCompletionRequest {
+    Ok(ChatCompletionRequest {
         model,
-        messages,
+        messages: Vec::new(),
+
         temperature,
         max_tokens,
         top_p,
@@ -512,10 +446,41 @@ fn js_client_chat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         stream_options,
         seed,
         reasoning_effort,
-        ..Default::default()
-    };
+        stream: Some(stream),
 
-    if common.stream {
+        ..Default::default()
+    })
+}
+
+enum ChatReply {
+    Chunk(ChatCompletionChunk),
+    Done,
+    Error(String),
+}
+
+/// chat({messages, model?, stream?, temperature?, maxTokens?, topP?, stop?,
+///       n?, presencePenalty?, frequencyPenalty?, logitBias?, user?,
+///       tools?, toolChoice?, parallelToolCalls?, responseFormat?,
+///       streamOptions?, seed?, reasoningEffort?})
+fn js_client_chat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let this = cc.this();
+    let client = get_client_arc(ctx, &this)?;
+
+    // Single object argument
+    let opts = cc.arg(0).as_object().copied().ok_or_else(|| {
+        ctx.throw_type_error("chat() requires an options object");
+        -1
+    })?;
+
+    // Parse messages (required)
+    let messages_val = opts.get_property_str(ctx, "messages")?;
+    let messages = parse_messages(ctx, &messages_val)?;
+
+    // Parse all chat options into a ChatCompletionRequest
+    let mut req = parse_chat_request(ctx, &opts)?;
+    req.messages = messages;
+
+    if req.stream.unwrap_or(false) {
         // Streaming: AsyncIterableIterator
         let (tx, rx) = crossbeam::channel::bounded::<ChatReply>(1);
 

@@ -6,8 +6,8 @@ use std::{
 
 use linkme::distributed_slice;
 use liter_llm::{
-    ChatCompletionChunk, ChatCompletionResponse, Choice, FinishReason, FunctionCall, StreamChoice,
-    StreamDelta, ToolCall, ToolType,
+    ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, Choice, FinishReason,
+    FunctionCall, StopSequence, StreamChoice, StreamDelta, ToolCall, ToolType,
     types::common::{AssistantMessage, Usage},
 };
 use llama_cpp_ffi::ToolChoice as LarkToolChoice;
@@ -21,7 +21,7 @@ use zuqe::{
 
 use crate::{
     USER_CLASS_DEFS,
-    class_llama_client::{ChatOptions, chunk_to_js, parse_chat_options, parse_messages},
+    class_llama_client::{chunk_to_js, parse_chat_request, parse_messages},
     class_llama_context::parse_tokens,
     engine::{Engine, EngineReply, GrammarConfig, OutputMode, StopReason, TaskConfig},
     helpers::{build_chat_prompt_tokens, compile_tools_grammar, now_unix_s, to_lark_tool_choice},
@@ -442,18 +442,7 @@ fn js_engine_chat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut include_usage = false;
     let mut max_tokens = engine.lock().unwrap().default_max_tokens();
 
-    let mut opts = ChatOptions {
-        stream: false,
-        temperature: None,
-        max_tokens: None,
-        top_p: None,
-        stop: None,
-        tools: None,
-        tool_choice: None,
-        parallel_tool_calls: None,
-        response_format: None,
-        reasoning_effort: None,
-    };
+    let mut req = ChatCompletionRequest::default();
     if cc.length() > 1 {
         let val = cc.arg(1);
         if !val.is_undefined() && !val.is_null() {
@@ -462,7 +451,7 @@ fn js_engine_chat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 -1
             })?;
 
-            opts = parse_chat_options(ctx, &opts_obj)?;
+            req = parse_chat_request(ctx, &opts_obj)?;
 
             // maxTokens (engine-specific: has default, validates >= 0)
             let v = opts_obj.get_property_str(ctx, "maxTokens")?;
@@ -502,11 +491,11 @@ fn js_engine_chat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let prompt_tokens = build_chat_prompt_tokens(
         engine.lock().unwrap().model(),
         &messages,
-        opts.tools.as_deref(),
-        opts.tool_choice.as_ref(),
-        opts.parallel_tool_calls,
-        opts.reasoning_effort.as_ref(),
-        opts.response_format.as_ref(),
+        req.tools.as_deref(),
+        req.tool_choice.as_ref(),
+        req.parallel_tool_calls,
+        req.reasoning_effort.as_ref(),
+        req.response_format.as_ref(),
     )
     .map_err(|e| {
         ctx.throw_internal_error(&format!("build prompt tokens failed: {e}"));
@@ -515,19 +504,26 @@ fn js_engine_chat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     // Build TaskConfig
     let mut task_config = TaskConfig::new()
-        .stop_words(opts.stop.unwrap_or_default())
         .max_tokens(max_tokens)
-        .temperature(opts.temperature.unwrap_or(0.75) as f32)
-        .top_p(opts.top_p.unwrap_or(1.0) as f32)
-        .output_mode(if opts.stream {
+        .temperature(req.temperature.unwrap_or(0.75) as f32)
+        .top_p(req.top_p.unwrap_or(1.0) as f32)
+        .output_mode(if req.stream.unwrap_or(false) {
             OutputMode::Continuous
         } else {
             OutputMode::OneShot
         });
 
+    // stop words
+    if let Some(sw) = req.stop {
+        task_config = task_config.stop_words(match sw {
+            StopSequence::Single(w) => vec![w],
+            StopSequence::Multiple(w) => w,
+        });
+    }
+
     // tools → grammar
-    if let Some(tools) = opts.tools.as_ref().filter(|t| !t.is_empty()) {
-        let tc = opts
+    if let Some(tools) = req.tools.as_ref().filter(|t| !t.is_empty()) {
+        let tc = req
             .tool_choice
             .as_ref()
             .map(to_lark_tool_choice)
