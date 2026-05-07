@@ -420,7 +420,7 @@ mod tests {
     use super::*;
 
     fn text_output(p: &ChatResponseParser) -> String {
-        p.output()
+        p.out
             .iter()
             .filter_map(|e| match e {
                 ChatPart::Text(s) => Some(s.as_str()),
@@ -430,7 +430,7 @@ mod tests {
     }
 
     fn reasoning_output(p: &ChatResponseParser) -> String {
-        p.output()
+        p.out
             .iter()
             .filter_map(|e| match e {
                 ChatPart::Think(s) => Some(s.as_str()),
@@ -477,8 +477,8 @@ mod tests {
         p.push_str(r#"<tool_call>{"name":"get_weather","arguments":"{}"}</tool_call>"#);
         assert_eq!(p.state(), "Text");
         assert_eq!(text_output(&p), "");
-        assert_eq!(p.output().len(), 1);
-        match &p.output()[0] {
+        assert_eq!(p.out.len(), 1);
+        match &p.out[0] {
             ChatPart::Call(fc) => {
                 assert_eq!(fc.function.name, "get_weather");
                 assert_eq!(fc.function.arguments, "{}");
@@ -501,7 +501,8 @@ mod tests {
         let mut p = ChatResponseParser::new();
         p.push_str("start <tool_call>{\"key\"");
         assert_eq!(p.state(), "MaybeCall");
-        assert_eq!(text_output(&p), "");
+        // Text before <tool_call> is emitted immediately
+        assert_eq!(text_output(&p), "start ");
         // No </tool_call> tag, so parser stays in MaybeCall
         p.push_str(": invalid}");
         assert_eq!(p.state(), "MaybeCall");
@@ -519,8 +520,8 @@ mod tests {
         assert_eq!(p.state(), "Text");
         // Text after </tool_call> is emitted as Text
         assert_eq!(text_output(&p), " b");
-        assert_eq!(p.output().len(), 2);
-        match &p.output()[0] {
+        assert_eq!(p.out.len(), 2);
+        match &p.out[0] {
             ChatPart::Call(fc) => {
                 assert_eq!(fc.function.name, "search");
                 assert_eq!(fc.function.arguments, "{}");
@@ -536,20 +537,18 @@ mod tests {
             r#"<think>reasoning</think> <tool_call>{"name":"calc","arguments":"{}"}</tool_call>"#,
         );
         assert_eq!(reasoning_output(&p), "reasoning");
-        // Text before <tool_call> (" ") is buffered in MaybeCall and prepended
-        // to the JSON content, but serde_json ignores leading whitespace,
-        // so the JSON still parses as a valid FunctionCall
-        assert_eq!(text_output(&p), "");
-        assert_eq!(p.output().len(), 3);
-        match &p.output()[0] {
-            ChatPart::Text(s) => assert_eq!(s, ""),
+        // The space between </think> and <tool_call> is emitted as Text
+        assert_eq!(text_output(&p), " ");
+        assert_eq!(p.out.len(), 3);
+        match &p.out[0] {
+            ChatPart::Think(s) => assert_eq!(s, "reasoning"),
+            _ => panic!("expected Think element"),
+        }
+        match &p.out[1] {
+            ChatPart::Text(s) => assert_eq!(s, " "),
             _ => panic!("expected Text element"),
         }
-        match &p.output()[1] {
-            ChatPart::Think(s) => assert_eq!(s, "reasoning"),
-            _ => panic!("expected Reasoning element"),
-        }
-        match &p.output()[2] {
+        match &p.out[2] {
             ChatPart::Call(fc) => {
                 assert_eq!(fc.function.name, "calc");
                 assert_eq!(fc.function.arguments, "{}");
@@ -569,7 +568,7 @@ mod tests {
     fn empty_input() {
         let mut p = ChatResponseParser::new();
         p.push_str("");
-        assert!(p.output().is_empty());
+        assert!(p.out.is_empty());
     }
 
     #[test]
@@ -591,8 +590,8 @@ mod tests {
         let mut p = ChatResponseParser::new();
         // No text before <tool_call>
         p.push_str(r#"<tool_call>{"name":"<think>","arguments":"{}"}</tool_call>"#);
-        assert_eq!(p.output().len(), 1);
-        match &p.output()[0] {
+        assert_eq!(p.out.len(), 1);
+        match &p.out[0] {
             ChatPart::Call(fc) => {
                 assert_eq!(fc.function.name, "<think>");
             }
