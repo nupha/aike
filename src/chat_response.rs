@@ -109,9 +109,9 @@ impl ChatResponseParser {
         }
     }
 
-    /// Push a chunk of streaming text into the parser.
-    pub fn push_str(&mut self, input: &str) {
-        let mut remaining = input;
+    /// Feed streaming text into the parser.
+    pub fn push_str(&mut self, chunk: &str) {
+        let mut remaining = chunk;
 
         while !remaining.is_empty() {
             // Find the earliest occurrence among all special tags
@@ -272,6 +272,7 @@ impl ChatResponseParser {
         }
     }
 
+    /// end parsing
     pub fn end(&mut self) {
         if let State::MaybeCall(s) = std::mem::replace(&mut self.state, State::Text) {
             self.out
@@ -279,20 +280,9 @@ impl ChatResponseParser {
         }
     }
 
-    pub fn output(&self) -> &VecDeque<ChatPart> {
-        &self.out
-    }
-
+    /// get next parsed char response part
     pub fn next(&mut self) -> Option<ChatPart> {
         self.out.pop_front()
-    }
-
-    pub fn state(&self) -> &str {
-        match self.state {
-            State::Text => "Text",
-            State::Thinking => "Thinking",
-            State::MaybeCall(_) => "MaybeCall",
-        }
     }
 }
 
@@ -450,21 +440,22 @@ mod tests {
     fn think_tag_basic() {
         let mut p = ChatResponseParser::new();
         p.push_str("Hello <think>hmm</think> world");
+        assert_eq!(p.state, State::Text);
         assert_eq!(text_output(&p), "Hello  world");
         assert_eq!(reasoning_output(&p), "hmm");
-        assert_eq!(p.state(), "Text");
+        assert_eq!(p.state, State::Text);
     }
 
     #[test]
     fn think_tag_multiple_chunks() {
         let mut p = ChatResponseParser::new();
         p.push_str("Hello <think>");
-        assert_eq!(p.state(), "Thinking");
+        assert_eq!(p.state, State::Thinking);
         assert_eq!(text_output(&p), "Hello ");
         p.push_str("let me think");
         p.push_str(" carefully");
         p.push_str("</think> done");
-        assert_eq!(p.state(), "Text");
+        assert_eq!(p.state, State::Text);
         assert_eq!(reasoning_output(&p), "let me think carefully");
         assert_eq!(text_output(&p), "Hello  done");
     }
@@ -475,7 +466,7 @@ mod tests {
         // No text before <tool_call> — the MaybeCall buffer is empty,
         // so the JSON parses correctly as FunctionCall
         p.push_str(r#"<tool_call>{"name":"get_weather","arguments":"{}"}</tool_call>"#);
-        assert_eq!(p.state(), "Text");
+        assert_eq!(p.state, State::Text);
         assert_eq!(text_output(&p), "");
         assert_eq!(p.out.len(), 1);
         match &p.out[0] {
@@ -491,7 +482,7 @@ mod tests {
     fn tool_call_invalid_json_fallback() {
         let mut p = ChatResponseParser::new();
         p.push_str("bad: <tool_call>{invalid}</tool_call>");
-        assert_eq!(p.state(), "Text");
+        assert_eq!(p.state, State::Text);
         // Invalid JSON: tags are stripped, text before + content becomes Text
         assert_eq!(text_output(&p), "bad: {invalid}");
     }
@@ -500,12 +491,12 @@ mod tests {
     fn tool_call_partial_then_invalid() {
         let mut p = ChatResponseParser::new();
         p.push_str("start <tool_call>{\"key\"");
-        assert_eq!(p.state(), "MaybeCall");
+        assert_eq!(p.state, State::MaybeCall("{\"key\"".to_string()));
         // Text before <tool_call> is emitted immediately
         assert_eq!(text_output(&p), "start ");
         // No </tool_call> tag, so parser stays in MaybeCall
         p.push_str(": invalid}");
-        assert_eq!(p.state(), "MaybeCall");
+        assert_eq!(p.state, State::MaybeCall("{\"key\": invalid}".to_string()));
     }
 
     #[test]
@@ -513,11 +504,11 @@ mod tests {
         let mut p = ChatResponseParser::new();
         // No text before <tool_call>
         p.push_str(r#"<tool_call>{"name":"#);
-        assert_eq!(p.state(), "MaybeCall");
+        assert_eq!(p.state, State::MaybeCall(r#"{"name":"#.to_string()));
         assert_eq!(text_output(&p), "");
         p.push_str(r#""search""#);
         p.push_str(r#","arguments":"{}"}</tool_call> b"#);
-        assert_eq!(p.state(), "Text");
+        assert_eq!(p.state, State::Text);
         // Text after </tool_call> is emitted as Text
         assert_eq!(text_output(&p), " b");
         assert_eq!(p.out.len(), 2);
