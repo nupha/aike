@@ -75,11 +75,11 @@ struct ModelInfo {
 #[derive(Clone)]
 #[repr(transparent)]
 pub(crate) struct AppState {
-    pub engine: Arc<Mutex<Engine>>,
+    engine: Arc<Mutex<Engine>>,
 }
 
 /// Start http server with Engine (in current thread), blocks until shutdown signal.
-pub(crate) async fn http_serve(
+pub async fn http_serve(
     engine: Arc<Mutex<Engine>>,
     host: &str,
     port: u16,
