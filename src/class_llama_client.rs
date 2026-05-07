@@ -6,15 +6,15 @@ use std::{cell::Cell, ffi::c_void, sync::Arc, time::Duration};
 use async_openai::{
     Client,
     config::OpenAIConfig,
-    types::{
+    types::chat::{
         ChatCompletionRequestAssistantMessage, ChatCompletionRequestAssistantMessageContent,
         ChatCompletionRequestMessage, ChatCompletionRequestSystemMessage,
         ChatCompletionRequestSystemMessageContent, ChatCompletionRequestToolMessage,
         ChatCompletionRequestToolMessageContent, ChatCompletionRequestUserMessage,
         ChatCompletionRequestUserMessageContent, ChatCompletionStreamOptions, ChatCompletionTool,
-        ChatCompletionToolChoiceOption, CreateChatCompletionRequestArgs,
+        ChatCompletionToolChoiceOption, ChatCompletionTools, CreateChatCompletionRequestArgs,
         CreateChatCompletionResponse, CreateChatCompletionStreamResponse, ReasoningEffort,
-        ResponseFormat,
+        ResponseFormat, ToolChoiceOptions,
     },
 };
 use linkme::distributed_slice;
@@ -187,11 +187,11 @@ pub(crate) fn parse_messages(
     Ok(messages)
 }
 
-/// Parse JS tools array → Vec<ChatCompletionTool>
+/// Parse JS tools array → Vec<ChatCompletionTools>
 pub(crate) fn parse_tools(
     ctx: &mut ScopedContext,
     val: &JSValue,
-) -> Result<Vec<ChatCompletionTool>, i32> {
+) -> Result<Vec<ChatCompletionTools>, i32> {
     let arr = val.as_object_Array().copied().ok_or_else(|| {
         ctx.throw_type_error("tools must be an array");
         -1
@@ -207,12 +207,11 @@ pub(crate) fn parse_tools(
         tools_json.push(json_val);
     }
 
-    serde_json::from_value::<Vec<ChatCompletionTool>>(serde_json::Value::Array(tools_json)).map_err(
-        |e| {
+    serde_json::from_value::<Vec<ChatCompletionTools>>(serde_json::Value::Array(tools_json))
+        .map_err(|e| {
             ctx.throw_type_error(&format!("invalid tool definition: {e}"));
             -1
-        },
-    )
+        })
 }
 
 /// Parse JS tool_choice → ChatCompletionToolChoiceOption
@@ -223,9 +222,15 @@ pub(crate) fn parse_tool_choice(
     if let Some(s) = val.as_string() {
         let mode = s.content().encode_utf8(false);
         match mode.as_ref() {
-            "auto" => Ok(ChatCompletionToolChoiceOption::Auto),
-            "required" => Ok(ChatCompletionToolChoiceOption::Required),
-            "none" => Ok(ChatCompletionToolChoiceOption::None),
+            "auto" => Ok(ChatCompletionToolChoiceOption::Mode(
+                ToolChoiceOptions::Auto,
+            )),
+            "required" => Ok(ChatCompletionToolChoiceOption::Mode(
+                ToolChoiceOptions::Required,
+            )),
+            "none" => Ok(ChatCompletionToolChoiceOption::Mode(
+                ToolChoiceOptions::None,
+            )),
             _ => {
                 ctx.throw_type_error(&format!("invalid tool_choice: {mode}"));
                 Err(-1)
@@ -290,9 +295,9 @@ pub(crate) struct ParsedChatOptions {
     pub stop: Option<Vec<String>>,
     pub presence_penalty: Option<f32>,
     pub frequency_penalty: Option<f32>,
-    pub logit_bias: Option<std::collections::HashMap<String, serde_json::Value>>,
+    pub logit_bias: Option<std::collections::HashMap<String, i8>>,
     pub user: Option<String>,
-    pub tools: Option<Vec<ChatCompletionTool>>,
+    pub tools: Option<Vec<ChatCompletionTools>>,
     pub tool_choice: Option<ChatCompletionToolChoiceOption>,
     pub parallel_tool_calls: Option<bool>,
     pub response_format: Option<ResponseFormat>,
@@ -313,9 +318,9 @@ pub(crate) fn parse_chat_options(
     let mut stop: Option<Vec<String>> = None;
     let mut presence_penalty: Option<f32> = None;
     let mut frequency_penalty: Option<f32> = None;
-    let mut logit_bias: Option<std::collections::HashMap<String, serde_json::Value>> = None;
+    let mut logit_bias: Option<std::collections::HashMap<String, i8>> = None;
     let mut user: Option<String> = None;
-    let mut tools: Option<Vec<ChatCompletionTool>> = None;
+    let mut tools: Option<Vec<ChatCompletionTools>> = None;
     let mut tool_choice: Option<ChatCompletionToolChoiceOption> = None;
     let mut parallel_tool_calls: Option<bool> = None;
     let mut response_format: Option<ResponseFormat> = None;

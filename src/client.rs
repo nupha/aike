@@ -26,7 +26,7 @@ mod tests {
     use async_openai::{
         Client,
         config::OpenAIConfig,
-        types::{
+        types::chat::{
             ChatCompletionRequestAssistantMessage, ChatCompletionRequestAssistantMessageContent,
             ChatCompletionRequestMessage, ChatCompletionRequestSystemMessage,
             ChatCompletionRequestSystemMessageContent, ChatCompletionRequestUserMessage,
@@ -83,13 +83,12 @@ mod tests {
             .as_ref()
             .expect("tool_calls should be parsed");
         assert_eq!(tc.len(), 1);
-        assert_eq!(tc[0].id, "call_abc");
-        assert_eq!(
-            tc[0].r#type,
-            async_openai::types::ChatCompletionToolType::Function
-        );
-        assert_eq!(tc[0].function.name, "get_weather");
-        assert_eq!(tc[0].function.arguments, r#"{"city":"Beijing"}"#);
+        let tool_call = match &tc[0] {
+            async_openai::types::chat::ChatCompletionMessageToolCalls::Function(tc) => tc,
+        };
+        assert_eq!(tool_call.id, "call_abc");
+        assert_eq!(tool_call.function.name, "get_weather");
+        assert_eq!(tool_call.function.arguments, r#"{"city":"Beijing"}"#);
 
         // content is None when the model only calls tools
         assert!(choice.message.content.is_none());

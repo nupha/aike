@@ -4,10 +4,9 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use async_openai::types::{
-    ChatChoice, ChatCompletionMessageToolCall, ChatCompletionResponseMessage,
-    ChatCompletionToolType, CompletionUsage, CreateChatCompletionResponse,
-    CreateChatCompletionStreamResponse, FinishReason, FunctionCall,
+use async_openai::types::chat::{
+    ChatChoice, ChatCompletionMessageToolCall, ChatCompletionResponseMessage, CompletionUsage,
+    CreateChatCompletionResponse, CreateChatCompletionStreamResponse, FinishReason, FunctionCall,
 };
 use linkme::distributed_slice;
 use llama_cpp_ffi::ToolChoice as LarkToolChoice;
@@ -140,7 +139,14 @@ pub(super) fn collect_chat_response(
                 };
 
                 // Detect tool calls in the generated text (e.g. <tool_call>...</tool_call>)
-                let tool_calls = parse_tool_calls_from_text(&full_text);
+                let tool_calls = parse_tool_calls_from_text(&full_text).map(|calls| {
+                    calls
+                        .into_iter()
+                        .map(|tc| {
+                            async_openai::types::chat::ChatCompletionMessageToolCalls::Function(tc)
+                        })
+                        .collect::<Vec<_>>()
+                });
 
                 // Build response
                 let resp = CreateChatCompletionResponse {
@@ -153,10 +159,11 @@ pub(super) fn collect_chat_response(
                         message: ChatCompletionResponseMessage {
                             content: Some(full_text),
                             tool_calls,
-                            role: async_openai::types::Role::Assistant,
+                            role: async_openai::types::chat::Role::Assistant,
                             refusal: None,
                             function_call: None,
                             audio: None,
+                            annotations: None,
                         },
                         finish_reason: Some(finish_reason),
                         logprobs: None,
@@ -210,7 +217,6 @@ fn parse_tool_calls_from_text(text: &str) -> Option<Vec<ChatCompletionMessageToo
 
                 calls.push(ChatCompletionMessageToolCall {
                     id: format!("call_{}", uuid::Uuid::new_v4().simple()),
-                    r#type: ChatCompletionToolType::Function,
                     function: FunctionCall { name, arguments },
                 });
             }

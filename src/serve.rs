@@ -3,10 +3,9 @@ use std::{
     time::Duration,
 };
 
-use async_openai::types::{
-    ChatChoice, ChatCompletionMessageToolCall, ChatCompletionResponseMessage,
-    ChatCompletionToolType, CompletionUsage, CreateChatCompletionRequest,
-    CreateChatCompletionResponse, FinishReason, FunctionCall, Role,
+use async_openai::types::chat::{
+    ChatChoice, ChatCompletionMessageToolCall, ChatCompletionResponseMessage, CompletionUsage,
+    CreateChatCompletionRequest, CreateChatCompletionResponse, FinishReason, FunctionCall, Role,
 };
 use axum::{
     Json, Router,
@@ -162,8 +161,20 @@ async fn handle_chat_completions(
     let include_usage = req
         .stream_options
         .as_ref()
-        .map(|o| o.include_usage)
+        .and_then(|o| o.include_usage)
         .unwrap_or(false);
+
+    let tools_inner: Option<Vec<async_openai::types::chat::ChatCompletionTool>> =
+        tools.as_ref().map(|t| {
+            t.iter()
+                .filter_map(|tc| match tc {
+                    async_openai::types::chat::ChatCompletionTools::Function(tool) => {
+                        Some(tool.clone())
+                    }
+                    _ => None,
+                })
+                .collect()
+        });
 
     let prompt_tokens = match build_chat_prompt_tokens(
         state.engine.lock().unwrap().model(),
@@ -196,8 +207,8 @@ async fn handle_chat_completions(
 
     if let Some(stop_words) = stop.as_ref() {
         let words: Vec<String> = match stop_words {
-            async_openai::types::Stop::String(s) => vec![s.clone()],
-            async_openai::types::Stop::StringArray(arr) => arr.clone(),
+            async_openai::types::chat::StopConfiguration::String(s) => vec![s.clone()],
+            async_openai::types::chat::StopConfiguration::StringArray(arr) => arr.clone(),
         };
         if !words.is_empty() {
             task_config = task_config.stop_words(words);
@@ -348,7 +359,14 @@ fn collect_chat_response(
                     }
                 };
 
-                let tool_calls = parse_tool_calls_from_text(&full_text);
+                let tool_calls = parse_tool_calls_from_text(&full_text).map(|calls| {
+                    calls
+                        .into_iter()
+                        .map(|tc| {
+                            async_openai::types::chat::ChatCompletionMessageToolCalls::Function(tc)
+                        })
+                        .collect::<Vec<_>>()
+                });
 
                 let resp = CreateChatCompletionResponse {
                     id: respond_id.to_string(),
@@ -364,6 +382,7 @@ fn collect_chat_response(
                             refusal: None,
                             function_call: None,
                             audio: None,
+                            annotations: None,
                         },
                         finish_reason: Some(finish_reason),
                         logprobs: None,
@@ -414,7 +433,6 @@ fn parse_tool_calls_from_text(text: &str) -> Option<Vec<ChatCompletionMessageToo
 
                 calls.push(ChatCompletionMessageToolCall {
                     id: format!("call_{}", Uuid::new_v4().simple()),
-                    r#type: ChatCompletionToolType::Function,
                     function: FunctionCall { name, arguments },
                 });
             }

@@ -1,13 +1,14 @@
 use std::ffi::CString;
 
-use async_openai::types::{
+use async_openai::types::chat::{
     ChatCompletionRequestAssistantMessage, ChatCompletionRequestAssistantMessageContent,
     ChatCompletionRequestDeveloperMessage, ChatCompletionRequestDeveloperMessageContent,
     ChatCompletionRequestFunctionMessage, ChatCompletionRequestMessage,
     ChatCompletionRequestSystemMessage, ChatCompletionRequestSystemMessageContent,
     ChatCompletionRequestToolMessage, ChatCompletionRequestToolMessageContent,
     ChatCompletionRequestUserMessage, ChatCompletionRequestUserMessageContent, ChatCompletionTool,
-    ChatCompletionToolChoiceOption, ReasoningEffort, ResponseFormat,
+    ChatCompletionToolChoiceOption, ChatCompletionTools, ReasoningEffort, ResponseFormat,
+    ToolChoiceOptions,
 };
 use llama_cpp_ffi::{LlamaModel, ToolChoice as LarkToolChoice};
 use minijinja::Environment;
@@ -127,20 +128,26 @@ pub(crate) fn render_chat_template(tmpl: &str, ctx: &TemplateContext) -> Result<
 /// Convert ToolChoiceOption enum to string for jinja template context.
 pub(crate) fn tool_choice_to_string(tc: &ChatCompletionToolChoiceOption) -> String {
     match tc {
-        ChatCompletionToolChoiceOption::Auto => "auto".to_string(),
-        ChatCompletionToolChoiceOption::Required => "required".to_string(),
-        ChatCompletionToolChoiceOption::None => "none".to_string(),
-        ChatCompletionToolChoiceOption::Named(s) => s.function.name.clone(),
+        ChatCompletionToolChoiceOption::Mode(m) => match m {
+            ToolChoiceOptions::Auto => "auto".to_string(),
+            ToolChoiceOptions::Required => "required".to_string(),
+            ToolChoiceOptions::None => "none".to_string(),
+        },
+        ChatCompletionToolChoiceOption::Function(s) => s.function.name.clone(),
+        _ => "auto".to_string(),
     }
 }
 
 /// Map async-openai ToolChoiceOption to LarkToolChoice for grammar controller.
 pub(crate) fn to_lark_tool_choice(tc: &ChatCompletionToolChoiceOption) -> LarkToolChoice {
     match tc {
-        ChatCompletionToolChoiceOption::Auto => LarkToolChoice::Auto,
-        ChatCompletionToolChoiceOption::Required => LarkToolChoice::Required,
-        ChatCompletionToolChoiceOption::None => LarkToolChoice::None,
-        ChatCompletionToolChoiceOption::Named(_) => LarkToolChoice::Required,
+        ChatCompletionToolChoiceOption::Mode(m) => match m {
+            ToolChoiceOptions::Auto => LarkToolChoice::Auto,
+            ToolChoiceOptions::Required => LarkToolChoice::Required,
+            ToolChoiceOptions::None => LarkToolChoice::None,
+        },
+        ChatCompletionToolChoiceOption::Function(_) => LarkToolChoice::Required,
+        _ => LarkToolChoice::Auto,
     }
 }
 
@@ -203,7 +210,7 @@ pub(crate) fn tokenize_prompt(model: &LlamaModel, prompt: &str) -> Result<Vec<To
 pub(crate) fn build_chat_prompt_tokens(
     model: &LlamaModel,
     messages: &[ChatCompletionRequestMessage],
-    tools: Option<&[ChatCompletionTool]>,
+    tools: Option<&[ChatCompletionTools]>,
     tool_choice: Option<&ChatCompletionToolChoiceOption>,
     parallel_tool_calls: Option<bool>,
     reasoning_effort: Option<&ReasoningEffort>,
@@ -269,7 +276,7 @@ pub(crate) fn build_chat_prompt_tokens(
 
 /// Compile tool definitions into a Lark grammar string for llguidance.
 pub(crate) fn compile_tools_grammar(
-    tools: &[ChatCompletionTool],
+    tools: &[ChatCompletionTools],
     tool_choice: LarkToolChoice,
 ) -> String {
     debug_assert!(!tools.is_empty());
@@ -279,6 +286,10 @@ pub(crate) fn compile_tools_grammar(
     let mut tool_alternatives = Vec::new();
 
     for tool in tools {
+        let tool = match tool {
+            ChatCompletionTools::Function(t) => t,
+            _ => continue,
+        };
         let name = &tool.function.name;
         let params = tool
             .function

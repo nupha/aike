@@ -1,9 +1,9 @@
 use std::collections::VecDeque;
 
-use async_openai::types::{
+use async_openai::types::chat::{
     ChatChoiceStream, ChatCompletionMessageToolCall, ChatCompletionMessageToolCallChunk,
-    ChatCompletionStreamResponseDelta, ChatCompletionToolType, CompletionUsage,
-    CreateChatCompletionStreamResponse, FinishReason, FunctionCall, FunctionCallStream,
+    ChatCompletionStreamResponseDelta, CompletionUsage, CreateChatCompletionStreamResponse,
+    FinishReason, FunctionCall, FunctionCallStream, FunctionType,
 };
 
 use crate::{
@@ -42,7 +42,7 @@ impl ChatPart {
                 tool_calls: Some(vec![ChatCompletionMessageToolCallChunk {
                     index: 0,
                     id: Some(tool_call.id),
-                    r#type: Some(tool_call.r#type),
+                    r#type: Some(FunctionType::Function),
                     function: Some(FunctionCallStream {
                         name: Some(tool_call.function.name),
                         arguments: Some(tool_call.function.arguments),
@@ -225,7 +225,6 @@ impl ChatResponseParser {
                         self.out
                             .push_back(ChatPart::Call(ChatCompletionMessageToolCall {
                                 id: format!("call_{}", uuid::Uuid::new_v4().simple()),
-                                r#type: ChatCompletionToolType::Function,
                                 function: FunctionCall { name, arguments },
                             }));
                     } else {
@@ -314,7 +313,7 @@ pub(crate) fn chat_response_listener<F>(
                         choices: vec![ChatChoiceStream {
                             delta: ChatCompletionStreamResponseDelta {
                                 content: None,
-                                role: Some(async_openai::types::Role::Assistant),
+                                role: Some(async_openai::types::chat::Role::Assistant),
                                 tool_calls: None,
                                 refusal: None,
                                 function_call: None,
