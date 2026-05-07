@@ -316,8 +316,8 @@ fn js_engine_chat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     // Build task config
     let mut task_config = TaskConfig::new()
         .max_tokens(max_tokens)
-        .temperature(parsed.temperature.unwrap_or(0.75) as f32)
-        .top_p(parsed.top_p.unwrap_or(1.0) as f32)
+        .temperature(parsed.temperature.unwrap_or(0.75))
+        .top_p(parsed.top_p.unwrap_or(1.0))
         .output_mode(if is_stream {
             OutputMode::Continuous
         } else {

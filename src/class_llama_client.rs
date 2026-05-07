@@ -21,7 +21,10 @@ use linkme::distributed_slice;
 use zuqe::{
     CallContext, ClassCtorDef, ClassDef, ClassID, FieldDef, JSResult, JSValue, Object, Runtime,
     ScopedContext,
-    builtins::{iterator::AsyncIterableIterator, promise::Promise},
+    builtins::{
+        iterator::AsyncIterableIterator,
+        promise::{Promise, PromiseResultSlot},
+    },
 };
 
 use crate::{
@@ -171,7 +174,6 @@ pub(crate) fn parse_messages(
                 ChatCompletionRequestMessage::Tool(ChatCompletionRequestToolMessage {
                     content: ChatCompletionRequestToolMessageContent::Text(content),
                     tool_call_id: tc_id,
-                    ..Default::default()
                 })
             }
             _ => {
@@ -474,10 +476,6 @@ enum ChatReply {
     Error(String),
 }
 
-/// chat({messages, model?, temperature?, maxTokens?, topP?, stop?,
-///       n?, presencePenalty?, frequencyPenalty?, logitBias?, user?,
-///       tools?, toolChoice?, parallelToolCalls?, responseFormat?,
-///       streamOptions?, seed?, reasoningEffort?})
 fn js_client_chat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let client_arc = get_client_arc(ctx, &this)?;
@@ -566,37 +564,52 @@ fn js_client_chat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     if is_stream {
         // Streaming: AsyncIterableIterator
-        let (tx, rx) = crossbeam::channel::bounded::<ChatReply>(1);
+        let result_slot = PromiseResultSlot::<ChatReply>::new();
+        let slot = result_slot.clone();
 
         tokio::spawn(async move {
+            async fn commit_slot(slot: &PromiseResultSlot<ChatReply>, mut msg: ChatReply) {
+                loop {
+                    match slot.commit(msg) {
+                        Ok(()) => return,
+                        Err(ret) => {
+                            // slot is full, yield and do commit later
+                            msg = ret;
+                            tokio::task::yield_now().await;
+                        }
+                    }
+                }
+            }
+
             match client.chat().create_stream(req).await {
                 Ok(stream) => {
                     use futures_util::StreamExt;
+
                     let mut pin = std::pin::pin!(stream);
                     while let Some(result) = pin.next().await {
                         match result {
                             Ok(chunk) => {
-                                if tx.send(ChatReply::Chunk(chunk)).is_err() {
-                                    break;
-                                }
+                                commit_slot(&slot, ChatReply::Chunk(chunk)).await;
                             }
                             Err(e) => {
-                                let _ = tx.send(ChatReply::Error(e.to_string()));
+                                commit_slot(&slot, ChatReply::Error(e.to_string())).await;
                                 break;
                             }
                         }
                     }
-                    let _ = tx.send(ChatReply::Done);
+
+                    // stop iterate
+                    commit_slot(&slot, ChatReply::Done).await;
                 }
                 Err(e) => {
-                    let _ = tx.send(ChatReply::Error(e.to_string()));
+                    commit_slot(&slot, ChatReply::Error(e.to_string())).await;
                 }
             }
         });
 
-        AsyncIterableIterator::create_with_receiver(
+        AsyncIterableIterator::create_with_result_slot(
             ctx,
-            rx,
+            result_slot,
             |cx, msg| -> Result<Option<JSValue>, i32> {
                 match msg {
                     ChatReply::Chunk(chunk) => chunk_to_js(cx, &chunk).map(Some),
@@ -611,24 +624,24 @@ fn js_client_chat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         .map(JSValue::from)
     } else {
         // Non-streaming: Promise
-        let (tx, rx) =
-            crossbeam::channel::bounded::<Result<CreateChatCompletionResponse, String>>(1);
+        let result_slot = PromiseResultSlot::<Result<CreateChatCompletionResponse, String>>::new();
+        let promise =
+            Promise::create_with_result_slot(ctx, result_slot.clone(), |cx, result| -> JSResult {
+                match result {
+                    Ok(resp) => response_to_js(cx, &resp),
+                    Err(e) => {
+                        cx.throw_internal_error(&e);
+                        Err(-1)
+                    }
+                }
+            })?;
 
         tokio::spawn(async move {
             let result = client.chat().create(req).await.map_err(|e| e.to_string());
-            let _ = tx.send(result);
+            let _ = result_slot.commit(result);
         });
 
-        Promise::create_with_receiver(ctx, rx, |cx, result| -> JSResult {
-            match result {
-                Ok(resp) => response_to_js(cx, &resp),
-                Err(e) => {
-                    cx.throw_internal_error(&e);
-                    Err(-1)
-                }
-            }
-        })
-        .map(JSValue::from)
+        Ok(promise.into())
     }
 }
 
