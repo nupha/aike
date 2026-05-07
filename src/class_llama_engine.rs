@@ -114,9 +114,10 @@ pub(super) fn get_engine_arc(
 
 const MAGIC_GENERATE: i32 = 0;
 const MAGIC_GENERATE_STREAM: i32 = 1;
-pub(super) const MAGIC_CHAT: i32 = 2;
+pub(super) const MAGIC_CHAT_ONCE: i32 = 2;
 pub(super) const MAGIC_CHAT_STREAM: i32 = 3;
 
+#[deprecated(note = "should be removed")]
 fn js_engine_generate(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let engine = get_engine(ctx, &this)?;
@@ -707,19 +708,19 @@ fn js_engine_dispose(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 }
 
 const CLASS_ENGINE_PROTO: &[FieldDef] = &[
-    FieldDef::CALL("chat", 2, js_engine_chat, MAGIC_CHAT as i16),
-    FieldDef::CALL("chatStream", 2, js_engine_chat, MAGIC_CHAT_STREAM as i16),
-    FieldDef::CALL("generate", 1, js_engine_generate, MAGIC_GENERATE as i16),
-    FieldDef::CALL(
-        "generateStream",
-        1,
-        js_engine_generate,
-        MAGIC_GENERATE_STREAM as i16,
-    ),
+    FieldDef::CALL("chat", 2, js_engine_chat, MAGIC_CHAT_STREAM as i16),
+    FieldDef::CALL("chatOnce", 2, js_engine_chat, MAGIC_CHAT_ONCE as i16),
     FieldDef::CALL("httpServe", 1, js_engine_httpServe, 0),
     FieldDef::CALL("stopServe", 0, js_engine_stopServe, 0),
     FieldDef::GETSET("isServing", Some(js_engine_isServing), None, 0),
     FieldDef::CALL("dispose", 0, js_engine_dispose, 0),
+    // FieldDef::CALL("generate", 1, js_engine_generate, MAGIC_GENERATE as i16),
+    // FieldDef::CALL(
+    //     "generateStream",
+    //     1,
+    //     js_engine_generate,
+    //     MAGIC_GENERATE_STREAM as i16,
+    // ),
 ];
 
 pub struct JSLlamaEngine;

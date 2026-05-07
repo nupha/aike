@@ -20,7 +20,7 @@ use zuqe::{
 
 use crate::{
     USER_CLASS_DEFS,
-    class_llama_engine::{MAGIC_CHAT, MAGIC_CHAT_STREAM},
+    class_llama_engine::{MAGIC_CHAT_ONCE, MAGIC_CHAT_STREAM},
 };
 
 /// Constructor: new OpenAI({apiKey, baseUrl, model?, timeout?})
@@ -579,8 +579,8 @@ pub(crate) fn chunk_to_js(ctx: &mut ScopedContext, chunk: &ChatCompletionChunk) 
 }
 
 const CLASS_CLIENT_PROTO: &[FieldDef] = &[
-    FieldDef::CALL("chat", 1, js_client_chat, MAGIC_CHAT as i16),
-    FieldDef::CALL("chatStream", 1, js_client_chat, MAGIC_CHAT_STREAM as i16),
+    FieldDef::CALL("chat", 1, js_client_chat, MAGIC_CHAT_STREAM as i16),
+    FieldDef::CALL("chatOnce", 1, js_client_chat, MAGIC_CHAT_ONCE as i16),
     FieldDef::CALL("dispose", 0, js_client_dispose, 0),
 ];
 
