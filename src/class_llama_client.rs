@@ -18,7 +18,10 @@ use zuqe::{
     builtins::{iterator::AsyncIterableIterator, promise::Promise},
 };
 
-use crate::USER_CLASS_DEFS;
+use crate::{
+    USER_CLASS_DEFS,
+    class_llama_engine::{MAGIC_CHAT, MAGIC_CHAT_STREAM},
+};
 
 /// Constructor: new OpenAI({apiKey, baseUrl, model?, timeout?})
 fn js_client_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -270,7 +273,6 @@ pub(crate) fn parse_chat_request(
     opts: &Object,
 ) -> Result<ChatCompletionRequest, i32> {
     let mut model = String::new();
-    let mut stream = false;
     let mut temperature: Option<f64> = None;
     let mut max_tokens: Option<u64> = None;
     let mut top_p: Option<f64> = None;
@@ -292,12 +294,6 @@ pub(crate) fn parse_chat_request(
     let v = opts.get_property_str(ctx, "model")?;
     if let Some(s) = v.as_string() {
         model = s.content().encode_utf8(false).to_string();
-    }
-
-    // stream
-    let v = opts.get_property_str(ctx, "stream")?;
-    if !v.is_undefined() {
-        stream = v.to_bool()?;
     }
 
     // temperature
@@ -446,7 +442,6 @@ pub(crate) fn parse_chat_request(
         stream_options,
         seed,
         reasoning_effort,
-        stream: Some(stream),
 
         ..Default::default()
     })
@@ -458,13 +453,14 @@ enum ChatReply {
     Error(String),
 }
 
-/// chat({messages, model?, stream?, temperature?, maxTokens?, topP?, stop?,
+/// chat({messages, model?, temperature?, maxTokens?, topP?, stop?,
 ///       n?, presencePenalty?, frequencyPenalty?, logitBias?, user?,
 ///       tools?, toolChoice?, parallelToolCalls?, responseFormat?,
 ///       streamOptions?, seed?, reasoningEffort?})
 fn js_client_chat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let client = get_client_arc(ctx, &this)?;
+    let is_stream = cc.magic() == MAGIC_CHAT_STREAM;
 
     // Single object argument
     let opts = cc.arg(0).as_object().copied().ok_or_else(|| {
@@ -480,7 +476,7 @@ fn js_client_chat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut req = parse_chat_request(ctx, &opts)?;
     req.messages = messages;
 
-    if req.stream.unwrap_or(false) {
+    if is_stream {
         // Streaming: AsyncIterableIterator
         let (tx, rx) = crossbeam::channel::bounded::<ChatReply>(1);
 
@@ -583,7 +579,8 @@ pub(crate) fn chunk_to_js(ctx: &mut ScopedContext, chunk: &ChatCompletionChunk) 
 }
 
 const CLASS_CLIENT_PROTO: &[FieldDef] = &[
-    FieldDef::CALL("chat", 1, js_client_chat, 0),
+    FieldDef::CALL("chat", 1, js_client_chat, MAGIC_CHAT as i16),
+    FieldDef::CALL("chatStream", 1, js_client_chat, MAGIC_CHAT_STREAM as i16),
     FieldDef::CALL("dispose", 0, js_client_dispose, 0),
 ];
 

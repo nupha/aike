@@ -114,8 +114,8 @@ pub(super) fn get_engine_arc(
 
 const MAGIC_GENERATE: i32 = 0;
 const MAGIC_GENERATE_STREAM: i32 = 1;
-const MAGIC_CHAT: i32 = 2;
-const MAGIC_CHAT_STREAM: i32 = 3;
+pub(super) const MAGIC_CHAT: i32 = 2;
+pub(super) const MAGIC_CHAT_STREAM: i32 = 3;
 
 fn js_engine_generate(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
@@ -502,12 +502,14 @@ fn js_engine_chat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         -1
     })?;
 
+    let is_stream = cc.magic() == MAGIC_CHAT_STREAM;
+
     // Build TaskConfig
     let mut task_config = TaskConfig::new()
         .max_tokens(max_tokens)
         .temperature(req.temperature.unwrap_or(0.75) as f32)
         .top_p(req.top_p.unwrap_or(1.0) as f32)
-        .output_mode(if req.stream.unwrap_or(false) {
+        .output_mode(if is_stream {
             OutputMode::Continuous
         } else {
             OutputMode::OneShot
@@ -540,7 +542,6 @@ fn js_engine_chat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let n_prompt_tokens = prompt_tokens.len();
     let respond_id = format!("chatcmpl-{}", uuid::Uuid::new_v4().simple());
     let model_name = engine.lock().unwrap().model_name().to_string();
-    let mode = cc.magic();
 
     let rx = engine
         .lock()
@@ -551,32 +552,7 @@ fn js_engine_chat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             -1
         })?;
 
-    if mode == MAGIC_CHAT {
-        // Non-streaming: Promise
-        let result_slot = PromiseResultSlot::<Result<serde_json::Value, String>>::new();
-        let promise =
-            Promise::create_with_result_slot(ctx, result_slot.clone(), |cx, res| match res {
-                Ok(val) => JSValue::from_serde_json(cx, &val),
-                Err(e) => {
-                    cx.throw_internal_error(&e);
-                    Err(-1)
-                }
-            })?;
-
-        std::thread::spawn(move || {
-            let result = collect_chat_response(
-                rx,
-                std::time::Duration::from_secs(u64::MAX),
-                &respond_id,
-                &model_name,
-                include_usage,
-                n_prompt_tokens,
-            );
-            let _ = result_slot.commit(result);
-        });
-
-        Ok(promise.into())
-    } else {
+    if is_stream {
         // Streaming: AsyncIterableIterator
         let (bridge_tx, bridge_rx) = crossbeam::channel::bounded::<ChatStreamItem>(8);
         std::thread::spawn(move || {
@@ -606,6 +582,31 @@ fn js_engine_chat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             },
         )
         .map(JSValue::from)
+    } else {
+        // Non-streaming: Promise
+        let result_slot = PromiseResultSlot::<Result<serde_json::Value, String>>::new();
+        let promise =
+            Promise::create_with_result_slot(ctx, result_slot.clone(), |cx, res| match res {
+                Ok(val) => JSValue::from_serde_json(cx, &val),
+                Err(e) => {
+                    cx.throw_internal_error(&e);
+                    Err(-1)
+                }
+            })?;
+
+        std::thread::spawn(move || {
+            let result = collect_chat_response(
+                rx,
+                std::time::Duration::from_secs(u64::MAX),
+                &respond_id,
+                &model_name,
+                include_usage,
+                n_prompt_tokens,
+            );
+            let _ = result_slot.commit(result);
+        });
+
+        Ok(promise.into())
     }
 }
 
