@@ -13,7 +13,10 @@ use axum::{
     routing::{get, post},
 };
 use futures_util::StreamExt;
-use liter_llm::{ChatCompletionRequest, types::common::StopSequence};
+use liter_llm::{
+    ChatCompletionChunk, ChatCompletionRequest, FinishReason, StreamChoice, StreamDelta, Usage,
+    types::common::StopSequence,
+};
 use llama_cpp_ffi::{LlamaModel, ToolChoice};
 use serde::Serialize;
 use serde_json::json;
@@ -22,11 +25,9 @@ use tower_http::cors::CorsLayer;
 use uuid::Uuid;
 
 use crate::{
-    class_llama_engine::{
-        ChatStreamItem, ERR_CANCELLED, ERR_ENGINE_SHUTDOWN, bridge_chat_stream,
-        collect_chat_response,
-    },
-    engine::{Engine, GrammarConfig, OutputMode, TaskConfig, Token},
+    chat_response::ChatStreamItem,
+    class_llama_engine::{ERR_CANCELLED, ERR_ENGINE_SHUTDOWN, collect_chat_response},
+    engine::{Engine, EngineReply, GrammarConfig, OutputMode, StopReason, TaskConfig, Token},
     helpers::{build_chat_prompt_tokens, compile_tools_grammar, now_unix_s, to_lark_tool_choice},
 };
 
@@ -283,7 +284,7 @@ async fn handle_chat_completions(
         let (tx, rx_tokio) = tokio::sync::mpsc::unbounded_channel::<String>();
         let model_id = state.engine.lock().unwrap().model_name().to_string();
         tokio::task::spawn_blocking(move || {
-            bridge_chat_stream(
+            chat_stream_listener(
                 engine_rx,
                 std::time::Duration::from_secs(300),
                 &respond_id,
@@ -370,4 +371,121 @@ fn build_chat_prompt_tokens_from_request(
         req.reasoning_effort.as_ref(),
         req.response_format.as_ref(),
     )
+}
+
+/// Bridge crossbeam Receiver<EngineReply> for streaming.
+/// Emits role delta as first chunk, content deltas for Text, and finish chunk for Stop.
+/// Calls `on_item` for each ChatStreamItem produced.
+/// If `timeout` elapses without a message, emits an error and stops.
+pub(crate) fn chat_stream_listener<F>(
+    rx: crossbeam::channel::Receiver<EngineReply>,
+    timeout: std::time::Duration,
+    respond_id: &str,
+    model_name: &str,
+    include_usage: bool,
+    n_prompt_tokens: usize,
+    mut on_item: F,
+) where
+    F: FnMut(ChatStreamItem) -> bool,
+{
+    let respond_id = respond_id.to_string();
+    let model_name = model_name.to_string();
+    let mut sent_started = false;
+
+    loop {
+        match rx.recv_timeout(timeout) {
+            Ok(EngineReply::Text(t)) => {
+                let created = now_unix_s() as u64;
+                if !sent_started {
+                    // First chunk: emit role delta
+                    sent_started = true;
+                    let first = ChatCompletionChunk {
+                        id: respond_id.clone(),
+                        object: "chat.completion.chunk".to_string(),
+                        created,
+                        model: model_name.clone(),
+                        choices: vec![StreamChoice {
+                            index: 0,
+                            delta: StreamDelta {
+                                role: Some("assistant".to_string()),
+                                content: None,
+                                ..Default::default()
+                            },
+                            finish_reason: None,
+                        }],
+                        ..Default::default()
+                    };
+                    if !on_item(ChatStreamItem::Chunk(first)) {
+                        break;
+                    }
+                }
+                let chunk = ChatCompletionChunk {
+                    id: respond_id.clone(),
+                    object: "chat.completion.chunk".to_string(),
+                    created,
+                    model: model_name.clone(),
+                    choices: vec![StreamChoice {
+                        index: 0,
+                        delta: StreamDelta {
+                            role: None,
+                            content: Some(t),
+                            ..Default::default()
+                        },
+                        finish_reason: None,
+                    }],
+                    ..Default::default()
+                };
+                if !on_item(ChatStreamItem::Chunk(chunk)) {
+                    break;
+                }
+            }
+            Ok(EngineReply::Stop(reason, n_completion_tokens)) => {
+                let last = ChatCompletionChunk {
+                    id: respond_id.clone(),
+                    object: "chat.completion.chunk".to_string(),
+                    created: now_unix_s() as u64,
+                    model: model_name.clone(),
+                    choices: vec![StreamChoice {
+                        index: 0,
+                        delta: StreamDelta::default(),
+                        finish_reason: Some(match reason {
+                            StopReason::Eog | StopReason::Word(_) | StopReason::PrefillOnly => {
+                                FinishReason::Stop
+                            }
+                            StopReason::MaxTokens => FinishReason::Length,
+                        }),
+                    }],
+                    usage: if include_usage {
+                        Some(Usage {
+                            prompt_tokens: n_prompt_tokens as u64,
+                            completion_tokens: n_completion_tokens as u64,
+                            total_tokens: (n_prompt_tokens + n_completion_tokens) as u64,
+                        })
+                    } else {
+                        None
+                    },
+                    ..Default::default()
+                };
+                on_item(ChatStreamItem::Chunk(last));
+                on_item(ChatStreamItem::Done);
+                break;
+            }
+            Ok(EngineReply::Cancelled) => {
+                on_item(ChatStreamItem::Error(ERR_CANCELLED.to_string()));
+                break;
+            }
+            Ok(EngineReply::Error(e)) => {
+                on_item(ChatStreamItem::Error(e));
+                break;
+            }
+            Ok(EngineReply::Shutdown) => {
+                on_item(ChatStreamItem::Error(ERR_ENGINE_SHUTDOWN.to_string()));
+                break;
+            }
+            Err(_) => {
+                on_item(ChatStreamItem::Error("stream timed out".to_string()));
+                break;
+            }
+        }
+    }
 }

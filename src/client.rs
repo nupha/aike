@@ -534,13 +534,14 @@ mod tests {
             .expect("stream_collect request failed");
         let mut output = String::new();
         let mut stream = std::pin::pin!(stream);
+
         use futures_util::StreamExt;
         while let Some(chunk_result) = stream.next().await {
             let chunk = chunk_result.expect("stream chunk error");
-            if let Some(choice) = chunk.choices.first() {
-                if let Some(ref content) = choice.delta.content {
-                    output.push_str(content);
-                }
+            if let Some(choice) = chunk.choices.first()
+                && let Some(ref content) = choice.delta.content
+            {
+                output.push_str(content);
             }
         }
         let text = output;

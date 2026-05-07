@@ -1,13 +1,20 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-use liter_llm::{FunctionCall, ToolCall, ToolType};
+use liter_llm::{ChatCompletionChunk, FunctionCall, ToolCall, ToolType};
 
 #[derive(Debug)]
 pub enum ChatElement {
     Text(String),
     Reasoning(String),
     Call(ToolCall),
+}
+
+// TODO: combine ChatStreamItem with ChatElement
+pub(crate) enum ChatStreamItem {
+    Chunk(ChatCompletionChunk),
+    Done,
+    Error(String),
 }
 
 pub struct ChatResponseParser {
