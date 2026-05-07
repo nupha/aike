@@ -22,7 +22,7 @@ use tower_http::cors::CorsLayer;
 use uuid::Uuid;
 
 use crate::{
-    chat_response::{ChatResponseParser, ChatStreamItem, chat_reply_listener},
+    chat_response::{ChatResponseParser, ChatStreamItem, chat_response_listener},
     class_llama_engine::{ERR_CANCELLED, ERR_ENGINE_SHUTDOWN, collect_chat_response},
     engine::{Engine, GrammarConfig, OutputMode, TaskConfig, Token},
     helpers::{build_chat_prompt_tokens, compile_tools_grammar, now_unix_s, to_lark_tool_choice},
@@ -282,7 +282,7 @@ async fn handle_chat_completions(
         let model_name = state.engine.lock().unwrap().model_name().to_string();
 
         tokio::task::spawn_blocking(move || {
-            chat_reply_listener(
+            chat_response_listener(
                 engine_rx,
                 std::time::Duration::from_secs(300),
                 &respond_id,

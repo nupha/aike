@@ -196,9 +196,10 @@ impl ChatResponseParser {
     }
 }
 
-/// Parse message recevied from Receiver<EngineReply> and call on_item on parsed elements
+/// Reading messages from Receiver<EngineReply>, parse and call `on_item` on each parsed elements.
 /// If `timeout` elapses without a message, emits an error and stops.
-pub(crate) fn chat_reply_listener<F>(
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn chat_response_listener<F>(
     rx: crossbeam::channel::Receiver<EngineReply>,
     timeout: std::time::Duration,
     respond_id: &str,

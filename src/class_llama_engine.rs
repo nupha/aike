@@ -6,8 +6,8 @@ use std::{
 
 use linkme::distributed_slice;
 use liter_llm::{
-    ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, Choice, FinishReason,
-    FunctionCall, StopSequence, StreamChoice, StreamDelta, ToolCall, ToolType,
+    ChatCompletionRequest, ChatCompletionResponse, Choice, FinishReason, FunctionCall,
+    StopSequence, ToolCall, ToolType,
     types::common::{AssistantMessage, Usage},
 };
 use llama_cpp_ffi::ToolChoice as LarkToolChoice;
@@ -21,7 +21,7 @@ use zuqe::{
 
 use crate::{
     USER_CLASS_DEFS,
-    chat_response::{ChatResponseParser, ChatStreamItem, chat_reply_listener},
+    chat_response::{ChatResponseParser, ChatStreamItem, chat_response_listener},
     class_llama_client::{chunk_to_js, parse_chat_request, parse_messages},
     engine::{Engine, EngineReply, GrammarConfig, OutputMode, StopReason, TaskConfig},
     helpers::{build_chat_prompt_tokens, compile_tools_grammar, now_unix_s, to_lark_tool_choice},
@@ -352,7 +352,7 @@ fn js_engine_chat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         // Streaming: AsyncIterableIterator
         let (stream_tx, stream_rx) = crossbeam::channel::bounded::<ChatStreamItem>(8);
         std::thread::spawn(move || {
-            chat_reply_listener(
+            chat_response_listener(
                 rx,
                 std::time::Duration::from_secs(u64::MAX),
                 &respond_id,
