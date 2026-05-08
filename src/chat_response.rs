@@ -461,11 +461,15 @@ impl ChatResponseParser {
                         }
                     }
 
-                    let finish_reason = match reason {
-                        StopReason::MaxTokens => FinishReason::Length,
-                        StopReason::Eog | StopReason::Word(_) | StopReason::PrefillOnly => {
-                            FinishReason::Stop
+                    let finish_reason = if tool_calls.is_empty() {
+                        match reason {
+                            StopReason::MaxTokens => FinishReason::Length,
+                            StopReason::Eog | StopReason::Word(_) | StopReason::PrefillOnly => {
+                                FinishReason::Stop
+                            }
                         }
+                    } else {
+                        FinishReason::ToolCalls
                     };
 
                     let resp = CreateChatCompletionResponse {
@@ -476,13 +480,13 @@ impl ChatResponseParser {
                         choices: vec![ChatChoice {
                             index: 0,
                             message: ChatCompletionResponseMessage {
+                                role: Role::Assistant,
                                 content: if !text.is_empty() { Some(text) } else { None },
                                 tool_calls: if !tool_calls.is_empty() {
                                     Some(tool_calls)
                                 } else {
                                     None
                                 },
-                                role: Role::Assistant,
                                 refusal: None,
                                 function_call: None,
                                 audio: None,
