@@ -4,7 +4,7 @@ use async_openai::types::{
         ChatCompletionRequestDeveloperMessage, ChatCompletionRequestDeveloperMessageContent,
         ChatCompletionRequestMessage, ChatCompletionRequestSystemMessage,
         ChatCompletionRequestSystemMessageContent, ChatCompletionRequestUserMessage,
-        ChatCompletionRequestUserMessageContent, ChatCompletionTool, FunctionObject, Role,
+        ChatCompletionRequestUserMessageContent, ChatCompletionTool, FunctionObject,
     },
     responses::{
         EasyInputContent, InputContent, InputItem, InputRole, Item, MessageItem,
@@ -43,9 +43,9 @@ pub fn input_item_to_chat_message(item: &InputItem) -> Option<ChatCompletionRequ
                     let text = output_msg
                         .content
                         .iter()
-                        .filter_map(|c| match c {
-                            OutputMessageContent::OutputText(t) => Some(t.text.clone()),
-                            OutputMessageContent::Refusal(r) => Some(r.refusal.clone()),
+                        .map(|c| match c {
+                            OutputMessageContent::OutputText(t) => t.text.clone(),
+                            OutputMessageContent::Refusal(r) => r.refusal.clone(),
                         })
                         .collect::<Vec<_>>()
                         .join("\n");

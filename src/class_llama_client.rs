@@ -73,19 +73,13 @@ fn js_client_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     let client = Client::with_config(config);
 
-    let opaque = Arc::into_raw(Arc::new((client, default_model))).cast::<c_void>();
-    ctx.create_class_instance_with_opaque(JSLlamaClient::class_id(), opaque as _)
-        .map_err(|e| {
-            let p = e.other().unwrap();
-            let _ = unsafe {
-                Arc::from_raw(p.opaque().cast::<(Client<OpenAIConfig>, Option<String>)>())
-            };
-            -1
-        })
-        .map(|obj| obj.into())
+    JSLlamaClient::new_instance(ctx, client, default_model).map(|obj| obj.into())
 }
 
-pub(crate) type ClientState = (Client<OpenAIConfig>, Option<String>);
+pub(crate) struct ClientState {
+    pub client: Client<OpenAIConfig>,
+    pub model: Option<String>,
+}
 
 /// Get Arc<ClientState> from JS value (bumps strong count)
 pub(crate) fn get_client_arc(
@@ -508,7 +502,7 @@ fn js_client_chat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     let model = if parsed.model.is_empty() {
         client_arc
-            .1
+            .model
             .clone()
             .unwrap_or_else(|| "default".to_string())
     } else {
@@ -572,7 +566,7 @@ fn js_client_chat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         -1
     })?;
 
-    let client = client_arc.0.clone();
+    let client = client_arc.client.clone();
 
     if is_stream {
         // Streaming: AsyncIterableIterator
@@ -742,6 +736,21 @@ impl JSLlamaClient {
     #[inline(always)]
     pub fn class_id() -> ClassID {
         Self::CLASS_ID.with(|x| x.get())
+    }
+
+    pub fn new_instance(
+        ctx: &mut ScopedContext,
+        client: Client<OpenAIConfig>,
+        model: Option<String>,
+    ) -> Result<Object, i32> {
+        let state = Arc::new(ClientState { client, model });
+        let opaque = Arc::into_raw(state).cast::<c_void>() as *mut c_void;
+        ctx.create_class_instance_with_opaque(Self::class_id(), opaque)
+            .map_err(|e| {
+                let p = e.other().unwrap();
+                let _ = unsafe { Arc::from_raw(p.opaque().cast::<ClientState>()) };
+                -1
+            })
     }
 }
 

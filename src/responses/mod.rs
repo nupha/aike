@@ -1,6 +1,6 @@
-mod convert;
-mod response_builder;
-mod stream;
+pub(crate) mod convert;
+pub(crate) mod response_builder;
+pub(crate) mod stream;
 
 mod handler;
 pub use handler::handle_responses;

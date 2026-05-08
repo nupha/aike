@@ -3,7 +3,6 @@
 
 #![allow(non_snake_case)]
 
-mod chat_response;
 mod class_file;
 mod class_llama_client;
 mod class_llama_client_responses;
@@ -17,6 +16,7 @@ mod helpers;
 mod mod_llama;
 mod mod_os;
 mod mod_std;
+mod output;
 mod responses;
 mod serve;
 mod worker;

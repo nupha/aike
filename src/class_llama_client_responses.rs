@@ -24,7 +24,10 @@ enum ResponsesReply {
     Error(String),
 }
 
-fn parse_responses_input(ctx: &mut ScopedContext, val: &JSValue) -> Result<InputParam, i32> {
+pub(super) fn parse_responses_input(
+    ctx: &mut ScopedContext,
+    val: &JSValue,
+) -> Result<InputParam, i32> {
     if let Some(s) = val.as_string() {
         return Ok(InputParam::Text(s.content().encode_utf8(false).to_string()));
     };
@@ -85,12 +88,15 @@ fn parse_responses_input(ctx: &mut ScopedContext, val: &JSValue) -> Result<Input
     Err(-1)
 }
 
-fn parse_responses_reasoning(ctx: &mut ScopedContext, val: &JSValue) -> Result<Reasoning, i32> {
+pub(super) fn parse_responses_reasoning(
+    ctx: &mut ScopedContext,
+    val: &JSValue,
+) -> Result<Reasoning, i32> {
     let json_val = val.to_serde_json(ctx).map_err(|_| {
         ctx.throw_type_error("failed to serialize reasoning");
         -1
     })?;
-    serde_json::from_value(json_val).map_err(|e| {
+    serde_json::from_value::<Reasoning>(json_val).map_err(|e| {
         ctx.throw_type_error(&format!("invalid reasoning: {e}"));
         -1
     })
@@ -130,7 +136,7 @@ pub(super) fn js_client_responses(ctx: &mut ScopedContext, cc: CallContext) -> J
         s.content().encode_utf8(false).to_string()
     } else {
         client_arc
-            .1
+            .model
             .clone()
             .unwrap_or_else(|| "default".to_string())
     };
@@ -166,16 +172,18 @@ pub(super) fn js_client_responses(ctx: &mut ScopedContext, cc: CallContext) -> J
 
     let tools_val = opts.get_property_str(ctx, "tools")?;
     if !tools_val.is_undefined() {
-        let json_val = tools_val.to_serde_json(ctx).map_err(|_| {
-            ctx.throw_type_error("failed to serialize tools");
-            -1
-        })?;
-        let tools: Vec<async_openai::types::responses::Tool> = serde_json::from_value(json_val)
+        let tools: Vec<async_openai::types::responses::Tool> =
+            serde_json::from_value(tools_val.to_serde_json(ctx).map_err(|_| {
+                ctx.throw_type_error("failed to serialize tools");
+                -1
+            })?)
             .map_err(|e| {
                 ctx.throw_type_error(&format!("invalid tools: {e}"));
                 -1
             })?;
-        req_builder.tools(tools);
+        if !tools.is_empty() {
+            req_builder.tools(tools);
+        }
     }
 
     let tool_choice_val = opts.get_property_str(ctx, "toolChoice")?;
@@ -216,7 +224,7 @@ pub(super) fn js_client_responses(ctx: &mut ScopedContext, cc: CallContext) -> J
         -1
     })?;
 
-    let client = client_arc.0.clone();
+    let client = client_arc.client.clone();
 
     if is_stream {
         let result_slot = PromiseResultSlot::<ResponsesReply>::new();

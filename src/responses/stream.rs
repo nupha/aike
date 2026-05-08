@@ -1,27 +1,87 @@
-use axum::{
-    http::StatusCode,
-    response::{
-        IntoResponse, Response,
-        sse::{Event, Sse},
-    },
+use axum::response::{
+    IntoResponse, Response,
+    sse::{Event, Sse},
 };
 use futures_util::StreamExt;
 use serde_json::json;
 use tokio_stream::wrappers::UnboundedReceiverStream;
-use uuid::Uuid;
 
 use crate::{
-    chat_response::{ChatResponseParser, ChatResponsePart, ChatStreamItem},
     engine::EngineReply,
-    helpers::now_unix_s,
-    serve::{ERR_CANCELLED, ERR_ENGINE_SHUTDOWN, STREAM_TIMEOUT, oai_error},
+    output::{ChatResponsePart, ChatStreamItem, LlmOutputParser},
+    serve::STREAM_TIMEOUT,
 };
 
 use super::response_builder::{
     build_content_part_added_event, build_output_item_added_event, build_reasoning_delta_event,
     build_response_completed_event, build_response_created_event, build_text_delta_event,
-    extract_reasoning_from_text,
 };
+
+/// Convert a ChatStreamItem to a ResponseStreamEvent-shaped JSON value.
+/// Used by Engine.responses() to produce the same event format as the SSE stream.
+pub fn chat_stream_item_to_response_event(
+    item: &ChatStreamItem,
+    respond_id: &str,
+    model_name: &str,
+    nth: usize,
+) -> serde_json::Value {
+    match item {
+        ChatStreamItem::Part(part) => match part {
+            ChatResponsePart::Text(t) => {
+                if nth == 0 {
+                    // First text chunk: emit output_item.added + content_part.added + text.delta
+                    json!({
+                        "type": "response.output_text.delta",
+                        "delta": t,
+                        "output_index": 0,
+                        "content_index": 0
+                    })
+                } else {
+                    json!({
+                        "type": "response.output_text.delta",
+                        "delta": t,
+                        "output_index": 0,
+                        "content_index": 0
+                    })
+                }
+            }
+            ChatResponsePart::Think(r) => {
+                json!({
+                    "type": "response.reasoning_summary.delta",
+                    "delta": r,
+                    "output_index": 0
+                })
+            }
+            ChatResponsePart::Call(_) => {
+                json!({
+                    "type": "response.output_text.delta",
+                    "delta": "",
+                    "output_index": 0,
+                    "content_index": 0
+                })
+            }
+        },
+        ChatStreamItem::Stop(_finish_reason, usage) => {
+            let n_completion = usage
+                .as_ref()
+                .map(|u| u.completion_tokens as usize)
+                .unwrap_or(0);
+            build_response_completed_event(respond_id, model_name, 0, n_completion)
+        }
+        ChatStreamItem::Done => {
+            json!({"type": "done"})
+        }
+        ChatStreamItem::Error(e) => {
+            json!({
+                "type": "error",
+                "error": {
+                    "message": e,
+                    "type": "server_error"
+                }
+            })
+        }
+    }
+}
 
 fn sse_event(event_type: &str, data: serde_json::Value) -> String {
     let data_str = serde_json::to_string(&data).unwrap_or_default();
@@ -30,7 +90,7 @@ fn sse_event(event_type: &str, data: serde_json::Value) -> String {
 
 pub(crate) fn handle_responses_stream(
     rx: crossbeam::channel::Receiver<EngineReply>,
-    mut parser: ChatResponseParser,
+    mut parser: LlmOutputParser,
     respond_id: String,
     model_name: String,
 ) -> Response {

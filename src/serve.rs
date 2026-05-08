@@ -22,9 +22,9 @@ use tower_http::cors::CorsLayer;
 use uuid::Uuid;
 
 use crate::{
-    chat_response::{ChatResponseParser, ChatStreamItem},
     engine::{Engine, GrammarConfig, OutputMode, TaskConfig},
     helpers::{build_chat_prompt_tokens, compile_tools_grammar, now_unix_s, to_lark_tool_choice},
+    output::{ChatStreamItem, LlmOutputParser, ParserKind},
 };
 
 pub(crate) const ERR_CANCELLED: &str = "cancelled";
@@ -235,8 +235,12 @@ async fn handle_chat_completions(
         }
     };
 
-    let mut parser =
-        ChatResponseParser::new(reasoning_effort.is_some(), n_prompt_tokens, include_usage);
+    let mut parser = LlmOutputParser::new(
+        false,
+        reasoning_effort.is_some(),
+        n_prompt_tokens,
+        include_usage,
+    );
     parser.set_respond_id(respond_id.clone());
     parser.set_model_name(model_name.clone());
 
@@ -281,7 +285,7 @@ async fn handle_chat_completions(
         // non-streaming
         let join = tokio::task::spawn_blocking(move || {
             parser
-                .parse_all(rx, STREAM_TIMEOUT)
+                .parse_all(rx, STREAM_TIMEOUT, ParserKind::Chat)
                 .map_err(|e| match e.as_str() {
                     ERR_CANCELLED => (StatusCode::CONFLICT, oai_error(e, "cancelled")),
                     ERR_ENGINE_SHUTDOWN => (

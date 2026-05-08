@@ -17,10 +17,11 @@ use zuqe::{
 
 use crate::{
     USER_CLASS_DEFS,
-    chat_response::{ChatResponseParser, ChatStreamItem},
     class_llama_client::{ParsedChatOptions, chunk_to_js, parse_chat_options, parse_messages},
+    class_llama_client_responses::{parse_responses_input, parse_responses_reasoning},
     engine::{Engine, GrammarConfig, OutputMode, TaskConfig},
     helpers::{build_chat_prompt_tokens, compile_tools_grammar, now_unix_s, to_lark_tool_choice},
+    output::{ChatStreamItem, LlmOutputParser, ParserKind},
 };
 
 pub(crate) const ERR_CANCELLED: &str = "cancelled";
@@ -114,6 +115,8 @@ pub(super) fn get_engine_arc(
 
 pub(super) const MAGIC_CHAT_ONCE: i32 = 2;
 pub(super) const MAGIC_CHAT_STREAM: i32 = 3;
+pub(super) const MAGIC_RESPONSES_ONCE: i32 = 5;
+pub(super) const MAGIC_RESPONSES_STREAM: i32 = 4;
 
 fn js_engine_chat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
@@ -243,7 +246,8 @@ fn js_engine_chat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             -1
         })?;
 
-    let mut parser = ChatResponseParser::new(
+    let mut parser = LlmOutputParser::new(
+        false,
         params.reasoning_effort.is_some(),
         n_prompt_tokens,
         include_usage,
@@ -296,7 +300,207 @@ fn js_engine_chat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             })?;
 
         std::thread::spawn(move || {
-            let result = parser.parse_all(rx, std::time::Duration::from_secs(u64::MAX));
+            let result = parser.parse_all(
+                rx,
+                std::time::Duration::from_secs(u64::MAX),
+                ParserKind::Chat,
+            );
+            let _ = result_slot.commit(result);
+        });
+
+        Ok(promise.into())
+    }
+}
+
+fn js_engine_responses(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let this = cc.this();
+    let engine = get_engine(ctx, &this)?;
+    let is_stream = cc.magic() == MAGIC_RESPONSES_STREAM;
+
+    let opts = cc.arg(0).as_object().copied().ok_or_else(|| {
+        ctx.throw_type_error("responses() requires an options object");
+        -1
+    })?;
+
+    let input_val = opts.get_property_str(ctx, "input")?;
+    let input = parse_responses_input(ctx, &input_val)?;
+
+    let temperature_val = opts.get_property_str(ctx, "temperature")?;
+    let temperature = if !temperature_val.is_undefined() {
+        Some(temperature_val.to_number(ctx)?.to_f64() as f32)
+    } else {
+        None
+    };
+
+    let top_p_val = opts.get_property_str(ctx, "topP")?;
+    let top_p = if !top_p_val.is_undefined() {
+        Some(top_p_val.to_number(ctx)?.to_f64() as f32)
+    } else {
+        None
+    };
+
+    let max_output_tokens_val = opts.get_property_str(ctx, "maxOutputTokens")?;
+    let max_output_tokens = if !max_output_tokens_val.is_undefined() {
+        Some(max_output_tokens_val.to_number(ctx)?.to_i32() as usize)
+    } else {
+        None
+    };
+
+    let reasoning_val = opts.get_property_str(ctx, "reasoning")?;
+    let reasoning = if !reasoning_val.is_undefined() {
+        Some(parse_responses_reasoning(ctx, &reasoning_val)?)
+    } else {
+        None
+    };
+
+    let tools_val = opts.get_property_str(ctx, "tools")?;
+    let tools = if !tools_val.is_undefined() {
+        let t: Vec<async_openai::types::responses::Tool> =
+            serde_json::from_value(tools_val.to_serde_json(ctx).map_err(|_| {
+                ctx.throw_type_error("failed to serialize tools");
+                -1
+            })?)
+            .map_err(|e| {
+                ctx.throw_type_error(&format!("invalid tools: {e}"));
+                -1
+            })?;
+        if t.is_empty() { None } else { Some(t) }
+    } else {
+        None
+    };
+
+    // Convert responses input items to chat messages
+    let input_items = match &input {
+        async_openai::types::responses::InputParam::Text(t) => {
+            vec![async_openai::types::responses::InputItem::EasyMessage(
+                async_openai::types::responses::EasyInputMessage {
+                    r#type: async_openai::types::responses::MessageType::Message,
+                    role: async_openai::types::responses::Role::User,
+                    content: async_openai::types::responses::EasyInputContent::Text(t.clone()),
+                    phase: None,
+                },
+            )]
+        }
+        async_openai::types::responses::InputParam::Items(items) => items.clone(),
+    };
+    if input_items.is_empty() {
+        ctx.throw_type_error("\"input\" must contain at least one valid message");
+        return Err(-1);
+    }
+    let messages: Vec<_> = input_items
+        .iter()
+        .filter_map(crate::responses::convert::input_item_to_chat_message)
+        .collect();
+
+    // Build prompt tokens
+    let chat_tools: Option<Vec<async_openai::types::chat::ChatCompletionTools>> = tools
+        .as_ref()
+        .map(|t| crate::responses::convert::responses_tools_to_chat_tools(t));
+    let prompt_tokens = build_chat_prompt_tokens(
+        engine.lock().unwrap().model(),
+        &messages,
+        chat_tools.as_deref(),
+        None,
+        None,
+        reasoning.as_ref().and_then(|r| r.effort.as_ref()),
+        None,
+    )
+    .map_err(|e| {
+        ctx.throw_internal_error(&format!("build prompt tokens failed: {e}"));
+        -1
+    })?;
+
+    // Build task config
+    let mut task_config = TaskConfig::new()
+        .temperature(temperature.unwrap_or(0.75))
+        .top_p(top_p.unwrap_or(1.0))
+        .max_tokens(max_output_tokens.unwrap_or(engine.lock().unwrap().default_max_tokens()))
+        .output_mode(if is_stream {
+            OutputMode::Continuous
+        } else {
+            OutputMode::OneShot
+        });
+
+    if let Some(tools) = chat_tools.as_ref().filter(|t| !t.is_empty()) {
+        let tc = llama_cpp_ffi::ToolChoice::Auto;
+        task_config = task_config.grammar(GrammarConfig {
+            lark_grammar: crate::helpers::compile_tools_grammar(tools, tc),
+            tool_choice: tc,
+        });
+    }
+
+    let n_prompt_tokens = prompt_tokens.len();
+    let respond_id = format!("resp-{}", uuid::Uuid::new_v4().simple());
+    let model_name = engine.lock().unwrap().model_name().to_string();
+
+    // Push task to engine
+    let rx = engine
+        .lock()
+        .unwrap()
+        .push_task_with_params(prompt_tokens, task_config, None, false)
+        .map_err(|e| {
+            ctx.throw_internal_error(&e.to_string());
+            -1
+        })?;
+
+    let mut parser = LlmOutputParser::new(true, reasoning.is_some(), n_prompt_tokens, true);
+    parser.set_respond_id(respond_id.clone());
+    parser.set_model_name(model_name.clone());
+
+    if is_stream {
+        // Streaming: AsyncIterableIterator
+        let (item_tx, item_rx) = crossbeam::channel::bounded::<(ChatStreamItem, usize)>(8);
+        std::thread::spawn(move || {
+            parser.parse_stream(rx, std::time::Duration::from_secs(u64::MAX), |item, nth| {
+                item_tx.send((item, nth)).is_ok()
+            });
+        });
+
+        AsyncIterableIterator::create_with_receiver::<(ChatStreamItem, usize)>(
+            ctx,
+            item_rx,
+            move |cx, (msg, nth)| -> Result<Option<JSValue>, i32> {
+                match msg {
+                    ChatStreamItem::Done => Ok(None),
+                    ChatStreamItem::Error(e) => {
+                        cx.throw_internal_error(&e);
+                        Err(-1)
+                    }
+                    _ => {
+                        let event = crate::responses::stream::chat_stream_item_to_response_event(
+                            &msg,
+                            &respond_id,
+                            &model_name,
+                            nth,
+                        );
+                        let val = serde_json::to_value(&event).map_err(|e| {
+                            cx.throw_internal_error(&format!("serialize event failed: {e}"));
+                            -1
+                        })?;
+                        JSValue::from_serde_json(cx, &val).map(Some)
+                    }
+                }
+            },
+        )
+        .map(JSValue::from)
+    } else {
+        // Non-streaming: Promise
+        let result_slot = PromiseResultSlot::<Result<serde_json::Value, String>>::new();
+        let promise =
+            Promise::create_with_result_slot(ctx, result_slot.clone(), |cx, res| match res {
+                Ok(val) => JSValue::from_serde_json(cx, &val),
+                Err(e) => {
+                    cx.throw_internal_error(&e);
+                    Err(-1)
+                }
+            })?;
+
+        std::thread::spawn(move || {
+            let result = parser.parse_all(
+                rx,
+                std::time::Duration::from_secs(u64::MAX),
+                ParserKind::Responses,
+            );
             let _ = result_slot.commit(result);
         });
 
@@ -404,6 +608,18 @@ fn js_engine_dispose(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 const CLASS_ENGINE_PROTO: &[FieldDef] = &[
     FieldDef::CALL("chat", 2, js_engine_chat, MAGIC_CHAT_STREAM as i16),
     FieldDef::CALL("chatOnce", 2, js_engine_chat, MAGIC_CHAT_ONCE as i16),
+    FieldDef::CALL(
+        "responses",
+        1,
+        js_engine_responses,
+        MAGIC_RESPONSES_STREAM as i16,
+    ),
+    FieldDef::CALL(
+        "responsesOnce",
+        1,
+        js_engine_responses,
+        MAGIC_RESPONSES_ONCE as i16,
+    ),
     FieldDef::CALL("httpServe", 1, js_engine_httpServe, 0),
     FieldDef::CALL("stopServe", 0, js_engine_stopServe, 0),
     FieldDef::GETSET("isServing", Some(js_engine_isServing), None, 0),
