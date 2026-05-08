@@ -40,13 +40,13 @@ tokio = { version = "1", features = [
 minijinja = { version = "2", features = ["serde"] }
 minijinja-contrib = { version = "2", features = ["pycompat"] }
 chrono = "0.4"
-axum = { version = "0.7", features = ["json"] }
+axum = { version = "0.7", features = ["json", "macros"] }
 futures-util = "0.3"
 async-stream = "0.3"
 tokio-stream = "0.1"
 tower-http = { version = "0.5", features = ["cors"] }
 uuid = { version = "1", features = ["v4"] }
-async-openai = { version = "0.37", features = ["chat-completion"] }
+async-openai = { version = "0.37", features = ["chat-completion", "responses"] }
 reqwest = { version = "0.12", features = ["json"] }
 
 [[bin]]

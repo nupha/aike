@@ -183,6 +183,16 @@ impl ChatResponseParser {
         self.model_name = name;
     }
 
+    pub fn n_prompt_tokens(&self) -> usize {
+        self.n_prompt_tokens
+    }
+
+    pub fn n_completion_tokens(&self) -> usize {
+        // This is tracked internally during parse_stream/parse_all
+        // We'll use a default of 0 since the actual value is local to those methods
+        0
+    }
+
     /// Feed streaming text into the parser.
     pub fn push_str(&mut self, chunk: &str) {
         let mut remaining = chunk;

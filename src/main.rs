@@ -6,6 +6,7 @@
 mod chat_response;
 mod class_file;
 mod class_llama_client;
+mod class_llama_client_responses;
 mod class_llama_context;
 mod class_llama_engine;
 mod class_llama_model;
@@ -16,6 +17,7 @@ mod helpers;
 mod mod_llama;
 mod mod_os;
 mod mod_std;
+mod responses;
 mod serve;
 mod worker;
 

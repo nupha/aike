@@ -29,6 +29,9 @@ use zuqe::{
 
 use crate::{
     USER_CLASS_DEFS,
+    class_llama_client_responses::{
+        MAGIC_RESPONSES_ONCE, MAGIC_RESPONSES_STREAM, js_client_responses,
+    },
     class_llama_engine::{MAGIC_CHAT_ONCE, MAGIC_CHAT_STREAM},
 };
 
@@ -82,15 +85,19 @@ fn js_client_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         .map(|obj| obj.into())
 }
 
-type ClientState = (Client<OpenAIConfig>, Option<String>);
+pub(crate) type ClientState = (Client<OpenAIConfig>, Option<String>);
 
 /// Get Arc<ClientState> from JS value (bumps strong count)
-fn get_client_arc(ctx: &mut ScopedContext, val: &JSValue) -> Result<Arc<ClientState>, i32> {
+pub(crate) fn get_client_arc(
+    ctx: &mut ScopedContext,
+    val: &JSValue,
+) -> Result<Arc<ClientState>, i32> {
     let payload = val
         .retrive_object_payload(ctx, JSLlamaClient::class_id())?
         .other()
         .unwrap();
     let opaque = payload.opaque();
+
     if opaque.is_null() {
         ctx.throw_type_error("OpenAI client was disposed");
         Err(-1)
@@ -693,6 +700,18 @@ pub(crate) fn chunk_to_js(
 const CLASS_CLIENT_PROTO: &[FieldDef] = &[
     FieldDef::CALL("chat", 1, js_client_chat, MAGIC_CHAT_STREAM as i16),
     FieldDef::CALL("chatOnce", 1, js_client_chat, MAGIC_CHAT_ONCE as i16),
+    FieldDef::CALL(
+        "responses",
+        1,
+        js_client_responses,
+        MAGIC_RESPONSES_STREAM as i16,
+    ),
+    FieldDef::CALL(
+        "responsesOnce",
+        1,
+        js_client_responses,
+        MAGIC_RESPONSES_ONCE as i16,
+    ),
     FieldDef::CALL("dispose", 0, js_client_dispose, 0),
 ];
 

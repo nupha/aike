@@ -27,29 +27,29 @@ use crate::{
     helpers::{build_chat_prompt_tokens, compile_tools_grammar, now_unix_s, to_lark_tool_choice},
 };
 
-const ERR_CANCELLED: &str = "cancelled";
-const ERR_ENGINE_SHUTDOWN: &str = "engine shutdown";
-const DEFAULT_TEMPERATURE: f32 = 0.75;
-const DEFAULT_TOP_P: f32 = 1.0;
-const STREAM_TIMEOUT: Duration = Duration::from_secs(300);
+pub(crate) const ERR_CANCELLED: &str = "cancelled";
+pub(crate) const ERR_ENGINE_SHUTDOWN: &str = "engine shutdown";
+pub(crate) const DEFAULT_TEMPERATURE: f32 = 0.75;
+pub(crate) const DEFAULT_TOP_P: f32 = 1.0;
+pub(crate) const STREAM_TIMEOUT: Duration = Duration::from_secs(300);
 
 #[derive(Debug, Serialize)]
-struct ErrorResponse {
-    error: OpenAiError,
+pub(crate) struct ErrorResponse {
+    pub(crate) error: OpenAiError,
 }
 
 #[derive(Debug, Serialize)]
-struct OpenAiError {
-    message: String,
+pub(crate) struct OpenAiError {
+    pub(crate) message: String,
     #[serde(rename = "type")]
-    type_: String,
+    pub(crate) type_: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    param: Option<String>,
+    pub(crate) param: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    code: Option<String>,
+    pub(crate) code: Option<String>,
 }
 
-fn oai_error(message: impl Into<String>, type_: impl Into<String>) -> ErrorResponse {
+pub(crate) fn oai_error(message: impl Into<String>, type_: impl Into<String>) -> ErrorResponse {
     ErrorResponse {
         error: OpenAiError {
             message: message.into(),
@@ -71,7 +71,7 @@ struct ModelInfo {
 #[derive(Clone)]
 #[repr(transparent)]
 pub(crate) struct AppState {
-    engine: Arc<Mutex<Engine>>,
+    pub(crate) engine: Arc<Mutex<Engine>>,
 }
 
 /// Start http server with Engine (in current thread), blocks until shutdown signal.
@@ -90,6 +90,7 @@ pub async fn http_serve(
         .route("/v1/health", get(handle_health))
         .route("/v1/models", get(handle_models))
         .route("/v1/chat/completions", post(handle_chat_completions))
+        .route("/v1/responses", post(crate::responses::handle_responses))
         .with_state(state)
         .layer(CorsLayer::permissive());
 
