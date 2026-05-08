@@ -21,7 +21,7 @@ use crate::{
         chat_response_stream,
     },
     class_llama_client::{ParsedChatOptions, chunk_to_js, parse_chat_options, parse_messages},
-    engine::{Engine, EngineReply, GrammarConfig, OutputMode, StopReason, TaskConfig},
+    engine::{Engine, GrammarConfig, OutputMode, TaskConfig},
     helpers::{build_chat_prompt_tokens, compile_tools_grammar, now_unix_s, to_lark_tool_choice},
 };
 
@@ -253,12 +253,11 @@ fn js_engine_chat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     if is_stream {
         // Streaming: AsyncIterableIterator
         let (stream_tx, stream_rx) = crossbeam::channel::bounded::<ChatStreamItem>(8);
+
         std::thread::spawn(move || {
             chat_response_stream(
                 rx,
                 std::time::Duration::from_secs(u64::MAX),
-                &respond_id,
-                &model_name,
                 include_usage,
                 n_prompt_tokens,
                 parser,
@@ -269,13 +268,16 @@ fn js_engine_chat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         AsyncIterableIterator::create_with_receiver::<ChatStreamItem>(
             ctx,
             stream_rx,
-            |cx, msg| -> Result<Option<JSValue>, i32> {
+            move |cx, msg| -> Result<Option<JSValue>, i32> {
                 match msg {
-                    ChatStreamItem::Chunk(chunk) => chunk_to_js(cx, &chunk).map(Some),
                     ChatStreamItem::Done => Ok(None),
                     ChatStreamItem::Error(e) => {
                         cx.throw_internal_error(&e);
                         Err(-1)
+                    }
+                    _ => {
+                        let chunk = msg.into_chunk(&respond_id, &model_name, now_unix_s() as u32);
+                        chunk_to_js(cx, &chunk).map(Some)
                     }
                 }
             },

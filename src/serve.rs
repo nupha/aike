@@ -246,22 +246,15 @@ async fn handle_chat_completions(
     if is_stream {
         // streaming
         let (tx, rx_tokio) = tokio::sync::mpsc::unbounded_channel::<String>();
-
         tokio::task::spawn_blocking(move || {
             chat_response_stream(
                 rx,
                 STREAM_TIMEOUT,
-                &respond_id,
-                &model_name,
                 include_usage,
                 n_prompt_tokens,
                 parser,
                 |item| {
                     match item {
-                        ChatStreamItem::Chunk(chunk) => {
-                            let data = serde_json::to_string(&chunk).unwrap_or_default();
-                            let _ = tx.send(data);
-                        }
                         ChatStreamItem::Done => {
                             let _ = tx.send("[DONE]".to_string());
                         }
@@ -270,6 +263,12 @@ async fn handle_chat_completions(
                             let data = serde_json::to_string(&err).unwrap_or_default();
                             let _ = tx.send(data);
                             let _ = tx.send("[DONE]".to_string());
+                        }
+                        _ => {
+                            let chunk =
+                                item.into_chunk(&respond_id, &model_name, now_unix_s() as u32);
+                            let data = serde_json::to_string(&chunk).unwrap_or_default();
+                            let _ = tx.send(data);
                         }
                     }
                     true

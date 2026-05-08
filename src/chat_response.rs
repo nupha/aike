@@ -15,13 +15,13 @@ use crate::{
 };
 
 #[derive(Debug)]
-pub(crate) enum ChatPart {
+pub(crate) enum ChatResponsePart {
     Text(String),
     Think(String),
     Call(ChatCompletionMessageToolCall),
 }
 
-impl ChatPart {
+impl ChatResponsePart {
     pub fn into_chunk_delta(self) -> ChatCompletionStreamResponseDelta {
         match self {
             Self::Text(t) => ChatCompletionStreamResponseDelta {
@@ -58,14 +58,14 @@ impl ChatPart {
 
     pub fn into_chunk(
         self,
-        id: String,
-        model: String,
+        id: &str,
+        model: &str,
         created: u32,
     ) -> CreateChatCompletionStreamResponse {
         CreateChatCompletionStreamResponse {
-            id,
+            id: id.to_string(),
+            model: model.to_string(),
             created,
-            model,
             object: "chat.completion.chunk".to_string(),
             choices: vec![ChatChoiceStream {
                 delta: self.into_chunk_delta(),
@@ -81,21 +81,69 @@ impl ChatPart {
 }
 
 pub(crate) enum ChatStreamItem {
-    Chunk(CreateChatCompletionStreamResponse),
+    Role(Role),
+    Part(ChatResponsePart),
+    Stop(FinishReason, Option<CompletionUsage>),
     Done,
     Error(String),
 }
 
-pub struct ChatResponseParser {
-    state: State,
-    out: VecDeque<ChatPart>,
-}
-
-#[derive(Debug, PartialEq)]
-enum State {
-    Text,
-    Thinking,
-    MaybeCall(String),
+impl ChatStreamItem {
+    pub fn into_chunk(
+        self,
+        id: &str,
+        model: &str,
+        created: u32,
+    ) -> CreateChatCompletionStreamResponse {
+        match self {
+            Self::Part(part) => part.into_chunk(id, model, created),
+            Self::Role(role) => CreateChatCompletionStreamResponse {
+                id: id.to_string(),
+                model: model.to_string(),
+                object: "chat.completion.chunk".to_string(),
+                created,
+                choices: vec![ChatChoiceStream {
+                    delta: ChatCompletionStreamResponseDelta {
+                        role: Some(role),
+                        content: None,
+                        tool_calls: None,
+                        refusal: None,
+                        function_call: None,
+                    },
+                    index: 0,
+                    finish_reason: None,
+                    logprobs: None,
+                }],
+                system_fingerprint: None,
+                service_tier: None,
+                usage: None,
+            },
+            Self::Stop(finish_reason, usage) => CreateChatCompletionStreamResponse {
+                id: id.to_string(),
+                model: model.to_string(),
+                created,
+                object: "chat.completion.chunk".to_string(),
+                choices: vec![ChatChoiceStream {
+                    delta: ChatCompletionStreamResponseDelta {
+                        content: None,
+                        role: None,
+                        tool_calls: None,
+                        refusal: None,
+                        function_call: None,
+                    },
+                    index: 0,
+                    finish_reason: Some(finish_reason),
+                    logprobs: None,
+                }],
+                usage,
+                system_fingerprint: None,
+                service_tier: None,
+            },
+            Self::Done | Self::Error(_) => {
+                unreachable!();
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -117,11 +165,23 @@ impl ChatResponseTag {
     }
 }
 
+#[derive(Debug, PartialEq)]
+enum State {
+    Text,
+    Thinking,
+    MaybeCall(String),
+}
+
+pub struct ChatResponseParser {
+    state: State,
+    parts: VecDeque<ChatResponsePart>,
+}
+
 impl ChatResponseParser {
     pub fn new() -> Self {
         Self {
             state: State::Text,
-            out: VecDeque::new(),
+            parts: VecDeque::new(),
         }
     }
 
@@ -173,23 +233,23 @@ impl ChatResponseParser {
                 (Some((pos, ChatResponseTag::Think)), State::Text) => {
                     self.state = State::Thinking;
                     if pos > 0 {
-                        self.out
-                            .push_back(ChatPart::Text(remaining[..pos].to_string()));
+                        self.parts
+                            .push_back(ChatResponsePart::Text(remaining[..pos].to_string()));
                     }
                     remaining = &remaining[pos + ChatResponseTag::Think.as_str().len()..];
                 }
                 (Some((pos, ChatResponseTag::CloseThink)), State::Thinking) => {
                     self.state = State::Text;
                     if pos > 0 {
-                        self.out
-                            .push_back(ChatPart::Think(remaining[..pos].to_string()));
+                        self.parts
+                            .push_back(ChatResponsePart::Think(remaining[..pos].to_string()));
                     }
                     remaining = &remaining[pos + ChatResponseTag::CloseThink.as_str().len()..];
                 }
                 (Some((pos, ChatResponseTag::ToolCall)), State::Text) => {
                     if pos > 0 {
-                        self.out
-                            .push_back(ChatPart::Text(remaining[..pos].to_string()));
+                        self.parts
+                            .push_back(ChatResponsePart::Text(remaining[..pos].to_string()));
                     }
                     remaining = &remaining[pos + ChatResponseTag::ToolCall.as_str().len()..];
                     self.state = State::MaybeCall(String::new());
@@ -202,7 +262,8 @@ impl ChatResponseParser {
                         let obj = match value.as_object() {
                             Some(obj) if obj.len() == 2 => obj,
                             _ => {
-                                self.out.push_back(ChatPart::Text(std::mem::take(s)));
+                                self.parts
+                                    .push_back(ChatResponsePart::Text(std::mem::take(s)));
                                 return;
                             }
                         };
@@ -210,7 +271,8 @@ impl ChatResponseParser {
                         let name = match obj.get("name").and_then(|v| v.as_str()) {
                             Some(n) => n.to_string(),
                             None => {
-                                self.out.push_back(ChatPart::Text(std::mem::take(s)));
+                                self.parts
+                                    .push_back(ChatResponsePart::Text(std::mem::take(s)));
                                 return;
                             }
                         };
@@ -219,32 +281,35 @@ impl ChatResponseParser {
                             Some(serde_json::Value::String(s)) => s.clone(),
                             Some(other) => serde_json::to_string(other).unwrap_or_default(),
                             None => {
-                                self.out.push_back(ChatPart::Text(std::mem::take(s)));
+                                self.parts
+                                    .push_back(ChatResponsePart::Text(std::mem::take(s)));
                                 return;
                             }
                         };
 
-                        self.out
-                            .push_back(ChatPart::Call(ChatCompletionMessageToolCall {
+                        self.parts.push_back(ChatResponsePart::Call(
+                            ChatCompletionMessageToolCall {
                                 id: format!("call_{}", uuid::Uuid::new_v4().simple()),
                                 function: FunctionCall { name, arguments },
-                            }));
+                            },
+                        ));
                     } else {
-                        self.out.push_back(ChatPart::Text(std::mem::take(s)));
+                        self.parts
+                            .push_back(ChatResponsePart::Text(std::mem::take(s)));
                     }
 
                     self.state = State::Text;
                 }
                 (Some((pos, t)), State::Text) => {
                     let p = pos + t.as_str().len();
-                    self.out
-                        .push_back(ChatPart::Text(remaining[..p].to_string()));
+                    self.parts
+                        .push_back(ChatResponsePart::Text(remaining[..p].to_string()));
                     remaining = &remaining[p..];
                 }
                 (Some((pos, t)), State::Thinking) => {
                     let p = pos + t.as_str().len();
-                    self.out
-                        .push_back(ChatPart::Think(remaining[..p].to_string()));
+                    self.parts
+                        .push_back(ChatResponsePart::Think(remaining[..p].to_string()));
                     remaining = &remaining[p..];
                 }
                 (Some((pos, t)), State::MaybeCall(s)) => {
@@ -254,12 +319,14 @@ impl ChatResponseParser {
                 }
                 (None, State::Text) => {
                     debug_assert!(!remaining.is_empty());
-                    self.out.push_back(ChatPart::Text(remaining.to_string()));
+                    self.parts
+                        .push_back(ChatResponsePart::Text(remaining.to_string()));
                     remaining = "";
                 }
                 (None, State::Thinking) => {
                     debug_assert!(!remaining.is_empty());
-                    self.out.push_back(ChatPart::Think(remaining.to_string()));
+                    self.parts
+                        .push_back(ChatResponsePart::Think(remaining.to_string()));
                     remaining = "";
                 }
                 (None, State::MaybeCall(s)) => {
@@ -273,15 +340,15 @@ impl ChatResponseParser {
 
     pub fn end(&mut self) {
         if let State::MaybeCall(s) = std::mem::replace(&mut self.state, State::Text) {
-            self.out.push_back(ChatPart::Text(format!(
+            self.parts.push_back(ChatResponsePart::Text(format!(
                 "{}{s}",
                 ChatResponseTag::ToolCall.as_str()
             )));
         }
     }
 
-    pub fn next(&mut self) -> Option<ChatPart> {
-        self.out.pop_front()
+    pub fn next(&mut self) -> Option<ChatResponsePart> {
+        self.parts.pop_front()
     }
 }
 
@@ -289,8 +356,6 @@ impl ChatResponseParser {
 pub(crate) fn chat_response_stream<F>(
     rx: crossbeam::channel::Receiver<EngineReply>,
     timeout: std::time::Duration,
-    respond_id: &str,
-    model_name: &str,
     include_usage: bool,
     n_prompt_tokens: usize,
     mut parser: ChatResponseParser,
@@ -298,39 +363,16 @@ pub(crate) fn chat_response_stream<F>(
 ) where
     F: FnMut(ChatStreamItem) -> bool,
 {
-    let respond_id = respond_id.to_string();
-    let model_name = model_name.to_string();
     let mut sent_started = false;
 
     loop {
         match rx.recv_timeout(timeout) {
             Ok(EngineReply::Text(t)) => {
-                let created = now_unix_s() as u32;
-
                 if !sent_started {
                     sent_started = true;
-                    let first = CreateChatCompletionStreamResponse {
-                        id: respond_id.clone(),
-                        object: "chat.completion.chunk".to_string(),
-                        created,
-                        model: model_name.clone(),
-                        choices: vec![ChatChoiceStream {
-                            delta: ChatCompletionStreamResponseDelta {
-                                content: None,
-                                role: Some(async_openai::types::chat::Role::Assistant),
-                                tool_calls: None,
-                                refusal: None,
-                                function_call: None,
-                            },
-                            index: 0,
-                            finish_reason: None,
-                            logprobs: None,
-                        }],
-                        system_fingerprint: None,
-                        service_tier: None,
-                        usage: None,
-                    };
-                    if !on_item(ChatStreamItem::Chunk(first)) {
+                    if !on_item(ChatStreamItem::Role(
+                        async_openai::types::chat::Role::Assistant,
+                    )) {
                         break;
                     }
                 }
@@ -338,46 +380,28 @@ pub(crate) fn chat_response_stream<F>(
                 parser.push_str(&t);
 
                 while let Some(part) = parser.next() {
-                    let chunk = part.into_chunk(respond_id.clone(), model_name.clone(), created);
-                    if !on_item(ChatStreamItem::Chunk(chunk)) {
+                    if !on_item(ChatStreamItem::Part(part)) {
                         break;
                     }
                 }
             }
             Ok(EngineReply::Stop(reason, n_completion_tokens)) => {
-                let created = now_unix_s() as u32;
-
                 parser.end();
-                while let Some(el) = parser.next() {
-                    let chunk = el.into_chunk(respond_id.clone(), model_name.clone(), created);
-                    if !on_item(ChatStreamItem::Chunk(chunk)) {
+
+                while let Some(part) = parser.next() {
+                    if !on_item(ChatStreamItem::Part(part)) {
                         break;
                     }
                 }
 
-                let last = CreateChatCompletionStreamResponse {
-                    id: respond_id.clone(),
-                    object: "chat.completion.chunk".to_string(),
-                    created,
-                    model: model_name.clone(),
-                    choices: vec![ChatChoiceStream {
-                        index: 0,
-                        delta: ChatCompletionStreamResponseDelta {
-                            content: None,
-                            role: None,
-                            tool_calls: None,
-                            refusal: None,
-                            function_call: None,
-                        },
-                        finish_reason: Some(match reason {
-                            StopReason::Eog | StopReason::Word(_) | StopReason::PrefillOnly => {
-                                FinishReason::Stop
-                            }
-                            StopReason::MaxTokens => FinishReason::Length,
-                        }),
-                        logprobs: None,
-                    }],
-                    usage: if include_usage {
+                on_item(ChatStreamItem::Stop(
+                    match reason {
+                        StopReason::Eog | StopReason::Word(_) | StopReason::PrefillOnly => {
+                            FinishReason::Stop
+                        }
+                        StopReason::MaxTokens => FinishReason::Length,
+                    },
+                    if include_usage {
                         Some(CompletionUsage {
                             prompt_tokens: n_prompt_tokens as u32,
                             completion_tokens: n_completion_tokens as u32,
@@ -388,10 +412,7 @@ pub(crate) fn chat_response_stream<F>(
                     } else {
                         None
                     },
-                    system_fingerprint: None,
-                    service_tier: None,
-                };
-                on_item(ChatStreamItem::Chunk(last));
+                ));
                 on_item(ChatStreamItem::Done);
                 break;
             }
@@ -441,10 +462,10 @@ pub(crate) fn chat_response_once(
 
                 while let Some(part) = parser.next() {
                     match part {
-                        ChatPart::Text(t) => {
+                        ChatResponsePart::Text(t) => {
                             text.push_str(&t);
                         }
-                        ChatPart::Call(t) => {
+                        ChatResponsePart::Call(t) => {
                             tool_calls.push(ChatCompletionMessageToolCalls::Function(t));
                         }
                         _ => {}
@@ -511,20 +532,20 @@ mod tests {
     use super::*;
 
     fn text_output(p: &ChatResponseParser) -> String {
-        p.out
+        p.parts
             .iter()
             .filter_map(|e| match e {
-                ChatPart::Text(s) => Some(s.as_str()),
+                ChatResponsePart::Text(s) => Some(s.as_str()),
                 _ => None,
             })
             .collect()
     }
 
     fn reasoning_output(p: &ChatResponseParser) -> String {
-        p.out
+        p.parts
             .iter()
             .filter_map(|e| match e {
-                ChatPart::Think(s) => Some(s.as_str()),
+                ChatResponsePart::Think(s) => Some(s.as_str()),
                 _ => None,
             })
             .collect()
@@ -567,9 +588,9 @@ mod tests {
         p.push_str(r#"<tool_call>{"name":"get_weather","arguments":"{}"}</tool_call>"#);
         assert_eq!(p.state, State::Text);
         assert_eq!(text_output(&p), "");
-        assert_eq!(p.out.len(), 1);
-        match &p.out[0] {
-            ChatPart::Call(fc) => {
+        assert_eq!(p.parts.len(), 1);
+        match &p.parts[0] {
+            ChatResponsePart::Call(fc) => {
                 assert_eq!(fc.function.name, "get_weather");
                 assert_eq!(fc.function.arguments, "{}");
             }
@@ -605,9 +626,9 @@ mod tests {
         p.push_str(r#","arguments":"{}"}</tool_call> b"#);
         assert_eq!(p.state, State::Text);
         assert_eq!(text_output(&p), " b");
-        assert_eq!(p.out.len(), 2);
-        match &p.out[0] {
-            ChatPart::Call(fc) => {
+        assert_eq!(p.parts.len(), 2);
+        match &p.parts[0] {
+            ChatResponsePart::Call(fc) => {
                 assert_eq!(fc.function.name, "search");
                 assert_eq!(fc.function.arguments, "{}");
             }
@@ -623,17 +644,17 @@ mod tests {
         );
         assert_eq!(reasoning_output(&p), "reasoning");
         assert_eq!(text_output(&p), " ");
-        assert_eq!(p.out.len(), 3);
-        match &p.out[0] {
-            ChatPart::Think(s) => assert_eq!(s, "reasoning"),
+        assert_eq!(p.parts.len(), 3);
+        match &p.parts[0] {
+            ChatResponsePart::Think(s) => assert_eq!(s, "reasoning"),
             _ => panic!("expected Think element"),
         }
-        match &p.out[1] {
-            ChatPart::Text(s) => assert_eq!(s, " "),
+        match &p.parts[1] {
+            ChatResponsePart::Text(s) => assert_eq!(s, " "),
             _ => panic!("expected Text element"),
         }
-        match &p.out[2] {
-            ChatPart::Call(fc) => {
+        match &p.parts[2] {
+            ChatResponsePart::Call(fc) => {
                 assert_eq!(fc.function.name, "calc");
                 assert_eq!(fc.function.arguments, "{}");
             }
@@ -652,7 +673,7 @@ mod tests {
     fn empty_input() {
         let mut p = ChatResponseParser::new();
         p.push_str("");
-        assert!(p.out.is_empty());
+        assert!(p.parts.is_empty());
     }
 
     #[test]
@@ -673,9 +694,9 @@ mod tests {
     fn tool_call_nested_think_inside() {
         let mut p = ChatResponseParser::new();
         p.push_str(r#"<tool_call>{"name":"<think>","arguments":"{}"}</tool_call>"#);
-        assert_eq!(p.out.len(), 1);
-        match &p.out[0] {
-            ChatPart::Call(fc) => {
+        assert_eq!(p.parts.len(), 1);
+        match &p.parts[0] {
+            ChatResponsePart::Call(fc) => {
                 assert_eq!(fc.function.name, "<think>");
             }
             _ => panic!("expected Call element"),
