@@ -487,7 +487,7 @@ impl LlmOutputParser {
 
                     let mut text = String::new();
                     let mut reasoning = String::new();
-                    let mut tool_calls = Vec::<ChatCompletionMessageToolCalls>::new();
+                    let mut calls = Vec::<ChatCompletionMessageToolCalls>::new();
 
                     while let Some(part) = self.next() {
                         match part {
@@ -495,7 +495,7 @@ impl LlmOutputParser {
                                 text.push_str(&t);
                             }
                             OutputPart::Call(t) => {
-                                tool_calls.push(ChatCompletionMessageToolCalls::Function(t));
+                                calls.push(ChatCompletionMessageToolCalls::Function(t));
                             }
                             OutputPart::Reasoning(t) => {
                                 reasoning.push_str(&t);
@@ -505,7 +505,7 @@ impl LlmOutputParser {
 
                     match kind {
                         ParserKind::Chat => {
-                            let finish_reason = if tool_calls.is_empty() {
+                            let finish_reason = if calls.is_empty() {
                                 match reason {
                                     StopReason::MaxTokens => FinishReason::Length,
                                     StopReason::Eog
@@ -526,8 +526,8 @@ impl LlmOutputParser {
                                     message: ChatCompletionResponseMessage {
                                         role: Role::Assistant,
                                         content: if !text.is_empty() { Some(text) } else { None },
-                                        tool_calls: if !tool_calls.is_empty() {
-                                            Some(tool_calls)
+                                        tool_calls: if !calls.is_empty() {
+                                            Some(calls)
                                         } else {
                                             None
                                         },
@@ -589,7 +589,7 @@ impl LlmOutputParser {
                                 }));
                             }
 
-                            for tc in tool_calls {
+                            for tc in calls {
                                 match tc {
                                     ChatCompletionMessageToolCalls::Function(f) => {
                                         output.push(OutputItem::FunctionCall(FunctionToolCall {
