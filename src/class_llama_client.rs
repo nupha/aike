@@ -11,7 +11,7 @@ use async_openai::{
         ChatCompletionRequestMessage, ChatCompletionRequestSystemMessage,
         ChatCompletionRequestSystemMessageContent, ChatCompletionRequestToolMessage,
         ChatCompletionRequestToolMessageContent, ChatCompletionRequestUserMessage,
-        ChatCompletionRequestUserMessageContent, ChatCompletionStreamOptions, ChatCompletionTool,
+        ChatCompletionRequestUserMessageContent, ChatCompletionStreamOptions,
         ChatCompletionToolChoiceOption, ChatCompletionTools, CreateChatCompletionRequestArgs,
         CreateChatCompletionResponse, CreateChatCompletionStreamResponse, ReasoningEffort,
         ResponseFormat, ToolChoiceOptions,
