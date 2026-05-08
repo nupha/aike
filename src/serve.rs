@@ -24,7 +24,7 @@ use uuid::Uuid;
 use crate::{
     engine::{Engine, GrammarConfig, OutputMode, TaskConfig},
     helpers::{build_chat_prompt_tokens, compile_tools_grammar, now_unix_s, to_lark_tool_choice},
-    output::{ChatStreamItem, LlmOutputParser, ParserKind},
+    output::{LlmOutputParser, OutputStreamItem, ParserKind},
 };
 
 pub(crate) const ERR_CANCELLED: &str = "cancelled";
@@ -250,10 +250,10 @@ async fn handle_chat_completions(
         tokio::task::spawn_blocking(move || {
             parser.parse_stream(rx, STREAM_TIMEOUT, |item, nth| {
                 match item {
-                    ChatStreamItem::Done => {
+                    OutputStreamItem::Done => {
                         let _ = tx.send("[DONE]".to_string());
                     }
-                    ChatStreamItem::Error(e) => {
+                    OutputStreamItem::Error(e) => {
                         let err = oai_error(e, "server_error");
                         let data = serde_json::to_string(&err).unwrap_or_default();
                         let _ = tx.send(data);

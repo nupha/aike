@@ -21,7 +21,7 @@ use crate::{
     class_llama_client_responses::{parse_responses_input, parse_responses_reasoning},
     engine::{Engine, GrammarConfig, OutputMode, TaskConfig},
     helpers::{build_chat_prompt_tokens, compile_tools_grammar, now_unix_s, to_lark_tool_choice},
-    output::{ChatStreamItem, LlmOutputParser, ParserKind},
+    output::{OutputStreamItem, LlmOutputParser, ParserKind},
 };
 
 pub(crate) const ERR_CANCELLED: &str = "cancelled";
@@ -257,20 +257,20 @@ fn js_engine_chat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     if is_stream {
         // Streaming: AsyncIterableIterator
-        let (item_tx, item_rx) = crossbeam::channel::bounded::<(ChatStreamItem, usize)>(8);
+        let (item_tx, item_rx) = crossbeam::channel::bounded::<(OutputStreamItem, usize)>(8);
         std::thread::spawn(move || {
             parser.parse_stream(rx, std::time::Duration::from_secs(u64::MAX), |item, nth| {
                 item_tx.send((item, nth)).is_ok()
             });
         });
 
-        AsyncIterableIterator::create_with_receiver::<(ChatStreamItem, usize)>(
+        AsyncIterableIterator::create_with_receiver::<(OutputStreamItem, usize)>(
             ctx,
             item_rx,
             move |cx, (msg, nth)| -> Result<Option<JSValue>, i32> {
                 match msg {
-                    ChatStreamItem::Done => Ok(None),
-                    ChatStreamItem::Error(e) => {
+                    OutputStreamItem::Done => Ok(None),
+                    OutputStreamItem::Error(e) => {
                         cx.throw_internal_error(&e);
                         Err(-1)
                     }
@@ -449,20 +449,20 @@ fn js_engine_responses(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     if is_stream {
         // Streaming: AsyncIterableIterator
-        let (item_tx, item_rx) = crossbeam::channel::bounded::<(ChatStreamItem, usize)>(8);
+        let (item_tx, item_rx) = crossbeam::channel::bounded::<(OutputStreamItem, usize)>(8);
         std::thread::spawn(move || {
             parser.parse_stream(rx, std::time::Duration::from_secs(u64::MAX), |item, nth| {
                 item_tx.send((item, nth)).is_ok()
             });
         });
 
-        AsyncIterableIterator::create_with_receiver::<(ChatStreamItem, usize)>(
+        AsyncIterableIterator::create_with_receiver::<(OutputStreamItem, usize)>(
             ctx,
             item_rx,
             move |cx, (msg, nth)| -> Result<Option<JSValue>, i32> {
                 match msg {
-                    ChatStreamItem::Done => Ok(None),
-                    ChatStreamItem::Error(e) => {
+                    OutputStreamItem::Done => Ok(None),
+                    OutputStreamItem::Error(e) => {
                         cx.throw_internal_error(&e);
                         Err(-1)
                     }

@@ -8,7 +8,7 @@ use tokio_stream::wrappers::UnboundedReceiverStream;
 
 use crate::{
     engine::EngineReply,
-    output::{ChatResponsePart, ChatStreamItem, LlmOutputParser},
+    output::{LlmOutputParser, OutputPart, OutputStreamItem},
     serve::STREAM_TIMEOUT,
 };
 
@@ -20,14 +20,14 @@ use super::response_builder::{
 /// Convert a ChatStreamItem to a ResponseStreamEvent-shaped JSON value.
 /// Used by Engine.responses() to produce the same event format as the SSE stream.
 pub fn chat_stream_item_to_response_event(
-    item: &ChatStreamItem,
+    item: &OutputStreamItem,
     respond_id: &str,
     model_name: &str,
     nth: usize,
 ) -> serde_json::Value {
     match item {
-        ChatStreamItem::Part(part) => match part {
-            ChatResponsePart::Text(t) => {
+        OutputStreamItem::Part(part) => match part {
+            OutputPart::Text(t) => {
                 if nth == 0 {
                     // First text chunk: emit output_item.added + content_part.added + text.delta
                     json!({
@@ -45,14 +45,14 @@ pub fn chat_stream_item_to_response_event(
                     })
                 }
             }
-            ChatResponsePart::Think(r) => {
+            OutputPart::Reasoning(r) => {
                 json!({
                     "type": "response.reasoning_summary.delta",
                     "delta": r,
                     "output_index": 0
                 })
             }
-            ChatResponsePart::Call(_) => {
+            OutputPart::Call(_) => {
                 json!({
                     "type": "response.output_text.delta",
                     "delta": "",
@@ -61,17 +61,17 @@ pub fn chat_stream_item_to_response_event(
                 })
             }
         },
-        ChatStreamItem::Stop(_finish_reason, usage) => {
+        OutputStreamItem::Stop(_finish_reason, usage) => {
             let n_completion = usage
                 .as_ref()
                 .map(|u| u.completion_tokens as usize)
                 .unwrap_or(0);
             build_response_completed_event(respond_id, model_name, 0, n_completion)
         }
-        ChatStreamItem::Done => {
+        OutputStreamItem::Done => {
             json!({"type": "done"})
         }
-        ChatStreamItem::Error(e) => {
+        OutputStreamItem::Error(e) => {
             json!({
                 "type": "error",
                 "error": {
@@ -113,8 +113,8 @@ pub(crate) fn handle_responses_stream(
 
         parser.parse_stream(rx, STREAM_TIMEOUT, |item, _nth| {
             match item {
-                ChatStreamItem::Part(part) => match part {
-                    ChatResponsePart::Text(t) => {
+                OutputStreamItem::Part(part) => match part {
+                    OutputPart::Text(t) => {
                         if !text_started {
                             text_started = true;
 
@@ -133,7 +133,7 @@ pub(crate) fn handle_responses_stream(
                         seq += 1;
                         let _ = tx.send(sse_event("response.output_text.delta", delta));
                     }
-                    ChatResponsePart::Think(r) => {
+                    OutputPart::Reasoning(r) => {
                         if !reasoning_started {
                             reasoning_started = true;
                         }
@@ -142,11 +142,11 @@ pub(crate) fn handle_responses_stream(
                         seq += 1;
                         let _ = tx.send(sse_event("response.reasoning_summary.delta", delta));
                     }
-                    ChatResponsePart::Call(_) => {
+                    OutputPart::Call(_) => {
                         // Tool calls not yet implemented for Responses API
                     }
                 },
-                ChatStreamItem::Stop(_finish_reason, usage) => {
+                OutputStreamItem::Stop(_finish_reason, usage) => {
                     let n_completion = usage
                         .as_ref()
                         .map(|u| u.completion_tokens as usize)
@@ -159,10 +159,10 @@ pub(crate) fn handle_responses_stream(
                     );
                     let _ = tx.send(sse_event("response.completed", completed));
                 }
-                ChatStreamItem::Done => {
+                OutputStreamItem::Done => {
                     // Already handled by Stop; this is a no-op
                 }
-                ChatStreamItem::Error(e) => {
+                OutputStreamItem::Error(e) => {
                     let err = json!({
                         "type": "error",
                         "error": {

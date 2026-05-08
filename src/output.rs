@@ -11,7 +11,7 @@ use async_openai::types::{
     responses::{
         AssistantRole, FunctionToolCall, InputTokenDetails, OutputItem, OutputMessage,
         OutputMessageContent, OutputStatus, OutputTextContent, OutputTokenDetails, ReasoningItem,
-        ReasoningTextContent, Response, ResponseUsage, Status,
+        ReasoningTextContent, Response, ResponseUsage, Status, SummaryPart, SummaryTextContent,
     },
 };
 use uuid::Uuid;
@@ -23,13 +23,13 @@ use crate::{
 };
 
 #[derive(Debug)]
-pub(crate) enum ChatResponsePart {
+pub(crate) enum OutputPart {
     Text(String),
-    Think(String),
     Call(ChatCompletionMessageToolCall),
+    Reasoning(String),
 }
 
-impl ChatResponsePart {
+impl OutputPart {
     pub fn into_chunk_delta(self) -> ChatCompletionStreamResponseDelta {
         match self {
             Self::Text(t) => ChatCompletionStreamResponseDelta {
@@ -39,7 +39,7 @@ impl ChatResponsePart {
                 refusal: None,
                 function_call: None,
             },
-            Self::Think(t) => ChatCompletionStreamResponseDelta {
+            Self::Reasoning(t) => ChatCompletionStreamResponseDelta {
                 content: Some(t),
                 role: None,
                 tool_calls: None,
@@ -88,14 +88,14 @@ impl ChatResponsePart {
     }
 }
 
-pub(crate) enum ChatStreamItem {
-    Part(ChatResponsePart),
+pub(crate) enum OutputStreamItem {
+    Part(OutputPart),
     Stop(FinishReason, Option<CompletionUsage>),
     Done,
     Error(String),
 }
 
-impl ChatStreamItem {
+impl OutputStreamItem {
     pub fn into_chunk(
         self,
         id: &str,
@@ -133,20 +133,20 @@ impl ChatStreamItem {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) enum ChatResponseTag {
+pub(crate) enum OutputTag {
     Think,
     CloseThink,
     ToolCall,
     CloseToolCall,
 }
 
-impl ChatResponseTag {
+impl OutputTag {
     pub const fn as_str(&self) -> &str {
         match self {
-            ChatResponseTag::Think => "<think>",
-            ChatResponseTag::CloseThink => "</think>",
-            ChatResponseTag::ToolCall => "<tool_call>",
-            ChatResponseTag::CloseToolCall => "</tool_call>",
+            OutputTag::Think => "<think>",
+            OutputTag::CloseThink => "</think>",
+            OutputTag::ToolCall => "<tool_call>",
+            OutputTag::CloseToolCall => "</tool_call>",
         }
     }
 }
@@ -166,7 +166,7 @@ enum State {
 
 pub struct LlmOutputParser {
     state: State,
-    parts: VecDeque<ChatResponsePart>,
+    parts: VecDeque<OutputPart>,
     parse_think: bool,
     include_usage: bool,
     n_prompt_tokens: usize,
@@ -183,9 +183,7 @@ impl LlmOutputParser {
     ) -> Self {
         let mut parts = VecDeque::new();
         if start_think && !parse_think {
-            parts.push_back(ChatResponsePart::Text(
-                ChatResponseTag::Think.as_str().into(),
-            ));
+            parts.push_back(OutputPart::Text(OutputTag::Think.as_str().into()));
         }
 
         Self {
@@ -233,26 +231,26 @@ impl LlmOutputParser {
 
             match self.state {
                 State::Text => {
-                    tool_call_pos = remaining.find(ChatResponseTag::ToolCall.as_str());
+                    tool_call_pos = remaining.find(OutputTag::ToolCall.as_str());
                     if self.parse_think {
-                        think_pos = remaining.find(ChatResponseTag::Think.as_str());
+                        think_pos = remaining.find(OutputTag::Think.as_str());
                     }
                 }
                 State::MaybeCall(_) => {
-                    close_tool_call_pos = remaining.find(ChatResponseTag::CloseToolCall.as_str());
+                    close_tool_call_pos = remaining.find(OutputTag::CloseToolCall.as_str());
                 }
                 State::Thinking => {
-                    close_think_pos = remaining.find(ChatResponseTag::CloseThink.as_str());
+                    close_think_pos = remaining.find(OutputTag::CloseThink.as_str());
                 }
             }
 
-            let mut found_tag: Option<(usize, ChatResponseTag)> = None;
+            let mut found_tag: Option<(usize, OutputTag)> = None;
 
             for (p, t) in [
-                (think_pos, ChatResponseTag::Think),
-                (close_think_pos, ChatResponseTag::CloseThink),
-                (tool_call_pos, ChatResponseTag::ToolCall),
-                (close_tool_call_pos, ChatResponseTag::CloseToolCall),
+                (think_pos, OutputTag::Think),
+                (close_think_pos, OutputTag::CloseThink),
+                (tool_call_pos, OutputTag::ToolCall),
+                (close_tool_call_pos, OutputTag::CloseToolCall),
             ] {
                 if let Some(p) = p {
                     match found_tag {
@@ -268,40 +266,39 @@ impl LlmOutputParser {
             }
 
             match (found_tag, &mut self.state) {
-                (Some((pos, ChatResponseTag::Think)), State::Text) => {
+                (Some((pos, OutputTag::Think)), State::Text) => {
                     self.state = State::Thinking;
                     if pos > 0 {
                         self.parts
-                            .push_back(ChatResponsePart::Text(remaining[..pos].to_string()));
+                            .push_back(OutputPart::Text(remaining[..pos].to_string()));
                     }
-                    remaining = &remaining[pos + ChatResponseTag::Think.as_str().len()..];
+                    remaining = &remaining[pos + OutputTag::Think.as_str().len()..];
                 }
-                (Some((pos, ChatResponseTag::CloseThink)), State::Thinking) => {
+                (Some((pos, OutputTag::CloseThink)), State::Thinking) => {
                     self.state = State::Text;
                     if pos > 0 {
                         self.parts
-                            .push_back(ChatResponsePart::Think(remaining[..pos].to_string()));
+                            .push_back(OutputPart::Reasoning(remaining[..pos].to_string()));
                     }
-                    remaining = &remaining[pos + ChatResponseTag::CloseThink.as_str().len()..];
+                    remaining = &remaining[pos + OutputTag::CloseThink.as_str().len()..];
                 }
-                (Some((pos, ChatResponseTag::ToolCall)), State::Text) => {
+                (Some((pos, OutputTag::ToolCall)), State::Text) => {
                     if pos > 0 {
                         self.parts
-                            .push_back(ChatResponsePart::Text(remaining[..pos].to_string()));
+                            .push_back(OutputPart::Text(remaining[..pos].to_string()));
                     }
-                    remaining = &remaining[pos + ChatResponseTag::ToolCall.as_str().len()..];
+                    remaining = &remaining[pos + OutputTag::ToolCall.as_str().len()..];
                     self.state = State::MaybeCall(String::new());
                 }
-                (Some((pos, ChatResponseTag::CloseToolCall)), State::MaybeCall(s)) => {
+                (Some((pos, OutputTag::CloseToolCall)), State::MaybeCall(s)) => {
                     s.push_str(&remaining[..pos]);
-                    remaining = &remaining[pos + ChatResponseTag::CloseToolCall.as_str().len()..];
+                    remaining = &remaining[pos + OutputTag::CloseToolCall.as_str().len()..];
 
                     if let Ok(value) = serde_json::from_str::<serde_json::Value>(s) {
                         let obj = match value.as_object() {
                             Some(obj) if obj.len() == 2 => obj,
                             _ => {
-                                self.parts
-                                    .push_back(ChatResponsePart::Text(std::mem::take(s)));
+                                self.parts.push_back(OutputPart::Text(std::mem::take(s)));
                                 return;
                             }
                         };
@@ -309,8 +306,7 @@ impl LlmOutputParser {
                         let name = match obj.get("name").and_then(|v| v.as_str()) {
                             Some(n) => n.to_string(),
                             None => {
-                                self.parts
-                                    .push_back(ChatResponsePart::Text(std::mem::take(s)));
+                                self.parts.push_back(OutputPart::Text(std::mem::take(s)));
                                 return;
                             }
                         };
@@ -319,21 +315,18 @@ impl LlmOutputParser {
                             Some(serde_json::Value::String(s)) => s.clone(),
                             Some(other) => serde_json::to_string(other).unwrap_or_default(),
                             None => {
-                                self.parts
-                                    .push_back(ChatResponsePart::Text(std::mem::take(s)));
+                                self.parts.push_back(OutputPart::Text(std::mem::take(s)));
                                 return;
                             }
                         };
 
-                        self.parts.push_back(ChatResponsePart::Call(
-                            ChatCompletionMessageToolCall {
+                        self.parts
+                            .push_back(OutputPart::Call(ChatCompletionMessageToolCall {
                                 id: format!("call_{}", uuid::Uuid::new_v4().simple()),
                                 function: FunctionCall { name, arguments },
-                            },
-                        ));
+                            }));
                     } else {
-                        self.parts
-                            .push_back(ChatResponsePart::Text(std::mem::take(s)));
+                        self.parts.push_back(OutputPart::Text(std::mem::take(s)));
                     }
 
                     self.state = State::Text;
@@ -341,13 +334,13 @@ impl LlmOutputParser {
                 (Some((pos, t)), State::Text) => {
                     let p = pos + t.as_str().len();
                     self.parts
-                        .push_back(ChatResponsePart::Text(remaining[..p].to_string()));
+                        .push_back(OutputPart::Text(remaining[..p].to_string()));
                     remaining = &remaining[p..];
                 }
                 (Some((pos, t)), State::Thinking) => {
                     let p = pos + t.as_str().len();
                     self.parts
-                        .push_back(ChatResponsePart::Think(remaining[..p].to_string()));
+                        .push_back(OutputPart::Reasoning(remaining[..p].to_string()));
                     remaining = &remaining[p..];
                 }
                 (Some((pos, t)), State::MaybeCall(s)) => {
@@ -358,13 +351,13 @@ impl LlmOutputParser {
                 (None, State::Text) => {
                     debug_assert!(!remaining.is_empty());
                     self.parts
-                        .push_back(ChatResponsePart::Text(remaining.to_string()));
+                        .push_back(OutputPart::Text(remaining.to_string()));
                     remaining = "";
                 }
                 (None, State::Thinking) => {
                     debug_assert!(!remaining.is_empty());
                     self.parts
-                        .push_back(ChatResponsePart::Think(remaining.to_string()));
+                        .push_back(OutputPart::Reasoning(remaining.to_string()));
                     remaining = "";
                 }
                 (None, State::MaybeCall(s)) => {
@@ -378,14 +371,14 @@ impl LlmOutputParser {
 
     pub fn end(&mut self) {
         if let State::MaybeCall(s) = std::mem::replace(&mut self.state, State::Text) {
-            self.parts.push_back(ChatResponsePart::Text(format!(
+            self.parts.push_back(OutputPart::Text(format!(
                 "{}{s}",
-                ChatResponseTag::ToolCall.as_str()
+                OutputTag::ToolCall.as_str()
             )));
         }
     }
 
-    pub fn next(&mut self) -> Option<ChatResponsePart> {
+    pub fn next(&mut self) -> Option<OutputPart> {
         self.parts.pop_front()
     }
 
@@ -395,7 +388,7 @@ impl LlmOutputParser {
         timeout: std::time::Duration,
         mut on_item: F,
     ) where
-        F: FnMut(ChatStreamItem, usize) -> bool,
+        F: FnMut(OutputStreamItem, usize) -> bool,
     {
         let mut nth = 0_usize; // index of chunk
         let mut has_tool_call = false;
@@ -405,11 +398,11 @@ impl LlmOutputParser {
                 Ok(EngineReply::Text(t)) => {
                     self.push_str(&t);
                     while let Some(part) = self.next() {
-                        if matches!(part, ChatResponsePart::Call(_)) {
+                        if matches!(part, OutputPart::Call(_)) {
                             has_tool_call = true;
                         }
 
-                        if !on_item(ChatStreamItem::Part(part), nth) {
+                        if !on_item(OutputStreamItem::Part(part), nth) {
                             break;
                         }
                         nth += 1;
@@ -418,7 +411,7 @@ impl LlmOutputParser {
                 Ok(EngineReply::Stop(reason, n_completion_tokens)) => {
                     self.end();
                     while let Some(part) = self.next() {
-                        if !on_item(ChatStreamItem::Part(part), nth) {
+                        if !on_item(OutputStreamItem::Part(part), nth) {
                             break;
                         }
                         nth += 1;
@@ -446,27 +439,30 @@ impl LlmOutputParser {
                     } else {
                         None
                     };
-                    on_item(ChatStreamItem::Stop(finish_reason, usage), nth);
+                    on_item(OutputStreamItem::Stop(finish_reason, usage), nth);
                     nth += 1;
 
                     // emit done message
-                    on_item(ChatStreamItem::Done, nth);
+                    on_item(OutputStreamItem::Done, nth);
                     break;
                 }
                 Ok(EngineReply::Cancelled) => {
-                    on_item(ChatStreamItem::Error(ERR_CANCELLED.to_string()), nth);
+                    on_item(OutputStreamItem::Error(ERR_CANCELLED.to_string()), nth);
                     break;
                 }
                 Ok(EngineReply::Error(e)) => {
-                    on_item(ChatStreamItem::Error(e), nth);
+                    on_item(OutputStreamItem::Error(e), nth);
                     break;
                 }
                 Ok(EngineReply::Shutdown) => {
-                    on_item(ChatStreamItem::Error(ERR_ENGINE_SHUTDOWN.to_string()), nth);
+                    on_item(
+                        OutputStreamItem::Error(ERR_ENGINE_SHUTDOWN.to_string()),
+                        nth,
+                    );
                     break;
                 }
                 Err(_) => {
-                    on_item(ChatStreamItem::Error("stream timed out".to_string()), nth);
+                    on_item(OutputStreamItem::Error("stream timed out".to_string()), nth);
                     break;
                 }
             }
@@ -495,13 +491,13 @@ impl LlmOutputParser {
 
                     while let Some(part) = self.next() {
                         match part {
-                            ChatResponsePart::Text(t) => {
+                            OutputPart::Text(t) => {
                                 text.push_str(&t);
                             }
-                            ChatResponsePart::Call(t) => {
+                            OutputPart::Call(t) => {
                                 tool_calls.push(ChatCompletionMessageToolCalls::Function(t));
                             }
-                            ChatResponsePart::Think(t) => {
+                            OutputPart::Reasoning(t) => {
                                 reasoning.push_str(&t);
                             }
                         }
@@ -561,30 +557,30 @@ impl LlmOutputParser {
 
                             return serde_json::to_value(resp).map_err(|e| e.to_string());
                         }
+
                         ParserKind::Responses => {
-                            let mut output_items: Vec<OutputItem> = Vec::new();
+                            let mut output: Vec<OutputItem> = Vec::new();
 
                             if !reasoning.is_empty() {
-                                output_items.push(OutputItem::Reasoning(ReasoningItem {
+                                output.push(OutputItem::Reasoning(ReasoningItem {
                                     id: Some(format!("think_{}", Uuid::new_v4().simple())),
-                                    // summary: vec![SummaryPart::SummaryText(SummaryTextContent {
-                                    //     text: reasoning.clone(),
-                                    // })],
-                                    summary: vec![],
-                                    content: Some(vec![ReasoningTextContent { text: reasoning }]),
+                                    summary: vec![SummaryPart::SummaryText(SummaryTextContent {
+                                        text: reasoning,
+                                    })],
+                                    content: None,
                                     encrypted_content: None,
                                     status: None,
                                 }));
                             }
 
                             if !text.is_empty() {
-                                output_items.push(OutputItem::Message(OutputMessage {
-                                    id: format!("msg_{}", Uuid::new_v4().simple()),
+                                output.push(OutputItem::Message(OutputMessage {
+                                    id: format!("text_{}", Uuid::new_v4().simple()),
                                     role: AssistantRole::Assistant,
                                     status: OutputStatus::Completed,
                                     content: vec![OutputMessageContent::OutputText(
                                         OutputTextContent {
-                                            text: text.clone(),
+                                            text,
                                             annotations: vec![],
                                             logprobs: None,
                                         },
@@ -596,39 +592,43 @@ impl LlmOutputParser {
                             for tc in tool_calls {
                                 match tc {
                                     ChatCompletionMessageToolCalls::Function(f) => {
-                                        output_items.push(OutputItem::FunctionCall(
-                                            FunctionToolCall {
-                                                id: Some(f.id.clone()),
-                                                call_id: f.id,
-                                                name: f.function.name,
-                                                arguments: f.function.arguments,
-                                                namespace: None,
-                                                status: Some(OutputStatus::Completed),
-                                            },
-                                        ));
+                                        output.push(OutputItem::FunctionCall(FunctionToolCall {
+                                            id: Some(f.id.clone()),
+                                            call_id: f.id,
+                                            name: f.function.name,
+                                            arguments: f.function.arguments,
+                                            namespace: None,
+                                            status: Some(OutputStatus::Completed),
+                                        }));
                                     }
                                     ChatCompletionMessageToolCalls::Custom(_) => {}
                                 }
                             }
 
                             let resp = Response {
-                                id: self.respond_id.clone(),
+                                id: self.respond_id,
                                 object: "response".to_string(),
                                 created_at: tm as _,
                                 completed_at: Some(now_unix_s() as _),
                                 status: Status::Completed,
-                                model: self.model_name.clone(),
-                                output: output_items,
-                                usage: Some(ResponseUsage {
-                                    input_tokens: self.n_prompt_tokens as u32,
-                                    output_tokens: n_completion_tokens as u32,
-                                    total_tokens: (self.n_prompt_tokens + n_completion_tokens)
-                                        as u32,
-                                    input_tokens_details: InputTokenDetails { cached_tokens: 0 },
-                                    output_tokens_details: OutputTokenDetails {
-                                        reasoning_tokens: 0,
-                                    },
-                                }),
+                                model: self.model_name,
+                                output,
+                                usage: if self.include_usage {
+                                    Some(ResponseUsage {
+                                        input_tokens: self.n_prompt_tokens as u32,
+                                        output_tokens: n_completion_tokens as u32,
+                                        total_tokens: (self.n_prompt_tokens + n_completion_tokens)
+                                            as u32,
+                                        input_tokens_details: InputTokenDetails {
+                                            cached_tokens: 0,
+                                        },
+                                        output_tokens_details: OutputTokenDetails {
+                                            reasoning_tokens: 0,
+                                        },
+                                    })
+                                } else {
+                                    None
+                                },
                                 background: None,
                                 billing: None,
                                 conversation: None,
@@ -675,7 +675,7 @@ mod tests {
         p.parts
             .iter()
             .filter_map(|e| match e {
-                ChatResponsePart::Text(s) => Some(s.as_str()),
+                OutputPart::Text(s) => Some(s.as_str()),
                 _ => None,
             })
             .collect()
@@ -685,7 +685,7 @@ mod tests {
         p.parts
             .iter()
             .filter_map(|e| match e {
-                ChatResponsePart::Think(s) => Some(s.as_str()),
+                OutputPart::Reasoning(s) => Some(s.as_str()),
                 _ => None,
             })
             .collect()
@@ -730,7 +730,7 @@ mod tests {
         assert_eq!(text_output(&p), "");
         assert_eq!(p.parts.len(), 1);
         match &p.parts[0] {
-            ChatResponsePart::Call(fc) => {
+            OutputPart::Call(fc) => {
                 assert_eq!(fc.function.name, "get_weather");
                 assert_eq!(fc.function.arguments, "{}");
             }
@@ -768,7 +768,7 @@ mod tests {
         assert_eq!(text_output(&p), " b");
         assert_eq!(p.parts.len(), 2);
         match &p.parts[0] {
-            ChatResponsePart::Call(fc) => {
+            OutputPart::Call(fc) => {
                 assert_eq!(fc.function.name, "search");
                 assert_eq!(fc.function.arguments, "{}");
             }
@@ -786,15 +786,15 @@ mod tests {
         assert_eq!(text_output(&p), " ");
         assert_eq!(p.parts.len(), 3);
         match &p.parts[0] {
-            ChatResponsePart::Think(s) => assert_eq!(s, "reasoning"),
+            OutputPart::Reasoning(s) => assert_eq!(s, "reasoning"),
             _ => panic!("expected Think element"),
         }
         match &p.parts[1] {
-            ChatResponsePart::Text(s) => assert_eq!(s, " "),
+            OutputPart::Text(s) => assert_eq!(s, " "),
             _ => panic!("expected Text element"),
         }
         match &p.parts[2] {
-            ChatResponsePart::Call(fc) => {
+            OutputPart::Call(fc) => {
                 assert_eq!(fc.function.name, "calc");
                 assert_eq!(fc.function.arguments, "{}");
             }
@@ -836,7 +836,7 @@ mod tests {
         p.push_str(r#"<tool_call>{"name":"<think>","arguments":"{}"}</tool_call>"#);
         assert_eq!(p.parts.len(), 1);
         match &p.parts[0] {
-            ChatResponsePart::Call(fc) => {
+            OutputPart::Call(fc) => {
                 assert_eq!(fc.function.name, "<think>");
             }
             _ => panic!("expected Call element"),
