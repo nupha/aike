@@ -271,8 +271,10 @@ impl ChatResponseParser {
 
     pub fn end(&mut self) {
         if let State::MaybeCall(s) = std::mem::replace(&mut self.state, State::Text) {
-            self.out
-                .push_back(ChatPart::Text(format!("{}{s}", ChatResponseTag::ToolCall.as_str())));
+            self.out.push_back(ChatPart::Text(format!(
+                "{}{s}",
+                ChatResponseTag::ToolCall.as_str()
+            )));
         }
     }
 

@@ -4,8 +4,8 @@ use std::{
 };
 
 use async_openai::types::chat::{
-    ChatChoice, ChatCompletionMessageToolCall, ChatCompletionResponseMessage, CompletionUsage,
-    CreateChatCompletionRequest, CreateChatCompletionResponse, FinishReason, FunctionCall, Role,
+    ChatChoice, ChatCompletionMessageToolCalls, ChatCompletionResponseMessage, CompletionUsage,
+    CreateChatCompletionRequest, CreateChatCompletionResponse, FinishReason, Role,
 };
 use axum::{
     Json, Router,
@@ -25,7 +25,9 @@ use tower_http::cors::CorsLayer;
 use uuid::Uuid;
 
 use crate::{
-    chat_response::{ChatResponseParser, ChatResponseTag, ChatStreamItem, chat_response_listener},
+    chat_response::{
+        ChatPart, ChatResponseParser, ChatResponseTag, ChatStreamItem, chat_response_listener,
+    },
     engine::{Engine, EngineReply, GrammarConfig, OutputMode, StopReason, TaskConfig},
     helpers::{build_chat_prompt_tokens, compile_tools_grammar, now_unix_s, to_lark_tool_choice},
 };
@@ -237,16 +239,17 @@ async fn handle_chat_completions(
         }
     };
 
+    // make response parser
+    let mut parser = ChatResponseParser::new();
+    if reasoning_effort.is_some() {
+        parser.push_str(ChatResponseTag::Think.as_str());
+    }
+
     if is_stream {
         let (tx, rx_tokio) = tokio::sync::mpsc::unbounded_channel::<String>();
         let model_name_clone = model_name.clone();
 
         tokio::task::spawn_blocking(move || {
-            let mut parser = ChatResponseParser::new();
-            if reasoning_effort.is_some() {
-                parser.push_str(ChatResponseTag::Think.as_str());
-            }
-
             chat_response_listener(
                 rx,
                 STREAM_TIMEOUT,
@@ -292,6 +295,7 @@ async fn handle_chat_completions(
                 &model_name,
                 include_usage,
                 n_prompt_tokens,
+                parser,
             )
             .map_err(|e| match e.as_str() {
                 ERR_CANCELLED => (StatusCode::CONFLICT, oai_error(e, "cancelled")),
@@ -329,15 +333,15 @@ fn chat_response_once(
     model_name: &str,
     include_usage: bool,
     n_prompt_tokens: usize,
+    mut parser: ChatResponseParser,
 ) -> Result<String, String> {
-    let mut full_text = String::new();
     let mut n_completion_tokens = 0usize;
 
     loop {
         match rx.recv_timeout(timeout) {
             Ok(EngineReply::Text(t)) => {
-                full_text.push_str(&t);
-                n_completion_tokens += 1;
+                parser.push_str(&t);
+                n_completion_tokens += 1; // FIXME: add token count, not text
             }
             Ok(EngineReply::Stop(reason, _)) => {
                 let finish_reason = match reason {
@@ -347,14 +351,24 @@ fn chat_response_once(
                     }
                 };
 
-                let tool_calls = parse_tool_calls_from_text(&full_text).map(|calls| {
-                    calls
-                        .into_iter()
-                        .map(|tc| {
-                            async_openai::types::chat::ChatCompletionMessageToolCalls::Function(tc)
-                        })
-                        .collect::<Vec<_>>()
-                });
+                parser.end();
+
+                let mut text = String::new();
+                let mut tool_calls = Vec::<ChatCompletionMessageToolCalls>::new();
+
+                while let Some(part) = parser.next() {
+                    match part {
+                        ChatPart::Text(t) => {
+                            text.push_str(&t);
+                        }
+                        ChatPart::Call(t) => {
+                            tool_calls.push(ChatCompletionMessageToolCalls::Function(t));
+                        }
+                        _ => {
+                            // reasoning content is ignored
+                        }
+                    }
+                }
 
                 let resp = CreateChatCompletionResponse {
                     id: respond_id.to_string(),
@@ -364,8 +378,12 @@ fn chat_response_once(
                     choices: vec![ChatChoice {
                         index: 0,
                         message: ChatCompletionResponseMessage {
-                            content: Some(full_text),
-                            tool_calls,
+                            content: if !text.is_empty() { Some(text) } else { None },
+                            tool_calls: if !tool_calls.is_empty() {
+                                Some(tool_calls)
+                            } else {
+                                None
+                            },
                             role: Role::Assistant,
                             refusal: None,
                             function_call: None,
@@ -398,36 +416,4 @@ fn chat_response_once(
             Err(_) => return Err("stream timed out".to_string()),
         }
     }
-}
-
-fn parse_tool_calls_from_text(text: &str) -> Option<Vec<ChatCompletionMessageToolCall>> {
-    let mut calls = Vec::new();
-    let mut remaining = text;
-
-    while let Some(start) = remaining.find("<tool_call>") {
-        let content_start = start + "<tool_call>".len();
-        let end = remaining[content_start..].find("</tool_call>")?;
-        let json_str = &remaining[content_start..content_start + end];
-
-        if let Ok(value) = serde_json::from_str::<serde_json::Value>(json_str) {
-            let name = value["name"].as_str().map(|s| s.to_string());
-            let args_value = value["arguments"].clone();
-
-            if let Some(name) = name {
-                let Ok(arguments) = serde_json::to_string(&args_value) else {
-                    eprint!("[warn] bad arguments in tool_call: {}", args_value);
-                    return None;
-                };
-
-                calls.push(ChatCompletionMessageToolCall {
-                    id: format!("call_{}", Uuid::new_v4().simple()),
-                    function: FunctionCall { name, arguments },
-                });
-            }
-        }
-
-        remaining = &remaining[content_start + end + "</tool_call>".len()..];
-    }
-
-    if !calls.is_empty() { Some(calls) } else { None }
 }

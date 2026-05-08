@@ -6,7 +6,7 @@ use std::{
 
 use async_openai::types::chat::{
     ChatChoice, ChatCompletionMessageToolCall, ChatCompletionResponseMessage, CompletionUsage,
-    CreateChatCompletionResponse, CreateChatCompletionStreamResponse, FinishReason, FunctionCall,
+    CreateChatCompletionResponse, FinishReason, FunctionCall,
 };
 use linkme::distributed_slice;
 use llama_cpp_ffi::ToolChoice as LarkToolChoice;
