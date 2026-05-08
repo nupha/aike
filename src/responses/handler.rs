@@ -5,14 +5,23 @@ use axum::{
     Json,
     extract::State,
     http::StatusCode,
-    response::{IntoResponse, Response},
+    response::{IntoResponse, Response, Sse, sse::Event},
 };
+use futures_util::StreamExt;
 use uuid::Uuid;
 
 use crate::{
-    engine::{GrammarConfig, OutputMode, TaskConfig},
-    helpers::{build_chat_prompt_tokens, compile_tools_grammar},
-    output::{LlmOutputParser, ParserKind},
+    engine::{EngineReply, GrammarConfig, OutputMode, TaskConfig},
+    helpers::{build_prompt_tokens, compile_tools_grammar},
+    output::{LlmOutputParser, OutputPart, OutputStreamItem, ParserKind},
+    responses::{
+        response_builder::{
+            build_content_part_added_event, build_output_item_added_event,
+            build_reasoning_delta_event, build_response_completed_event,
+            build_response_created_event, build_text_delta_event,
+        },
+        stream::sse_event,
+    },
     serve::{
         AppState, DEFAULT_TEMPERATURE, DEFAULT_TOP_P, ERR_CANCELLED, ERR_ENGINE_SHUTDOWN,
         STREAM_TIMEOUT, oai_error,
@@ -20,7 +29,6 @@ use crate::{
 };
 
 use super::convert::{input_item_to_chat_message, responses_tools_to_chat_tools};
-use super::stream::handle_responses_stream;
 
 pub async fn handle_responses(
     State(state): State<AppState>,
@@ -78,7 +86,7 @@ pub async fn handle_responses(
         temperature = req.temperature.unwrap_or(DEFAULT_TEMPERATURE);
         top_p = req.top_p.unwrap_or(DEFAULT_TOP_P);
 
-        let prompt_tokens = match build_chat_prompt_tokens(
+        let prompt_tokens = match build_prompt_tokens(
             engine.model(),
             &messages,
             tools.as_deref(),
@@ -116,7 +124,7 @@ pub async fn handle_responses(
         }
 
         n_prompt_tokens = prompt_tokens.len();
-        respond_id = format!("resp-{}", Uuid::new_v4().simple());
+        respond_id = format!("res-{}", Uuid::new_v4().simple());
         model_name = engine.model_name().to_string();
 
         rx = match engine.push_task_with_params(prompt_tokens, task_config, None, false) {
@@ -138,37 +146,126 @@ pub async fn handle_responses(
     if is_stream {
         handle_responses_stream(rx, parser, respond_id, model_name)
     } else {
-        handle_responses_non_stream(rx, parser).await
+        // non-stream
+        let join = tokio::task::spawn_blocking(move || {
+            parser
+                .parse_all(rx, STREAM_TIMEOUT, ParserKind::Responses)
+                .map_err(|e| match e.as_str() {
+                    ERR_CANCELLED => (StatusCode::CONFLICT, oai_error(e, "cancelled")),
+                    ERR_ENGINE_SHUTDOWN => (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        oai_error(e, "server_error"),
+                    ),
+                    _ => (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        oai_error(e, "server_error"),
+                    ),
+                })
+        });
+
+        match join.await {
+            Ok(Ok(val)) => Json(val).into_response(),
+            Ok(Err((code, err_info))) => (code, Json(err_info)).into_response(),
+            Err(_) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(oai_error("request task failed", "server_error")),
+            )
+                .into_response(),
+        }
     }
 }
 
-async fn handle_responses_non_stream(
-    rx: crossbeam::channel::Receiver<crate::engine::EngineReply>,
-    parser: LlmOutputParser,
+pub(crate) fn handle_responses_stream(
+    rx: crossbeam::channel::Receiver<EngineReply>,
+    mut parser: LlmOutputParser,
+    respond_id: String,
+    model_name: String,
 ) -> Response {
-    let join = tokio::task::spawn_blocking(move || {
-        parser
-            .parse_all(rx, STREAM_TIMEOUT, ParserKind::Responses)
-            .map_err(|e| match e.as_str() {
-                ERR_CANCELLED => (StatusCode::CONFLICT, oai_error(e, "cancelled")),
-                ERR_ENGINE_SHUTDOWN => (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    oai_error(e, "server_error"),
-                ),
-                _ => (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    oai_error(e, "server_error"),
-                ),
-            })
+    let (tx, rx_tokio) = tokio::sync::mpsc::unbounded_channel::<String>();
+
+    let n_prompt_tokens = { parser.n_prompt_tokens() };
+
+    tokio::task::spawn_blocking(move || {
+        let mut text_buffer = String::new();
+        let mut reasoning_buffer = String::new();
+        let mut text_started = false;
+        let mut reasoning_started = false;
+        let mut output_index: u32 = 0;
+        let mut content_index: u32 = 0;
+        let mut seq: u64 = 0;
+
+        // Emit response.created
+        let created = build_response_created_event(&respond_id, &model_name);
+        let _ = tx.send(sse_event("response.created", created));
+
+        parser.parse_partial(rx, STREAM_TIMEOUT, |item, _nth| {
+            match item {
+                OutputStreamItem::Part(part) => match part {
+                    OutputPart::Text(t) => {
+                        if !text_started {
+                            text_started = true;
+
+                            let item_added = build_output_item_added_event(seq, output_index);
+                            seq += 1;
+                            let _ = tx.send(sse_event("response.output_item.added", item_added));
+
+                            let part_added =
+                                build_content_part_added_event(seq, output_index, content_index);
+                            seq += 1;
+                            let _ = tx.send(sse_event("response.content_part.added", part_added));
+                        }
+
+                        text_buffer.push_str(&t);
+                        let delta = build_text_delta_event(seq, output_index, content_index, &t);
+                        seq += 1;
+                        let _ = tx.send(sse_event("response.output_text.delta", delta));
+                    }
+                    OutputPart::Reasoning(r) => {
+                        if !reasoning_started {
+                            reasoning_started = true;
+                        }
+                        reasoning_buffer.push_str(&r);
+                        let delta = build_reasoning_delta_event(seq, output_index, &r);
+                        seq += 1;
+                        let _ = tx.send(sse_event("response.reasoning_summary.delta", delta));
+                    }
+                    OutputPart::Call(_) => {
+                        // Tool calls not yet implemented for Responses API
+                    }
+                },
+                OutputStreamItem::Stop(_finish_reason, usage) => {
+                    let n_completion = usage
+                        .as_ref()
+                        .map(|u| u.completion_tokens as usize)
+                        .unwrap_or(0);
+                    let completed = build_response_completed_event(
+                        &respond_id,
+                        &model_name,
+                        n_prompt_tokens,
+                        n_completion,
+                    );
+                    let _ = tx.send(sse_event("response.completed", completed));
+                }
+                OutputStreamItem::Done => {
+                    // Already handled by Stop; this is a no-op
+                }
+                OutputStreamItem::Error(e) => {
+                    let err = serde_json::json!({
+                        "type": "error",
+                        "error": {
+                            "message": e,
+                            "type": "server_error"
+                        }
+                    });
+                    let _ = tx.send(sse_event("error", err));
+                }
+            }
+            true
+        });
     });
 
-    match join.await {
-        Ok(Ok(val)) => Json(val).into_response(),
-        Ok(Err((code, err_info))) => (code, Json(err_info)).into_response(),
-        Err(_) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(oai_error("request task failed", "server_error")),
-        )
-            .into_response(),
-    }
+    let stream = tokio_stream::wrappers::UnboundedReceiverStream::new(rx_tokio)
+        .map(|data| Ok::<_, std::convert::Infallible>(Event::default().data(data)));
+
+    Sse::new(stream).into_response()
 }

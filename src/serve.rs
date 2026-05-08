@@ -23,7 +23,7 @@ use uuid::Uuid;
 
 use crate::{
     engine::{Engine, GrammarConfig, OutputMode, TaskConfig},
-    helpers::{build_chat_prompt_tokens, compile_tools_grammar, now_unix_s, to_lark_tool_choice},
+    helpers::{build_prompt_tokens, compile_tools_grammar, now_unix_s, to_lark_tool_choice},
     output::{LlmOutputParser, OutputStreamItem, ParserKind},
 };
 
@@ -162,7 +162,7 @@ async fn handle_chat_completions(
         .and_then(|o| o.include_usage)
         .unwrap_or(false);
 
-    let prompt_tokens = match build_chat_prompt_tokens(
+    let prompt_tokens = match build_prompt_tokens(
         state.engine.lock().unwrap().model(),
         messages,
         tools.as_deref(),
@@ -248,7 +248,7 @@ async fn handle_chat_completions(
         // streaming
         let (tx, rx_tokio) = tokio::sync::mpsc::unbounded_channel::<String>();
         tokio::task::spawn_blocking(move || {
-            parser.parse_stream(rx, STREAM_TIMEOUT, |item, nth| {
+            parser.parse_partial(rx, STREAM_TIMEOUT, |item, nth| {
                 match item {
                     OutputStreamItem::Done => {
                         let _ = tx.send("[DONE]".to_string());

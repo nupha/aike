@@ -30,7 +30,7 @@ pub(crate) enum OutputPart {
 }
 
 impl OutputPart {
-    pub fn into_chunk_delta(self) -> ChatCompletionStreamResponseDelta {
+    pub fn into_chat_chunk_delta(self) -> ChatCompletionStreamResponseDelta {
         match self {
             Self::Text(t) => ChatCompletionStreamResponseDelta {
                 content: Some(t),
@@ -64,7 +64,7 @@ impl OutputPart {
         }
     }
 
-    pub fn into_chunk(
+    pub fn into_chat_chunk(
         self,
         id: &str,
         model: &str,
@@ -76,7 +76,7 @@ impl OutputPart {
             created,
             object: "chat.completion.chunk".to_string(),
             choices: vec![ChatChoiceStream {
-                delta: self.into_chunk_delta(),
+                delta: self.into_chat_chunk_delta(),
                 index: 0,
                 finish_reason: None,
                 logprobs: None,
@@ -103,7 +103,7 @@ impl OutputStreamItem {
         created: u32,
     ) -> CreateChatCompletionStreamResponse {
         match self {
-            Self::Part(part) => part.into_chunk(id, model, created),
+            Self::Part(part) => part.into_chat_chunk(id, model, created),
             Self::Stop(finish_reason, usage) => CreateChatCompletionStreamResponse {
                 id: id.to_string(),
                 model: model.to_string(),
@@ -382,7 +382,7 @@ impl LlmOutputParser {
         self.parts.pop_front()
     }
 
-    pub(crate) fn parse_stream<F>(
+    pub(crate) fn parse_partial<F>(
         &mut self,
         rx: crossbeam::channel::Receiver<EngineReply>,
         timeout: std::time::Duration,

@@ -20,8 +20,8 @@ use crate::{
     class_llama_client::{ParsedChatOptions, chunk_to_js, parse_chat_options, parse_messages},
     class_llama_client_responses::{parse_responses_input, parse_responses_reasoning},
     engine::{Engine, GrammarConfig, OutputMode, TaskConfig},
-    helpers::{build_chat_prompt_tokens, compile_tools_grammar, now_unix_s, to_lark_tool_choice},
-    output::{OutputStreamItem, LlmOutputParser, ParserKind},
+    helpers::{build_prompt_tokens, compile_tools_grammar, now_unix_s, to_lark_tool_choice},
+    output::{LlmOutputParser, OutputStreamItem, ParserKind},
 };
 
 pub(crate) const ERR_CANCELLED: &str = "cancelled";
@@ -128,7 +128,7 @@ fn js_engine_chat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     let mut id_slot: Option<usize> = None;
     let mut cache_prompt = false;
-    let mut include_usage = false;
+    let mut usage = false;
 
     let mut params = ParsedChatOptions {
         model: String::new(),
@@ -174,14 +174,14 @@ fn js_engine_chat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 cache_prompt = v.to_bool()?;
             }
 
-            let v = opts_obj.get_property_str(ctx, "includeUsage")?;
+            let v = opts_obj.get_property_str(ctx, "usage")?;
             if !v.is_undefined() {
-                include_usage = v.to_bool()?;
+                usage = v.to_bool()?;
             }
         }
     }
 
-    let prompt_tokens = build_chat_prompt_tokens(
+    let prompt_tokens = build_prompt_tokens(
         engine.lock().unwrap().model(),
         &messages,
         params.tools.as_deref(),
@@ -250,7 +250,7 @@ fn js_engine_chat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         false,
         params.reasoning_effort.is_some(),
         n_prompt_tokens,
-        include_usage,
+        usage,
     );
     parser.set_respond_id(respond_id.clone());
     parser.set_model_name(model_name.clone());
@@ -259,7 +259,7 @@ fn js_engine_chat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         // Streaming: AsyncIterableIterator
         let (item_tx, item_rx) = crossbeam::channel::bounded::<(OutputStreamItem, usize)>(8);
         std::thread::spawn(move || {
-            parser.parse_stream(rx, std::time::Duration::from_secs(u64::MAX), |item, nth| {
+            parser.parse_partial(rx, std::time::Duration::from_secs(u64::MAX), |item, nth| {
                 item_tx.send((item, nth)).is_ok()
             });
         });
@@ -369,6 +369,13 @@ fn js_engine_responses(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         None
     };
 
+    let usage_val = opts.get_property_str(ctx, "usage")?;
+    let usage = if !usage_val.is_undefined() {
+        usage_val.to_bool()?
+    } else {
+        false
+    };
+
     // Convert responses input items to chat messages
     let input_items = match &input {
         async_openai::types::responses::InputParam::Text(t) => {
@@ -396,7 +403,7 @@ fn js_engine_responses(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let chat_tools: Option<Vec<async_openai::types::chat::ChatCompletionTools>> = tools
         .as_ref()
         .map(|t| crate::responses::convert::responses_tools_to_chat_tools(t));
-    let prompt_tokens = build_chat_prompt_tokens(
+    let prompt_tokens = build_prompt_tokens(
         engine.lock().unwrap().model(),
         &messages,
         chat_tools.as_deref(),
@@ -430,7 +437,7 @@ fn js_engine_responses(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     }
 
     let n_prompt_tokens = prompt_tokens.len();
-    let respond_id = format!("resp-{}", uuid::Uuid::new_v4().simple());
+    let respond_id = format!("res-{}", uuid::Uuid::new_v4().simple());
     let model_name = engine.lock().unwrap().model_name().to_string();
 
     // Push task to engine
@@ -443,7 +450,7 @@ fn js_engine_responses(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             -1
         })?;
 
-    let mut parser = LlmOutputParser::new(true, reasoning.is_some(), n_prompt_tokens, true);
+    let mut parser = LlmOutputParser::new(true, reasoning.is_some(), n_prompt_tokens, usage);
     parser.set_respond_id(respond_id.clone());
     parser.set_model_name(model_name.clone());
 
@@ -451,7 +458,7 @@ fn js_engine_responses(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         // Streaming: AsyncIterableIterator
         let (item_tx, item_rx) = crossbeam::channel::bounded::<(OutputStreamItem, usize)>(8);
         std::thread::spawn(move || {
-            parser.parse_stream(rx, std::time::Duration::from_secs(u64::MAX), |item, nth| {
+            parser.parse_partial(rx, std::time::Duration::from_secs(u64::MAX), |item, nth| {
                 item_tx.send((item, nth)).is_ok()
             });
         });

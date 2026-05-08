@@ -204,7 +204,7 @@ pub(crate) fn tokenize_prompt(model: &LlamaModel, prompt: &str) -> Result<Vec<To
 
 /// Build prompt tokens for chat completion. Mirrors serve.rs build_chat_prompt_tokens
 /// but takes separate parameters instead of CreateChatCompletionRequest.
-pub(crate) fn build_chat_prompt_tokens(
+pub(crate) fn build_prompt_tokens(
     model: &LlamaModel,
     messages: &[ChatCompletionRequestMessage],
     tools: Option<&[ChatCompletionTools]>,

@@ -286,7 +286,6 @@ pub(crate) fn parse_reasoning_effort(
     }
 }
 
-/// All parsed fields are set on the returned request; caller fills in messages and any engine-specific fields (idSlot, cachePrompt, includeUsage) separately.
 pub(crate) struct ParsedChatOptions {
     pub model: String,
     pub temperature: Option<f32>,
