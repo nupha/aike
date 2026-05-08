@@ -187,7 +187,7 @@ impl LlmOutputParser {
         }
 
         Self {
-            state: if start_think {
+            state: if start_think && parse_think {
                 State::Thinking
             } else {
                 State::Text
