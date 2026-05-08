@@ -20,7 +20,7 @@ use zuqe::{
 
 use crate::{
     USER_CLASS_DEFS,
-    chat_response::{ChatResponseParser, ChatStreamItem, chat_response_listener},
+    chat_response::{ChatResponseParser, ChatResponseTag, ChatStreamItem, chat_response_listener},
     class_llama_client::{ParsedChatOptions, chunk_to_js, parse_chat_options, parse_messages},
     engine::{Engine, EngineReply, GrammarConfig, OutputMode, StopReason, TaskConfig},
     helpers::{build_chat_prompt_tokens, compile_tools_grammar, now_unix_s, to_lark_tool_choice},
@@ -239,12 +239,11 @@ fn js_engine_chat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut id_slot: Option<usize> = None;
     let mut cache_prompt = false;
     let mut include_usage = false;
-    let mut max_tokens = engine.lock().unwrap().default_max_tokens();
 
     let mut parsed = ParsedChatOptions {
         model: String::new(),
         temperature: None,
-        max_tokens: None,
+        max_completion_tokens: None,
         top_p: None,
         n: None,
         stop: None,
@@ -271,16 +270,6 @@ fn js_engine_chat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             })?;
 
             parsed = parse_chat_options(ctx, &opts_obj)?;
-
-            let v = opts_obj.get_property_str(ctx, "maxTokens")?;
-            if !v.is_undefined() {
-                let n = v.to_number(ctx)?.to_i32();
-                if n < 0 {
-                    ctx.throw_type_error("maxTokens must be >= 0");
-                    return Err(-1);
-                }
-                max_tokens = n as usize;
-            }
 
             let v = opts_obj.get_property_str(ctx, "idSlot")?;
             if !v.is_undefined() {
@@ -321,9 +310,13 @@ fn js_engine_chat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     // Build task config
     let mut task_config = TaskConfig::new()
-        .max_tokens(max_tokens)
         .temperature(parsed.temperature.unwrap_or(0.75))
         .top_p(parsed.top_p.unwrap_or(1.0))
+        .max_tokens(
+            parsed
+                .max_completion_tokens
+                .map_or(engine.lock().unwrap().default_max_tokens(), |n| n as usize),
+        )
         .output_mode(if is_stream {
             OutputMode::Continuous
         } else {
@@ -365,7 +358,7 @@ fn js_engine_chat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     let mut parser = ChatResponseParser::new();
     if parsed.reasoning_effort.is_some() {
-        parser.push_str("<think>");
+        parser.push_str(ChatResponseTag::Think.as_str());
     }
 
     if is_stream {

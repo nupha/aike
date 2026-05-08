@@ -25,7 +25,7 @@ use tower_http::cors::CorsLayer;
 use uuid::Uuid;
 
 use crate::{
-    chat_response::{ChatResponseParser, ChatStreamItem, chat_response_listener},
+    chat_response::{ChatResponseParser, ChatResponseTag, ChatStreamItem, chat_response_listener},
     engine::{Engine, EngineReply, GrammarConfig, OutputMode, StopReason, TaskConfig},
     helpers::{build_chat_prompt_tokens, compile_tools_grammar, now_unix_s, to_lark_tool_choice},
 };
@@ -153,7 +153,7 @@ async fn handle_chat_completions(
     let reasoning_effort = req.reasoning_effort;
     let response_format = req.response_format;
     let max_tokens =
-        req.max_tokens
+        req.max_completion_tokens
             .unwrap_or(state.engine.lock().unwrap().default_max_tokens() as u32) as usize;
     let temperature = req.temperature.unwrap_or(DEFAULT_TEMPERATURE);
     let top_p = req.top_p.unwrap_or(DEFAULT_TOP_P);
@@ -163,18 +163,6 @@ async fn handle_chat_completions(
         .as_ref()
         .and_then(|o| o.include_usage)
         .unwrap_or(false);
-
-    let tools_inner: Option<Vec<async_openai::types::chat::ChatCompletionTool>> =
-        tools.as_ref().map(|t| {
-            t.iter()
-                .filter_map(|tc| match tc {
-                    async_openai::types::chat::ChatCompletionTools::Function(tool) => {
-                        Some(tool.clone())
-                    }
-                    _ => None,
-                })
-                .collect()
-        });
 
     let prompt_tokens = match build_chat_prompt_tokens(
         state.engine.lock().unwrap().model(),
@@ -256,7 +244,7 @@ async fn handle_chat_completions(
         tokio::task::spawn_blocking(move || {
             let mut parser = ChatResponseParser::new();
             if reasoning_effort.is_some() {
-                parser.push_str("<think>");
+                parser.push_str(ChatResponseTag::Think.as_str());
             }
 
             chat_response_listener(
@@ -297,7 +285,7 @@ async fn handle_chat_completions(
             .into_response()
     } else {
         let join = tokio::task::spawn_blocking(move || {
-            collect_chat_response(
+            chat_response_once(
                 rx,
                 STREAM_TIMEOUT,
                 &respond_id,
@@ -334,7 +322,7 @@ async fn handle_chat_completions(
     }
 }
 
-fn collect_chat_response(
+fn chat_response_once(
     rx: crossbeam::channel::Receiver<EngineReply>,
     timeout: std::time::Duration,
     respond_id: &str,

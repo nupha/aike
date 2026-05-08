@@ -97,20 +97,20 @@ enum State {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-enum Tag {
+pub(crate) enum ChatResponseTag {
     Think,
     CloseThink,
     ToolCall,
     CloseToolCall,
 }
 
-impl Tag {
+impl ChatResponseTag {
     pub const fn as_str(&self) -> &str {
         match self {
-            Tag::Think => "<think>",
-            Tag::CloseThink => "</think>",
-            Tag::ToolCall => "<tool_call>",
-            Tag::CloseToolCall => "</tool_call>",
+            ChatResponseTag::Think => "<think>",
+            ChatResponseTag::CloseThink => "</think>",
+            ChatResponseTag::ToolCall => "<tool_call>",
+            ChatResponseTag::CloseToolCall => "</tool_call>",
         }
     }
 }
@@ -135,24 +135,24 @@ impl ChatResponseParser {
 
             match self.state {
                 State::Text => {
-                    think_pos = remaining.find(Tag::Think.as_str());
-                    tool_call_pos = remaining.find(Tag::ToolCall.as_str());
+                    think_pos = remaining.find(ChatResponseTag::Think.as_str());
+                    tool_call_pos = remaining.find(ChatResponseTag::ToolCall.as_str());
                 }
                 State::Thinking => {
-                    close_think_pos = remaining.find(Tag::CloseThink.as_str());
+                    close_think_pos = remaining.find(ChatResponseTag::CloseThink.as_str());
                 }
                 State::MaybeCall(_) => {
-                    close_tool_call_pos = remaining.find(Tag::CloseToolCall.as_str());
+                    close_tool_call_pos = remaining.find(ChatResponseTag::CloseToolCall.as_str());
                 }
             }
 
-            let mut found_tag: Option<(usize, Tag)> = None;
+            let mut found_tag: Option<(usize, ChatResponseTag)> = None;
 
             for (p, t) in [
-                (think_pos, Tag::Think),
-                (close_think_pos, Tag::CloseThink),
-                (tool_call_pos, Tag::ToolCall),
-                (close_tool_call_pos, Tag::CloseToolCall),
+                (think_pos, ChatResponseTag::Think),
+                (close_think_pos, ChatResponseTag::CloseThink),
+                (tool_call_pos, ChatResponseTag::ToolCall),
+                (close_tool_call_pos, ChatResponseTag::CloseToolCall),
             ] {
                 if let Some(p) = p {
                     match found_tag {
@@ -168,33 +168,33 @@ impl ChatResponseParser {
             }
 
             match (found_tag, &mut self.state) {
-                (Some((pos, Tag::Think)), State::Text) => {
+                (Some((pos, ChatResponseTag::Think)), State::Text) => {
                     self.state = State::Thinking;
                     if pos > 0 {
                         self.out
                             .push_back(ChatPart::Text(remaining[..pos].to_string()));
                     }
-                    remaining = &remaining[pos + Tag::Think.as_str().len()..];
+                    remaining = &remaining[pos + ChatResponseTag::Think.as_str().len()..];
                 }
-                (Some((pos, Tag::CloseThink)), State::Thinking) => {
+                (Some((pos, ChatResponseTag::CloseThink)), State::Thinking) => {
                     self.state = State::Text;
                     if pos > 0 {
                         self.out
                             .push_back(ChatPart::Think(remaining[..pos].to_string()));
                     }
-                    remaining = &remaining[pos + Tag::CloseThink.as_str().len()..];
+                    remaining = &remaining[pos + ChatResponseTag::CloseThink.as_str().len()..];
                 }
-                (Some((pos, Tag::ToolCall)), State::Text) => {
+                (Some((pos, ChatResponseTag::ToolCall)), State::Text) => {
                     if pos > 0 {
                         self.out
                             .push_back(ChatPart::Text(remaining[..pos].to_string()));
                     }
-                    remaining = &remaining[pos + Tag::ToolCall.as_str().len()..];
+                    remaining = &remaining[pos + ChatResponseTag::ToolCall.as_str().len()..];
                     self.state = State::MaybeCall(String::new());
                 }
-                (Some((pos, Tag::CloseToolCall)), State::MaybeCall(s)) => {
+                (Some((pos, ChatResponseTag::CloseToolCall)), State::MaybeCall(s)) => {
                     s.push_str(&remaining[..pos]);
-                    remaining = &remaining[pos + Tag::CloseToolCall.as_str().len()..];
+                    remaining = &remaining[pos + ChatResponseTag::CloseToolCall.as_str().len()..];
 
                     if let Ok(value) = serde_json::from_str::<serde_json::Value>(s) {
                         let obj = match value.as_object() {
@@ -272,7 +272,7 @@ impl ChatResponseParser {
     pub fn end(&mut self) {
         if let State::MaybeCall(s) = std::mem::replace(&mut self.state, State::Text) {
             self.out
-                .push_back(ChatPart::Text(format!("{}{s}", Tag::ToolCall.as_str())));
+                .push_back(ChatPart::Text(format!("{}{s}", ChatResponseTag::ToolCall.as_str())));
         }
     }
 

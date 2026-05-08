@@ -289,7 +289,7 @@ pub(crate) fn parse_reasoning_effort(
 pub(crate) struct ParsedChatOptions {
     pub model: String,
     pub temperature: Option<f32>,
-    pub max_tokens: Option<u32>,
+    pub max_completion_tokens: Option<u32>,
     pub top_p: Option<f32>,
     pub n: Option<u32>,
     pub stop: Option<Vec<String>>,
@@ -312,7 +312,7 @@ pub(crate) fn parse_chat_options(
 ) -> Result<ParsedChatOptions, i32> {
     let mut model = String::new();
     let mut temperature: Option<f32> = None;
-    let mut max_tokens: Option<u32> = None;
+    let mut max_completion_tokens: Option<u32> = None;
     let mut top_p: Option<f32> = None;
     let mut n: Option<u32> = None;
     let mut stop: Option<Vec<String>> = None;
@@ -340,10 +340,10 @@ pub(crate) fn parse_chat_options(
         temperature = Some(v.to_number(ctx)?.to_f64() as f32);
     }
 
-    // maxTokens
-    let v = opts.get_property_str(ctx, "maxTokens")?;
+    // maxCompletionTokens
+    let v = opts.get_property_str(ctx, "maxCompletionTokens")?;
     if !v.is_undefined() {
-        max_tokens = Some(v.to_number(ctx)?.to_f64() as u32);
+        max_completion_tokens = Some(v.to_number(ctx)?.to_f64() as u32);
     }
 
     // topP
@@ -457,7 +457,7 @@ pub(crate) fn parse_chat_options(
     Ok(ParsedChatOptions {
         model,
         temperature,
-        max_tokens,
+        max_completion_tokens,
         top_p,
         n,
         stop,
@@ -514,8 +514,8 @@ fn js_client_chat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     if let Some(v) = parsed.temperature {
         req_builder.temperature(v);
     }
-    if let Some(v) = parsed.max_tokens {
-        req_builder.max_tokens(v);
+    if let Some(v) = parsed.max_completion_tokens {
+        req_builder.max_completion_tokens(v);
     }
     if let Some(v) = parsed.top_p {
         req_builder.top_p(v);
