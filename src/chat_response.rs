@@ -175,14 +175,34 @@ enum State {
 pub struct ChatResponseParser {
     state: State,
     parts: VecDeque<ChatResponsePart>,
+    include_usage: bool,
+    n_prompt_tokens: usize,
+    respond_id: String,
+    model_name: String,
 }
 
 impl ChatResponseParser {
-    pub fn new() -> Self {
+    pub fn new(start_thinking: bool, n_prompt_tokens: usize, include_usage: bool) -> Self {
         Self {
-            state: State::Text,
+            state: if start_thinking {
+                State::Thinking
+            } else {
+                State::Text
+            },
             parts: VecDeque::new(),
+            include_usage,
+            n_prompt_tokens,
+            respond_id: String::new(),
+            model_name: String::new(),
         }
+    }
+
+    pub fn set_respond_id(&mut self, id: String) {
+        self.respond_id = id;
+    }
+
+    pub fn set_model_name(&mut self, name: String) {
+        self.model_name = name;
     }
 
     /// Feed streaming text into the parser.
@@ -350,179 +370,168 @@ impl ChatResponseParser {
     pub fn next(&mut self) -> Option<ChatResponsePart> {
         self.parts.pop_front()
     }
-}
 
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn chat_response_stream<F>(
-    rx: crossbeam::channel::Receiver<EngineReply>,
-    timeout: std::time::Duration,
-    include_usage: bool,
-    n_prompt_tokens: usize,
-    mut parser: ChatResponseParser,
-    mut on_item: F,
-) where
-    F: FnMut(ChatStreamItem) -> bool,
-{
-    let mut sent_started = false;
+    pub(crate) fn parse_stream<F>(
+        &mut self,
+        rx: crossbeam::channel::Receiver<EngineReply>,
+        timeout: std::time::Duration,
+        mut on_item: F,
+    ) where
+        F: FnMut(ChatStreamItem) -> bool,
+    {
+        let mut sent_started = false;
 
-    loop {
-        match rx.recv_timeout(timeout) {
-            Ok(EngineReply::Text(t)) => {
-                if !sent_started {
-                    sent_started = true;
-                    if !on_item(ChatStreamItem::Role(
-                        async_openai::types::chat::Role::Assistant,
-                    )) {
-                        break;
-                    }
-                }
-
-                parser.push_str(&t);
-
-                while let Some(part) = parser.next() {
-                    if !on_item(ChatStreamItem::Part(part)) {
-                        break;
-                    }
-                }
-            }
-            Ok(EngineReply::Stop(reason, n_completion_tokens)) => {
-                parser.end();
-
-                while let Some(part) = parser.next() {
-                    if !on_item(ChatStreamItem::Part(part)) {
-                        break;
-                    }
-                }
-
-                on_item(ChatStreamItem::Stop(
-                    match reason {
-                        StopReason::Eog | StopReason::Word(_) | StopReason::PrefillOnly => {
-                            FinishReason::Stop
+        loop {
+            match rx.recv_timeout(timeout) {
+                Ok(EngineReply::Text(t)) => {
+                    if !sent_started {
+                        // emit first role message
+                        if !on_item(ChatStreamItem::Role(Role::Assistant)) {
+                            break;
                         }
-                        StopReason::MaxTokens => FinishReason::Length,
-                    },
-                    if include_usage {
-                        Some(CompletionUsage {
-                            prompt_tokens: n_prompt_tokens as u32,
-                            completion_tokens: n_completion_tokens as u32,
-                            total_tokens: (n_prompt_tokens + n_completion_tokens) as u32,
-                            completion_tokens_details: None,
-                            prompt_tokens_details: None,
-                        })
-                    } else {
-                        None
-                    },
-                ));
-                on_item(ChatStreamItem::Done);
-                break;
-            }
-            Ok(EngineReply::Cancelled) => {
-                on_item(ChatStreamItem::Error(ERR_CANCELLED.to_string()));
-                break;
-            }
-            Ok(EngineReply::Error(e)) => {
-                on_item(ChatStreamItem::Error(e));
-                break;
-            }
-            Ok(EngineReply::Shutdown) => {
-                on_item(ChatStreamItem::Error(ERR_ENGINE_SHUTDOWN.to_string()));
-                break;
-            }
-            Err(_) => {
-                on_item(ChatStreamItem::Error("stream timed out".to_string()));
-                break;
+                        sent_started = true;
+                    }
+
+                    self.push_str(&t);
+                    while let Some(part) = self.next() {
+                        if !on_item(ChatStreamItem::Part(part)) {
+                            break;
+                        }
+                    }
+                }
+                Ok(EngineReply::Stop(reason, n_completion_tokens)) => {
+                    self.end();
+                    while let Some(part) = self.next() {
+                        if !on_item(ChatStreamItem::Part(part)) {
+                            break;
+                        }
+                    }
+
+                    // emit stop message
+                    on_item(ChatStreamItem::Stop(
+                        match reason {
+                            StopReason::Eog | StopReason::Word(_) | StopReason::PrefillOnly => {
+                                FinishReason::Stop
+                            }
+                            StopReason::MaxTokens => FinishReason::Length,
+                        },
+                        if self.include_usage {
+                            Some(CompletionUsage {
+                                prompt_tokens: self.n_prompt_tokens as u32,
+                                completion_tokens: n_completion_tokens as u32,
+                                total_tokens: (self.n_prompt_tokens + n_completion_tokens) as u32,
+                                completion_tokens_details: None,
+                                prompt_tokens_details: None,
+                            })
+                        } else {
+                            None
+                        },
+                    ));
+
+                    // emit done message
+                    on_item(ChatStreamItem::Done);
+                    break;
+                }
+                Ok(EngineReply::Cancelled) => {
+                    on_item(ChatStreamItem::Error(ERR_CANCELLED.to_string()));
+                    break;
+                }
+                Ok(EngineReply::Error(e)) => {
+                    on_item(ChatStreamItem::Error(e));
+                    break;
+                }
+                Ok(EngineReply::Shutdown) => {
+                    on_item(ChatStreamItem::Error(ERR_ENGINE_SHUTDOWN.to_string()));
+                    break;
+                }
+                Err(_) => {
+                    on_item(ChatStreamItem::Error("stream timed out".to_string()));
+                    break;
+                }
             }
         }
     }
-}
 
-/// Collect all EngineReply messages for non-streaming chat, building a CreateChatCompletionResponse json.
-/// Uses ChatResponseParser to parse tool calls and reasoning content from the generated text.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn chat_response_once(
-    rx: crossbeam::channel::Receiver<EngineReply>,
-    timeout: std::time::Duration,
-    respond_id: &str,
-    model_name: &str,
-    include_usage: bool,
-    n_prompt_tokens: usize,
-    mut parser: ChatResponseParser,
-) -> Result<serde_json::Value, String> {
-    loop {
-        match rx.recv_timeout(timeout) {
-            Ok(EngineReply::Text(t)) => {
-                parser.push_str(&t);
-            }
-
-            Ok(EngineReply::Stop(reason, n_completion_tokens)) => {
-                parser.end();
-
-                let mut text = String::new();
-                let mut tool_calls = Vec::<ChatCompletionMessageToolCalls>::new();
-
-                while let Some(part) = parser.next() {
-                    match part {
-                        ChatResponsePart::Text(t) => {
-                            text.push_str(&t);
-                        }
-                        ChatResponsePart::Call(t) => {
-                            tool_calls.push(ChatCompletionMessageToolCalls::Function(t));
-                        }
-                        _ => {}
-                    }
+    pub(crate) fn parse_all(
+        mut self,
+        rx: crossbeam::channel::Receiver<EngineReply>,
+        timeout: std::time::Duration,
+    ) -> Result<serde_json::Value, String> {
+        loop {
+            match rx.recv_timeout(timeout) {
+                Ok(EngineReply::Text(t)) => {
+                    self.push_str(&t);
                 }
+                Ok(EngineReply::Stop(reason, n_completion_tokens)) => {
+                    self.end();
 
-                let finish_reason = match reason {
-                    StopReason::MaxTokens => FinishReason::Length,
-                    StopReason::Eog | StopReason::Word(_) | StopReason::PrefillOnly => {
-                        FinishReason::Stop
+                    let mut text = String::new();
+                    let mut tool_calls = Vec::<ChatCompletionMessageToolCalls>::new();
+
+                    while let Some(part) = self.next() {
+                        match part {
+                            ChatResponsePart::Text(t) => {
+                                text.push_str(&t);
+                            }
+                            ChatResponsePart::Call(t) => {
+                                tool_calls.push(ChatCompletionMessageToolCalls::Function(t));
+                            }
+                            _ => {}
+                        }
                     }
-                };
 
-                let resp = CreateChatCompletionResponse {
-                    id: respond_id.to_string(),
-                    object: "chat.completion".to_string(),
-                    created: now_unix_s() as u32,
-                    model: model_name.to_string(),
-                    choices: vec![ChatChoice {
-                        index: 0,
-                        message: ChatCompletionResponseMessage {
-                            content: if !text.is_empty() { Some(text) } else { None },
-                            tool_calls: if !tool_calls.is_empty() {
-                                Some(tool_calls)
-                            } else {
-                                None
+                    let finish_reason = match reason {
+                        StopReason::MaxTokens => FinishReason::Length,
+                        StopReason::Eog | StopReason::Word(_) | StopReason::PrefillOnly => {
+                            FinishReason::Stop
+                        }
+                    };
+
+                    let resp = CreateChatCompletionResponse {
+                        id: self.respond_id,
+                        object: "chat.completion".to_string(),
+                        created: now_unix_s() as u32,
+                        model: self.model_name,
+                        choices: vec![ChatChoice {
+                            index: 0,
+                            message: ChatCompletionResponseMessage {
+                                content: if !text.is_empty() { Some(text) } else { None },
+                                tool_calls: if !tool_calls.is_empty() {
+                                    Some(tool_calls)
+                                } else {
+                                    None
+                                },
+                                role: Role::Assistant,
+                                refusal: None,
+                                function_call: None,
+                                audio: None,
+                                annotations: None,
                             },
-                            role: Role::Assistant,
-                            refusal: None,
-                            function_call: None,
-                            audio: None,
-                            annotations: None,
+                            finish_reason: Some(finish_reason),
+                            logprobs: None,
+                        }],
+                        usage: if self.include_usage {
+                            Some(CompletionUsage {
+                                prompt_tokens: self.n_prompt_tokens as u32,
+                                completion_tokens: n_completion_tokens as u32,
+                                total_tokens: (self.n_prompt_tokens + n_completion_tokens) as u32,
+                                completion_tokens_details: None,
+                                prompt_tokens_details: None,
+                            })
+                        } else {
+                            None
                         },
-                        finish_reason: Some(finish_reason),
-                        logprobs: None,
-                    }],
-                    usage: if include_usage {
-                        Some(CompletionUsage {
-                            prompt_tokens: n_prompt_tokens as u32,
-                            completion_tokens: n_completion_tokens as u32,
-                            total_tokens: (n_prompt_tokens + n_completion_tokens) as u32,
-                            completion_tokens_details: None,
-                            prompt_tokens_details: None,
-                        })
-                    } else {
-                        None
-                    },
-                    system_fingerprint: None,
-                    service_tier: None,
-                };
+                        system_fingerprint: None,
+                        service_tier: None,
+                    };
 
-                return serde_json::to_value(resp).map_err(|e| e.to_string());
+                    return serde_json::to_value(resp).map_err(|e| e.to_string());
+                }
+                Ok(EngineReply::Cancelled) => return Err(ERR_CANCELLED.to_string()),
+                Ok(EngineReply::Error(e)) => return Err(e),
+                Ok(EngineReply::Shutdown) => return Err(ERR_ENGINE_SHUTDOWN.to_string()),
+                Err(_) => return Err("stream timed out".to_string()),
             }
-            Ok(EngineReply::Cancelled) => return Err(ERR_CANCELLED.to_string()),
-            Ok(EngineReply::Error(e)) => return Err(e),
-            Ok(EngineReply::Shutdown) => return Err(ERR_ENGINE_SHUTDOWN.to_string()),
-            Err(_) => return Err("stream timed out".to_string()),
         }
     }
 }
@@ -553,14 +562,14 @@ mod tests {
 
     #[test]
     fn plain_text_passthrough() {
-        let mut p = ChatResponseParser::new();
+        let mut p = ChatResponseParser::new(false, 0, false);
         p.push_str("Hello, world!");
         assert_eq!(text_output(&p), "Hello, world!");
     }
 
     #[test]
     fn think_tag_basic() {
-        let mut p = ChatResponseParser::new();
+        let mut p = ChatResponseParser::new(false, 0, false);
         p.push_str("Hello <think>hmm</think> world");
         assert_eq!(p.state, State::Text);
         assert_eq!(text_output(&p), "Hello  world");
@@ -570,7 +579,7 @@ mod tests {
 
     #[test]
     fn think_tag_multiple_chunks() {
-        let mut p = ChatResponseParser::new();
+        let mut p = ChatResponseParser::new(false, 0, false);
         p.push_str("Hello <think>");
         assert_eq!(p.state, State::Thinking);
         assert_eq!(text_output(&p), "Hello ");
@@ -584,7 +593,7 @@ mod tests {
 
     #[test]
     fn tool_call_valid_json() {
-        let mut p = ChatResponseParser::new();
+        let mut p = ChatResponseParser::new(false, 0, false);
         p.push_str(r#"<tool_call>{"name":"get_weather","arguments":"{}"}</tool_call>"#);
         assert_eq!(p.state, State::Text);
         assert_eq!(text_output(&p), "");
@@ -600,7 +609,7 @@ mod tests {
 
     #[test]
     fn tool_call_invalid_json_fallback() {
-        let mut p = ChatResponseParser::new();
+        let mut p = ChatResponseParser::new(false, 0, false);
         p.push_str("bad: <tool_call>{invalid}</tool_call>");
         assert_eq!(p.state, State::Text);
         assert_eq!(text_output(&p), "bad: {invalid}");
@@ -608,7 +617,7 @@ mod tests {
 
     #[test]
     fn tool_call_partial_then_invalid() {
-        let mut p = ChatResponseParser::new();
+        let mut p = ChatResponseParser::new(false, 0, false);
         p.push_str("start <tool_call>{\"key\"");
         assert_eq!(p.state, State::MaybeCall("{\"key\"".to_string()));
         assert_eq!(text_output(&p), "start ");
@@ -618,7 +627,7 @@ mod tests {
 
     #[test]
     fn tool_call_multiple_chunks_valid() {
-        let mut p = ChatResponseParser::new();
+        let mut p = ChatResponseParser::new(false, 0, false);
         p.push_str(r#"<tool_call>{"name":"#);
         assert_eq!(p.state, State::MaybeCall(r#"{"name":"#.to_string()));
         assert_eq!(text_output(&p), "");
@@ -638,7 +647,7 @@ mod tests {
 
     #[test]
     fn mixed_think_and_tool_call() {
-        let mut p = ChatResponseParser::new();
+        let mut p = ChatResponseParser::new(false, 0, false);
         p.push_str(
             r#"<think>reasoning</think> <tool_call>{"name":"calc","arguments":"{}"}</tool_call>"#,
         );
@@ -664,35 +673,35 @@ mod tests {
 
     #[test]
     fn no_tags() {
-        let mut p = ChatResponseParser::new();
+        let mut p = ChatResponseParser::new(false, 0, false);
         p.push_str("just text");
         assert_eq!(text_output(&p), "just text");
     }
 
     #[test]
     fn empty_input() {
-        let mut p = ChatResponseParser::new();
+        let mut p = ChatResponseParser::new(false, 0, false);
         p.push_str("");
         assert!(p.parts.is_empty());
     }
 
     #[test]
     fn orphan_close_think_in_text() {
-        let mut p = ChatResponseParser::new();
+        let mut p = ChatResponseParser::new(false, 0, false);
         p.push_str("hello </think> world");
         assert_eq!(text_output(&p), "hello </think> world");
     }
 
     #[test]
     fn orphan_close_tool_call_in_text() {
-        let mut p = ChatResponseParser::new();
+        let mut p = ChatResponseParser::new(false, 0, false);
         p.push_str("hello </tool_call> world");
         assert_eq!(text_output(&p), "hello </tool_call> world");
     }
 
     #[test]
     fn tool_call_nested_think_inside() {
-        let mut p = ChatResponseParser::new();
+        let mut p = ChatResponseParser::new(false, 0, false);
         p.push_str(r#"<tool_call>{"name":"<think>","arguments":"{}"}</tool_call>"#);
         assert_eq!(p.parts.len(), 1);
         match &p.parts[0] {

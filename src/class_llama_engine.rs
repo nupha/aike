@@ -16,10 +16,7 @@ use zuqe::{
 
 use crate::{
     USER_CLASS_DEFS,
-    chat_response::{
-        ChatResponseParser, ChatResponseTag, ChatStreamItem, chat_response_once,
-        chat_response_stream,
-    },
+    chat_response::{ChatResponseParser, ChatStreamItem},
     class_llama_client::{ParsedChatOptions, chunk_to_js, parse_chat_options, parse_messages},
     engine::{Engine, GrammarConfig, OutputMode, TaskConfig},
     helpers::{build_chat_prompt_tokens, compile_tools_grammar, now_unix_s, to_lark_tool_choice},
@@ -129,7 +126,7 @@ fn js_engine_chat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut cache_prompt = false;
     let mut include_usage = false;
 
-    let mut parsed = ParsedChatOptions {
+    let mut params = ParsedChatOptions {
         model: String::new(),
         temperature: None,
         max_completion_tokens: None,
@@ -158,7 +155,7 @@ fn js_engine_chat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 -1
             })?;
 
-            parsed = parse_chat_options(ctx, &opts_obj)?;
+            params = parse_chat_options(ctx, &opts_obj)?;
 
             let v = opts_obj.get_property_str(ctx, "idSlot")?;
             if !v.is_undefined() {
@@ -183,11 +180,11 @@ fn js_engine_chat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let prompt_tokens = build_chat_prompt_tokens(
         engine.lock().unwrap().model(),
         &messages,
-        parsed.tools.as_deref(),
-        parsed.tool_choice.as_ref(),
-        parsed.parallel_tool_calls,
-        parsed.reasoning_effort.as_ref(),
-        parsed.response_format.as_ref(),
+        params.tools.as_deref(),
+        params.tool_choice.as_ref(),
+        params.parallel_tool_calls,
+        params.reasoning_effort.as_ref(),
+        params.response_format.as_ref(),
     )
     .map_err(|e| {
         ctx.throw_internal_error(&format!("build prompt tokens failed: {e}"));
@@ -199,10 +196,10 @@ fn js_engine_chat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     // Build task config
     let mut task_config = TaskConfig::new()
-        .temperature(parsed.temperature.unwrap_or(0.75))
-        .top_p(parsed.top_p.unwrap_or(1.0))
+        .temperature(params.temperature.unwrap_or(0.75))
+        .top_p(params.top_p.unwrap_or(1.0))
         .max_tokens(
-            parsed
+            params
                 .max_completion_tokens
                 .map_or(engine.lock().unwrap().default_max_tokens(), |n| n as usize),
         )
@@ -212,12 +209,12 @@ fn js_engine_chat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             OutputMode::OneShot
         });
 
-    if let Some(stop_words) = parsed.stop.as_ref().filter(|w| !w.is_empty()) {
+    if let Some(stop_words) = params.stop.as_ref().filter(|w| !w.is_empty()) {
         task_config = task_config.stop_words(stop_words.clone());
     }
 
-    if let Some(tools) = parsed.tools.as_ref().filter(|t| !t.is_empty()) {
-        let tc = parsed
+    if let Some(tools) = params.tools.as_ref().filter(|t| !t.is_empty()) {
+        let tc = params
             .tool_choice
             .as_ref()
             .map(to_lark_tool_choice)
@@ -245,24 +242,22 @@ fn js_engine_chat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             -1
         })?;
 
-    let mut parser = ChatResponseParser::new();
-    if parsed.reasoning_effort.is_some() {
-        parser.push_str(ChatResponseTag::Think.as_str());
-    }
+    let mut parser = ChatResponseParser::new(
+        params.reasoning_effort.is_some(),
+        n_prompt_tokens,
+        include_usage,
+    );
+    parser.set_respond_id(respond_id.clone());
+    parser.set_model_name(model_name.clone());
 
     if is_stream {
         // Streaming: AsyncIterableIterator
         let (stream_tx, stream_rx) = crossbeam::channel::bounded::<ChatStreamItem>(8);
 
         std::thread::spawn(move || {
-            chat_response_stream(
-                rx,
-                std::time::Duration::from_secs(u64::MAX),
-                include_usage,
-                n_prompt_tokens,
-                parser,
-                |item| stream_tx.send(item).is_ok(),
-            );
+            parser.parse_stream(rx, std::time::Duration::from_secs(u64::MAX), |item| {
+                stream_tx.send(item).is_ok()
+            });
         });
 
         AsyncIterableIterator::create_with_receiver::<ChatStreamItem>(
@@ -296,15 +291,7 @@ fn js_engine_chat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             })?;
 
         std::thread::spawn(move || {
-            let result = chat_response_once(
-                rx,
-                std::time::Duration::from_secs(u64::MAX),
-                &respond_id,
-                &model_name,
-                include_usage,
-                n_prompt_tokens,
-                parser,
-            );
+            let result = parser.parse_all(rx, std::time::Duration::from_secs(u64::MAX));
             let _ = result_slot.commit(result);
         });
 

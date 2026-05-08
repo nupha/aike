@@ -22,10 +22,7 @@ use tower_http::cors::CorsLayer;
 use uuid::Uuid;
 
 use crate::{
-    chat_response::{
-        ChatResponseParser, ChatResponseTag, ChatStreamItem, chat_response_once,
-        chat_response_stream,
-    },
+    chat_response::{ChatResponseParser, ChatStreamItem},
     engine::{Engine, GrammarConfig, OutputMode, TaskConfig},
     helpers::{build_chat_prompt_tokens, compile_tools_grammar, now_unix_s, to_lark_tool_choice},
 };
@@ -237,43 +234,34 @@ async fn handle_chat_completions(
         }
     };
 
-    // make response parser
-    let mut parser = ChatResponseParser::new();
-    if reasoning_effort.is_some() {
-        parser.push_str(ChatResponseTag::Think.as_str());
-    }
+    let mut parser =
+        ChatResponseParser::new(reasoning_effort.is_some(), n_prompt_tokens, include_usage);
+    parser.set_respond_id(respond_id.clone());
+    parser.set_model_name(model_name.clone());
 
     if is_stream {
         // streaming
         let (tx, rx_tokio) = tokio::sync::mpsc::unbounded_channel::<String>();
         tokio::task::spawn_blocking(move || {
-            chat_response_stream(
-                rx,
-                STREAM_TIMEOUT,
-                include_usage,
-                n_prompt_tokens,
-                parser,
-                |item| {
-                    match item {
-                        ChatStreamItem::Done => {
-                            let _ = tx.send("[DONE]".to_string());
-                        }
-                        ChatStreamItem::Error(e) => {
-                            let err = oai_error(e, "server_error");
-                            let data = serde_json::to_string(&err).unwrap_or_default();
-                            let _ = tx.send(data);
-                            let _ = tx.send("[DONE]".to_string());
-                        }
-                        _ => {
-                            let chunk =
-                                item.into_chunk(&respond_id, &model_name, now_unix_s() as u32);
-                            let data = serde_json::to_string(&chunk).unwrap_or_default();
-                            let _ = tx.send(data);
-                        }
+            parser.parse_stream(rx, STREAM_TIMEOUT, |item| {
+                match item {
+                    ChatStreamItem::Done => {
+                        let _ = tx.send("[DONE]".to_string());
                     }
-                    true
-                },
-            );
+                    ChatStreamItem::Error(e) => {
+                        let err = oai_error(e, "server_error");
+                        let data = serde_json::to_string(&err).unwrap_or_default();
+                        let _ = tx.send(data);
+                        let _ = tx.send("[DONE]".to_string());
+                    }
+                    _ => {
+                        let chunk = item.into_chunk(&respond_id, &model_name, now_unix_s() as u32);
+                        let data = serde_json::to_string(&chunk).unwrap_or_default();
+                        let _ = tx.send(data);
+                    }
+                }
+                true
+            });
         });
 
         let s = UnboundedReceiverStream::new(rx_tokio)
@@ -286,26 +274,19 @@ async fn handle_chat_completions(
     } else {
         // non-streaming
         let join = tokio::task::spawn_blocking(move || {
-            chat_response_once(
-                rx,
-                STREAM_TIMEOUT,
-                &respond_id,
-                &model_name,
-                include_usage,
-                n_prompt_tokens,
-                parser,
-            )
-            .map_err(|e| match e.as_str() {
-                ERR_CANCELLED => (StatusCode::CONFLICT, oai_error(e, "cancelled")),
-                ERR_ENGINE_SHUTDOWN => (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    oai_error(e, "server_error"),
-                ),
-                _ => (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    oai_error(e, "server_error"),
-                ),
-            })
+            parser
+                .parse_all(rx, STREAM_TIMEOUT)
+                .map_err(|e| match e.as_str() {
+                    ERR_CANCELLED => (StatusCode::CONFLICT, oai_error(e, "cancelled")),
+                    ERR_ENGINE_SHUTDOWN => (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        oai_error(e, "server_error"),
+                    ),
+                    _ => (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        oai_error(e, "server_error"),
+                    ),
+                })
         });
 
         match join.await {
