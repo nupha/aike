@@ -266,8 +266,6 @@ pub(crate) fn build_chat_prompt_tokens(
     }
 
     let prompt = render_chat_template(tmpl, &tmpl_ctx)?;
-    println!("[O.o]============== prompt============\n{}", prompt);
-
     tokenize_prompt(model, &prompt)
 }
 
