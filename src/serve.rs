@@ -3,7 +3,7 @@ use std::{
     time::Duration,
 };
 
-use async_openai::types::chat::CreateChatCompletionRequest;
+use async_openai::types::chat::{CreateChatCompletionRequest, Role};
 use axum::{
     Json, Router,
     extract::State,
@@ -243,7 +243,7 @@ async fn handle_chat_completions(
         // streaming
         let (tx, rx_tokio) = tokio::sync::mpsc::unbounded_channel::<String>();
         tokio::task::spawn_blocking(move || {
-            parser.parse_stream(rx, STREAM_TIMEOUT, |item| {
+            parser.parse_stream(rx, STREAM_TIMEOUT, |item, nth| {
                 match item {
                     ChatStreamItem::Done => {
                         let _ = tx.send("[DONE]".to_string());
@@ -255,7 +255,12 @@ async fn handle_chat_completions(
                         let _ = tx.send("[DONE]".to_string());
                     }
                     _ => {
-                        let chunk = item.into_chunk(&respond_id, &model_name, now_unix_s() as u32);
+                        let mut chunk =
+                            item.into_chunk(&respond_id, &model_name, now_unix_s() as u32);
+                        if nth == 0 {
+                            // set role on first chunk
+                            chunk.choices[0].delta.role = Some(Role::Assistant);
+                        }
                         let data = serde_json::to_string(&chunk).unwrap_or_default();
                         let _ = tx.send(data);
                     }

@@ -81,7 +81,6 @@ impl ChatResponsePart {
 }
 
 pub(crate) enum ChatStreamItem {
-    Role(Role),
     Part(ChatResponsePart),
     Stop(FinishReason, Option<CompletionUsage>),
     Done,
@@ -97,27 +96,6 @@ impl ChatStreamItem {
     ) -> CreateChatCompletionStreamResponse {
         match self {
             Self::Part(part) => part.into_chunk(id, model, created),
-            Self::Role(role) => CreateChatCompletionStreamResponse {
-                id: id.to_string(),
-                model: model.to_string(),
-                object: "chat.completion.chunk".to_string(),
-                created,
-                choices: vec![ChatChoiceStream {
-                    delta: ChatCompletionStreamResponseDelta {
-                        role: Some(role),
-                        content: None,
-                        tool_calls: None,
-                        refusal: None,
-                        function_call: None,
-                    },
-                    index: 0,
-                    finish_reason: None,
-                    logprobs: None,
-                }],
-                system_fingerprint: None,
-                service_tier: None,
-                usage: None,
-            },
             Self::Stop(finish_reason, usage) => CreateChatCompletionStreamResponse {
                 id: id.to_string(),
                 model: model.to_string(),
@@ -377,75 +355,78 @@ impl ChatResponseParser {
         timeout: std::time::Duration,
         mut on_item: F,
     ) where
-        F: FnMut(ChatStreamItem) -> bool,
+        F: FnMut(ChatStreamItem, usize) -> bool,
     {
-        let mut sent_started = false;
+        let mut nth = 0_usize; // index of chunk
+        let mut has_tool_call = false;
 
         loop {
             match rx.recv_timeout(timeout) {
                 Ok(EngineReply::Text(t)) => {
-                    if !sent_started {
-                        // emit first role message
-                        if !on_item(ChatStreamItem::Role(Role::Assistant)) {
-                            break;
-                        }
-                        sent_started = true;
-                    }
-
                     self.push_str(&t);
                     while let Some(part) = self.next() {
-                        if !on_item(ChatStreamItem::Part(part)) {
+                        if matches!(part, ChatResponsePart::Call(_)) {
+                            has_tool_call = true;
+                        }
+
+                        if !on_item(ChatStreamItem::Part(part), nth) {
                             break;
                         }
+                        nth += 1;
                     }
                 }
                 Ok(EngineReply::Stop(reason, n_completion_tokens)) => {
                     self.end();
                     while let Some(part) = self.next() {
-                        if !on_item(ChatStreamItem::Part(part)) {
+                        if !on_item(ChatStreamItem::Part(part), nth) {
                             break;
                         }
+                        nth += 1;
                     }
 
                     // emit stop message
-                    on_item(ChatStreamItem::Stop(
+                    let finish_reason = if has_tool_call {
+                        FinishReason::ToolCalls
+                    } else {
                         match reason {
                             StopReason::Eog | StopReason::Word(_) | StopReason::PrefillOnly => {
                                 FinishReason::Stop
                             }
                             StopReason::MaxTokens => FinishReason::Length,
-                        },
-                        if self.include_usage {
-                            Some(CompletionUsage {
-                                prompt_tokens: self.n_prompt_tokens as u32,
-                                completion_tokens: n_completion_tokens as u32,
-                                total_tokens: (self.n_prompt_tokens + n_completion_tokens) as u32,
-                                completion_tokens_details: None,
-                                prompt_tokens_details: None,
-                            })
-                        } else {
-                            None
-                        },
-                    ));
+                        }
+                    };
+                    let usage = if self.include_usage {
+                        Some(CompletionUsage {
+                            prompt_tokens: self.n_prompt_tokens as u32,
+                            completion_tokens: n_completion_tokens as u32,
+                            total_tokens: (self.n_prompt_tokens + n_completion_tokens) as u32,
+                            completion_tokens_details: None,
+                            prompt_tokens_details: None,
+                        })
+                    } else {
+                        None
+                    };
+                    on_item(ChatStreamItem::Stop(finish_reason, usage), nth);
+                    nth += 1;
 
                     // emit done message
-                    on_item(ChatStreamItem::Done);
+                    on_item(ChatStreamItem::Done, nth);
                     break;
                 }
                 Ok(EngineReply::Cancelled) => {
-                    on_item(ChatStreamItem::Error(ERR_CANCELLED.to_string()));
+                    on_item(ChatStreamItem::Error(ERR_CANCELLED.to_string()), nth);
                     break;
                 }
                 Ok(EngineReply::Error(e)) => {
-                    on_item(ChatStreamItem::Error(e));
+                    on_item(ChatStreamItem::Error(e), nth);
                     break;
                 }
                 Ok(EngineReply::Shutdown) => {
-                    on_item(ChatStreamItem::Error(ERR_ENGINE_SHUTDOWN.to_string()));
+                    on_item(ChatStreamItem::Error(ERR_ENGINE_SHUTDOWN.to_string()), nth);
                     break;
                 }
                 Err(_) => {
-                    on_item(ChatStreamItem::Error("stream timed out".to_string()));
+                    on_item(ChatStreamItem::Error("stream timed out".to_string()), nth);
                     break;
                 }
             }

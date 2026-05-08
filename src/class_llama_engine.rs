@@ -4,6 +4,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use async_openai::types::chat::Role;
 use linkme::distributed_slice;
 use llama_cpp_ffi::ToolChoice as LarkToolChoice;
 use zuqe::{
@@ -252,18 +253,17 @@ fn js_engine_chat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     if is_stream {
         // Streaming: AsyncIterableIterator
-        let (stream_tx, stream_rx) = crossbeam::channel::bounded::<ChatStreamItem>(8);
-
+        let (item_tx, item_rx) = crossbeam::channel::bounded::<(ChatStreamItem, usize)>(8);
         std::thread::spawn(move || {
-            parser.parse_stream(rx, std::time::Duration::from_secs(u64::MAX), |item| {
-                stream_tx.send(item).is_ok()
+            parser.parse_stream(rx, std::time::Duration::from_secs(u64::MAX), |item, nth| {
+                item_tx.send((item, nth)).is_ok()
             });
         });
 
-        AsyncIterableIterator::create_with_receiver::<ChatStreamItem>(
+        AsyncIterableIterator::create_with_receiver::<(ChatStreamItem, usize)>(
             ctx,
-            stream_rx,
-            move |cx, msg| -> Result<Option<JSValue>, i32> {
+            item_rx,
+            move |cx, (msg, nth)| -> Result<Option<JSValue>, i32> {
                 match msg {
                     ChatStreamItem::Done => Ok(None),
                     ChatStreamItem::Error(e) => {
@@ -271,7 +271,12 @@ fn js_engine_chat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                         Err(-1)
                     }
                     _ => {
-                        let chunk = msg.into_chunk(&respond_id, &model_name, now_unix_s() as u32);
+                        let mut chunk =
+                            msg.into_chunk(&respond_id, &model_name, now_unix_s() as u32);
+                        if nth == 0 {
+                            // set role on first chunk
+                            chunk.choices[0].delta.role = Some(Role::Assistant);
+                        }
                         chunk_to_js(cx, &chunk).map(Some)
                     }
                 }
