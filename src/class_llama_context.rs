@@ -2,12 +2,13 @@ use std::{
     borrow::Cow,
     cell::Cell,
     ffi::c_void,
+    ops::DerefMut,
     sync::{Arc, Mutex},
     time::Duration,
 };
 
 use linkme::distributed_slice;
-use llama_cpp_ffi::LlamaContext;
+use llama_cpp_ffi::{LlamaContext, SamplerChain};
 use zuqe::{
     CallContext, ClassDef, ClassID, FieldDef, IntOrFloat, JS_PROP_ENUMERABLE, JS_PROP_FORCE,
     JSResult, JSValue, Object, Runtime, ScopedContext,
@@ -17,7 +18,7 @@ use zuqe::{
 use crate::{
     USER_CLASS_DEFS,
     class_llama_engine::{JSLlamaEngine, parse_engine_params},
-    class_llama_sampler::{SamplerId, SamplerSpec, get_sampler_id, get_sampler_spec_by_id},
+    class_llama_sampler::get_sampler_chain_arc,
     engine::{Engine, Token},
     worker::WorkerPool,
 };
@@ -115,20 +116,9 @@ impl LlamaContextWrap {
         })
     }
 
-    fn sample_token(
-        &self,
-        sampler_id: SamplerId,
-        logits: i32,
-        sampler_spec: SamplerSpec,
-    ) -> Result<i32, String> {
+    fn sample_token(&self, logits: i32, chain: &mut SamplerChain) -> Result<i32, String> {
         self.with_ctx_mut(|llm_ctx| {
-            let token = crate::worker::sample_with_cached_sampler(
-                llm_ctx,
-                sampler_id,
-                sampler_spec.rev,
-                &sampler_spec.steps,
-                logits,
-            )?;
+            let token = chain.sample(llm_ctx.as_ptr(), logits);
             Ok(token)
         })
     }
@@ -326,7 +316,7 @@ fn js_context_sample(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     let logits = cc.arg(0).to_number(ctx)?.to_i32();
     let s = cc.arg(1);
-    let sampler_id: SamplerId = get_sampler_id(ctx, &s)?;
+    let sampler = get_sampler_chain_arc(ctx, &s)?;
 
     let (promise, tx) =
         Promise::create_with_channel::<Result<Token, String>>(ctx, |cx, data| -> JSResult {
@@ -344,9 +334,7 @@ fn js_context_sample(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let tx_timeout = tx.clone();
     if let Err(e) = WorkerPool::singleton().add_job(
         move || {
-            let res = get_sampler_spec_by_id(sampler_id).and_then(|sampler_spec| {
-                llm_ctx_wrap.sample_token(sampler_id, logits, sampler_spec)
-            });
+            let res = llm_ctx_wrap.sample_token(logits, sampler.lock().unwrap().deref_mut());
             let _ = tx_submit.send(res);
         },
         Some(move || {

@@ -1,88 +1,51 @@
 use std::{
     cell::Cell,
-    collections::HashMap,
-    sync::{Mutex, OnceLock},
+    ffi::c_void,
+    sync::{Arc, Mutex},
 };
 
 use linkme::distributed_slice;
-use llama_cpp_ffi::SamplerKind;
+use llama_cpp_ffi::{SamplerChain, SamplerKind};
 use zuqe::{
     CallContext, ClassDef, ClassID, FieldDef, IntOrFloat, JS_PROP_ENUMERABLE, JSResult, JSValue,
     Object, Runtime, RuntimeImpl, ScopedContext,
 };
 
-use crate::{
-    USER_CLASS_DEFS,
-    class_llama_model::get_llama_model,
-    worker::{self, WorkerPool},
-};
+use crate::{USER_CLASS_DEFS, class_llama_model::get_llama_model};
 
-pub(super) type SamplerId = usize;
-
-#[derive(Clone, Default)]
-pub(super) struct SamplerSpec {
-    pub rev: u64,
-    pub steps: Vec<SamplerKind>,
-}
-
-static SAMPLER_SPEC_LUT: OnceLock<Mutex<HashMap<SamplerId, SamplerSpec>>> = OnceLock::new();
-
-fn sampler_spec_lut() -> &'static Mutex<HashMap<SamplerId, SamplerSpec>> {
-    SAMPLER_SPEC_LUT.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-/// retrive sampler id from js value
-pub(super) fn get_sampler_id(ctx: &mut ScopedContext, val: &JSValue) -> Result<SamplerId, i32> {
-    let obj = val.as_object().ok_or_else(|| {
-        ctx.throw_type_error("invalid Sampler object");
-        -1
-    })?;
-    let sampler_id = obj.id();
-    let exists = sampler_spec_lut()
-        .lock()
-        .map_err(|_| {
-            ctx.throw_internal_error("sampler registry poisoned");
-            -1
-        })?
-        .contains_key(&sampler_id);
-    if exists {
-        Ok(sampler_id)
-    } else {
-        ctx.throw_type_error("invalid Sampler object");
-        Err(-1)
-    }
-}
-
-fn get_sampler_spec_mut<'a>(
+fn get_sampler_chain<'a>(
     ctx: &mut ScopedContext,
-    reg: &'a mut HashMap<SamplerId, SamplerSpec>,
-    sampler_id: SamplerId,
-) -> Result<&'a mut SamplerSpec, i32> {
-    if let Some(spec) = reg.get_mut(&sampler_id) {
-        Ok(spec)
-    } else {
-        ctx.throw_type_error("invalid Sampler object");
+    val: &JSValue,
+) -> Result<&'a Mutex<SamplerChain>, i32> {
+    let payload = val
+        .retrive_object_payload(ctx, JSSamplerChain::class_id())?
+        .other()
+        .unwrap();
+    let opaque = payload.opaque();
+    if opaque.is_null() {
+        ctx.throw_type_error("SamplerChain was disposed");
         Err(-1)
+    } else {
+        let k = unsafe { &*opaque.cast::<Mutex<SamplerChain>>() };
+        Ok(k)
     }
 }
 
-pub(super) fn get_sampler_spec_by_id(sampler_id: SamplerId) -> Result<SamplerSpec, String> {
-    let reg = sampler_spec_lut()
-        .lock()
-        .map_err(|_| "sampler registry poisoned".to_string())?;
-    reg.get(&sampler_id)
-        .cloned()
-        .ok_or_else(|| "Sampler was disposed".to_string())
+pub(super) fn get_sampler_chain_arc(
+    ctx: &mut ScopedContext,
+    val: &JSValue,
+) -> Result<Arc<Mutex<SamplerChain>>, i32> {
+    let chain_ref = get_sampler_chain(ctx, val)?;
+    let ptr = chain_ref as *const Mutex<SamplerChain>;
+    unsafe { Arc::increment_strong_count(ptr) };
+    Ok(unsafe { Arc::from_raw(ptr) })
 }
 
 pub fn js_model_createSamplerChain(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
-    let _ = get_llama_model(ctx, &this)?;
+    let model = get_llama_model(ctx, &this)?;
 
-    let mut spec = SamplerSpec {
-        rev: 1,
-        steps: Vec::new(),
-    };
+    let mut chain = SamplerChain::new(model, false);
 
     if cc.length() > 0 {
         let arr = cc.arg(0).as_object_Array().copied().ok_or_else(|| {
@@ -161,7 +124,7 @@ pub fn js_model_createSamplerChain(ctx: &mut ScopedContext, cc: CallContext) -> 
                             }
                         }
 
-                        spec.steps.push(SamplerKind::Penalties {
+                        chain.add_sampler(&SamplerKind::Penalties {
                             repeat_last_n,
                             repeat_penalty,
                             frequency_penalty,
@@ -177,7 +140,7 @@ pub fn js_model_createSamplerChain(ctx: &mut ScopedContext, cc: CallContext) -> 
                                 -1
                             })?
                             .to_i32();
-                        spec.steps.push(SamplerKind::TopK(d));
+                        chain.add_sampler(&SamplerKind::TopK(d));
                     }
                     "top-p" => {
                         let d = o
@@ -188,7 +151,7 @@ pub fn js_model_createSamplerChain(ctx: &mut ScopedContext, cc: CallContext) -> 
                                 -1
                             })?
                             .to_f64() as f32;
-                        spec.steps.push(SamplerKind::TopP(d));
+                        chain.add_sampler(&SamplerKind::TopP(d));
                     }
                     "temperature" => {
                         let dyn_range = 0.0;
@@ -202,7 +165,7 @@ pub fn js_model_createSamplerChain(ctx: &mut ScopedContext, cc: CallContext) -> 
                             })?
                             .to_f64() as f32;
 
-                        spec.steps.push(SamplerKind::Temperature {
+                        chain.add_sampler(&SamplerKind::Temperature {
                             temp,
                             dyn_range,
                             dyn_exponent,
@@ -220,30 +183,19 @@ pub fn js_model_createSamplerChain(ctx: &mut ScopedContext, cc: CallContext) -> 
         }
     }
 
-    spec.steps.push(SamplerKind::Dist(0));
-    let mut obj = JSSamplerChain::new_instance(ctx)?;
-    let sampler_id = obj.id();
-    spec.rev = worker::next_sampler_rev(sampler_id);
-    sampler_spec_lut()
-        .lock()
-        .map_err(|_| {
-            ctx.throw_internal_error("sampler registry poisoned");
-            -1
-        })?
-        .insert(sampler_id, spec);
+    chain.add_sampler(&SamplerKind::Dist(0));
+    chain.finalize_samplers();
+
+    let mut obj = JSSamplerChain::new_instance(ctx, Arc::new(Mutex::new(chain)))?;
     obj.define_property_value_str(ctx, "model", this, JS_PROP_ENUMERABLE)?;
 
     Ok(obj.into())
 }
 
-fn add_penalties(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+fn js_samplerchain_penalties(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
-    let sampler_id = get_sampler_id(ctx, &this)?;
-    let mut reg = sampler_spec_lut().lock().map_err(|_| {
-        ctx.throw_internal_error("sampler registry poisoned");
-        -1
-    })?;
-    let spec = get_sampler_spec_mut(ctx, &mut reg, sampler_id)?;
+    let chain = get_sampler_chain(ctx, &this)?;
+    let mut chain = chain.lock().unwrap();
 
     let mut repeat_last_n = 64_i32;
     let mut repeat_penalty = 1.1;
@@ -310,13 +262,12 @@ fn add_penalties(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         }
     }
 
-    spec.steps.push(SamplerKind::Penalties {
+    chain.add_sampler(&SamplerKind::Penalties {
         repeat_last_n,
         repeat_penalty,
         frequency_penalty,
         presence_penalty,
     });
-    spec.rev = worker::next_sampler_rev(sampler_id);
 
     Ok(cc.this())
 }
@@ -324,58 +275,49 @@ fn add_penalties(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 const TOP_K: i32 = 1;
 const TOP_P: i32 = 2;
 
-fn add_top_k_p(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+fn js_samplerchain_topKP(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
-    let sampler_id = get_sampler_id(ctx, &this)?;
-    let mut reg = sampler_spec_lut().lock().map_err(|_| {
-        ctx.throw_internal_error("sampler registry poisoned");
-        -1
-    })?;
-    let spec = get_sampler_spec_mut(ctx, &mut reg, sampler_id)?;
+    let chain = get_sampler_chain(ctx, &this)?;
+    let mut chain = chain.lock().unwrap();
 
     let n = cc.arg(0).to_number(ctx)?;
     match cc.magic() {
         TOP_K => {
             let d = n.to_i32();
-            spec.steps.push(SamplerKind::TopK(d));
-            spec.steps.push(SamplerKind::Dist(0));
+            chain.add_sampler(&SamplerKind::TopK(d));
+            chain.add_sampler(&SamplerKind::Dist(0));
         }
         TOP_P => {
             let d = n.to_f64() as f32;
-            spec.steps.push(SamplerKind::TopP(d));
+            chain.add_sampler(&SamplerKind::TopP(d));
         }
         _ => {
             unreachable!()
         }
     }
-    spec.rev = worker::next_sampler_rev(sampler_id);
 
     Ok(cc.this())
 }
 
-fn add_temperature(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+fn js_samplerchain_temperature(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
-    let sampler_id = get_sampler_id(ctx, &this)?;
-    let mut reg = sampler_spec_lut().lock().map_err(|_| {
-        ctx.throw_internal_error("sampler registry poisoned");
-        -1
-    })?;
-    let spec = get_sampler_spec_mut(ctx, &mut reg, sampler_id)?;
+    let chain = get_sampler_chain(ctx, &this)?;
+    let mut chain = chain.lock().unwrap();
 
     let d = cc.arg(0).to_number(ctx)?.to_f64();
-    spec.steps.push(SamplerKind::Temperature {
+    chain.add_sampler(&SamplerKind::Temperature {
         temp: d as f32,
         dyn_range: 1.0,
         dyn_exponent: 1.0,
     });
-    spec.rev = worker::next_sampler_rev(sampler_id);
 
     Ok(this)
 }
 
 fn add_grammar(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
-    let sampler_id = get_sampler_id(ctx, &this)?;
+    let chain = get_sampler_chain(ctx, &this)?;
+    let mut chain = chain.lock().unwrap();
 
     let g = cc.arg(0);
     if g.is_undefined_or_null() {
@@ -388,15 +330,10 @@ fn add_grammar(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         return Err(-1);
     }
 
-    let grammer = s.content().encode_utf8(false).to_string();
-    todo!();
-    // if let Err(e) = sc.set_lark_grammar(&grammar) {
-    //     log::warn!("failed to set grammar: {}", e);
-    // } else {
-    //     let mut ctrl = GrammarController::new();
-    //     ctrl.set_tool_choice(g.tool_choice);
-    //     sc.set_controller(ctrl);
-    // }
+    let grammar = s.content().encode_utf8(false).to_string();
+    if let Err(e) = chain.set_lark_grammar(&grammar) {
+        log::warn!("failed to set grammar: {}", e);
+    }
 
     Ok(this)
 }
@@ -407,30 +344,35 @@ mod debug_api {
 
     pub(super) fn debug_dispose(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         let this = cc.this();
-        let obj = this.as_object().ok_or_else(|| {
-            ctx.throw_type_error("invalid Sampler object");
-            -1
-        })?;
-        JSSamplerChain::dispose_by_id(obj.id());
+        let _guard = get_sampler_chain(ctx, &this)?.lock().unwrap();
+        let mut this = cc.this();
+        let payload = this
+            .retrive_object_payload_mut(ctx, JSSamplerChain::class_id())?
+            .other_mut()
+            .unwrap();
+        if !payload.opaque().is_null() {
+            unsafe {
+                let p = payload.replace_opaque(std::ptr::null_mut());
+                drop(Arc::from_raw(p.cast::<Mutex<SamplerChain>>()));
+            }
+        }
         Ok(JSValue::UNDEFINED)
     }
 
     pub(super) fn debug_cache_count(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         let this = cc.this();
-        let obj = this.as_object().ok_or_else(|| {
-            ctx.throw_type_error("invalid Sampler object");
-            -1
-        })?;
-        let n = WorkerPool::singleton().debug_sampler_cache_count(obj.id());
+        let chain = get_sampler_chain(ctx, &this)?;
+        let chain = chain.lock().unwrap();
+        let n = chain.len();
         Ok((n as i32).into())
     }
 }
 
 const CLASS_SAMPLER_CHAIN_PROTO: &[FieldDef] = &[
-    FieldDef::CALL("penalties", 1, add_penalties, 0),
-    FieldDef::CALL("topK", 1, add_top_k_p, TOP_K as _),
-    FieldDef::CALL("topP", 1, add_top_k_p, TOP_P as _),
-    FieldDef::CALL("temperature", 1, add_temperature, 0 as _),
+    FieldDef::CALL("penalties", 1, js_samplerchain_penalties, 0),
+    FieldDef::CALL("topK", 1, js_samplerchain_topKP, TOP_K as _),
+    FieldDef::CALL("topP", 1, js_samplerchain_topKP, TOP_P as _),
+    FieldDef::CALL("temperature", 1, js_samplerchain_temperature, 0 as _),
     #[cfg(debug_assertions)]
     FieldDef::CALL("_debug_dispose", 0, debug_api::debug_dispose, 0),
     #[cfg(debug_assertions)]
@@ -444,15 +386,6 @@ impl JSSamplerChain {
         static CLASS_ID: Cell<ClassID> = const { Cell::new(0) };
     }
 
-    fn dispose_by_id(id: usize) {
-        if let Ok(mut reg) = sampler_spec_lut().lock() {
-            reg.remove(&id);
-        }
-        worker::next_sampler_rev(id);
-        WorkerPool::singleton().purge_sampler_sync(id);
-    }
-
-    /// register class
     fn register(rt: &mut Runtime) -> Result<ClassID, i32> {
         let class_id = rt.register_class(
             ClassDef::new("SamplerChain", CLASS_SAMPLER_CHAIN_PROTO, None)
@@ -462,20 +395,29 @@ impl JSSamplerChain {
         Ok(class_id)
     }
 
-    fn handle_dispose(_: &mut RuntimeImpl, _: *mut std::ffi::c_void, id: usize) {
-        Self::dispose_by_id(id);
+    fn handle_dispose(_: &mut RuntimeImpl, opaque: *mut c_void, _id: usize) {
+        if !opaque.is_null() {
+            drop(unsafe { Arc::from_raw(opaque.cast::<Mutex<SamplerChain>>()) });
+        }
     }
 
-    /// get class id
     #[inline(always)]
     pub fn class_id() -> ClassID {
         Self::CLASS_ID.with(|x| x.get())
     }
 
-    pub fn new_instance(ctx: &mut ScopedContext) -> Result<Object, i32> {
-        let class_id = Self::class_id();
-        ctx.create_class_instance_with_opaque(class_id, std::ptr::null_mut())
-            .map_err(|_| -1)
+    pub fn new_instance(
+        ctx: &mut ScopedContext,
+        chain: Arc<Mutex<SamplerChain>>,
+    ) -> Result<Object, i32> {
+        let opaque = Arc::into_raw(chain) as *mut c_void;
+
+        ctx.create_class_instance_with_opaque(Self::class_id(), opaque)
+            .map_err(|e| {
+                let p = e.other().unwrap();
+                let _ = unsafe { Arc::from_raw(p.opaque().cast::<Mutex<SamplerChain>>()) };
+                -1
+            })
     }
 }
 
