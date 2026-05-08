@@ -3,10 +3,7 @@ use std::{
     time::Duration,
 };
 
-use async_openai::types::chat::{
-    ChatChoice, ChatCompletionMessageToolCalls, ChatCompletionResponseMessage, CompletionUsage,
-    CreateChatCompletionRequest, CreateChatCompletionResponse, FinishReason, Role,
-};
+use async_openai::types::chat::CreateChatCompletionRequest;
 use axum::{
     Json, Router,
     extract::State,
@@ -26,9 +23,10 @@ use uuid::Uuid;
 
 use crate::{
     chat_response::{
-        ChatPart, ChatResponseParser, ChatResponseTag, ChatStreamItem, chat_response_listener,
+        ChatResponseParser, ChatResponseTag, ChatStreamItem, chat_response_once,
+        chat_response_stream,
     },
-    engine::{Engine, EngineReply, GrammarConfig, OutputMode, StopReason, TaskConfig},
+    engine::{Engine, GrammarConfig, OutputMode, TaskConfig},
     helpers::{build_chat_prompt_tokens, compile_tools_grammar, now_unix_s, to_lark_tool_choice},
 };
 
@@ -246,15 +244,15 @@ async fn handle_chat_completions(
     }
 
     if is_stream {
+        // streaming
         let (tx, rx_tokio) = tokio::sync::mpsc::unbounded_channel::<String>();
-        let model_name_clone = model_name.clone();
 
         tokio::task::spawn_blocking(move || {
-            chat_response_listener(
+            chat_response_stream(
                 rx,
                 STREAM_TIMEOUT,
                 &respond_id,
-                &model_name_clone,
+                &model_name,
                 include_usage,
                 n_prompt_tokens,
                 parser,
@@ -287,6 +285,7 @@ async fn handle_chat_completions(
             )
             .into_response()
     } else {
+        // non-streaming
         let join = tokio::task::spawn_blocking(move || {
             chat_response_once(
                 rx,
@@ -311,109 +310,13 @@ async fn handle_chat_completions(
         });
 
         match join.await {
-            Ok(Ok(res)) => {
-                let val: serde_json::Value =
-                    serde_json::from_str(&res).unwrap_or(serde_json::Value::String(res));
-                Json(val).into_response()
-            }
+            Ok(Ok(val)) => Json(val).into_response(),
             Ok(Err((code, err_info))) => (code, Json(err_info)).into_response(),
             Err(_) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(oai_error("request task failed", "server_error")),
             )
                 .into_response(),
-        }
-    }
-}
-
-fn chat_response_once(
-    rx: crossbeam::channel::Receiver<EngineReply>,
-    timeout: std::time::Duration,
-    respond_id: &str,
-    model_name: &str,
-    include_usage: bool,
-    n_prompt_tokens: usize,
-    mut parser: ChatResponseParser,
-) -> Result<String, String> {
-    let mut n_completion_tokens = 0usize;
-
-    loop {
-        match rx.recv_timeout(timeout) {
-            Ok(EngineReply::Text(t)) => {
-                parser.push_str(&t);
-                n_completion_tokens += 1; // FIXME: add token count, not text
-            }
-            Ok(EngineReply::Stop(reason, _)) => {
-                let finish_reason = match reason {
-                    StopReason::MaxTokens => FinishReason::Length,
-                    StopReason::Eog | StopReason::Word(_) | StopReason::PrefillOnly => {
-                        FinishReason::Stop
-                    }
-                };
-
-                parser.end();
-
-                let mut text = String::new();
-                let mut tool_calls = Vec::<ChatCompletionMessageToolCalls>::new();
-
-                while let Some(part) = parser.next() {
-                    match part {
-                        ChatPart::Text(t) => {
-                            text.push_str(&t);
-                        }
-                        ChatPart::Call(t) => {
-                            tool_calls.push(ChatCompletionMessageToolCalls::Function(t));
-                        }
-                        _ => {
-                            // reasoning content is ignored
-                        }
-                    }
-                }
-
-                let resp = CreateChatCompletionResponse {
-                    id: respond_id.to_string(),
-                    object: "chat.completion".to_string(),
-                    created: now_unix_s() as u32,
-                    model: model_name.to_string(),
-                    choices: vec![ChatChoice {
-                        index: 0,
-                        message: ChatCompletionResponseMessage {
-                            content: if !text.is_empty() { Some(text) } else { None },
-                            tool_calls: if !tool_calls.is_empty() {
-                                Some(tool_calls)
-                            } else {
-                                None
-                            },
-                            role: Role::Assistant,
-                            refusal: None,
-                            function_call: None,
-                            audio: None,
-                            annotations: None,
-                        },
-                        finish_reason: Some(finish_reason),
-                        logprobs: None,
-                    }],
-                    usage: if include_usage {
-                        Some(CompletionUsage {
-                            prompt_tokens: n_prompt_tokens as u32,
-                            completion_tokens: n_completion_tokens as u32,
-                            total_tokens: (n_prompt_tokens + n_completion_tokens) as u32,
-                            completion_tokens_details: None,
-                            prompt_tokens_details: None,
-                        })
-                    } else {
-                        None
-                    },
-                    system_fingerprint: None,
-                    service_tier: None,
-                };
-
-                return serde_json::to_string(&resp).map_err(|e| e.to_string());
-            }
-            Ok(EngineReply::Cancelled) => return Err(ERR_CANCELLED.to_string()),
-            Ok(EngineReply::Error(e)) => return Err(e),
-            Ok(EngineReply::Shutdown) => return Err(ERR_ENGINE_SHUTDOWN.to_string()),
-            Err(_) => return Err("stream timed out".to_string()),
         }
     }
 }

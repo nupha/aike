@@ -1,9 +1,11 @@
 use std::collections::VecDeque;
 
 use async_openai::types::chat::{
-    ChatChoiceStream, ChatCompletionMessageToolCall, ChatCompletionMessageToolCallChunk,
-    ChatCompletionStreamResponseDelta, CompletionUsage, CreateChatCompletionStreamResponse,
-    FinishReason, FunctionCall, FunctionCallStream, FunctionType,
+    ChatChoice, ChatChoiceStream, ChatCompletionMessageToolCall,
+    ChatCompletionMessageToolCallChunk, ChatCompletionMessageToolCalls,
+    ChatCompletionResponseMessage, ChatCompletionStreamResponseDelta, CompletionUsage,
+    CreateChatCompletionResponse, CreateChatCompletionStreamResponse, FinishReason, FunctionCall,
+    FunctionCallStream, FunctionType, Role,
 };
 
 use crate::{
@@ -284,7 +286,7 @@ impl ChatResponseParser {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn chat_response_listener<F>(
+pub(crate) fn chat_response_stream<F>(
     rx: crossbeam::channel::Receiver<EngineReply>,
     timeout: std::time::Duration,
     respond_id: &str,
@@ -409,6 +411,97 @@ pub(crate) fn chat_response_listener<F>(
                 on_item(ChatStreamItem::Error("stream timed out".to_string()));
                 break;
             }
+        }
+    }
+}
+
+/// Collect all EngineReply messages for non-streaming chat, building a CreateChatCompletionResponse json.
+/// Uses ChatResponseParser to parse tool calls and reasoning content from the generated text.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn chat_response_once(
+    rx: crossbeam::channel::Receiver<EngineReply>,
+    timeout: std::time::Duration,
+    respond_id: &str,
+    model_name: &str,
+    include_usage: bool,
+    n_prompt_tokens: usize,
+    mut parser: ChatResponseParser,
+) -> Result<serde_json::Value, String> {
+    loop {
+        match rx.recv_timeout(timeout) {
+            Ok(EngineReply::Text(t)) => {
+                parser.push_str(&t);
+            }
+
+            Ok(EngineReply::Stop(reason, n_completion_tokens)) => {
+                parser.end();
+
+                let mut text = String::new();
+                let mut tool_calls = Vec::<ChatCompletionMessageToolCalls>::new();
+
+                while let Some(part) = parser.next() {
+                    match part {
+                        ChatPart::Text(t) => {
+                            text.push_str(&t);
+                        }
+                        ChatPart::Call(t) => {
+                            tool_calls.push(ChatCompletionMessageToolCalls::Function(t));
+                        }
+                        _ => {}
+                    }
+                }
+
+                let finish_reason = match reason {
+                    StopReason::MaxTokens => FinishReason::Length,
+                    StopReason::Eog | StopReason::Word(_) | StopReason::PrefillOnly => {
+                        FinishReason::Stop
+                    }
+                };
+
+                let resp = CreateChatCompletionResponse {
+                    id: respond_id.to_string(),
+                    object: "chat.completion".to_string(),
+                    created: now_unix_s() as u32,
+                    model: model_name.to_string(),
+                    choices: vec![ChatChoice {
+                        index: 0,
+                        message: ChatCompletionResponseMessage {
+                            content: if !text.is_empty() { Some(text) } else { None },
+                            tool_calls: if !tool_calls.is_empty() {
+                                Some(tool_calls)
+                            } else {
+                                None
+                            },
+                            role: Role::Assistant,
+                            refusal: None,
+                            function_call: None,
+                            audio: None,
+                            annotations: None,
+                        },
+                        finish_reason: Some(finish_reason),
+                        logprobs: None,
+                    }],
+                    usage: if include_usage {
+                        Some(CompletionUsage {
+                            prompt_tokens: n_prompt_tokens as u32,
+                            completion_tokens: n_completion_tokens as u32,
+                            total_tokens: (n_prompt_tokens + n_completion_tokens) as u32,
+                            completion_tokens_details: None,
+                            prompt_tokens_details: None,
+                        })
+                    } else {
+                        None
+                    },
+                    system_fingerprint: None,
+                    service_tier: None,
+                };
+
+                return serde_json::to_value(resp).map_err(|e| e.to_string());
+            }
+            Ok(EngineReply::Cancelled) => return Err(ERR_CANCELLED.to_string()),
+            Ok(EngineReply::Error(e)) => return Err(e),
+            Ok(EngineReply::Shutdown) => return Err(ERR_ENGINE_SHUTDOWN.to_string()),
+            Err(_) => return Err("stream timed out".to_string()),
         }
     }
 }

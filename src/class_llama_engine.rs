@@ -4,10 +4,6 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use async_openai::types::chat::{
-    ChatChoice, ChatCompletionMessageToolCall, ChatCompletionResponseMessage, CompletionUsage,
-    CreateChatCompletionResponse, FinishReason, FunctionCall,
-};
 use linkme::distributed_slice;
 use llama_cpp_ffi::ToolChoice as LarkToolChoice;
 use zuqe::{
@@ -20,7 +16,10 @@ use zuqe::{
 
 use crate::{
     USER_CLASS_DEFS,
-    chat_response::{ChatResponseParser, ChatResponseTag, ChatStreamItem, chat_response_listener},
+    chat_response::{
+        ChatResponseParser, ChatResponseTag, ChatStreamItem, chat_response_once,
+        chat_response_stream,
+    },
     class_llama_client::{ParsedChatOptions, chunk_to_js, parse_chat_options, parse_messages},
     engine::{Engine, EngineReply, GrammarConfig, OutputMode, StopReason, TaskConfig},
     helpers::{build_chat_prompt_tokens, compile_tools_grammar, now_unix_s, to_lark_tool_choice},
@@ -42,6 +41,7 @@ pub(super) fn parse_engine_params(
     let mut idle_sleep_ms = 1u64;
     let mut slot_match_threshold = 0.5f32;
     let mut max_tokens = 0usize;
+
     if let Some(opts) = opts {
         // idleSleepMs
         let v = opts.get_property_str(ctx, "idleSleepMs")?;
@@ -67,17 +67,18 @@ pub(super) fn parse_engine_params(
             }
         }
 
-        // maxTokens
-        let v = opts.get_property_str(ctx, "maxTokens")?;
+        // maxCompletionTokens
+        let v = opts.get_property_str(ctx, "maxCompletionTokens")?;
         if !v.is_undefined() {
             let n = v.to_number(ctx)?.to_i32();
             if n < 0 {
-                ctx.throw_type_error("maxTokens must be >= 0");
+                ctx.throw_type_error("maxCompletionTokens must be >= 0");
                 return Err(-1);
             }
             max_tokens = n as usize;
         }
     }
+
     Ok(EngineParams {
         idle_sleep_ms,
         slot_match_threshold,
@@ -115,118 +116,6 @@ pub(super) fn get_engine_arc(
 
 pub(super) const MAGIC_CHAT_ONCE: i32 = 2;
 pub(super) const MAGIC_CHAT_STREAM: i32 = 3;
-
-/// Collect all EngineReply messages for non-streaming chat, building a CreateChatCompletionResponse json.
-pub(super) fn collect_chat_response(
-    rx: crossbeam::channel::Receiver<EngineReply>,
-    timeout: std::time::Duration,
-    respond_id: &str,
-    model_name: &str,
-    include_usage: bool,
-    n_prompt_tokens: usize,
-) -> Result<serde_json::Value, String> {
-    let mut full_text = String::new();
-
-    loop {
-        match rx.recv_timeout(timeout) {
-            Ok(EngineReply::Text(t)) => full_text.push_str(&t),
-            Ok(EngineReply::Stop(reason, n_completion_tokens)) => {
-                let finish_reason = match reason {
-                    StopReason::MaxTokens => FinishReason::Length,
-                    StopReason::Eog | StopReason::Word(_) | StopReason::PrefillOnly => {
-                        FinishReason::Stop
-                    }
-                };
-
-                // Detect tool calls in the generated text (e.g. <tool_call>...</tool_call>)
-                let tool_calls = parse_tool_calls_from_text(&full_text).map(|calls| {
-                    calls
-                        .into_iter()
-                        .map(|tc| {
-                            async_openai::types::chat::ChatCompletionMessageToolCalls::Function(tc)
-                        })
-                        .collect::<Vec<_>>()
-                });
-
-                // Build response
-                let resp = CreateChatCompletionResponse {
-                    id: respond_id.to_string(),
-                    object: "chat.completion".to_string(),
-                    created: now_unix_s() as u32,
-                    model: model_name.to_string(),
-                    choices: vec![ChatChoice {
-                        index: 0,
-                        message: ChatCompletionResponseMessage {
-                            content: Some(full_text),
-                            tool_calls,
-                            role: async_openai::types::chat::Role::Assistant,
-                            refusal: None,
-                            function_call: None,
-                            audio: None,
-                            annotations: None,
-                        },
-                        finish_reason: Some(finish_reason),
-                        logprobs: None,
-                    }],
-                    usage: if include_usage {
-                        Some(CompletionUsage {
-                            prompt_tokens: n_prompt_tokens as u32,
-                            completion_tokens: n_completion_tokens as u32,
-                            total_tokens: (n_prompt_tokens + n_completion_tokens) as u32,
-                            completion_tokens_details: None,
-                            prompt_tokens_details: None,
-                        })
-                    } else {
-                        None
-                    },
-                    system_fingerprint: None,
-                    service_tier: None,
-                };
-
-                return serde_json::to_value(resp).map_err(|e| e.to_string());
-            }
-            Ok(EngineReply::Cancelled) => return Err(ERR_CANCELLED.to_string()),
-            Ok(EngineReply::Error(e)) => return Err(e),
-            Ok(EngineReply::Shutdown) => return Err(ERR_ENGINE_SHUTDOWN.to_string()),
-            Err(_) => return Err("stream timed out".to_string()),
-        }
-    }
-}
-
-/// Parse tool calls from generated text that contains `<tool_call>...</tool_call>` tags.
-fn parse_tool_calls_from_text(text: &str) -> Option<Vec<ChatCompletionMessageToolCall>> {
-    let mut calls = Vec::<ChatCompletionMessageToolCall>::new();
-    let mut remaining = text;
-
-    while let Some(start) = remaining.find("<tool_call>") {
-        let content_start = start + "<tool_call>".len();
-        let end = remaining[content_start..].find("</tool_call>")?;
-        let json_str = &remaining[content_start..content_start + end];
-
-        // First parse as generic Value to handle arguments as JSON object
-        if let Ok(value) = serde_json::from_str::<serde_json::Value>(json_str) {
-            let name = value["name"].as_str().map(|s| s.to_string());
-            let args_value = value["arguments"].clone();
-
-            if let Some(name) = name {
-                // Stringify the arguments object to a JSON string
-                let Ok(arguments) = serde_json::to_string(&args_value) else {
-                    eprint!("[warn] bad arguments in tool_call: {}", args_value);
-                    return None;
-                };
-
-                calls.push(ChatCompletionMessageToolCall {
-                    id: format!("call_{}", uuid::Uuid::new_v4().simple()),
-                    function: FunctionCall { name, arguments },
-                });
-            }
-        }
-
-        remaining = &remaining[content_start + end + "</tool_call>".len()..];
-    }
-
-    if !calls.is_empty() { Some(calls) } else { None }
-}
 
 fn js_engine_chat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
@@ -365,7 +254,7 @@ fn js_engine_chat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         // Streaming: AsyncIterableIterator
         let (stream_tx, stream_rx) = crossbeam::channel::bounded::<ChatStreamItem>(8);
         std::thread::spawn(move || {
-            chat_response_listener(
+            chat_response_stream(
                 rx,
                 std::time::Duration::from_secs(u64::MAX),
                 &respond_id,
@@ -405,13 +294,14 @@ fn js_engine_chat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             })?;
 
         std::thread::spawn(move || {
-            let result = collect_chat_response(
+            let result = chat_response_once(
                 rx,
                 std::time::Duration::from_secs(u64::MAX),
                 &respond_id,
                 &model_name,
                 include_usage,
                 n_prompt_tokens,
+                parser,
             );
             let _ = result_slot.commit(result);
         });
