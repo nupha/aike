@@ -136,7 +136,7 @@ pub(super) fn js_client_responses(ctx: &mut ScopedContext, cc: CallContext) -> J
         s.content().encode_utf8(false).to_string()
     } else {
         client_arc
-            .model
+            .model_name
             .clone()
             .unwrap_or_else(|| "default".to_string())
     };

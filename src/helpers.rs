@@ -192,19 +192,7 @@ pub(crate) fn message_to_role_content(msg: &ChatCompletionRequestMessage) -> (&s
     }
 }
 
-/// Tokenize a prompt string using model, return error if zero tokens.
-pub(crate) fn tokenize_prompt(model: &LlamaModel, prompt: &str) -> Result<Vec<Token>, String> {
-    let c_prompt = CString::new(prompt).map_err(|_| "prompt contains NUL")?;
-    let tokens = model.tokenize(&c_prompt, false, true);
-    if tokens.is_empty() {
-        return Err("prompt tokenized to zero tokens".to_string());
-    }
-    Ok(tokens)
-}
-
-/// Build prompt tokens for chat completion. Mirrors serve.rs build_chat_prompt_tokens
-/// but takes separate parameters instead of CreateChatCompletionRequest.
-pub(crate) fn build_prompt_tokens(
+pub(crate) fn apply_chat_template(
     model: &LlamaModel,
     messages: &[ChatCompletionRequestMessage],
     tools: Option<&[ChatCompletionTools]>,
@@ -212,61 +200,60 @@ pub(crate) fn build_prompt_tokens(
     parallel_tool_calls: Option<bool>,
     reasoning_effort: ReasoningEffort,
     response_format: Option<&ResponseFormat>,
-) -> Result<Vec<Token>, String> {
-    let tmpl = model.chat_template().ok_or("model has no chat template")?;
-    let tmpl = tmpl
-        .to_str()
-        .map_err(|e| format!("invalid template: {e}"))?;
-
+) -> Result<String, String> {
     let eos_token = model.eos_token_text().unwrap_or_default();
     let bos_token = model.bos_token_text().unwrap_or_default();
 
-    // Convert Message → (role, content) → JinjaMessage
-    let backing = messages
-        .iter()
-        .map(message_to_role_content)
-        .collect::<Vec<_>>();
-    let jinja_msgs: Vec<JinjaMessage> = backing
-        .into_iter()
-        .map(|(role, content)| JinjaMessage {
-            role: role.into(),
-            content,
-        })
-        .collect();
+    model
+        .with_chat_template(|tmpl| {
+            // Convert Message → (role, content) → JinjaMessage
+            let backing = messages
+                .iter()
+                .map(message_to_role_content)
+                .collect::<Vec<_>>();
 
-    let mut tmpl_ctx = TemplateContext::new(&jinja_msgs, eos_token, bos_token);
+            let jinja_msgs: Vec<JinjaMessage> = backing
+                .into_iter()
+                .map(|(role, content)| JinjaMessage {
+                    role: role.into(),
+                    content,
+                })
+                .collect();
 
-    // tools
-    if let Some(tools) = tools
-        && let Ok(val) = serde_json::to_value(tools)
-    {
-        tmpl_ctx.tools = Some(val);
-    }
+            let mut tmpl_ctx = TemplateContext::new(&jinja_msgs, eos_token, bos_token);
 
-    // tool_choice
-    if let Some(tc) = tool_choice {
-        tmpl_ctx.tool_choice = Some(tool_choice_to_string(tc));
-    }
+            // tools
+            if let Some(tools) = tools
+                && let Ok(val) = serde_json::to_value(tools)
+            {
+                tmpl_ctx.tools = Some(val);
+            }
 
-    // parallel_tool_calls
-    tmpl_ctx.parallel_tool_calls = parallel_tool_calls;
-    // reasoning_effort → enable_thinking
-    tmpl_ctx.enable_thinking = reasoning_effort != ReasoningEffort::None;
-    // response_format → json_schema
-    if let Some(rf) = response_format {
-        match rf {
-            ResponseFormat::JsonObject => {}
-            ResponseFormat::JsonSchema { json_schema } => {
-                if let Some(schema) = &json_schema.schema {
-                    tmpl_ctx.json_schema = Some(schema.to_string());
+            // tool_choice
+            if let Some(tc) = tool_choice {
+                tmpl_ctx.tool_choice = Some(tool_choice_to_string(tc));
+            }
+
+            // parallel_tool_calls
+            tmpl_ctx.parallel_tool_calls = parallel_tool_calls;
+            // reasoning_effort → enable_thinking
+            tmpl_ctx.enable_thinking = reasoning_effort != ReasoningEffort::None;
+            // response_format → json_schema
+            if let Some(rf) = response_format {
+                match rf {
+                    ResponseFormat::JsonObject => {}
+                    ResponseFormat::JsonSchema { json_schema } => {
+                        if let Some(schema) = &json_schema.schema {
+                            tmpl_ctx.json_schema = Some(schema.to_string());
+                        }
+                    }
+                    ResponseFormat::Text => {}
                 }
             }
-            ResponseFormat::Text => {}
-        }
-    }
 
-    let prompt = render_chat_template(tmpl, &tmpl_ctx)?;
-    tokenize_prompt(model, &prompt)
+            render_chat_template(tmpl, &tmpl_ctx)
+        })
+        .ok_or("model has no chat template".to_string())?
 }
 
 /// Build tool definitions into a Lark grammar string for llguidance.

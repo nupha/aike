@@ -1,3 +1,5 @@
+use std::ffi::CString;
+
 use async_openai::types::responses::{
     CreateResponse, EasyInputContent, EasyInputMessage, InputItem, InputParam, MessageType, Role,
 };
@@ -12,7 +14,7 @@ use uuid::Uuid;
 
 use crate::{
     engine::{EngineReply, GrammarConfig, OutputMode, TaskConfig},
-    helpers::build_prompt_tokens,
+    helpers::apply_chat_template,
     output::{LlmOutputParser, OutputChunk, OutputPart, ParserKind},
     responses::{
         response_builder::{
@@ -84,7 +86,7 @@ pub async fn handle_responses(
         temperature = req.temperature.unwrap_or(DEFAULT_TEMPERATURE);
         top_p = req.top_p.unwrap_or(DEFAULT_TOP_P);
 
-        let prompt_tokens = match build_prompt_tokens(
+        let prompt_tokens = match apply_chat_template(
             engine.model(),
             &messages,
             tools.as_deref(),
@@ -96,7 +98,9 @@ pub async fn handle_responses(
                 .unwrap_or_default(),
             None,
         ) {
-            Ok(tokens) => tokens,
+            Ok(prompt) => engine
+                .model()
+                .tokenize(&CString::new(prompt).unwrap(), false, true),
             Err(e) => {
                 return (
                     StatusCode::BAD_REQUEST,
@@ -105,6 +109,17 @@ pub async fn handle_responses(
                     .into_response();
             }
         };
+
+        if prompt_tokens.is_empty() {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(oai_error(
+                    "prompt tokenized to zero tokens",
+                    "invalid_request_error",
+                )),
+            )
+                .into_response();
+        }
 
         let mut task_config = TaskConfig::new()
             .max_tokens(max_tokens)

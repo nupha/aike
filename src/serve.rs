@@ -1,4 +1,5 @@
 use std::{
+    ffi::CString,
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -23,7 +24,7 @@ use uuid::Uuid;
 
 use crate::{
     engine::{Engine, GrammarConfig, OutputMode, TaskConfig},
-    helpers::{build_prompt_tokens, build_tools_grammar, now_unix_s, to_lark_tool_choice},
+    helpers::{apply_chat_template, now_unix_s, to_lark_tool_choice},
     output::{LlmOutputParser, OutputChunk, ParserKind},
 };
 
@@ -145,7 +146,8 @@ async fn handle_chat_completions(
 
     let is_stream = req.stream.unwrap_or(false);
 
-    let prompt_tokens = match build_prompt_tokens(
+    // Build prompt tokens
+    let prompt_tokens = match apply_chat_template(
         state.engine.lock().unwrap().model(),
         &req.messages,
         req.tools.as_deref(),
@@ -154,7 +156,11 @@ async fn handle_chat_completions(
         req.reasoning_effort.clone().unwrap_or_default(),
         req.response_format.as_ref(),
     ) {
-        Ok(tokens) => tokens,
+        Ok(prompt) => state.engine.lock().unwrap().model().tokenize(
+            &CString::new(prompt).unwrap(),
+            false,
+            true,
+        ),
         Err(e) => {
             return (
                 StatusCode::BAD_REQUEST,
@@ -163,6 +169,17 @@ async fn handle_chat_completions(
                 .into_response();
         }
     };
+
+    if prompt_tokens.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(oai_error(
+                "prompt tokenized to zero tokens",
+                "invalid_request_error",
+            )),
+        )
+            .into_response();
+    }
 
     let mut task_config = TaskConfig::new()
         .max_tokens(

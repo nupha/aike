@@ -70,7 +70,7 @@ fn js_client_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
 pub(crate) struct ClientState {
     pub client: Client<OpenAIConfig>,
-    pub model: Option<String>,
+    pub model_name: Option<String>,
 }
 
 /// Get Arc<ClientState> from JS value (bumps strong count)
@@ -121,7 +121,10 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
     })?;
 
     if req.model.is_empty() {
-        req.model = client_arc.model.clone().unwrap_or_else(|| "".to_string());
+        req.model = client_arc
+            .model_name
+            .clone()
+            .unwrap_or_else(|| "".to_string());
     }
 
     let client = client_arc.client.clone();
@@ -306,7 +309,10 @@ impl JSLlamaClient {
         client: Client<OpenAIConfig>,
         model: Option<String>,
     ) -> Result<Object, i32> {
-        let state = Arc::new(ClientState { client, model });
+        let state = Arc::new(ClientState {
+            client,
+            model_name: model,
+        });
         let opaque = Arc::into_raw(state).cast::<c_void>() as *mut c_void;
         ctx.create_class_instance_with_opaque(Self::class_id(), opaque)
             .map_err(|e| {

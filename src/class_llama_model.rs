@@ -295,6 +295,7 @@ const PROP_EOT_TEXT: i32 = 9;
 const PROP_SEP_TOKEN: i32 = 10;
 const PROP_SEP_TEXT: i32 = 11;
 const PROP_DESC: i32 = 12;
+const PROP_CHAT_TEMPLATE: i32 = 13;
 
 fn js_mode_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
@@ -343,10 +344,33 @@ fn js_mode_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 Ok(JSValue::NULL)
             }
         }
+        PROP_CHAT_TEMPLATE => {
+            if let Some(text) = model.with_chat_template(|t| ctx.create_string_from_str(t)) {
+                text.map(JSValue::String)
+            } else {
+                Ok(JSValue::NULL)
+            }
+        }
         _ => {
             unreachable!()
         }
     }
+}
+
+fn js_mode_setter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let this = cc.this();
+    let model = get_llama_model(ctx, &this)?;
+    let val = cc.arg(0);
+
+    match cc.magic() {
+        PROP_CHAT_TEMPLATE => {
+            let t = val.to_string(ctx)?.content().encode_utf8(false).to_string();
+            model.set_chat_template(t);
+        }
+        _ => {}
+    }
+
+    Ok(JSValue::UNDEFINED)
 }
 
 fn js_model_isEog(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -1004,6 +1028,12 @@ const CLASS_MODEL_PROTO_ENTRIES: &[FieldDef] = &[
     FieldDef::GETSET("eotText", Some(js_mode_getter), None, PROP_EOT_TEXT as _),
     FieldDef::GETSET("sepToken", Some(js_mode_getter), None, PROP_SEP_TOKEN as _),
     FieldDef::GETSET("sepText", Some(js_mode_getter), None, PROP_SEP_TEXT as _),
+    FieldDef::GETSET(
+        "chatTemplate",
+        Some(js_mode_getter),
+        Some(js_mode_setter),
+        PROP_CHAT_TEMPLATE as _,
+    ),
     FieldDef::CALL("createContext", 1, js_model_createContext, 0),
     FieldDef::CALL("createSamplerChain", 1, js_model_createSamplerChain, 0),
     FieldDef::CALL("tokenize", 1, js_model_tokenize, 0),

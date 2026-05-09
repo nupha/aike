@@ -19,7 +19,7 @@ use crate::{
     USER_CLASS_DEFS,
     class_llama_client_responses::{parse_responses_input, parse_responses_reasoning},
     engine::{Engine, GrammarConfig, OutputMode, TaskConfig},
-    helpers::{build_prompt_tokens, now_unix_s, parse_chat_completion_req, to_lark_tool_choice},
+    helpers::{apply_chat_template, now_unix_s, parse_chat_completion_req, to_lark_tool_choice},
     output::{LlmOutputParser, OutputChunk, ParserKind},
 };
 
@@ -152,43 +152,38 @@ fn js_engine_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
         })
     })?;
 
+    // Build prompt tokens
+    let (prompt_tokens, parse_reasoning) = {
+        let eng = engine.lock().unwrap();
+        let model = eng.model();
+
+        let prompt = apply_chat_template(
+            model,
+            &req.messages,
+            req.tools.as_deref(),
+            req.tool_choice.as_ref(),
+            req.parallel_tool_calls,
+            req.reasoning_effort.clone().unwrap_or_default(),
+            req.response_format.as_ref(),
+        )
+        .map_err(|e| {
+            ctx.throw_internal_error(&e);
+            -1
+        })?;
+
+        let tokens = model.tokenize(&CString::new(prompt).unwrap(), false, true);
+        if tokens.is_empty() {
+            ctx.throw_internal_error("prompt tokenized to zero tokens");
+            return Err(-1);
+        }
+
+        (tokens, eng.parse_reasoning())
+    };
+
+    let is_stream = cc.magic() == MAGIC_CHAT_STREAM;
     if req.model.is_empty() {
         req.model = engine.lock().unwrap().model_name().into();
     }
-
-    let mut id_slot: Option<usize> = None;
-    let mut cache_prompt = false;
-    let parse_reasoning = engine.lock().unwrap().parse_reasoning();
-
-    let v = opts_obj.get_property_str(ctx, "idSlot")?;
-    if !v.is_undefined() {
-        let n = v.to_number(ctx)?.to_i32();
-        if n >= 0 {
-            id_slot = Some(n as usize);
-        }
-    }
-
-    let v = opts_obj.get_property_str(ctx, "cachePrompt")?;
-    if !v.is_undefined() {
-        cache_prompt = v.to_bool()?;
-    }
-
-    let prompt_tokens = build_prompt_tokens(
-        engine.lock().unwrap().model(),
-        &req.messages,
-        req.tools.as_deref(),
-        req.tool_choice.as_ref(),
-        req.parallel_tool_calls,
-        req.reasoning_effort.clone().unwrap_or_default(),
-        req.response_format.as_ref(),
-    )
-    .map_err(|e| {
-        ctx.throw_internal_error(&format!("build prompt tokens failed: {e}"));
-        -1
-    })?;
-
-    // Build prompt tokens
-    let is_stream = cc.magic() == MAGIC_CHAT_STREAM;
 
     // Build task config
     let mut task_config = TaskConfig::new()
@@ -210,7 +205,7 @@ fn js_engine_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
         .and_then(stop_to_vec)
         .filter(|w| !w.is_empty())
     {
-        task_config = task_config.stop_words(stop_words.clone());
+        task_config = task_config.stop_words(stop_words);
     }
 
     if let Some(tools) = req.tools.as_ref().filter(|t| !t.is_empty()) {
@@ -237,7 +232,7 @@ fn js_engine_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
     let rx = engine
         .lock()
         .unwrap()
-        .push_task_with_params(prompt_tokens, task_config, id_slot, cache_prompt)
+        .push_task_with_params(prompt_tokens, task_config, None, true)
         .map_err(|e| {
             ctx.throw_internal_error(&e.to_string());
             -1
@@ -410,22 +405,37 @@ fn js_engine_responses(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let chat_tools: Option<Vec<async_openai::types::chat::ChatCompletionTools>> = tools
         .as_ref()
         .map(|t| crate::responses::convert::responses_tools_to_chat_tools(t));
-    let prompt_tokens = build_prompt_tokens(
-        engine.lock().unwrap().model(),
-        &messages,
-        chat_tools.as_deref(),
-        None,
-        None,
-        reasoning
-            .as_ref()
-            .and_then(|r| r.effort.clone())
-            .unwrap_or_default(),
-        None,
-    )
-    .map_err(|e| {
-        ctx.throw_internal_error(&format!("build prompt tokens failed: {e}"));
-        -1
-    })?;
+
+    // Build prompt tokens
+    let prompt_tokens = {
+        let eng = engine.lock().unwrap();
+        let model = eng.model();
+
+        let prompt = apply_chat_template(
+            model,
+            &messages,
+            chat_tools.as_deref(),
+            None,
+            None,
+            reasoning
+                .as_ref()
+                .and_then(|r| r.effort.clone())
+                .unwrap_or_default(),
+            None,
+        )
+        .map_err(|e| {
+            ctx.throw_internal_error(&e);
+            -1
+        })?;
+
+        let tokens = model.tokenize(&CString::new(prompt).unwrap(), false, true);
+        if tokens.is_empty() {
+            ctx.throw_internal_error("prompt tokenized to zero tokens");
+            return Err(-1);
+        }
+
+        tokens
+    };
 
     // Build task config
     let mut task_config = TaskConfig::new()
