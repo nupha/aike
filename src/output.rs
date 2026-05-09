@@ -448,16 +448,17 @@ impl LlmOutputParser {
                     }
 
                     // emit stop message
-                    let finish_reason = if has_tool_call {
-                        FinishReason::ToolCalls
-                    } else {
-                        match reason {
-                            StopReason::Eog | StopReason::Word(_) | StopReason::PrefillOnly => {
+                    let finish_reason = match reason {
+                        StopReason::Eog | StopReason::Word(_) | StopReason::PrefillOnly => {
+                            if has_tool_call {
+                                FinishReason::ToolCalls
+                            } else {
                                 FinishReason::Stop
                             }
-                            StopReason::MaxTokens => FinishReason::Length,
                         }
+                        StopReason::MaxTokens => FinishReason::Length,
                     };
+
                     let usage = if self.include_usage {
                         Some(CompletionUsage {
                             prompt_tokens: self.n_prompt_tokens as u32,
@@ -469,6 +470,7 @@ impl LlmOutputParser {
                     } else {
                         None
                     };
+
                     on_item(OutputChunk::Stop(finish_reason, usage), nth);
                     nth += 1;
 

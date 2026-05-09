@@ -240,7 +240,7 @@ async fn handle_chat_completions(
         );
 
     if is_stream {
-        // streaming
+        // streaming - sse
         let (tx, rx_tokio) = tokio::sync::mpsc::unbounded_channel::<String>();
         tokio::task::spawn_blocking(move || {
             parser.parse_partial(rx, STREAM_TIMEOUT, |item, nth| {
