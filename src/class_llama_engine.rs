@@ -4,7 +4,9 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use async_openai::types::chat::Role;
+use async_openai::types::chat::{
+    CreateChatCompletionRequest, ReasoningEffort, Role, StopConfiguration,
+};
 use linkme::distributed_slice;
 use llama_cpp_ffi::ToolChoice as LarkToolChoice;
 use zuqe::{
@@ -17,7 +19,7 @@ use zuqe::{
 
 use crate::{
     USER_CLASS_DEFS,
-    class_llama_client::{ParsedChatOptions, chunk_to_js, parse_chat_options, parse_messages},
+    class_llama_client::{chunk_to_js, parse_chat_completion_options, parse_messages},
     class_llama_client_responses::{parse_responses_input, parse_responses_reasoning},
     engine::{Engine, GrammarConfig, OutputMode, TaskConfig},
     helpers::{build_prompt_tokens, compile_tools_grammar, now_unix_s, to_lark_tool_choice},
@@ -118,6 +120,25 @@ pub(super) const MAGIC_CHAT_STREAM: i32 = 3;
 pub(super) const MAGIC_RESPONSES_ONCE: i32 = 5;
 pub(super) const MAGIC_RESPONSES_STREAM: i32 = 4;
 
+fn stop_to_vec(stop: &StopConfiguration) -> Option<Vec<String>> {
+    match stop {
+        StopConfiguration::String(s) => {
+            if s.is_empty() {
+                None
+            } else {
+                Some(vec![s.clone()])
+            }
+        }
+        StopConfiguration::StringArray(arr) => {
+            if arr.is_empty() {
+                None
+            } else {
+                Some(arr.clone())
+            }
+        }
+    }
+}
+
 fn js_engine_chat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let engine = get_engine(ctx, &this)?;
@@ -126,40 +147,26 @@ fn js_engine_chat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let messages_val = cc.arg(0);
     let messages = parse_messages(ctx, &messages_val)?;
 
+    let mut req = CreateChatCompletionRequest::default();
+    let mut reasoning_content = false;
     let mut id_slot: Option<usize> = None;
     let mut cache_prompt = false;
-    let mut usage = false;
 
-    let mut params = ParsedChatOptions {
-        model: String::new(),
-        temperature: None,
-        max_completion_tokens: None,
-        top_p: None,
-        n: None,
-        stop: None,
-        presence_penalty: None,
-        frequency_penalty: None,
-        logit_bias: None,
-        user: None,
-        tools: None,
-        tool_choice: None,
-        parallel_tool_calls: None,
-        response_format: None,
-        stream_options: None,
-        seed: None,
-        reasoning_effort: None,
-    };
-
-    // Parse options (optional)
+    // Parse options
     if cc.length() > 1 {
         let val = cc.arg(1);
-        if !val.is_undefined() && !val.is_null() {
+        if !val.is_undefined_or_null() {
             let opts_obj = val.as_object().copied().ok_or_else(|| {
                 ctx.throw_type_error("options must be object");
                 -1
             })?;
 
-            params = parse_chat_options(ctx, &opts_obj)?;
+            req = parse_chat_completion_options(ctx, opts_obj)?;
+
+            let v = opts_obj.get_property_str(ctx, "reasoningContent")?;
+            if !v.is_undefined() {
+                reasoning_content = v.to_bool()?;
+            }
 
             let v = opts_obj.get_property_str(ctx, "idSlot")?;
             if !v.is_undefined() {
@@ -173,22 +180,17 @@ fn js_engine_chat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             if !v.is_undefined() {
                 cache_prompt = v.to_bool()?;
             }
-
-            let v = opts_obj.get_property_str(ctx, "usage")?;
-            if !v.is_undefined() {
-                usage = v.to_bool()?;
-            }
         }
     }
 
     let prompt_tokens = build_prompt_tokens(
         engine.lock().unwrap().model(),
         &messages,
-        params.tools.as_deref(),
-        params.tool_choice.as_ref(),
-        params.parallel_tool_calls,
-        params.reasoning_effort.as_ref(),
-        params.response_format.as_ref(),
+        req.tools.as_deref(),
+        req.tool_choice.as_ref(),
+        req.parallel_tool_calls,
+        req.reasoning_effort.clone().unwrap_or_default(),
+        req.response_format.as_ref(),
     )
     .map_err(|e| {
         ctx.throw_internal_error(&format!("build prompt tokens failed: {e}"));
@@ -200,11 +202,10 @@ fn js_engine_chat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     // Build task config
     let mut task_config = TaskConfig::new()
-        .temperature(params.temperature.unwrap_or(0.75))
-        .top_p(params.top_p.unwrap_or(1.0))
+        .temperature(req.temperature.unwrap_or(0.75))
+        .top_p(req.top_p.unwrap_or(1.0))
         .max_tokens(
-            params
-                .max_completion_tokens
+            req.max_completion_tokens
                 .map_or(engine.lock().unwrap().default_max_tokens(), |n| n as usize),
         )
         .output_mode(if is_stream {
@@ -213,12 +214,17 @@ fn js_engine_chat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             OutputMode::OneShot
         });
 
-    if let Some(stop_words) = params.stop.as_ref().filter(|w| !w.is_empty()) {
+    if let Some(stop_words) = req
+        .stop
+        .as_ref()
+        .and_then(stop_to_vec)
+        .filter(|w| !w.is_empty())
+    {
         task_config = task_config.stop_words(stop_words.clone());
     }
 
-    if let Some(tools) = params.tools.as_ref().filter(|t| !t.is_empty()) {
-        let tc = params
+    if let Some(tools) = req.tools.as_ref().filter(|t| !t.is_empty()) {
+        let tc = req
             .tool_choice
             .as_ref()
             .map(to_lark_tool_choice)
@@ -247,10 +253,12 @@ fn js_engine_chat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         })?;
 
     let mut parser = LlmOutputParser::new(
-        false,
-        params.reasoning_effort.is_some(),
+        reasoning_content,
+        reasoning_content
+            && req.reasoning_effort.clone().unwrap_or_default() != ReasoningEffort::None,
         n_prompt_tokens,
-        usage,
+        req.stream_options
+            .is_some_and(|s| s.include_usage.unwrap_or(false)),
     );
     parser.set_respond_id(respond_id.clone());
     parser.set_model_name(model_name.clone());
@@ -409,7 +417,10 @@ fn js_engine_responses(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         chat_tools.as_deref(),
         None,
         None,
-        reasoning.as_ref().and_then(|r| r.effort.as_ref()),
+        reasoning
+            .as_ref()
+            .and_then(|r| r.effort.clone())
+            .unwrap_or_default(),
         None,
     )
     .map_err(|e| {

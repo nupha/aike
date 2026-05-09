@@ -210,7 +210,7 @@ pub(crate) fn build_prompt_tokens(
     tools: Option<&[ChatCompletionTools]>,
     tool_choice: Option<&ChatCompletionToolChoiceOption>,
     parallel_tool_calls: Option<bool>,
-    reasoning_effort: Option<&ReasoningEffort>,
+    reasoning_effort: ReasoningEffort,
     response_format: Option<&ResponseFormat>,
 ) -> Result<Vec<Token>, String> {
     let tmpl = model.chat_template().ok_or("model has no chat template")?;
@@ -251,7 +251,7 @@ pub(crate) fn build_prompt_tokens(
     // parallel_tool_calls
     tmpl_ctx.parallel_tool_calls = parallel_tool_calls;
     // reasoning_effort → enable_thinking
-    tmpl_ctx.enable_thinking = reasoning_effort.is_some();
+    tmpl_ctx.enable_thinking = reasoning_effort != ReasoningEffort::None;
     // response_format → json_schema
     if let Some(rf) = response_format {
         match rf {

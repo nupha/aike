@@ -144,32 +144,18 @@ async fn handle_chat_completions(
     }
 
     let is_stream = req.stream.unwrap_or(false);
-    let messages = &req.messages;
-    let tools = req.tools.clone();
-    let tool_choice = req.tool_choice.clone();
-    let parallel_tool_calls = req.parallel_tool_calls;
-    let reasoning_effort = req.reasoning_effort;
-    let response_format = req.response_format;
-    let max_tokens =
-        req.max_completion_tokens
-            .unwrap_or(state.engine.lock().unwrap().default_max_tokens() as u32) as usize;
-    let temperature = req.temperature.unwrap_or(DEFAULT_TEMPERATURE);
-    let top_p = req.top_p.unwrap_or(DEFAULT_TOP_P);
+    let tools = req.tools;
+    let tool_choice = req.tool_choice;
     let stop = req.stop.clone();
-    let include_usage = req
-        .stream_options
-        .as_ref()
-        .and_then(|o| o.include_usage)
-        .unwrap_or(false);
 
     let prompt_tokens = match build_prompt_tokens(
         state.engine.lock().unwrap().model(),
-        messages,
+        &req.messages,
         tools.as_deref(),
         tool_choice.as_ref(),
-        parallel_tool_calls,
-        reasoning_effort.as_ref(),
-        response_format.as_ref(),
+        req.parallel_tool_calls,
+        req.reasoning_effort.clone().unwrap_or_default(),
+        req.response_format.as_ref(),
     ) {
         Ok(tokens) => tokens,
         Err(e) => {
@@ -182,9 +168,13 @@ async fn handle_chat_completions(
     };
 
     let mut task_config = TaskConfig::new()
-        .max_tokens(max_tokens)
-        .temperature(temperature)
-        .top_p(top_p)
+        .max_tokens(
+            req.max_completion_tokens
+                .unwrap_or_else(|| state.engine.lock().unwrap().default_max_tokens() as u32)
+                as usize,
+        )
+        .temperature(req.temperature.unwrap_or(DEFAULT_TEMPERATURE))
+        .top_p(req.top_p.unwrap_or(DEFAULT_TOP_P))
         .output_mode(if is_stream {
             OutputMode::Continuous
         } else {
@@ -237,9 +227,12 @@ async fn handle_chat_completions(
 
     let mut parser = LlmOutputParser::new(
         false,
-        reasoning_effort.is_some(),
+        false, // reasoning_effort != ReasoningEffort::None,
         n_prompt_tokens,
-        include_usage,
+        req.stream_options
+            .as_ref()
+            .and_then(|o| o.include_usage)
+            .unwrap_or(false),
     );
     parser.set_respond_id(respond_id.clone());
     parser.set_model_name(model_name.clone());

@@ -11,7 +11,7 @@ use async_openai::types::{
     responses::{
         AssistantRole, FunctionToolCall, InputTokenDetails, OutputItem, OutputMessage,
         OutputMessageContent, OutputStatus, OutputTextContent, OutputTokenDetails, ReasoningItem,
-        ReasoningTextContent, Response, ResponseUsage, Status, SummaryPart, SummaryTextContent,
+        Response, ResponseUsage, Status, SummaryPart, SummaryTextContent,
     },
 };
 use uuid::Uuid;
@@ -505,18 +505,19 @@ impl LlmOutputParser {
 
                     match kind {
                         ParserKind::Chat => {
-                            let finish_reason = if calls.is_empty() {
-                                match reason {
-                                    StopReason::MaxTokens => FinishReason::Length,
-                                    StopReason::Eog
-                                    | StopReason::Word(_)
-                                    | StopReason::PrefillOnly => FinishReason::Stop,
+                            let finish_reason = match reason {
+                                StopReason::MaxTokens => FinishReason::Length,
+                                StopReason::PrefillOnly => FinishReason::Stop,
+                                StopReason::Eog | StopReason::Word(_) => {
+                                    if calls.is_empty() {
+                                        FinishReason::ToolCalls
+                                    } else {
+                                        FinishReason::Stop
+                                    }
                                 }
-                            } else {
-                                FinishReason::ToolCalls
                             };
 
-                            let resp = CreateChatCompletionResponse {
+                            let mut resp = serde_json::to_value(CreateChatCompletionResponse {
                                 id: self.respond_id,
                                 object: "chat.completion".to_string(),
                                 created: now_unix_s() as u32,
@@ -553,9 +554,22 @@ impl LlmOutputParser {
                                 },
                                 system_fingerprint: None,
                                 service_tier: None,
-                            };
+                            })
+                            .map_err(|e| e.to_string())?;
 
-                            return serde_json::to_value(resp).map_err(|e| e.to_string());
+                            // add extra reasoning_content field
+                            if !reasoning.is_empty()
+                                && let Some(choices) = resp["choices"].as_array_mut()
+                                && let Some(choice) = choices.first_mut()
+                                && let Some(msg) = choice["message"].as_object_mut()
+                            {
+                                msg.insert(
+                                    "reasoning_content".to_string(),
+                                    serde_json::Value::String(reasoning),
+                                );
+                            }
+
+                            return Ok(resp);
                         }
 
                         ParserKind::Responses => {

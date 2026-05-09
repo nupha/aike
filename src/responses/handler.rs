@@ -92,7 +92,10 @@ pub async fn handle_responses(
             tools.as_deref(),
             tool_choice.as_ref(),
             None,
-            req.reasoning.as_ref().and_then(|r| r.effort.as_ref()),
+            req.reasoning
+                .as_ref()
+                .and_then(|r| r.effort.clone())
+                .unwrap_or_default(),
             None,
         ) {
             Ok(tokens) => tokens,

@@ -11,10 +11,8 @@ use async_openai::{
         ChatCompletionRequestMessage, ChatCompletionRequestSystemMessage,
         ChatCompletionRequestSystemMessageContent, ChatCompletionRequestToolMessage,
         ChatCompletionRequestToolMessageContent, ChatCompletionRequestUserMessage,
-        ChatCompletionRequestUserMessageContent, ChatCompletionStreamOptions,
-        ChatCompletionToolChoiceOption, ChatCompletionTools, CreateChatCompletionRequestArgs,
-        CreateChatCompletionResponse, CreateChatCompletionStreamResponse, ReasoningEffort,
-        ResponseFormat, ToolChoiceOptions,
+        ChatCompletionRequestUserMessageContent, CreateChatCompletionRequest,
+        CreateChatCompletionResponse, CreateChatCompletionStreamResponse,
     },
 };
 use linkme::distributed_slice;
@@ -188,291 +186,40 @@ pub(crate) fn parse_messages(
     Ok(messages)
 }
 
-/// Parse JS tools array → Vec<ChatCompletionTools>
-pub(crate) fn parse_tools(
+pub(crate) fn parse_chat_completion_options(
     ctx: &mut ScopedContext,
-    val: &JSValue,
-) -> Result<Vec<ChatCompletionTools>, i32> {
-    let arr = val.as_object_Array().copied().ok_or_else(|| {
-        ctx.throw_type_error("tools must be an array");
+    opts: Object,
+) -> Result<CreateChatCompletionRequest, i32> {
+    let mut json_val = opts.to_serde_json(ctx).map_err(|_| {
+        ctx.throw_type_error("failed to serialize options");
         -1
     })?;
 
-    // Convert JS array to serde_json::Value array, then deserialize
-    let mut tools_json = Vec::with_capacity(arr.payload().len());
-    for item in arr.payload().values() {
-        let json_val = item.to_serde_json(ctx).map_err(|_| {
-            ctx.throw_type_error("failed to serialize tool definition");
-            -1
-        })?;
-        tools_json.push(json_val);
-    }
-
-    serde_json::from_value::<Vec<ChatCompletionTools>>(serde_json::Value::Array(tools_json))
-        .map_err(|e| {
-            ctx.throw_type_error(&format!("invalid tool definition: {e}"));
-            -1
-        })
-}
-
-/// Parse JS tool_choice → ChatCompletionToolChoiceOption
-pub(crate) fn parse_tool_choice(
-    ctx: &mut ScopedContext,
-    val: &JSValue,
-) -> Result<ChatCompletionToolChoiceOption, i32> {
-    if let Some(s) = val.as_string() {
-        let mode = s.content().encode_utf8(false);
-        match mode.as_ref() {
-            "auto" => Ok(ChatCompletionToolChoiceOption::Mode(
-                ToolChoiceOptions::Auto,
-            )),
-            "required" => Ok(ChatCompletionToolChoiceOption::Mode(
-                ToolChoiceOptions::Required,
-            )),
-            "none" => Ok(ChatCompletionToolChoiceOption::Mode(
-                ToolChoiceOptions::None,
-            )),
-            _ => {
-                ctx.throw_type_error(&format!("invalid tool_choice: {mode}"));
-                Err(-1)
-            }
+    // Note:
+    // 1) messages is parsed separately, inject empty array to satisfy deserialization
+    // 2) model is required, set default value if missing
+    if let Some(obj) = json_val.as_object_mut() {
+        obj.insert("messages".to_string(), serde_json::Value::Array(Vec::new()));
+        if !obj.contains_key("model") {
+            obj.insert(
+                "model".to_string(),
+                serde_json::Value::String("default".to_string()),
+            );
         }
-    } else {
-        // Object form: {type: "function", function: {name: "xxx"}}
-        let json_val = val.to_serde_json(ctx).map_err(|_| {
-            ctx.throw_type_error("failed to serialize tool_choice");
-            -1
-        })?;
-        serde_json::from_value::<ChatCompletionToolChoiceOption>(json_val).map_err(|e| {
-            ctx.throw_type_error(&format!("invalid tool_choice: {e}"));
-            -1
-        })
     }
-}
 
-/// Parse JS response_format → ResponseFormat
-pub(crate) fn parse_response_format(
-    ctx: &mut ScopedContext,
-    val: &JSValue,
-) -> Result<ResponseFormat, i32> {
-    let json_val = val.to_serde_json(ctx).map_err(|_| {
-        ctx.throw_type_error("failed to serialize response_format");
+    let mut req: CreateChatCompletionRequest = serde_json::from_value(json_val).map_err(|e| {
+        ctx.throw_type_error(&format!("invalid options: {e}"));
         -1
     })?;
-    serde_json::from_value::<ResponseFormat>(json_val).map_err(|e| {
-        ctx.throw_type_error(&format!("invalid response_format: {e}"));
-        -1
-    })
-}
 
-/// Parse JS reasoning_effort string → ReasoningEffort
-pub(crate) fn parse_reasoning_effort(
-    ctx: &mut ScopedContext,
-    val: &JSValue,
-) -> Result<ReasoningEffort, i32> {
-    let s = val.as_string().ok_or_else(|| {
-        ctx.throw_type_error("reasoningEffort must be a string");
-        -1
-    })?;
-    let v = s.content().encode_utf8(false);
-    match v.as_ref() {
-        "low" => Ok(ReasoningEffort::Low),
-        "medium" => Ok(ReasoningEffort::Medium),
-        "high" => Ok(ReasoningEffort::High),
-        _ => {
-            ctx.throw_type_error(&format!("invalid reasoningEffort: {v}"));
-            Err(-1)
-        }
-    }
-}
+    // // Apply defaults for fields where None means "use default"
+    // req.reasoning_effort.get_or_insert_with(Default::default);
 
-pub(crate) struct ParsedChatOptions {
-    pub model: String,
-    pub temperature: Option<f32>,
-    pub max_completion_tokens: Option<u32>,
-    pub top_p: Option<f32>,
-    pub n: Option<u32>,
-    pub stop: Option<Vec<String>>,
-    pub presence_penalty: Option<f32>,
-    pub frequency_penalty: Option<f32>,
-    pub logit_bias: Option<std::collections::HashMap<String, i8>>,
-    pub user: Option<String>,
-    pub tools: Option<Vec<ChatCompletionTools>>,
-    pub tool_choice: Option<ChatCompletionToolChoiceOption>,
-    pub parallel_tool_calls: Option<bool>,
-    pub response_format: Option<ResponseFormat>,
-    pub stream_options: Option<ChatCompletionStreamOptions>,
-    pub seed: Option<i64>,
-    pub reasoning_effort: Option<ReasoningEffort>,
-}
+    // messages is parsed separately, clear it here
+    req.messages = Vec::new();
 
-pub(crate) fn parse_chat_options(
-    ctx: &mut ScopedContext,
-    opts: &Object,
-) -> Result<ParsedChatOptions, i32> {
-    let mut model = String::new();
-    let mut temperature: Option<f32> = None;
-    let mut max_completion_tokens: Option<u32> = None;
-    let mut top_p: Option<f32> = None;
-    let mut n: Option<u32> = None;
-    let mut stop: Option<Vec<String>> = None;
-    let mut presence_penalty: Option<f32> = None;
-    let mut frequency_penalty: Option<f32> = None;
-    let mut logit_bias: Option<std::collections::HashMap<String, i8>> = None;
-    let mut user: Option<String> = None;
-    let mut tools: Option<Vec<ChatCompletionTools>> = None;
-    let mut tool_choice: Option<ChatCompletionToolChoiceOption> = None;
-    let mut parallel_tool_calls: Option<bool> = None;
-    let mut response_format: Option<ResponseFormat> = None;
-    let mut stream_options: Option<ChatCompletionStreamOptions> = None;
-    let mut seed: Option<i64> = None;
-    let mut reasoning_effort: Option<ReasoningEffort> = None;
-
-    // model
-    let v = opts.get_property_str(ctx, "model")?;
-    if let Some(s) = v.as_string() {
-        model = s.content().encode_utf8(false).to_string();
-    }
-
-    // temperature
-    let v = opts.get_property_str(ctx, "temperature")?;
-    if !v.is_undefined() {
-        temperature = Some(v.to_number(ctx)?.to_f64() as f32);
-    }
-
-    // maxCompletionTokens
-    let v = opts.get_property_str(ctx, "maxCompletionTokens")?;
-    if !v.is_undefined() {
-        max_completion_tokens = Some(v.to_number(ctx)?.to_f64() as u32);
-    }
-
-    // topP
-    let v = opts.get_property_str(ctx, "topP")?;
-    if !v.is_undefined() {
-        top_p = Some(v.to_number(ctx)?.to_f64() as f32);
-    }
-
-    // n
-    let v = opts.get_property_str(ctx, "n")?;
-    if !v.is_undefined() {
-        n = Some(v.to_number(ctx)?.to_f64() as u32);
-    }
-
-    // stop
-    let v = opts.get_property_str(ctx, "stop")?;
-    if !v.is_undefined() {
-        if let Some(s) = v.as_string() {
-            stop = Some(vec![s.content().encode_utf8(false).to_string()]);
-        } else if let Some(arr) = v.as_object_Array() {
-            let mut words = Vec::with_capacity(arr.payload().len());
-            for item in arr.payload().values() {
-                if let Some(s) = item.as_string() {
-                    words.push(s.content().encode_utf8(false).to_string());
-                }
-            }
-            stop = Some(words);
-        }
-    }
-
-    // presencePenalty
-    let v = opts.get_property_str(ctx, "presencePenalty")?;
-    if !v.is_undefined() {
-        presence_penalty = Some(v.to_number(ctx)?.to_f64() as f32);
-    }
-
-    // frequencyPenalty
-    let v = opts.get_property_str(ctx, "frequencyPenalty")?;
-    if !v.is_undefined() {
-        frequency_penalty = Some(v.to_number(ctx)?.to_f64() as f32);
-    }
-
-    // logitBias
-    let v = opts.get_property_str(ctx, "logitBias")?;
-    if !v.is_undefined() {
-        let json_val = v.to_serde_json(ctx).map_err(|_| {
-            ctx.throw_type_error("logitBias must be an object");
-            -1
-        })?;
-        logit_bias = serde_json::from_value(json_val).map_err(|e| {
-            ctx.throw_type_error(&format!("invalid logitBias: {e}"));
-            -1
-        })?;
-    }
-
-    // user
-    let v = opts.get_property_str(ctx, "user")?;
-    if let Some(s) = v.as_string() {
-        user = Some(s.content().encode_utf8(false).to_string());
-    }
-
-    // tools
-    let v = opts.get_property_str(ctx, "tools")?;
-    if !v.is_undefined() {
-        tools = Some(parse_tools(ctx, &v)?);
-    }
-
-    // toolChoice
-    let v = opts.get_property_str(ctx, "toolChoice")?;
-    if !v.is_undefined() {
-        tool_choice = Some(parse_tool_choice(ctx, &v)?);
-    }
-
-    // parallelToolCalls
-    let v = opts.get_property_str(ctx, "parallelToolCalls")?;
-    if !v.is_undefined() {
-        parallel_tool_calls = Some(v.to_bool()?);
-    }
-
-    // responseFormat
-    let v = opts.get_property_str(ctx, "responseFormat")?;
-    if !v.is_undefined() {
-        response_format = Some(parse_response_format(ctx, &v)?);
-    }
-
-    // streamOptions
-    let v = opts.get_property_str(ctx, "streamOptions")?;
-    if !v.is_undefined() {
-        let json_val = v.to_serde_json(ctx).map_err(|_| {
-            ctx.throw_type_error("streamOptions must be an object");
-            -1
-        })?;
-        stream_options = serde_json::from_value(json_val).map_err(|e| {
-            ctx.throw_type_error(&format!("invalid streamOptions: {e}"));
-            -1
-        })?;
-    }
-
-    // seed
-    let v = opts.get_property_str(ctx, "seed")?;
-    if !v.is_undefined() {
-        seed = Some(v.to_number(ctx)?.to_f64() as i64);
-    }
-
-    // reasoningEffort
-    let v = opts.get_property_str(ctx, "reasoningEffort")?;
-    if !v.is_undefined() {
-        reasoning_effort = Some(parse_reasoning_effort(ctx, &v)?);
-    }
-
-    Ok(ParsedChatOptions {
-        model,
-        temperature,
-        max_completion_tokens,
-        top_p,
-        n,
-        stop,
-        presence_penalty,
-        frequency_penalty,
-        logit_bias,
-        user,
-        tools,
-        tool_choice,
-        parallel_tool_calls,
-        response_format,
-        stream_options,
-        seed,
-        reasoning_effort,
-    })
+    Ok(req)
 }
 
 enum ChatReply {
@@ -487,83 +234,25 @@ fn js_client_chat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let is_stream = cc.magic() == MAGIC_CHAT_STREAM;
 
     // Single object argument
-    let opts = cc.arg(0).as_object().copied().ok_or_else(|| {
+    let opts_obj = cc.arg(0).as_object().copied().ok_or_else(|| {
         ctx.throw_type_error("chat() requires an options object");
         -1
     })?;
 
     // Parse messages (required)
-    let messages_val = opts.get_property_str(ctx, "messages")?;
+    let messages_val = opts_obj.get_property_str(ctx, "messages")?;
     let messages = parse_messages(ctx, &messages_val)?;
 
     // Parse all chat options into a ChatCompletionRequest
-    let parsed = parse_chat_options(ctx, &opts)?;
+    let mut req = parse_chat_completion_options(ctx, opts_obj)?;
 
-    let model = if parsed.model.is_empty() {
-        client_arc
+    if req.model.is_empty() {
+        req.model = client_arc
             .model
             .clone()
-            .unwrap_or_else(|| "default".to_string())
-    } else {
-        parsed.model
-    };
-
-    let mut req_builder = CreateChatCompletionRequestArgs::default();
-    req_builder.model(&model).messages(messages);
-
-    if let Some(v) = parsed.temperature {
-        req_builder.temperature(v);
+            .unwrap_or_else(|| "default".to_string());
     }
-    if let Some(v) = parsed.max_completion_tokens {
-        req_builder.max_completion_tokens(v);
-    }
-    if let Some(v) = parsed.top_p {
-        req_builder.top_p(v);
-    }
-    if let Some(v) = parsed.n {
-        req_builder.n(v as u8);
-    }
-    if let Some(v) = parsed.stop {
-        req_builder.stop(v);
-    }
-    if let Some(v) = parsed.presence_penalty {
-        req_builder.presence_penalty(v);
-    }
-    if let Some(v) = parsed.frequency_penalty {
-        req_builder.frequency_penalty(v);
-    }
-    if let Some(v) = parsed.logit_bias {
-        req_builder.logit_bias(v);
-    }
-    if let Some(v) = parsed.user {
-        req_builder.user(v);
-    }
-    if let Some(v) = parsed.tools {
-        req_builder.tools(v);
-    }
-    if let Some(v) = parsed.tool_choice {
-        req_builder.tool_choice(v);
-    }
-    if let Some(v) = parsed.parallel_tool_calls {
-        req_builder.parallel_tool_calls(v);
-    }
-    if let Some(v) = parsed.response_format {
-        req_builder.response_format(v);
-    }
-    if let Some(v) = parsed.stream_options {
-        req_builder.stream_options(v);
-    }
-    if let Some(v) = parsed.seed {
-        req_builder.seed(v);
-    }
-    if let Some(v) = parsed.reasoning_effort {
-        req_builder.reasoning_effort(v);
-    }
-
-    let req = req_builder.build().map_err(|e| {
-        ctx.throw_internal_error(&format!("failed to build request: {e}"));
-        -1
-    })?;
+    req.messages = messages;
 
     let client = client_arc.client.clone();
 
