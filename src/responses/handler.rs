@@ -34,8 +34,6 @@ pub async fn handle_responses(
     State(state): State<AppState>,
     Json(req): Json<CreateResponse>,
 ) -> Response {
-    println!("[O.o] req: {:?}", req);
-
     let input_items = match &req.input {
         InputParam::Text(t) => {
             vec![InputItem::EasyMessage(EasyInputMessage {
@@ -121,7 +119,7 @@ pub async fn handle_responses(
         if let Some(tools) = tools.as_ref().filter(|t| !t.is_empty()) {
             let tc = llama_cpp_ffi::ToolChoice::Auto;
             task_config = task_config.grammar(GrammarConfig {
-                lark_grammar: compile_tools_grammar(tools, tc),
+                lark_grammar: compile_tools_grammar(tools, tc, ("<tool_call>", "</tool_call>")),
                 tool_choice: tc,
             });
         }

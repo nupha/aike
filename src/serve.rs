@@ -197,7 +197,7 @@ async fn handle_chat_completions(
 
         if tc != llama_cpp_ffi::ToolChoice::None {
             task_config = task_config.grammar(GrammarConfig {
-                lark_grammar: compile_tools_grammar(tools, tc),
+                lark_grammar: compile_tools_grammar(tools, tc, ("<tool_call>", "</tool_call>")),
                 tool_choice: tc,
             });
         }

@@ -266,9 +266,6 @@ pub(crate) fn build_prompt_tokens(
     }
 
     let prompt = render_chat_template(tmpl, &tmpl_ctx)?;
-
-    println!("[O.o] **** jinjia ctx ****\n{tmpl_ctx:?}\n====prompt====\n{prompt}");
-
     tokenize_prompt(model, &prompt)
 }
 
@@ -276,6 +273,7 @@ pub(crate) fn build_prompt_tokens(
 pub(crate) fn compile_tools_grammar(
     tools: &[ChatCompletionTools],
     tool_choice: LarkToolChoice,
+    tool_call_tags: (&str, &str),
 ) -> String {
     debug_assert!(!tools.is_empty());
     debug_assert!(tool_choice != LarkToolChoice::None);
@@ -306,9 +304,13 @@ pub(crate) fn compile_tools_grammar(
         });
         rules.push_str(&format!("json_body_{name}: %json {wrapped}\n"));
 
-        rules.push_str(&format!("tool_{name}_hd[lazy]: TEXT \"<tool_call>\"\n"));
         rules.push_str(&format!(
-            "tool_{name}: tool_{name}_hd json_body_{name} \"</tool_call>\"\n"
+            "tool_{name}_hd[lazy]: TEXT \"{}\"\n",
+            tool_call_tags.0
+        ));
+        rules.push_str(&format!(
+            "tool_{name}: tool_{name}_hd json_body_{name} \"{}\"\n",
+            tool_call_tags.1
         ));
         tool_alternatives.push(format!("tool_{name}"));
     }

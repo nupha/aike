@@ -225,7 +225,7 @@ fn js_engine_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
 
         if tc != LarkToolChoice::None {
             task_config = task_config.grammar(GrammarConfig {
-                lark_grammar: compile_tools_grammar(tools, tc),
+                lark_grammar: compile_tools_grammar(tools, tc, ("<tool_call>", "</tool_call>")),
                 tool_choice: tc,
             });
         }
@@ -443,7 +443,11 @@ fn js_engine_responses(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     if let Some(tools) = chat_tools.as_ref().filter(|t| !t.is_empty()) {
         let tc = llama_cpp_ffi::ToolChoice::Auto;
         task_config = task_config.grammar(GrammarConfig {
-            lark_grammar: crate::helpers::compile_tools_grammar(tools, tc),
+            lark_grammar: crate::helpers::compile_tools_grammar(
+                tools,
+                tc,
+                ("<tool_call>", "</tool_call>"),
+            ),
             tool_choice: tc,
         });
     }
