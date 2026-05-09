@@ -3,7 +3,7 @@ use std::{
     time::Duration,
 };
 
-use async_openai::types::chat::{CreateChatCompletionRequest, ReasoningEffort, Role};
+use async_openai::types::chat::{CreateChatCompletionRequest, ReasoningEffort};
 use axum::{
     Json, Router,
     extract::State,
@@ -259,9 +259,11 @@ async fn handle_chat_completions(
                             item.into_chat_chunk(&respond_id, &model_name, now_unix_s() as u32);
                         if nth == 0 {
                             // set role on first chunk
-                            chunk.choices[0].delta.role = Some(Role::Assistant);
+                            chunk["choices"][0]["delta"]["role"] =
+                                serde_json::Value::String("assistant".to_string());
                         }
-                        let data = serde_json::to_string(&chunk).unwrap_or_default();
+
+                        let data = serde_json::to_string(&chunk).unwrap();
                         let _ = tx.send(data);
                     }
                 }

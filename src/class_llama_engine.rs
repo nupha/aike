@@ -4,7 +4,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use async_openai::types::chat::{ReasoningEffort, Role, StopConfiguration};
+use async_openai::types::chat::{ReasoningEffort, StopConfiguration};
 use linkme::distributed_slice;
 use llama_cpp_ffi::ToolChoice as LarkToolChoice;
 use zuqe::{
@@ -17,7 +17,6 @@ use zuqe::{
 
 use crate::{
     USER_CLASS_DEFS,
-    class_llama_client::chunk_to_js,
     class_llama_client_responses::{parse_responses_input, parse_responses_reasoning},
     engine::{Engine, GrammarConfig, OutputMode, TaskConfig},
     helpers::{
@@ -290,9 +289,14 @@ fn js_engine_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
                             msg.into_chat_chunk(&respond_id, &model_name, now_unix_s() as u32);
                         if nth == 0 {
                             // set role on first chunk
-                            chunk.choices[0].delta.role = Some(Role::Assistant);
+                            chunk["choices"][0]["delta"]["role"] =
+                                serde_json::Value::String("assistant".to_string());
                         }
-                        chunk_to_js(cx, &chunk).map(Some)
+
+                        JSValue::from_serde_json(cx, &chunk).map(Some).map_err(|_| {
+                            cx.throw_internal_error("serialize chunk failed");
+                            -1
+                        })
                     }
                 }
             },

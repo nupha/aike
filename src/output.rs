@@ -30,23 +30,33 @@ pub(crate) enum OutputPart {
 }
 
 impl OutputPart {
-    pub fn into_chat_chunk_delta(self) -> ChatCompletionStreamResponseDelta {
+    pub fn into_chat_chunk_delta(self) -> serde_json::Value {
         match self {
-            Self::Text(t) => ChatCompletionStreamResponseDelta {
+            Self::Text(t) => serde_json::to_value(ChatCompletionStreamResponseDelta {
                 content: Some(t),
                 role: None,
                 tool_calls: None,
                 refusal: None,
                 function_call: None,
-            },
-            Self::Reasoning(t) => ChatCompletionStreamResponseDelta {
-                content: Some(t),
-                role: None,
-                tool_calls: None,
-                refusal: None,
-                function_call: None,
-            },
-            Self::Call(tool_call) => ChatCompletionStreamResponseDelta {
+            })
+            .unwrap(),
+
+            Self::Reasoning(t) => {
+                let mut delta = serde_json::to_value(ChatCompletionStreamResponseDelta {
+                    content: None,
+                    role: None,
+                    tool_calls: None,
+                    refusal: None,
+                    function_call: None,
+                })
+                .unwrap();
+                let obj = delta.as_object_mut().unwrap();
+                obj.insert("reasoning_content".to_string(), t.into());
+
+                delta
+            }
+
+            Self::Call(tool_call) => serde_json::to_value(ChatCompletionStreamResponseDelta {
                 content: None,
                 role: None,
                 tool_calls: Some(vec![ChatCompletionMessageToolCallChunk {
@@ -60,23 +70,27 @@ impl OutputPart {
                 }]),
                 refusal: None,
                 function_call: None,
-            },
+            })
+            .unwrap(),
         }
     }
 
-    pub fn into_chat_chunk(
-        self,
-        id: &str,
-        model: &str,
-        created: u32,
-    ) -> CreateChatCompletionStreamResponse {
-        CreateChatCompletionStreamResponse {
+    pub fn into_chat_chunk(self, id: &str, model: &str, created: u32) -> serde_json::Value {
+        let delta = self.into_chat_chunk_delta();
+        let mut chunk = serde_json::to_value(CreateChatCompletionStreamResponse {
             id: id.to_string(),
             model: model.to_string(),
             created,
             object: "chat.completion.chunk".to_string(),
             choices: vec![ChatChoiceStream {
-                delta: self.into_chat_chunk_delta(),
+                // an empty placeholder for delta
+                delta: ChatCompletionStreamResponseDelta {
+                    content: None,
+                    role: None,
+                    tool_calls: None,
+                    refusal: None,
+                    function_call: None,
+                },
                 index: 0,
                 finish_reason: None,
                 logprobs: None,
@@ -84,7 +98,11 @@ impl OutputPart {
             system_fingerprint: None,
             service_tier: None,
             usage: None,
-        }
+        })
+        .unwrap();
+
+        chunk["choices"][0]["delta"] = delta; // update to real delta
+        chunk
     }
 }
 
@@ -96,35 +114,33 @@ pub(crate) enum OutputChunk {
 }
 
 impl OutputChunk {
-    pub fn into_chat_chunk(
-        self,
-        id: &str,
-        model: &str,
-        created: u32,
-    ) -> CreateChatCompletionStreamResponse {
+    pub fn into_chat_chunk(self, id: &str, model: &str, created: u32) -> serde_json::Value {
         match self {
             Self::Part(part) => part.into_chat_chunk(id, model, created),
-            Self::Stop(finish_reason, usage) => CreateChatCompletionStreamResponse {
-                id: id.to_string(),
-                model: model.to_string(),
-                created,
-                object: "chat.completion.chunk".to_string(),
-                choices: vec![ChatChoiceStream {
-                    delta: ChatCompletionStreamResponseDelta {
-                        content: None,
-                        role: None,
-                        tool_calls: None,
-                        refusal: None,
-                        function_call: None,
-                    },
-                    index: 0,
-                    finish_reason: Some(finish_reason),
-                    logprobs: None,
-                }],
-                usage,
-                system_fingerprint: None,
-                service_tier: None,
-            },
+            Self::Stop(finish_reason, usage) => {
+                serde_json::to_value(CreateChatCompletionStreamResponse {
+                    id: id.to_string(),
+                    model: model.to_string(),
+                    created,
+                    object: "chat.completion.chunk".to_string(),
+                    choices: vec![ChatChoiceStream {
+                        delta: ChatCompletionStreamResponseDelta {
+                            content: None,
+                            role: None,
+                            tool_calls: None,
+                            refusal: None,
+                            function_call: None,
+                        },
+                        index: 0,
+                        finish_reason: Some(finish_reason),
+                        logprobs: None,
+                    }],
+                    usage,
+                    system_fingerprint: None,
+                    service_tier: None,
+                })
+                .unwrap()
+            }
             Self::Done | Self::Error(_) => {
                 unreachable!();
             }
