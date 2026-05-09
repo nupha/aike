@@ -23,7 +23,7 @@ use uuid::Uuid;
 
 use crate::{
     engine::{Engine, GrammarConfig, OutputMode, TaskConfig},
-    helpers::{build_prompt_tokens, compile_tools_grammar, now_unix_s, to_lark_tool_choice},
+    helpers::{build_prompt_tokens, build_tools_grammar, now_unix_s, to_lark_tool_choice},
     output::{LlmOutputParser, OutputChunk, ParserKind},
 };
 
@@ -196,10 +196,11 @@ async fn handle_chat_completions(
             .unwrap_or(llama_cpp_ffi::ToolChoice::Auto);
 
         if tc != llama_cpp_ffi::ToolChoice::None {
-            task_config = task_config.grammar(GrammarConfig {
-                lark_grammar: compile_tools_grammar(tools, tc, ("<tool_call>", "</tool_call>")),
-                tool_choice: tc,
-            });
+            task_config = task_config.grammar(GrammarConfig::new(
+                state.engine.lock().unwrap().model(),
+                tools,
+                tc,
+            ));
         }
     }
 

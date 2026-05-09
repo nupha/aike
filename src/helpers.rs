@@ -269,8 +269,8 @@ pub(crate) fn build_prompt_tokens(
     tokenize_prompt(model, &prompt)
 }
 
-/// Compile tool definitions into a Lark grammar string for llguidance.
-pub(crate) fn compile_tools_grammar(
+/// Build tool definitions into a Lark grammar string for llguidance.
+pub(crate) fn build_tools_grammar(
     tools: &[ChatCompletionTools],
     tool_choice: LarkToolChoice,
     tool_call_tags: (&str, &str),

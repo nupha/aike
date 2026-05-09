@@ -12,7 +12,7 @@ use uuid::Uuid;
 
 use crate::{
     engine::{EngineReply, GrammarConfig, OutputMode, TaskConfig},
-    helpers::{build_prompt_tokens, compile_tools_grammar},
+    helpers::build_prompt_tokens,
     output::{LlmOutputParser, OutputChunk, OutputPart, ParserKind},
     responses::{
         response_builder::{
@@ -117,11 +117,11 @@ pub async fn handle_responses(
             });
 
         if let Some(tools) = tools.as_ref().filter(|t| !t.is_empty()) {
-            let tc = llama_cpp_ffi::ToolChoice::Auto;
-            task_config = task_config.grammar(GrammarConfig {
-                lark_grammar: compile_tools_grammar(tools, tc, ("<tool_call>", "</tool_call>")),
-                tool_choice: tc,
-            });
+            task_config = task_config.grammar(GrammarConfig::new(
+                state.engine.lock().unwrap().model(),
+                tools,
+                llama_cpp_ffi::ToolChoice::Auto,
+            ));
         }
 
         n_prompt_tokens = prompt_tokens.len();

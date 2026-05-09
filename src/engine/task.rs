@@ -1,8 +1,10 @@
 use std::collections::{HashSet, VecDeque};
 
+use async_openai::types::chat::ChatCompletionTools;
 use crossbeam::channel::{Receiver, Sender};
+use llama_cpp_ffi::{LlamaModel, ToolChoice};
 
-use crate::helpers::now_unix_s;
+use crate::helpers::{build_tools_grammar, now_unix_s};
 
 use super::{
     context::Engine,
@@ -15,7 +17,25 @@ pub type Token = i32;
 #[derive(Debug, Clone)]
 pub struct GrammarConfig {
     pub(crate) lark_grammar: String,
-    pub(crate) tool_choice: llama_cpp_ffi::ToolChoice,
+    pub(crate) tool_choice: ToolChoice,
+}
+
+impl GrammarConfig {
+    pub fn new(model: &LlamaModel, tools: &[ChatCompletionTools], tool_choice: ToolChoice) -> Self {
+        debug_assert!(!tools.is_empty());
+
+        let family = model.family();
+        let tags = family.tool_call_tags();
+
+        // check if tag is token
+        // let tt = model.tokenize(CString::new(tags.0).unwrap().as_c_str(), false, false);
+        // let is_token = tt.len() == 1;
+
+        Self {
+            lark_grammar: build_tools_grammar(tools, tool_choice, tags),
+            tool_choice,
+        }
+    }
 }
 
 static NEXT_TASK_ID: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);

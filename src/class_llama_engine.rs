@@ -1,6 +1,6 @@
 use std::{
     cell::Cell,
-    ffi::c_void,
+    ffi::{CString, c_void},
     sync::{Arc, Mutex},
 };
 
@@ -19,10 +19,7 @@ use crate::{
     USER_CLASS_DEFS,
     class_llama_client_responses::{parse_responses_input, parse_responses_reasoning},
     engine::{Engine, GrammarConfig, OutputMode, TaskConfig},
-    helpers::{
-        build_prompt_tokens, compile_tools_grammar, now_unix_s, parse_chat_completion_req,
-        to_lark_tool_choice,
-    },
+    helpers::{build_prompt_tokens, now_unix_s, parse_chat_completion_req, to_lark_tool_choice},
     output::{LlmOutputParser, OutputChunk, ParserKind},
 };
 
@@ -224,10 +221,11 @@ fn js_engine_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
             .unwrap_or(LarkToolChoice::Auto);
 
         if tc != LarkToolChoice::None {
-            task_config = task_config.grammar(GrammarConfig {
-                lark_grammar: compile_tools_grammar(tools, tc, ("<tool_call>", "</tool_call>")),
-                tool_choice: tc,
-            });
+            task_config = task_config.grammar(GrammarConfig::new(
+                engine.lock().unwrap().model(),
+                tools,
+                tc,
+            ));
         }
     }
 
@@ -441,15 +439,11 @@ fn js_engine_responses(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         });
 
     if let Some(tools) = chat_tools.as_ref().filter(|t| !t.is_empty()) {
-        let tc = llama_cpp_ffi::ToolChoice::Auto;
-        task_config = task_config.grammar(GrammarConfig {
-            lark_grammar: crate::helpers::compile_tools_grammar(
-                tools,
-                tc,
-                ("<tool_call>", "</tool_call>"),
-            ),
-            tool_choice: tc,
-        });
+        task_config = task_config.grammar(GrammarConfig::new(
+            engine.lock().unwrap().model(),
+            tools,
+            llama_cpp_ffi::ToolChoice::Auto,
+        ));
     }
 
     let n_prompt_tokens = prompt_tokens.len();

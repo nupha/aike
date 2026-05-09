@@ -294,12 +294,16 @@ const PROP_EOT_TOKEN: i32 = 8;
 const PROP_EOT_TEXT: i32 = 9;
 const PROP_SEP_TOKEN: i32 = 10;
 const PROP_SEP_TEXT: i32 = 11;
+const PROP_DESC: i32 = 12;
 
 fn js_mode_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let model = get_llama_model(ctx, &this)?;
 
     match cc.magic() {
+        PROP_DESC => ctx
+            .create_string_from_utf8(model.model_desc().into_bytes())
+            .map(JSValue::from),
         PROP_BOS_TOKEN => Ok(JSValue::Int(model.bos_token_id())),
         PROP_PATH => this.get_property_str(ctx, MODEL_PATH_HIDDEN_KEY),
         PROP_PARAMETERS => Ok((model.n_params() as f64).into()),
@@ -978,8 +982,9 @@ fn js_model_dispose(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 }
 
 const CLASS_MODEL_PROTO_ENTRIES: &[FieldDef] = &[
-    FieldDef::GETSET("bosToken", Some(js_mode_getter), None, PROP_BOS_TOKEN as _),
     FieldDef::GETSET("path", Some(js_mode_getter), None, PROP_PATH as _),
+    FieldDef::GETSET("desc", Some(js_mode_getter), None, PROP_DESC as _),
+    FieldDef::GETSET("bosToken", Some(js_mode_getter), None, PROP_BOS_TOKEN as _),
     FieldDef::GETSET(
         "parameters",
         Some(js_mode_getter),
