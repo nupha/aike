@@ -1,5 +1,3 @@
-use std::ffi::CString;
-
 use async_openai::types::chat::{
     ChatCompletionRequestAssistantMessageContent, ChatCompletionRequestDeveloperMessageContent,
     ChatCompletionRequestMessage, ChatCompletionRequestSystemMessageContent,
@@ -12,8 +10,6 @@ use minijinja::Environment;
 use minijinja_contrib::pycompat;
 use serde::Serialize;
 use serde_json::Value as JsonValue;
-
-use crate::engine::Token;
 
 #[derive(Debug, Serialize)]
 pub(crate) struct JinjaMessage {

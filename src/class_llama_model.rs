@@ -9,7 +9,6 @@ use llama_cpp_ffi::{
     AttentionType, BackendDevice, FlashAttentionType, KVCacheType, LlamaContext, LlamaModel,
     ModelOptions, PoolingType, RopeScalingType, SplitMode,
 };
-use serde_json::Value as JsonValue;
 use zuqe::{
     Array, CallContext, ClassCtorDef, ClassDef, ClassID, FieldDef, JS_PROP_ENUMERABLE, JSResult,
     JSValue, Object, Runtime, ScopedContext,
@@ -24,7 +23,6 @@ use crate::{
 };
 
 const MODEL_PATH_HIDDEN_KEY: &str = "__modelPath";
-const MODEL_CHAT_TEMPLATE_KEY: &str = "__chatTemplate";
 static LLAMA_LOG_BUFFER: OnceLock<Mutex<String>> = OnceLock::new();
 
 fn llama_log_buffer() -> &'static Mutex<String> {
@@ -362,12 +360,9 @@ fn js_mode_setter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let model = get_llama_model(ctx, &this)?;
     let val = cc.arg(0);
 
-    match cc.magic() {
-        PROP_CHAT_TEMPLATE => {
-            let t = val.to_string(ctx)?.content().encode_utf8(false).to_string();
-            model.set_chat_template(t);
-        }
-        _ => {}
+    if cc.magic() == PROP_CHAT_TEMPLATE {
+        let t = val.to_string(ctx)?.content().encode_utf8(false).to_string();
+        model.set_chat_template(t);
     }
 
     Ok(JSValue::UNDEFINED)
@@ -813,6 +808,8 @@ fn js_model_lookupTokenText(ctx: &mut ScopedContext, cc: CallContext) -> JSResul
     }
 }
 
+const MODEL_CHAT_TEMPLATE_KEY: &str = "__chatTemplate";
+
 fn get_chat_template(
     ctx: &mut ScopedContext,
     this: &JSValue,
@@ -883,108 +880,110 @@ fn js_model_renderTemplate(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
     }
 
     // Parse options into TemplateContext
-    let mut ctx_obj = TemplateContext::new(
+    let mut tmpl_ctx = TemplateContext::new(
         &messages,
         model.eos_token_text().unwrap_or_default(),
         model.bos_token_text().unwrap_or_default(),
     );
-    let mut extra_vars = serde_json::Map::<String, JsonValue>::new();
+    let mut extra_vars = serde_json::Map::<String, serde_json::Value>::new();
 
-    if cc.length() > 1 {
-        let opts = cc.arg(1);
-        if !opts.is_undefined() && !opts.is_null() {
-            let opts = opts.as_object().copied().ok_or_else(|| {
-                ctx.throw_type_error("options must be object");
-                -1
-            })?;
+    let val = cc.arg(1);
+    if !val.is_undefined() {
+        let opts = val.as_object().copied().ok_or_else(|| {
+            ctx.throw_type_error("options must be object");
+            -1
+        })?;
 
-            let opts_json = ctx.with_new_scope(|scope| {
-                scope.json_stringify(opts.into(), JSValue::UNDEFINED, JSValue::UNDEFINED)
-            })?;
-            if let Some(opts_json_str) = opts_json.as_string() {
-                let s = opts_json_str.content().encode_utf8(false).to_string();
-                if let Ok(JsonValue::Object(mut map)) = serde_json::from_str::<JsonValue>(&s) {
-                    // Extract well-known template variables
-                    fn pop_bool(
-                        ctx: &mut ScopedContext,
-                        m: &mut serde_json::Map<String, JsonValue>,
-                        key: &str,
-                        default: bool,
-                    ) -> Result<bool, i32> {
-                        match m.remove(key) {
-                            Some(JsonValue::Bool(b)) => Ok(b),
-                            Some(_) => {
-                                ctx.throw_type_error(&format!(
-                                    "renderTemplate options.{key} must be boolean"
-                                ));
-                                Err(-1)
-                            }
-                            None => Ok(default),
-                        }
+        let json = ctx.with_new_scope(|mut scope| {
+            scope.json_stringify(opts.into(), JSValue::UNDEFINED, JSValue::UNDEFINED)
+        })?;
+
+        if let Some(json_str) = json.as_string()
+            && let Ok(serde_json::Value::Object(mut map)) = serde_json::from_str::<serde_json::Value>(
+                json_str.content().encode_utf8(false).as_ref(),
+            )
+        {
+            // Extract well-known template variables
+            fn pop_bool(
+                ctx: &mut ScopedContext,
+                m: &mut serde_json::Map<String, serde_json::Value>,
+                key: &str,
+                default: bool,
+            ) -> Result<bool, i32> {
+                match m.remove(key) {
+                    Some(serde_json::Value::Bool(b)) => Ok(b),
+                    Some(_) => {
+                        ctx.throw_type_error(&format!(
+                            "renderTemplate options.{key} must be boolean"
+                        ));
+                        Err(-1)
                     }
-
-                    fn pop_string(
-                        ctx: &mut ScopedContext,
-                        m: &mut serde_json::Map<String, JsonValue>,
-                        key: &str,
-                        default: String,
-                    ) -> Result<String, i32> {
-                        match m.remove(key) {
-                            Some(JsonValue::String(s)) => Ok(s),
-                            Some(_) => {
-                                ctx.throw_type_error(&format!(
-                                    "renderTemplate options.{key} must be string"
-                                ));
-                                Err(-1)
-                            }
-                            None => Ok(default),
-                        }
-                    }
-
-                    ctx_obj.tools = map.remove("tools");
-                    ctx_obj.add_generation_prompt =
-                        pop_bool(ctx, &mut map, "add_generation_prompt", true)?;
-                    ctx_obj.enable_thinking = pop_bool(ctx, &mut map, "enable_thinking", false)?;
-                    ctx_obj.add_vision_id = pop_bool(ctx, &mut map, "add_vision_id", false)?;
-                    ctx_obj.eos_token = pop_string(
-                        ctx,
-                        &mut map,
-                        "eos_token",
-                        model.eos_token_text().unwrap_or_default(),
-                    )?;
-                    ctx_obj.bos_token = pop_string(
-                        ctx,
-                        &mut map,
-                        "bos_token",
-                        model.bos_token_text().unwrap_or_default(),
-                    )?;
-
-                    // Remaining keys go to extra_vars
-                    for (k, v) in map {
-                        extra_vars.insert(k, v);
-                    }
+                    None => Ok(default),
                 }
+            }
+
+            fn pop_string(
+                ctx: &mut ScopedContext,
+                m: &mut serde_json::Map<String, serde_json::Value>,
+                key: &str,
+                default: String,
+            ) -> Result<String, i32> {
+                match m.remove(key) {
+                    Some(serde_json::Value::String(s)) => Ok(s),
+                    Some(_) => {
+                        ctx.throw_type_error(&format!(
+                            "renderTemplate options.{key} must be string"
+                        ));
+                        Err(-1)
+                    }
+                    None => Ok(default),
+                }
+            }
+
+            tmpl_ctx.tools = map.remove("tools");
+            tmpl_ctx.add_generation_prompt =
+                pop_bool(ctx, &mut map, "add_generation_prompt", true)?;
+            tmpl_ctx.enable_thinking = pop_bool(ctx, &mut map, "enable_thinking", false)?;
+            tmpl_ctx.add_vision_id = pop_bool(ctx, &mut map, "add_vision_id", false)?;
+            tmpl_ctx.eos_token = pop_string(
+                ctx,
+                &mut map,
+                "eos_token",
+                model.eos_token_text().unwrap_or_default(),
+            )?;
+            tmpl_ctx.bos_token = pop_string(
+                ctx,
+                &mut map,
+                "bos_token",
+                model.bos_token_text().unwrap_or_default(),
+            )?;
+
+            // Remaining keys go to extra_vars
+            for (k, v) in map {
+                extra_vars.insert(k, v);
             }
         }
     }
 
-    let tmpl = get_chat_template(ctx, &this, &model)?;
-    let mut env = create_minijinja_env();
+    let rendered = model
+        .with_chat_template(|tmpl| -> Result<String, minijinja::Error> {
+            let mut env = create_minijinja_env();
 
-    env.add_template("chat", &tmpl).map_err(|e| {
-        ctx.throw_internal_error(&format!("invalid chat template: {e}"));
-        -1
-    })?;
-
-    let text = env
-        .get_template("chat")
-        .and_then(|t| t.render(&ctx_obj))
+            // parse template
+            env.add_template("chat", tmpl)?;
+            // render template
+            env.get_template("chat").and_then(|t| t.render(&tmpl_ctx))
+        })
+        .ok_or_else(|| {
+            ctx.throw_internal_error("no chat template");
+            -1
+        })?
         .map_err(|e| {
-            ctx.throw_internal_error(&format!("can't render template: {e}"));
+            ctx.throw_internal_error(&format!("fail to apply chat template: {e}"));
             -1
         })?;
 
-    ctx.create_string_from_utf8(text.into_bytes())
+    ctx.create_string_from_utf8(rendered.into_bytes())
         .map(JSValue::String)
 }
 
