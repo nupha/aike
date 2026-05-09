@@ -11,8 +11,8 @@ use async_openai::{
         ChatCompletionRequestMessage, ChatCompletionRequestSystemMessage,
         ChatCompletionRequestSystemMessageContent, ChatCompletionRequestToolMessage,
         ChatCompletionRequestToolMessageContent, ChatCompletionRequestUserMessage,
-        ChatCompletionRequestUserMessageContent, CreateChatCompletionRequest,
-        CreateChatCompletionResponse, CreateChatCompletionStreamResponse,
+        ChatCompletionRequestUserMessageContent, CreateChatCompletionResponse,
+        CreateChatCompletionStreamResponse,
     },
 };
 use linkme::distributed_slice;
@@ -31,6 +31,7 @@ use crate::{
         MAGIC_RESPONSES_ONCE, MAGIC_RESPONSES_STREAM, js_client_responses,
     },
     class_llama_engine::{MAGIC_CHAT_ONCE, MAGIC_CHAT_STREAM},
+    helpers::parse_chat_completion_req,
 };
 
 /// Constructor: new OpenAI({apiKey, baseUrl, model?, timeout?})
@@ -102,9 +103,9 @@ pub(crate) fn get_client_arc(
 }
 
 /// Parse JS messages array → Vec<ChatCompletionRequestMessage>
-pub(crate) fn parse_messages(
+pub(crate) fn parse_chat_messages(
     ctx: &mut ScopedContext,
-    val: &JSValue,
+    val: JSValue,
 ) -> Result<Vec<ChatCompletionRequestMessage>, i32> {
     let arr = val.as_object_Array().copied().ok_or_else(|| {
         ctx.throw_type_error("messages must be an array");
@@ -186,42 +187,6 @@ pub(crate) fn parse_messages(
     Ok(messages)
 }
 
-pub(crate) fn parse_chat_completion_options(
-    ctx: &mut ScopedContext,
-    opts: Object,
-) -> Result<CreateChatCompletionRequest, i32> {
-    let mut json_val = opts.to_serde_json(ctx).map_err(|_| {
-        ctx.throw_type_error("failed to serialize options");
-        -1
-    })?;
-
-    // Note:
-    // 1) messages is parsed separately, inject empty array to satisfy deserialization
-    // 2) model is required, set default value if missing
-    if let Some(obj) = json_val.as_object_mut() {
-        obj.insert("messages".to_string(), serde_json::Value::Array(Vec::new()));
-        if !obj.contains_key("model") {
-            obj.insert(
-                "model".to_string(),
-                serde_json::Value::String("default".to_string()),
-            );
-        }
-    }
-
-    let mut req: CreateChatCompletionRequest = serde_json::from_value(json_val).map_err(|e| {
-        ctx.throw_type_error(&format!("invalid options: {e}"));
-        -1
-    })?;
-
-    // // Apply defaults for fields where None means "use default"
-    // req.reasoning_effort.get_or_insert_with(Default::default);
-
-    // messages is parsed separately, clear it here
-    req.messages = Vec::new();
-
-    Ok(req)
-}
-
 enum ChatReply {
     Chunk(CreateChatCompletionStreamResponse),
     Done,
@@ -239,20 +204,17 @@ fn js_client_chat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         -1
     })?;
 
-    // Parse messages (required)
-    let messages_val = opts_obj.get_property_str(ctx, "messages")?;
-    let messages = parse_messages(ctx, &messages_val)?;
-
     // Parse all chat options into a ChatCompletionRequest
-    let mut req = parse_chat_completion_options(ctx, opts_obj)?;
+    let mut req = opts_obj.to_serde_json(ctx).and_then(|v| {
+        parse_chat_completion_req(v).map_err(|_| {
+            ctx.throw_type_error("failed to serialize options");
+            -1
+        })
+    })?;
 
     if req.model.is_empty() {
-        req.model = client_arc
-            .model
-            .clone()
-            .unwrap_or_else(|| "default".to_string());
+        req.model = client_arc.model.clone().unwrap_or_else(|| "".to_string());
     }
-    req.messages = messages;
 
     let client = client_arc.client.clone();
 

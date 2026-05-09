@@ -88,15 +88,15 @@ impl OutputPart {
     }
 }
 
-pub(crate) enum OutputStreamItem {
+pub(crate) enum OutputChunk {
     Part(OutputPart),
     Stop(FinishReason, Option<CompletionUsage>),
     Done,
     Error(String),
 }
 
-impl OutputStreamItem {
-    pub fn into_chunk(
+impl OutputChunk {
+    pub fn into_chat_chunk(
         self,
         id: &str,
         model: &str,
@@ -140,17 +140,6 @@ pub(crate) enum OutputTag {
     CloseToolCall,
 }
 
-impl OutputTag {
-    pub const fn as_str(&self) -> &str {
-        match self {
-            OutputTag::Think => "<think>",
-            OutputTag::CloseThink => "</think>",
-            OutputTag::ToolCall => "<tool_call>",
-            OutputTag::CloseToolCall => "</tool_call>",
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum ParserKind {
     Chat,
@@ -165,13 +154,17 @@ enum State {
 }
 
 pub struct LlmOutputParser {
+    /// current state
     state: State,
+    /// parsed output parts
     parts: VecDeque<OutputPart>,
     parse_think: bool,
     include_usage: bool,
     n_prompt_tokens: usize,
     respond_id: String,
     model_name: String,
+    think_tags: (String, String),
+    tool_call_tags: (String, String),
 }
 
 impl LlmOutputParser {
@@ -181,23 +174,20 @@ impl LlmOutputParser {
         n_prompt_tokens: usize,
         include_usage: bool,
     ) -> Self {
-        let mut parts = VecDeque::new();
-        if start_think && !parse_think {
-            parts.push_back(OutputPart::Text(OutputTag::Think.as_str().into()));
-        }
-
         Self {
-            state: if start_think && parse_think {
+            state: if start_think {
                 State::Thinking
             } else {
                 State::Text
             },
-            parts,
+            parts: VecDeque::new(),
             parse_think,
             include_usage,
             n_prompt_tokens,
             respond_id: String::new(),
             model_name: String::new(),
+            think_tags: (String::from("<think>"), String::from("</think>")),
+            tool_call_tags: (String::from("<tool_call>"), String::from("</tool_call>")),
         }
     }
 
@@ -219,6 +209,16 @@ impl LlmOutputParser {
         0
     }
 
+    /// get tag text length
+    fn tag_len(&self, t: OutputTag) -> usize {
+        match t {
+            OutputTag::Think => self.think_tags.0.len(),
+            OutputTag::CloseThink => self.think_tags.1.len(),
+            OutputTag::ToolCall => self.tool_call_tags.0.len(),
+            OutputTag::CloseToolCall => self.tool_call_tags.1.len(),
+        }
+    }
+
     /// Feed streaming text into the parser.
     pub fn push_str(&mut self, chunk: &str) {
         let mut remaining = chunk;
@@ -231,16 +231,16 @@ impl LlmOutputParser {
 
             match self.state {
                 State::Text => {
-                    tool_call_pos = remaining.find(OutputTag::ToolCall.as_str());
+                    tool_call_pos = remaining.find(self.tool_call_tags.0.as_str());
                     if self.parse_think {
-                        think_pos = remaining.find(OutputTag::Think.as_str());
+                        think_pos = remaining.find(self.think_tags.0.as_str());
                     }
                 }
                 State::MaybeCall(_) => {
-                    close_tool_call_pos = remaining.find(OutputTag::CloseToolCall.as_str());
+                    close_tool_call_pos = remaining.find(self.tool_call_tags.1.as_str());
                 }
                 State::Thinking => {
-                    close_think_pos = remaining.find(OutputTag::CloseThink.as_str());
+                    close_think_pos = remaining.find(self.think_tags.1.as_str());
                 }
             }
 
@@ -266,13 +266,14 @@ impl LlmOutputParser {
             }
 
             match (found_tag, &mut self.state) {
+                // think
                 (Some((pos, OutputTag::Think)), State::Text) => {
                     self.state = State::Thinking;
                     if pos > 0 {
                         self.parts
                             .push_back(OutputPart::Text(remaining[..pos].to_string()));
                     }
-                    remaining = &remaining[pos + OutputTag::Think.as_str().len()..];
+                    remaining = &remaining[pos + self.think_tags.0.len()..];
                 }
                 (Some((pos, OutputTag::CloseThink)), State::Thinking) => {
                     self.state = State::Text;
@@ -280,19 +281,21 @@ impl LlmOutputParser {
                         self.parts
                             .push_back(OutputPart::Reasoning(remaining[..pos].to_string()));
                     }
-                    remaining = &remaining[pos + OutputTag::CloseThink.as_str().len()..];
+                    remaining = &remaining[pos + self.think_tags.1.len()..];
                 }
+
+                // tool call
                 (Some((pos, OutputTag::ToolCall)), State::Text) => {
                     if pos > 0 {
                         self.parts
                             .push_back(OutputPart::Text(remaining[..pos].to_string()));
                     }
-                    remaining = &remaining[pos + OutputTag::ToolCall.as_str().len()..];
+                    remaining = &remaining[pos + self.tool_call_tags.0.len()..];
                     self.state = State::MaybeCall(String::new());
                 }
                 (Some((pos, OutputTag::CloseToolCall)), State::MaybeCall(s)) => {
                     s.push_str(&remaining[..pos]);
-                    remaining = &remaining[pos + OutputTag::CloseToolCall.as_str().len()..];
+                    remaining = &remaining[pos + self.tool_call_tags.1.len()..];
 
                     if let Ok(value) = serde_json::from_str::<serde_json::Value>(s) {
                         let obj = match value.as_object() {
@@ -331,23 +334,26 @@ impl LlmOutputParser {
 
                     self.state = State::Text;
                 }
+
+                // start think or tool_call
                 (Some((pos, t)), State::Text) => {
-                    let p = pos + t.as_str().len();
-                    self.parts
-                        .push_back(OutputPart::Text(remaining[..p].to_string()));
-                    remaining = &remaining[p..];
+                    debug_assert!(matches!(t, OutputTag::Think | OutputTag::ToolCall));
+                    if pos > 0 {
+                        self.parts
+                            .push_back(OutputPart::Text(remaining[..pos].to_string()));
+                    }
+                    remaining = &remaining[pos + self.tag_len(t)..];
+                    self.state = if t == OutputTag::Think {
+                        State::Thinking
+                    } else {
+                        State::Text
+                    };
                 }
-                (Some((pos, t)), State::Thinking) => {
-                    let p = pos + t.as_str().len();
-                    self.parts
-                        .push_back(OutputPart::Reasoning(remaining[..p].to_string()));
-                    remaining = &remaining[p..];
+
+                (Some((_, t)), State::Thinking | State::MaybeCall(_)) => {
+                    unreachable!("impossible tag: {t:?}");
                 }
-                (Some((pos, t)), State::MaybeCall(s)) => {
-                    let p = pos + t.as_str().len();
-                    s.push_str(&remaining[..p]);
-                    remaining = &remaining[p..];
-                }
+
                 (None, State::Text) => {
                     debug_assert!(!remaining.is_empty());
                     self.parts
@@ -371,10 +377,8 @@ impl LlmOutputParser {
 
     pub fn end(&mut self) {
         if let State::MaybeCall(s) = std::mem::replace(&mut self.state, State::Text) {
-            self.parts.push_back(OutputPart::Text(format!(
-                "{}{s}",
-                OutputTag::ToolCall.as_str()
-            )));
+            self.parts
+                .push_back(OutputPart::Text(format!("{}{s}", &self.tool_call_tags.0)));
         }
     }
 
@@ -383,13 +387,22 @@ impl LlmOutputParser {
     }
 
     pub(crate) fn parse_partial<F>(
-        &mut self,
+        mut self,
         rx: crossbeam::channel::Receiver<EngineReply>,
         timeout: std::time::Duration,
         mut on_item: F,
     ) where
-        F: FnMut(OutputStreamItem, usize) -> bool,
+        F: FnMut(OutputChunk, usize) -> bool,
     {
+        debug_assert!(self.parts.is_empty());
+
+        if self.state == State::Thinking && !self.parse_think {
+            // change init state to text
+            self.parts
+                .push_back(OutputPart::Text(self.think_tags.0.clone()));
+            self.state = State::Text;
+        }
+
         let mut nth = 0_usize; // index of chunk
         let mut has_tool_call = false;
 
@@ -402,7 +415,7 @@ impl LlmOutputParser {
                             has_tool_call = true;
                         }
 
-                        if !on_item(OutputStreamItem::Part(part), nth) {
+                        if !on_item(OutputChunk::Part(part), nth) {
                             break;
                         }
                         nth += 1;
@@ -411,7 +424,7 @@ impl LlmOutputParser {
                 Ok(EngineReply::Stop(reason, n_completion_tokens)) => {
                     self.end();
                     while let Some(part) = self.next() {
-                        if !on_item(OutputStreamItem::Part(part), nth) {
+                        if !on_item(OutputChunk::Part(part), nth) {
                             break;
                         }
                         nth += 1;
@@ -439,30 +452,27 @@ impl LlmOutputParser {
                     } else {
                         None
                     };
-                    on_item(OutputStreamItem::Stop(finish_reason, usage), nth);
+                    on_item(OutputChunk::Stop(finish_reason, usage), nth);
                     nth += 1;
 
                     // emit done message
-                    on_item(OutputStreamItem::Done, nth);
+                    on_item(OutputChunk::Done, nth);
                     break;
                 }
                 Ok(EngineReply::Cancelled) => {
-                    on_item(OutputStreamItem::Error(ERR_CANCELLED.to_string()), nth);
+                    on_item(OutputChunk::Error(ERR_CANCELLED.to_string()), nth);
                     break;
                 }
                 Ok(EngineReply::Error(e)) => {
-                    on_item(OutputStreamItem::Error(e), nth);
+                    on_item(OutputChunk::Error(e), nth);
                     break;
                 }
                 Ok(EngineReply::Shutdown) => {
-                    on_item(
-                        OutputStreamItem::Error(ERR_ENGINE_SHUTDOWN.to_string()),
-                        nth,
-                    );
+                    on_item(OutputChunk::Error(ERR_ENGINE_SHUTDOWN.to_string()), nth);
                     break;
                 }
                 Err(_) => {
-                    on_item(OutputStreamItem::Error("stream timed out".to_string()), nth);
+                    on_item(OutputChunk::Error("stream timed out".to_string()), nth);
                     break;
                 }
             }
@@ -475,6 +485,15 @@ impl LlmOutputParser {
         timeout: std::time::Duration,
         kind: ParserKind,
     ) -> Result<serde_json::Value, String> {
+        debug_assert!(self.parts.is_empty());
+
+        if self.state == State::Thinking && !self.parse_think {
+            // change init state to text
+            self.parts
+                .push_back(OutputPart::Text(self.think_tags.0.clone()));
+            self.state = State::Text;
+        }
+
         let tm = now_unix_s();
 
         loop {
@@ -707,14 +726,14 @@ mod tests {
 
     #[test]
     fn plain_text_passthrough() {
-        let mut p = LlmOutputParser::new(false, false, 0, false);
+        let mut p = LlmOutputParser::new(true, false, 0, false);
         p.push_str("Hello, world!");
         assert_eq!(text_output(&p), "Hello, world!");
     }
 
     #[test]
     fn think_tag_basic() {
-        let mut p = LlmOutputParser::new(false, false, 0, false);
+        let mut p = LlmOutputParser::new(true, false, 0, false);
         p.push_str("Hello <think>hmm</think> world");
         assert_eq!(p.state, State::Text);
         assert_eq!(text_output(&p), "Hello  world");
@@ -724,7 +743,7 @@ mod tests {
 
     #[test]
     fn think_tag_multiple_chunks() {
-        let mut p = LlmOutputParser::new(false, false, 0, false);
+        let mut p = LlmOutputParser::new(true, false, 0, false);
         p.push_str("Hello <think>");
         assert_eq!(p.state, State::Thinking);
         assert_eq!(text_output(&p), "Hello ");
@@ -738,7 +757,7 @@ mod tests {
 
     #[test]
     fn tool_call_valid_json() {
-        let mut p = LlmOutputParser::new(false, false, 0, false);
+        let mut p = LlmOutputParser::new(true, false, 0, false);
         p.push_str(r#"<tool_call>{"name":"get_weather","arguments":"{}"}</tool_call>"#);
         assert_eq!(p.state, State::Text);
         assert_eq!(text_output(&p), "");
@@ -754,7 +773,7 @@ mod tests {
 
     #[test]
     fn tool_call_invalid_json_fallback() {
-        let mut p = LlmOutputParser::new(false, false, 0, false);
+        let mut p = LlmOutputParser::new(true, false, 0, false);
         p.push_str("bad: <tool_call>{invalid}</tool_call>");
         assert_eq!(p.state, State::Text);
         assert_eq!(text_output(&p), "bad: {invalid}");
@@ -762,7 +781,7 @@ mod tests {
 
     #[test]
     fn tool_call_partial_then_invalid() {
-        let mut p = LlmOutputParser::new(false, false, 0, false);
+        let mut p = LlmOutputParser::new(true, false, 0, false);
         p.push_str("start <tool_call>{\"key\"");
         assert_eq!(p.state, State::MaybeCall("{\"key\"".to_string()));
         assert_eq!(text_output(&p), "start ");
@@ -772,7 +791,7 @@ mod tests {
 
     #[test]
     fn tool_call_multiple_chunks_valid() {
-        let mut p = LlmOutputParser::new(false, false, 0, false);
+        let mut p = LlmOutputParser::new(true, false, 0, false);
         p.push_str(r#"<tool_call>{"name":"#);
         assert_eq!(p.state, State::MaybeCall(r#"{"name":"#.to_string()));
         assert_eq!(text_output(&p), "");
@@ -792,7 +811,7 @@ mod tests {
 
     #[test]
     fn mixed_think_and_tool_call() {
-        let mut p = LlmOutputParser::new(false, false, 0, false);
+        let mut p = LlmOutputParser::new(true, false, 0, false);
         p.push_str(
             r#"<think>reasoning</think> <tool_call>{"name":"calc","arguments":"{}"}</tool_call>"#,
         );
@@ -818,35 +837,35 @@ mod tests {
 
     #[test]
     fn no_tags() {
-        let mut p = LlmOutputParser::new(false, false, 0, false);
+        let mut p = LlmOutputParser::new(true, false, 0, false);
         p.push_str("just text");
         assert_eq!(text_output(&p), "just text");
     }
 
     #[test]
     fn empty_input() {
-        let mut p = LlmOutputParser::new(false, false, 0, false);
+        let mut p = LlmOutputParser::new(true, false, 0, false);
         p.push_str("");
         assert!(p.parts.is_empty());
     }
 
     #[test]
     fn orphan_close_think_in_text() {
-        let mut p = LlmOutputParser::new(false, false, 0, false);
+        let mut p = LlmOutputParser::new(true, false, 0, false);
         p.push_str("hello </think> world");
         assert_eq!(text_output(&p), "hello </think> world");
     }
 
     #[test]
     fn orphan_close_tool_call_in_text() {
-        let mut p = LlmOutputParser::new(false, false, 0, false);
+        let mut p = LlmOutputParser::new(true, false, 0, false);
         p.push_str("hello </tool_call> world");
         assert_eq!(text_output(&p), "hello </tool_call> world");
     }
 
     #[test]
     fn tool_call_nested_think_inside() {
-        let mut p = LlmOutputParser::new(false, false, 0, false);
+        let mut p = LlmOutputParser::new(true, false, 0, false);
         p.push_str(r#"<tool_call>{"name":"<think>","arguments":"{}"}</tool_call>"#);
         assert_eq!(p.parts.len(), 1);
         match &p.parts[0] {

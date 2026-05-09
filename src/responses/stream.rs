@@ -1,19 +1,19 @@
 use serde_json::json;
 
-use crate::output::{OutputPart, OutputStreamItem};
+use crate::output::{OutputPart, OutputChunk};
 
 use super::response_builder::build_response_completed_event;
 
 /// Convert a ChatStreamItem to a ResponseStreamEvent-shaped JSON value.
 /// Used by Engine.responses() to produce the same event format as the SSE stream.
 pub(crate) fn chat_stream_item_to_response_event(
-    item: &OutputStreamItem,
+    item: &OutputChunk,
     respond_id: &str,
     model_name: &str,
     nth: usize,
 ) -> serde_json::Value {
     match item {
-        OutputStreamItem::Part(part) => match part {
+        OutputChunk::Part(part) => match part {
             OutputPart::Text(t) => {
                 if nth == 0 {
                     // First text chunk: emit output_item.added + content_part.added + text.delta
@@ -48,17 +48,17 @@ pub(crate) fn chat_stream_item_to_response_event(
                 })
             }
         },
-        OutputStreamItem::Stop(_finish_reason, usage) => {
+        OutputChunk::Stop(_finish_reason, usage) => {
             let n_completion = usage
                 .as_ref()
                 .map(|u| u.completion_tokens as usize)
                 .unwrap_or(0);
             build_response_completed_event(respond_id, model_name, 0, n_completion)
         }
-        OutputStreamItem::Done => {
+        OutputChunk::Done => {
             json!({"type": "done"})
         }
-        OutputStreamItem::Error(e) => {
+        OutputChunk::Error(e) => {
             json!({
                 "type": "error",
                 "error": {

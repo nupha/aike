@@ -4,9 +4,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use async_openai::types::chat::{
-    CreateChatCompletionRequest, ReasoningEffort, Role, StopConfiguration,
-};
+use async_openai::types::chat::{ReasoningEffort, Role, StopConfiguration};
 use linkme::distributed_slice;
 use llama_cpp_ffi::ToolChoice as LarkToolChoice;
 use zuqe::{
@@ -19,11 +17,14 @@ use zuqe::{
 
 use crate::{
     USER_CLASS_DEFS,
-    class_llama_client::{chunk_to_js, parse_chat_completion_options, parse_messages},
+    class_llama_client::chunk_to_js,
     class_llama_client_responses::{parse_responses_input, parse_responses_reasoning},
     engine::{Engine, GrammarConfig, OutputMode, TaskConfig},
-    helpers::{build_prompt_tokens, compile_tools_grammar, now_unix_s, to_lark_tool_choice},
-    output::{LlmOutputParser, OutputStreamItem, ParserKind},
+    helpers::{
+        build_prompt_tokens, compile_tools_grammar, now_unix_s, parse_chat_completion_req,
+        to_lark_tool_choice,
+    },
+    output::{LlmOutputParser, OutputChunk, ParserKind},
 };
 
 pub(crate) const ERR_CANCELLED: &str = "cancelled";
@@ -139,53 +140,52 @@ fn stop_to_vec(stop: &StopConfiguration) -> Option<Vec<String>> {
     }
 }
 
-fn js_engine_chat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+fn js_engine_chat_completions(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let engine = get_engine(ctx, &this)?;
 
-    // Parse messages (required)
-    let messages_val = cc.arg(0);
-    let messages = parse_messages(ctx, &messages_val)?;
+    let opts_obj = cc.arg(0).as_object().copied().ok_or_else(|| {
+        ctx.throw_type_error("options must be object");
+        -1
+    })?;
 
-    let mut req = CreateChatCompletionRequest::default();
-    let mut reasoning_content = false;
+    let mut req = opts_obj.to_serde_json(ctx).and_then(|v| {
+        parse_chat_completion_req(v).map_err(|_| {
+            ctx.throw_type_error("failed to serialize options");
+            -1
+        })
+    })?;
+
+    if req.model.is_empty() {
+        req.model = engine.lock().unwrap().model_name().into();
+    }
+
     let mut id_slot: Option<usize> = None;
     let mut cache_prompt = false;
 
-    // Parse options
-    if cc.length() > 1 {
-        let val = cc.arg(1);
-        if !val.is_undefined_or_null() {
-            let opts_obj = val.as_object().copied().ok_or_else(|| {
-                ctx.throw_type_error("options must be object");
-                -1
-            })?;
+    let v = opts_obj.get_property_str(ctx, "reasoning")?;
+    let reasoning = if !v.is_undefined() {
+        v.to_bool()?
+    } else {
+        false
+    };
 
-            req = parse_chat_completion_options(ctx, opts_obj)?;
-
-            let v = opts_obj.get_property_str(ctx, "reasoningContent")?;
-            if !v.is_undefined() {
-                reasoning_content = v.to_bool()?;
-            }
-
-            let v = opts_obj.get_property_str(ctx, "idSlot")?;
-            if !v.is_undefined() {
-                let n = v.to_number(ctx)?.to_i32();
-                if n >= 0 {
-                    id_slot = Some(n as usize);
-                }
-            }
-
-            let v = opts_obj.get_property_str(ctx, "cachePrompt")?;
-            if !v.is_undefined() {
-                cache_prompt = v.to_bool()?;
-            }
+    let v = opts_obj.get_property_str(ctx, "idSlot")?;
+    if !v.is_undefined() {
+        let n = v.to_number(ctx)?.to_i32();
+        if n >= 0 {
+            id_slot = Some(n as usize);
         }
+    }
+
+    let v = opts_obj.get_property_str(ctx, "cachePrompt")?;
+    if !v.is_undefined() {
+        cache_prompt = v.to_bool()?;
     }
 
     let prompt_tokens = build_prompt_tokens(
         engine.lock().unwrap().model(),
-        &messages,
+        &req.messages,
         req.tools.as_deref(),
         req.tool_choice.as_ref(),
         req.parallel_tool_calls,
@@ -253,9 +253,8 @@ fn js_engine_chat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         })?;
 
     let mut parser = LlmOutputParser::new(
-        reasoning_content,
-        reasoning_content
-            && req.reasoning_effort.clone().unwrap_or_default() != ReasoningEffort::None,
+        reasoning,
+        req.reasoning_effort.clone().unwrap_or_default() != ReasoningEffort::None,
         n_prompt_tokens,
         req.stream_options
             .is_some_and(|s| s.include_usage.unwrap_or(false)),
@@ -265,26 +264,26 @@ fn js_engine_chat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     if is_stream {
         // Streaming: AsyncIterableIterator
-        let (item_tx, item_rx) = crossbeam::channel::bounded::<(OutputStreamItem, usize)>(8);
+        let (item_tx, item_rx) = crossbeam::channel::bounded::<(OutputChunk, usize)>(8);
         std::thread::spawn(move || {
             parser.parse_partial(rx, std::time::Duration::from_secs(u64::MAX), |item, nth| {
                 item_tx.send((item, nth)).is_ok()
             });
         });
 
-        AsyncIterableIterator::create_with_receiver::<(OutputStreamItem, usize)>(
+        AsyncIterableIterator::create_with_receiver::<(OutputChunk, usize)>(
             ctx,
             item_rx,
             move |cx, (msg, nth)| -> Result<Option<JSValue>, i32> {
                 match msg {
-                    OutputStreamItem::Done => Ok(None),
-                    OutputStreamItem::Error(e) => {
+                    OutputChunk::Done => Ok(None),
+                    OutputChunk::Error(e) => {
                         cx.throw_internal_error(&e);
                         Err(-1)
                     }
                     _ => {
                         let mut chunk =
-                            msg.into_chunk(&respond_id, &model_name, now_unix_s() as u32);
+                            msg.into_chat_chunk(&respond_id, &model_name, now_unix_s() as u32);
                         if nth == 0 {
                             // set role on first chunk
                             chunk.choices[0].delta.role = Some(Role::Assistant);
@@ -467,20 +466,20 @@ fn js_engine_responses(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     if is_stream {
         // Streaming: AsyncIterableIterator
-        let (item_tx, item_rx) = crossbeam::channel::bounded::<(OutputStreamItem, usize)>(8);
+        let (item_tx, item_rx) = crossbeam::channel::bounded::<(OutputChunk, usize)>(8);
         std::thread::spawn(move || {
             parser.parse_partial(rx, std::time::Duration::from_secs(u64::MAX), |item, nth| {
                 item_tx.send((item, nth)).is_ok()
             });
         });
 
-        AsyncIterableIterator::create_with_receiver::<(OutputStreamItem, usize)>(
+        AsyncIterableIterator::create_with_receiver::<(OutputChunk, usize)>(
             ctx,
             item_rx,
             move |cx, (msg, nth)| -> Result<Option<JSValue>, i32> {
                 match msg {
-                    OutputStreamItem::Done => Ok(None),
-                    OutputStreamItem::Error(e) => {
+                    OutputChunk::Done => Ok(None),
+                    OutputChunk::Error(e) => {
                         cx.throw_internal_error(&e);
                         Err(-1)
                     }
@@ -624,8 +623,18 @@ fn js_engine_dispose(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 }
 
 const CLASS_ENGINE_PROTO: &[FieldDef] = &[
-    FieldDef::CALL("chat", 2, js_engine_chat, MAGIC_CHAT_STREAM as i16),
-    FieldDef::CALL("chatOnce", 2, js_engine_chat, MAGIC_CHAT_ONCE as i16),
+    FieldDef::CALL(
+        "chat",
+        2,
+        js_engine_chat_completions,
+        MAGIC_CHAT_STREAM as i16,
+    ),
+    FieldDef::CALL(
+        "chatOnce",
+        2,
+        js_engine_chat_completions,
+        MAGIC_CHAT_ONCE as i16,
+    ),
     FieldDef::CALL(
         "responses",
         1,

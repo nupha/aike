@@ -4,8 +4,8 @@ use async_openai::types::chat::{
     ChatCompletionRequestAssistantMessageContent, ChatCompletionRequestDeveloperMessageContent,
     ChatCompletionRequestMessage, ChatCompletionRequestSystemMessageContent,
     ChatCompletionRequestToolMessageContent, ChatCompletionRequestUserMessageContent,
-    ChatCompletionToolChoiceOption, ChatCompletionTools, ReasoningEffort, ResponseFormat,
-    ToolChoiceOptions,
+    ChatCompletionToolChoiceOption, ChatCompletionTools, CreateChatCompletionRequest,
+    ReasoningEffort, ResponseFormat, ToolChoiceOptions,
 };
 use llama_cpp_ffi::{LlamaModel, ToolChoice as LarkToolChoice};
 use minijinja::Environment;
@@ -342,6 +342,22 @@ CODE_CONTENT: /(.|\\n)*?/\n\
             unreachable!();
         }
     }
+}
+
+pub(crate) fn parse_chat_completion_req(
+    mut json_val: serde_json::Value,
+) -> Result<CreateChatCompletionRequest, serde_json::Error> {
+    // Note: model is required, set default if missing
+    if let Some(obj) = json_val.as_object_mut()
+        && !obj.contains_key("model")
+    {
+        obj.insert(
+            "model".to_string(),
+            serde_json::Value::String("".to_string()),
+        );
+    }
+
+    serde_json::from_value(json_val)
 }
 
 pub(crate) fn now_unix_s() -> i64 {

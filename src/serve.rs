@@ -3,7 +3,7 @@ use std::{
     time::Duration,
 };
 
-use async_openai::types::chat::{CreateChatCompletionRequest, Role};
+use async_openai::types::chat::{CreateChatCompletionRequest, ReasoningEffort, Role};
 use axum::{
     Json, Router,
     extract::State,
@@ -24,7 +24,7 @@ use uuid::Uuid;
 use crate::{
     engine::{Engine, GrammarConfig, OutputMode, TaskConfig},
     helpers::{build_prompt_tokens, compile_tools_grammar, now_unix_s, to_lark_tool_choice},
-    output::{LlmOutputParser, OutputStreamItem, ParserKind},
+    output::{LlmOutputParser, OutputChunk, ParserKind},
 };
 
 pub(crate) const ERR_CANCELLED: &str = "cancelled";
@@ -227,7 +227,7 @@ async fn handle_chat_completions(
 
     let mut parser = LlmOutputParser::new(
         false,
-        false, // reasoning_effort != ReasoningEffort::None,
+        req.reasoning_effort.clone().unwrap_or_default() != ReasoningEffort::None,
         n_prompt_tokens,
         req.stream_options
             .as_ref()
@@ -243,10 +243,10 @@ async fn handle_chat_completions(
         tokio::task::spawn_blocking(move || {
             parser.parse_partial(rx, STREAM_TIMEOUT, |item, nth| {
                 match item {
-                    OutputStreamItem::Done => {
+                    OutputChunk::Done => {
                         let _ = tx.send("[DONE]".to_string());
                     }
-                    OutputStreamItem::Error(e) => {
+                    OutputChunk::Error(e) => {
                         let err = oai_error(e, "server_error");
                         let data = serde_json::to_string(&err).unwrap_or_default();
                         let _ = tx.send(data);
@@ -254,7 +254,7 @@ async fn handle_chat_completions(
                     }
                     _ => {
                         let mut chunk =
-                            item.into_chunk(&respond_id, &model_name, now_unix_s() as u32);
+                            item.into_chat_chunk(&respond_id, &model_name, now_unix_s() as u32);
                         if nth == 0 {
                             // set role on first chunk
                             chunk.choices[0].delta.role = Some(Role::Assistant);

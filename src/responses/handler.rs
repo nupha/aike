@@ -13,7 +13,7 @@ use uuid::Uuid;
 use crate::{
     engine::{EngineReply, GrammarConfig, OutputMode, TaskConfig},
     helpers::{build_prompt_tokens, compile_tools_grammar},
-    output::{LlmOutputParser, OutputPart, OutputStreamItem, ParserKind},
+    output::{LlmOutputParser, OutputChunk, OutputPart, ParserKind},
     responses::{
         response_builder::{
             build_content_part_added_event, build_output_item_added_event,
@@ -203,7 +203,7 @@ pub(crate) fn handle_responses_stream(
 
         parser.parse_partial(rx, STREAM_TIMEOUT, |item, _nth| {
             match item {
-                OutputStreamItem::Part(part) => match part {
+                OutputChunk::Part(part) => match part {
                     OutputPart::Text(t) => {
                         if !text_started {
                             text_started = true;
@@ -236,7 +236,7 @@ pub(crate) fn handle_responses_stream(
                         // Tool calls not yet implemented for Responses API
                     }
                 },
-                OutputStreamItem::Stop(_finish_reason, usage) => {
+                OutputChunk::Stop(_finish_reason, usage) => {
                     let n_completion = usage
                         .as_ref()
                         .map(|u| u.completion_tokens as usize)
@@ -249,10 +249,10 @@ pub(crate) fn handle_responses_stream(
                     );
                     let _ = tx.send(sse_event("response.completed", completed));
                 }
-                OutputStreamItem::Done => {
+                OutputChunk::Done => {
                     // Already handled by Stop; this is a no-op
                 }
-                OutputStreamItem::Error(e) => {
+                OutputChunk::Error(e) => {
                     let err = serde_json::json!({
                         "type": "error",
                         "error": {
