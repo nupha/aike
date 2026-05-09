@@ -223,11 +223,11 @@ async fn handle_chat_completions(
         }
     };
 
+    let parse_reasoning = state.engine.lock().unwrap().parse_reasoning();
     let mut parser = LlmOutputParser::new(
-        false,
+        parse_reasoning,
         req.reasoning_effort.clone().unwrap_or_default() != ReasoningEffort::None,
     );
-
     parser
         .set_respond_id(respond_id.clone())
         .set_model_name(model_name.clone())

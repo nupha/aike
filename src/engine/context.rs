@@ -38,6 +38,11 @@ pub struct Engine {
     pub(crate) is_serving: bool,
     /// Shutdown sender for the active HTTP server (if any).
     pub(crate) shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
+
+    /// Whether to parse <think> tags and expose reasoning content
+    /// via reasoning_content field instead of leaving them in content.
+    /// meaningful for chat completion response only.
+    pub(crate) parse_reasoning: bool,
 }
 
 impl Drop for Engine {
@@ -329,6 +334,7 @@ impl Engine {
             ubatch_size,
             is_serving: false,
             shutdown_tx: None,
+            parse_reasoning: true,
             llm_ctx,
             slot_cached_tokens: vec![Vec::new(); num_parallel],
             slot_samplers: (0..num_parallel).map(|_| None).collect(),
@@ -364,6 +370,14 @@ impl Engine {
 
     pub fn is_serving(&self) -> bool {
         self.is_serving
+    }
+
+    pub fn parse_reasoning(&self) -> bool {
+        self.parse_reasoning
+    }
+
+    pub fn set_parse_reasoning(&mut self, v: bool) {
+        self.parse_reasoning = v;
     }
 
     /// Mark engine as serving and store the shutdown sender.

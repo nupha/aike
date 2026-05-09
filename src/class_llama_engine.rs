@@ -161,13 +161,7 @@ fn js_engine_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
 
     let mut id_slot: Option<usize> = None;
     let mut cache_prompt = false;
-
-    let v = opts_obj.get_property_str(ctx, "reasoning")?;
-    let reasoning = if !v.is_undefined() {
-        v.to_bool()?
-    } else {
-        true // enabled by default
-    };
+    let parse_reasoning = engine.lock().unwrap().parse_reasoning();
 
     let v = opts_obj.get_property_str(ctx, "idSlot")?;
     if !v.is_undefined() {
@@ -252,7 +246,7 @@ fn js_engine_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
         })?;
 
     let mut parser = LlmOutputParser::new(
-        reasoning,
+        parse_reasoning,
         req.reasoning_effort.clone().unwrap_or_default() != ReasoningEffort::None,
     );
 
@@ -618,6 +612,20 @@ fn js_engine_isServing(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     Ok(JSValue::Bool(engine.lock().unwrap().is_serving()))
 }
 
+fn js_engine_parseReasoning(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let this = cc.this();
+    let engine = get_engine(ctx, &this)?;
+    Ok(JSValue::Bool(engine.lock().unwrap().parse_reasoning()))
+}
+
+fn js_engine_setParseReasoning(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let this = cc.this();
+    let engine = get_engine(ctx, &this)?;
+    let v = cc.arg(0).to_bool()?;
+    engine.lock().unwrap().set_parse_reasoning(v);
+    Ok(JSValue::UNDEFINED)
+}
+
 fn js_engine_dispose(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut this = cc.this();
     let payload = this
@@ -661,6 +669,12 @@ const CLASS_ENGINE_PROTO: &[FieldDef] = &[
     FieldDef::CALL("httpServe", 1, js_engine_httpServe, 0),
     FieldDef::CALL("stopServe", 0, js_engine_stopServe, 0),
     FieldDef::GETSET("isServing", Some(js_engine_isServing), None, 0),
+    FieldDef::GETSET(
+        "parseReasoning",
+        Some(js_engine_parseReasoning),
+        Some(js_engine_setParseReasoning),
+        0,
+    ),
     FieldDef::CALL("dispose", 0, js_engine_dispose, 0),
 ];
 
