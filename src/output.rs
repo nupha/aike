@@ -236,12 +236,6 @@ impl LlmOutputParser {
         self.n_prompt_tokens
     }
 
-    pub fn n_completion_tokens(&self) -> usize {
-        // This is tracked internally during parse_stream/parse_all
-        // We'll use a default of 0 since the actual value is local to those methods
-        0
-    }
-
     /// get tag text length
     fn tag_len(&self, t: OutputTag) -> usize {
         match t {

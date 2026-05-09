@@ -202,7 +202,7 @@ pub(crate) fn handle_responses_stream(
 ) -> Response {
     let (tx, rx_tokio) = tokio::sync::mpsc::unbounded_channel::<String>();
 
-    let n_prompt_tokens = { parser.n_prompt_tokens() };
+    let n_prompt_tokens = parser.n_prompt_tokens();
 
     tokio::task::spawn_blocking(move || {
         let mut text_buffer = String::new();

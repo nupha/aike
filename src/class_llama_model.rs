@@ -808,36 +808,6 @@ fn js_model_lookupTokenText(ctx: &mut ScopedContext, cc: CallContext) -> JSResul
     }
 }
 
-const MODEL_CHAT_TEMPLATE_KEY: &str = "__chatTemplate";
-
-fn get_chat_template(
-    ctx: &mut ScopedContext,
-    this: &JSValue,
-    model: &LlamaModel,
-) -> Result<String, i32> {
-    let cached = this.get_property_str(ctx, MODEL_CHAT_TEMPLATE_KEY)?;
-    if let Some(s) = cached.as_string() {
-        return Ok(s.content().encode_utf8(false).to_string());
-    }
-
-    let key = CString::new("tokenizer.chat_template").unwrap();
-    let raw = model.meta_val_str(key.as_c_str()).ok_or_else(|| {
-        ctx.throw_internal_error("model meta tokenizer.chat_template not found");
-        -1
-    })?;
-
-    let mut this_obj = this.as_object().copied().ok_or_else(|| {
-        ctx.throw_type_error("invalid Model object");
-        -1
-    })?;
-    let v = ctx
-        .create_string_from_utf8(raw.clone().into_bytes())
-        .map(JSValue::String)?;
-    this_obj.define_property_value_str(ctx, MODEL_CHAT_TEMPLATE_KEY, v, 0)?;
-
-    Ok(raw)
-}
-
 fn js_model_renderTemplate(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let model = get_llama_model(ctx, &this)?;
