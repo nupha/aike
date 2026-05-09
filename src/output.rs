@@ -159,31 +159,26 @@ pub struct LlmOutputParser {
     /// parsed output parts
     parts: VecDeque<OutputPart>,
     parse_think: bool,
-    include_usage: bool,
     n_prompt_tokens: usize,
     respond_id: String,
     model_name: String,
+    include_usage: bool,
     think_tags: (String, String),
     tool_call_tags: (String, String),
 }
 
 impl LlmOutputParser {
-    pub fn new(
-        parse_think: bool,
-        start_think: bool,
-        n_prompt_tokens: usize,
-        include_usage: bool,
-    ) -> Self {
+    pub fn new(parse_think: bool, start_think: bool) -> Self {
         Self {
+            parse_think,
             state: if start_think {
                 State::Thinking
             } else {
                 State::Text
             },
             parts: VecDeque::new(),
-            parse_think,
-            include_usage,
-            n_prompt_tokens,
+            n_prompt_tokens: 0,
+            include_usage: false,
             respond_id: String::new(),
             model_name: String::new(),
             think_tags: (String::from("<think>"), String::from("</think>")),
@@ -191,12 +186,34 @@ impl LlmOutputParser {
         }
     }
 
-    pub fn set_respond_id(&mut self, id: String) {
-        self.respond_id = id;
+    pub fn set_think_tags(&mut self, open: String, close: String) -> &mut Self {
+        self.think_tags = (open, close);
+        self
     }
 
-    pub fn set_model_name(&mut self, name: String) {
+    pub fn set_tool_call_tags(&mut self, open: String, close: String) -> &mut Self {
+        self.tool_call_tags = (open, close);
+        self
+    }
+
+    pub fn set_respond_id(&mut self, id: String) -> &mut Self {
+        self.respond_id = id;
+        self
+    }
+
+    pub fn set_model_name(&mut self, name: String) -> &mut Self {
         self.model_name = name;
+        self
+    }
+
+    pub fn set_n_prompt_tokens(&mut self, n: usize) -> &mut Self {
+        self.n_prompt_tokens = n;
+        self
+    }
+
+    pub fn set_include_usage(&mut self, include_usage: bool) -> &mut Self {
+        self.include_usage = include_usage;
+        self
     }
 
     pub fn n_prompt_tokens(&self) -> usize {
@@ -726,14 +743,14 @@ mod tests {
 
     #[test]
     fn plain_text_passthrough() {
-        let mut p = LlmOutputParser::new(true, false, 0, false);
+        let mut p = LlmOutputParser::new(true, false);
         p.push_str("Hello, world!");
         assert_eq!(text_output(&p), "Hello, world!");
     }
 
     #[test]
     fn think_tag_basic() {
-        let mut p = LlmOutputParser::new(true, false, 0, false);
+        let mut p = LlmOutputParser::new(true, false);
         p.push_str("Hello <think>hmm</think> world");
         assert_eq!(p.state, State::Text);
         assert_eq!(text_output(&p), "Hello  world");
@@ -743,7 +760,7 @@ mod tests {
 
     #[test]
     fn think_tag_multiple_chunks() {
-        let mut p = LlmOutputParser::new(true, false, 0, false);
+        let mut p = LlmOutputParser::new(true, false);
         p.push_str("Hello <think>");
         assert_eq!(p.state, State::Thinking);
         assert_eq!(text_output(&p), "Hello ");
@@ -757,7 +774,7 @@ mod tests {
 
     #[test]
     fn tool_call_valid_json() {
-        let mut p = LlmOutputParser::new(true, false, 0, false);
+        let mut p = LlmOutputParser::new(true, false);
         p.push_str(r#"<tool_call>{"name":"get_weather","arguments":"{}"}</tool_call>"#);
         assert_eq!(p.state, State::Text);
         assert_eq!(text_output(&p), "");
@@ -773,7 +790,7 @@ mod tests {
 
     #[test]
     fn tool_call_invalid_json_fallback() {
-        let mut p = LlmOutputParser::new(true, false, 0, false);
+        let mut p = LlmOutputParser::new(true, false);
         p.push_str("bad: <tool_call>{invalid}</tool_call>");
         assert_eq!(p.state, State::Text);
         assert_eq!(text_output(&p), "bad: {invalid}");
@@ -781,7 +798,7 @@ mod tests {
 
     #[test]
     fn tool_call_partial_then_invalid() {
-        let mut p = LlmOutputParser::new(true, false, 0, false);
+        let mut p = LlmOutputParser::new(true, false);
         p.push_str("start <tool_call>{\"key\"");
         assert_eq!(p.state, State::MaybeCall("{\"key\"".to_string()));
         assert_eq!(text_output(&p), "start ");
@@ -791,7 +808,7 @@ mod tests {
 
     #[test]
     fn tool_call_multiple_chunks_valid() {
-        let mut p = LlmOutputParser::new(true, false, 0, false);
+        let mut p = LlmOutputParser::new(true, false);
         p.push_str(r#"<tool_call>{"name":"#);
         assert_eq!(p.state, State::MaybeCall(r#"{"name":"#.to_string()));
         assert_eq!(text_output(&p), "");
@@ -811,7 +828,7 @@ mod tests {
 
     #[test]
     fn mixed_think_and_tool_call() {
-        let mut p = LlmOutputParser::new(true, false, 0, false);
+        let mut p = LlmOutputParser::new(true, false);
         p.push_str(
             r#"<think>reasoning</think> <tool_call>{"name":"calc","arguments":"{}"}</tool_call>"#,
         );
@@ -837,35 +854,35 @@ mod tests {
 
     #[test]
     fn no_tags() {
-        let mut p = LlmOutputParser::new(true, false, 0, false);
+        let mut p = LlmOutputParser::new(true, false);
         p.push_str("just text");
         assert_eq!(text_output(&p), "just text");
     }
 
     #[test]
     fn empty_input() {
-        let mut p = LlmOutputParser::new(true, false, 0, false);
+        let mut p = LlmOutputParser::new(true, false);
         p.push_str("");
         assert!(p.parts.is_empty());
     }
 
     #[test]
     fn orphan_close_think_in_text() {
-        let mut p = LlmOutputParser::new(true, false, 0, false);
+        let mut p = LlmOutputParser::new(true, false);
         p.push_str("hello </think> world");
         assert_eq!(text_output(&p), "hello </think> world");
     }
 
     #[test]
     fn orphan_close_tool_call_in_text() {
-        let mut p = LlmOutputParser::new(true, false, 0, false);
+        let mut p = LlmOutputParser::new(true, false);
         p.push_str("hello </tool_call> world");
         assert_eq!(text_output(&p), "hello </tool_call> world");
     }
 
     #[test]
     fn tool_call_nested_think_inside() {
-        let mut p = LlmOutputParser::new(true, false, 0, false);
+        let mut p = LlmOutputParser::new(true, false);
         p.push_str(r#"<tool_call>{"name":"<think>","arguments":"{}"}</tool_call>"#);
         assert_eq!(p.parts.len(), 1);
         match &p.parts[0] {

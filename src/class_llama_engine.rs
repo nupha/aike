@@ -140,7 +140,7 @@ fn stop_to_vec(stop: &StopConfiguration) -> Option<Vec<String>> {
     }
 }
 
-fn js_engine_chat_completions(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+fn js_engine_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let engine = get_engine(ctx, &this)?;
 
@@ -167,7 +167,7 @@ fn js_engine_chat_completions(ctx: &mut ScopedContext, cc: CallContext) -> JSRes
     let reasoning = if !v.is_undefined() {
         v.to_bool()?
     } else {
-        false
+        true // enabled by default
     };
 
     let v = opts_obj.get_property_str(ctx, "idSlot")?;
@@ -255,12 +255,16 @@ fn js_engine_chat_completions(ctx: &mut ScopedContext, cc: CallContext) -> JSRes
     let mut parser = LlmOutputParser::new(
         reasoning,
         req.reasoning_effort.clone().unwrap_or_default() != ReasoningEffort::None,
-        n_prompt_tokens,
-        req.stream_options
-            .is_some_and(|s| s.include_usage.unwrap_or(false)),
     );
-    parser.set_respond_id(respond_id.clone());
-    parser.set_model_name(model_name.clone());
+
+    parser
+        .set_respond_id(respond_id.clone())
+        .set_model_name(model_name.clone())
+        .set_n_prompt_tokens(n_prompt_tokens)
+        .set_include_usage(
+            req.stream_options
+                .is_some_and(|s| s.include_usage.unwrap_or(false)),
+        );
 
     if is_stream {
         // Streaming: AsyncIterableIterator
@@ -460,9 +464,12 @@ fn js_engine_responses(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             -1
         })?;
 
-    let mut parser = LlmOutputParser::new(true, reasoning.is_some(), n_prompt_tokens, usage);
-    parser.set_respond_id(respond_id.clone());
-    parser.set_model_name(model_name.clone());
+    let mut parser = LlmOutputParser::new(true, reasoning.is_some());
+    parser
+        .set_respond_id(respond_id.clone())
+        .set_model_name(model_name.clone())
+        .set_n_prompt_tokens(n_prompt_tokens)
+        .set_include_usage(usage);
 
     if is_stream {
         // Streaming: AsyncIterableIterator
@@ -626,13 +633,13 @@ const CLASS_ENGINE_PROTO: &[FieldDef] = &[
     FieldDef::CALL(
         "chat",
         2,
-        js_engine_chat_completions,
+        js_engine_chatCompletions,
         MAGIC_CHAT_STREAM as i16,
     ),
     FieldDef::CALL(
         "chatOnce",
         2,
-        js_engine_chat_completions,
+        js_engine_chatCompletions,
         MAGIC_CHAT_ONCE as i16,
     ),
     FieldDef::CALL(

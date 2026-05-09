@@ -6,14 +6,7 @@ use std::{cell::Cell, ffi::c_void, sync::Arc, time::Duration};
 use async_openai::{
     Client,
     config::OpenAIConfig,
-    types::chat::{
-        ChatCompletionRequestAssistantMessage, ChatCompletionRequestAssistantMessageContent,
-        ChatCompletionRequestMessage, ChatCompletionRequestSystemMessage,
-        ChatCompletionRequestSystemMessageContent, ChatCompletionRequestToolMessage,
-        ChatCompletionRequestToolMessageContent, ChatCompletionRequestUserMessage,
-        ChatCompletionRequestUserMessageContent, CreateChatCompletionResponse,
-        CreateChatCompletionStreamResponse,
-    },
+    types::chat::{CreateChatCompletionResponse, CreateChatCompletionStreamResponse},
 };
 use linkme::distributed_slice;
 use zuqe::{
@@ -102,98 +95,13 @@ pub(crate) fn get_client_arc(
     }
 }
 
-/// Parse JS messages array → Vec<ChatCompletionRequestMessage>
-pub(crate) fn parse_chat_messages(
-    ctx: &mut ScopedContext,
-    val: JSValue,
-) -> Result<Vec<ChatCompletionRequestMessage>, i32> {
-    let arr = val.as_object_Array().copied().ok_or_else(|| {
-        ctx.throw_type_error("messages must be an array");
-        -1
-    })?;
-
-    if arr.payload().is_empty() {
-        ctx.throw_type_error("messages must not be empty");
-        return Err(-1);
-    }
-
-    let mut messages = Vec::with_capacity(arr.payload().len());
-    for item in arr.payload().values() {
-        let obj = item.as_object().copied().ok_or_else(|| {
-            ctx.throw_type_error("messages[] item must be object");
-            -1
-        })?;
-
-        let role_val = obj.get_property_str(ctx, "role")?;
-        let role = role_val
-            .as_string()
-            .map(|s| s.content().encode_utf8(false).to_string())
-            .ok_or_else(|| {
-                ctx.throw_type_error("messages[].role must be string");
-                -1
-            })?;
-
-        let content_val = obj.get_property_str(ctx, "content")?;
-        let content = if content_val.is_undefined() || content_val.is_null() {
-            String::new()
-        } else if let Some(s) = content_val.as_string() {
-            s.content().encode_utf8(false).to_string()
-        } else {
-            content_val
-                .to_string(ctx)?
-                .content()
-                .encode_utf8(false)
-                .to_string()
-        };
-
-        let msg = match role.as_str() {
-            "system" => ChatCompletionRequestMessage::System(ChatCompletionRequestSystemMessage {
-                content: ChatCompletionRequestSystemMessageContent::Text(content),
-                ..Default::default()
-            }),
-            "user" => ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
-                content: ChatCompletionRequestUserMessageContent::Text(content),
-                ..Default::default()
-            }),
-            "assistant" => {
-                ChatCompletionRequestMessage::Assistant(ChatCompletionRequestAssistantMessage {
-                    content: if content.is_empty() {
-                        None
-                    } else {
-                        Some(ChatCompletionRequestAssistantMessageContent::Text(content))
-                    },
-                    ..Default::default()
-                })
-            }
-            "tool" => {
-                let tc_id = obj
-                    .get_property_str(ctx, "tool_call_id")?
-                    .as_string()
-                    .map(|s| s.content().encode_utf8(false).to_string())
-                    .unwrap_or_default();
-                ChatCompletionRequestMessage::Tool(ChatCompletionRequestToolMessage {
-                    content: ChatCompletionRequestToolMessageContent::Text(content),
-                    tool_call_id: tc_id,
-                })
-            }
-            _ => {
-                ctx.throw_type_error(&format!("unsupported role: {role}"));
-                return Err(-1);
-            }
-        };
-        messages.push(msg);
-    }
-
-    Ok(messages)
-}
-
 enum ChatReply {
     Chunk(CreateChatCompletionStreamResponse),
     Done,
     Error(String),
 }
 
-fn js_client_chat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let client_arc = get_client_arc(ctx, &this)?;
     let is_stream = cc.magic() == MAGIC_CHAT_STREAM;
@@ -337,8 +245,18 @@ pub(crate) fn chunk_to_js(
 }
 
 const CLASS_CLIENT_PROTO: &[FieldDef] = &[
-    FieldDef::CALL("chat", 1, js_client_chat, MAGIC_CHAT_STREAM as i16),
-    FieldDef::CALL("chatOnce", 1, js_client_chat, MAGIC_CHAT_ONCE as i16),
+    FieldDef::CALL(
+        "chat",
+        1,
+        js_client_chatCompletions,
+        MAGIC_CHAT_STREAM as i16,
+    ),
+    FieldDef::CALL(
+        "chatOnce",
+        1,
+        js_client_chatCompletions,
+        MAGIC_CHAT_ONCE as i16,
+    ),
     FieldDef::CALL(
         "responses",
         1,

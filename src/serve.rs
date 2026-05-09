@@ -144,15 +144,12 @@ async fn handle_chat_completions(
     }
 
     let is_stream = req.stream.unwrap_or(false);
-    let tools = req.tools;
-    let tool_choice = req.tool_choice;
-    let stop = req.stop.clone();
 
     let prompt_tokens = match build_prompt_tokens(
         state.engine.lock().unwrap().model(),
         &req.messages,
-        tools.as_deref(),
-        tool_choice.as_ref(),
+        req.tools.as_deref(),
+        req.tool_choice.as_ref(),
         req.parallel_tool_calls,
         req.reasoning_effort.clone().unwrap_or_default(),
         req.response_format.as_ref(),
@@ -181,7 +178,7 @@ async fn handle_chat_completions(
             OutputMode::OneShot
         });
 
-    if let Some(stop_words) = stop.as_ref() {
+    if let Some(stop_words) = req.stop.as_ref() {
         let words: Vec<String> = match stop_words {
             async_openai::types::chat::StopConfiguration::String(s) => vec![s.clone()],
             async_openai::types::chat::StopConfiguration::StringArray(arr) => arr.clone(),
@@ -191,8 +188,9 @@ async fn handle_chat_completions(
         }
     }
 
-    if let Some(tools) = tools.as_ref().filter(|t| !t.is_empty()) {
-        let tc = tool_choice
+    if let Some(tools) = req.tools.as_ref().filter(|t| !t.is_empty()) {
+        let tc = req
+            .tool_choice
             .as_ref()
             .map(to_lark_tool_choice)
             .unwrap_or(llama_cpp_ffi::ToolChoice::Auto);
@@ -228,14 +226,18 @@ async fn handle_chat_completions(
     let mut parser = LlmOutputParser::new(
         false,
         req.reasoning_effort.clone().unwrap_or_default() != ReasoningEffort::None,
-        n_prompt_tokens,
-        req.stream_options
-            .as_ref()
-            .and_then(|o| o.include_usage)
-            .unwrap_or(false),
     );
-    parser.set_respond_id(respond_id.clone());
-    parser.set_model_name(model_name.clone());
+
+    parser
+        .set_respond_id(respond_id.clone())
+        .set_model_name(model_name.clone())
+        .set_n_prompt_tokens(n_prompt_tokens)
+        .set_include_usage(
+            req.stream_options
+                .as_ref()
+                .and_then(|o| o.include_usage)
+                .unwrap_or(false),
+        );
 
     if is_stream {
         // streaming

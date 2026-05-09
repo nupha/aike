@@ -142,9 +142,12 @@ pub async fn handle_responses(
         };
     }
 
-    let mut parser = LlmOutputParser::new(true, enalbe_thinking, n_prompt_tokens, true);
-    parser.set_respond_id(respond_id.clone());
-    parser.set_model_name(model_name.clone());
+    let mut parser = LlmOutputParser::new(true, enalbe_thinking);
+
+    parser
+        .set_respond_id(respond_id.clone())
+        .set_model_name(model_name.clone())
+        .set_n_prompt_tokens(n_prompt_tokens);
 
     if is_stream {
         handle_responses_stream(rx, parser, respond_id, model_name)
@@ -180,7 +183,7 @@ pub async fn handle_responses(
 
 pub(crate) fn handle_responses_stream(
     rx: crossbeam::channel::Receiver<EngineReply>,
-    mut parser: LlmOutputParser,
+    parser: LlmOutputParser,
     respond_id: String,
     model_name: String,
 ) -> Response {
