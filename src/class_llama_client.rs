@@ -631,9 +631,16 @@ fn js_client_chat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         // Non-streaming: Promise
         let result_slot = PromiseResultSlot::<Result<CreateChatCompletionResponse, String>>::new();
         let promise =
-            Promise::create_with_result_slot(ctx, result_slot.clone(), |cx, result| -> JSResult {
-                match result {
-                    Ok(resp) => response_to_js(cx, &resp),
+            Promise::create_with_result_slot(ctx, result_slot.clone(), |cx, data| -> JSResult {
+                match data {
+                    Ok(resp) => {
+                        // convert Chat completion response to JS object
+                        let val = serde_json::to_value(resp).map_err(|e| {
+                            cx.throw_internal_error(&format!("serialize response failed: {e}"));
+                            -1
+                        })?;
+                        JSValue::from_serde_json(cx, &val)
+                    }
                     Err(e) => {
                         cx.throw_internal_error(&e);
                         Err(-1)
@@ -664,18 +671,6 @@ fn js_client_dispose(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         }
     }
     Ok(JSValue::UNDEFINED)
-}
-
-/// Convert CreateChatCompletionResponse to a JS object.
-pub(crate) fn response_to_js(
-    ctx: &mut ScopedContext,
-    resp: &CreateChatCompletionResponse,
-) -> JSResult {
-    let val = serde_json::to_value(resp).map_err(|e| {
-        ctx.throw_internal_error(&format!("serialize response failed: {e}"));
-        -1
-    })?;
-    JSValue::from_serde_json(ctx, &val)
 }
 
 /// Convert CreateChatCompletionStreamResponse to a JS object.
