@@ -16,6 +16,7 @@ use axum::{
     routing::{get, post},
 };
 use futures_util::StreamExt;
+use llama_cpp_ffi::ModelFamily;
 use serde::Serialize;
 use serde_json::json;
 use tokio_stream::wrappers::UnboundedReceiverStream;
@@ -145,28 +146,46 @@ async fn handle_chat_completions(
     }
 
     let is_stream = req.stream.unwrap_or(false);
+    let enable_thinking = req.reasoning_effort.clone().unwrap_or_default() != ReasoningEffort::None;
+
+    let model_arch: ModelFamily;
+    let parse_reasoning: bool;
+    let default_max_tokens: usize;
+    let model_name: String;
+    let start_thinking: bool;
 
     // Build prompt tokens
-    let prompt_tokens = match apply_chat_template(
-        state.engine.lock().unwrap().model(),
-        &req.messages,
-        req.tools.as_deref(),
-        req.tool_choice.as_ref(),
-        req.parallel_tool_calls,
-        req.reasoning_effort.clone().unwrap_or_default(),
-        req.response_format.as_ref(),
-    ) {
-        Ok(prompt) => state.engine.lock().unwrap().model().tokenize(
-            &CString::new(prompt).unwrap(),
-            false,
-            true,
-        ),
-        Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(oai_error(e, "invalid_request_error")),
-            )
-                .into_response();
+    let prompt_tokens = {
+        let engine = state.engine.lock().unwrap();
+        let model = engine.model();
+
+        parse_reasoning = engine.parse_reasoning();
+        default_max_tokens = engine.default_max_tokens();
+        model_name = engine.model_name().to_string();
+        model_arch = model.family();
+
+        match apply_chat_template(
+            model,
+            &req.messages,
+            req.tools.as_deref(),
+            req.tool_choice.as_ref(),
+            req.parallel_tool_calls,
+            req.reasoning_effort.clone().unwrap_or_default(),
+            req.response_format.as_ref(),
+        ) {
+            Ok(prompt) => {
+                start_thinking = enable_thinking
+                    && (prompt.ends_with(model_arch.think_tags().0)
+                        || prompt.ends_with(&format!("{}\n", model_arch.think_tags().0)));
+                model.tokenize(&CString::new(prompt).unwrap(), false, true)
+            }
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(oai_error(e, "invalid_request_error")),
+                )
+                    .into_response();
+            }
         }
     };
 
@@ -184,8 +203,7 @@ async fn handle_chat_completions(
     let mut task_config = TaskConfig::new()
         .max_tokens(
             req.max_completion_tokens
-                .unwrap_or_else(|| state.engine.lock().unwrap().default_max_tokens() as u32)
-                as usize,
+                .unwrap_or_else(|| default_max_tokens as u32) as usize,
         )
         .temperature(req.temperature.unwrap_or(DEFAULT_TEMPERATURE))
         .top_p(req.top_p.unwrap_or(DEFAULT_TOP_P))
@@ -223,7 +241,6 @@ async fn handle_chat_completions(
 
     let n_prompt_tokens = prompt_tokens.len();
     let respond_id = format!("chatcmpl-{}", Uuid::new_v4().simple());
-    let model_name = state.engine.lock().unwrap().model_name().to_string();
 
     let rx = match state.engine.lock().unwrap().push_task_with_params(
         prompt_tokens,
@@ -241,12 +258,11 @@ async fn handle_chat_completions(
         }
     };
 
-    let parse_reasoning = state.engine.lock().unwrap().parse_reasoning();
-    let mut parser = LlmOutputParser::new(
-        parse_reasoning,
-        req.reasoning_effort.clone().unwrap_or_default() != ReasoningEffort::None,
-    );
+    let mut parser = LlmOutputParser::new(parse_reasoning, start_thinking);
+
     parser
+        .set_think_tags(model_arch.think_tags())
+        .set_tool_call_tags(model_arch.tool_call_tags())
         .set_respond_id(respond_id.clone())
         .set_model_name(model_name.clone())
         .set_n_prompt_tokens(n_prompt_tokens)

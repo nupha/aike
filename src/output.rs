@@ -184,10 +184,11 @@ pub struct LlmOutputParser {
 }
 
 impl LlmOutputParser {
-    pub fn new(parse_think: bool, start_think: bool) -> Self {
+    /// start_thinking: whether initial parser state is thinking or not.
+    pub fn new(parse_think: bool, start_thinking: bool) -> Self {
         Self {
             parse_think,
-            state: if start_think {
+            state: if start_thinking {
                 State::Thinking
             } else {
                 State::Text
@@ -202,13 +203,13 @@ impl LlmOutputParser {
         }
     }
 
-    pub fn set_think_tags(&mut self, open: String, close: String) -> &mut Self {
-        self.think_tags = (open, close);
+    pub fn set_think_tags(&mut self, tags: (&str, &str)) -> &mut Self {
+        self.think_tags = (tags.0.to_string(), tags.1.to_string());
         self
     }
 
-    pub fn set_tool_call_tags(&mut self, open: String, close: String) -> &mut Self {
-        self.tool_call_tags = (open, close);
+    pub fn set_tool_call_tags(&mut self, tags: (&str, &str)) -> &mut Self {
+        self.tool_call_tags = (tags.0.to_string(), tags.1.to_string());
         self
     }
 

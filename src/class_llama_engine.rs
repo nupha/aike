@@ -6,7 +6,7 @@ use std::{
 
 use async_openai::types::chat::{ReasoningEffort, StopConfiguration};
 use linkme::distributed_slice;
-use llama_cpp_ffi::ToolChoice as LarkToolChoice;
+use llama_cpp_ffi::{ModelFamily, ToolChoice as LarkToolChoice};
 use zuqe::{
     CallContext, ClassDef, ClassID, FieldDef, JSResult, JSValue, Object, Runtime, ScopedContext,
     builtins::{
@@ -152,10 +152,20 @@ fn js_engine_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
         })
     })?;
 
+    let enable_thinking = req.reasoning_effort.clone().unwrap_or_default() != ReasoningEffort::None;
+    let model_arch: ModelFamily;
+    let model_name: String;
+    let parse_reasoning: bool;
+    let start_thinking: bool;
+
     // Build prompt tokens
-    let (prompt_tokens, parse_reasoning) = {
-        let eng = engine.lock().unwrap();
-        let model = eng.model();
+    let prompt_tokens = {
+        let engine = engine.lock().unwrap();
+        let model = engine.model();
+
+        model_name = engine.model_name().to_string();
+        model_arch = model.family();
+        parse_reasoning = engine.parse_reasoning();
 
         let prompt = apply_chat_template(
             model,
@@ -171,13 +181,17 @@ fn js_engine_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
             -1
         })?;
 
+        start_thinking = enable_thinking
+            && (prompt.ends_with(model_arch.think_tags().0)
+                || prompt.ends_with(&format!("{}\n", model_arch.think_tags().0)));
+
         let tokens = model.tokenize(&CString::new(prompt).unwrap(), false, true);
         if tokens.is_empty() {
             ctx.throw_internal_error("prompt tokenized to zero tokens");
             return Err(-1);
         }
 
-        (tokens, eng.parse_reasoning())
+        tokens
     };
 
     let is_stream = cc.magic() == MAGIC_CHAT_STREAM;
@@ -226,7 +240,6 @@ fn js_engine_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
 
     let n_prompt_tokens = prompt_tokens.len();
     let respond_id = format!("chatcmpl-{}", uuid::Uuid::new_v4().simple());
-    let model_name = engine.lock().unwrap().model_name().to_string();
 
     // Push task to engine
     let rx = engine
@@ -238,12 +251,11 @@ fn js_engine_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
             -1
         })?;
 
-    let mut parser = LlmOutputParser::new(
-        parse_reasoning,
-        req.reasoning_effort.clone().unwrap_or_default() != ReasoningEffort::None,
-    );
+    let mut parser = LlmOutputParser::new(parse_reasoning, start_thinking);
 
     parser
+        .set_think_tags(model_arch.think_tags())
+        .set_tool_call_tags(model_arch.tool_call_tags())
         .set_respond_id(respond_id.clone())
         .set_model_name(model_name.clone())
         .set_n_prompt_tokens(n_prompt_tokens)
@@ -406,10 +418,13 @@ fn js_engine_responses(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         .as_ref()
         .map(|t| crate::responses::convert::responses_tools_to_chat_tools(t));
 
+    let model_arch: ModelFamily;
+
     // Build prompt tokens
     let prompt_tokens = {
         let eng = engine.lock().unwrap();
         let model = eng.model();
+        model_arch = model.family();
 
         let prompt = apply_chat_template(
             model,
@@ -472,6 +487,8 @@ fn js_engine_responses(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     let mut parser = LlmOutputParser::new(true, reasoning.is_some());
     parser
+        .set_think_tags(model_arch.think_tags())
+        .set_tool_call_tags(model_arch.tool_call_tags())
         .set_respond_id(respond_id.clone())
         .set_model_name(model_name.clone())
         .set_n_prompt_tokens(n_prompt_tokens)

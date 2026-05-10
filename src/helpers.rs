@@ -329,9 +329,51 @@ CODE_CONTENT: /(.|\\n)*?/\n\
     }
 }
 
+/// Convert a camelCase string to snake_case.
+fn camel_to_snake(s: &str) -> String {
+    let mut result = String::with_capacity(s.len() + 4);
+    for (i, ch) in s.char_indices() {
+        if i > 0 && ch.is_uppercase() {
+            result.push('_');
+        }
+        result.push(ch.to_ascii_lowercase());
+    }
+    result
+}
+
+/// Recursively convert all object keys in a JSON value from camelCase to snake_case.
+fn json_keys_camel_to_snake(val: &mut JsonValue) {
+    match val {
+        JsonValue::Object(map) => {
+            let keys: Vec<String> = map.keys().cloned().collect();
+            for key in keys {
+                let snake = camel_to_snake(&key);
+                if snake != key {
+                    if let Some(v) = map.remove(&key) {
+                        map.insert(snake, v);
+                    }
+                }
+            }
+            // recurse into values
+            for v in map.values_mut() {
+                json_keys_camel_to_snake(v);
+            }
+        }
+        JsonValue::Array(arr) => {
+            for v in arr.iter_mut() {
+                json_keys_camel_to_snake(v);
+            }
+        }
+        _ => {}
+    }
+}
+
 pub(crate) fn parse_chat_completion_req(
     mut json_val: serde_json::Value,
 ) -> Result<CreateChatCompletionRequest, serde_json::Error> {
+    // Convert camelCase JS keys to snake_case for serde deserialization
+    json_keys_camel_to_snake(&mut json_val);
+
     // Note: model is required, set default if missing
     if let Some(obj) = json_val.as_object_mut()
         && !obj.contains_key("model")

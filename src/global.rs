@@ -7,7 +7,7 @@ use colorized::{Colors, colorize_print, colorize_println};
 use zuqe::{Array, CallContext, Callback, JS_PROP_C_W_E, JSResult, JSValue, ScopedContext};
 
 fn js_print(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let level = cc.magic();
+    let level = cc.magic() % 100;
     let inspect = true;
 
     let color = || {
@@ -37,7 +37,7 @@ fn js_print(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         );
     }
 
-    if cc.magic() == 999 {
+    if cc.magic() >= 100 {
         // print no newline
         colorize_print("", color());
     } else {
@@ -51,8 +51,10 @@ pub fn setup_globals(ctx: &mut ScopedContext, script_args: &[String]) -> Result<
     let mut global = ctx.global_obj();
 
     {
-        let print_no_nl = ctx.create_native_function(Callback::Func(js_print), "print", 0, 999)?;
+        let print_no_nl = ctx.create_native_function(Callback::Func(js_print), "print", 0, 100)?;
         global.set_property_str(ctx, "print", print_no_nl.into())?;
+        let debug_no_nl = ctx.create_native_function(Callback::Func(js_print), "debug", 0, 101)?;
+        global.set_property_str(ctx, "debug", debug_no_nl.into())?;
 
         let mut console = ctx.create_base_object()?;
 
