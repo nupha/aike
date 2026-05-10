@@ -36,6 +36,7 @@ tokio = { version = "1", features = [
     "sync",
     "net",
     "time",
+    "fs",
 ] }
 minijinja = { version = "2", features = ["serde"] }
 minijinja-contrib = { version = "2", features = ["pycompat"] }

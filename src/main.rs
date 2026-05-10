@@ -11,6 +11,7 @@ mod class_llama_engine;
 mod class_llama_model;
 mod class_llama_sampler;
 mod engine;
+mod fs;
 mod global;
 mod helpers;
 mod mod_llama;
@@ -38,6 +39,8 @@ use crate::{
     class_llama_engine::JSLlamaEngine,
     class_llama_model::JSLlamaModel,
     class_llama_sampler::JSSamplerChain,
+    fs::class_file_handle::JSFileHandle,
+    fs::init_mod_fs,
     global::setup_globals,
     mod_llama::init_mod_llama,
     mod_os::{init_mod_os, mod_os_gc_trace},
@@ -235,12 +238,14 @@ async fn main() -> ExitCode {
                 JSLlamaClient::class_id(),
                 JSSamplerChain::class_id(),
                 JSFile::class_id(),
+                JSFileHandle::class_id(),
             ])?;
 
             // register native modules
             init_mod_std(cx)?;
             init_mod_os(cx)?;
             init_mod_llama(cx)?;
+            init_mod_fs(cx)?;
 
             setup_globals(cx, &args.script_args)
         })
