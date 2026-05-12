@@ -199,6 +199,7 @@ fn generated_content_to_chat_chunk(
             service_tier: None,
         })
         .unwrap(),
+
         GeneratedContent::Reasoning(text) => {
             let mut chunk = serde_json::to_value(CreateChatCompletionStreamResponse {
                 id: id.to_string(),
@@ -234,6 +235,7 @@ fn generated_content_to_chat_chunk(
 
             chunk
         }
+
         GeneratedContent::ToolCall(text) => {
             *has_tool_call = true;
 
@@ -272,6 +274,16 @@ fn generated_content_to_chat_chunk(
 }
 
 /// Receive EngineReply from rx and direct to OpenAI chat completion chunks.
+/// Represents a chunk in OpenAI streaming response
+pub(crate) enum ChatChunk {
+    /// Normal content chunk
+    Chunk(serde_json::Value),
+    /// Error occurred - callback should handle error formatting
+    Error(String),
+    /// Stream finished marker - callback should handle cleanup (e.g., send "[DONE]")
+    Done,
+}
+
 pub(crate) fn redirect_engine_reply_to_openai_chunks(
     rx: crossbeam::channel::Receiver<EngineReply>,
     timeout: std::time::Duration,
@@ -279,9 +291,8 @@ pub(crate) fn redirect_engine_reply_to_openai_chunks(
     model_name: &str,
     n_prompt_tokens: usize,
     include_usage: bool,
-    mut on_chunk: impl FnMut(serde_json::Value, usize) -> bool,
+    mut on_chunk: impl FnMut(ChatChunk) -> bool,
 ) {
-    let mut nth = 0usize;
     let mut has_tool_call = false;
     let mut first_chunk = true;
 
@@ -303,10 +314,9 @@ pub(crate) fn redirect_engine_reply_to_openai_chunks(
                     first_chunk = false;
                 }
 
-                if !on_chunk(chunk, nth) {
+                if !on_chunk(ChatChunk::Chunk(chunk)) {
                     break;
                 }
-                nth += 1;
             }
             Ok(EngineReply::Stop(reason, n_completion_tokens)) => {
                 // Emit stop message
@@ -356,42 +366,26 @@ pub(crate) fn redirect_engine_reply_to_openai_chunks(
                 })
                 .unwrap();
 
-                on_chunk(stop_chunk, nth);
-                nth += 1;
+                on_chunk(ChatChunk::Chunk(stop_chunk));
 
-                // Emit done marker (empty object)
-                let done_chunk = serde_json::json!({
-                    "done": true
-                });
-                on_chunk(done_chunk, nth);
+                // Emit done marker
+                on_chunk(ChatChunk::Done);
                 break;
             }
             Ok(EngineReply::Cancelled) => {
-                let error_chunk = serde_json::json!({
-                    "error": ERR_CANCELLED
-                });
-                on_chunk(error_chunk, nth);
+                on_chunk(ChatChunk::Error(ERR_CANCELLED.to_string()));
                 break;
             }
             Ok(EngineReply::Error(e)) => {
-                let error_chunk = serde_json::json!({
-                    "error": e
-                });
-                on_chunk(error_chunk, nth);
+                on_chunk(ChatChunk::Error(e));
                 break;
             }
             Ok(EngineReply::Shutdown) => {
-                let error_chunk = serde_json::json!({
-                    "error": ERR_ENGINE_SHUTDOWN
-                });
-                on_chunk(error_chunk, nth);
+                on_chunk(ChatChunk::Error(ERR_ENGINE_SHUTDOWN.to_string()));
                 break;
             }
             Err(_) => {
-                let error_chunk = serde_json::json!({
-                    "error": "stream timed out"
-                });
-                on_chunk(error_chunk, nth);
+                on_chunk(ChatChunk::Error("stream timed out".to_string()));
                 break;
             }
         }
@@ -644,6 +638,7 @@ impl LlmOutputParser {
         self.parts.pop_front()
     }
 
+    #[deprecated]
     pub(crate) fn parse_partial<F>(
         mut self,
         rx: crossbeam::channel::Receiver<EngineReply>,
@@ -741,6 +736,7 @@ impl LlmOutputParser {
         }
     }
 
+    #[deprecated]
     pub(crate) fn parse_all(
         mut self,
         rx: crossbeam::channel::Receiver<EngineReply>,

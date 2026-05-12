@@ -267,7 +267,7 @@ fn js_engine_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
 
     if is_stream {
         // Streaming: AsyncIterableIterator
-        let (chunk_tx, chunk_rx) = crossbeam::channel::bounded::<(serde_json::Value, usize)>(8);
+        let (chunk_tx, chunk_rx) = crossbeam::channel::bounded::<crate::output::ChatChunk>(8);
         std::thread::spawn(move || {
             redirect_engine_reply_to_openai_chunks(
                 rx,
@@ -277,29 +277,30 @@ fn js_engine_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
                 n_prompt_tokens,
                 req.stream_options
                     .is_some_and(|s| s.include_usage.unwrap_or(false)),
-                |chunk, nth| chunk_tx.send((chunk, nth)).is_ok(),
+                |chunk| chunk_tx.send(chunk).is_ok(),
             );
         });
 
-        AsyncIterableIterator::create_with_receiver::<(serde_json::Value, usize)>(
+        AsyncIterableIterator::create_with_receiver::<crate::output::ChatChunk>(
             ctx,
             chunk_rx,
-            move |cx, (chunk, _)| -> Result<Option<JSValue>, i32> {
-                // Check for done marker
-                if chunk.get("done").is_some() {
-                    return Ok(None);
+            move |cx, chunk| -> Result<Option<JSValue>, i32> {
+                match chunk {
+                    crate::output::ChatChunk::Chunk(data) => {
+                        JSValue::from_serde_json(cx, &data).map(Some).map_err(|_| {
+                            cx.throw_internal_error("serialize chunk failed");
+                            -1
+                        })
+                    }
+                    crate::output::ChatChunk::Error(e) => {
+                        cx.throw_internal_error(&e);
+                        Err(-1)
+                    }
+                    crate::output::ChatChunk::Done => {
+                        // End the iterator
+                        Ok(None)
+                    }
                 }
-
-                // Check for error
-                if let Some(error) = chunk.get("error") {
-                    cx.throw_internal_error(&error.as_str().unwrap_or("unknown error"));
-                    return Err(-1);
-                }
-
-                JSValue::from_serde_json(cx, &chunk).map(Some).map_err(|_| {
-                    cx.throw_internal_error("serialize chunk failed");
-                    -1
-                })
             },
         )
         .map(JSValue::from)

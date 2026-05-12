@@ -26,7 +26,7 @@ use uuid::Uuid;
 use crate::{
     engine::{Engine, GrammarConfig, OutputMode, TaskConfig},
     helpers::{apply_chat_template, now_unix_s, to_lark_tool_choice},
-    output::{LlmOutputParser, OutputChunk, ParserKind},
+    output::{ChatChunk, LlmOutputParser, ParserKind, redirect_engine_reply_to_openai_chunks},
 };
 
 pub(crate) const ERR_CANCELLED: &str = "cancelled";
@@ -207,6 +207,7 @@ async fn handle_chat_completions(
         )
         .temperature(req.temperature.unwrap_or(DEFAULT_TEMPERATURE))
         .top_p(req.top_p.unwrap_or(DEFAULT_TOP_P))
+        // .enable_output_parser(parse_reasoning)
         .output_mode(if is_stream {
             OutputMode::Continuous
         } else {
@@ -277,32 +278,35 @@ async fn handle_chat_completions(
         // streaming - sse
         let (tx, rx_tokio) = tokio::sync::mpsc::unbounded_channel::<String>();
         tokio::task::spawn_blocking(move || {
-            parser.parse_partial(rx, STREAM_TIMEOUT, |item, nth| {
-                match item {
-                    OutputChunk::Done => {
-                        let _ = tx.send("[DONE]".to_string());
-                    }
-                    OutputChunk::Error(e) => {
-                        let err = oai_error(e, "server_error");
-                        let data = serde_json::to_string(&err).unwrap_or_default();
-                        let _ = tx.send(data);
-                        let _ = tx.send("[DONE]".to_string());
-                    }
-                    _ => {
-                        let mut chunk =
-                            item.into_chat_chunk(&respond_id, &model_name, now_unix_s() as u32);
-                        if nth == 0 {
-                            // set role on first chunk
-                            chunk["choices"][0]["delta"]["role"] =
-                                serde_json::Value::String("assistant".to_string());
+            redirect_engine_reply_to_openai_chunks(
+                rx,
+                STREAM_TIMEOUT,
+                &respond_id,
+                &model_name,
+                n_prompt_tokens,
+                req.stream_options
+                    .as_ref()
+                    .and_then(|o| o.include_usage)
+                    .unwrap_or(false),
+                |chunk| {
+                    match chunk {
+                        ChatChunk::Chunk(data) => {
+                            let serialized = serde_json::to_string(&data).unwrap();
+                            let _ = tx.send(serialized);
                         }
-
-                        let data = serde_json::to_string(&chunk).unwrap();
-                        let _ = tx.send(data);
+                        ChatChunk::Done => {
+                            let _ = tx.send("[DONE]".to_string());
+                        }
+                        ChatChunk::Error(e) => {
+                            let err = oai_error(e, "server_error");
+                            let data = serde_json::to_string(&err).unwrap_or_default();
+                            let _ = tx.send(data);
+                            let _ = tx.send("[DONE]".to_string());
+                        }
                     }
-                }
-                true
-            });
+                    true
+                },
+            );
         });
 
         let s = UnboundedReceiverStream::new(rx_tokio)
