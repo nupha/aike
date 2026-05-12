@@ -2,7 +2,7 @@ use std::collections::{HashSet, VecDeque};
 
 use async_openai::types::chat::ChatCompletionTools;
 use crossbeam::channel::{Receiver, Sender};
-use llama_cpp_ffi::{LlamaModel, ToolChoice};
+use llama_cpp_ffi::{LlamaModel, OutputParser, ToolChoice};
 
 use crate::helpers::{build_tools_grammar, now_unix_s};
 
@@ -50,6 +50,8 @@ pub struct TaskConfig {
     pub top_p: f32,
     pub logits_for_all_tokens: bool,
     pub output_mode: OutputMode,
+    /// Enable output parsing to track semantic states (reasoning, tool calls, etc.)
+    pub enable_output_parser: bool,
 }
 
 impl TaskConfig {
@@ -63,6 +65,7 @@ impl TaskConfig {
             logits_for_all_tokens: false,
             grammar: None,
             output_mode: OutputMode::OneShot,
+            enable_output_parser: false,
         }
     }
 
@@ -100,6 +103,11 @@ impl TaskConfig {
         self.output_mode = v;
         self
     }
+
+    pub fn enable_output_parser(mut self, enable: bool) -> Self {
+        self.enable_output_parser = enable;
+        self
+    }
 }
 
 pub struct EngineTask {
@@ -130,9 +138,59 @@ pub enum StopReason {
     Word(String),
 }
 
+/// Represents different types of generated content based on semantic state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GeneratedContent {
+    /// Normal text output
+    Text(String),
+    /// Reasoning/thinking content
+    Reasoning(String),
+    /// Tool call content (typically JSON)
+    ToolCall(String),
+}
+
+impl GeneratedContent {
+    /// Get the text content regardless of type
+    pub fn as_str(&self) -> &str {
+        match self {
+            GeneratedContent::Text(s) => s,
+            GeneratedContent::Reasoning(s) => s,
+            GeneratedContent::ToolCall(s) => s,
+        }
+    }
+
+    /// Append string to content
+    pub fn push_str(&mut self, s: &str) {
+        match self {
+            GeneratedContent::Text(text) => text.push_str(s),
+            GeneratedContent::Reasoning(text) => text.push_str(s),
+            GeneratedContent::ToolCall(text) => text.push_str(s),
+        }
+    }
+
+    /// Truncate content to new length
+    pub fn truncate(&mut self, new_len: usize) {
+        match self {
+            GeneratedContent::Text(text) => text.truncate(new_len),
+            GeneratedContent::Reasoning(text) => text.truncate(new_len),
+            GeneratedContent::ToolCall(text) => text.truncate(new_len),
+        }
+    }
+}
+
+/// Helper function to check if a GeneratedContent matches the given state
+fn matches_content(content: &GeneratedContent, state: &llama_cpp_ffi::OutputState) -> bool {
+    match (content, state) {
+        (GeneratedContent::Text(_), llama_cpp_ffi::OutputState::Text) => true,
+        (GeneratedContent::Reasoning(_), llama_cpp_ffi::OutputState::Reasoning) => true,
+        (GeneratedContent::ToolCall(_), llama_cpp_ffi::OutputState::ToolCall) => true,
+        _ => false,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EngineReply {
-    Text(String),
+    Content(GeneratedContent),
     Stop(StopReason, usize),
     Cancelled,
     Error(String),
@@ -141,40 +199,119 @@ pub enum EngineReply {
 
 #[derive(Debug)]
 pub struct TaskState {
-    pub config: TaskConfig,
-    pub n_completion_tokens: usize,
-    pub generated_text: String,
-    pub pending_bytes: Vec<u8>,
-    pub output_tx: Sender<EngineReply>,
+    pub(crate) config: TaskConfig,
+    pub(crate) n_completion_tokens: usize,
+    pub(crate) output_parser: Option<OutputParser>,
+    pub(crate) output_tx: Sender<EngineReply>,
+
+    /// Accumulated generated contents.
+    /// In OneShot mode: collects all contents, sent at the end.
+    /// In Continuous mode: sent immediately on state transition.
+    /// The last element represents the current content being accumulated.
+    pub(crate) current_content: Vec<GeneratedContent>,
+    /// Pending bytes for UTF-8 decoding
+    pub(crate) pending_bytes: Vec<u8>,
 }
 
 impl TaskState {
-    pub fn append_utf8_piece(&mut self, piece: &[u8]) {
-        if piece.is_empty() {
-            return;
+    pub(crate) fn add_output_token(&mut self, token: Token, model: &LlamaModel) {
+        let mut append_token_utf8 = true;
+        self.n_completion_tokens += 1;
+
+        // Push token to parser and get events
+        if let Some(ref mut parser) = self.output_parser {
+            match parser.push_token(token) {
+                Ok((add_text, event_list)) => {
+                    for event in event_list {
+                        self.handle_output_event(event);
+                    }
+                    append_token_utf8 = add_text;
+                }
+                Err(e) => {
+                    append_token_utf8 = false;
+                    eprintln!("[OutputParser] Error: {}", e);
+                }
+            }
+        }
+
+        if append_token_utf8 {
+            self.append_utf8_bytes(&model.token_to_piece(token));
+        }
+    }
+
+    /// Handle output parser events
+    fn handle_output_event(&mut self, event: llama_cpp_ffi::OutputEvent) {
+        #[cfg(debug_assertions)]
+        eprintln!("[OutputParser] Parsing output event: {event:?} ");
+
+        // At boundary of chunk: in continuous mode, send current content
+        if self.config.output_mode == OutputMode::Continuous {
+            for content in self.current_content.drain(..) {
+                if !content.as_str().is_empty() {
+                    let _ = self.output_tx.send(EngineReply::Content(content));
+                }
+            }
+            self.pending_bytes.clear();
+        }
+
+        // Push new empty content for the new state
+        self.current_content.push(match event {
+            llama_cpp_ffi::OutputEvent::ReasoningStart => {
+                GeneratedContent::Reasoning(String::new())
+            }
+            llama_cpp_ffi::OutputEvent::ToolCallStart => GeneratedContent::ToolCall(String::new()),
+            _ => GeneratedContent::Text(String::new()),
+        });
+    }
+
+    fn append_utf8_bytes(&mut self, piece: &[u8]) {
+        debug_assert!(!piece.is_empty());
+        debug_assert!(!self.current_content.is_empty());
+
+        #[cfg(debug_assertions)]
+        {
+            // Get current state from parser
+            let state = self
+                .output_parser
+                .as_ref()
+                .map(|p| p.current_state().clone())
+                .unwrap_or(llama_cpp_ffi::OutputState::Text);
+
+            // Debug assert: parser state should match last content element's type
+            debug_assert!(
+                matches_content(self.current_content.last().unwrap(), &state),
+                "Parser state mismatch with current_content"
+            );
         }
 
         self.pending_bytes.extend_from_slice(piece);
 
-        loop {
-            match std::str::from_utf8(&self.pending_bytes) {
+        while !self.pending_bytes.is_empty() {
+            let text: String = match std::str::from_utf8(&self.pending_bytes) {
                 Ok(s) => {
-                    self.generated_text.push_str(s);
+                    let text = s.to_string();
                     self.pending_bytes.clear();
-                    break;
+                    text
                 }
                 Err(e) => {
                     let valid = e.valid_up_to();
-                    if valid == 0 {
-                        break;
-                    }
-                    let s = unsafe { std::str::from_utf8_unchecked(&self.pending_bytes[..valid]) };
-                    self.generated_text.push_str(s);
-                    self.pending_bytes.drain(0..valid);
-                    if self.pending_bytes.is_empty() {
-                        break;
+                    if valid > 0 {
+                        let s = unsafe {
+                            std::str::from_utf8_unchecked(&self.pending_bytes[..valid]).to_string()
+                        };
+                        self.pending_bytes.drain(0..valid);
+                        s
+                    } else if self.pending_bytes.len() >= 4 {
+                        self.pending_bytes.drain(0..1);
+                        continue;
+                    } else {
+                        String::new()
                     }
                 }
+            };
+
+            if !text.is_empty() {
+                self.current_content.last_mut().unwrap().push_str(&text);
             }
         }
     }
@@ -354,12 +491,45 @@ impl Engine {
             return SchedResult::Rejected;
         }
 
+        // Create output parser if enabled
+        let output_parser: Option<OutputParser> = if task.config.enable_output_parser {
+            // Get output grammar
+            let grammar = self.model.family().output_grammar();
+
+            let token_validator: llama_cpp_ffi::LlmTokenValidator = Box::new({
+                let model2 = self.model.clone();
+                move |token_text: &str| -> bool { model2.lookup_text_token(token_text).is_some() }
+            });
+
+            OutputParser::builder()
+                .model(self.model.clone())
+                .grammar(&grammar)
+                .token_validator(token_validator)
+                .build()
+                .ok()
+        } else {
+            None
+        };
+
+        // Initialize current_content with first Text element
+        let initial_state = output_parser
+            .as_ref()
+            .map(|p| p.current_state().clone())
+            .unwrap_or(llama_cpp_ffi::OutputState::Text);
+
+        let current_content = vec![match initial_state {
+            llama_cpp_ffi::OutputState::Text => GeneratedContent::Text(String::new()),
+            llama_cpp_ffi::OutputState::Reasoning => GeneratedContent::Reasoning(String::new()),
+            llama_cpp_ffi::OutputState::ToolCall => GeneratedContent::ToolCall(String::new()),
+        }];
+
         let task_state = TaskState {
             config: task.config,
             n_completion_tokens: 0,
-            generated_text: String::new(),
-            pending_bytes: Vec::new(),
+            output_parser,
             output_tx: task.output_tx,
+            current_content,
+            pending_bytes: Vec::new(),
         };
 
         let slot = &mut slots[slot_idx];

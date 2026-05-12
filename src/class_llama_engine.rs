@@ -20,7 +20,7 @@ use crate::{
     class_llama_client_responses::{parse_responses_input, parse_responses_reasoning},
     engine::{Engine, GrammarConfig, OutputMode, TaskConfig},
     helpers::{apply_chat_template, now_unix_s, parse_chat_completion_req, to_lark_tool_choice},
-    output::{LlmOutputParser, OutputChunk, ParserKind},
+    output::{LlmOutputParser, OutputChunk, ParserKind, redirect_engine_reply_to_openai_chunks},
 };
 
 pub(crate) const ERR_CANCELLED: &str = "cancelled";
@@ -211,7 +211,8 @@ fn js_engine_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
             OutputMode::Continuous
         } else {
             OutputMode::OneShot
-        });
+        })
+        .enable_output_parser(parse_reasoning);
 
     if let Some(stop_words) = req
         .stop
@@ -266,38 +267,39 @@ fn js_engine_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
 
     if is_stream {
         // Streaming: AsyncIterableIterator
-        let (item_tx, item_rx) = crossbeam::channel::bounded::<(OutputChunk, usize)>(8);
+        let (chunk_tx, chunk_rx) = crossbeam::channel::bounded::<(serde_json::Value, usize)>(8);
         std::thread::spawn(move || {
-            parser.parse_partial(rx, std::time::Duration::from_secs(u64::MAX), |item, nth| {
-                item_tx.send((item, nth)).is_ok()
-            });
+            redirect_engine_reply_to_openai_chunks(
+                rx,
+                std::time::Duration::from_secs(u64::MAX),
+                &respond_id,
+                &model_name,
+                n_prompt_tokens,
+                req.stream_options
+                    .is_some_and(|s| s.include_usage.unwrap_or(false)),
+                |chunk, nth| chunk_tx.send((chunk, nth)).is_ok(),
+            );
         });
 
-        AsyncIterableIterator::create_with_receiver::<(OutputChunk, usize)>(
+        AsyncIterableIterator::create_with_receiver::<(serde_json::Value, usize)>(
             ctx,
-            item_rx,
-            move |cx, (msg, nth)| -> Result<Option<JSValue>, i32> {
-                match msg {
-                    OutputChunk::Done => Ok(None),
-                    OutputChunk::Error(e) => {
-                        cx.throw_internal_error(&e);
-                        Err(-1)
-                    }
-                    _ => {
-                        let mut chunk =
-                            msg.into_chat_chunk(&respond_id, &model_name, now_unix_s() as u32);
-                        if nth == 0 {
-                            // set role on first chunk
-                            chunk["choices"][0]["delta"]["role"] =
-                                serde_json::Value::String("assistant".to_string());
-                        }
-
-                        JSValue::from_serde_json(cx, &chunk).map(Some).map_err(|_| {
-                            cx.throw_internal_error("serialize chunk failed");
-                            -1
-                        })
-                    }
+            chunk_rx,
+            move |cx, (chunk, _)| -> Result<Option<JSValue>, i32> {
+                // Check for done marker
+                if chunk.get("done").is_some() {
+                    return Ok(None);
                 }
+
+                // Check for error
+                if let Some(error) = chunk.get("error") {
+                    cx.throw_internal_error(&error.as_str().unwrap_or("unknown error"));
+                    return Err(-1);
+                }
+
+                JSValue::from_serde_json(cx, &chunk).map(Some).map_err(|_| {
+                    cx.throw_internal_error("serialize chunk failed");
+                    -1
+                })
             },
         )
         .map(JSValue::from)

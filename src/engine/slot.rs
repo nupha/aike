@@ -40,14 +40,4 @@ impl Slot {
             state: SlotState::Idle,
         }
     }
-
-    pub fn output_tx(&self) -> Option<&Sender<EngineReply>> {
-        match &self.state {
-            SlotState::Decoding { task_state, .. } | SlotState::Sampling { task_state, .. } => {
-                Some(&task_state.output_tx)
-            }
-            SlotState::Done { task_state, .. } => Some(&task_state.output_tx),
-            SlotState::Idle | SlotState::Busy => None,
-        }
-    }
 }

@@ -223,7 +223,8 @@ impl Engine {
         }
     }
 
-    pub(crate) fn accept_token(&mut self, seq_id: usize, token: Token) {
+    /// accept sampled token
+    pub(crate) fn sample_accept(&mut self, seq_id: usize, token: Token) {
         let samplers = self.samplers_mut();
         if seq_id < samplers.len()
             && let Some(sampler) = samplers[seq_id].as_mut()
@@ -299,11 +300,6 @@ impl Engine {
             self.cached_tokens_mut()[seq_id].clear();
             self.samplers_mut()[seq_id] = None;
         }
-    }
-
-    pub(crate) fn append_token(&self, task_state: &mut TaskState, token: Token) {
-        task_state.n_completion_tokens += 1;
-        task_state.append_utf8_piece(&self.token_to_piece(token));
     }
 
     pub fn start(

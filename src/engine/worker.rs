@@ -10,8 +10,21 @@ use crossbeam::channel::Receiver;
 use super::{
     context::Engine,
     slot::{Slot, SlotState},
-    task::{EngineCtrlMsg, EngineReply, EngineTask, OutputMode, SchedResult, StopReason},
+    task::{
+        EngineCtrlMsg, EngineReply, EngineTask, GeneratedContent, OutputMode, SchedResult,
+        StopReason,
+    },
 };
+
+/// Helper function to check if a GeneratedContent matches the parser state
+fn matches_content_state(content: &GeneratedContent, state: &llama_cpp_ffi::OutputState) -> bool {
+    match (content, state) {
+        (GeneratedContent::Text(_), llama_cpp_ffi::OutputState::Text) => true,
+        (GeneratedContent::Reasoning(_), llama_cpp_ffi::OutputState::Reasoning) => true,
+        (GeneratedContent::ToolCall(_), llama_cpp_ffi::OutputState::ToolCall) => true,
+        _ => false,
+    }
+}
 
 pub fn worker_loop(
     engine: Arc<Mutex<Engine>>,
@@ -289,14 +302,9 @@ impl Engine {
 
                     match self.sample(slot.seq_id, logits) {
                         Ok(token) => {
-                            self.accept_token(slot.seq_id, token);
+                            self.sample_accept(slot.seq_id, token);
 
-                            let mut out_text: String = "".into();
                             slot.state = if self.is_eog(token) {
-                                out_text = std::mem::replace(
-                                    &mut task_state.generated_text,
-                                    "".to_string(),
-                                );
                                 let n = task_state.n_completion_tokens;
                                 SlotState::Done {
                                     task_state,
@@ -305,41 +313,81 @@ impl Engine {
                             } else if task_state.config.max_tokens > 0
                                 && task_state.n_completion_tokens >= task_state.config.max_tokens
                             {
-                                out_text = std::mem::replace(
-                                    &mut task_state.generated_text,
-                                    "".to_string(),
-                                );
                                 let n = task_state.n_completion_tokens;
                                 SlotState::Done {
                                     task_state,
                                     reply: EngineReply::Stop(StopReason::MaxTokens, n),
                                 }
                             } else {
-                                self.append_token(&mut task_state, token);
+                                task_state.add_output_token(token, self.model());
 
+                                #[cfg(debug_assertions)]
+                                if let Some(parser) = &task_state.output_parser {
+                                    debug_assert!(
+                                        matches_content_state(
+                                            task_state.current_content.last().unwrap(),
+                                            parser.current_state()
+                                        ),
+                                        "current_content state mismatch: {:?} != {:?}",
+                                        task_state.current_content.last().unwrap(),
+                                        parser.current_state()
+                                    );
+                                }
+
+                                // Check stop words against the current content text
                                 if let Some(w) = hit_stop_words(
-                                    &task_state.generated_text,
+                                    task_state.current_content.last().unwrap().as_str(),
                                     &task_state.config.stop_words,
                                 ) {
-                                    let new_len =
-                                        task_state.generated_text.len().saturating_sub(w.len());
-                                    task_state.generated_text.truncate(new_len);
+                                    // Truncate stop word from tail of last content's text
+                                    let last_content =
+                                        task_state.current_content.last_mut().unwrap();
 
-                                    out_text = std::mem::replace(
-                                        &mut task_state.generated_text,
-                                        "".to_string(),
-                                    );
+                                    let new_len =
+                                        last_content.as_str().len().saturating_sub(w.len());
+
+                                    last_content.truncate(new_len);
+
                                     let n = task_state.n_completion_tokens;
                                     SlotState::Done {
                                         task_state,
                                         reply: EngineReply::Stop(StopReason::Word(w), n),
                                     }
                                 } else {
-                                    if task_state.config.output_mode != OutputMode::OneShot {
-                                        out_text = std::mem::replace(
-                                            &mut task_state.generated_text,
-                                            "".to_string(),
+                                    // In continuous mode, send current content if not ToolCall
+                                    if task_state.config.output_mode == OutputMode::Continuous {
+                                        debug_assert_eq!(
+                                            task_state.current_content.len(),
+                                            1,
+                                            "continuous mode should have only 1 content element in sampling_stage"
                                         );
+
+                                        let mut content = task_state.current_content.pop().unwrap();
+
+                                        // Only send if not ToolCall
+                                        if !matches!(content, GeneratedContent::ToolCall(_))
+                                            && !content.as_str().is_empty()
+                                        {
+                                            let empty = match content {
+                                                GeneratedContent::Text(_) => {
+                                                    GeneratedContent::Text(String::new())
+                                                }
+                                                GeneratedContent::Reasoning(_) => {
+                                                    GeneratedContent::Reasoning(String::new())
+                                                }
+                                                GeneratedContent::ToolCall(_) => {
+                                                    GeneratedContent::ToolCall(String::new())
+                                                }
+                                            };
+
+                                            let _ = task_state
+                                                .output_tx
+                                                .send(EngineReply::Content(content));
+
+                                            content = empty;
+                                        }
+
+                                        task_state.current_content.push(content);
                                     }
                                     SlotState::Decoding {
                                         prompt_tokens: VecDeque::from([token]),
@@ -349,12 +397,6 @@ impl Engine {
                                     }
                                 }
                             };
-
-                            if !out_text.is_empty()
-                                && let Some(tx) = slot.output_tx()
-                            {
-                                let _ = tx.send(EngineReply::Text(out_text));
-                            }
                         }
                         Err(e) => {
                             slot.state = SlotState::Done {
@@ -385,16 +427,31 @@ impl Engine {
                 match task_state.config.output_mode {
                     OutputMode::OneShot => {
                         if !aborted {
-                            let _ = task_state
-                                .output_tx
-                                .send(EngineReply::Text(task_state.generated_text));
+                            // Send all accumulated content
+                            for content in task_state.current_content {
+                                if !content.as_str().is_empty() {
+                                    let _ =
+                                        task_state.output_tx.send(EngineReply::Content(content));
+                                }
+                            }
                         }
                     }
                     OutputMode::Continuous => {
-                        debug_assert!(task_state.generated_text.is_empty());
+                        // In continuous mode, content should have been streamed already
+                        // Verify all elements are empty
+                        debug_assert!(
+                            task_state
+                                .current_content
+                                .iter()
+                                .all(|c| c.as_str().is_empty()),
+                            "Continuous mode: current_content should be empty after streaming, but found: {:?}",
+                            task_state.current_content
+                        );
                     }
                 }
+
                 let _ = task_state.output_tx.send(reply);
+
                 if aborted {
                     self.clear_slot(slot.seq_id);
                     slot.n_past = 0;
