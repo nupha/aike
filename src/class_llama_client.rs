@@ -1,14 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-use std::{cell::Cell, ffi::c_void, sync::Arc, time::Duration};
+use std::{cell::Cell, ffi::c_void, sync::Arc};
 
-use async_openai::{
-    Client,
-    config::OpenAIConfig,
-    types::chat::{CreateChatCompletionResponse, CreateChatCompletionStreamResponse},
-};
 use linkme::distributed_slice;
+use reqwest::header::HeaderMap;
 use zuqe::{
     CallContext, ClassCtorDef, ClassDef, ClassID, FieldDef, JSResult, JSValue, Object, Runtime,
     ScopedContext,
@@ -48,34 +44,30 @@ fn js_client_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         .map(|s| s.content().encode_utf8(false).to_string())
         .unwrap_or_else(|| "".to_string());
 
-    let mut config = OpenAIConfig::new()
-        .with_api_key(&api_key)
-        .with_api_base(&base_url);
-
-    let timeout_val = opts_obj.get_property_str(ctx, "timeout")?;
-    let timeout = if !timeout_val.is_undefined() {
-        Some(Duration::from_secs(
-            timeout_val.to_number(ctx)?.to_f64() as u64
-        ))
-    } else {
-        None
-    };
-
     let default_model: Option<String> = opts_obj
         .get_property_str(ctx, "model")?
         .as_string()
         .map(|s| s.content().encode_utf8(false).to_string());
 
-    let client = Client::with_config(config);
-
-    JSLlamaClient::new_instance(ctx, client, default_model, base_url, api_key).map(|obj| obj.into())
+    JSLlamaClient::new_instance(
+        ctx,
+        default_model,
+        base_url,
+        api_key,
+        String::new(),
+        String::new(),
+        HeaderMap::new(),
+    )
+    .map(|obj| obj.into())
 }
 
 pub(crate) struct ClientState {
-    pub client: Client<OpenAIConfig>,
-    pub model_name: Option<String>,
-    pub base_url: String,
-    pub api_key: String,
+    pub(crate) api_base: String,
+    pub(crate) api_key: String,
+    pub(crate) org_id: String,
+    pub(crate) project_id: String,
+    pub(crate) custom_headers: HeaderMap,
+    pub(crate) model_name: Option<String>,
 }
 
 /// Get Arc<ClientState> from JS value (bumps strong count)
@@ -132,7 +124,16 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
             .unwrap_or_else(|| "".to_string());
     }
 
-    let client = client_arc.client.clone();
+    // Use reqwest to make HTTP request, build client
+    let http_client = reqwest::Client::new();
+    let mut client = http_client
+        .post(&format!("{}/chat/completions", client_arc.api_base))
+        .body(serde_json::to_string(&req).unwrap_or_default())
+        .header("Content-Type", "application/json");
+
+    if !client_arc.api_key.is_empty() {
+        client = client.header("Authorization", format!("Bearer {}", client_arc.api_key));
+    }
 
     if is_stream {
         // Streaming: AsyncIterableIterator
@@ -153,23 +154,9 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
                 }
             }
 
-            // Use reqwest to make HTTP request and parse SSE manually
-            let base_url = client_arc.base_url.clone();
-            let api_key = client_arc.api_key.clone();
-            let url = format!("{}/chat/completions", base_url);
-
-            let http_client = reqwest::Client::new();
-            let request_body = serde_json::to_string(&req).unwrap_or_default();
-
-            match http_client
-                .post(&url)
-                .header("Content-Type", "application/json")
-                .header("Authorization", format!("Bearer {}", api_key))
-                .body(request_body)
-                .send()
-                .await
-            {
+            match client.send().await {
                 Ok(response) => {
+                    // parse SSE manually
                     use futures_util::StreamExt;
                     use tokio::io::AsyncBufReadExt;
                     use tokio_util::io::StreamReader;
@@ -242,22 +229,8 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
                 }
             })?;
 
-        let base_url = client_arc.base_url.clone();
-        let api_key = client_arc.api_key.clone();
-
         tokio::spawn(async move {
-            let url = format!("{}/chat/completions", base_url);
-            let http_client = reqwest::Client::new();
-            let request_body = serde_json::to_string(&req).unwrap_or_default();
-
-            let result = match http_client
-                .post(&url)
-                .header("Content-Type", "application/json")
-                .header("Authorization", format!("Bearer {}", api_key))
-                .body(request_body)
-                .send()
-                .await
-            {
+            let result = match client.send().await {
                 Ok(response) => {
                     let status = response.status();
                     let body = response.text().await.unwrap_or_default();
@@ -373,16 +346,20 @@ impl JSLlamaClient {
 
     pub fn new_instance(
         ctx: &mut ScopedContext,
-        client: Client<OpenAIConfig>,
         model: Option<String>,
         base_url: String,
         api_key: String,
+        org_id: String,
+        project_id: String,
+        custom_headers: HeaderMap,
     ) -> Result<Object, i32> {
         let state = Arc::new(ClientState {
-            client,
             model_name: model,
-            base_url,
+            api_base: base_url,
             api_key,
+            org_id,
+            project_id,
+            custom_headers,
         });
         let opaque = Arc::into_raw(state).cast::<c_void>() as *mut c_void;
         ctx.create_class_instance_with_opaque(Self::class_id(), opaque)

@@ -224,7 +224,8 @@ pub(super) fn js_client_responses(ctx: &mut ScopedContext, cc: CallContext) -> J
         -1
     })?;
 
-    let client = client_arc.client.clone();
+    let base_url = client_arc.api_base.clone();
+    let api_key = client_arc.api_key.clone();
 
     if is_stream {
         let result_slot = PromiseResultSlot::<ResponsesReply>::new();
@@ -246,19 +247,39 @@ pub(super) fn js_client_responses(ctx: &mut ScopedContext, cc: CallContext) -> J
                 }
             }
 
-            match client.responses().create_stream(req).await {
-                Ok(stream) => {
-                    use futures_util::StreamExt;
+            let url = format!("{}/responses", base_url);
+            let http_client = reqwest::Client::new();
+            let request_body = serde_json::to_string(&req).unwrap_or_default();
 
-                    let mut stream = stream;
-                    while let Some(result) = stream.next().await {
-                        match result {
-                            Ok(event) => {
-                                commit_slot(&slot, ResponsesReply::Event(Box::new(event))).await;
-                            }
-                            Err(e) => {
-                                commit_slot(&slot, ResponsesReply::Error(e.to_string())).await;
+            match http_client
+                .post(&url)
+                .header("Content-Type", "application/json")
+                .header("Authorization", format!("Bearer {}", api_key))
+                .body(request_body)
+                .send()
+                .await
+            {
+                Ok(response) => {
+                    use futures_util::StreamExt;
+                    use tokio::io::AsyncBufReadExt;
+                    use tokio_util::io::StreamReader;
+
+                    let byte_stream = response
+                        .bytes_stream()
+                        .map(|r| r.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e)));
+                    let reader = StreamReader::new(byte_stream);
+                    let mut lines = tokio::io::BufReader::new(reader).lines();
+
+                    while let Ok(Some(line)) = lines.next_line().await {
+                        let line = line.trim().to_string();
+                        if line.starts_with("data: ") {
+                            let data = &line[6..];
+                            if data == "[DONE]" {
                                 break;
+                            }
+
+                            if let Ok(event) = serde_json::from_str::<ResponseStreamEvent>(data) {
+                                commit_slot(&slot, ResponsesReply::Event(Box::new(event))).await;
                             }
                         }
                     }
@@ -299,11 +320,32 @@ pub(super) fn js_client_responses(ctx: &mut ScopedContext, cc: CallContext) -> J
             })?;
 
         tokio::spawn(async move {
-            let result: Result<Response, String> = client
-                .responses()
-                .create(req)
+            let url = format!("{}/responses", base_url);
+            let http_client = reqwest::Client::new();
+            let request_body = serde_json::to_string(&req).unwrap_or_default();
+
+            let result = match http_client
+                .post(&url)
+                .header("Content-Type", "application/json")
+                .header("Authorization", format!("Bearer {}", api_key))
+                .body(request_body)
+                .send()
                 .await
-                .map_err(|e| e.to_string());
+            {
+                Ok(response) => {
+                    let status = response.status();
+                    let body = response.text().await.unwrap_or_default();
+                    if status.is_success() {
+                        match serde_json::from_str::<Response>(&body) {
+                            Ok(resp) => Ok(resp),
+                            Err(e) => Err(format!("Failed to parse response: {}", e)),
+                        }
+                    } else {
+                        Err(format!("HTTP {} : {}", status, body))
+                    }
+                }
+                Err(e) => Err(e.to_string()),
+            };
             let _ = result_slot.commit(result);
         });
 
