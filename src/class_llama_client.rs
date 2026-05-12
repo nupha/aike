@@ -35,19 +35,22 @@ fn js_client_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         -1
     })?;
 
+    let base_url_val = opts_obj.get_property_str(ctx, "baseUrl")?;
+    let base_url = if let Some(s) = base_url_val.as_string() {
+        s.content().encode_utf8(false).to_string()
+    } else {
+        "https://api.openai.com/v1".to_string()
+    };
+
     let api_key = opts_obj
         .get_property_str(ctx, "apiKey")?
         .as_string()
         .map(|s| s.content().encode_utf8(false).to_string())
         .unwrap_or_else(|| "".to_string());
 
-    let mut config = OpenAIConfig::new().with_api_key(&api_key);
-
-    let base_url_val = opts_obj.get_property_str(ctx, "baseUrl")?;
-    if let Some(s) = base_url_val.as_string() {
-        let url = s.content().encode_utf8(false);
-        config = config.with_api_base(url.as_ref());
-    }
+    let mut config = OpenAIConfig::new()
+        .with_api_key(&api_key)
+        .with_api_base(&base_url);
 
     let timeout_val = opts_obj.get_property_str(ctx, "timeout")?;
     let timeout = if !timeout_val.is_undefined() {
@@ -65,12 +68,14 @@ fn js_client_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     let client = Client::with_config(config);
 
-    JSLlamaClient::new_instance(ctx, client, default_model).map(|obj| obj.into())
+    JSLlamaClient::new_instance(ctx, client, default_model, base_url, api_key).map(|obj| obj.into())
 }
 
 pub(crate) struct ClientState {
     pub client: Client<OpenAIConfig>,
     pub model_name: Option<String>,
+    pub base_url: String,
+    pub api_key: String,
 }
 
 /// Get Arc<ClientState> from JS value (bumps strong count)
@@ -96,7 +101,7 @@ pub(crate) fn get_client_arc(
 }
 
 enum ChatReply {
-    Chunk(CreateChatCompletionStreamResponse),
+    Chunk(serde_json::Value), // Use raw JSON to preserve extension fields
     Done,
     Error(String),
 }
@@ -148,24 +153,58 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
                 }
             }
 
-            match client.chat().create_stream(req).await {
-                Ok(stream) => {
-                    use futures_util::StreamExt;
+            // Use reqwest to make HTTP request and parse SSE manually
+            let base_url = client_arc.base_url.clone();
+            let api_key = client_arc.api_key.clone();
+            let url = format!("{}/chat/completions", base_url);
 
-                    let mut pin = std::pin::pin!(stream);
-                    while let Some(result) = pin.next().await {
-                        match result {
-                            Ok(chunk) => {
-                                commit_slot(&slot, ChatReply::Chunk(chunk)).await;
-                            }
-                            Err(e) => {
-                                commit_slot(&slot, ChatReply::Error(e.to_string())).await;
+            let http_client = reqwest::Client::new();
+            let request_body = serde_json::to_string(&req).unwrap_or_default();
+
+            match http_client
+                .post(&url)
+                .header("Content-Type", "application/json")
+                .header("Authorization", format!("Bearer {}", api_key))
+                .body(request_body)
+                .send()
+                .await
+            {
+                Ok(response) => {
+                    use futures_util::StreamExt;
+                    use tokio::io::AsyncBufReadExt;
+                    use tokio_util::io::StreamReader;
+
+                    // Convert response bytes to AsyncRead
+                    let byte_stream = response
+                        .bytes_stream()
+                        .map(|r| r.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e)));
+                    let reader = StreamReader::new(byte_stream);
+                    let mut lines = tokio::io::BufReader::new(reader).lines();
+
+                    while let Ok(Some(line)) = lines.next_line().await {
+                        let line = line.trim().to_string();
+                        if line.starts_with("data: ") {
+                            let data = &line[6..];
+                            if data == "[DONE]" {
                                 break;
+                            }
+
+                            if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
+                                // Check for error
+                                if json.get("error").is_some() {
+                                    let err_msg = json["error"]["message"]
+                                        .as_str()
+                                        .unwrap_or(data)
+                                        .to_string();
+                                    commit_slot(&slot, ChatReply::Error(err_msg)).await;
+                                    break;
+                                }
+
+                                commit_slot(&slot, ChatReply::Chunk(json)).await;
                             }
                         }
                     }
 
-                    // stop iterate
                     commit_slot(&slot, ChatReply::Done).await;
                 }
                 Err(e) => {
@@ -190,19 +229,12 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
         )
         .map(JSValue::from)
     } else {
-        // Non-streaming: Promise
-        let result_slot = PromiseResultSlot::<Result<CreateChatCompletionResponse, String>>::new();
+        // Non-streaming: Promise - Use reqwest to preserve extension fields
+        let result_slot = PromiseResultSlot::<Result<serde_json::Value, String>>::new();
         let promise =
             Promise::create_with_result_slot(ctx, result_slot.clone(), |cx, data| -> JSResult {
                 match data {
-                    Ok(resp) => {
-                        // convert Chat completion response to JS object
-                        let val = serde_json::to_value(resp).map_err(|e| {
-                            cx.throw_internal_error(&format!("serialize response failed: {e}"));
-                            -1
-                        })?;
-                        JSValue::from_serde_json(cx, &val)
-                    }
+                    Ok(resp) => JSValue::from_serde_json(cx, &resp),
                     Err(e) => {
                         cx.throw_internal_error(&e);
                         Err(-1)
@@ -210,8 +242,49 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
                 }
             })?;
 
+        let base_url = client_arc.base_url.clone();
+        let api_key = client_arc.api_key.clone();
+
         tokio::spawn(async move {
-            let result = client.chat().create(req).await.map_err(|e| e.to_string());
+            let url = format!("{}/chat/completions", base_url);
+            let http_client = reqwest::Client::new();
+            let request_body = serde_json::to_string(&req).unwrap_or_default();
+
+            let result = match http_client
+                .post(&url)
+                .header("Content-Type", "application/json")
+                .header("Authorization", format!("Bearer {}", api_key))
+                .body(request_body)
+                .send()
+                .await
+            {
+                Ok(response) => {
+                    let status = response.status();
+                    let body = response.text().await.unwrap_or_default();
+
+                    if status.is_success() {
+                        match serde_json::from_str::<serde_json::Value>(&body) {
+                            Ok(json) => {
+                                // Check for error in response
+                                if json.get("error").is_some() {
+                                    let err_msg = json["error"]["message"]
+                                        .as_str()
+                                        .unwrap_or(&body)
+                                        .to_string();
+                                    Err(err_msg)
+                                } else {
+                                    Ok(json)
+                                }
+                            }
+                            Err(e) => Err(format!("Failed to parse JSON: {}", e)),
+                        }
+                    } else {
+                        Err(format!("HTTP {} : {}", status, body))
+                    }
+                }
+                Err(e) => Err(e.to_string()),
+            };
+
             let _ = result_slot.commit(result);
         });
 
@@ -236,15 +309,9 @@ fn js_client_dispose(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 }
 
 /// Convert CreateChatCompletionStreamResponse to a JS object.
-pub(crate) fn chunk_to_js(
-    ctx: &mut ScopedContext,
-    chunk: &CreateChatCompletionStreamResponse,
-) -> JSResult {
-    let val = serde_json::to_value(chunk).map_err(|e| {
-        ctx.throw_internal_error(&format!("serialize chunk failed: {e}"));
-        -1
-    })?;
-    JSValue::from_serde_json(ctx, &val)
+pub(crate) fn chunk_to_js(ctx: &mut ScopedContext, chunk: &serde_json::Value) -> JSResult {
+    // chunk is already a JSON Value, just convert it to JS
+    JSValue::from_serde_json(ctx, chunk)
 }
 
 const CLASS_CLIENT_PROTO: &[FieldDef] = &[
@@ -308,10 +375,14 @@ impl JSLlamaClient {
         ctx: &mut ScopedContext,
         client: Client<OpenAIConfig>,
         model: Option<String>,
+        base_url: String,
+        api_key: String,
     ) -> Result<Object, i32> {
         let state = Arc::new(ClientState {
             client,
             model_name: model,
+            base_url,
+            api_key,
         });
         let opaque = Arc::into_raw(state).cast::<c_void>() as *mut c_void;
         ctx.create_class_instance_with_opaque(Self::class_id(), opaque)

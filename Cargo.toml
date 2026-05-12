@@ -45,7 +45,8 @@ tokio-stream = "0.1"
 tower-http = { version = "0.5", features = ["cors"] }
 uuid = { version = "1", features = ["v4"] }
 async-openai = { version = "0.37", features = ["chat-completion", "responses"] }
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.12", features = ["json", "stream"] }
+tokio-util = { version = "0.7", features = ["io"] }
 
 [[bin]]
 name = "llama-js"

@@ -207,7 +207,7 @@ async fn handle_chat_completions(
         )
         .temperature(req.temperature.unwrap_or(DEFAULT_TEMPERATURE))
         .top_p(req.top_p.unwrap_or(DEFAULT_TOP_P))
-        // .enable_output_parser(parse_reasoning)
+        .enable_output_parser(parse_reasoning)
         .output_mode(if is_stream {
             OutputMode::Continuous
         } else {
