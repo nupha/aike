@@ -27,10 +27,6 @@ impl GrammarConfig {
         let family = model.family();
         let tags = family.tool_call_tags();
 
-        // check if tag is token
-        // let tt = model.tokenize(CString::new(tags.0).unwrap().as_c_str(), false, false);
-        // let is_token = tt.len() == 1;
-
         Self {
             lark_grammar: build_tools_grammar(tools, tool_choice, tags),
             tool_choice,

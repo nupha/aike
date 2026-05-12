@@ -4,7 +4,7 @@
 pub(crate) mod class_file_handle;
 
 use zuqe::{
-    Array, CallContext, FieldDef, JSResult, JSValue, ScopedContext,
+    Array, CallContext, FieldDef, JSResult, JSValue, PollSender, ScopedContext,
     builtins::{promise::Promise, typed_array::TypedArray},
 };
 
@@ -27,30 +27,6 @@ fn make_void_promise(
         })?;
         Ok(JSValue::UNDEFINED)
     })
-}
-
-/// Send a value through a crossbeam channel from an async context.
-/// Uses try_send in a loop to avoid blocking the async task.
-/// If the channel is full, yields to the tokio runtime and retries.
-pub(super) async fn async_send<T>(
-    tx: &crossbeam::channel::Sender<T>,
-    val: T,
-) -> Result<(), crossbeam::channel::TrySendError<T>> {
-    let mut val = val;
-    loop {
-        match tx.try_send(val) {
-            Ok(()) => {
-                return Ok(());
-            }
-            Err(crossbeam::channel::TrySendError::Full(v)) => {
-                val = v;
-                tokio::task::yield_now().await;
-            }
-            Err(crossbeam::channel::TrySendError::Disconnected(v)) => {
-                return Err(crossbeam::channel::TrySendError::Disconnected(v));
-            }
-        }
-    }
 }
 
 /// Extract bytes from a JS value: supports ArrayBuffer & TypedArray (Uint8Array).
@@ -101,13 +77,13 @@ fn js_fs_readText(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         })?;
 
     tokio::spawn(async move {
-        async_send(
-            &tx,
-            tokio::fs::read_to_string(&path)
-                .await
-                .map_err(|e| e.to_string()),
-        )
-        .await;
+        let _ = PollSender::from(tx)
+            .send_async(
+                tokio::fs::read_to_string(&path)
+                    .await
+                    .map_err(|e| e.to_string()),
+            )
+            .await;
     });
 
     Ok(promise.into())
@@ -135,11 +111,13 @@ fn js_fs_readJSON(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         let raw = tokio::fs::read_to_string(&path)
             .await
             .map_err(|e| e.to_string());
+
         let result = match raw {
             Ok(s) => serde_json::from_str(&s).map_err(|e| e.to_string()),
             Err(e) => Err(e),
         };
-        async_send(&tx, result).await;
+
+        let _ = PollSender::from(tx).send_async(result).await;
     });
 
     Ok(promise.into())
@@ -162,7 +140,9 @@ fn js_fs_readBytes(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         })?;
 
     tokio::spawn(async move {
-        async_send(&tx, tokio::fs::read(&path).await.map_err(|e| e.to_string())).await;
+        let _ = PollSender::from(tx)
+            .send_async(tokio::fs::read(&path).await.map_err(|e| e.to_string()))
+            .await;
     });
 
     Ok(promise.into())
@@ -180,13 +160,13 @@ fn js_fs_writeText(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let (promise, tx) = make_void_promise(ctx)?;
 
     tokio::spawn(async move {
-        async_send(
-            &tx,
-            tokio::fs::write(&path, data_str.as_bytes())
-                .await
-                .map_err(|e| e.to_string()),
-        )
-        .await;
+        let _ = PollSender::from(tx)
+            .send_async(
+                tokio::fs::write(&path, data_str.as_bytes())
+                    .await
+                    .map_err(|e| e.to_string()),
+            )
+            .await;
     });
 
     Ok(promise.into())
@@ -224,13 +204,13 @@ fn js_fs_writeJSON(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let (promise, tx) = make_void_promise(ctx)?;
 
     tokio::spawn(async move {
-        async_send(
-            &tx,
-            tokio::fs::write(&path, json_str.as_bytes())
-                .await
-                .map_err(|e| e.to_string()),
-        )
-        .await;
+        let _ = PollSender::from(tx)
+            .send_async(
+                tokio::fs::write(&path, json_str.as_bytes())
+                    .await
+                    .map_err(|e| e.to_string()),
+            )
+            .await;
     });
 
     Ok(promise.into())
@@ -247,13 +227,13 @@ fn js_fs_writeBytes(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let (promise, tx) = make_void_promise(ctx)?;
 
     tokio::spawn(async move {
-        async_send(
-            &tx,
-            tokio::fs::write(&path, &bytes)
-                .await
-                .map_err(|e| e.to_string()),
-        )
-        .await;
+        let _ = PollSender::from(tx)
+            .send_async(
+                tokio::fs::write(&path, &bytes)
+                    .await
+                    .map_err(|e| e.to_string()),
+            )
+            .await;
     });
 
     Ok(promise.into())
@@ -272,23 +252,21 @@ fn js_fs_appendText(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     tokio::spawn(async move {
         use tokio::io::AsyncWriteExt;
-        match tokio::fs::OpenOptions::new()
+
+        let res: Result<(), String> = match tokio::fs::OpenOptions::new()
             .append(true)
             .create(true)
             .open(&path)
             .await
         {
-            Ok(mut f) => {
-                let r: Result<(), String> = f
-                    .write_all(data_str.as_bytes())
-                    .await
-                    .map_err(|e| e.to_string());
-                async_send(&tx, r).await;
-            }
-            Err(e) => {
-                async_send(&tx, Err(e.to_string())).await;
-            }
-        }
+            Ok(mut f) => f
+                .write_all(data_str.as_bytes())
+                .await
+                .map_err(|e| e.to_string()),
+            Err(e) => Err(e.to_string()),
+        };
+
+        let _ = PollSender::from(tx).send_async(res).await;
     });
 
     Ok(promise.into())
@@ -315,15 +293,17 @@ fn js_fs_write(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     if let Some(s) = cc.arg(1).as_string() {
         let content = s.content().encode_utf8(false).to_string();
         let (promise, tx) = make_void_promise(ctx)?;
+
         tokio::spawn(async move {
-            async_send(
-                &tx,
-                tokio::fs::write(&path, content.as_bytes())
-                    .await
-                    .map_err(|e| e.to_string()),
-            )
-            .await;
+            let _ = PollSender::from(tx)
+                .send_async(
+                    tokio::fs::write(&path, content.as_bytes())
+                        .await
+                        .map_err(|e| e.to_string()),
+                )
+                .await;
         });
+
         return Ok(promise.into());
     }
 
@@ -332,13 +312,13 @@ fn js_fs_write(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         Ok(bytes) => {
             let (promise, tx) = make_void_promise(ctx)?;
             tokio::spawn(async move {
-                async_send(
-                    &tx,
-                    tokio::fs::write(&path, &bytes)
-                        .await
-                        .map_err(|e| e.to_string()),
-                )
-                .await;
+                let _ = PollSender::from(tx)
+                    .send_async(
+                        tokio::fs::write(&path, &bytes)
+                            .await
+                            .map_err(|e| e.to_string()),
+                    )
+                    .await;
             });
             return Ok(promise.into());
         }
@@ -351,23 +331,19 @@ fn js_fs_write(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     if JSFileHandle::is_instance(ctx, &cc.arg(1)) {
         let src_path = handle_get_path(ctx, &cc.arg(1));
         let (promise, tx) = make_void_promise(ctx)?;
+
         tokio::spawn(async move {
             let data = tokio::fs::read(&src_path).await.map_err(|e| e.to_string());
-            match data {
-                Ok(bytes) => {
-                    async_send(
-                        &tx,
-                        tokio::fs::write(&path, &bytes)
-                            .await
-                            .map_err(|e| e.to_string()),
-                    )
-                    .await;
-                }
-                Err(e) => {
-                    async_send(&tx, Err(e)).await;
-                }
-            }
+            let res = match data {
+                Ok(bytes) => tokio::fs::write(&path, &bytes)
+                    .await
+                    .map_err(|e| e.to_string()),
+                Err(e) => Err(e),
+            };
+
+            let _ = PollSender::from(tx).send_async(res).await;
         });
+
         return Ok(promise.into());
     }
 
@@ -408,7 +384,8 @@ fn js_fs_ensureDir(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 .await
                 .map_err(|e| e.to_string())
         };
-        async_send(&tx, r).await;
+
+        let _ = PollSender::from(tx).send_async(r).await;
     });
 
     Ok(promise.into())
@@ -484,6 +461,7 @@ fn js_fs_readDir(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             let mut dir = tokio::fs::read_dir(&path)
                 .await
                 .map_err(|e| e.to_string())?;
+
             let mut entries = Vec::new();
             while let Some(entry) = dir.next_entry().await.map_err(|e| e.to_string())? {
                 let name = entry.file_name().to_string_lossy().to_string();
@@ -496,10 +474,12 @@ fn js_fs_readDir(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                     is_symlink: meta.is_symlink(),
                 });
             }
+
             Ok(entries)
         }
         .await;
-        async_send(&tx, r).await;
+
+        let _ = PollSender::from(tx).send_async(r).await;
     });
 
     Ok(promise.into())
@@ -614,11 +594,9 @@ fn js_fs_stat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     )?;
 
     tokio::spawn(async move {
-        async_send(
-            &tx,
-            tokio::fs::metadata(&path).await.map_err(|e| e.to_string()),
-        )
-        .await;
+        let _ = PollSender::from(tx)
+            .send_async(tokio::fs::metadata(&path).await.map_err(|e| e.to_string()))
+            .await;
     });
 
     Ok(promise.into())

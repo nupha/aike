@@ -5,14 +5,12 @@ use std::{cell::Cell, ffi::c_void, path::Path};
 
 use linkme::distributed_slice;
 use zuqe::{
-    CallContext, ClassDef, ClassID, FieldDef, JSResult, JSValue, Object, Runtime, RuntimeImpl,
-    ScopedContext,
+    CallContext, ClassDef, ClassID, FieldDef, JSResult, JSValue, Object, PollSender, Runtime,
+    RuntimeImpl, ScopedContext,
     builtins::{promise::Promise, typed_array::TypedArray},
 };
 
 use crate::USER_CLASS_DEFS;
-
-use super::async_send;
 
 // Magic values for GETSET properties
 const PROP_PATH: i32 = 0;
@@ -112,13 +110,13 @@ fn js_fh_text(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         })?;
 
     tokio::spawn(async move {
-        async_send(
-            &tx,
-            tokio::fs::read_to_string(&path)
-                .await
-                .map_err(|e| e.to_string()),
-        )
-        .await;
+        let _ = PollSender::from(tx)
+            .send_async(
+                tokio::fs::read_to_string(&path)
+                    .await
+                    .map_err(|e| e.to_string()),
+            )
+            .await;
     });
 
     Ok(promise.into())
@@ -147,7 +145,8 @@ fn js_fh_json(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             Ok(s) => serde_json::from_str(&s).map_err(|e| e.to_string()),
             Err(e) => Err(e),
         };
-        async_send(&tx, result).await;
+
+        let _ = PollSender::from(tx).send_async(result).await;
     });
 
     Ok(promise.into())
@@ -167,7 +166,9 @@ fn js_fh_bytes(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         })?;
 
     tokio::spawn(async move {
-        async_send(&tx, tokio::fs::read(&path).await.map_err(|e| e.to_string())).await;
+        let _ = PollSender::from(tx)
+            .send_async(tokio::fs::read(&path).await.map_err(|e| e.to_string()))
+            .await;
     });
 
     Ok(promise.into())
@@ -187,7 +188,13 @@ fn js_fh_exists(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         })?;
 
     tokio::spawn(async move {
-        async_send(&tx, Ok(tokio::fs::try_exists(&path).await.unwrap_or(false))).await;
+        let _ = PollSender::from(tx)
+            .send_async(
+                tokio::fs::try_exists(&path)
+                    .await
+                    .map_err(|e| e.to_string()),
+            )
+            .await;
     });
 
     Ok(promise.into())
@@ -207,13 +214,13 @@ fn js_fh_delete(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         })?;
 
     tokio::spawn(async move {
-        async_send(
-            &tx,
-            tokio::fs::remove_file(&path)
-                .await
-                .map_err(|e| e.to_string()),
-        )
-        .await;
+        let _ = PollSender::from(tx)
+            .send_async(
+                tokio::fs::remove_file(&path)
+                    .await
+                    .map_err(|e| e.to_string()),
+            )
+            .await;
     });
 
     Ok(promise.into())

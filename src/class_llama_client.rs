@@ -144,7 +144,9 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
             async fn commit_slot(slot: &PromiseResultSlot<ChatReply>, mut msg: ChatReply) {
                 loop {
                     match slot.commit(msg) {
-                        Ok(()) => return,
+                        Ok(()) => {
+                            return;
+                        }
                         Err(ret) => {
                             // slot is full, yield and do commit later
                             msg = ret;
