@@ -2,10 +2,10 @@ use llama_cpp_ffi::{LlamaModel, ModelFamily, llama_token};
 use smallvec::{SmallVec, smallvec};
 use swiftlet_incremental::{IncrementalParser, LarkTokenValidation, Swiftlet};
 
-use super::{LlmTokenValidator, OutputEvent, OutputState};
+use super::{LlmTokenValidator, OutputStateChange, OutputState};
 
 /// Type alias for small event vector (optimized for 0-2 events per token)
-pub type OutputEvents = SmallVec<[OutputEvent; 2]>;
+pub type OutputEvents = SmallVec<[OutputStateChange; 2]>;
 
 /// Builder for OutputParser with fluent API.
 pub struct OutputParserBuilder {
@@ -145,11 +145,11 @@ impl OutputParser {
             if is_start {
                 match ctype {
                     OutputState::Reasoning => {
-                        events.push(OutputEvent::ReasoningStart);
+                        events.push(OutputStateChange::ReasoningStart);
                         new_state = Some(OutputState::Reasoning);
                     }
                     OutputState::ToolCall => {
-                        events.push(OutputEvent::ToolCallStart);
+                        events.push(OutputStateChange::ToolCallStart);
                         new_state = Some(OutputState::ToolCall);
                     }
                     _ => {}
@@ -158,10 +158,10 @@ impl OutputParser {
                 new_state = Some(OutputState::Text);
                 match ctype {
                     OutputState::Reasoning => {
-                        events.push(OutputEvent::ReasoningEnd);
+                        events.push(OutputStateChange::ReasoningEnd);
                     }
                     OutputState::ToolCall => {
-                        events.push(OutputEvent::ToolCallEnd);
+                        events.push(OutputStateChange::ToolCallEnd);
                     }
                     _ => {}
                 }

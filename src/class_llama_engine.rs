@@ -18,7 +18,7 @@ use zuqe::{
 use crate::{
     USER_CLASS_DEFS,
     class_llama_client_responses::{parse_responses_input, parse_responses_reasoning},
-    engine::{Engine, GrammarConfig, OutputMode, TaskConfig},
+    engine::{Engine, GrammarConfig, TaskConfig},
     helpers::{apply_chat_template, parse_chat_completion_req, to_lark_tool_choice},
     output::{
         ChunkSSE, ParserKind, collect_engine_reply_to_json, redirect_engine_reply_to_chat_sse,
@@ -202,11 +202,7 @@ fn js_engine_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
             req.max_completion_tokens
                 .map_or(engine.lock().unwrap().default_max_tokens(), |n| n as usize),
         )
-        .output_mode(if is_stream {
-            OutputMode::Continuous
-        } else {
-            OutputMode::OneShot
-        })
+        .output_stream(is_stream)
         .enable_output_parser(parse_reasoning);
 
     if let Some(stop_words) = req
@@ -449,11 +445,7 @@ fn js_engine_responses(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         .temperature(temperature.unwrap_or(0.75))
         .top_p(top_p.unwrap_or(1.0))
         .max_tokens(max_output_tokens.unwrap_or(engine.lock().unwrap().default_max_tokens()))
-        .output_mode(if is_stream {
-            OutputMode::Continuous
-        } else {
-            OutputMode::OneShot
-        });
+        .output_stream(is_stream);
 
     if let Some(tools) = chat_tools.as_ref().filter(|t| !t.is_empty()) {
         task_config = task_config.grammar(GrammarConfig::new(

@@ -24,7 +24,7 @@ use tower_http::cors::CorsLayer;
 use uuid::Uuid;
 
 use crate::{
-    engine::{Engine, GrammarConfig, OutputMode, TaskConfig},
+    engine::{Engine, GrammarConfig, TaskConfig},
     helpers::{apply_chat_template, now_unix_s, to_lark_tool_choice},
     output::{
         ChunkSSE, ParserKind, collect_engine_reply_to_json, redirect_engine_reply_to_chat_sse,
@@ -210,11 +210,7 @@ async fn handle_chat_completions(
         .temperature(req.temperature.unwrap_or(DEFAULT_TEMPERATURE))
         .top_p(req.top_p.unwrap_or(DEFAULT_TOP_P))
         .enable_output_parser(parse_reasoning)
-        .output_mode(if is_stream {
-            OutputMode::Continuous
-        } else {
-            OutputMode::OneShot
-        });
+        .output_stream(is_stream);
 
     if let Some(stop_words) = req.stop.as_ref() {
         let words: Vec<String> = match stop_words {

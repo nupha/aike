@@ -10,10 +10,7 @@ use crossbeam::channel::Receiver;
 use super::{
     context::Engine,
     slot::{Slot, SlotState},
-    task::{
-        EngineCtrlMsg, EngineReply, EngineTask, GeneratedContent, OutputMode, SchedResult,
-        StopReason,
-    },
+    task::{EngineCtrlMsg, EngineReply, EngineTask, GeneratedContent, SchedResult, StopReason},
 };
 
 /// Helper function to check if a GeneratedContent matches the parser state
@@ -355,8 +352,8 @@ impl Engine {
                                         reply: EngineReply::Stop(StopReason::Word(w), n),
                                     }
                                 } else {
-                                    // In continuous mode, send current content if not ToolCall
-                                    if task_state.config.output_mode == OutputMode::Continuous {
+                                    // In stream mode, send current content if not ToolCall
+                                    if task_state.config.output_stream {
                                         debug_assert_eq!(
                                             task_state.current_content.len(),
                                             1,
@@ -425,29 +422,26 @@ impl Engine {
                     reply,
                     EngineReply::Cancelled | EngineReply::Shutdown | EngineReply::Error(_)
                 );
-                match task_state.config.output_mode {
-                    OutputMode::OneShot => {
-                        if !aborted {
-                            // Send all accumulated content
-                            for content in task_state.current_content {
-                                if !content.as_str().is_empty() {
-                                    let _ =
-                                        task_state.output_tx.send(EngineReply::Content(content));
-                                }
+
+                if task_state.config.output_stream {
+                    // In continuous mode, content should have been streamed already
+                    // Verify all elements are empty
+                    debug_assert!(
+                        task_state
+                            .current_content
+                            .iter()
+                            .all(|c| c.as_str().is_empty()),
+                        "Continuous mode: current_content should be empty after streaming, but found: {:?}",
+                        task_state.current_content
+                    );
+                } else {
+                    if !aborted {
+                        // Send all accumulated content
+                        for content in task_state.current_content {
+                            if !content.as_str().is_empty() {
+                                let _ = task_state.output_tx.send(EngineReply::Content(content));
                             }
                         }
-                    }
-                    OutputMode::Continuous => {
-                        // In continuous mode, content should have been streamed already
-                        // Verify all elements are empty
-                        debug_assert!(
-                            task_state
-                                .current_content
-                                .iter()
-                                .all(|c| c.as_str().is_empty()),
-                            "Continuous mode: current_content should be empty after streaming, but found: {:?}",
-                            task_state.current_content
-                        );
                     }
                 }
 

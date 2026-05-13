@@ -14,7 +14,7 @@ use llama_cpp_ffi::ModelFamily;
 use uuid::Uuid;
 
 use crate::{
-    engine::{EngineReply, GrammarConfig, OutputMode, TaskConfig},
+    engine::{EngineReply, GrammarConfig, TaskConfig},
     helpers::apply_chat_template,
     output::{
         ChunkSSE, ParserKind, collect_engine_reply_to_json, redirect_engine_reply_to_responses_sse,
@@ -124,11 +124,7 @@ pub async fn handle_responses(
             .max_tokens(max_tokens)
             .temperature(temperature)
             .top_p(top_p)
-            .output_mode(if is_stream {
-                OutputMode::Continuous
-            } else {
-                OutputMode::OneShot
-            });
+            .output_stream(is_stream);
 
         if let Some(tools) = tools.as_ref().filter(|t| !t.is_empty()) {
             task_config = task_config.grammar(GrammarConfig::new(

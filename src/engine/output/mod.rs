@@ -13,9 +13,9 @@ pub enum OutputState {
     ToolCall,
 }
 
-/// Events emitted by OutputParser when chunk boundaries are detected.
-#[derive(Debug, Clone)]
-pub enum OutputEvent {
+/// Events when chunk boundaries are detected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutputStateChange {
     ReasoningStart,
     ReasoningEnd,
     ToolCallStart,

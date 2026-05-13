@@ -12,7 +12,5 @@ mod worker;
 
 pub use {
     context::Engine,
-    task::{
-        EngineReply, GeneratedContent, GrammarConfig, OutputMode, StopReason, TaskConfig, Token,
-    },
+    task::{EngineReply, GeneratedContent, GrammarConfig, StopReason, TaskConfig, Token},
 };

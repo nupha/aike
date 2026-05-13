@@ -8,7 +8,7 @@ use crate::helpers::{build_tools_grammar, now_unix_s};
 
 use super::{
     context::Engine,
-    output::{LlmTokenValidator, OutputEvent, OutputParser, OutputState},
+    output::{LlmTokenValidator, OutputParser, OutputState, OutputStateChange},
     slot::{Slot, SlotState},
     worker::remove_cancelled_inputs,
 };
@@ -46,7 +46,7 @@ pub struct TaskConfig {
     pub temperature: f32,
     pub top_p: f32,
     pub logits_for_all_tokens: bool,
-    pub output_mode: OutputMode,
+    pub output_stream: bool,
     /// Enable output parsing to track semantic states (reasoning, tool calls, etc.)
     pub enable_output_parser: bool,
 }
@@ -61,7 +61,7 @@ impl TaskConfig {
             top_p: 1.0,
             logits_for_all_tokens: false,
             grammar: None,
-            output_mode: OutputMode::OneShot,
+            output_stream: false,
             enable_output_parser: false,
         }
     }
@@ -96,8 +96,8 @@ impl TaskConfig {
         self
     }
 
-    pub fn output_mode(mut self, v: OutputMode) -> Self {
-        self.output_mode = v;
+    pub fn output_stream(mut self, is_stream: bool) -> Self {
+        self.output_stream = is_stream;
         self
     }
 
@@ -113,12 +113,6 @@ pub struct EngineTask {
     pub seq_hint: Option<usize>,
     pub use_cache: bool,
     pub output_tx: Sender<EngineReply>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OutputMode {
-    Continuous,
-    OneShot,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -236,13 +230,12 @@ impl TaskState {
         }
     }
 
-    /// Handle output parser events
-    fn handle_output_event(&mut self, event: OutputEvent) {
+    fn handle_output_event(&mut self, event: OutputStateChange) {
         #[cfg(debug_assertions)]
         eprintln!("[OutputParser] Parsing output event: {event:?} ");
 
-        // At boundary of chunk: in continuous mode, send current content
-        if self.config.output_mode == OutputMode::Continuous {
+        // At chunk boundary (state change) and in stream mode: send current content
+        if self.config.output_stream {
             for content in self.current_content.drain(..) {
                 if !content.as_str().is_empty() {
                     let _ = self.output_tx.send(EngineReply::Content(content));
@@ -253,8 +246,8 @@ impl TaskState {
 
         // Push new empty content for the new state
         self.current_content.push(match event {
-            OutputEvent::ReasoningStart => GeneratedContent::Reasoning(String::new()),
-            OutputEvent::ToolCallStart => GeneratedContent::ToolCall(String::new()),
+            OutputStateChange::ReasoningStart => GeneratedContent::Reasoning(String::new()),
+            OutputStateChange::ToolCallStart => GeneratedContent::ToolCall(String::new()),
             _ => GeneratedContent::Text(String::new()),
         });
     }
