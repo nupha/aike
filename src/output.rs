@@ -9,9 +9,12 @@ use async_openai::types::{
         FunctionCall, FunctionCallStream, FunctionType, Role,
     },
     responses::{
-        AssistantRole, FunctionToolCall, InputTokenDetails, OutputItem, OutputMessage,
-        OutputMessageContent, OutputStatus, OutputTextContent, OutputTokenDetails, ReasoningItem,
-        Response, ResponseUsage, Status, SummaryPart, SummaryTextContent,
+        AssistantRole, FunctionToolCall, InputTokenDetails, OutputContent, OutputItem,
+        OutputMessage, OutputMessageContent, OutputStatus, OutputTextContent, OutputTokenDetails,
+        ReasoningItem, Response, ResponseCompletedEvent, ResponseContentPartAddedEvent,
+        ResponseCreatedEvent, ResponseFunctionCallArgumentsDeltaEvent,
+        ResponseOutputItemAddedEvent, ResponseReasoningSummaryTextDeltaEvent, ResponseStreamEvent,
+        ResponseTextDeltaEvent, ResponseUsage, Status, SummaryPart, SummaryTextContent,
     },
 };
 use uuid::Uuid;
@@ -169,113 +172,120 @@ enum State {
     Thinking,
 }
 
-/// Convert GeneratedContent to OpenAI chat completion chunk
-fn generated_content_to_chat_chunk(
-    content: &GeneratedContent,
-    id: &str,
-    model: &str,
-    has_tool_call: &mut bool,
-) -> serde_json::Value {
-    match content {
-        GeneratedContent::Text(text) => serde_json::to_value(CreateChatCompletionStreamResponse {
-            id: id.to_string(),
-            model: model.to_string(),
-            created: now_unix_s() as u32,
-            object: "chat.completion.chunk".to_string(),
-            choices: vec![ChatChoiceStream {
-                delta: ChatCompletionStreamResponseDelta {
-                    content: Some(text.clone()),
-                    role: None,
-                    tool_calls: None,
-                    refusal: None,
-                    function_call: None,
-                },
-                index: 0,
-                finish_reason: None,
-                logprobs: None,
-            }],
-            usage: None,
-            system_fingerprint: None,
-            service_tier: None,
-        })
-        .unwrap(),
-
-        GeneratedContent::Reasoning(text) => {
-            let mut chunk = serde_json::to_value(CreateChatCompletionStreamResponse {
-                id: id.to_string(),
-                model: model.to_string(),
-                created: now_unix_s() as u32,
-                object: "chat.completion.chunk".to_string(),
-                choices: vec![ChatChoiceStream {
-                    delta: ChatCompletionStreamResponseDelta {
-                        content: None,
-                        role: None,
-                        tool_calls: None,
-                        refusal: None,
-                        function_call: None,
-                    },
-                    index: 0,
-                    finish_reason: None,
-                    logprobs: None,
-                }],
-                usage: None,
-                system_fingerprint: None,
-                service_tier: None,
-            })
-            .unwrap();
-
-            // Add reasoning_content field
-            if let Some(choices) = chunk["choices"].as_array_mut() {
-                if let Some(choice) = choices.first_mut() {
-                    if let Some(delta) = choice["delta"].as_object_mut() {
-                        delta.insert("reasoning_content".to_string(), text.clone().into());
-                    }
-                }
+impl GeneratedContent {
+    /// Convert GeneratedContent to OpenAI chat completion chunk
+    pub fn into_chat_chunk(
+        self,
+        id: String,
+        model: String,
+        has_tool_call: &mut bool,
+    ) -> serde_json::Value {
+        match self {
+            GeneratedContent::Text(text) => {
+                serde_json::to_value(CreateChatCompletionStreamResponse {
+                    id,
+                    model,
+                    created: now_unix_s() as u32,
+                    object: "chat.completion.chunk".to_string(),
+                    choices: vec![ChatChoiceStream {
+                        delta: ChatCompletionStreamResponseDelta {
+                            content: Some(text),
+                            role: None,
+                            tool_calls: None,
+                            refusal: None,
+                            function_call: None,
+                        },
+                        index: 0,
+                        finish_reason: None,
+                        logprobs: None,
+                    }],
+                    usage: None,
+                    system_fingerprint: None,
+                    service_tier: None,
+                })
+                .unwrap()
             }
 
-            chunk
-        }
+            GeneratedContent::Reasoning(text) => {
+                let mut chunk = serde_json::to_value(CreateChatCompletionStreamResponse {
+                    id,
+                    model,
+                    created: now_unix_s() as u32,
+                    object: "chat.completion.chunk".to_string(),
+                    choices: vec![ChatChoiceStream {
+                        delta: ChatCompletionStreamResponseDelta {
+                            content: None,
+                            role: None,
+                            tool_calls: None,
+                            refusal: None,
+                            function_call: None,
+                        },
+                        index: 0,
+                        finish_reason: None,
+                        logprobs: None,
+                    }],
+                    usage: None,
+                    system_fingerprint: None,
+                    service_tier: None,
+                })
+                .unwrap();
 
-        GeneratedContent::ToolCall(text) => {
-            *has_tool_call = true;
+                // Add reasoning_content field
+                if let Some(choices) = chunk["choices"].as_array_mut() {
+                    if let Some(choice) = choices.first_mut() {
+                        if let Some(delta) = choice["delta"].as_object_mut() {
+                            delta.insert("reasoning_content".to_string(), text.into());
+                        }
+                    }
+                }
 
-            serde_json::to_value(CreateChatCompletionStreamResponse {
-                id: id.to_string(),
-                model: model.to_string(),
-                created: now_unix_s() as u32,
-                object: "chat.completion.chunk".to_string(),
-                choices: vec![ChatChoiceStream {
-                    delta: ChatCompletionStreamResponseDelta {
-                        content: None,
-                        role: None,
-                        tool_calls: Some(vec![ChatCompletionMessageToolCallChunk {
-                            index: 0,
-                            id: Some(format!("call_{}", Uuid::new_v4().simple())),
-                            r#type: Some(FunctionType::Function),
-                            function: Some(FunctionCallStream {
-                                name: None,
-                                arguments: Some(text.clone()),
-                            }),
-                        }]),
-                        refusal: None,
-                        function_call: None,
-                    },
-                    index: 0,
-                    finish_reason: None,
-                    logprobs: None,
-                }],
-                usage: None,
-                system_fingerprint: None,
-                service_tier: None,
-            })
-            .unwrap()
+                chunk
+            }
+
+            GeneratedContent::ToolCall(repr) => {
+                *has_tool_call = true;
+
+                serde_json::to_value(CreateChatCompletionStreamResponse {
+                    id,
+                    model,
+                    created: now_unix_s() as u32,
+                    object: "chat.completion.chunk".to_string(),
+                    choices: vec![ChatChoiceStream {
+                        delta: ChatCompletionStreamResponseDelta {
+                            content: None,
+                            role: None,
+                            tool_calls: Some(vec![ChatCompletionMessageToolCallChunk {
+                                index: 0,
+                                id: Some(format!("call_{}", Uuid::new_v4().simple())),
+                                r#type: Some(FunctionType::Function),
+                                function: Some(
+                                    serde_json::from_str::<FunctionCallStream>(&repr)
+                                        .unwrap_or_else(|_| FunctionCallStream {
+                                            name: None,
+                                            arguments: None,
+                                        }),
+                                ),
+                            }]),
+                            refusal: None,
+                            function_call: None,
+                        },
+                        index: 0,
+                        finish_reason: None,
+                        logprobs: None,
+                    }],
+                    usage: None,
+                    system_fingerprint: None,
+                    service_tier: None,
+                })
+                .unwrap()
+            }
         }
     }
 }
 
 /// Receive EngineReply from rx and direct to OpenAI chat completion chunks.
 /// Represents a chunk in OpenAI streaming response
-pub(crate) enum ChatChunk {
+pub(crate) enum ChunkSSE {
     /// Normal content chunk
     Chunk(serde_json::Value),
     /// Error occurred - callback should handle error formatting
@@ -284,14 +294,14 @@ pub(crate) enum ChatChunk {
     Done,
 }
 
-pub(crate) fn redirect_engine_reply_to_chat_chunks(
+pub(crate) fn redirect_engine_reply_to_chat_sse(
     rx: crossbeam::channel::Receiver<EngineReply>,
     timeout: std::time::Duration,
     respond_id: &str,
     model_name: &str,
     n_prompt_tokens: usize,
     include_usage: bool,
-    mut on_chunk: impl FnMut(ChatChunk) -> bool,
+    mut on_chunk: impl FnMut(ChunkSSE) -> bool,
 ) {
     let mut has_tool_call = false;
     let mut first_chunk = true;
@@ -299,11 +309,9 @@ pub(crate) fn redirect_engine_reply_to_chat_chunks(
     loop {
         match rx.recv_timeout(timeout) {
             Ok(EngineReply::Content(content)) => {
-                // Convert GeneratedContent to chat chunk
-                let mut chunk = generated_content_to_chat_chunk(
-                    &content,
-                    respond_id,
-                    model_name,
+                let mut chunk = content.into_chat_chunk(
+                    respond_id.to_string(),
+                    model_name.to_string(),
                     &mut has_tool_call,
                 );
 
@@ -314,7 +322,7 @@ pub(crate) fn redirect_engine_reply_to_chat_chunks(
                     first_chunk = false;
                 }
 
-                if !on_chunk(ChatChunk::Chunk(chunk)) {
+                if !on_chunk(ChunkSSE::Chunk(chunk)) {
                     break;
                 }
             }
@@ -366,26 +374,26 @@ pub(crate) fn redirect_engine_reply_to_chat_chunks(
                 })
                 .unwrap();
 
-                on_chunk(ChatChunk::Chunk(stop_chunk));
+                on_chunk(ChunkSSE::Chunk(stop_chunk));
 
                 // Emit done marker
-                on_chunk(ChatChunk::Done);
+                on_chunk(ChunkSSE::Done);
                 break;
             }
             Ok(EngineReply::Cancelled) => {
-                on_chunk(ChatChunk::Error(ERR_CANCELLED.to_string()));
+                on_chunk(ChunkSSE::Error(ERR_CANCELLED.to_string()));
                 break;
             }
             Ok(EngineReply::Error(e)) => {
-                on_chunk(ChatChunk::Error(e));
+                on_chunk(ChunkSSE::Error(e));
                 break;
             }
             Ok(EngineReply::Shutdown) => {
-                on_chunk(ChatChunk::Error(ERR_ENGINE_SHUTDOWN.to_string()));
+                on_chunk(ChunkSSE::Error(ERR_ENGINE_SHUTDOWN.to_string()));
                 break;
             }
             Err(_) => {
-                on_chunk(ChatChunk::Error("stream timed out".to_string()));
+                on_chunk(ChunkSSE::Error("stream timed out".to_string()));
                 break;
             }
         }
@@ -408,47 +416,35 @@ pub(crate) fn collect_engine_reply_to_json(
     let tm = now_unix_s();
     let mut text = String::new();
     let mut reasoning = String::new();
-    let mut tool_call_buf = String::new();
+    let mut calls: Vec<ChatCompletionMessageToolCalls> = Vec::new();
 
     loop {
         match rx.recv_timeout(timeout) {
             Ok(EngineReply::Content(content)) => match content {
                 GeneratedContent::Text(t) => text.push_str(&t),
                 GeneratedContent::Reasoning(t) => reasoning.push_str(&t),
-                GeneratedContent::ToolCall(t) => tool_call_buf.push_str(&t),
-            },
-            Ok(EngineReply::Stop(reason, n_completion_tokens)) => {
-                // Parse tool calls from accumulated buffer using stream deserializer
-                // to handle multiple concatenated JSON objects.
-                let mut calls = Vec::<ChatCompletionMessageToolCalls>::new();
-                if !tool_call_buf.is_empty() {
-                    let stream = serde_json::Deserializer::from_str(&tool_call_buf)
-                        .into_iter::<serde_json::Value>();
-                    for item in stream {
-                        let Ok(value) = item else { continue };
-                        let Some(obj) = value.as_object().filter(|o| o.len() == 2) else {
-                            continue;
-                        };
-                        let Some(name) = obj.get("name").and_then(|v| v.as_str()) else {
-                            continue;
-                        };
-                        let arguments = match obj.get("arguments") {
-                            Some(serde_json::Value::String(s)) => s.clone(),
-                            Some(other) => serde_json::to_string(other).unwrap_or_default(),
-                            None => continue,
-                        };
-                        calls.push(ChatCompletionMessageToolCalls::Function(
-                            ChatCompletionMessageToolCall {
-                                id: format!("call_{}", uuid::Uuid::new_v4().simple()),
-                                function: FunctionCall {
-                                    name: name.to_string(),
-                                    arguments,
+                GeneratedContent::ToolCall(t) => {
+                    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&t) {
+                        if let Some(name) = value.get("name").and_then(|v| v.as_str()) {
+                            let arguments = match value.get("arguments") {
+                                Some(serde_json::Value::String(s)) => s.clone(),
+                                Some(other) => serde_json::to_string(other).unwrap_or_default(),
+                                None => String::new(),
+                            };
+                            calls.push(ChatCompletionMessageToolCalls::Function(
+                                ChatCompletionMessageToolCall {
+                                    id: format!("call_{}", uuid::Uuid::new_v4().simple()),
+                                    function: FunctionCall {
+                                        name: name.to_string(),
+                                        arguments,
+                                    },
                                 },
-                            },
-                        ));
+                            ));
+                        }
                     }
                 }
-
+            },
+            Ok(EngineReply::Stop(reason, n_completion_tokens)) => {
                 return match kind {
                     ParserKind::Chat => {
                         let finish_reason = match reason {
@@ -618,104 +614,273 @@ pub(crate) fn collect_engine_reply_to_json(
     }
 }
 
-/// Direct EngineReply -> OutputChunk conversion (streaming variant).
-/// EngineReply::Content already carries parsed GeneratedContent (Text/Reasoning/ToolCall),
-/// so no need for LlmOutputParser state machine.
-pub(crate) fn redirect_engine_reply_to_responses_chunks<F>(
+/// Build a minimal Response with only essential fields set.
+/// All optional fields are left as None (skipped during serialization).
+fn minimal_response(
+    id: &str,
+    model: &str,
+    created_at: u64,
+    status: Status,
+    usage: Option<ResponseUsage>,
+) -> Response {
+    Response {
+        id: id.to_string(),
+        object: "response".to_string(),
+        created_at,
+        model: model.to_string(),
+        status,
+        output: vec![],
+        usage,
+        background: None,
+        billing: None,
+        conversation: None,
+        completed_at: None,
+        error: None,
+        incomplete_details: None,
+        instructions: None,
+        max_output_tokens: None,
+        metadata: None,
+        parallel_tool_calls: None,
+        previous_response_id: None,
+        prompt: None,
+        prompt_cache_key: None,
+        prompt_cache_retention: None,
+        reasoning: None,
+        safety_identifier: None,
+        service_tier: None,
+        temperature: None,
+        text: None,
+        tool_choice: None,
+        tools: None,
+        top_logprobs: None,
+        top_p: None,
+        truncation: None,
+    }
+}
+
+/// Direct EngineReply -> Response API event stream (streaming variant).
+/// Uses async_openai ResponseStreamEvent standard types for serialization.
+pub(crate) fn redirect_engine_reply_to_responses_sse(
     rx: crossbeam::channel::Receiver<EngineReply>,
     timeout: std::time::Duration,
-    include_usage: bool,
+    respond_id: &str,
+    model_name: &str,
     n_prompt_tokens: usize,
-    mut on_item: F,
-) where
-    F: FnMut(OutputChunk, usize) -> bool,
-{
-    let mut nth = 0;
-    let mut tool_call_buf = String::new();
+    include_usage: bool,
+    mut on_chunk: impl FnMut(ChunkSSE) -> bool,
+) {
+    let mut text_started = false;
+    let mut msg_id = String::new();
+    let mut reasoning_item_id: Option<String> = None;
+    let mut seq = 0u64;
+    let output_index = 0u32;
+    let content_index = 0u32;
+
+    // Emit response.created
+    let created = ResponseStreamEvent::ResponseCreated(ResponseCreatedEvent {
+        sequence_number: seq,
+        response: minimal_response(
+            respond_id,
+            model_name,
+            now_unix_s() as u64,
+            Status::InProgress,
+            None,
+        ),
+    });
+    if !on_chunk(ChunkSSE::Chunk(serde_json::to_value(&created).unwrap())) {
+        return;
+    }
 
     loop {
         match rx.recv_timeout(timeout) {
             Ok(EngineReply::Content(content)) => match content {
                 GeneratedContent::Text(t) => {
-                    tool_call_buf.clear();
-                    if !on_item(OutputChunk::Part(OutputPart::Text(t)), nth) {
+                    // Lifecycle events on first text chunk
+                    if !text_started {
+                        text_started = true;
+                        msg_id = format!("msg_{}", uuid::Uuid::new_v4().simple());
+
+                        let item_added = ResponseStreamEvent::ResponseOutputItemAdded(
+                            ResponseOutputItemAddedEvent {
+                                sequence_number: seq,
+                                output_index,
+                                item: OutputItem::Message(OutputMessage {
+                                    id: msg_id.clone(),
+                                    role: AssistantRole::Assistant,
+                                    status: OutputStatus::InProgress,
+                                    content: vec![],
+                                    phase: None,
+                                }),
+                            },
+                        );
+                        if !on_chunk(ChunkSSE::Chunk(serde_json::to_value(&item_added).unwrap())) {
+                            break;
+                        }
+                        seq += 1;
+
+                        let part_added = ResponseStreamEvent::ResponseContentPartAdded(
+                            ResponseContentPartAddedEvent {
+                                sequence_number: seq,
+                                item_id: msg_id.clone(),
+                                output_index,
+                                content_index,
+                                part: OutputContent::OutputText(OutputTextContent {
+                                    text: String::new(),
+                                    annotations: vec![],
+                                    logprobs: None,
+                                }),
+                            },
+                        );
+                        if !on_chunk(ChunkSSE::Chunk(serde_json::to_value(&part_added).unwrap())) {
+                            break;
+                        }
+                        seq += 1;
+                    }
+
+                    let delta =
+                        ResponseStreamEvent::ResponseOutputTextDelta(ResponseTextDeltaEvent {
+                            sequence_number: seq,
+                            item_id: msg_id.clone(),
+                            output_index,
+                            content_index,
+                            delta: t,
+                            logprobs: None,
+                        });
+                    if !on_chunk(ChunkSSE::Chunk(serde_json::to_value(&delta).unwrap())) {
                         break;
                     }
-                    nth += 1;
+                    seq += 1;
                 }
                 GeneratedContent::Reasoning(t) => {
-                    tool_call_buf.clear();
-                    if !on_item(OutputChunk::Part(OutputPart::Reasoning(t)), nth) {
+                    let rid = if let Some(ref id) = reasoning_item_id {
+                        id.clone()
+                    } else {
+                        let new_id = format!("rsn_{}", uuid::Uuid::new_v4().simple());
+                        reasoning_item_id = Some(new_id.clone());
+                        new_id
+                    };
+                    let delta = ResponseStreamEvent::ResponseReasoningSummaryTextDelta(
+                        ResponseReasoningSummaryTextDeltaEvent {
+                            sequence_number: seq,
+                            item_id: rid,
+                            output_index,
+                            summary_index: 0,
+                            delta: t,
+                        },
+                    );
+                    if !on_chunk(ChunkSSE::Chunk(serde_json::to_value(&delta).unwrap())) {
                         break;
                     }
-                    nth += 1;
+                    seq += 1;
                 }
                 GeneratedContent::ToolCall(t) => {
-                    tool_call_buf.push_str(&t);
-                    // Try to parse accumulated tool call JSON; emit when complete
-                    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&tool_call_buf) {
-                        if let Some(obj) = value.as_object().filter(|o| o.len() == 2) {
-                            if let Some(name) = obj.get("name").and_then(|v| v.as_str()) {
-                                let arguments = match obj.get("arguments") {
-                                    Some(serde_json::Value::String(s)) => s.clone(),
-                                    Some(other) => serde_json::to_string(other).unwrap_or_default(),
-                                    None => String::new(),
-                                };
-                                let call = ChatCompletionMessageToolCall {
-                                    id: format!("call_{}", uuid::Uuid::new_v4().simple()),
-                                    function: FunctionCall {
+                    match serde_json::from_str::<serde_json::Value>(&t) {
+                        Ok(value) => {
+                            if let Some(obj) = value.as_object().filter(|o| o.len() == 2) {
+                                if let Some(name) = obj.get("name").and_then(|v| v.as_str()) {
+                                    let call_id = format!("call_{}", uuid::Uuid::new_v4().simple());
+                                    let fc_id = format!("fc_{}", uuid::Uuid::new_v4().simple());
+                                    let arguments = match obj.get("arguments") {
+                                        Some(serde_json::Value::String(s)) => s.clone(),
+                                        Some(other) => {
+                                            serde_json::to_string(other).unwrap_or_default()
+                                        }
+                                        None => String::new(),
+                                    };
+
+                                    let tool_call = FunctionToolCall {
+                                        id: Some(fc_id.clone()),
+                                        call_id: call_id.clone(),
+                                        namespace: None,
                                         name: name.to_string(),
-                                        arguments,
-                                    },
-                                };
-                                if !on_item(OutputChunk::Part(OutputPart::Call(call)), nth) {
-                                    break;
+                                        arguments: arguments.clone(),
+                                        status: None,
+                                    };
+
+                                    let item_added = ResponseStreamEvent::ResponseOutputItemAdded(
+                                        ResponseOutputItemAddedEvent {
+                                            sequence_number: seq,
+                                            output_index,
+                                            item: OutputItem::FunctionCall(tool_call),
+                                        },
+                                    );
+                                    if !on_chunk(ChunkSSE::Chunk(
+                                        serde_json::to_value(&item_added).unwrap(),
+                                    )) {
+                                        break;
+                                    }
+                                    seq += 1;
+
+                                    let args_delta =
+                                        ResponseStreamEvent::ResponseFunctionCallArgumentsDelta(
+                                            ResponseFunctionCallArgumentsDeltaEvent {
+                                                sequence_number: seq,
+                                                item_id: fc_id,
+                                                output_index,
+                                                delta: arguments,
+                                            },
+                                        );
+                                    if !on_chunk(ChunkSSE::Chunk(
+                                        serde_json::to_value(&args_delta).unwrap(),
+                                    )) {
+                                        break;
+                                    }
+                                    seq += 1;
                                 }
-                                nth += 1;
-                                tool_call_buf.clear();
+                            }
+                        }
+                        Err(e) => {
+                            if !on_chunk(ChunkSSE::Error(format!("tool_call parse error: {e}"))) {
+                                break;
                             }
                         }
                     }
                 }
             },
-            Ok(EngineReply::Stop(reason, n_completion_tokens)) => {
-                let finish_reason = match reason {
-                    StopReason::Eog | StopReason::Word(_) | StopReason::PrefillOnly => {
-                        FinishReason::Stop
-                    }
-                    StopReason::MaxTokens => FinishReason::Length,
-                };
+            Ok(EngineReply::Stop(_reason, n_completion_tokens)) => {
                 let usage = if include_usage {
-                    Some(CompletionUsage {
-                        prompt_tokens: n_prompt_tokens as u32,
-                        completion_tokens: n_completion_tokens as u32,
+                    Some(ResponseUsage {
+                        input_tokens: n_prompt_tokens as u32,
+                        output_tokens: n_completion_tokens as u32,
                         total_tokens: (n_prompt_tokens + n_completion_tokens) as u32,
-                        completion_tokens_details: None,
-                        prompt_tokens_details: None,
+                        input_tokens_details: InputTokenDetails { cached_tokens: 0 },
+                        output_tokens_details: OutputTokenDetails {
+                            reasoning_tokens: 0,
+                        },
                     })
                 } else {
                     None
                 };
-                if !on_item(OutputChunk::Stop(finish_reason, usage), nth) {
+                let completed = ResponseStreamEvent::ResponseCompleted(ResponseCompletedEvent {
+                    sequence_number: seq,
+                    response: minimal_response(
+                        respond_id,
+                        model_name,
+                        now_unix_s() as u64,
+                        Status::Completed,
+                        usage,
+                    ),
+                });
+                if !on_chunk(ChunkSSE::Chunk(serde_json::to_value(&completed).unwrap())) {
                     break;
                 }
-                on_item(OutputChunk::Done, nth + 1);
+                on_chunk(ChunkSSE::Done);
                 break;
             }
             Ok(EngineReply::Cancelled) => {
-                on_item(OutputChunk::Error(ERR_CANCELLED.to_string()), nth);
+                on_chunk(ChunkSSE::Error(ERR_CANCELLED.to_string()));
                 break;
             }
             Ok(EngineReply::Error(e)) => {
-                on_item(OutputChunk::Error(e), nth);
+                on_chunk(ChunkSSE::Error(e));
                 break;
             }
             Ok(EngineReply::Shutdown) => {
-                on_item(OutputChunk::Error(ERR_ENGINE_SHUTDOWN.to_string()), nth);
+                on_chunk(ChunkSSE::Error(ERR_ENGINE_SHUTDOWN.to_string()));
                 break;
             }
             Err(_) => {
-                on_item(OutputChunk::Error("stream timed out".to_string()), nth);
+                on_chunk(ChunkSSE::Error("stream timed out".to_string()));
                 break;
             }
         }

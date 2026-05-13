@@ -27,7 +27,7 @@ use crate::{
     engine::{Engine, GrammarConfig, OutputMode, TaskConfig},
     helpers::{apply_chat_template, now_unix_s, to_lark_tool_choice},
     output::{
-        ChatChunk, ParserKind, collect_engine_reply_to_json, redirect_engine_reply_to_chat_chunks,
+        ChunkSSE, ParserKind, collect_engine_reply_to_json, redirect_engine_reply_to_chat_sse,
     },
 };
 
@@ -271,7 +271,7 @@ async fn handle_chat_completions(
         // streaming - sse
         let (tx, rx_tokio) = tokio::sync::mpsc::unbounded_channel::<String>();
         tokio::task::spawn_blocking(move || {
-            redirect_engine_reply_to_chat_chunks(
+            redirect_engine_reply_to_chat_sse(
                 rx,
                 STREAM_TIMEOUT,
                 &respond_id,
@@ -283,14 +283,14 @@ async fn handle_chat_completions(
                     .unwrap_or(false),
                 |chunk| {
                     match chunk {
-                        ChatChunk::Chunk(data) => {
+                        ChunkSSE::Chunk(data) => {
                             let serialized = serde_json::to_string(&data).unwrap();
                             let _ = tx.send(serialized);
                         }
-                        ChatChunk::Done => {
+                        ChunkSSE::Done => {
                             let _ = tx.send("[DONE]".to_string());
                         }
-                        ChatChunk::Error(e) => {
+                        ChunkSSE::Error(e) => {
                             let err = oai_error(e, "server_error");
                             let data = serde_json::to_string(&err).unwrap_or_default();
                             let _ = tx.send(data);

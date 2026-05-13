@@ -21,8 +21,8 @@ use crate::{
     engine::{Engine, GrammarConfig, OutputMode, TaskConfig},
     helpers::{apply_chat_template, parse_chat_completion_req, to_lark_tool_choice},
     output::{
-        OutputChunk, ParserKind, collect_engine_reply_to_json,
-        redirect_engine_reply_to_chat_chunks, redirect_engine_reply_to_responses_chunks,
+        ChunkSSE, ParserKind, collect_engine_reply_to_json, redirect_engine_reply_to_chat_sse,
+        redirect_engine_reply_to_responses_sse,
     },
 };
 
@@ -253,9 +253,9 @@ fn js_engine_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
 
     if is_stream {
         // Streaming: AsyncIterableIterator
-        let (chunk_tx, chunk_rx) = crossbeam::channel::bounded::<crate::output::ChatChunk>(8);
+        let (chunk_tx, chunk_rx) = crossbeam::channel::bounded::<crate::output::ChunkSSE>(8);
         std::thread::spawn(move || {
-            redirect_engine_reply_to_chat_chunks(
+            redirect_engine_reply_to_chat_sse(
                 rx,
                 std::time::Duration::from_secs(u64::MAX),
                 &respond_id,
@@ -266,22 +266,22 @@ fn js_engine_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
             );
         });
 
-        AsyncIterableIterator::create_with_receiver::<crate::output::ChatChunk>(
+        AsyncIterableIterator::create_with_receiver::<crate::output::ChunkSSE>(
             ctx,
             chunk_rx,
             move |cx, chunk| -> Result<Option<JSValue>, i32> {
                 match chunk {
-                    crate::output::ChatChunk::Chunk(data) => {
+                    crate::output::ChunkSSE::Chunk(data) => {
                         JSValue::from_serde_json(cx, &data).map(Some).map_err(|_| {
                             cx.throw_internal_error("serialize chunk failed");
                             -1
                         })
                     }
-                    crate::output::ChatChunk::Error(e) => {
+                    crate::output::ChunkSSE::Error(e) => {
                         cx.throw_internal_error(&e);
                         Err(-1)
                     }
-                    crate::output::ChatChunk::Done => {
+                    crate::output::ChunkSSE::Done => {
                         // End the iterator
                         Ok(None)
                     }
@@ -479,40 +479,30 @@ fn js_engine_responses(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     if is_stream {
         // Streaming: AsyncIterableIterator
-        let (item_tx, item_rx) = crossbeam::channel::bounded::<(OutputChunk, usize)>(8);
+        let (item_tx, item_rx) = crossbeam::channel::bounded::<ChunkSSE>(8);
         std::thread::spawn(move || {
-            redirect_engine_reply_to_responses_chunks(
+            redirect_engine_reply_to_responses_sse(
                 rx,
                 std::time::Duration::from_secs(u64::MAX),
-                usage,
+                &respond_id,
+                &model_name,
                 n_prompt_tokens,
-                |item, nth| item_tx.send((item, nth)).is_ok(),
+                false,
+                |chunk| item_tx.send(chunk).is_ok(),
             );
         });
 
-        AsyncIterableIterator::create_with_receiver::<(OutputChunk, usize)>(
+        AsyncIterableIterator::create_with_receiver::<ChunkSSE>(
             ctx,
             item_rx,
-            move |cx, (msg, nth)| -> Result<Option<JSValue>, i32> {
-                match msg {
-                    OutputChunk::Done => Ok(None),
-                    OutputChunk::Error(e) => {
+            move |cx, chunk| -> Result<Option<JSValue>, i32> {
+                match chunk {
+                    ChunkSSE::Done => Ok(None),
+                    ChunkSSE::Error(e) => {
                         cx.throw_internal_error(&e);
                         Err(-1)
                     }
-                    _ => {
-                        let event = crate::responses::stream::chat_stream_item_to_response_event(
-                            &msg,
-                            &respond_id,
-                            &model_name,
-                            nth,
-                        );
-                        let val = serde_json::to_value(&event).map_err(|e| {
-                            cx.throw_internal_error(&format!("serialize event failed: {e}"));
-                            -1
-                        })?;
-                        JSValue::from_serde_json(cx, &val).map(Some)
-                    }
+                    ChunkSSE::Chunk(value) => JSValue::from_serde_json(cx, &value).map(Some),
                 }
             },
         )
