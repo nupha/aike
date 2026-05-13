@@ -392,6 +392,232 @@ pub(crate) fn redirect_engine_reply_to_openai_chunks(
     }
 }
 
+/// Parse EngineReply stream into a complete JSON response.
+/// EngineReply::Content already carries parsed `GeneratedContent` (Text/Reasoning/ToolCall),
+/// so the engine-side OutputParser handles tag/state machine logic — no need for LlmOutputParser.
+/// Only non-empty output content is included.
+pub(crate) fn collect_engine_reply_to_json(
+    rx: crossbeam::channel::Receiver<EngineReply>,
+    timeout: std::time::Duration,
+    kind: ParserKind,
+    respond_id: &str,
+    model_name: &str,
+    n_prompt_tokens: usize,
+    include_usage: bool,
+) -> Result<serde_json::Value, String> {
+    let tm = now_unix_s();
+    let mut text = String::new();
+    let mut reasoning = String::new();
+    let mut tool_call_buf = String::new();
+
+    loop {
+        match rx.recv_timeout(timeout) {
+            Ok(EngineReply::Content(content)) => match content {
+                GeneratedContent::Text(t) => text.push_str(&t),
+                GeneratedContent::Reasoning(t) => reasoning.push_str(&t),
+                GeneratedContent::ToolCall(t) => tool_call_buf.push_str(&t),
+            },
+            Ok(EngineReply::Stop(reason, n_completion_tokens)) => {
+                // Parse tool calls from accumulated buffer using stream deserializer
+                // to handle multiple concatenated JSON objects.
+                let mut calls = Vec::<ChatCompletionMessageToolCalls>::new();
+                if !tool_call_buf.is_empty() {
+                    let stream = serde_json::Deserializer::from_str(&tool_call_buf)
+                        .into_iter::<serde_json::Value>();
+                    for item in stream {
+                        let Ok(value) = item else { continue };
+                        let Some(obj) = value.as_object().filter(|o| o.len() == 2) else {
+                            continue;
+                        };
+                        let Some(name) = obj.get("name").and_then(|v| v.as_str()) else {
+                            continue;
+                        };
+                        let arguments = match obj.get("arguments") {
+                            Some(serde_json::Value::String(s)) => s.clone(),
+                            Some(other) => serde_json::to_string(other).unwrap_or_default(),
+                            None => continue,
+                        };
+                        calls.push(ChatCompletionMessageToolCalls::Function(
+                            ChatCompletionMessageToolCall {
+                                id: format!("call_{}", uuid::Uuid::new_v4().simple()),
+                                function: FunctionCall {
+                                    name: name.to_string(),
+                                    arguments,
+                                },
+                            },
+                        ));
+                    }
+                }
+
+                return match kind {
+                    ParserKind::Chat => {
+                        let finish_reason = match reason {
+                            StopReason::MaxTokens => FinishReason::Length,
+                            StopReason::PrefillOnly => FinishReason::Stop,
+                            StopReason::Eog | StopReason::Word(_) => {
+                                if calls.is_empty() {
+                                    FinishReason::ToolCalls
+                                } else {
+                                    FinishReason::Stop
+                                }
+                            }
+                        };
+
+                        let mut resp = serde_json::to_value(CreateChatCompletionResponse {
+                            id: respond_id.to_string(),
+                            object: "chat.completion".to_string(),
+                            created: now_unix_s() as u32,
+                            model: model_name.to_string(),
+                            choices: vec![ChatChoice {
+                                index: 0,
+                                message: ChatCompletionResponseMessage {
+                                    role: Role::Assistant,
+                                    content: if !text.is_empty() { Some(text) } else { None },
+                                    tool_calls: if !calls.is_empty() { Some(calls) } else { None },
+                                    refusal: None,
+                                    function_call: None,
+                                    audio: None,
+                                    annotations: None,
+                                },
+                                finish_reason: Some(finish_reason),
+                                logprobs: None,
+                            }],
+                            usage: if include_usage {
+                                Some(CompletionUsage {
+                                    prompt_tokens: n_prompt_tokens as u32,
+                                    completion_tokens: n_completion_tokens as u32,
+                                    total_tokens: (n_prompt_tokens + n_completion_tokens) as u32,
+                                    completion_tokens_details: None,
+                                    prompt_tokens_details: None,
+                                })
+                            } else {
+                                None
+                            },
+                            system_fingerprint: None,
+                            service_tier: None,
+                        })
+                        .map_err(|e| e.to_string())?;
+
+                        // add extra reasoning_content field
+                        if !reasoning.is_empty()
+                            && let Some(choices) = resp["choices"].as_array_mut()
+                            && let Some(choice) = choices.first_mut()
+                            && let Some(msg) = choice["message"].as_object_mut()
+                        {
+                            msg.insert(
+                                "reasoning_content".to_string(),
+                                serde_json::Value::String(reasoning),
+                            );
+                        }
+
+                        Ok(resp)
+                    }
+
+                    ParserKind::Responses => {
+                        let mut output: Vec<OutputItem> = Vec::new();
+
+                        if !reasoning.is_empty() {
+                            output.push(OutputItem::Reasoning(ReasoningItem {
+                                id: Some(format!("think_{}", Uuid::new_v4().simple())),
+                                summary: vec![SummaryPart::SummaryText(SummaryTextContent {
+                                    text: reasoning,
+                                })],
+                                content: None,
+                                encrypted_content: None,
+                                status: None,
+                            }));
+                        }
+
+                        if !text.is_empty() {
+                            output.push(OutputItem::Message(OutputMessage {
+                                id: format!("text_{}", Uuid::new_v4().simple()),
+                                role: AssistantRole::Assistant,
+                                status: OutputStatus::Completed,
+                                content: vec![OutputMessageContent::OutputText(
+                                    OutputTextContent {
+                                        text,
+                                        annotations: vec![],
+                                        logprobs: None,
+                                    },
+                                )],
+                                phase: None,
+                            }));
+                        }
+
+                        for tc in calls {
+                            match tc {
+                                ChatCompletionMessageToolCalls::Function(f) => {
+                                    output.push(OutputItem::FunctionCall(FunctionToolCall {
+                                        id: Some(f.id.clone()),
+                                        call_id: f.id,
+                                        name: f.function.name,
+                                        arguments: f.function.arguments,
+                                        namespace: None,
+                                        status: Some(OutputStatus::Completed),
+                                    }));
+                                }
+                                ChatCompletionMessageToolCalls::Custom(_) => {}
+                            }
+                        }
+
+                        let resp = Response {
+                            id: respond_id.to_string(),
+                            object: "response".to_string(),
+                            created_at: tm as _,
+                            completed_at: Some(now_unix_s() as _),
+                            status: Status::Completed,
+                            model: model_name.to_string(),
+                            output,
+                            usage: if include_usage {
+                                Some(ResponseUsage {
+                                    input_tokens: n_prompt_tokens as u32,
+                                    output_tokens: n_completion_tokens as u32,
+                                    total_tokens: (n_prompt_tokens + n_completion_tokens) as u32,
+                                    input_tokens_details: InputTokenDetails { cached_tokens: 0 },
+                                    output_tokens_details: OutputTokenDetails {
+                                        reasoning_tokens: 0,
+                                    },
+                                })
+                            } else {
+                                None
+                            },
+                            background: None,
+                            billing: None,
+                            conversation: None,
+                            error: None,
+                            incomplete_details: None,
+                            instructions: None,
+                            max_output_tokens: None,
+                            metadata: None,
+                            parallel_tool_calls: None,
+                            previous_response_id: None,
+                            prompt: None,
+                            prompt_cache_key: None,
+                            prompt_cache_retention: None,
+                            reasoning: None,
+                            safety_identifier: None,
+                            service_tier: None,
+                            temperature: None,
+                            text: None,
+                            tool_choice: None,
+                            tools: None,
+                            top_logprobs: None,
+                            top_p: None,
+                            truncation: None,
+                        };
+
+                        serde_json::to_value(resp).map_err(|e| e.to_string())
+                    }
+                };
+            }
+            Ok(EngineReply::Cancelled) => return Err(ERR_CANCELLED.to_string()),
+            Ok(EngineReply::Error(e)) => return Err(e),
+            Ok(EngineReply::Shutdown) => return Err(ERR_ENGINE_SHUTDOWN.to_string()),
+            Err(_) => return Err("stream timed out".to_string()),
+        }
+    }
+}
+
 #[deprecated]
 pub struct LlmOutputParser {
     /// current state

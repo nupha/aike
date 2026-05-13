@@ -4,7 +4,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use async_openai::types::chat::{ReasoningEffort, StopConfiguration};
+use async_openai::types::chat::StopConfiguration;
 use linkme::distributed_slice;
 use llama_cpp_ffi::{ModelFamily, ToolChoice as LarkToolChoice};
 use zuqe::{
@@ -19,8 +19,11 @@ use crate::{
     USER_CLASS_DEFS,
     class_llama_client_responses::{parse_responses_input, parse_responses_reasoning},
     engine::{Engine, GrammarConfig, OutputMode, TaskConfig},
-    helpers::{apply_chat_template, now_unix_s, parse_chat_completion_req, to_lark_tool_choice},
-    output::{LlmOutputParser, OutputChunk, ParserKind, redirect_engine_reply_to_openai_chunks},
+    helpers::{apply_chat_template, parse_chat_completion_req, to_lark_tool_choice},
+    output::{
+        LlmOutputParser, OutputChunk, ParserKind, collect_engine_reply_to_json,
+        redirect_engine_reply_to_openai_chunks,
+    },
 };
 
 pub(crate) const ERR_CANCELLED: &str = "cancelled";
@@ -152,11 +155,8 @@ fn js_engine_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
         })
     })?;
 
-    let enable_thinking = req.reasoning_effort.clone().unwrap_or_default() != ReasoningEffort::None;
-    let model_arch: ModelFamily;
     let model_name: String;
     let parse_reasoning: bool;
-    let start_thinking: bool;
 
     // Build prompt tokens
     let prompt_tokens = {
@@ -164,7 +164,6 @@ fn js_engine_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
         let model = engine.model();
 
         model_name = engine.model_name().to_string();
-        model_arch = model.family();
         parse_reasoning = engine.parse_reasoning();
 
         let prompt = apply_chat_template(
@@ -180,10 +179,6 @@ fn js_engine_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
             ctx.throw_internal_error(&e);
             -1
         })?;
-
-        start_thinking = enable_thinking
-            && (prompt.ends_with(model_arch.think_tags().0)
-                || prompt.ends_with(&format!("{}\n", model_arch.think_tags().0)));
 
         let tokens = model.tokenize(&CString::new(prompt).unwrap(), false, true);
         if tokens.is_empty() {
@@ -252,18 +247,9 @@ fn js_engine_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
             -1
         })?;
 
-    let mut parser = LlmOutputParser::new(parse_reasoning, start_thinking);
-
-    parser
-        .set_think_tags(model_arch.think_tags())
-        .set_tool_call_tags(model_arch.tool_call_tags())
-        .set_respond_id(respond_id.clone())
-        .set_model_name(model_name.clone())
-        .set_n_prompt_tokens(n_prompt_tokens)
-        .set_include_usage(
-            req.stream_options
-                .is_some_and(|s| s.include_usage.unwrap_or(false)),
-        );
+    let include_usage = req
+        .stream_options
+        .is_some_and(|s| s.include_usage.unwrap_or(false));
 
     if is_stream {
         // Streaming: AsyncIterableIterator
@@ -275,8 +261,7 @@ fn js_engine_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
                 &respond_id,
                 &model_name,
                 n_prompt_tokens,
-                req.stream_options
-                    .is_some_and(|s| s.include_usage.unwrap_or(false)),
+                include_usage,
                 |chunk| chunk_tx.send(chunk).is_ok(),
             );
         });
@@ -317,10 +302,14 @@ fn js_engine_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
             })?;
 
         std::thread::spawn(move || {
-            let result = parser.parse_all(
+            let result = collect_engine_reply_to_json(
                 rx,
                 std::time::Duration::from_secs(u64::MAX),
                 ParserKind::Chat,
+                &respond_id,
+                &model_name,
+                n_prompt_tokens,
+                include_usage,
             );
             let _ = result_slot.commit(result);
         });
@@ -488,16 +477,16 @@ fn js_engine_responses(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             -1
         })?;
 
-    let mut parser = LlmOutputParser::new(true, reasoning.is_some());
-    parser
-        .set_think_tags(model_arch.think_tags())
-        .set_tool_call_tags(model_arch.tool_call_tags())
-        .set_respond_id(respond_id.clone())
-        .set_model_name(model_name.clone())
-        .set_n_prompt_tokens(n_prompt_tokens)
-        .set_include_usage(usage);
-
     if is_stream {
+        let mut parser = LlmOutputParser::new(true, reasoning.is_some());
+        parser
+            .set_think_tags(model_arch.think_tags())
+            .set_tool_call_tags(model_arch.tool_call_tags())
+            .set_respond_id(respond_id.clone())
+            .set_model_name(model_name.clone())
+            .set_n_prompt_tokens(n_prompt_tokens)
+            .set_include_usage(usage);
+
         // Streaming: AsyncIterableIterator
         let (item_tx, item_rx) = crossbeam::channel::bounded::<(OutputChunk, usize)>(8);
         std::thread::spawn(move || {
@@ -546,10 +535,14 @@ fn js_engine_responses(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             })?;
 
         std::thread::spawn(move || {
-            let result = parser.parse_all(
+            let result = collect_engine_reply_to_json(
                 rx,
                 std::time::Duration::from_secs(u64::MAX),
                 ParserKind::Responses,
+                &respond_id,
+                &model_name,
+                n_prompt_tokens,
+                usage,
             );
             let _ = result_slot.commit(result);
         });
