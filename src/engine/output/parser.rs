@@ -1,25 +1,8 @@
+use llama_cpp_ffi::{LlamaModel, ModelFamily, llama_token};
 use smallvec::{SmallVec, smallvec};
 use swiftlet_incremental::{IncrementalParser, LarkTokenValidation, Swiftlet};
 
-use llama_cpp_ffi::{LlamaModel, ModelFamily, llama_token};
-
-use super::state::OutputState;
-
-/// Callback type for validating whether a given name is a single token in vocab or not.
-pub type LlmTokenValidator = Box<dyn Fn(&str) -> bool + Send + Sync>;
-
-/// Events emitted by OutputParser when chunk boundaries are detected.
-#[derive(Debug, Clone)]
-pub enum OutputEvent {
-    /// Entered reasoning block
-    ReasoningStart,
-    /// Exited reasoning block
-    ReasoningEnd,
-    /// Entered tool call block
-    ToolCallStart,
-    /// Exited tool call block
-    ToolCallEnd,
-}
+use super::{LlmTokenValidator, OutputEvent, OutputState};
 
 /// Type alias for small event vector (optimized for 0-2 events per token)
 pub type OutputEvents = SmallVec<[OutputEvent; 2]>;
