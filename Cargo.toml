@@ -10,6 +10,7 @@ metal = ["llama-cpp-ffi/metal"]
 
 [dependencies]
 llama-cpp-ffi = { path = "../llama-cpp-ffi", features = ["cmake_static"] }
+swiftlet-incremental = { path = "../swiftlet-incremental" }
 zuqe = { path = "../../../devel/zhuque", features = [
     "crossbeam_channel",
     "serde_json_support",

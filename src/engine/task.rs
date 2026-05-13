@@ -2,12 +2,13 @@ use std::collections::{HashSet, VecDeque};
 
 use async_openai::types::chat::ChatCompletionTools;
 use crossbeam::channel::{Receiver, Sender};
-use llama_cpp_ffi::{LlamaModel, OutputParser, ToolChoice};
+use llama_cpp_ffi::{LlamaModel, ToolChoice};
 
 use crate::helpers::{build_tools_grammar, now_unix_s};
 
 use super::{
     context::Engine,
+    output::{LlmTokenValidator, OutputEvent, OutputParser, OutputState},
     slot::{Slot, SlotState},
     worker::remove_cancelled_inputs,
 };
@@ -175,11 +176,11 @@ impl GeneratedContent {
 }
 
 /// Helper function to check if a GeneratedContent matches the given state
-fn matches_content(content: &GeneratedContent, state: &llama_cpp_ffi::OutputState) -> bool {
+fn matches_content(content: &GeneratedContent, state: &OutputState) -> bool {
     match (content, state) {
-        (GeneratedContent::Text(_), llama_cpp_ffi::OutputState::Text) => true,
-        (GeneratedContent::Reasoning(_), llama_cpp_ffi::OutputState::Reasoning) => true,
-        (GeneratedContent::ToolCall(_), llama_cpp_ffi::OutputState::ToolCall) => true,
+        (GeneratedContent::Text(_), OutputState::Text) => true,
+        (GeneratedContent::Reasoning(_), OutputState::Reasoning) => true,
+        (GeneratedContent::ToolCall(_), OutputState::ToolCall) => true,
         _ => false,
     }
 }
@@ -236,7 +237,7 @@ impl TaskState {
     }
 
     /// Handle output parser events
-    fn handle_output_event(&mut self, event: llama_cpp_ffi::OutputEvent) {
+    fn handle_output_event(&mut self, event: OutputEvent) {
         #[cfg(debug_assertions)]
         eprintln!("[OutputParser] Parsing output event: {event:?} ");
 
@@ -252,10 +253,8 @@ impl TaskState {
 
         // Push new empty content for the new state
         self.current_content.push(match event {
-            llama_cpp_ffi::OutputEvent::ReasoningStart => {
-                GeneratedContent::Reasoning(String::new())
-            }
-            llama_cpp_ffi::OutputEvent::ToolCallStart => GeneratedContent::ToolCall(String::new()),
+            OutputEvent::ReasoningStart => GeneratedContent::Reasoning(String::new()),
+            OutputEvent::ToolCallStart => GeneratedContent::ToolCall(String::new()),
             _ => GeneratedContent::Text(String::new()),
         });
     }
@@ -271,7 +270,7 @@ impl TaskState {
                 .output_parser
                 .as_ref()
                 .map(|p| p.current_state().clone())
-                .unwrap_or(llama_cpp_ffi::OutputState::Text);
+                .unwrap_or(OutputState::Text);
 
             // Debug assert: parser state should match last content element's type
             debug_assert!(
@@ -456,7 +455,7 @@ impl Engine {
             // Get output grammar
             let grammar = self.model.family().output_grammar();
 
-            let token_validator: llama_cpp_ffi::LlmTokenValidator = Box::new({
+            let token_validator: LlmTokenValidator = Box::new({
                 let model2 = self.model.clone();
                 move |token_text: &str| -> bool { model2.lookup_text_token(token_text).is_some() }
             });
@@ -475,12 +474,12 @@ impl Engine {
         let initial_state = output_parser
             .as_ref()
             .map(|p| p.current_state().clone())
-            .unwrap_or(llama_cpp_ffi::OutputState::Text);
+            .unwrap_or(OutputState::Text);
 
         let current_content = vec![match initial_state {
-            llama_cpp_ffi::OutputState::Text => GeneratedContent::Text(String::new()),
-            llama_cpp_ffi::OutputState::Reasoning => GeneratedContent::Reasoning(String::new()),
-            llama_cpp_ffi::OutputState::ToolCall => GeneratedContent::ToolCall(String::new()),
+            OutputState::Text => GeneratedContent::Text(String::new()),
+            OutputState::Reasoning => GeneratedContent::Reasoning(String::new()),
+            OutputState::ToolCall => GeneratedContent::ToolCall(String::new()),
         }];
 
         let task_state = TaskState {

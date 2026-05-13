@@ -17,11 +17,11 @@ use super::{
 };
 
 /// Helper function to check if a GeneratedContent matches the parser state
-fn matches_content_state(content: &GeneratedContent, state: &llama_cpp_ffi::OutputState) -> bool {
+fn matches_content_state(content: &GeneratedContent, state: &super::output::OutputState) -> bool {
     match (content, state) {
-        (GeneratedContent::Text(_), llama_cpp_ffi::OutputState::Text) => true,
-        (GeneratedContent::Reasoning(_), llama_cpp_ffi::OutputState::Reasoning) => true,
-        (GeneratedContent::ToolCall(_), llama_cpp_ffi::OutputState::ToolCall) => true,
+        (GeneratedContent::Text(_), super::output::OutputState::Text) => true,
+        (GeneratedContent::Reasoning(_), super::output::OutputState::Reasoning) => true,
+        (GeneratedContent::ToolCall(_), super::output::OutputState::ToolCall) => true,
         _ => false,
     }
 }
