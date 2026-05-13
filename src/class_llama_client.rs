@@ -3,8 +3,11 @@
 
 use std::{cell::Cell, ffi::c_void, sync::Arc};
 
+use futures_util::StreamExt;
 use linkme::distributed_slice;
 use reqwest::header::HeaderMap;
+use tokio::io::AsyncBufReadExt;
+use tokio_util::io::StreamReader;
 use zuqe::{
     CallContext, ClassCtorDef, ClassDef, ClassID, FieldDef, JSResult, JSValue, Object, Runtime,
     ScopedContext,
@@ -159,10 +162,6 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
             match client.send().await {
                 Ok(response) => {
                     // parse SSE manually
-                    use futures_util::StreamExt;
-                    use tokio::io::AsyncBufReadExt;
-                    use tokio_util::io::StreamReader;
-
                     // Convert response bytes to AsyncRead
                     let byte_stream = response
                         .bytes_stream()
@@ -172,6 +171,7 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
 
                     while let Ok(Some(line)) = lines.next_line().await {
                         let line = line.trim().to_string();
+
                         if line.starts_with("data: ") {
                             let data = &line[6..];
                             if data == "[DONE]" {
@@ -207,7 +207,7 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
             result_slot,
             |cx, msg| -> Result<Option<JSValue>, i32> {
                 match msg {
-                    ChatReply::Chunk(chunk) => chunk_to_js(cx, &chunk).map(Some),
+                    ChatReply::Chunk(chunk) => JSValue::from_serde_json(cx, &chunk).map(Some),
                     ChatReply::Done => Ok(None),
                     ChatReply::Error(e) => {
                         cx.throw_internal_error(&e);
@@ -267,7 +267,6 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
     }
 }
 
-/// dispose
 fn js_client_dispose(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut this = cc.this();
     let payload = this
@@ -281,12 +280,6 @@ fn js_client_dispose(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         }
     }
     Ok(JSValue::UNDEFINED)
-}
-
-/// Convert CreateChatCompletionStreamResponse to a JS object.
-pub(crate) fn chunk_to_js(ctx: &mut ScopedContext, chunk: &serde_json::Value) -> JSResult {
-    // chunk is already a JSON Value, just convert it to JS
-    JSValue::from_serde_json(ctx, chunk)
 }
 
 const CLASS_CLIENT_PROTO: &[FieldDef] = &[

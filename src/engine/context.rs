@@ -8,7 +8,7 @@ use crossbeam::channel::{Receiver, SendError, Sender};
 use llama_cpp_ffi::{LlamaContext, LlamaModel, SamplerChain, SamplerKind};
 
 use super::{
-    task::{EngineCtrlMsg, EngineReply, EngineTask, GrammarConfig, TaskConfig, TaskState, Token},
+    task::{EngineCtrlMsg, EngineReply, EngineTask, GrammarConfig, TaskConfig, Token},
     worker::worker_loop,
 };
 
@@ -70,11 +70,11 @@ impl Engine {
         &self.model
     }
 
-    fn llm_ctx(&self) -> &LlamaContext {
+    pub(super) fn llm_ctx(&self) -> &LlamaContext {
         &self.llm_ctx
     }
 
-    fn llm_ctx_mut(&mut self) -> &mut LlamaContext {
+    pub(super) fn llm_ctx_mut(&mut self) -> &mut LlamaContext {
         &mut self.llm_ctx
     }
 
@@ -100,64 +100,6 @@ impl Engine {
 
     pub(crate) fn set_pending(&mut self, v: usize) {
         self.pending_decode_tokens = v;
-    }
-
-    pub(crate) fn common_prefix_len(&self, seq_id: usize, prompt_tokens: &[Token]) -> usize {
-        let cached: &Vec<Token> = match self.cached_tokens().get(seq_id) {
-            Some(c) => c,
-            None => return 0,
-        };
-        let max_common = cached.len().min(prompt_tokens.len());
-        let mut n = 0usize;
-        while n < max_common && cached[n] == prompt_tokens[n] {
-            n += 1;
-        }
-        n
-    }
-
-    /// Align KV/cache state for prefix reuse. Returns reusable prefix length.
-    pub(crate) fn prepare_slot(
-        &mut self,
-        seq_id: usize,
-        prompt_tokens: &[Token],
-    ) -> Result<usize, String> {
-        if seq_id >= self.cached_tokens().len() {
-            return Err(format!("invalid seq id {}", seq_id));
-        }
-
-        let mut n_common: usize = {
-            let cached = self.cached_tokens();
-            let slot_cache = &cached[seq_id];
-            let max_common = slot_cache.len().min(prompt_tokens.len());
-            let mut cnt = 0_usize;
-
-            while cnt < max_common && slot_cache[cnt] == prompt_tokens[cnt] {
-                cnt += 1;
-            }
-            if cnt == prompt_tokens.len() && cnt > 0 {
-                cnt -= 1;
-            }
-
-            cnt
-        };
-
-        let llm = self.llm_ctx_mut();
-        let removed = llm.memory_seq_rm(seq_id as i32, n_common as i32, -1);
-        if !removed {
-            llm.memory_seq_rm(seq_id as i32, 0, -1);
-            n_common = 0;
-        }
-
-        self.cached_tokens_mut()[seq_id].truncate(n_common);
-
-        Ok(n_common)
-    }
-
-    pub(crate) fn truncate_slot_cache(&mut self, seq_id: usize, n_keep: usize) {
-        let cached: &mut Vec<Vec<Token>> = self.cached_tokens_mut();
-        if let Some(c) = cached.get_mut(seq_id) {
-            c.truncate(n_keep);
-        }
     }
 
     pub(crate) fn begin_decode_batch(&mut self) {
@@ -233,8 +175,8 @@ impl Engine {
         }
     }
 
-    /// lazy initialize slot sampler
-    pub(super) fn init_slot_sampler(
+    /// lazy initialize sampler for slot
+    pub(super) fn init_sampler(
         &mut self,
         seq_id: usize,
         temperature: f32,
@@ -265,8 +207,7 @@ impl Engine {
             .add_sampler(&SamplerKind::Dist(0));
 
             if let Some(g) = grammar {
-                // use grammar
-                if let Err(e) = sc.set_lark_grammar(&g.lark_grammar) {
+                if let Err(e) = sc.set_grammar(&g.lark_grammar) {
                     log::warn!("failed to set grammar: {}", e);
                 } else {
                     sc.set_tool_choice(g.tool_choice);
@@ -277,29 +218,6 @@ impl Engine {
         }
 
         Ok(())
-    }
-
-    pub(crate) fn token_to_piece(&self, token: Token) -> Vec<u8> {
-        self.llm_ctx().model().token_to_piece(token)
-    }
-
-    pub(crate) fn is_eog(&self, token: Token) -> bool {
-        self.llm_ctx().model().is_eog(token)
-    }
-
-    pub(crate) fn reset_slot_runtime(&mut self, seq_id: usize) {
-        let ss = self.samplers_mut();
-        if seq_id < ss.len() {
-            ss[seq_id] = None;
-        }
-    }
-
-    pub(crate) fn clear_slot(&mut self, seq_id: usize) {
-        if seq_id < self.cached_tokens().len() {
-            self.llm_ctx_mut().memory_seq_rm(seq_id as i32, 0, -1);
-            self.cached_tokens_mut()[seq_id].clear();
-            self.samplers_mut()[seq_id] = None;
-        }
     }
 
     pub fn start(
@@ -399,14 +317,6 @@ impl Engine {
     }
 
     pub fn push_task(
-        &self,
-        prompt_tokens: Vec<Token>,
-        config: TaskConfig,
-    ) -> Result<Receiver<EngineReply>, SendError<Box<EngineTask>>> {
-        self.push_task_with_params(prompt_tokens, config, None, true)
-    }
-
-    pub fn push_task_with_params(
         &self,
         prompt_tokens: Vec<Token>,
         config: TaskConfig,

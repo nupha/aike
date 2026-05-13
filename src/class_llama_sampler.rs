@@ -330,8 +330,8 @@ fn add_grammar(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         return Err(-1);
     }
 
-    let grammar = s.content().encode_utf8(false).to_string();
-    if let Err(e) = chain.set_lark_grammar(&grammar) {
+    let lark = s.content().encode_utf8(false);
+    if let Err(e) = chain.set_grammar(&lark) {
         log::warn!("failed to set grammar: {}", e);
     }
 

@@ -405,42 +405,6 @@ impl Engine {
         false
     }
 
-    pub(crate) fn pick_idle_slot(
-        &self,
-        slots: &[Slot],
-        seq_hint: Option<usize>,
-        prompt_tokens: &[Token],
-        use_cache: bool,
-        match_threshold: f32,
-    ) -> Option<(usize, bool)> {
-        if let Some(hint) = seq_hint
-            && let Some(slot) = slots.get(hint)
-            && matches!(slot.state, SlotState::Idle)
-        {
-            let can_reuse = use_cache && self.common_prefix_len(slot.seq_id, prompt_tokens) > 0;
-            return Some((hint, can_reuse));
-        }
-        let idle_indices = slots
-            .iter()
-            .enumerate()
-            .filter_map(|(idx, s)| matches!(s.state, SlotState::Idle).then_some(idx))
-            .collect::<Vec<_>>();
-        if idle_indices.is_empty() {
-            return None;
-        }
-
-        let mut lru_idx = idle_indices[0];
-        let mut lru_mtime = slots[lru_idx].mtime;
-        for idx in idle_indices.iter().skip(1) {
-            if slots[*idx].mtime < lru_mtime {
-                lru_mtime = slots[*idx].mtime;
-                lru_idx = *idx;
-            }
-        }
-
-        Some((lru_idx, false))
-    }
-
     pub(crate) fn sched_task(
         &mut self,
         task: Box<EngineTask>,

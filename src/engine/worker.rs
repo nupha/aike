@@ -275,6 +275,7 @@ impl Engine {
 
     fn sampling_stage(&mut self, slots: &mut [Slot]) -> bool {
         let mut did_work = false;
+        let model = self.llm_ctx().model().clone();
 
         for slot in slots.iter_mut() {
             let state0 = std::mem::replace(&mut slot.state, SlotState::Busy);
@@ -287,7 +288,7 @@ impl Engine {
                 if task_state.output_tx.is_full() {
                     // do sampling in next tick
                     slot.state = SlotState::Sampling { logits, task_state };
-                } else if let Err(e) = self.init_slot_sampler(
+                } else if let Err(e) = self.init_sampler(
                     slot.seq_id,
                     task_state.config.temperature,
                     task_state.config.top_p,
@@ -304,7 +305,7 @@ impl Engine {
                         Ok(token) => {
                             self.sample_accept(slot.seq_id, token);
 
-                            slot.state = if self.is_eog(token) {
+                            slot.state = if model.is_eog(token) {
                                 let n = task_state.n_completion_tokens;
                                 SlotState::Done {
                                     task_state,
@@ -456,7 +457,7 @@ impl Engine {
                     self.clear_slot(slot.seq_id);
                     slot.n_past = 0;
                 } else {
-                    self.reset_slot_runtime(slot.seq_id);
+                    self.reset_slot(slot.seq_id);
                 }
                 completed += 1;
                 slot.state = SlotState::Idle;
