@@ -13,8 +13,9 @@ use async_openai::types::{
         OutputMessage, OutputMessageContent, OutputStatus, OutputTextContent, OutputTokenDetails,
         ReasoningItem, Response, ResponseCompletedEvent, ResponseContentPartAddedEvent,
         ResponseCreatedEvent, ResponseFunctionCallArgumentsDeltaEvent,
-        ResponseOutputItemAddedEvent, ResponseReasoningSummaryTextDeltaEvent, ResponseStreamEvent,
-        ResponseTextDeltaEvent, ResponseUsage, Status, SummaryPart, SummaryTextContent,
+        ResponseOutputItemAddedEvent, ResponseOutputItemDoneEvent,
+        ResponseReasoningSummaryTextDeltaEvent, ResponseStreamEvent, ResponseTextDeltaEvent,
+        ResponseUsage, Status, SummaryPart, SummaryTextContent,
     },
 };
 use uuid::Uuid;
@@ -25,6 +26,7 @@ use crate::{
     helpers::now_unix_s,
 };
 
+#[deprecated]
 #[derive(Debug)]
 pub(crate) enum OutputPart {
     Text(String),
@@ -109,6 +111,7 @@ impl OutputPart {
     }
 }
 
+#[deprecated]
 pub(crate) enum OutputChunk {
     Part(OutputPart),
     Stop(FinishReason, Option<CompletionUsage>),
@@ -165,6 +168,7 @@ pub(crate) enum ParserKind {
     Responses,
 }
 
+#[deprecated]
 #[derive(Debug, PartialEq)]
 enum State {
     Text,
@@ -658,6 +662,26 @@ fn minimal_response(
     }
 }
 
+/// Emit a ResponseStreamEvent::ResponseOutputItemAdded.
+/// Returns false if the callback indicated the stream should stop.
+fn emit_item_added(
+    seq: &mut u64,
+    output_index: u32,
+    item: OutputItem,
+    on_chunk: &mut impl FnMut(ChunkSSE) -> bool,
+) -> bool {
+    let event = ResponseStreamEvent::ResponseOutputItemAdded(ResponseOutputItemAddedEvent {
+        sequence_number: *seq,
+        output_index,
+        item,
+    });
+    if !on_chunk(ChunkSSE::Chunk(serde_json::to_value(&event).unwrap())) {
+        return false;
+    }
+    *seq += 1;
+    true
+}
+
 /// Direct EngineReply -> Response API event stream (streaming variant).
 /// Uses async_openai ResponseStreamEvent standard types for serialization.
 pub(crate) fn redirect_engine_reply_to_responses_sse(
@@ -669,12 +693,56 @@ pub(crate) fn redirect_engine_reply_to_responses_sse(
     include_usage: bool,
     mut on_chunk: impl FnMut(ChunkSSE) -> bool,
 ) {
-    let mut text_started = false;
+    enum ItemKind {
+        Text,
+        Reasoning,
+    }
+    let mut prev_kind: Option<ItemKind> = None;
     let mut msg_id = String::new();
     let mut reasoning_item_id: Option<String> = None;
     let mut seq = 0u64;
     let output_index = 0u32;
     let content_index = 0u32;
+
+    /// Close the current active output item by emitting output_item.done.
+    /// Returns false if callback requested stop.
+    fn close_current_item(
+        seq: &mut u64,
+        output_index: u32,
+        prev_kind: &mut Option<ItemKind>,
+        msg_id: &str,
+        reasoning_item_id: &Option<String>,
+        on_chunk: &mut impl FnMut(ChunkSSE) -> bool,
+    ) -> bool {
+        let item = match prev_kind {
+            Some(ItemKind::Text) => OutputItem::Message(OutputMessage {
+                id: msg_id.to_string(),
+                role: AssistantRole::Assistant,
+                status: OutputStatus::Completed,
+                content: vec![],
+                phase: None,
+            }),
+            Some(ItemKind::Reasoning) => OutputItem::Reasoning(ReasoningItem {
+                id: reasoning_item_id.clone(),
+                summary: vec![],
+                content: None,
+                encrypted_content: None,
+                status: Some(OutputStatus::Completed),
+            }),
+            None => return true,
+        };
+        *prev_kind = None;
+        let event = ResponseStreamEvent::ResponseOutputItemDone(ResponseOutputItemDoneEvent {
+            sequence_number: *seq,
+            output_index,
+            item,
+        });
+        if !on_chunk(ChunkSSE::Chunk(serde_json::to_value(&event).unwrap())) {
+            return false;
+        }
+        *seq += 1;
+        true
+    }
 
     // Emit response.created
     let created = ResponseStreamEvent::ResponseCreated(ResponseCreatedEvent {
@@ -695,28 +763,34 @@ pub(crate) fn redirect_engine_reply_to_responses_sse(
         match rx.recv_timeout(timeout) {
             Ok(EngineReply::Content(content)) => match content {
                 GeneratedContent::Text(t) => {
-                    // Lifecycle events on first text chunk
-                    if !text_started {
-                        text_started = true;
-                        msg_id = format!("msg_{}", uuid::Uuid::new_v4().simple());
-
-                        let item_added = ResponseStreamEvent::ResponseOutputItemAdded(
-                            ResponseOutputItemAddedEvent {
-                                sequence_number: seq,
-                                output_index,
-                                item: OutputItem::Message(OutputMessage {
-                                    id: msg_id.clone(),
-                                    role: AssistantRole::Assistant,
-                                    status: OutputStatus::InProgress,
-                                    content: vec![],
-                                    phase: None,
-                                }),
-                            },
-                        );
-                        if !on_chunk(ChunkSSE::Chunk(serde_json::to_value(&item_added).unwrap())) {
+                    if !matches!(prev_kind, Some(ItemKind::Text)) {
+                        if !close_current_item(
+                            &mut seq,
+                            output_index,
+                            &mut prev_kind,
+                            &msg_id,
+                            &reasoning_item_id,
+                            &mut on_chunk,
+                        ) {
                             break;
                         }
-                        seq += 1;
+                        prev_kind = Some(ItemKind::Text);
+                        msg_id = format!("msg_{}", uuid::Uuid::new_v4().simple());
+
+                        if !emit_item_added(
+                            &mut seq,
+                            output_index,
+                            OutputItem::Message(OutputMessage {
+                                id: msg_id.clone(),
+                                role: AssistantRole::Assistant,
+                                status: OutputStatus::InProgress,
+                                content: vec![],
+                                phase: None,
+                            }),
+                            &mut on_chunk,
+                        ) {
+                            break;
+                        }
 
                         let part_added = ResponseStreamEvent::ResponseContentPartAdded(
                             ResponseContentPartAddedEvent {
@@ -752,13 +826,37 @@ pub(crate) fn redirect_engine_reply_to_responses_sse(
                     seq += 1;
                 }
                 GeneratedContent::Reasoning(t) => {
-                    let rid = if let Some(ref id) = reasoning_item_id {
-                        id.clone()
-                    } else {
+                    if !matches!(prev_kind, Some(ItemKind::Reasoning)) {
+                        if !close_current_item(
+                            &mut seq,
+                            output_index,
+                            &mut prev_kind,
+                            &msg_id,
+                            &reasoning_item_id,
+                            &mut on_chunk,
+                        ) {
+                            break;
+                        }
+                        prev_kind = Some(ItemKind::Reasoning);
                         let new_id = format!("rsn_{}", uuid::Uuid::new_v4().simple());
-                        reasoning_item_id = Some(new_id.clone());
-                        new_id
-                    };
+                        if !emit_item_added(
+                            &mut seq,
+                            output_index,
+                            OutputItem::Reasoning(ReasoningItem {
+                                id: Some(new_id.clone()),
+                                summary: vec![],
+                                content: None,
+                                encrypted_content: None,
+                                status: Some(OutputStatus::InProgress),
+                            }),
+                            &mut on_chunk,
+                        ) {
+                            break;
+                        }
+                        reasoning_item_id = Some(new_id);
+                    }
+
+                    let rid = reasoning_item_id.as_ref().unwrap().clone();
                     let delta = ResponseStreamEvent::ResponseReasoningSummaryTextDelta(
                         ResponseReasoningSummaryTextDeltaEvent {
                             sequence_number: seq,
@@ -774,6 +872,16 @@ pub(crate) fn redirect_engine_reply_to_responses_sse(
                     seq += 1;
                 }
                 GeneratedContent::ToolCall(t) => {
+                    if !close_current_item(
+                        &mut seq,
+                        output_index,
+                        &mut prev_kind,
+                        &msg_id,
+                        &reasoning_item_id,
+                        &mut on_chunk,
+                    ) {
+                        break;
+                    }
                     match serde_json::from_str::<serde_json::Value>(&t) {
                         Ok(value) => {
                             if let Some(obj) = value.as_object().filter(|o| o.len() == 2) {
@@ -797,19 +905,14 @@ pub(crate) fn redirect_engine_reply_to_responses_sse(
                                         status: None,
                                     };
 
-                                    let item_added = ResponseStreamEvent::ResponseOutputItemAdded(
-                                        ResponseOutputItemAddedEvent {
-                                            sequence_number: seq,
-                                            output_index,
-                                            item: OutputItem::FunctionCall(tool_call),
-                                        },
-                                    );
-                                    if !on_chunk(ChunkSSE::Chunk(
-                                        serde_json::to_value(&item_added).unwrap(),
-                                    )) {
+                                    if !emit_item_added(
+                                        &mut seq,
+                                        output_index,
+                                        OutputItem::FunctionCall(tool_call),
+                                        &mut on_chunk,
+                                    ) {
                                         break;
                                     }
-                                    seq += 1;
 
                                     let args_delta =
                                         ResponseStreamEvent::ResponseFunctionCallArgumentsDelta(
@@ -838,6 +941,16 @@ pub(crate) fn redirect_engine_reply_to_responses_sse(
                 }
             },
             Ok(EngineReply::Stop(_reason, n_completion_tokens)) => {
+                if !close_current_item(
+                    &mut seq,
+                    output_index,
+                    &mut prev_kind,
+                    &msg_id,
+                    &reasoning_item_id,
+                    &mut on_chunk,
+                ) {
+                    break;
+                }
                 let usage = if include_usage {
                     Some(ResponseUsage {
                         input_tokens: n_prompt_tokens as u32,

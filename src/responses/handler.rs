@@ -16,15 +16,10 @@ use uuid::Uuid;
 use crate::{
     engine::{EngineReply, GrammarConfig, OutputMode, TaskConfig},
     helpers::apply_chat_template,
-    output::{LlmOutputParser, OutputChunk, OutputPart, ParserKind},
-    responses::{
-        response_builder::{
-            build_content_part_added_event, build_output_item_added_event,
-            build_reasoning_delta_event, build_response_completed_event,
-            build_response_created_event, build_text_delta_event,
-        },
-        stream::sse_event,
+    output::{
+        ChunkSSE, ParserKind, collect_engine_reply_to_json, redirect_engine_reply_to_responses_sse,
     },
+    responses::stream::sse_event,
     serve::{
         AppState, DEFAULT_TEMPERATURE, DEFAULT_TOP_P, ERR_CANCELLED, ERR_ENGINE_SHUTDOWN,
         STREAM_TIMEOUT, oai_error,
@@ -159,33 +154,31 @@ pub async fn handle_responses(
         };
     }
 
-    let mut parser = LlmOutputParser::new(true, enalbe_thinking);
-
-    parser
-        .set_think_tags(model_arch.think_tags())
-        .set_tool_call_tags(model_arch.tool_call_tags())
-        .set_respond_id(respond_id.clone())
-        .set_model_name(model_name.clone())
-        .set_n_prompt_tokens(n_prompt_tokens);
-
     if is_stream {
-        handle_responses_stream(rx, parser, respond_id, model_name)
+        handle_responses_stream(rx, respond_id, model_name, n_prompt_tokens)
     } else {
         // non-stream
         let join = tokio::task::spawn_blocking(move || {
-            parser
-                .parse_all(rx, STREAM_TIMEOUT, ParserKind::Responses)
-                .map_err(|e| match e.as_str() {
-                    ERR_CANCELLED => (StatusCode::CONFLICT, oai_error(e, "cancelled")),
-                    ERR_ENGINE_SHUTDOWN => (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        oai_error(e, "server_error"),
-                    ),
-                    _ => (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        oai_error(e, "server_error"),
-                    ),
-                })
+            collect_engine_reply_to_json(
+                rx,
+                STREAM_TIMEOUT,
+                ParserKind::Responses,
+                &respond_id,
+                &model_name,
+                n_prompt_tokens,
+                true,
+            )
+            .map_err(|e| match e.as_str() {
+                ERR_CANCELLED => (StatusCode::CONFLICT, oai_error(e, "cancelled")),
+                ERR_ENGINE_SHUTDOWN => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    oai_error(e, "server_error"),
+                ),
+                _ => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    oai_error(e, "server_error"),
+                ),
+            })
         });
 
         match join.await {
@@ -202,91 +195,48 @@ pub async fn handle_responses(
 
 pub(crate) fn handle_responses_stream(
     rx: crossbeam::channel::Receiver<EngineReply>,
-    parser: LlmOutputParser,
     respond_id: String,
     model_name: String,
+    n_prompt_tokens: usize,
 ) -> Response {
     let (tx, rx_tokio) = tokio::sync::mpsc::unbounded_channel::<String>();
-
-    let n_prompt_tokens = parser.n_prompt_tokens();
-
     tokio::task::spawn_blocking(move || {
-        let mut text_buffer = String::new();
-        let mut reasoning_buffer = String::new();
-        let mut text_started = false;
-        let mut reasoning_started = false;
-        let mut output_index: u32 = 0;
-        let mut content_index: u32 = 0;
-        let mut seq: u64 = 0;
-
-        // Emit response.created
-        let created = build_response_created_event(&respond_id, &model_name);
-        let _ = tx.send(sse_event("response.created", created));
-
-        parser.parse_partial(rx, STREAM_TIMEOUT, |item, _nth| {
-            match item {
-                OutputChunk::Part(part) => match part {
-                    OutputPart::Text(t) => {
-                        if !text_started {
-                            text_started = true;
-
-                            let item_added = build_output_item_added_event(seq, output_index);
-                            seq += 1;
-                            let _ = tx.send(sse_event("response.output_item.added", item_added));
-
-                            let part_added =
-                                build_content_part_added_event(seq, output_index, content_index);
-                            seq += 1;
-                            let _ = tx.send(sse_event("response.content_part.added", part_added));
-                        }
-
-                        text_buffer.push_str(&t);
-                        let delta = build_text_delta_event(seq, output_index, content_index, &t);
-                        seq += 1;
-                        let _ = tx.send(sse_event("response.output_text.delta", delta));
+        redirect_engine_reply_to_responses_sse(
+            rx,
+            STREAM_TIMEOUT,
+            &respond_id,
+            &model_name,
+            n_prompt_tokens,
+            true,
+            |chunk| {
+                match chunk {
+                    ChunkSSE::Chunk(data) => {
+                        let event_type = data["type"]
+                            .as_str()
+                            .unwrap_or("response.output_text.delta")
+                            .to_owned();
+                        let data_str = serde_json::to_string(&data).unwrap_or_default();
+                        drop(data);
+                        let msg = format!("event: {event_type}\ndata: {data_str}\n\n");
+                        let _ = tx.send(msg);
                     }
-                    OutputPart::Reasoning(r) => {
-                        if !reasoning_started {
-                            reasoning_started = true;
-                        }
-                        reasoning_buffer.push_str(&r);
-                        let delta = build_reasoning_delta_event(seq, output_index, &r);
-                        seq += 1;
-                        let _ = tx.send(sse_event("response.reasoning_summary.delta", delta));
+                    ChunkSSE::Done => {
+                        let _ = tx.send("[DONE]".to_string());
                     }
-                    OutputPart::Call(_) => {
-                        // Tool calls not yet implemented for Responses API
+                    ChunkSSE::Error(e) => {
+                        let err = serde_json::json!({
+                            "type": "error",
+                            "error": {
+                                "message": e,
+                                "type": "server_error"
+                            }
+                        });
+                        let _ = tx.send(sse_event("error", err));
                     }
-                },
-                OutputChunk::Stop(_finish_reason, usage) => {
-                    let n_completion = usage
-                        .as_ref()
-                        .map(|u| u.completion_tokens as usize)
-                        .unwrap_or(0);
-                    let completed = build_response_completed_event(
-                        &respond_id,
-                        &model_name,
-                        n_prompt_tokens,
-                        n_completion,
-                    );
-                    let _ = tx.send(sse_event("response.completed", completed));
                 }
-                OutputChunk::Done => {
-                    // Already handled by Stop; this is a no-op
-                }
-                OutputChunk::Error(e) => {
-                    let err = serde_json::json!({
-                        "type": "error",
-                        "error": {
-                            "message": e,
-                            "type": "server_error"
-                        }
-                    });
-                    let _ = tx.send(sse_event("error", err));
-                }
-            }
-            true
-        });
+                true
+            },
+        );
     });
 
     let stream = tokio_stream::wrappers::UnboundedReceiverStream::new(rx_tokio)
