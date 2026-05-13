@@ -26,7 +26,9 @@ use uuid::Uuid;
 use crate::{
     engine::{Engine, GrammarConfig, OutputMode, TaskConfig},
     helpers::{apply_chat_template, now_unix_s, to_lark_tool_choice},
-    output::{ChatChunk, LlmOutputParser, ParserKind, redirect_engine_reply_to_openai_chunks},
+    output::{
+        ChatChunk, ParserKind, collect_engine_reply_to_json, redirect_engine_reply_to_openai_chunks,
+    },
 };
 
 pub(crate) const ERR_CANCELLED: &str = "cancelled";
@@ -259,20 +261,11 @@ async fn handle_chat_completions(
         }
     };
 
-    let mut parser = LlmOutputParser::new(parse_reasoning, start_thinking);
-
-    parser
-        .set_think_tags(model_arch.think_tags())
-        .set_tool_call_tags(model_arch.tool_call_tags())
-        .set_respond_id(respond_id.clone())
-        .set_model_name(model_name.clone())
-        .set_n_prompt_tokens(n_prompt_tokens)
-        .set_include_usage(
-            req.stream_options
-                .as_ref()
-                .and_then(|o| o.include_usage)
-                .unwrap_or(false),
-        );
+    let include_usage = req
+        .stream_options
+        .as_ref()
+        .and_then(|o| o.include_usage)
+        .unwrap_or(false);
 
     if is_stream {
         // streaming - sse
@@ -319,19 +312,26 @@ async fn handle_chat_completions(
     } else {
         // non-streaming
         let join = tokio::task::spawn_blocking(move || {
-            parser
-                .parse_all(rx, STREAM_TIMEOUT, ParserKind::Chat)
-                .map_err(|e| match e.as_str() {
-                    ERR_CANCELLED => (StatusCode::CONFLICT, oai_error(e, "cancelled")),
-                    ERR_ENGINE_SHUTDOWN => (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        oai_error(e, "server_error"),
-                    ),
-                    _ => (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        oai_error(e, "server_error"),
-                    ),
-                })
+            collect_engine_reply_to_json(
+                rx,
+                STREAM_TIMEOUT,
+                ParserKind::Chat,
+                &respond_id,
+                &model_name,
+                n_prompt_tokens,
+                include_usage,
+            )
+            .map_err(|e| match e.as_str() {
+                ERR_CANCELLED => (StatusCode::CONFLICT, oai_error(e, "cancelled")),
+                ERR_ENGINE_SHUTDOWN => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    oai_error(e, "server_error"),
+                ),
+                _ => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    oai_error(e, "server_error"),
+                ),
+            })
         });
 
         match join.await {
