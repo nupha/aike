@@ -21,7 +21,7 @@ use crate::{
     engine::{Engine, GrammarConfig, OutputMode, TaskConfig},
     helpers::{apply_chat_template, parse_chat_completion_req, to_lark_tool_choice},
     output::{
-        OutputChunk, ParserKind, collect_engine_reply_to_chat_json,
+        OutputChunk, ParserKind, collect_engine_reply_to_json,
         redirect_engine_reply_to_chat_chunks, redirect_engine_reply_to_responses_chunks,
     },
 };
@@ -302,7 +302,7 @@ fn js_engine_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
             })?;
 
         std::thread::spawn(move || {
-            let result = collect_engine_reply_to_chat_json(
+            let result = collect_engine_reply_to_json(
                 rx,
                 std::time::Duration::from_secs(u64::MAX),
                 ParserKind::Chat,
@@ -530,7 +530,7 @@ fn js_engine_responses(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             })?;
 
         std::thread::spawn(move || {
-            let result = collect_engine_reply_to_chat_json(
+            let result = collect_engine_reply_to_json(
                 rx,
                 std::time::Duration::from_secs(u64::MAX),
                 ParserKind::Responses,

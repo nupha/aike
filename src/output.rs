@@ -396,7 +396,7 @@ pub(crate) fn redirect_engine_reply_to_chat_chunks(
 /// EngineReply::Content already carries parsed `GeneratedContent` (Text/Reasoning/ToolCall),
 /// so the engine-side OutputParser handles tag/state machine logic — no need for LlmOutputParser.
 /// Only non-empty output content is included.
-pub(crate) fn collect_engine_reply_to_chat_json(
+pub(crate) fn collect_engine_reply_to_json(
     rx: crossbeam::channel::Receiver<EngineReply>,
     timeout: std::time::Duration,
     kind: ParserKind,
