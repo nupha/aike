@@ -154,9 +154,9 @@ impl OutputParser {
         {
             // Convert from llama_cpp_ffi Boundary to local OutputState (identical enum)
             let ctype = match ctype {
-                llama_cpp_ffi::Boundary::Text => OutputState::Text,
-                llama_cpp_ffi::Boundary::Reasoning => OutputState::Reasoning,
-                llama_cpp_ffi::Boundary::ToolCall => OutputState::ToolCall,
+                llama_cpp_ffi::ContentType::Text => OutputState::Text,
+                llama_cpp_ffi::ContentType::Reasoning => OutputState::Reasoning,
+                llama_cpp_ffi::ContentType::ToolCall => OutputState::ToolCall,
             };
 
             if is_start {
