@@ -27,7 +27,8 @@ use crate::{
     engine::{Engine, GrammarConfig, OutputMode, TaskConfig},
     helpers::{apply_chat_template, now_unix_s, to_lark_tool_choice},
     output::{
-        ChatChunk, ParserKind, collect_engine_reply_to_json, redirect_engine_reply_to_openai_chunks,
+        ChatChunk, ParserKind, collect_engine_reply_to_chat_json,
+        redirect_engine_reply_to_chat_chunks,
     },
 };
 
@@ -271,7 +272,7 @@ async fn handle_chat_completions(
         // streaming - sse
         let (tx, rx_tokio) = tokio::sync::mpsc::unbounded_channel::<String>();
         tokio::task::spawn_blocking(move || {
-            redirect_engine_reply_to_openai_chunks(
+            redirect_engine_reply_to_chat_chunks(
                 rx,
                 STREAM_TIMEOUT,
                 &respond_id,
@@ -312,7 +313,7 @@ async fn handle_chat_completions(
     } else {
         // non-streaming
         let join = tokio::task::spawn_blocking(move || {
-            collect_engine_reply_to_json(
+            collect_engine_reply_to_chat_json(
                 rx,
                 STREAM_TIMEOUT,
                 ParserKind::Chat,

@@ -284,7 +284,7 @@ pub(crate) enum ChatChunk {
     Done,
 }
 
-pub(crate) fn redirect_engine_reply_to_openai_chunks(
+pub(crate) fn redirect_engine_reply_to_chat_chunks(
     rx: crossbeam::channel::Receiver<EngineReply>,
     timeout: std::time::Duration,
     respond_id: &str,
@@ -396,7 +396,7 @@ pub(crate) fn redirect_engine_reply_to_openai_chunks(
 /// EngineReply::Content already carries parsed `GeneratedContent` (Text/Reasoning/ToolCall),
 /// so the engine-side OutputParser handles tag/state machine logic — no need for LlmOutputParser.
 /// Only non-empty output content is included.
-pub(crate) fn collect_engine_reply_to_json(
+pub(crate) fn collect_engine_reply_to_chat_json(
     rx: crossbeam::channel::Receiver<EngineReply>,
     timeout: std::time::Duration,
     kind: ParserKind,
@@ -614,6 +614,110 @@ pub(crate) fn collect_engine_reply_to_json(
             Ok(EngineReply::Error(e)) => return Err(e),
             Ok(EngineReply::Shutdown) => return Err(ERR_ENGINE_SHUTDOWN.to_string()),
             Err(_) => return Err("stream timed out".to_string()),
+        }
+    }
+}
+
+/// Direct EngineReply -> OutputChunk conversion (streaming variant).
+/// EngineReply::Content already carries parsed GeneratedContent (Text/Reasoning/ToolCall),
+/// so no need for LlmOutputParser state machine.
+pub(crate) fn redirect_engine_reply_to_responses_chunks<F>(
+    rx: crossbeam::channel::Receiver<EngineReply>,
+    timeout: std::time::Duration,
+    include_usage: bool,
+    n_prompt_tokens: usize,
+    mut on_item: F,
+) where
+    F: FnMut(OutputChunk, usize) -> bool,
+{
+    let mut nth = 0;
+    let mut tool_call_buf = String::new();
+
+    loop {
+        match rx.recv_timeout(timeout) {
+            Ok(EngineReply::Content(content)) => match content {
+                GeneratedContent::Text(t) => {
+                    tool_call_buf.clear();
+                    if !on_item(OutputChunk::Part(OutputPart::Text(t)), nth) {
+                        break;
+                    }
+                    nth += 1;
+                }
+                GeneratedContent::Reasoning(t) => {
+                    tool_call_buf.clear();
+                    if !on_item(OutputChunk::Part(OutputPart::Reasoning(t)), nth) {
+                        break;
+                    }
+                    nth += 1;
+                }
+                GeneratedContent::ToolCall(t) => {
+                    tool_call_buf.push_str(&t);
+                    // Try to parse accumulated tool call JSON; emit when complete
+                    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&tool_call_buf) {
+                        if let Some(obj) = value.as_object().filter(|o| o.len() == 2) {
+                            if let Some(name) = obj.get("name").and_then(|v| v.as_str()) {
+                                let arguments = match obj.get("arguments") {
+                                    Some(serde_json::Value::String(s)) => s.clone(),
+                                    Some(other) => serde_json::to_string(other).unwrap_or_default(),
+                                    None => String::new(),
+                                };
+                                let call = ChatCompletionMessageToolCall {
+                                    id: format!("call_{}", uuid::Uuid::new_v4().simple()),
+                                    function: FunctionCall {
+                                        name: name.to_string(),
+                                        arguments,
+                                    },
+                                };
+                                if !on_item(OutputChunk::Part(OutputPart::Call(call)), nth) {
+                                    break;
+                                }
+                                nth += 1;
+                                tool_call_buf.clear();
+                            }
+                        }
+                    }
+                }
+            },
+            Ok(EngineReply::Stop(reason, n_completion_tokens)) => {
+                let finish_reason = match reason {
+                    StopReason::Eog | StopReason::Word(_) | StopReason::PrefillOnly => {
+                        FinishReason::Stop
+                    }
+                    StopReason::MaxTokens => FinishReason::Length,
+                };
+                let usage = if include_usage {
+                    Some(CompletionUsage {
+                        prompt_tokens: n_prompt_tokens as u32,
+                        completion_tokens: n_completion_tokens as u32,
+                        total_tokens: (n_prompt_tokens + n_completion_tokens) as u32,
+                        completion_tokens_details: None,
+                        prompt_tokens_details: None,
+                    })
+                } else {
+                    None
+                };
+                if !on_item(OutputChunk::Stop(finish_reason, usage), nth) {
+                    break;
+                }
+                on_item(OutputChunk::Done, nth + 1);
+                break;
+            }
+            Ok(EngineReply::Cancelled) => {
+                on_item(OutputChunk::Error(ERR_CANCELLED.to_string()), nth);
+                break;
+            }
+            Ok(EngineReply::Error(e)) => {
+                on_item(OutputChunk::Error(e), nth);
+                break;
+            }
+            Ok(EngineReply::Shutdown) => {
+                on_item(OutputChunk::Error(ERR_ENGINE_SHUTDOWN.to_string()), nth);
+                break;
+            }
+            Err(_) => {
+                on_item(OutputChunk::Error("stream timed out".to_string()), nth);
+                break;
+            }
         }
     }
 }

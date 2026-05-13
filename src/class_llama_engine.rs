@@ -21,8 +21,8 @@ use crate::{
     engine::{Engine, GrammarConfig, OutputMode, TaskConfig},
     helpers::{apply_chat_template, parse_chat_completion_req, to_lark_tool_choice},
     output::{
-        LlmOutputParser, OutputChunk, ParserKind, collect_engine_reply_to_json,
-        redirect_engine_reply_to_openai_chunks,
+        OutputChunk, ParserKind, collect_engine_reply_to_chat_json,
+        redirect_engine_reply_to_chat_chunks, redirect_engine_reply_to_responses_chunks,
     },
 };
 
@@ -255,7 +255,7 @@ fn js_engine_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
         // Streaming: AsyncIterableIterator
         let (chunk_tx, chunk_rx) = crossbeam::channel::bounded::<crate::output::ChatChunk>(8);
         std::thread::spawn(move || {
-            redirect_engine_reply_to_openai_chunks(
+            redirect_engine_reply_to_chat_chunks(
                 rx,
                 std::time::Duration::from_secs(u64::MAX),
                 &respond_id,
@@ -302,7 +302,7 @@ fn js_engine_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
             })?;
 
         std::thread::spawn(move || {
-            let result = collect_engine_reply_to_json(
+            let result = collect_engine_reply_to_chat_json(
                 rx,
                 std::time::Duration::from_secs(u64::MAX),
                 ParserKind::Chat,
@@ -414,8 +414,8 @@ fn js_engine_responses(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     // Build prompt tokens
     let prompt_tokens = {
-        let eng = engine.lock().unwrap();
-        let model = eng.model();
+        let engine = engine.lock().unwrap();
+        let model = engine.model();
         model_arch = model.family();
 
         let prompt = apply_chat_template(
@@ -478,21 +478,16 @@ fn js_engine_responses(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         })?;
 
     if is_stream {
-        let mut parser = LlmOutputParser::new(true, reasoning.is_some());
-        parser
-            .set_think_tags(model_arch.think_tags())
-            .set_tool_call_tags(model_arch.tool_call_tags())
-            .set_respond_id(respond_id.clone())
-            .set_model_name(model_name.clone())
-            .set_n_prompt_tokens(n_prompt_tokens)
-            .set_include_usage(usage);
-
         // Streaming: AsyncIterableIterator
         let (item_tx, item_rx) = crossbeam::channel::bounded::<(OutputChunk, usize)>(8);
         std::thread::spawn(move || {
-            parser.parse_partial(rx, std::time::Duration::from_secs(u64::MAX), |item, nth| {
-                item_tx.send((item, nth)).is_ok()
-            });
+            redirect_engine_reply_to_responses_chunks(
+                rx,
+                std::time::Duration::from_secs(u64::MAX),
+                usage,
+                n_prompt_tokens,
+                |item, nth| item_tx.send((item, nth)).is_ok(),
+            );
         });
 
         AsyncIterableIterator::create_with_receiver::<(OutputChunk, usize)>(
@@ -535,7 +530,7 @@ fn js_engine_responses(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             })?;
 
         std::thread::spawn(move || {
-            let result = collect_engine_reply_to_json(
+            let result = collect_engine_reply_to_chat_json(
                 rx,
                 std::time::Duration::from_secs(u64::MAX),
                 ParserKind::Responses,
