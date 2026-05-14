@@ -6,6 +6,7 @@ use std::{
     io::Read,
     path::Path,
     process::{Command, ExitStatus, Stdio},
+    sync::atomic::{AtomicBool, AtomicI32, Ordering},
 };
 
 use zuqe::{
@@ -13,6 +14,20 @@ use zuqe::{
     JSValue, Object, ScopedContext,
     builtins::{promise::Promise, typed_array::TypedArray},
 };
+
+/// Exit signal for process.exit().
+/// PROCESS_EXIT_FLAG indicates exit was requested; PROCESS_EXIT_CODE holds the value.
+static PROCESS_EXIT_FLAG: AtomicBool = AtomicBool::new(false);
+static PROCESS_EXIT_CODE: AtomicI32 = AtomicI32::new(0);
+
+/// Check and consume the exit signal. Returns `Some(code)` if exit was requested.
+pub(crate) fn take_exit_code() -> Option<i32> {
+    if PROCESS_EXIT_FLAG.swap(false, Ordering::SeqCst) {
+        Some(PROCESS_EXIT_CODE.load(Ordering::SeqCst))
+    } else {
+        None
+    }
+}
 
 /// Build `process` object exposing system info.
 pub(crate) fn build_process_object(
@@ -60,6 +75,18 @@ pub(crate) fn build_process_object(
         }
         let arr = Array::from_values(ctx, elems)?;
         process.define_property_value_str(ctx, "execArgv", arr.into(), JS_PROP_C_W_E)?;
+    }
+
+    // cwd() — return current working directory
+    {
+        let cwd_func = ctx.create_native_function(Callback::Func(js_cwd), "cwd", 0, 0)?;
+        process.define_property_value_str(ctx, "cwd", cwd_func.into(), JS_PROP_C_W_E)?;
+    }
+
+    // exit(code) — signal graceful termination
+    {
+        let exit_func = ctx.create_native_function(Callback::Func(js_exit), "exit", 0, 0)?;
+        process.define_property_value_str(ctx, "exit", exit_func.into(), JS_PROP_C_W_E)?;
     }
 
     // spawnSync & spawn
@@ -115,6 +142,30 @@ fn load_dotenv() -> Vec<(String, String)> {
         }
     }
     vars
+}
+
+fn js_cwd(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
+    match std::env::current_dir() {
+        Ok(p) => ctx
+            .create_string_from_utf8(p.to_string_lossy().as_bytes().to_vec())
+            .map(JSValue::from),
+        Err(e) => {
+            ctx.throw_internal_error(&e.to_string());
+            Err(-1)
+        }
+    }
+}
+
+fn js_exit(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let code = if cc.length() > 0 && !cc.arg(0).is_undefined() {
+        cc.arg(0).to_number(ctx).map(|n| n.to_i32()).unwrap_or(0)
+    } else {
+        0
+    };
+    PROCESS_EXIT_FLAG.store(true, Ordering::SeqCst);
+    PROCESS_EXIT_CODE.store(code, Ordering::SeqCst);
+    ctx.throw_internal_error("process.exit");
+    Err(-1)
 }
 
 fn js_spawn(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {

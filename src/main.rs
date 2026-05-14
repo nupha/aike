@@ -306,6 +306,9 @@ async fn main() -> ExitCode {
                             ExitCode::SUCCESS
                         }
                         Err(_) => {
+                            if let Some(code) = crate::process::take_exit_code() {
+                                return ExitCode::from(code as u8);
+                            }
                             let exc = scope.rt_mut().take_exception();
                             let err = ErrorText::from(&mut scope, exc);
                             let mut err_msg = err.message;
@@ -322,6 +325,9 @@ async fn main() -> ExitCode {
                 }
             }
             Err(e) => {
+                if let Some(code) = crate::process::take_exit_code() {
+                    return ExitCode::from(code as u8);
+                }
                 let mut err_msg = e.message;
                 if let Some(tb) = e.traceback {
                     err_msg = format!("{err_msg}\n{tb}");
@@ -337,7 +343,6 @@ async fn main() -> ExitCode {
 
     if let Some(js_fut) = promise_future {
         let (rt_res, promise_res) = tokio::join!(rt.run_async(), js_fut);
-
         if let Err(code) = rt_res {
             let msg = format!("runtime error: {code}");
             colorize_println(msg, RedFg);
@@ -349,17 +354,20 @@ async fn main() -> ExitCode {
                 colorize_println(val.inspect(&mut rt).unwrap(), GreenFg);
             }
             Err(exc) => {
-                let err_msg = ctx.with_new_scope(|mut cx| {
-                    let err = ErrorText::from(&mut cx, exc);
-                    let mut txt = err.message;
-                    if let Some(tb) = err.traceback {
-                        txt = format!("{txt}\n{tb}");
-                    }
-                    txt
-                });
-                colorize_println(err_msg, RedFg);
-
-                exit_code = ExitCode::FAILURE;
+                exit_code = if let Some(code) = crate::process::take_exit_code() {
+                    ExitCode::from(code as u8)
+                } else {
+                    let err_msg = ctx.with_new_scope(|mut cx| {
+                        let err = ErrorText::from(&mut cx, exc);
+                        let mut txt = err.message;
+                        if let Some(tb) = err.traceback {
+                            txt = format!("{txt}\n{tb}");
+                        }
+                        txt
+                    });
+                    colorize_println(err_msg, RedFg);
+                    ExitCode::FAILURE
+                };
             }
         }
     } else {
