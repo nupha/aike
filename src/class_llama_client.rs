@@ -30,7 +30,7 @@ use crate::{
 fn js_client_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let opts = cc.arg(0);
     let opts_obj = opts.as_object().copied().ok_or_else(|| {
-        ctx.throw_type_error("OpenAI requires options object");
+        ctx.throw_type_error("requires options object");
         -1
     })?;
 
@@ -52,6 +52,12 @@ fn js_client_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         .as_string()
         .map(|s| s.content().encode_utf8(false).to_string());
 
+    let buffered_tool_call = true;
+    // let buffered_tool_call = opts_obj
+    //     .get_property_str(ctx, "bufferedToolCall")?
+    //     .as_bool()
+    //     .unwrap_or(false);
+
     JSLlamaClient::new_instance(
         ctx,
         default_model,
@@ -60,17 +66,19 @@ fn js_client_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         String::new(),
         String::new(),
         HeaderMap::new(),
+        buffered_tool_call,
     )
     .map(|obj| obj.into())
 }
 
 pub(crate) struct ClientState {
-    pub(crate) api_base: String,
+    pub(crate) base_url: String,
     pub(crate) api_key: String,
     pub(crate) org_id: String,
     pub(crate) project_id: String,
     pub(crate) custom_headers: HeaderMap,
     pub(crate) model_name: Option<String>,
+    pub(crate) buffered_tool_call: bool,
 }
 
 /// Get Arc<ClientState> from JS value (bumps strong count)
@@ -92,6 +100,82 @@ pub(crate) fn get_client_arc(
         // SAFETY: opaque came from Arc::into_raw, bump strong count to create a new Arc
         unsafe { Arc::increment_strong_count(ptr) };
         Ok(unsafe { Arc::from_raw(ptr) })
+    }
+}
+
+/// Accumulates tool_call deltas until complete, then emits a single chunk.
+struct ToolCallBuffer {
+    idx: usize,
+    id: Option<String>,
+    r#type: Option<String>,
+    name: Option<String>,
+    arguments: String,
+    // Original chunk metadata preserved for completeness
+    chunk_id: Option<String>,
+    chunk_object: Option<String>,
+    chunk_created: Option<i64>,
+    chunk_model: Option<String>,
+}
+
+impl ToolCallBuffer {
+    fn new(idx: usize) -> Self {
+        Self {
+            idx,
+            id: None,
+            r#type: None,
+            name: None,
+            arguments: String::new(),
+            chunk_id: None,
+            chunk_object: None,
+            chunk_created: None,
+            chunk_model: None,
+        }
+    }
+
+    fn apply_delta(&mut self, tc: &serde_json::Value, original: &serde_json::Value) {
+        if let Some(id) = tc["id"].as_str() {
+            self.id = Some(id.to_owned());
+        }
+        if let Some(t) = tc["type"].as_str() {
+            self.r#type = Some(t.to_owned());
+        }
+        if let Some(name) = tc["function"]["name"].as_str() {
+            self.name = Some(name.to_owned());
+        }
+        if let Some(args) = tc["function"]["arguments"].as_str() {
+            self.arguments.push_str(args);
+        }
+        // Capture chunk-level metadata from the first chunk that triggers tool_call accumulation
+        if self.chunk_id.is_none() {
+            self.chunk_id = original["id"].as_str().map(String::from);
+            self.chunk_object = original["object"].as_str().map(String::from);
+            self.chunk_created = original["created"].as_i64();
+            self.chunk_model = original["model"].as_str().map(String::from);
+        }
+    }
+
+    fn into_chunk(self) -> serde_json::Value {
+        serde_json::json!({
+            "id": self.chunk_id,
+            "object": self.chunk_object,
+            "created": self.chunk_created,
+            "model": self.chunk_model,
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "tool_calls": [{
+                        "index": self.idx,
+                        "id": self.id,
+                        "type": self.r#type,
+                        "function": {
+                            "name": self.name,
+                            "arguments": self.arguments,
+                        }
+                    }]
+                },
+                "finish_reason": null
+            }]
+        })
     }
 }
 
@@ -130,7 +214,7 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
     // Use reqwest to make HTTP request, build client
     let http_client = reqwest::Client::new();
     let mut client = http_client
-        .post(&format!("{}/chat/completions", client_arc.api_base))
+        .post(&format!("{}/chat/completions", client_arc.base_url))
         .body(serde_json::to_string(&req).unwrap_or_default())
         .header("Content-Type", "application/json");
 
@@ -142,6 +226,7 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
         // Streaming: AsyncIterableIterator
         let result_slot = PromiseResultSlot::<ChatReply>::new();
         let slot = result_slot.clone();
+        let buffered_tool_call = client_arc.buffered_tool_call;
 
         tokio::spawn(async move {
             async fn commit_slot(slot: &PromiseResultSlot<ChatReply>, mut msg: ChatReply) {
@@ -159,15 +244,25 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
                 }
             }
 
+            async fn flush_buf(
+                slot: &PromiseResultSlot<ChatReply>,
+                buf: &mut Option<ToolCallBuffer>,
+            ) {
+                if let Some(state) = buf.take() {
+                    commit_slot(slot, ChatReply::Chunk(state.into_chunk())).await;
+                }
+            }
+
             match client.send().await {
                 Ok(response) => {
                     // parse SSE manually
-                    // Convert response bytes to AsyncRead
                     let byte_stream = response
                         .bytes_stream()
                         .map(|r| r.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e)));
+
                     let reader = StreamReader::new(byte_stream);
                     let mut lines = tokio::io::BufReader::new(reader).lines();
+                    let mut buf: Option<ToolCallBuffer> = None;
 
                     while let Ok(Some(line)) = lines.next_line().await {
                         let line = line.trim().to_string();
@@ -175,12 +270,18 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
                         if line.starts_with("data: ") {
                             let data = &line[6..];
                             if data == "[DONE]" {
+                                if buf.is_some() {
+                                    flush_buf(&slot, &mut buf).await;
+                                }
                                 break;
                             }
 
                             if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
-                                // Check for error
                                 if json.get("error").is_some() {
+                                    if buf.is_some() {
+                                        flush_buf(&slot, &mut buf).await;
+                                    }
+
                                     let err_msg = json["error"]["message"]
                                         .as_str()
                                         .unwrap_or(data)
@@ -189,7 +290,50 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
                                     break;
                                 }
 
-                                commit_slot(&slot, ChatReply::Chunk(json)).await;
+                                if buffered_tool_call {
+                                    // Check for tool_calls in this chunk
+                                    if let Some(tcs) =
+                                        json["choices"][0]["delta"]["tool_calls"].as_array()
+                                        && !tcs.is_empty()
+                                    {
+                                        // Accumulate tool_call deltas
+                                        for tc in tcs {
+                                            let idx = tc["index"].as_i64().unwrap_or(0) as usize;
+                                            // Got a new index → flush previous buffered tool_call (matches openai-node logic)
+                                            if let Some(ref cur) = buf
+                                                && cur.idx != idx
+                                            {
+                                                flush_buf(&slot, &mut buf).await;
+                                            }
+
+                                            let state =
+                                                buf.get_or_insert_with(|| ToolCallBuffer::new(idx));
+                                            state.apply_delta(tc, &json);
+                                        }
+
+                                        // check finish_reason AFTER processing tool_calls
+                                        // (non-standard servers may emit both in one chunk)
+                                        if json["choices"][0]["finish_reason"].as_str().is_some() {
+                                            flush_buf(&slot, &mut buf).await;
+
+                                            // MUST NOT emit the original json as-is: it still carries the last
+                                            // tool_calls delta. Emit a clean finish-only chunk instead.
+                                            let mut finish = json.clone();
+                                            if let Some(obj) =
+                                                finish["choices"][0]["delta"].as_object_mut()
+                                            {
+                                                obj.remove("tool_calls");
+                                            }
+                                            commit_slot(&slot, ChatReply::Chunk(finish)).await;
+                                        }
+                                    } else {
+                                        // Non-tool_call (content, finish_reason, etc.) → flush then passthrough
+                                        flush_buf(&slot, &mut buf).await;
+                                        commit_slot(&slot, ChatReply::Chunk(json)).await;
+                                    }
+                                } else {
+                                    commit_slot(&slot, ChatReply::Chunk(json)).await;
+                                }
                             }
                         }
                     }
@@ -347,14 +491,16 @@ impl JSLlamaClient {
         org_id: String,
         project_id: String,
         custom_headers: HeaderMap,
+        buffered_tool_call: bool,
     ) -> Result<Object, i32> {
         let state = Arc::new(ClientState {
             model_name: model,
-            api_base: base_url,
+            base_url,
             api_key,
             org_id,
             project_id,
             custom_headers,
+            buffered_tool_call,
         });
         let opaque = Arc::into_raw(state).cast::<c_void>() as *mut c_void;
         ctx.create_class_instance_with_opaque(Self::class_id(), opaque)

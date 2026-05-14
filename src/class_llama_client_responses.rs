@@ -224,7 +224,7 @@ pub(super) fn js_client_responses(ctx: &mut ScopedContext, cc: CallContext) -> J
         -1
     })?;
 
-    let base_url = client_arc.api_base.clone();
+    let base_url = client_arc.base_url.clone();
     let api_key = client_arc.api_key.clone();
 
     if is_stream {
