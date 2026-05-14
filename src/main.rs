@@ -18,6 +18,7 @@ mod mod_llama;
 mod mod_os;
 mod mod_std;
 mod output;
+mod process;
 mod responses;
 mod serve;
 mod worker;

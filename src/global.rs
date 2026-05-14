@@ -4,7 +4,11 @@
 use std::ops::Deref;
 
 use colorized::{Colors, colorize_print, colorize_println};
-use zuqe::{Array, CallContext, Callback, JS_PROP_C_W_E, JSResult, JSValue, ScopedContext};
+use zuqe::{
+    Array, CallContext, Callback, JS_PROP_C_W_E, JS_PROP_WRITABLE, JSResult, JSValue, ScopedContext,
+};
+
+use crate::process::build_process_object;
 
 fn js_print(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let level = cc.magic() % 100;
@@ -95,41 +99,11 @@ pub fn setup_globals(ctx: &mut ScopedContext, script_args: &[String]) -> Result<
         global.set_property_str(ctx, "scriptArgs", arr.into())?;
     }
 
-    // for debug
-    // global.set_property_str(
-    //     ctx,
-    //     "createRealm",
-    //     ctx.create_native_function(
-    //         Callback::Func(|cc: CallContext| {
-    //             let ctx1 = cc.context().rt_mut().create_context_ecma()?;
-    //             let glo = JSValue::Object(ctx1.global_obj());
-    //             Ok(glo)
-    //         }),
-    //         "createRealm",
-    //         1,
-    //         0,
-    //     )?
-    //     .into(),
-    // )?;
-    // // detachArrayBuffer
-    // global
-    //     .set_property_str(
-    //         ctx,
-    //         "detachArrayBuffer",
-    //         ctx.create_native_function(
-    //             Callback::Func(|cc: CallContext| -> JSResult {
-    //                 if let Some(mut ab) = cc.arg(0).as_object_ArrayBuffer().copied() {
-    //                     ab.detatch(&cc.context());
-    //                 }
-    //                 Ok(JSValue::UNDEFINED)
-    //             }),
-    //             "detachArrayBuffer",
-    //             1,
-    //             0,
-    //         )?
-    //         .into(),
-    //     )
-    //     .unwrap();
+    {
+        let process = build_process_object(ctx)?;
+        // process is writable (reassignable) but non-configurable (undeletable) and non-enumerable
+        global.define_property_value_str(ctx, "process", process.into(), JS_PROP_WRITABLE)?;
+    }
 
     Ok(())
 }
