@@ -332,12 +332,12 @@ CODE_CONTENT: /(.|\\n)*?/\n\
 /// Result of scanning from the end of a prompt for think tags.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PromptThinkPattern {
-    Closed,
     Open,
+    Close,
     No,
 }
 
-/// Scan from the tail backwards and return the first think tag encountered.
+/// For given prompt, scan from the tail backwards and return the first think related tag encountered.
 pub(crate) fn detect_prompt_think_pattern(
     prompt: &str,
     open_tag: &str,  // for example, "<think>"
@@ -349,9 +349,9 @@ pub(crate) fn detect_prompt_think_pattern(
     let open_pos = s.rfind(open_tag);
 
     match (close_pos, open_pos) {
-        (Some(cp), Some(op)) if cp > op => PromptThinkPattern::Closed,
+        (Some(cp), Some(op)) if cp > op => PromptThinkPattern::Close,
         (Some(_), Some(_)) => PromptThinkPattern::Open,
-        (Some(_), None) => PromptThinkPattern::Closed,
+        (Some(_), None) => PromptThinkPattern::Close,
         (None, Some(_)) => PromptThinkPattern::Open,
         (None, None) => PromptThinkPattern::No,
     }
