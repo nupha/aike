@@ -329,6 +329,34 @@ CODE_CONTENT: /(.|\\n)*?/\n\
     }
 }
 
+/// Result of scanning from the end of a prompt for think tags.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PromptThinkPattern {
+    Closed,
+    Open,
+    No,
+}
+
+/// Scan from the tail backwards and return the first think tag encountered.
+pub(crate) fn detect_prompt_think_pattern(
+    prompt: &str,
+    open_tag: &str,  // for example, "<think>"
+    close_tag: &str, // for example, "</think>"
+) -> PromptThinkPattern {
+    let s = prompt.trim_end();
+
+    let close_pos = s.rfind(close_tag);
+    let open_pos = s.rfind(open_tag);
+
+    match (close_pos, open_pos) {
+        (Some(cp), Some(op)) if cp > op => PromptThinkPattern::Closed,
+        (Some(_), Some(_)) => PromptThinkPattern::Open,
+        (Some(_), None) => PromptThinkPattern::Closed,
+        (None, Some(_)) => PromptThinkPattern::Open,
+        (None, None) => PromptThinkPattern::No,
+    }
+}
+
 /// Convert a camelCase string to snake_case.
 fn camel_to_snake(s: &str) -> String {
     let mut result = String::with_capacity(s.len() + 4);

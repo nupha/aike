@@ -14,7 +14,7 @@ use uuid::Uuid;
 
 use crate::{
     engine::{EngineReply, GrammarConfig, TaskConfig},
-    helpers::apply_chat_template,
+    helpers::{PromptThinkPattern, apply_chat_template, detect_prompt_think_pattern},
     output::{
         ChunkSSE, ParserKind, collect_engine_reply_to_json, redirect_engine_reply_to_responses_sse,
     },
@@ -62,6 +62,7 @@ pub async fn handle_responses(
     let enable_thinking = req.reasoning.is_some();
     let tools = req.tools.as_ref().map(|t| responses_tools_to_chat_tools(t));
     let tool_choice = None;
+    let mut output_prepend = Vec::<i32>::new();
 
     let n_prompt_tokens;
     let respond_id;
@@ -93,9 +94,28 @@ pub async fn handle_responses(
                 .unwrap_or_default(),
             None,
         ) {
-            Ok(prompt) => engine
-                .model()
-                .tokenize(&CString::new(prompt).unwrap(), false, true),
+            Ok(prompt) => {
+                output_prepend = if enable_thinking && engine.parse_reasoning() {
+                    let tags = engine.model().arch().think_boundaries();
+                    if detect_prompt_think_pattern(&prompt, tags.0, tags.1)
+                        == PromptThinkPattern::Open
+                    {
+                        engine.model().tokenize(
+                            CString::new(tags.0).unwrap().as_c_str(),
+                            false,
+                            false,
+                        )
+                    } else {
+                        vec![]
+                    }
+                } else {
+                    vec![]
+                };
+
+                engine
+                    .model()
+                    .tokenize(CString::new(prompt).unwrap().as_c_str(), false, true)
+            }
             Err(e) => {
                 return (
                     StatusCode::BAD_REQUEST,
@@ -134,17 +154,7 @@ pub async fn handle_responses(
         respond_id = format!("res-{}", Uuid::new_v4().simple());
         model_name = engine.model_name().to_string();
 
-        rx = match engine.push_task(
-            prompt_tokens,
-            if enable_thinking {
-                engine.model().arch().prompt_ending_think_token()
-            } else {
-                0
-            },
-            task_config,
-            None,
-            false,
-        ) {
+        rx = match engine.push_task(prompt_tokens, task_config, output_prepend, None, false) {
             Ok(r) => r,
             Err(e) => {
                 return (

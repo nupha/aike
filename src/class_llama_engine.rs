@@ -19,7 +19,10 @@ use crate::{
     USER_CLASS_DEFS,
     class_llama_client_responses::{parse_responses_input, parse_responses_reasoning},
     engine::{Engine, GrammarConfig, TaskConfig},
-    helpers::{apply_chat_template, parse_chat_completion_req, to_lark_tool_choice},
+    helpers::{
+        PromptThinkPattern, apply_chat_template, detect_prompt_think_pattern,
+        parse_chat_completion_req, to_lark_tool_choice,
+    },
     output::{
         ChunkSSE, ParserKind, collect_engine_reply_to_json, redirect_engine_reply_to_chat_sse,
         redirect_engine_reply_to_responses_sse,
@@ -157,9 +160,9 @@ fn js_engine_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
 
     let model_name: String;
     let parse_reasoning: bool;
+    let output_prepend: Vec<i32>;
 
     let enable_thinking = req.reasoning_effort.clone().unwrap_or_default() != ReasoningEffort::None;
-    let mut prompt_ending_think_token = 0;
 
     // Build prompt tokens
     let prompt_tokens = {
@@ -183,14 +186,22 @@ fn js_engine_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
             -1
         })?;
 
+        // check prompt ending <think> pattern
+        output_prepend = if enable_thinking && parse_reasoning {
+            let tags = model.arch().think_boundaries();
+            if detect_prompt_think_pattern(&prompt, tags.0, tags.1) == PromptThinkPattern::Open {
+                model.tokenize(CString::new(tags.0).unwrap().as_c_str(), false, false)
+            } else {
+                vec![]
+            }
+        } else {
+            vec![]
+        };
+
         let tokens = model.tokenize(&CString::new(prompt).unwrap(), false, true);
         if tokens.is_empty() {
             ctx.throw_internal_error("prompt tokenized to zero tokens");
             return Err(-1);
-        }
-
-        if enable_thinking && model.arch().prompt_ending_think_token() > 0 {
-            prompt_ending_think_token = model.arch().prompt_ending_think_token();
         }
 
         tokens
@@ -244,13 +255,7 @@ fn js_engine_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
     let rx = engine
         .lock()
         .unwrap()
-        .push_task(
-            prompt_tokens,
-            prompt_ending_think_token,
-            task_config,
-            None,
-            true,
-        )
+        .push_task(prompt_tokens, task_config, output_prepend, None, true)
         .map_err(|e| {
             ctx.throw_internal_error(&e.to_string());
             -1
@@ -423,12 +428,16 @@ fn js_engine_responses(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         .as_ref()
         .and_then(|r| r.effort.clone())
         .unwrap_or_default();
+
     let enable_thinking = reasoning_effort != ReasoningEffort::None;
+    let parse_reasoning: bool;
+    let output_prepend: Vec<i32>;
 
     // Build prompt tokens
     let prompt_tokens = {
         let engine = engine.lock().unwrap();
         let model = engine.model();
+        parse_reasoning = engine.parse_reasoning();
 
         let prompt = apply_chat_template(
             model,
@@ -443,6 +452,17 @@ fn js_engine_responses(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             ctx.throw_internal_error(&e);
             -1
         })?;
+
+        output_prepend = if enable_thinking && parse_reasoning {
+            let tags = model.arch().think_boundaries();
+            if detect_prompt_think_pattern(&prompt, tags.0, tags.1) == PromptThinkPattern::Open {
+                model.tokenize(CString::new(tags.0).unwrap().as_c_str(), false, false)
+            } else {
+                vec![]
+            }
+        } else {
+            vec![]
+        };
 
         let tokens = model.tokenize(&CString::new(prompt).unwrap(), false, true);
         if tokens.is_empty() {
@@ -476,22 +496,7 @@ fn js_engine_responses(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let rx = engine
         .lock()
         .unwrap()
-        .push_task(
-            prompt_tokens,
-            if enable_thinking {
-                engine
-                    .lock()
-                    .unwrap()
-                    .model()
-                    .arch()
-                    .prompt_ending_think_token()
-            } else {
-                0
-            },
-            task_config,
-            None,
-            false,
-        )
+        .push_task(prompt_tokens, task_config, output_prepend, None, false)
         .map_err(|e| {
             ctx.throw_internal_error(&e.to_string());
             -1

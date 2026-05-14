@@ -319,8 +319,8 @@ impl Engine {
     pub fn push_task(
         &self,
         prompt_tokens: Vec<Token>,
-        prompt_ending_think_token: i32,
         config: TaskConfig,
+        output_prepend: Vec<Token>,
         seq_hint: Option<usize>,
         use_cache: bool,
     ) -> Result<Receiver<EngineReply>, SendError<Box<EngineTask>>> {
@@ -329,10 +329,10 @@ impl Engine {
         let task = Box::new(EngineTask {
             config,
             prompt_tokens,
-            prompt_ending_think_token,
+            output_prepend,
+            output_tx,
             seq_hint,
             use_cache,
-            output_tx,
         });
         self.input_tx.send(task)?;
 

@@ -24,7 +24,10 @@ use uuid::Uuid;
 
 use crate::{
     engine::{Engine, GrammarConfig, TaskConfig},
-    helpers::{apply_chat_template, now_unix_s, to_lark_tool_choice},
+    helpers::{
+        PromptThinkPattern, apply_chat_template, detect_prompt_think_pattern, now_unix_s,
+        to_lark_tool_choice,
+    },
     output::{
         ChunkSSE, ParserKind, collect_engine_reply_to_json, redirect_engine_reply_to_chat_sse,
     },
@@ -152,7 +155,7 @@ async fn handle_chat_completions(
     let parse_reasoning: bool;
     let default_max_tokens: usize;
     let model_name: String;
-    let start_thinking: bool;
+    let mut output_prepend = Vec::<i32>::new();
 
     // Build prompt tokens
     let prompt_tokens = {
@@ -173,11 +176,20 @@ async fn handle_chat_completions(
             req.response_format.as_ref(),
         ) {
             Ok(prompt) => {
-                let think_tags = model.arch().think_boundaries();
-                start_thinking = enable_thinking
-                    && (prompt.ends_with(think_tags.0)
-                        || prompt.ends_with(&format!("{}\n", think_tags.0)));
-                model.tokenize(&CString::new(prompt).unwrap(), false, true)
+                output_prepend = if enable_thinking && parse_reasoning {
+                    let tags = model.arch().think_boundaries();
+                    if detect_prompt_think_pattern(&prompt, tags.0, tags.1)
+                        == PromptThinkPattern::Open
+                    {
+                        model.tokenize(CString::new(tags.0).unwrap().as_c_str(), false, false)
+                    } else {
+                        vec![]
+                    }
+                } else {
+                    vec![]
+                };
+
+                model.tokenize(CString::new(prompt).unwrap().as_c_str(), false, true)
             }
             Err(e) => {
                 return (
@@ -241,18 +253,8 @@ async fn handle_chat_completions(
 
     let rx = match state.engine.lock().unwrap().push_task(
         prompt_tokens,
-        if enable_thinking {
-            state
-                .engine
-                .lock()
-                .unwrap()
-                .model()
-                .arch()
-                .prompt_ending_think_token()
-        } else {
-            0
-        },
         task_config,
+        output_prepend,
         None,
         false,
     ) {

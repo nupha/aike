@@ -112,13 +112,13 @@ pub struct EngineTask {
     pub config: TaskConfig,
 
     pub prompt_tokens: Vec<Token>,
-    /// prompt ends with an open <think> tag to make the model start in reasoning mode.
-    /// this field holds the <think> token if the prompt ends with it, 0 if none.
-    pub prompt_ending_think_token: i32,
+
+    /// Prepended tokens as output
+    pub output_prepend: Vec<Token>,
+    pub output_tx: Sender<EngineReply>,
 
     pub seq_hint: Option<usize>,
     pub use_cache: bool,
-    pub output_tx: Sender<EngineReply>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -405,7 +405,7 @@ impl Engine {
 
     pub(crate) fn sched_task(
         &mut self,
-        task: Box<EngineTask>,
+        mut task: Box<EngineTask>,
         slots: &mut [Slot],
         prefix_match_threshold: f32,
     ) -> SchedResult {
@@ -440,7 +440,6 @@ impl Engine {
             0
         };
 
-        let mut task = task;
         task.prompt_tokens.drain(..n_common);
         if task.prompt_tokens.is_empty() {
             let _ = task.output_tx.send(EngineReply::Error(
@@ -464,15 +463,13 @@ impl Engine {
                 .build()
                 .ok();
 
-            if task.prompt_ending_think_token > 0
+            if !task.output_prepend.is_empty()
                 && let Some(p) = &mut p
             {
                 // mimic model generates an open think tag, to make parser be prepared with proper state
-                println!(
-                    "[O.o] prompt ends with an open think tag: {:?}",
-                    task.prompt_ending_think_token
-                );
-                p.push_token(task.prompt_ending_think_token);
+                for token in task.output_prepend {
+                    let _ = p.push_token(token);
+                }
             }
 
             p
@@ -485,8 +482,6 @@ impl Engine {
             .as_ref()
             .map(|p| p.current_state())
             .unwrap_or(OutputState::Text);
-
-        println!("[O.o] initial parser state: {initial_state:?}");
 
         let current_content = vec![match initial_state {
             OutputState::Text => GeneratedContent::Text(String::new()),
