@@ -6,7 +6,7 @@ use std::{
 
 use async_openai::types::chat::StopConfiguration;
 use linkme::distributed_slice;
-use llama_cpp_ffi::{ModelFamily, ToolChoice as LarkToolChoice};
+use llama_cpp_ffi::ToolChoice as LarkToolChoice;
 use zuqe::{
     CallContext, ClassDef, ClassID, FieldDef, JSResult, JSValue, Object, Runtime, ScopedContext,
     builtins::{
@@ -406,13 +406,10 @@ fn js_engine_responses(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         .as_ref()
         .map(|t| crate::responses::convert::responses_tools_to_chat_tools(t));
 
-    let model_arch: ModelFamily;
-
     // Build prompt tokens
     let prompt_tokens = {
         let engine = engine.lock().unwrap();
         let model = engine.model();
-        model_arch = model.family();
 
         let prompt = apply_chat_template(
             model,

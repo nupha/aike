@@ -1,8 +1,8 @@
-use llama_cpp_ffi::{LlamaModel, ModelFamily, llama_token};
+use llama_cpp_ffi::{LlamaModel, llama_token};
 use smallvec::{SmallVec, smallvec};
 use swiftlet_incremental::{IncrementalParser, LarkTokenValidation, Swiftlet};
 
-use super::{LlmTokenValidator, OutputStateChange, OutputState};
+use super::{LlmTokenValidator, OutputState, OutputStateChange};
 
 /// Type alias for small event vector (optimized for 0-2 events per token)
 pub type OutputEvents = SmallVec<[OutputStateChange; 2]>;
@@ -101,23 +101,14 @@ impl OutputParser {
         let mut add_text = false;
 
         let terminal = if let Some(t) = self.model.lookup_token_text(llm_token) {
-            match self.model.family() {
-                ModelFamily::Gemma4 => match t {
-                    "<|channel>" => "TOK_CHANNEL_OPEN",
-                    "<channel|>" => "TOK_CHANNEL_CLOSE",
-                    "thought" => "TOK_THOUGHT",
-                    "<|tool_call>" => "TOK_TOOL_CALL_OPEN",
-                    "<tool_call|>" => "TOK_TOOL_CALL_CLOSE",
-                    _ => {
-                        text = t.to_string();
-                        add_text = true;
-                        "TEXT"
-                    }
-                },
-                _ => {
-                    todo!();
-                }
-            }
+            self.model
+                .arch()
+                .llm_token_to_terminal(t)
+                .unwrap_or_else(|| {
+                    text = t.to_string();
+                    add_text = true;
+                    "TEXT"
+                })
         } else {
             add_text = true;
             "TEXT"
@@ -133,7 +124,7 @@ impl OutputParser {
 
         // Check if the terminal is chunk boundary (TOK_* terminals)
         if terminal != "TEXT"
-            && let Some((ctype, is_start)) = self.model.family().chunk_boundary_terminal(terminal)
+            && let Some((ctype, is_start)) = self.model.arch().grammar_check_boundary(terminal)
         {
             // Convert from llama_cpp_ffi Boundary to local OutputState (identical enum)
             let ctype = match ctype {

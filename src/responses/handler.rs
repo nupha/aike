@@ -10,7 +10,6 @@ use axum::{
     response::{IntoResponse, Response, Sse, sse::Event},
 };
 use futures_util::StreamExt;
-use llama_cpp_ffi::ModelFamily;
 use uuid::Uuid;
 
 use crate::{
@@ -64,7 +63,6 @@ pub async fn handle_responses(
     let tools = req.tools.as_ref().map(|t| responses_tools_to_chat_tools(t));
     let tool_choice = None;
 
-    let model_arch: ModelFamily;
     let n_prompt_tokens;
     let respond_id;
     let model_name;
@@ -82,8 +80,6 @@ pub async fn handle_responses(
             .unwrap_or(engine.default_max_tokens() as u32) as usize;
         temperature = req.temperature.unwrap_or(DEFAULT_TEMPERATURE);
         top_p = req.top_p.unwrap_or(DEFAULT_TOP_P);
-
-        model_arch = engine.model().family();
 
         let prompt_tokens = match apply_chat_template(
             engine.model(),

@@ -25,11 +25,12 @@ impl GrammarConfig {
     pub fn new(model: &LlamaModel, tools: &[ChatCompletionTools], tool_choice: ToolChoice) -> Self {
         debug_assert!(!tools.is_empty());
 
-        let family = model.family();
-        let tags = family.tool_call_tags();
-
         Self {
-            lark_grammar: build_tools_grammar(tools, tool_choice, tags),
+            lark_grammar: build_tools_grammar(
+                tools,
+                tool_choice,
+                model.arch().tool_call_boundaries(),
+            ),
             tool_choice,
         }
     }
@@ -445,9 +446,7 @@ impl Engine {
 
         // Create output parser if enabled
         let output_parser: Option<OutputParser> = if task.config.enable_output_parser {
-            // Get output grammar
-            let grammar = self.model.family().output_grammar();
-
+            let grammar = self.model.arch().output_grammar();
             let token_validator: LlmTokenValidator = Box::new({
                 let model2 = self.model.clone();
                 move |token_text: &str| -> bool { model2.lookup_text_token(token_text).is_some() }

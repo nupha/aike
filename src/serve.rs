@@ -16,7 +16,6 @@ use axum::{
     routing::{get, post},
 };
 use futures_util::StreamExt;
-use llama_cpp_ffi::ModelFamily;
 use serde::Serialize;
 use serde_json::json;
 use tokio_stream::wrappers::UnboundedReceiverStream;
@@ -150,7 +149,6 @@ async fn handle_chat_completions(
     let is_stream = req.stream.unwrap_or(false);
     let enable_thinking = req.reasoning_effort.clone().unwrap_or_default() != ReasoningEffort::None;
 
-    let model_arch: ModelFamily;
     let parse_reasoning: bool;
     let default_max_tokens: usize;
     let model_name: String;
@@ -164,7 +162,6 @@ async fn handle_chat_completions(
         parse_reasoning = engine.parse_reasoning();
         default_max_tokens = engine.default_max_tokens();
         model_name = engine.model_name().to_string();
-        model_arch = model.family();
 
         match apply_chat_template(
             model,
@@ -176,9 +173,10 @@ async fn handle_chat_completions(
             req.response_format.as_ref(),
         ) {
             Ok(prompt) => {
+                let think_tags = model.arch().think_boundaries();
                 start_thinking = enable_thinking
-                    && (prompt.ends_with(model_arch.think_tags().0)
-                        || prompt.ends_with(&format!("{}\n", model_arch.think_tags().0)));
+                    && (prompt.ends_with(think_tags.0)
+                        || prompt.ends_with(&format!("{}\n", think_tags.0)));
                 model.tokenize(&CString::new(prompt).unwrap(), false, true)
             }
             Err(e) => {
