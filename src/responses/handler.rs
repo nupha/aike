@@ -59,7 +59,7 @@ pub async fn handle_responses(
     }
 
     let is_stream = req.stream.unwrap_or(false);
-    let enalbe_thinking = req.reasoning.is_some();
+    let enable_thinking = req.reasoning.is_some();
     let tools = req.tools.as_ref().map(|t| responses_tools_to_chat_tools(t));
     let tool_choice = None;
 
@@ -134,7 +134,17 @@ pub async fn handle_responses(
         respond_id = format!("res-{}", Uuid::new_v4().simple());
         model_name = engine.model_name().to_string();
 
-        rx = match engine.push_task(prompt_tokens, task_config, None, false) {
+        rx = match engine.push_task(
+            prompt_tokens,
+            if enable_thinking {
+                engine.model().arch().prompt_ending_think_token()
+            } else {
+                0
+            },
+            task_config,
+            None,
+            false,
+        ) {
             Ok(r) => r,
             Err(e) => {
                 return (

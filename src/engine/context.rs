@@ -319,6 +319,7 @@ impl Engine {
     pub fn push_task(
         &self,
         prompt_tokens: Vec<Token>,
+        prompt_ending_think_token: i32,
         config: TaskConfig,
         seq_hint: Option<usize>,
         use_cache: bool,
@@ -328,6 +329,7 @@ impl Engine {
         let task = Box::new(EngineTask {
             config,
             prompt_tokens,
+            prompt_ending_think_token,
             seq_hint,
             use_cache,
             output_tx,

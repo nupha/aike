@@ -239,12 +239,23 @@ async fn handle_chat_completions(
     let n_prompt_tokens = prompt_tokens.len();
     let respond_id = format!("chatcmpl-{}", Uuid::new_v4().simple());
 
-    let rx = match state
-        .engine
-        .lock()
-        .unwrap()
-        .push_task(prompt_tokens, task_config, None, false)
-    {
+    let rx = match state.engine.lock().unwrap().push_task(
+        prompt_tokens,
+        if enable_thinking {
+            state
+                .engine
+                .lock()
+                .unwrap()
+                .model()
+                .arch()
+                .prompt_ending_think_token()
+        } else {
+            0
+        },
+        task_config,
+        None,
+        false,
+    ) {
         Ok(rx) => rx,
         Err(e) => {
             return (

@@ -166,8 +166,8 @@ impl OutputParser {
         Ok((add_text, events))
     }
 
-    pub fn current_state(&self) -> &OutputState {
-        &self.current_state
+    pub fn current_state(&self) -> OutputState {
+        self.current_state
     }
 
     pub fn reset(&mut self) {

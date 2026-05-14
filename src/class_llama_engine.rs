@@ -4,7 +4,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use async_openai::types::chat::StopConfiguration;
+use async_openai::types::chat::{ReasoningEffort, StopConfiguration};
 use linkme::distributed_slice;
 use llama_cpp_ffi::ToolChoice as LarkToolChoice;
 use zuqe::{
@@ -158,6 +158,9 @@ fn js_engine_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
     let model_name: String;
     let parse_reasoning: bool;
 
+    let enable_thinking = req.reasoning_effort.clone().unwrap_or_default() != ReasoningEffort::None;
+    let mut prompt_ending_think_token = 0;
+
     // Build prompt tokens
     let prompt_tokens = {
         let engine = engine.lock().unwrap();
@@ -184,6 +187,10 @@ fn js_engine_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
         if tokens.is_empty() {
             ctx.throw_internal_error("prompt tokenized to zero tokens");
             return Err(-1);
+        }
+
+        if enable_thinking && model.arch().prompt_ending_think_token() > 0 {
+            prompt_ending_think_token = model.arch().prompt_ending_think_token();
         }
 
         tokens
@@ -237,7 +244,13 @@ fn js_engine_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
     let rx = engine
         .lock()
         .unwrap()
-        .push_task(prompt_tokens, task_config, None, true)
+        .push_task(
+            prompt_tokens,
+            prompt_ending_think_token,
+            task_config,
+            None,
+            true,
+        )
         .map_err(|e| {
             ctx.throw_internal_error(&e.to_string());
             -1
@@ -406,6 +419,12 @@ fn js_engine_responses(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         .as_ref()
         .map(|t| crate::responses::convert::responses_tools_to_chat_tools(t));
 
+    let reasoning_effort = reasoning
+        .as_ref()
+        .and_then(|r| r.effort.clone())
+        .unwrap_or_default();
+    let enable_thinking = reasoning_effort != ReasoningEffort::None;
+
     // Build prompt tokens
     let prompt_tokens = {
         let engine = engine.lock().unwrap();
@@ -417,10 +436,7 @@ fn js_engine_responses(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             chat_tools.as_deref(),
             None,
             None,
-            reasoning
-                .as_ref()
-                .and_then(|r| r.effort.clone())
-                .unwrap_or_default(),
+            reasoning_effort,
             None,
         )
         .map_err(|e| {
@@ -460,7 +476,22 @@ fn js_engine_responses(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let rx = engine
         .lock()
         .unwrap()
-        .push_task(prompt_tokens, task_config, None, false)
+        .push_task(
+            prompt_tokens,
+            if enable_thinking {
+                engine
+                    .lock()
+                    .unwrap()
+                    .model()
+                    .arch()
+                    .prompt_ending_think_token()
+            } else {
+                0
+            },
+            task_config,
+            None,
+            false,
+        )
         .map_err(|e| {
             ctx.throw_internal_error(&e.to_string());
             -1

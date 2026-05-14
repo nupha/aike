@@ -110,7 +110,12 @@ impl TaskConfig {
 
 pub struct EngineTask {
     pub config: TaskConfig,
+
     pub prompt_tokens: Vec<Token>,
+    /// prompt ends with an open <think> tag to make the model start in reasoning mode.
+    /// this field holds the <think> token if the prompt ends with it, 0 if none.
+    pub prompt_ending_think_token: i32,
+
     pub seq_hint: Option<usize>,
     pub use_cache: bool,
     pub output_tx: Sender<EngineReply>,
@@ -263,7 +268,7 @@ impl TaskState {
             let state = self
                 .output_parser
                 .as_ref()
-                .map(|p| p.current_state().clone())
+                .map(|p| p.current_state())
                 .unwrap_or(OutputState::Text);
 
             // Debug assert: parser state should match last content element's type
@@ -452,21 +457,36 @@ impl Engine {
                 move |token_text: &str| -> bool { model2.lookup_text_token(token_text).is_some() }
             });
 
-            OutputParser::builder()
+            let mut p = OutputParser::builder()
                 .model(self.model.clone())
                 .grammar(&grammar)
                 .token_validator(token_validator)
                 .build()
-                .ok()
+                .ok();
+
+            if task.prompt_ending_think_token > 0
+                && let Some(p) = &mut p
+            {
+                // mimic model generates an open think tag, to make parser be prepared with proper state
+                println!(
+                    "[O.o] prompt ends with an open think tag: {:?}",
+                    task.prompt_ending_think_token
+                );
+                p.push_token(task.prompt_ending_think_token);
+            }
+
+            p
         } else {
             None
         };
 
-        // Initialize current_content with first Text element
+        // Add initial current_content element
         let initial_state = output_parser
             .as_ref()
-            .map(|p| p.current_state().clone())
+            .map(|p| p.current_state())
             .unwrap_or(OutputState::Text);
+
+        println!("[O.o] initial parser state: {initial_state:?}");
 
         let current_content = vec![match initial_state {
             OutputState::Text => GeneratedContent::Text(String::new()),
