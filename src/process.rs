@@ -9,13 +9,17 @@ use std::{
 };
 
 use zuqe::{
-    CallContext, Callback, JS_GPN_ENUM_ONLY, JS_GPN_INDEX_MASK, JS_PROP_C_W_E, JSResult, JSValue,
-    Object, ScopedContext,
+    Array, CallContext, Callback, JS_GPN_ENUM_ONLY, JS_GPN_INDEX_MASK, JS_PROP_C_W_E, JSResult,
+    JSValue, Object, ScopedContext,
     builtins::{promise::Promise, typed_array::TypedArray},
 };
 
 /// Build `process` object exposing system info.
-pub(crate) fn build_process_object(ctx: &mut ScopedContext) -> Result<Object, i32> {
+pub(crate) fn build_process_object(
+    ctx: &mut ScopedContext,
+    argv: &[String],
+    exec_argv: &[String],
+) -> Result<Object, i32> {
     let mut process = ctx.create_base_object()?;
 
     {
@@ -33,6 +37,29 @@ pub(crate) fn build_process_object(ctx: &mut ScopedContext) -> Result<Object, i3
         }
 
         process.define_property_value_str(ctx, "env", env_obj.into(), JS_PROP_C_W_E)?;
+    }
+
+    // argv — mimics Node.js / Bun process.argv
+    // argv[0] = executable path, argv[1] = script path, argv[2+] = script args
+    {
+        let mut elems: Vec<JSValue> = Vec::with_capacity(argv.len());
+        for a in argv {
+            let s = ctx.create_string_from_utf8(a.as_bytes().to_vec())?;
+            elems.push(s.into());
+        }
+        let arr = Array::from_values(ctx, elems)?;
+        process.define_property_value_str(ctx, "argv", arr.into(), JS_PROP_C_W_E)?;
+    }
+
+    // execArgv — runtime-specific flags passed before the script path
+    {
+        let mut elems: Vec<JSValue> = Vec::with_capacity(exec_argv.len());
+        for a in exec_argv {
+            let s = ctx.create_string_from_utf8(a.as_bytes().to_vec())?;
+            elems.push(s.into());
+        }
+        let arr = Array::from_values(ctx, elems)?;
+        process.define_property_value_str(ctx, "execArgv", arr.into(), JS_PROP_C_W_E)?;
     }
 
     // spawnSync & spawn

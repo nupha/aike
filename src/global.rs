@@ -5,7 +5,7 @@ use std::ops::Deref;
 
 use colorized::{Colors, colorize_print, colorize_println};
 use zuqe::{
-    Array, CallContext, Callback, JS_PROP_C_W_E, JS_PROP_WRITABLE, JSResult, JSValue, ScopedContext,
+    CallContext, Callback, JS_PROP_C_W_E, JS_PROP_WRITABLE, JSResult, JSValue, ScopedContext,
 };
 
 use crate::process::build_process_object;
@@ -51,7 +51,11 @@ fn js_print(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     Ok(JSValue::UNDEFINED)
 }
 
-pub fn setup_globals(ctx: &mut ScopedContext, script_args: &[String]) -> Result<(), i32> {
+pub fn setup_globals(
+    ctx: &mut ScopedContext,
+    argv: &[String],
+    exec_argv: &[String],
+) -> Result<(), i32> {
     let mut global = ctx.global_obj();
 
     {
@@ -81,27 +85,7 @@ pub fn setup_globals(ctx: &mut ScopedContext, script_args: &[String]) -> Result<
     }
 
     {
-        let mut args = Vec::<JSValue>::with_capacity(script_args.len() + 1);
-        args.push(
-            ctx.create_string_from_utf8(
-                std::ffi::OsString::from("zjs")
-                    .to_string_lossy()
-                    .into_owned()
-                    .into_bytes(),
-            )?
-            .into(),
-        );
-        for a in script_args {
-            let s = ctx.create_string_from_utf8(a.as_bytes().to_vec())?;
-            args.push(s.into());
-        }
-        let arr = Array::from_values(ctx, args)?;
-        global.set_property_str(ctx, "scriptArgs", arr.into())?;
-    }
-
-    {
-        let process = build_process_object(ctx)?;
-        // process is writable (reassignable) but non-configurable (undeletable) and non-enumerable
+        let process = build_process_object(ctx, argv, exec_argv)?;
         global.define_property_value_str(ctx, "process", process.into(), JS_PROP_WRITABLE)?;
     }
 

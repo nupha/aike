@@ -172,6 +172,29 @@ async fn main() -> ExitCode {
 
     let args = Args::parse();
 
+    // Build process.argv and process.execArgv
+    let exe_path = std::env::current_exe()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| "zjs".to_string());
+
+    let argv: Vec<String> = {
+        let mut v = Vec::with_capacity(2 + args.script_args.len());
+        v.push(exe_path);
+        v.push(args.filename.clone());
+        v.extend(args.script_args.iter().cloned());
+        v
+    };
+
+    let exec_argv: Vec<String> = {
+        let mut v = Vec::new();
+        if args.module {
+            v.push("--module".to_string());
+        }
+        v.push(format!("--memory-limit={}", args.memory_limit));
+        v.push(format!("--stack-size={}", args.stack_size));
+        v
+    };
+
     let filename = args.filename;
     let script = match std::fs::read_to_string(&filename) {
         Ok(s) => s,
@@ -248,7 +271,7 @@ async fn main() -> ExitCode {
             init_mod_llama(cx)?;
             init_mod_fs(cx)?;
 
-            setup_globals(cx, &args.script_args)
+            setup_globals(cx, &argv, &exec_argv)
         })
         .unwrap();
 
