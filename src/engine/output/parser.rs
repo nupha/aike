@@ -103,7 +103,7 @@ impl OutputParser {
         let terminal = if let Some(t) = self.model.lookup_token_text(llm_token) {
             self.model
                 .arch()
-                .llm_token_to_terminal(t)
+                .output_token_to_terminal(t)
                 .unwrap_or_else(|| {
                     text = t.to_string();
                     add_text = true;
@@ -124,7 +124,7 @@ impl OutputParser {
 
         // Check if the terminal is chunk boundary (TOK_* terminals)
         if terminal != "TEXT"
-            && let Some((ctype, is_start)) = self.model.arch().grammar_check_boundary(terminal)
+            && let Some((ctype, is_start)) = self.model.arch().output_check_boundary(terminal)
         {
             // Convert from llama_cpp_ffi Boundary to local OutputState (identical enum)
             let ctype = match ctype {
