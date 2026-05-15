@@ -29,7 +29,7 @@ use clap::Parser;
 use colorized::{Colors::*, colorize_println};
 use linkme::distributed_slice;
 use zuqe::{
-    ClassID, Context, ErrorText, EvalFlags, EvalType, ModuleDef, Runtime, ScopedContext,
+    ClassID, Context, EvalFlags, EvalType, Exception, ModuleDef, Runtime, ScopedContext,
     builtins::promise::Promise,
 };
 
@@ -294,7 +294,7 @@ async fn main() -> ExitCode {
             )
             .map_err(|_| {
                 let exc = scope.rt_mut().take_exception();
-                ErrorText::from(&mut scope, exc)
+                exc.to_text(&mut scope)
             });
 
         match result {
@@ -310,9 +310,10 @@ async fn main() -> ExitCode {
                                 return ExitCode::from(code as u8);
                             }
                             let exc = scope.rt_mut().take_exception();
-                            let err = ErrorText::from(&mut scope, exc);
-                            let mut err_msg = err.message;
-                            if let Some(tb) = err.traceback {
+                            let err_text = exc.to_text(&mut scope);
+
+                            let mut err_msg = err_text.message;
+                            if let Some(tb) = err_text.traceback {
                                 err_msg = format!("{err_msg}\n{tb}");
                             }
                             colorize_println(err_msg, RedFg);
@@ -353,17 +354,17 @@ async fn main() -> ExitCode {
             Ok(val) => {
                 colorize_println(val.inspect(&mut rt).unwrap(), GreenFg);
             }
-            Err(exc) => {
+            Err(err_val) => {
                 exit_code = if let Some(code) = crate::process::take_exit_code() {
                     ExitCode::from(code as u8)
                 } else {
                     let err_msg = ctx.with_new_scope(|mut cx| {
-                        let err = ErrorText::from(&mut cx, exc);
-                        let mut txt = err.message;
-                        if let Some(tb) = err.traceback {
-                            txt = format!("{txt}\n{tb}");
+                        let err_text = Exception::from(err_val).to_text(&mut cx);
+                        let mut s = err_text.message;
+                        if let Some(tb) = err_text.traceback {
+                            s = format!("{s}\n{tb}");
                         }
-                        txt
+                        s
                     });
                     colorize_println(err_msg, RedFg);
                     ExitCode::FAILURE
