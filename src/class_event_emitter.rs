@@ -469,7 +469,7 @@ impl JSEventEmitter {
                 ClassDef::new(
                     "EventEmitter",
                     CLASS_EVENT_EMITTER_PROTO,
-                    Some(ClassCtorDef::new(js_constructor, 0, true).global()),
+                    Some(ClassCtorDef::new(js_constructor, 0, true).expose_to_global()),
                 )
                 .on_dispose(Self::handle_dispose),
             )
