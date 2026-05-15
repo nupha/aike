@@ -10,8 +10,8 @@ use std::{
 };
 
 use zuqe::{
-    Array, CallContext, Callback, JS_GPN_ENUM_ONLY, JS_GPN_INDEX_MASK, JS_PROP_C_W_E, JSResult,
-    JSValue, Object, ScopedContext,
+    Array, CallContext, Callback, Exception, JS_GPN_ENUM_ONLY, JS_GPN_INDEX_MASK, JS_PROP_C_W_E,
+    JSResult, JSValue, Object, ScopedContext,
     builtins::{promise::Promise, typed_array::TypedArray},
 };
 
@@ -162,9 +162,11 @@ fn js_exit(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     } else {
         0
     };
-    PROCESS_EXIT_FLAG.store(true, Ordering::SeqCst);
-    PROCESS_EXIT_CODE.store(code, Ordering::SeqCst);
-    ctx.throw_internal_error("process.exit");
+    ctx.rt_mut().set_exception(Exception::Interrupted(code));
+
+    // PROCESS_EXIT_FLAG.store(true, Ordering::SeqCst);
+    // PROCESS_EXIT_CODE.store(code, Ordering::SeqCst);
+    // ctx.throw_internal_error("process.exit");
     Err(-1)
 }
 

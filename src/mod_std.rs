@@ -103,13 +103,7 @@ fn js_evalScript(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         n + 1
     });
 
-    if lev == 1 {
-        /* install the interrupt handler */
-        ctx.rt_mut().set_interrupt_handler(|_| {
-            let s = OS_PENDING_SIGNALS.get();
-            (s >> libc::SIGINT) & 1 != 0 // break if has SIGINT
-        });
-    }
+    if lev == 1 { /* interrupt handler is now installed in main() at startup */ }
 
     let mut flags = EvalFlags::empty();
     if backtrace_barrier {
@@ -134,9 +128,6 @@ fn js_evalScript(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         n - 1
     });
     if lev == 0 {
-        /* remove the interrupt handler */
-        ctx.rt_mut().unset_interrupt_handler();
-
         OS_PENDING_SIGNALS.with(|s| {
             let n = s.get() & !(1_u64 << libc::SIGINT);
             s.set(n);

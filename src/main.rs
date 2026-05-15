@@ -3,6 +3,7 @@
 
 #![allow(non_snake_case)]
 
+mod class_event_emitter;
 mod class_file;
 mod class_llama_client;
 mod class_llama_client_responses;
@@ -27,6 +28,7 @@ use std::{io::Write, process::ExitCode};
 
 use clap::Parser;
 use colorized::{Colors::*, colorize_println};
+use libc;
 use linkme::distributed_slice;
 use zuqe::{
     ClassID, Context, EvalFlags, EvalType, Exception, ModuleDef, Runtime, ScopedContext,
@@ -34,6 +36,7 @@ use zuqe::{
 };
 
 use crate::{
+    class_event_emitter::{JSEventEmitter, emitter_gc_trace, poll_emitter_signals},
     class_file::JSFile,
     class_llama_client::JSLlamaClient,
     class_llama_context::JSLlamaContext,
@@ -239,6 +242,7 @@ async fn main() -> ExitCode {
     // install customized gc trace handler provided by 'os' module.
     rt.gc_set_trace_handler(|tr| {
         mod_os_gc_trace(tr);
+        emitter_gc_trace(tr);
     });
 
     // register native classes
@@ -256,6 +260,7 @@ async fn main() -> ExitCode {
 
             // use classes
             cx.use_classes(&[
+                JSEventEmitter::class_id(),
                 JSLlamaModel::class_id(),
                 JSLlamaContext::class_id(),
                 JSLlamaEngine::class_id(),
@@ -270,6 +275,19 @@ async fn main() -> ExitCode {
             init_mod_os(cx)?;
             init_mod_llama(cx)?;
             init_mod_fs(cx)?;
+
+            // EventEmitter signal polling
+            cx.add_tick_handler(poll_emitter_signals);
+
+            // Install SIGINT interrupt handler: when SIGINT bit is set in
+            // OS_PENDING_SIGNALS, the VM breaks execution.
+            {
+                use crate::mod_os::OS_PENDING_SIGNALS;
+                cx.rt_mut().set_interrupt_handler(|_| {
+                    let s = OS_PENDING_SIGNALS.get();
+                    (s >> libc::SIGINT) & 1 != 0
+                });
+            }
 
             setup_globals(cx, &argv, &exec_argv)
         })
@@ -292,10 +310,7 @@ async fn main() -> ExitCode {
                 },
                 EvalFlags::empty(),
             )
-            .map_err(|_| {
-                let exc = scope.rt_mut().take_exception();
-                exc.to_text(&mut scope)
-            });
+            .map_err(|_| scope.rt_mut().take_exception());
 
         match result {
             Ok(val) => {
@@ -306,9 +321,6 @@ async fn main() -> ExitCode {
                             ExitCode::SUCCESS
                         }
                         Err(_) => {
-                            if let Some(code) = crate::process::take_exit_code() {
-                                return ExitCode::from(code as u8);
-                            }
                             let exc = scope.rt_mut().take_exception();
                             let err_text = exc.to_text(&mut scope);
 
@@ -325,12 +337,11 @@ async fn main() -> ExitCode {
                     ExitCode::SUCCESS
                 }
             }
-            Err(e) => {
-                if let Some(code) = crate::process::take_exit_code() {
-                    return ExitCode::from(code as u8);
-                }
-                let mut err_msg = e.message;
-                if let Some(tb) = e.traceback {
+            Err(Exception::Interrupted(code)) => ExitCode::from(code as u8),
+            Err(exc) => {
+                let t = exc.to_text(&mut scope);
+                let mut err_msg = t.message;
+                if let Some(tb) = t.traceback {
                     err_msg = format!("{err_msg}\n{tb}");
                 }
                 colorize_println(err_msg, RedFg);
@@ -342,40 +353,58 @@ async fn main() -> ExitCode {
     #[cfg(debug_assertions)]
     debug_assert_eq!(ctx.gc_heap().scope_max_depth(), 0);
 
-    if let Some(js_fut) = promise_future {
+    // await till both runtime and result promise (optionally) resolved
+    let rt_result = if let Some(js_fut) = promise_future {
         let (rt_res, promise_res) = tokio::join!(rt.run_async(), js_fut);
-        if let Err(code) = rt_res {
-            let msg = format!("runtime error: {code}");
-            colorize_println(msg, RedFg);
-            exit_code = ExitCode::FAILURE;
-        }
 
         match promise_res {
             Ok(val) => {
+                // resolve()
                 colorize_println(val.inspect(&mut rt).unwrap(), GreenFg);
             }
-            Err(err_val) => {
-                exit_code = if let Some(code) = crate::process::take_exit_code() {
-                    ExitCode::from(code as u8)
-                } else {
-                    let err_msg = ctx.with_new_scope(|mut cx| {
-                        let err_text = Exception::from(err_val).to_text(&mut cx);
-                        let mut s = err_text.message;
-                        if let Some(tb) = err_text.traceback {
-                            s = format!("{s}\n{tb}");
-                        }
-                        s
-                    });
-                    colorize_println(err_msg, RedFg);
-                    ExitCode::FAILURE
-                };
+            Err(reason) => {
+                // reject()
+                let err_msg = ctx.with_new_scope(|mut cx| {
+                    let s = reason.to_string(&mut cx).unwrap();
+                    s.encode_utf8(false).to_string()
+                });
+                colorize_println(err_msg, RedFg);
+                return ExitCode::FAILURE; // pre-exit when promise was rejected
             }
         }
-    } else {
-        let _ = rt.run_async().await;
-    }
 
-    exit_code
+        rt_res
+    } else {
+        rt.run_async().await
+    };
+
+    // check runtime run result
+    if let Ok(code) = rt_result {
+        ExitCode::from(code as u8)
+    } else {
+        match rt.take_exception() {
+            Exception::Error(e) => {
+                let err_msg = ctx.with_new_scope(|mut cx| {
+                    let err_text = Exception::from(e).to_text(&mut cx);
+                    let mut s = err_text.message;
+                    if let Some(tb) = err_text.traceback {
+                        s = format!("{s}\n{tb}");
+                    }
+                    s
+                });
+                colorize_println(err_msg, RedFg);
+                ExitCode::FAILURE
+            }
+            Exception::OutOfMemory => {
+                colorize_println("out of memory", RedFg);
+                ExitCode::FAILURE
+            }
+            Exception::Interrupted(code) => ExitCode::from(code as u8),
+            Exception::No | Exception::TooManyClasses => {
+                unreachable!();
+            }
+        }
+    }
 }
 
 fn js_module_loader(
