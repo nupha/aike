@@ -32,10 +32,7 @@ thread_local! {
 
 static NEXT_ID: AtomicUsize = AtomicUsize::new(1);
 
-// ---------------------------------------------------------------------------
 // Per-instance opaque data
-// ---------------------------------------------------------------------------
-
 struct EmitterData {
     /// event_name -> list of (is_once, callback)
     listeners: RefCell<HashMap<String, Vec<(bool, JSValue)>>>,
@@ -52,20 +49,15 @@ impl EmitterData {
             if installed.get() & mask == 0 {
                 installed.set(installed.get() | mask);
 
-                // Same C handler as mod_os: just set a bit in OS_PENDING_SIGNALS
                 unsafe {
-                    libc::signal(
-                        sig_num as _,
-                        emitter_signal_handler as *const c_void as usize,
-                    );
+                    libc::signal(sig_num as _, signal_handler as *const c_void as usize);
                 }
             }
         });
     }
 }
 
-extern "C" fn emitter_signal_handler(sig_num: i32) {
-    // Uses the same OS_PENDING_SIGNALS bitmask as mod_os's signal system
+extern "C" fn signal_handler(sig_num: i32) {
     crate::mod_os::OS_PENDING_SIGNALS.with(|s| s.set(s.get() | (1_u64 << sig_num)));
 }
 
@@ -190,24 +182,21 @@ fn signal_number(name: &str) -> Option<i32> {
 // ---------------------------------------------------------------------------
 
 fn js_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let data = EmitterData {
+    let data = Box::new(EmitterData {
         listeners: RefCell::new(HashMap::new()),
         instance_id: NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         tracked_signals: RefCell::new(Vec::new()),
-    };
-    let opaque = Box::into_raw(Box::new(data)).cast::<c_void>();
+    });
 
-    // Follow same pattern as JSLlamaModel::new_instance:
-    // create a new class instance with the opaque data and return it.
+    let opaque = Box::into_raw(data).cast::<c_void>();
     let class_id = JSEventEmitter::class_id();
-    let obj = ctx
-        .create_class_instance_with_opaque(class_id, opaque)
+
+    ctx.create_class_instance_with_opaque(class_id, opaque)
         .map_err(|e| {
-            let p = e.other().unwrap();
-            let _ = unsafe { Box::from_raw(p.opaque().cast::<EmitterData>()) };
+            let _ = unsafe { Box::from_raw(opaque.cast::<EmitterData>()) };
             -1
-        })?;
-    Ok(obj.into())
+        })
+        .map(JSValue::from)
 }
 
 fn js_add_listener_signal(
@@ -480,7 +469,7 @@ impl JSEventEmitter {
                 ClassDef::new(
                     "EventEmitter",
                     CLASS_EVENT_EMITTER_PROTO,
-                    Some(ClassCtorDef::new(js_constructor, 0, true)),
+                    Some(ClassCtorDef::new(js_constructor, 0, true).global()),
                 )
                 .on_dispose(Self::handle_dispose),
             )

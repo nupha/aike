@@ -84,6 +84,7 @@ pub fn setup_globals(
         global.define_property_value_str(ctx, "console", console.into(), JS_PROP_C_W_E)?;
     }
 
+    // process
     {
         let process = build_process_object(ctx, argv, exec_argv)?;
         global.define_property_value_str(ctx, "process", process.into(), JS_PROP_WRITABLE)?;
