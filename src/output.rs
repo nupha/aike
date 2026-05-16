@@ -103,6 +103,23 @@ impl GeneratedContent {
             GeneratedContent::ToolCall(repr) => {
                 *has_tool_call = true;
 
+                // Parse JSON manually to handle arguments as nested object
+                let (name, arguments) = serde_json::from_str::<serde_json::Value>(&repr)
+                    .ok()
+                    .map(|v| {
+                        let name = v
+                            .get("name")
+                            .and_then(|n| n.as_str())
+                            .map(|s| s.to_string());
+
+                        let arguments = v.get("arguments").map(|args| match args {
+                            serde_json::Value::String(s) => s.clone(),
+                            other => serde_json::to_string(other).unwrap_or_default(),
+                        });
+                        (name, arguments)
+                    })
+                    .unwrap_or((None, None));
+
                 serde_json::to_value(CreateChatCompletionStreamResponse {
                     id,
                     model,
@@ -116,13 +133,7 @@ impl GeneratedContent {
                                 index: 0,
                                 id: Some(format!("call_{}", Uuid::new_v4().simple())),
                                 r#type: Some(FunctionType::Function),
-                                function: Some(
-                                    serde_json::from_str::<FunctionCallStream>(&repr)
-                                        .unwrap_or_else(|_| FunctionCallStream {
-                                            name: None,
-                                            arguments: None,
-                                        }),
-                                ),
+                                function: Some(FunctionCallStream { name, arguments }),
                             }]),
                             refusal: None,
                             function_call: None,
