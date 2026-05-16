@@ -14,13 +14,17 @@ use zuqe::{
     builtins::{promise::Promise, typed_array::TypedArray},
 };
 
+use crate::class_event_emitter::create_event_emitter_instance;
+
 /// Build `process` object exposing system info.
+/// The result is a proper EventEmitter instance so `process.on/emit/once`
+/// work natively (matching Node.js/Bun behaviour).
 pub(crate) fn build_process_object(
     ctx: &mut ScopedContext,
     argv: &[String],
     exec_argv: &[String],
 ) -> Result<Object, i32> {
-    let mut process = ctx.create_base_object()?;
+    let mut process = create_event_emitter_instance(ctx)?;
 
     {
         let mut env_obj = ctx.create_base_object()?;

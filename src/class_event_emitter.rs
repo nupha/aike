@@ -11,7 +11,7 @@ use std::{
 use linkme::distributed_slice;
 use zuqe::{
     Array, CallContext, ClassCtorDef, ClassDef, ClassID, FieldDef, JS_PROP_C_W_E, JSResult,
-    JSValue, Runtime, RuntimeImpl, ScopedContext,
+    JSValue, Object, Runtime, RuntimeImpl, ScopedContext,
     gc_lite::{GcTrace, GcTraceCtx},
 };
 
@@ -119,14 +119,19 @@ pub(crate) fn poll_emitter_signals(ctx: &mut ScopedContext) -> bool {
 
 /// retrive EmitterData from object
 fn get_emitter_data<'a>(ctx: &mut ScopedContext, val: &JSValue) -> Result<&'a EmitterData, i32> {
-    let payload = val
-        .retrive_object_payload(ctx, JSEventEmitter::class_id())?
-        .other()
-        .ok_or_else(|| {
-            ctx.throw_internal_error("invalid EventEmitter instance");
-            -1
-        })?;
-    Ok(unsafe { &*payload.opaque().cast::<EmitterData>() })
+    if let Some(o) = val.as_object() {
+        let payload = o
+            .retrive_payload(ctx, o.class_id())?
+            .other()
+            .ok_or_else(|| {
+                ctx.throw_internal_error("not a EventEmitter instance");
+                -1
+            })?;
+        Ok(unsafe { &*payload.opaque().cast::<EmitterData>() })
+    } else {
+        ctx.throw_internal_error("not a EventEmitter instance");
+        Err(-1)
+    }
 }
 
 /// Convert event name string to a name owned String.
@@ -452,6 +457,22 @@ impl JSEventEmitter {
     pub fn class_id() -> ClassID {
         Self::CLASS_ID.with(|x| x.get())
     }
+}
+
+/// Create a standalone EventEmitter instance with its own EmitterData.
+/// Useful when an object needs to behave as an EventEmitter (e.g. process).
+pub(crate) fn create_event_emitter_instance(ctx: &mut ScopedContext) -> Result<Object, i32> {
+    let data = Box::new(EmitterData {
+        listeners: RefCell::new(HashMap::new()),
+        instance_id: NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        tracked_signals: RefCell::new(Vec::new()),
+    });
+    let opaque = Box::into_raw(data).cast::<c_void>();
+    ctx.create_class_instance_with_opaque(JSEventEmitter::class_id(), opaque)
+        .map_err(|_| {
+            let _ = unsafe { Box::from_raw(opaque.cast::<EmitterData>()) };
+            -1
+        })
 }
 
 #[distributed_slice(USER_CLASS_DEFS)]
