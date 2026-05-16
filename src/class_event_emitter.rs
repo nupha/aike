@@ -65,7 +65,7 @@ extern "C" fn signal_handler(sig_num: i32) {
 // Public: called from main.rs gc trace handler
 // ---------------------------------------------------------------------------
 
-pub fn emitter_gc_trace(tr: &mut GcTraceCtx) {
+pub(crate) fn emitter_gc_trace(tr: &mut GcTraceCtx) {
     SIGNAL_DISPATCH.with_borrow_mut(|dispatch| {
         for list in dispatch.values_mut() {
             for (_, cb) in list.iter_mut() {

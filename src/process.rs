@@ -5,29 +5,14 @@ use std::{
     collections::HashMap,
     io::Read,
     path::Path,
-    process::{Command, ExitStatus, Stdio},
-    sync::atomic::{AtomicBool, AtomicI32, Ordering},
+    process::{Command, ExitCode, ExitStatus, Stdio},
 };
 
 use zuqe::{
-    Array, CallContext, Callback, Exception, JS_GPN_ENUM_ONLY, JS_GPN_INDEX_MASK, JS_PROP_C_W_E,
-    JSResult, JSValue, Object, ScopedContext,
+    Array, CallContext, Callback, JS_GPN_ENUM_ONLY, JS_GPN_INDEX_MASK, JS_PROP_C_W_E, JSResult,
+    JSValue, Object, ScopedContext,
     builtins::{promise::Promise, typed_array::TypedArray},
 };
-
-/// Exit signal for process.exit().
-/// PROCESS_EXIT_FLAG indicates exit was requested; PROCESS_EXIT_CODE holds the value.
-static PROCESS_EXIT_FLAG: AtomicBool = AtomicBool::new(false);
-static PROCESS_EXIT_CODE: AtomicI32 = AtomicI32::new(0);
-
-/// Check and consume the exit signal. Returns `Some(code)` if exit was requested.
-pub(crate) fn take_exit_code() -> Option<i32> {
-    if PROCESS_EXIT_FLAG.swap(false, Ordering::SeqCst) {
-        Some(PROCESS_EXIT_CODE.load(Ordering::SeqCst))
-    } else {
-        None
-    }
-}
 
 /// Build `process` object exposing system info.
 pub(crate) fn build_process_object(
@@ -162,11 +147,7 @@ fn js_exit(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     } else {
         0
     };
-    ctx.rt_mut().set_exception(Exception::Interrupted(code));
-
-    // PROCESS_EXIT_FLAG.store(true, Ordering::SeqCst);
-    // PROCESS_EXIT_CODE.store(code, Ordering::SeqCst);
-    // ctx.throw_internal_error("process.exit");
+    ctx.rt_mut().interrupt(ExitCode::from(code as u8));
     Err(-1)
 }
 

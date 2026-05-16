@@ -31,8 +31,9 @@ use colorized::{Colors::*, colorize_println};
 use libc;
 use linkme::distributed_slice;
 use zuqe::{
-    ClassID, Context, EvalFlags, EvalType, Exception, ModuleDef, Runtime, ScopedContext,
-    builtins::promise::Promise,
+    ClassID, Context, EvalFlags, EvalType, Exception, ExceptionText, ModuleDef, Runtime,
+    ScopedContext,
+    builtins::promise::{Promise, PromiseFuture},
 };
 
 use crate::{
@@ -281,13 +282,10 @@ async fn main() -> ExitCode {
 
             // Install SIGINT interrupt handler: when SIGINT bit is set in
             // OS_PENDING_SIGNALS, the VM breaks execution.
-            {
-                use crate::mod_os::OS_PENDING_SIGNALS;
-                cx.rt_mut().set_interrupt_handler(|_| {
-                    let s = OS_PENDING_SIGNALS.get();
-                    (s >> libc::SIGINT) & 1 != 0
-                });
-            }
+            cx.rt_mut().set_interrupt_handler(move |_| {
+                let s = crate::mod_os::OS_PENDING_SIGNALS.get();
+                (s >> libc::SIGINT) & 1 != 0
+            });
 
             setup_globals(cx, &argv, &exec_argv)
         })
@@ -296,80 +294,66 @@ async fn main() -> ExitCode {
     #[cfg(debug_assertions)]
     debug_assert_eq!(ctx.gc_heap().scope_max_depth(), 0, "no scope now");
 
-    let mut promise_future = None;
+    let mut promise_future: Option<PromiseFuture> = None;
 
-    let mut exit_code = ctx.with_new_scope(|mut scope| -> ExitCode {
-        let result = scope
-            .eval(
-                script.as_bytes(),
-                &filename,
-                if is_module {
-                    EvalType::Module
-                } else {
-                    EvalType::Global
-                },
-                EvalFlags::empty(),
-            )
-            .map_err(|_| scope.rt_mut().take_exception());
+    let res = ctx.with_new_scope(|mut scope| -> Result<(), i32> {
+        let v = scope.eval(
+            script.as_bytes(),
+            &filename,
+            if is_module {
+                EvalType::Module
+            } else {
+                EvalType::Global
+            },
+            EvalFlags::empty(),
+        )?;
 
-        match result {
-            Ok(val) => {
-                if let Ok(promise) = Promise::try_from(val) {
-                    match promise.into_future(&mut scope) {
-                        Ok(fut) => {
-                            promise_future = Some(fut);
-                            ExitCode::SUCCESS
-                        }
-                        Err(_) => {
-                            let exc = scope.rt_mut().take_exception();
-                            let err_text = exc.to_text(&mut scope);
-
-                            let mut err_msg = err_text.message;
-                            if let Some(tb) = err_text.traceback {
-                                err_msg = format!("{err_msg}\n{tb}");
-                            }
-                            colorize_println(err_msg, RedFg);
-                            ExitCode::FAILURE
-                        }
-                    }
-                } else {
-                    colorize_println(val.inspect(&mut rt).unwrap(), GreenFg);
-                    ExitCode::SUCCESS
-                }
-            }
-            Err(Exception::Interrupted(code)) => ExitCode::from(code as u8),
-            Err(exc) => {
-                let t = exc.to_text(&mut scope);
-                let mut err_msg = t.message;
-                if let Some(tb) = t.traceback {
-                    err_msg = format!("{err_msg}\n{tb}");
-                }
-                colorize_println(err_msg, RedFg);
-                ExitCode::FAILURE
-            }
+        if let Some(p) = v.as_object_Promise() {
+            // eval result is a Promise
+            promise_future = Some((*p).into_future(&mut scope)?);
+        } else {
+            // print eval result
+            colorize_println(v.inspect(&mut rt).unwrap(), GreenFg);
         }
+        Ok(())
     });
 
     #[cfg(debug_assertions)]
     debug_assert_eq!(ctx.gc_heap().scope_max_depth(), 0);
 
-    // await till both runtime and result promise (optionally) resolved
-    let rt_result = if let Some(js_fut) = promise_future {
+    if res.is_err() {
+        // eval error
+        return match rt.take_exception() {
+            Exception::Interrupted(code) => code,
+            Exception::Error(e) => ctx.with_new_scope(|mut cx| {
+                colorize_println(e.to_string(&mut cx).unwrap().encode_utf8(false), GreenFg);
+                ExitCode::FAILURE
+            }),
+            Exception::OutOfMemory => {
+                colorize_println("out of memory", RedFg);
+                ExitCode::FAILURE
+            }
+            Exception::No | Exception::TooManyClasses => {
+                unreachable!();
+            }
+        };
+    }
+
+    // await till all background jobs are finished
+    let run_result = if let Some(js_fut) = promise_future {
         let (rt_res, promise_res) = tokio::join!(rt.run_async(), js_fut);
 
         match promise_res {
-            Ok(val) => {
-                // resolve()
-                colorize_println(val.inspect(&mut rt).unwrap(), GreenFg);
+            Ok(result) => {
+                colorize_println(result.inspect(&mut rt).unwrap(), GreenFg);
             }
             Err(reason) => {
-                // reject()
+                // Promise reject
                 let err_msg = ctx.with_new_scope(|mut cx| {
                     let s = reason.to_string(&mut cx).unwrap();
                     s.encode_utf8(false).to_string()
                 });
                 colorize_println(err_msg, RedFg);
-                return ExitCode::FAILURE; // pre-exit when promise was rejected
             }
         }
 
@@ -378,31 +362,21 @@ async fn main() -> ExitCode {
         rt.run_async().await
     };
 
-    // check runtime run result
-    if let Ok(code) = rt_result {
-        ExitCode::from(code as u8)
-    } else {
-        match rt.take_exception() {
-            Exception::Error(e) => {
-                let err_msg = ctx.with_new_scope(|mut cx| {
-                    let err_text = Exception::from(e).to_text(&mut cx);
-                    let mut s = err_text.message;
-                    if let Some(tb) = err_text.traceback {
-                        s = format!("{s}\n{tb}");
-                    }
-                    s
-                });
-                colorize_println(err_msg, RedFg);
-                ExitCode::FAILURE
-            }
-            Exception::OutOfMemory => {
-                colorize_println("out of memory", RedFg);
-                ExitCode::FAILURE
-            }
-            Exception::Interrupted(code) => ExitCode::from(code as u8),
-            Exception::No | Exception::TooManyClasses => {
-                unreachable!();
-            }
+    match run_result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(Exception::OutOfMemory) => {
+            colorize_println("out of memory", RedFg);
+            ExitCode::FAILURE
+        }
+        Err(Exception::Interrupted(code)) => code,
+        Err(Exception::Error(err)) => {
+            ctx.with_new_scope(|mut cx| {
+                colorize_println(err.to_string(&mut cx).unwrap().encode_utf8(false), RedFg);
+            });
+            ExitCode::FAILURE
+        }
+        Err(Exception::No | Exception::TooManyClasses) => {
+            unreachable!();
         }
     }
 }
