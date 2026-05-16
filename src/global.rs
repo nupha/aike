@@ -8,7 +8,7 @@ use zuqe::{
     CallContext, Callback, JS_PROP_C_W_E, JS_PROP_WRITABLE, JSResult, JSValue, ScopedContext,
 };
 
-use crate::process::build_process_object;
+use crate::{process::build_process_object, request::js_request};
 
 fn js_print(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let level = cc.magic() % 100;
@@ -88,6 +88,12 @@ pub fn setup_globals(
     {
         let process = build_process_object(ctx, argv, exec_argv)?;
         global.define_property_value_str(ctx, "process", process.into(), JS_PROP_WRITABLE)?;
+    }
+
+    // request
+    {
+        let func = ctx.create_native_function(Callback::Func(js_request), "request", 2, 0)?;
+        global.define_property_value_str(ctx, "request", func.into(), zuqe::JS_PROP_C_W_E)?;
     }
 
     Ok(())

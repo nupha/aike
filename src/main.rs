@@ -20,6 +20,7 @@ mod mod_os;
 mod mod_std;
 mod output;
 mod process;
+mod request;
 mod responses;
 mod serve;
 mod worker;
@@ -31,9 +32,8 @@ use colorized::{Colors::*, colorize_println};
 use libc;
 use linkme::distributed_slice;
 use zuqe::{
-    ClassID, Context, EvalFlags, EvalType, Exception, ExceptionText, ModuleDef, Runtime,
-    ScopedContext,
-    builtins::promise::{Promise, PromiseFuture},
+    ClassID, Context, EvalFlags, EvalType, Exception, ModuleDef, Runtime, ScopedContext,
+    builtins::promise::PromiseFuture,
 };
 
 use crate::{
@@ -50,6 +50,7 @@ use crate::{
     mod_llama::init_mod_llama,
     mod_os::{init_mod_os, mod_os_gc_trace},
     mod_std::init_mod_std,
+    request::JSResponse,
 };
 
 /// write data both to stderr and file
@@ -269,6 +270,7 @@ async fn main() -> ExitCode {
                 JSSamplerChain::class_id(),
                 JSFile::class_id(),
                 JSFileHandle::class_id(),
+                JSResponse::class_id(),
             ])?;
 
             // register native modules
