@@ -11,7 +11,7 @@ use std::{
 use linkme::distributed_slice;
 use zuqe::{
     Array, CallContext, ClassCtorDef, ClassDef, ClassID, FieldDef, JS_PROP_C_W_E, JSResult,
-    JSValue, Object, Runtime, RuntimeImpl, ScopedContext,
+    JSValue, Runtime, RuntimeImpl, ScopedContext,
     gc_lite::{GcTrace, GcTraceCtx},
 };
 
@@ -24,8 +24,11 @@ use crate::USER_CLASS_DEFS;
 // ---------------------------------------------------------------------------
 
 thread_local! {
+    pub(super) static OS_PENDING_SIGNALS: Cell<u64> = const { Cell::new(0) };
+
     static SIGNAL_DISPATCH: RefCell<HashMap<u32, Vec<(usize, JSValue)>>> =
         RefCell::new(HashMap::new());
+
     // Bitmask: which signals have their C handler installed already
     static INSTALLED_SIGNALS: Cell<u64> = const { Cell::new(0) };
 }
@@ -49,6 +52,9 @@ impl EmitterData {
             if installed.get() & mask == 0 {
                 installed.set(installed.get() | mask);
 
+                extern "C" fn signal_handler(sig_num: i32) {
+                    OS_PENDING_SIGNALS.with(|s| s.set(s.get() | (1_u64 << sig_num)));
+                }
                 unsafe {
                     libc::signal(sig_num as _, signal_handler as *const c_void as usize);
                 }
@@ -56,14 +62,6 @@ impl EmitterData {
         });
     }
 }
-
-extern "C" fn signal_handler(sig_num: i32) {
-    crate::mod_os::OS_PENDING_SIGNALS.with(|s| s.set(s.get() | (1_u64 << sig_num)));
-}
-
-// ---------------------------------------------------------------------------
-// Public: called from main.rs gc trace handler
-// ---------------------------------------------------------------------------
 
 pub(crate) fn emitter_gc_trace(tr: &mut GcTraceCtx) {
     SIGNAL_DISPATCH.with_borrow_mut(|dispatch| {
@@ -78,7 +76,7 @@ pub(crate) fn emitter_gc_trace(tr: &mut GcTraceCtx) {
 /// Poll function: checks OS_PENDING_SIGNALS and dispatches to EventEmitter
 /// signal listeners.  Installed as a tick handler.
 pub(crate) fn poll_emitter_signals(ctx: &mut ScopedContext) -> bool {
-    let pending = crate::mod_os::OS_PENDING_SIGNALS.get();
+    let pending = OS_PENDING_SIGNALS.get();
     if pending == 0 {
         return false;
     }
@@ -86,8 +84,7 @@ pub(crate) fn poll_emitter_signals(ctx: &mut ScopedContext) -> bool {
     let mut callbacks = smallvec::SmallVec::<[JSValue; 16]>::new();
 
     SIGNAL_DISPATCH.with(|lut| {
-        let disp = lut.borrow();
-        for (sig_num, listeners) in disp.iter() {
+        for (sig_num, listeners) in lut.borrow().iter() {
             let mask = 1_u64 << *sig_num as u64;
             if pending & mask != 0 {
                 for (_, cb) in listeners {
@@ -108,7 +105,7 @@ pub(crate) fn poll_emitter_signals(ctx: &mut ScopedContext) -> bool {
             cleared &= !(1_u64 << *sig_num as u64);
         }
     });
-    crate::mod_os::OS_PENDING_SIGNALS.set(cleared);
+    OS_PENDING_SIGNALS.set(cleared);
 
     for cb in callbacks {
         if cb.call(ctx, JSValue::UNDEFINED, &[]).is_err() {
@@ -120,11 +117,8 @@ pub(crate) fn poll_emitter_signals(ctx: &mut ScopedContext) -> bool {
     true
 }
 
-// ---------------------------------------------------------------------------
-// JS method helpers
-// ---------------------------------------------------------------------------
-
-fn emitter_data<'a>(ctx: &mut ScopedContext, val: &JSValue) -> Result<&'a EmitterData, i32> {
+/// retrive EmitterData from object
+fn get_emitter_data<'a>(ctx: &mut ScopedContext, val: &JSValue) -> Result<&'a EmitterData, i32> {
     let payload = val
         .retrive_object_payload(ctx, JSEventEmitter::class_id())?
         .other()
@@ -177,11 +171,7 @@ fn signal_number(name: &str) -> Option<i32> {
     .filter(|n| *n >= 0 && *n < 64)
 }
 
-// ---------------------------------------------------------------------------
-// JS methods
-// ---------------------------------------------------------------------------
-
-fn js_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+fn js_constructor(ctx: &mut ScopedContext, _: CallContext) -> JSResult {
     let data = Box::new(EmitterData {
         listeners: RefCell::new(HashMap::new()),
         instance_id: NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
@@ -192,56 +182,42 @@ fn js_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let class_id = JSEventEmitter::class_id();
 
     ctx.create_class_instance_with_opaque(class_id, opaque)
-        .map_err(|e| {
+        .map_err(|_| {
             let _ = unsafe { Box::from_raw(opaque.cast::<EmitterData>()) };
             -1
         })
         .map(JSValue::from)
 }
 
-fn js_add_listener_signal(
-    ctx: &mut ScopedContext,
-    this: &JSValue,
-    data: &EmitterData,
-    sig: i32,
-    listener: JSValue,
-) -> Result<(), i32> {
-    data.install_signal_handler(sig as u32);
-
-    SIGNAL_DISPATCH.with(|lut| {
-        let mut d = lut.borrow_mut();
-        d.entry(sig as u32)
-            .or_default()
-            .push((data.instance_id, listener));
-    });
-    data.tracked_signals.borrow_mut().push(sig as u32);
-    Ok(())
-}
-
 /// addListener(event, listener) / on(event, listener)
 fn js_add_listener(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let is_once = cc.magic() == 1;
     let this = cc.this();
-    let listener = cc.arg(1);
 
-    if !listener.is_function() {
-        ctx.throw_type_error("listener must be a function");
-        return Err(-1);
-    }
+    let listener = cc.arg(1);
+    listener.ensure_function(ctx)?;
 
     let name = event_name(ctx, &cc.arg(0))?;
-    let data = emitter_data(ctx, &this)?;
+    let data = get_emitter_data(ctx, &this)?;
 
     // If the event name is a signal, install the C handler + global dispatch
     if let Some(sig) = signal_number(&name) {
-        js_add_listener_signal(ctx, &this, data, sig, listener)?;
+        data.install_signal_handler(sig as u32);
+
+        SIGNAL_DISPATCH.with(|lut| {
+            let mut d = lut.borrow_mut();
+            d.entry(sig as u32)
+                .or_default()
+                .push((data.instance_id, listener));
+        });
+        data.tracked_signals.borrow_mut().push(sig as u32);
     }
 
-    // Store in instance listener map
     data.listeners
         .borrow_mut()
         .entry(name)
         .or_default()
-        .push((false, listener));
+        .push((is_once, listener));
 
     Ok(this)
 }
@@ -249,12 +225,36 @@ fn js_add_listener(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 /// removeListener(event, listener) / off(event, listener)
 fn js_remove_listener(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
+    let data = get_emitter_data(ctx, &this)?;
+
     let name = event_name(ctx, &cc.arg(0))?;
     let listener = cc.arg(1);
 
-    let data = emitter_data(ctx, &this)?;
-    let mut listeners = data.listeners.borrow_mut();
+    // If signal, remove the specific callback from global dispatch table.
+    // Without this, poll_emitter_signals would still invoke the removed callback.
+    if let Some(sig) = signal_number(&name) {
+        SIGNAL_DISPATCH.with(|lut| {
+            let mut d = lut.borrow_mut();
+            if let Some(list) = d.get_mut(&(sig as u32)) {
+                list.retain(|(id, cb)| *id != data.instance_id || *cb != listener);
+                if list.is_empty() {
+                    d.remove(&(sig as u32));
+                }
+            }
+        });
 
+        // Remove one matching occurrence from tracked_signals.
+        // tracked_signals is a Vec (no dedup), and js_add_listener pushes
+        // unconditionally — multiple callbacks on the same signal produce
+        // duplicates. We remove exactly one occurrence to keep the Vec
+        // consistent without losing other entries for this signal.
+        let mut tracked = data.tracked_signals.borrow_mut();
+        if let Some(pos) = tracked.iter().position(|s| *s == sig as u32) {
+            tracked.swap_remove(pos);
+        }
+    }
+
+    let mut listeners = data.listeners.borrow_mut();
     if let Some(list) = listeners.get_mut(&name) {
         list.retain(|(_, cb)| *cb != listener);
         if list.is_empty() {
@@ -268,7 +268,7 @@ fn js_remove_listener(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 /// emit(event, ...args)
 fn js_emit(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
-    let data = emitter_data(ctx, &this)?;
+    let data = get_emitter_data(ctx, &this)?;
     let name = event_name(ctx, &cc.arg(0))?;
 
     // Collect args (skip event name)
@@ -311,37 +311,10 @@ fn js_emit(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     Ok(JSValue::Bool(fired))
 }
 
-/// once(event, listener)
-fn js_once(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let this = cc.this();
-    let listener = cc.arg(1);
-
-    if !listener.is_function() {
-        ctx.throw_type_error("listener must be a function");
-        return Err(-1);
-    }
-
-    let name = event_name(ctx, &cc.arg(0))?;
-    let data = emitter_data(ctx, &this)?;
-
-    // If signal, install handler + global dispatch
-    if let Some(sig) = signal_number(&name) {
-        js_add_listener_signal(ctx, &this, data, sig, listener)?;
-    }
-
-    data.listeners
-        .borrow_mut()
-        .entry(name)
-        .or_default()
-        .push((true, listener));
-
-    Ok(this)
-}
-
 /// removeAllListeners([event])
 fn js_remove_all_listeners(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
-    let data = emitter_data(ctx, &this)?;
+    let data = get_emitter_data(ctx, &this)?;
 
     if cc.length() > 0 && !cc.arg(0).is_undefined() {
         let name = event_name(ctx, &cc.arg(0))?;
@@ -383,7 +356,7 @@ fn js_remove_all_listeners(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
 /// listeners(event)
 fn js_listeners(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
-    let data = emitter_data(ctx, &this)?;
+    let data = get_emitter_data(ctx, &this)?;
     let name = event_name(ctx, &cc.arg(0))?;
 
     let mut arr = Array::create(ctx)?;
@@ -399,7 +372,7 @@ fn js_listeners(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 /// listenerCount(event)
 fn js_listener_count(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
-    let data = emitter_data(ctx, &this)?;
+    let data = get_emitter_data(ctx, &this)?;
     let name = event_name(ctx, &cc.arg(0))?;
 
     let count = data.listeners.borrow().get(&name).map_or(0, |l| l.len());
@@ -410,7 +383,7 @@ fn js_listener_count(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 /// eventNames()
 fn js_event_names(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
-    let data = emitter_data(ctx, &this)?;
+    let data = get_emitter_data(ctx, &this)?;
     let mut arr = Array::create(ctx)?;
     let names = data.listeners.borrow();
     for (i, key) in names.keys().enumerate() {
@@ -420,17 +393,13 @@ fn js_event_names(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     Ok(arr.into())
 }
 
-// ---------------------------------------------------------------------------
-// Class definition
-// ---------------------------------------------------------------------------
-
 const CLASS_EVENT_EMITTER_PROTO: &[FieldDef] = &[
     FieldDef::CALL("addListener", 2, js_add_listener, 0),
     FieldDef::CALL("on", 2, js_add_listener, 0),
+    FieldDef::CALL("once", 2, js_add_listener, 1),
     FieldDef::CALL("removeListener", 2, js_remove_listener, 0),
     FieldDef::CALL("off", 2, js_remove_listener, 0),
     FieldDef::CALL("emit", 1, js_emit, 0), // actually variadic
-    FieldDef::CALL("once", 2, js_once, 0),
     FieldDef::CALL("removeAllListeners", 0, js_remove_all_listeners, 0),
     FieldDef::CALL("listeners", 1, js_listeners, 0),
     FieldDef::CALL("listenerCount", 1, js_listener_count, 0),

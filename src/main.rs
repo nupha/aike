@@ -283,7 +283,7 @@ async fn main() -> ExitCode {
             // Install SIGINT interrupt handler: when SIGINT bit is set in
             // OS_PENDING_SIGNALS, the VM breaks execution.
             cx.rt_mut().set_interrupt_handler(move |_| {
-                let s = crate::mod_os::OS_PENDING_SIGNALS.get();
+                let s = crate::class_event_emitter::OS_PENDING_SIGNALS.get();
                 (s >> libc::SIGINT) & 1 != 0
             });
 

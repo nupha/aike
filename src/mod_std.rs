@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-use std::{cell::Cell, process::ExitCode};
+use std::cell::Cell;
 
 use zuqe::{
     CallContext, EvalFlags, EvalType, Exception, FieldDef, JS_SetUncatchableError, JSResult,
@@ -9,8 +9,8 @@ use zuqe::{
 };
 
 use crate::{
+    class_event_emitter::OS_PENDING_SIGNALS,
     class_file::{JSFile, js_file_puts},
-    mod_os::OS_PENDING_SIGNALS,
 };
 
 fn js_std_open(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {

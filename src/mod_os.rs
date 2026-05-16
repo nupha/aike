@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
 use std::{
-    cell::{Cell, RefCell},
+    cell::RefCell,
     collections::{HashMap, LinkedList},
     ffi::c_void,
 };
@@ -13,6 +13,8 @@ use zuqe::{
     ScopedContext,
     gc_lite::{GcTrace, GcTraceCtx},
 };
+
+use crate::class_event_emitter::OS_PENDING_SIGNALS;
 
 // Declare windows crt functions
 #[cfg(windows)]
@@ -27,10 +29,6 @@ fn js_os_now(_: &mut ScopedContext, _: CallContext) -> JSResult {
 
 #[inline]
 fn get_time_ns() -> u64 {
-    // std::time::SystemTime::now()
-    //     .duration_since(std::time::UNIX_EPOCH)
-    //     .map_or(0, |t| t.as_nanos() as u64)
-
     #[cfg(unix)]
     {
         let mut ts = libc::timespec {
@@ -177,41 +175,13 @@ struct Timer {
 }
 
 thread_local! {
-    pub(super) static OS_PENDING_SIGNALS: Cell<u64> = const { Cell::new(0) };
     static RW_HANDLERS: RefCell<HashMap<i32, [JSValue; 2]>> = RefCell::new(HashMap::new());
-    static SIG_HANDLERS: RefCell<HashMap<u32, JSValue>> = RefCell::new(HashMap::new());
 
     static TIMERS: RefCell<LinkedList<Timer>> = const { RefCell::new(LinkedList::new()) };
 }
 
 fn js_os_poll(ctx: &mut ScopedContext) -> bool {
     let mut callbacks = SmallVec::<[JSValue; 16]>::new();
-
-    if OS_PENDING_SIGNALS.get() != 0 {
-        SIG_HANDLERS.with(|lut| {
-            let b = lut.borrow();
-
-            for (sig_num, func) in b.iter() {
-                let mask = 1_u64 << *sig_num;
-                let p = OS_PENDING_SIGNALS.get();
-                if p & mask != 0 {
-                    OS_PENDING_SIGNALS.set(p & !mask);
-                    callbacks.push(*func);
-                }
-            }
-        });
-
-        for func in callbacks.drain(..) {
-            if func.call(ctx, JSValue::UNDEFINED, &[]).is_err() {
-                eprintln!(
-                    "signal handle error: {}",
-                    ctx.rt().exception().to_text(ctx).message
-                );
-            }
-        }
-
-        return true;
-    }
 
     if RW_HANDLERS.with(|s| s.borrow().is_empty()) && TIMERS.with(|s| s.borrow().is_empty()) {
         return false; // no more events (read-write and timer)
@@ -378,35 +348,11 @@ pub fn mod_os_gc_trace(tr: &mut GcTraceCtx) {
             v[1].trace(tr);
         }
     });
-    SIG_HANDLERS.with_borrow_mut(|s| {
-        for v in s.values() {
-            v.trace(tr);
-        }
-    });
     TIMERS.with_borrow_mut(|s| {
         for tm in s {
             tm.func.trace(tr);
         }
     });
-
-    // RW_HANDLERS.with(|lut| {
-    //     for v in lut.borrow().values() {
-    //         v[0].trace(tr);
-    //         v[1].trace(tr);
-    //     }
-    // });
-
-    // SIG_HANDLERS.with_borrow(|lut| {
-    //     for v in lut.values() {
-    //         v.trace(tr);
-    //     }
-    // });
-
-    // TIMERS.with_borrow(|tms| {
-    //     for tm in tms {
-    //         tm.func.trace(tr);
-    //     }
-    // })
 }
 
 fn js_os_setReadHandler(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -482,47 +428,6 @@ fn js_os_read_write(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     Ok(JSValue::from(ret))
 }
 
-fn js_os_signal(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let sig_num = cc.arg(0).to_number(ctx)?.to_u32();
-    if sig_num >= 64 {
-        ctx.throw_range_error("invalid signal number");
-        return Err(-1);
-    }
-
-    let func = cc.arg(1);
-
-    if func.is_undefined_or_null() {
-        SIG_HANDLERS.with(|lut| lut.borrow_mut().remove(&sig_num));
-        unsafe {
-            libc::signal(
-                sig_num as _,
-                if func.is_null() {
-                    libc::SIG_DFL
-                } else {
-                    libc::SIG_IGN
-                },
-            );
-        }
-    } else {
-        if !func.is_function() {
-            ctx.throw_type_error("not a function");
-            return Err(-1);
-        }
-        SIG_HANDLERS.with_borrow_mut(|lut| {
-            lut.insert(sig_num, func);
-        });
-
-        extern "C" fn os_signal_handler(sig_num: i32) {
-            OS_PENDING_SIGNALS.set(OS_PENDING_SIGNALS.get() | (1_u64 << sig_num));
-        }
-        unsafe {
-            libc::signal(sig_num as _, os_signal_handler as *const c_void as usize);
-        }
-    }
-
-    Ok(JSValue::UNDEFINED)
-}
-
 const MOD_OS_ENTRIES: &[FieldDef] = &[
     FieldDef::CALL("isatty", 1, js_os_isatty, 0),
     FieldDef::CALL("ttyGetWinSize", 1, js_os_ttyGetWinSize, 0),
@@ -531,7 +436,6 @@ const MOD_OS_ENTRIES: &[FieldDef] = &[
     FieldDef::CALL("setWriteHandler", 2, js_os_setReadHandler, 1),
     FieldDef::CALL("read", 4, js_os_read_write, 0),
     FieldDef::CALL("write", 4, js_os_read_write, 1),
-    FieldDef::CALL("signal", 2, js_os_signal, 0),
     FieldDef::CALL("now", 0, js_os_now, 0),
     FieldDef::INT32("SIGINT", libc::SIGINT, JS_PROP_CONFIGURABLE),
     FieldDef::INT32("SIGABRT", libc::SIGABRT, JS_PROP_CONFIGURABLE),
