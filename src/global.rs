@@ -3,7 +3,7 @@
 
 use std::ops::Deref;
 
-use colorized::{Colors, colorize_print, colorize_println};
+use colorized::{Colors, colorize_print};
 use zuqe::{
     CallContext, Callback, JS_PROP_C_W_E, JS_PROP_WRITABLE, JSResult, JSValue, ScopedContext,
 };
@@ -41,11 +41,8 @@ fn js_print(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         );
     }
 
-    if cc.magic() >= 100 {
-        // print no newline
-        colorize_print("", color());
-    } else {
-        colorize_println("", color());
+    if cc.magic() < 100 {
+        println!(); // print newline
     }
 
     Ok(JSValue::UNDEFINED)

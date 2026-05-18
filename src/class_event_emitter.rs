@@ -285,17 +285,26 @@ fn js_emit(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut fired = false;
 
     // Emit to instance listeners
+    // Clone callbacks first so borrow_mut is released before calling into JS
+    // (JS execution may trigger GC which needs to borrow listeners for trace)
+    let callbacks: Vec<(bool, JSValue)> = {
+        let listeners = data.listeners.borrow();
+        if let Some(list) = listeners.get(&name) {
+            list.clone()
+        } else {
+            vec![]
+        }
+    };
+
     let mut to_remove: Vec<usize> = Vec::new();
-    if let Some(list) = data.listeners.borrow_mut().get_mut(&name) {
-        for (i, (is_once, cb)) in list.iter().enumerate() {
-            if cb.call(ctx, JSValue::UNDEFINED, &args).is_err() {
-                // Ignore listener errors per Node.js convention
-                let _ = ctx.rt().exception();
-            }
-            fired = true;
-            if *is_once {
-                to_remove.push(i);
-            }
+    for (i, (is_once, cb)) in callbacks.iter().enumerate() {
+        if cb.call(ctx, JSValue::UNDEFINED, &args).is_err() {
+            // Ignore listener errors per Node.js convention
+            let _ = ctx.rt().exception();
+        }
+        fired = true;
+        if *is_once {
+            to_remove.push(i);
         }
     }
 
@@ -445,6 +454,19 @@ impl JSEventEmitter {
                     CLASS_EVENT_EMITTER_PROTO,
                     Some(ClassCtorDef::new(js_constructor, 0, true).expose_to_global()),
                 )
+                .on_gc_trace(|opaque: *mut c_void, gcx: &mut zuqe::gc_lite::GcTraceCtx| {
+                    if !opaque.is_null() {
+                        let data = unsafe { &*(opaque.cast::<EmitterData>()) };
+                        // try_borrow: if emit is in progress (mut borrowed), skip this GC cycle
+                        if let Ok(listeners) = data.listeners.try_borrow() {
+                            for list in listeners.values() {
+                                for (_, cb) in list {
+                                    cb.trace(gcx);
+                                }
+                            }
+                        }
+                    }
+                })
                 .on_dispose(Self::handle_dispose),
             )
             .expect("register class EventEmitter failed");

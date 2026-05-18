@@ -6,8 +6,7 @@ use std::{cell::Cell, ffi::c_void};
 use crossbeam::channel;
 use linkme::distributed_slice;
 use zuqe::{
-    CallContext, Callback, ClassDef, ClassID, FieldDef, JSResult, JSValue, Object, Runtime,
-    ScopedContext,
+    CallContext, ClassDef, ClassID, FieldDef, JSResult, JSValue, Runtime, ScopedContext,
     builtins::{
         iterator::AsyncIterableIterator,
         promise::{Promise, PromiseResultSlot},

@@ -411,6 +411,22 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
     }
 }
 
+/// Getter magic constants
+const PROP_MODEL: i32 = 0;
+
+fn js_client_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let this = cc.this();
+    let client_arc = get_client_arc(ctx, &this)?;
+
+    match cc.magic() {
+        PROP_MODEL => match &client_arc.model_name {
+            Some(name) => ctx.create_string_from_str(name).map(JSValue::String),
+            None => Ok(JSValue::NULL),
+        },
+        _ => Ok(JSValue::UNDEFINED),
+    }
+}
+
 fn js_client_dispose(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut this = cc.this();
     let payload = this
@@ -452,6 +468,7 @@ const CLASS_CLIENT_PROTO: &[FieldDef] = &[
         MAGIC_RESPONSES_ONCE as i16,
     ),
     FieldDef::CALL("dispose", 0, js_client_dispose, 0),
+    FieldDef::GETSET("model", Some(js_client_getter), None, PROP_MODEL as _),
 ];
 
 pub struct JSLlamaClient;
