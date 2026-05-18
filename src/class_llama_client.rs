@@ -23,7 +23,7 @@ use crate::{
         MAGIC_RESPONSES_ONCE, MAGIC_RESPONSES_STREAM, js_client_responses,
     },
     class_llama_engine::{MAGIC_CHAT_ONCE, MAGIC_CHAT_STREAM},
-    helpers::parse_chat_completion_req,
+    helpers::json_keys_camel_to_snake,
 };
 
 /// Constructor: new OpenAI({apiKey, baseUrl, model?, timeout?})
@@ -196,26 +196,35 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
         -1
     })?;
 
-    // Parse all chat options into a ChatCompletionRequest
-    let mut req = opts_obj.to_serde_json(ctx).and_then(|v| {
-        parse_chat_completion_req(v).map_err(|_| {
-            ctx.throw_type_error("failed to serialize options");
-            -1
-        })
-    })?;
+    // Convert JS options to raw JSON, preserving all fields (including extension
+    // fields like reasoning_content) that async-openai typed structs would drop.
+    // Client is a remote API proxy — it should forward everything, not filter.
+    let mut req_json = opts_obj.to_serde_json(ctx)?;
 
-    if req.model.is_empty() {
-        req.model = client_arc
-            .model_name
-            .clone()
-            .unwrap_or_else(|| "".to_string());
+    // camelCase → snake_case for OpenAI API compatibility
+    json_keys_camel_to_snake(&mut req_json);
+
+    // Fill default model if missing or empty
+    if let Some(obj) = req_json.as_object_mut() {
+        let model_val = obj.get("model").and_then(|v| v.as_str()).unwrap_or("");
+        if model_val.is_empty() {
+            obj.insert(
+                "model".to_string(),
+                serde_json::Value::String(
+                    client_arc
+                        .model_name
+                        .clone()
+                        .unwrap_or_else(|| "".to_string()),
+                ),
+            );
+        }
     }
 
     // Use reqwest to make HTTP request, build client
     let http_client = reqwest::Client::new();
     let mut client = http_client
         .post(&format!("{}/chat/completions", client_arc.base_url))
-        .body(serde_json::to_string(&req).unwrap_or_default())
+        .body(serde_json::to_string(&req_json).unwrap_or_default())
         .header("Content-Type", "application/json");
 
     if !client_arc.api_key.is_empty() {

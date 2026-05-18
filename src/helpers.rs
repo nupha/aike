@@ -370,7 +370,7 @@ fn camel_to_snake(s: &str) -> String {
 }
 
 /// Recursively convert all object keys in a JSON value from camelCase to snake_case.
-fn json_keys_camel_to_snake(val: &mut JsonValue) {
+pub(crate) fn json_keys_camel_to_snake(val: &mut JsonValue) {
     match val {
         JsonValue::Object(map) => {
             let keys: Vec<String> = map.keys().cloned().collect();
