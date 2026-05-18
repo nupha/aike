@@ -1,25 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-//! setTimeout / setInterval / clearTimeout / clearInterval
-//!
-//! Design:
-//!   - Each timer spawns a tokio task that sleeps for the given delay,
-//!     then sends `TimerMsg::Fired(id)` on a crossbeam channel.
-//!   - clearTimeout/clearInterval sends `TimerMsg::Cancelled(id)` instead.
-//!   - A single persistent microtask (queue_job) is active as long as any
-//!     timer registrations exist.  It polls the channel with try_recv every
-//!     microtask turn and returns JobState::Again to stay alive, or
-//!     JobState::Done when all entries are gone (sets TIMER_STATE back to None).
-//!   - setTimeout/setInterval call start_poll_job only when TIMER_STATE is None,
-//!     so at most one polling job runs at any time.  No tick handler needed.
-
 use std::{cell::RefCell, collections::HashMap};
 
 use crossbeam::channel::{Receiver, Sender};
 use zuqe::{
-    CallContext, Callback, JS_PROP_C_W_E, JSResult, JSValue, Object, ScopedContext,
-    builtins::promise::JobState,
+    CallContext, Callback, JS_PROP_C_W_E, JSResult, JSValue, JobState, Object, ScopedContext,
     gc_lite::{GcTrace, GcTraceCtx},
 };
 
