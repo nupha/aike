@@ -3,9 +3,10 @@
 
 pub(crate) mod class_file_handle;
 
-use std::cell::RefCell;
-use std::path::Path;
-use std::path::PathBuf;
+use std::{
+    cell::RefCell,
+    path::{Path, PathBuf},
+};
 
 use zuqe::{
     Array, CallContext, FieldDef, JSResult, JSValue, PollSender, ScopedContext,
@@ -786,6 +787,7 @@ const MOD_FS_ENTRIES: &[FieldDef] = &[
     FieldDef::CALL("writeBytes", 2, js_fs_writeBytes, 0),
     FieldDef::CALL("appendText", 2, js_fs_appendText, 0),
     FieldDef::CALL("write", 2, js_fs_write, 0),
+    FieldDef::CALL("readDir", 1, js_fs_readDir, 0),
     FieldDef::CALL("ensureDir", 2, js_fs_ensureDir, 0),
     FieldDef::CALL("stat", 1, js_fs_stat, 0),
 ];
