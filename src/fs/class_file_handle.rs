@@ -11,6 +11,7 @@ use zuqe::{
 };
 
 use crate::USER_CLASS_DEFS;
+use crate::fs::strip_chroot;
 
 // Magic values for GETSET properties
 const PROP_PATH: i32 = 0;
@@ -50,9 +51,11 @@ fn js_fh_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let path = get_path_from_obj(ctx, &this, class_id)?;
 
     match cc.magic() {
-        PROP_PATH => ctx
-            .create_string_from_utf8(path.into_bytes())
-            .map(JSValue::from),
+        PROP_PATH => {
+            let stripped = strip_chroot(&path);
+            ctx.create_string_from_utf8(stripped.into_bytes())
+                .map(JSValue::from)
+        }
         PROP_NAME => {
             let name = Path::new(&path)
                 .file_name()

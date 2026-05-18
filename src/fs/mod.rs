@@ -3,6 +3,10 @@
 
 pub(crate) mod class_file_handle;
 
+use std::cell::RefCell;
+use std::path::Path;
+use std::path::PathBuf;
+
 use zuqe::{
     Array, CallContext, FieldDef, JSResult, JSValue, PollSender, ScopedContext,
     builtins::{promise::Promise, typed_array::TypedArray},
@@ -60,11 +64,93 @@ fn get_bytes_from_arg(ctx: &mut ScopedContext, arg: &mut JSValue) -> Result<Vec<
 }
 
 // ---------------------------------------------------------------------------
+// Chroot support
+// ---------------------------------------------------------------------------
+thread_local! {
+    static CHROOT_PATH: RefCell<PathBuf> = RefCell::new(PathBuf::from("/"));
+}
+
+/// Normalize a path by resolving . and .. components without following symlinks.
+fn normalize_path(path: &Path) -> PathBuf {
+    let mut result = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::Normal(name) => result.push(name),
+            std::path::Component::ParentDir => {
+                if result.as_os_str() != "/" && !result.as_os_str().is_empty() {
+                    result.pop();
+                }
+            }
+            std::path::Component::CurDir => {}
+            std::path::Component::RootDir => {
+                result = PathBuf::from("/");
+            }
+            std::path::Component::Prefix(_) => result.push(component.as_os_str()),
+        }
+    }
+    result
+}
+
+/// Resolve a user path against the current chroot directory.
+/// Returns an error if the resolved path escapes the chroot boundary.
+fn resolve_path(user_path: &str) -> Result<PathBuf, String> {
+    let chroot = CHROOT_PATH.with(|c| c.borrow().clone());
+    let chroot_str = chroot.to_string_lossy().to_string();
+
+    // Build raw path: absolute user paths are relative to chroot
+    let raw = if user_path.starts_with('/') {
+        let mut base = chroot.clone();
+        base.push(&user_path[1..]);
+        base
+    } else {
+        let mut base = chroot.clone();
+        base.push(user_path);
+        base
+    };
+
+    // Normalize: resolve . and .. components
+    let normalized = normalize_path(&raw);
+    let norm_str = normalized.to_string_lossy().to_string();
+
+    // Security check: must stay within chroot
+    if !norm_str.starts_with(&chroot_str) {
+        return Err("forbidden: path outside chroot".to_string());
+    }
+
+    Ok(normalized)
+}
+
+/// Strip chroot prefix from a resolved path for external display.
+pub fn strip_chroot(full_path: &str) -> String {
+    let chroot = CHROOT_PATH.with(|c| c.borrow().clone());
+    let chroot_str = chroot.to_string_lossy();
+    if chroot_str == "/" {
+        return full_path.to_string();
+    }
+
+    let normalized = normalize_path(Path::new(full_path));
+    let norm_str = normalized.to_string_lossy();
+
+    if let Some(stripped) = norm_str.strip_prefix(chroot_str.as_ref()) {
+        if stripped.is_empty() {
+            "/".to_string()
+        } else {
+            stripped.to_string()
+        }
+    } else {
+        full_path.to_string()
+    }
+}
+
+// ---------------------------------------------------------------------------
 // readText - read file content as UTF-8 string
 // ---------------------------------------------------------------------------
 fn js_fs_readText(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let v = cc.arg(0).to_string(ctx)?;
-    let path = v.content().encode_utf8(false).to_string();
+    let path = resolve_path(&v.content().encode_utf8(false).to_string()).map_err(|e| {
+        ctx.throw_internal_error(&e);
+        -1
+    })?;
 
     let (promise, tx) =
         Promise::create_with_channel::<Result<String, String>>(ctx, |cx, payload| -> JSResult {
@@ -94,7 +180,10 @@ fn js_fs_readText(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 // ---------------------------------------------------------------------------
 fn js_fs_readJSON(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let v = cc.arg(0).to_string(ctx)?;
-    let path = v.content().encode_utf8(false).to_string();
+    let path = resolve_path(&v.content().encode_utf8(false).to_string()).map_err(|e| {
+        ctx.throw_internal_error(&e);
+        -1
+    })?;
 
     let (promise, tx) = Promise::create_with_channel::<Result<serde_json::Value, String>>(
         ctx,
@@ -128,7 +217,10 @@ fn js_fs_readJSON(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 // ---------------------------------------------------------------------------
 fn js_fs_readBytes(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let v = cc.arg(0).to_string(ctx)?;
-    let path = v.content().encode_utf8(false).to_string();
+    let path = resolve_path(&v.content().encode_utf8(false).to_string()).map_err(|e| {
+        ctx.throw_internal_error(&e);
+        -1
+    })?;
 
     let (promise, tx) =
         Promise::create_with_channel::<Result<Vec<u8>, String>>(ctx, |cx, payload| -> JSResult {
@@ -153,7 +245,10 @@ fn js_fs_readBytes(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 // ---------------------------------------------------------------------------
 fn js_fs_writeText(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let v = cc.arg(0).to_string(ctx)?;
-    let path = v.content().encode_utf8(false).to_string();
+    let path = resolve_path(&v.content().encode_utf8(false).to_string()).map_err(|e| {
+        ctx.throw_internal_error(&e);
+        -1
+    })?;
     let data = cc.arg(1).to_string(ctx)?;
     let data_str = data.content().encode_utf8(false).to_string();
 
@@ -177,7 +272,10 @@ fn js_fs_writeText(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 // ---------------------------------------------------------------------------
 fn js_fs_writeJSON(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let v = cc.arg(0).to_string(ctx)?;
-    let path = v.content().encode_utf8(false).to_string();
+    let path = resolve_path(&v.content().encode_utf8(false).to_string()).map_err(|e| {
+        ctx.throw_internal_error(&e);
+        -1
+    })?;
     let val = cc.arg(1).to_serde_json(ctx).map_err(|_| {
         ctx.throw_type_error("failed to serialize value to JSON");
         -1
@@ -221,7 +319,10 @@ fn js_fs_writeJSON(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 // ---------------------------------------------------------------------------
 fn js_fs_writeBytes(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let v = cc.arg(0).to_string(ctx)?;
-    let path = v.content().encode_utf8(false).to_string();
+    let path = resolve_path(&v.content().encode_utf8(false).to_string()).map_err(|e| {
+        ctx.throw_internal_error(&e);
+        -1
+    })?;
     let bytes = get_bytes_from_arg(ctx, &mut cc.arg(1))?;
 
     let (promise, tx) = make_void_promise(ctx)?;
@@ -244,7 +345,10 @@ fn js_fs_writeBytes(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 // ---------------------------------------------------------------------------
 fn js_fs_appendText(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let v = cc.arg(0).to_string(ctx)?;
-    let path = v.content().encode_utf8(false).to_string();
+    let path = resolve_path(&v.content().encode_utf8(false).to_string()).map_err(|e| {
+        ctx.throw_internal_error(&e);
+        -1
+    })?;
     let data = cc.arg(1).to_string(ctx)?;
     let data_str = data.content().encode_utf8(false).to_string();
 
@@ -277,9 +381,40 @@ fn js_fs_appendText(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 // ---------------------------------------------------------------------------
 fn js_fs_createFile(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let v = cc.arg(0).to_string(ctx)?;
-    let path = v.content().encode_utf8(false).to_string();
+    let path = resolve_path(&v.content().encode_utf8(false).to_string()).map_err(|e| {
+        ctx.throw_internal_error(&e);
+        -1
+    })?;
 
-    JSFileHandle::new_instance(ctx, path).map(JSValue::Object)
+    JSFileHandle::new_instance(ctx, path.to_string_lossy().to_string()).map(JSValue::Object)
+}
+
+// ---------------------------------------------------------------------------
+// setChroot - set the chroot directory for this thread
+// ---------------------------------------------------------------------------
+fn js_fs_setChroot(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let v = cc.arg(0).to_string(ctx)?;
+    let path = v.content().encode_utf8(false).to_string();
+    let normalized = normalize_path(Path::new(&path));
+
+    // Verify the path exists and is a directory
+    match std::fs::metadata(&normalized) {
+        Ok(meta) => {
+            if !meta.is_dir() {
+                ctx.throw_type_error("chroot path must be a directory");
+                return Err(-1);
+            }
+        }
+        Err(e) => {
+            ctx.throw_internal_error(&format!("chroot path error: {e}"));
+            return Err(-1);
+        }
+    }
+
+    CHROOT_PATH.with(|c| {
+        *c.borrow_mut() = normalized;
+    });
+    Ok(JSValue::UNDEFINED)
 }
 
 // ---------------------------------------------------------------------------
@@ -287,7 +422,10 @@ fn js_fs_createFile(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 // ---------------------------------------------------------------------------
 fn js_fs_write(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let v = cc.arg(0).to_string(ctx)?;
-    let path = v.content().encode_utf8(false).to_string();
+    let path = resolve_path(&v.content().encode_utf8(false).to_string()).map_err(|e| {
+        ctx.throw_internal_error(&e);
+        -1
+    })?;
 
     // string data
     if let Some(s) = cc.arg(1).as_string() {
@@ -356,7 +494,10 @@ fn js_fs_write(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 // ---------------------------------------------------------------------------
 fn js_fs_ensureDir(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let v = cc.arg(0).to_string(ctx)?;
-    let path = v.content().encode_utf8(false).to_string();
+    let path = resolve_path(&v.content().encode_utf8(false).to_string()).map_err(|e| {
+        ctx.throw_internal_error(&e);
+        -1
+    })?;
 
     // Parse optional options object: ensureDir(path, { recursive?: boolean })
     let recursive = if cc.length() > 1 {
@@ -438,7 +579,10 @@ fn make_dirent_obj(ctx: &mut ScopedContext, d: &DirentData) -> Result<JSValue, i
 // ---------------------------------------------------------------------------
 fn js_fs_readDir(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let v = cc.arg(0).to_string(ctx)?;
-    let path = v.content().encode_utf8(false).to_string();
+    let path = resolve_path(&v.content().encode_utf8(false).to_string()).map_err(|e| {
+        ctx.throw_internal_error(&e);
+        -1
+    })?;
 
     let (promise, tx) = Promise::create_with_channel::<Result<Vec<DirentData>, String>>(
         ctx,
@@ -580,7 +724,10 @@ fn make_stats(ctx: &mut ScopedContext, meta: &std::fs::Metadata) -> Result<JSVal
 
 fn js_fs_stat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let v = cc.arg(0).to_string(ctx)?;
-    let path = v.content().encode_utf8(false).to_string();
+    let path = resolve_path(&v.content().encode_utf8(false).to_string()).map_err(|e| {
+        ctx.throw_internal_error(&e);
+        -1
+    })?;
 
     let (promise, tx) = Promise::create_with_channel::<Result<std::fs::Metadata, String>>(
         ctx,
@@ -606,6 +753,7 @@ fn js_fs_stat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 // Module definition
 // ---------------------------------------------------------------------------
 const MOD_FS_ENTRIES: &[FieldDef] = &[
+    FieldDef::CALL("setChroot", 1, js_fs_setChroot, 0),
     FieldDef::CALL("createFile", 1, js_fs_createFile, 0),
     FieldDef::CALL("readText", 1, js_fs_readText, 0),
     FieldDef::CALL("readJSON", 1, js_fs_readJSON, 0),
