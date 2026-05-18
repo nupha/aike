@@ -176,6 +176,41 @@ fn signal_number(name: &str) -> Option<i32> {
     .filter(|n| *n >= 0 && *n < 64)
 }
 
+/// Reverse of signal_number: convert a signal number back to its name.
+fn sig_name(sig: u32) -> Option<&'static str> {
+    Some(match sig as i32 {
+        n if n == libc::SIGINT => "SIGINT",
+        n if n == libc::SIGABRT => "SIGABRT",
+        n if n == libc::SIGFPE => "SIGFPE",
+        n if n == libc::SIGILL => "SIGILL",
+        n if n == libc::SIGSEGV => "SIGSEGV",
+        n if n == libc::SIGTERM => "SIGTERM",
+        #[cfg(not(windows))]
+        n if n == libc::SIGQUIT => "SIGQUIT",
+        #[cfg(not(windows))]
+        n if n == libc::SIGPIPE => "SIGPIPE",
+        #[cfg(not(windows))]
+        n if n == libc::SIGALRM => "SIGALRM",
+        #[cfg(not(windows))]
+        n if n == libc::SIGUSR1 => "SIGUSR1",
+        #[cfg(not(windows))]
+        n if n == libc::SIGUSR2 => "SIGUSR2",
+        #[cfg(not(windows))]
+        n if n == libc::SIGCHLD => "SIGCHLD",
+        #[cfg(not(windows))]
+        n if n == libc::SIGCONT => "SIGCONT",
+        #[cfg(not(windows))]
+        n if n == libc::SIGSTOP => "SIGSTOP",
+        #[cfg(not(windows))]
+        n if n == libc::SIGTSTP => "SIGTSTP",
+        #[cfg(not(windows))]
+        n if n == libc::SIGTTIN => "SIGTTIN",
+        #[cfg(not(windows))]
+        n if n == libc::SIGTTOU => "SIGTTOU",
+        _ => return None,
+    })
+}
+
 fn js_constructor(ctx: &mut ScopedContext, _: CallContext) -> JSResult {
     let data = Box::new(EmitterData {
         listeners: RefCell::new(HashMap::new()),
@@ -205,24 +240,26 @@ fn js_add_listener(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let name = event_name(ctx, &cc.arg(0))?;
     let data = get_emitter_data(ctx, &this)?;
 
-    // If the event name is a signal, install the C handler + global dispatch
     if let Some(sig) = signal_number(&name) {
+        // Signal events: stored only in SIGNAL_DISPATCH (not in listeners).
+        // OS signals are dispatched via poll_emitter_signals; manual emit("SIGXXX")
+        // reads SIGNAL_DISPATCH too, so a single source of truth is enough.
         data.install_signal_handler(sig as u32);
-
         SIGNAL_DISPATCH.with(|lut| {
-            let mut d = lut.borrow_mut();
-            d.entry(sig as u32)
+            lut.borrow_mut()
+                .entry(sig as u32)
                 .or_default()
                 .push((data.instance_id, listener));
         });
         data.tracked_signals.borrow_mut().push(sig as u32);
+    } else {
+        // Regular events: stored in per-instance listeners map.
+        data.listeners
+            .borrow_mut()
+            .entry(name)
+            .or_default()
+            .push((is_once, listener));
     }
-
-    data.listeners
-        .borrow_mut()
-        .entry(name)
-        .or_default()
-        .push((is_once, listener));
 
     Ok(this)
 }
@@ -235,9 +272,8 @@ fn js_remove_listener(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let name = event_name(ctx, &cc.arg(0))?;
     let listener = cc.arg(1);
 
-    // If signal, remove the specific callback from global dispatch table.
-    // Without this, poll_emitter_signals would still invoke the removed callback.
     if let Some(sig) = signal_number(&name) {
+        // Signal: remove from SIGNAL_DISPATCH only (not stored in listeners).
         SIGNAL_DISPATCH.with(|lut| {
             let mut d = lut.borrow_mut();
             if let Some(list) = d.get_mut(&(sig as u32)) {
@@ -247,23 +283,20 @@ fn js_remove_listener(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 }
             }
         });
-
-        // Remove one matching occurrence from tracked_signals.
-        // tracked_signals is a Vec (no dedup), and js_add_listener pushes
-        // unconditionally — multiple callbacks on the same signal produce
-        // duplicates. We remove exactly one occurrence to keep the Vec
-        // consistent without losing other entries for this signal.
+        // Remove one occurrence from tracked_signals (Vec may have duplicates
+        // when the same signal is registered multiple times).
         let mut tracked = data.tracked_signals.borrow_mut();
         if let Some(pos) = tracked.iter().position(|s| *s == sig as u32) {
             tracked.swap_remove(pos);
         }
-    }
-
-    let mut listeners = data.listeners.borrow_mut();
-    if let Some(list) = listeners.get_mut(&name) {
-        list.retain(|(_, cb)| *cb != listener);
-        if list.is_empty() {
-            listeners.remove(&name);
+    } else {
+        // Regular event: remove from per-instance listeners map.
+        let mut listeners = data.listeners.borrow_mut();
+        if let Some(list) = listeners.get_mut(&name) {
+            list.retain(|(_, cb)| *cb != listener);
+            if list.is_empty() {
+                listeners.remove(&name);
+            }
         }
     }
 
@@ -284,40 +317,57 @@ fn js_emit(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     let mut fired = false;
 
-    // Emit to instance listeners
-    // Clone callbacks first so borrow_mut is released before calling into JS
-    // (JS execution may trigger GC which needs to borrow listeners for trace)
-    let callbacks: Vec<(bool, JSValue)> = {
-        let listeners = data.listeners.borrow();
-        if let Some(list) = listeners.get(&name) {
-            list.clone()
-        } else {
-            vec![]
-        }
-    };
-
-    let mut to_remove: Vec<usize> = Vec::new();
-    for (i, (is_once, cb)) in callbacks.iter().enumerate() {
-        if cb.call(ctx, JSValue::UNDEFINED, &args).is_err() {
-            // Ignore listener errors per Node.js convention
-            let _ = ctx.rt().exception();
-        }
-        fired = true;
-        if *is_once {
-            to_remove.push(i);
-        }
-    }
-
-    // Remove once listeners (reverse order)
-    if !to_remove.is_empty() {
-        let mut list = data.listeners.borrow_mut();
-        if let Some(l) = list.get_mut(&name) {
-            to_remove.sort_unstable_by(|a, b| b.cmp(a));
-            for i in to_remove {
-                l.remove(i);
+    if let Some(sig) = signal_number(&name) {
+        // Signal emit: read callbacks from SIGNAL_DISPATCH for this instance.
+        // Clone to release borrow before calling into JS.
+        let callbacks: Vec<JSValue> = SIGNAL_DISPATCH.with(|lut| {
+            lut.borrow()
+                .get(&(sig as u32))
+                .map(|list| {
+                    list.iter()
+                        .filter(|(id, _)| *id == data.instance_id)
+                        .map(|(_, cb)| *cb)
+                        .collect()
+                })
+                .unwrap_or_default()
+        });
+        for cb in &callbacks {
+            if cb.call(ctx, JSValue::UNDEFINED, &args).is_err() {
+                let _ = ctx.rt().exception();
             }
-            if l.is_empty() {
-                list.remove(&name);
+            fired = true;
+        }
+    } else {
+        // Regular event: read from per-instance listeners map.
+        // Clone first so borrow is released before JS execution (GC may run).
+        let callbacks: Vec<(bool, JSValue)> = {
+            let listeners = data.listeners.borrow();
+            listeners.get(&name).map(|l| l.clone()).unwrap_or_default()
+        };
+
+        let mut to_remove: Vec<usize> = Vec::new();
+        for (i, (is_once, cb)) in callbacks.iter().enumerate() {
+            if cb.call(ctx, JSValue::UNDEFINED, &args).is_err() {
+                // Ignore listener errors per Node.js convention
+                let _ = ctx.rt().exception();
+            }
+            fired = true;
+            if *is_once {
+                to_remove.push(i);
+            }
+        }
+
+        // Remove once-listeners in reverse index order
+        if !to_remove.is_empty() {
+            let mut list = data.listeners.borrow_mut();
+            if let Some(l) = list.get_mut(&name) {
+                to_remove.sort_unstable_by(|a, b| b.cmp(a));
+                for i in to_remove {
+                    l.remove(i);
+                }
+                if l.is_empty() {
+                    list.remove(&name);
+                }
             }
         }
     }
@@ -333,33 +383,37 @@ fn js_remove_all_listeners(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
     if cc.length() > 0 && !cc.arg(0).is_undefined() {
         let name = event_name(ctx, &cc.arg(0))?;
 
-        // If signal, remove from global dispatch
         if let Some(sig) = signal_number(&name) {
+            // Signal: remove only this instance's entries, not other instances'.
             SIGNAL_DISPATCH.with(|lut| {
-                lut.borrow_mut().remove(&(sig as u32));
+                let mut d = lut.borrow_mut();
+                if let Some(list) = d.get_mut(&(sig as u32)) {
+                    list.retain(|(id, _)| *id != data.instance_id);
+                    if list.is_empty() {
+                        d.remove(&(sig as u32));
+                    }
+                }
             });
             data.tracked_signals
                 .borrow_mut()
                 .retain(|s| *s != sig as u32);
+        } else {
+            data.listeners.borrow_mut().remove(&name);
         }
-
-        data.listeners.borrow_mut().remove(&name);
     } else {
-        // Remove all signal entries for this instance
-        {
-            let ids = data.tracked_signals.borrow().clone();
-            SIGNAL_DISPATCH.with(|lut| {
-                let mut d = lut.borrow_mut();
-                for sig in &ids {
-                    if let Some(list) = d.get_mut(sig) {
-                        list.retain(|(id, _)| *id != data.instance_id);
-                        if list.is_empty() {
-                            d.remove(sig);
-                        }
+        // Remove all listeners for this instance.
+        let sigs = data.tracked_signals.borrow().clone();
+        SIGNAL_DISPATCH.with(|lut| {
+            let mut d = lut.borrow_mut();
+            for sig in &sigs {
+                if let Some(list) = d.get_mut(sig) {
+                    list.retain(|(id, _)| *id != data.instance_id);
+                    if list.is_empty() {
+                        d.remove(sig);
                     }
                 }
-            });
-        }
+            }
+        });
         data.tracked_signals.borrow_mut().clear();
         data.listeners.borrow_mut().clear();
     }
@@ -367,16 +421,33 @@ fn js_remove_all_listeners(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
     Ok(this)
 }
 
-/// listeners(event)
+/// listeners(event) — returns callbacks for both regular and signal events
 fn js_listeners(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let data = get_emitter_data(ctx, &this)?;
     let name = event_name(ctx, &cc.arg(0))?;
 
     let mut arr = Array::create(ctx)?;
-    if let Some(list) = data.listeners.borrow().get(&name) {
-        for (i, (_, cb)) in list.iter().enumerate() {
-            arr.define_property_value_u32(ctx, i as u32, *cb, JS_PROP_C_W_E)?;
+    let mut idx = 0u32;
+
+    if let Some(sig) = signal_number(&name) {
+        // Signal: collect from SIGNAL_DISPATCH filtered by instance_id
+        SIGNAL_DISPATCH.with(|lut| {
+            if let Some(list) = lut.borrow().get(&(sig as u32)) {
+                for (id, cb) in list {
+                    if *id == data.instance_id {
+                        let _ = arr.define_property_value_u32(ctx, idx, *cb, JS_PROP_C_W_E);
+                        idx += 1;
+                    }
+                }
+            }
+        });
+    } else {
+        if let Some(list) = data.listeners.borrow().get(&name) {
+            for (_, cb) in list {
+                arr.define_property_value_u32(ctx, idx, *cb, JS_PROP_C_W_E)?;
+                idx += 1;
+            }
         }
     }
 
@@ -389,21 +460,62 @@ fn js_listener_count(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let data = get_emitter_data(ctx, &this)?;
     let name = event_name(ctx, &cc.arg(0))?;
 
-    let count = data.listeners.borrow().get(&name).map_or(0, |l| l.len());
+    let count = if let Some(sig) = signal_number(&name) {
+        // Signal: count entries matching this instance
+        SIGNAL_DISPATCH.with(|lut| {
+            lut.borrow()
+                .get(&(sig as u32))
+                .map(|list| {
+                    list.iter()
+                        .filter(|(id, _)| *id == data.instance_id)
+                        .count()
+                })
+                .unwrap_or(0)
+        })
+    } else {
+        data.listeners.borrow().get(&name).map_or(0, |l| l.len())
+    };
 
     Ok(JSValue::from(count as i32))
 }
 
-/// eventNames()
+/// eventNames() — returns names from both regular listeners and signal dispatch
 fn js_event_names(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let data = get_emitter_data(ctx, &this)?;
     let mut arr = Array::create(ctx)?;
-    let names = data.listeners.borrow();
-    for (i, key) in names.keys().enumerate() {
+    let mut idx = 0u32;
+
+    // Regular events
+    for key in data.listeners.borrow().keys() {
         let s = ctx.create_string_from_utf8(key.as_bytes().to_vec())?;
-        arr.define_property_value_u32(ctx, i as u32, s.into(), JS_PROP_C_W_E)?;
+        arr.define_property_value_u32(ctx, idx, s.into(), JS_PROP_C_W_E)?;
+        idx += 1;
     }
+
+    // Signal events registered for this instance
+    let tracked = data.tracked_signals.borrow().clone();
+    SIGNAL_DISPATCH.with(|lut| {
+        let d = lut.borrow();
+        for sig in &tracked {
+            // Only include if this instance still has entries
+            let has = d
+                .get(sig)
+                .map(|list| list.iter().any(|(id, _)| *id == data.instance_id))
+                .unwrap_or(false);
+            if has {
+                // Convert sig number back to name for the JS array
+                if let Some(name) = sig_name(*sig) {
+                    let s = ctx.create_string_from_utf8(name.as_bytes().to_vec());
+                    if let Ok(s) = s {
+                        let _ = arr.define_property_value_u32(ctx, idx, s.into(), JS_PROP_C_W_E);
+                        idx += 1;
+                    }
+                }
+            }
+        }
+    });
+
     Ok(arr.into())
 }
 
