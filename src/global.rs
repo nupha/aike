@@ -8,7 +8,7 @@ use zuqe::{
     CallContext, Callback, JS_PROP_C_W_E, JS_PROP_WRITABLE, JSResult, JSValue, ScopedContext,
 };
 
-use crate::{process::build_process_object, request::js_request};
+use crate::{process::build_process_object, request::js_request, timeout::install_timeout};
 
 fn js_print(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let level = cc.magic() % 100;
@@ -80,6 +80,9 @@ pub fn setup_globals(
 
         global.define_property_value_str(ctx, "console", console.into(), JS_PROP_C_W_E)?;
     }
+
+    // setTimeout, setInterval ...
+    install_timeout(ctx, global)?;
 
     // process
     {

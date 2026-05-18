@@ -341,7 +341,7 @@ fn js_os_poll(ctx: &mut ScopedContext) -> bool {
     has_rw || min_tv.is_some() || OS_PENDING_SIGNALS.get() != 0
 }
 
-pub fn mod_os_gc_trace(tr: &mut GcTraceCtx) {
+pub fn gc_trace_os(tr: &mut GcTraceCtx) {
     RW_HANDLERS.with_borrow_mut(|s| {
         for v in s.values() {
             v[0].trace(tr);

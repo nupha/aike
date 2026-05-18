@@ -23,6 +23,7 @@ mod process;
 mod request;
 mod responses;
 mod serve;
+mod timeout;
 mod worker;
 
 use std::{io::Write, process::ExitCode};
@@ -48,9 +49,10 @@ use crate::{
     fs::init_mod_fs,
     global::setup_globals,
     mod_llama::init_mod_llama,
-    mod_os::{init_mod_os, mod_os_gc_trace},
+    mod_os::{gc_trace_os, init_mod_os},
     mod_std::init_mod_std,
     request::JSResponse,
+    timeout::gc_trace_timeout,
 };
 
 /// write data both to stderr and file
@@ -243,8 +245,9 @@ async fn main() -> ExitCode {
     // 'os' module has gc objects inside which should be traced.
     // install customized gc trace handler provided by 'os' module.
     rt.gc_set_trace_handler(|tr| {
-        mod_os_gc_trace(tr);
+        gc_trace_os(tr);
         emitter_gc_trace(tr);
+        gc_trace_timeout(tr);
     });
 
     // register native classes
