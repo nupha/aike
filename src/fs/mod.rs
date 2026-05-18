@@ -46,61 +46,50 @@ fn normalize_path(path: &Path) -> PathBuf {
 /// Returns the path as-is if no chroot is set.
 /// Returns an error if the resolved path escapes the chroot boundary.
 fn prepend_chroot(user_path: &str) -> Result<PathBuf, String> {
-    let chroot_opt = CHROOT_PATH.with(|c| c.borrow().clone());
-
-    // If no chroot is set, return the path as-is
-    let Some(chroot) = chroot_opt else {
+    let Some(chroot) = CHROOT_PATH.with(|c| c.borrow().clone()) else {
         return Ok(PathBuf::from(user_path));
     };
 
-    let chroot_str = chroot.to_string_lossy().to_string();
-
     // Build raw path: absolute user paths are relative to chroot
-    let raw = if user_path.starts_with('/') {
-        let mut base = chroot.clone();
-        base.push(&user_path[1..]);
-        base
+    let mut raw = chroot;
+    if user_path.starts_with('/') {
+        raw.push(&user_path[1..]);
     } else {
-        let mut base = chroot.clone();
-        base.push(user_path);
-        base
-    };
-
-    // Normalize: resolve . and .. components
-    let normalized = normalize_path(&raw);
-    let norm_str = normalized.to_string_lossy().to_string();
-
-    // Security check: must stay within chroot
-    if !norm_str.starts_with(&chroot_str) {
-        return Err("forbidden: path outside chroot".to_string());
+        raw.push(user_path);
     }
 
+    let normalized = normalize_path(&raw);
+
+    // Security check: must stay within chroot
+    let allowed = CHROOT_PATH.with(|c| {
+        c.borrow()
+            .as_ref()
+            .map_or(false, |s| normalized.starts_with(s))
+    });
+    if !allowed {
+        return Err("forbidden: path outside chroot".to_string());
+    }
     Ok(normalized)
 }
 
 /// Strip chroot prefix from a resolved path for external display.
 /// Returns the path as-is if no chroot is set.
 pub fn strip_chroot(full_path: &str) -> String {
-    let chroot_opt = CHROOT_PATH.with(|c| c.borrow().clone());
-
-    // If no chroot is set, return the path as-is
-    let Some(chroot) = chroot_opt else {
+    let Some(chroot) = CHROOT_PATH.with(|c| c.borrow().clone()) else {
         return full_path.to_string();
     };
 
-    let chroot_str = chroot.to_string_lossy();
-    if chroot_str == "/" {
+    if chroot.as_os_str() == "/" {
         return full_path.to_string();
     }
 
     let normalized = normalize_path(Path::new(full_path));
-    let norm_str = normalized.to_string_lossy();
 
-    if let Some(stripped) = norm_str.strip_prefix(chroot_str.as_ref()) {
-        if stripped.is_empty() {
+    if let Ok(stripped) = normalized.strip_prefix(&chroot) {
+        if stripped.as_os_str().is_empty() {
             "/".to_string()
         } else {
-            stripped.to_string()
+            stripped.to_string_lossy().to_string()
         }
     } else {
         full_path.to_string()

@@ -10,8 +10,7 @@ use zuqe::{
     builtins::{promise::Promise, typed_array::TypedArray},
 };
 
-use crate::USER_CLASS_DEFS;
-use crate::fs::strip_chroot;
+use crate::{USER_CLASS_DEFS, fs::strip_chroot};
 
 // Magic values for GETSET properties
 const PROP_PATH: i32 = 0;
