@@ -267,6 +267,25 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
 
             match client.send().await {
                 Ok(response) => {
+                    // Check HTTP status before reading SSE stream.
+                    // non-2xx bodies are plain JSON, not SSE — they would be
+                    // silently swallowed by the "data: " prefix filter otherwise.
+                    let status = response.status();
+                    if !status.is_success() {
+                        let body = response.text().await.unwrap_or_default();
+                        // Try to extract error message from OpenAI-style JSON body
+                        let msg = serde_json::from_str::<serde_json::Value>(&body)
+                            .ok()
+                            .and_then(|j| {
+                                j["error"]["message"]
+                                    .as_str()
+                                    .map(String::from)
+                            })
+                            .unwrap_or_else(|| format!("HTTP {} : {}", status, body));
+                        commit_slot(&slot, ChatReply::Error(msg)).await;
+                        return;
+                    }
+
                     // parse SSE manually
                     let byte_stream = response
                         .bytes_stream()
