@@ -673,32 +673,32 @@ fn js_engine_dispose(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 }
 
 const CLASS_ENGINE_PROTO: &[FieldDef] = &[
-    FieldDef::CALL(
+    FieldDef::FUNC(
         "chat",
         2,
         js_engine_chatCompletions,
         MAGIC_CHAT_STREAM as i16,
     ),
-    FieldDef::CALL(
+    FieldDef::FUNC(
         "chatOnce",
         2,
         js_engine_chatCompletions,
         MAGIC_CHAT_ONCE as i16,
     ),
-    FieldDef::CALL(
+    FieldDef::FUNC(
         "responses",
         1,
         js_engine_responses,
         MAGIC_RESPONSES_STREAM as i16,
     ),
-    FieldDef::CALL(
+    FieldDef::FUNC(
         "responsesOnce",
         1,
         js_engine_responses,
         MAGIC_RESPONSES_ONCE as i16,
     ),
-    FieldDef::CALL("httpServe", 1, js_engine_httpServe, 0),
-    FieldDef::CALL("stopServe", 0, js_engine_stopServe, 0),
+    FieldDef::FUNC("httpServe", 1, js_engine_httpServe, 0),
+    FieldDef::FUNC("stopServe", 0, js_engine_stopServe, 0),
     FieldDef::GETSET("isServing", Some(js_engine_isServing), None, 0),
     FieldDef::GETSET(
         "parseReasoning",
@@ -706,7 +706,7 @@ const CLASS_ENGINE_PROTO: &[FieldDef] = &[
         Some(js_engine_setParseReasoning),
         0,
     ),
-    FieldDef::CALL("dispose", 0, js_engine_dispose, 0),
+    FieldDef::FUNC("dispose", 0, js_engine_dispose, 0),
 ];
 
 pub struct JSLlamaEngine;

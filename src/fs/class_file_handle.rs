@@ -807,15 +807,15 @@ fn js_fh_fd(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
 const CLASS_FILE_HANDLE_PROTO: &[FieldDef] = &[
     FieldDef::GETSET("fd", Some(js_fh_fd), None, PROP_FD as _),
-    FieldDef::CALL("text", 0, js_fh_text, 0),
-    FieldDef::CALL("json", 0, js_fh_json, 0),
-    FieldDef::CALL("bytes", 0, js_fh_bytes, 0),
-    FieldDef::CALL("read", 1, js_fh_read, 0),
-    FieldDef::CALL("stat", 0, js_fh_stat, 0),
-    FieldDef::CALL("write", 1, js_fh_writeAll, 0),
-    FieldDef::CALL("flush", 0, js_fh_flush, 0),
-    FieldDef::CALL("close", 0, js_fh_close, 0),
-    FieldDef::CALL("onRead", 1, js_fh_onRead, 0),
+    FieldDef::FUNC("text", 0, js_fh_text, 0),
+    FieldDef::FUNC("json", 0, js_fh_json, 0),
+    FieldDef::FUNC("bytes", 0, js_fh_bytes, 0),
+    FieldDef::FUNC("read", 1, js_fh_read, 0),
+    FieldDef::FUNC("stat", 0, js_fh_stat, 0),
+    FieldDef::FUNC("write", 1, js_fh_writeAll, 0),
+    FieldDef::FUNC("flush", 0, js_fh_flush, 0),
+    FieldDef::FUNC("close", 0, js_fh_close, 0),
+    FieldDef::FUNC("onRead", 1, js_fh_onRead, 0),
 ];
 
 pub struct JSFileHandle;

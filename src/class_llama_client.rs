@@ -276,11 +276,7 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
                         // Try to extract error message from OpenAI-style JSON body
                         let msg = serde_json::from_str::<serde_json::Value>(&body)
                             .ok()
-                            .and_then(|j| {
-                                j["error"]["message"]
-                                    .as_str()
-                                    .map(String::from)
-                            })
+                            .and_then(|j| j["error"]["message"].as_str().map(String::from))
                             .unwrap_or_else(|| format!("HTTP {} : {}", status, body));
                         commit_slot(&slot, ChatReply::Error(msg)).await;
                         return;
@@ -474,31 +470,31 @@ fn js_client_dispose(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 }
 
 const CLASS_CLIENT_PROTO: &[FieldDef] = &[
-    FieldDef::CALL(
+    FieldDef::FUNC(
         "chat",
         1,
         js_client_chatCompletions,
         MAGIC_CHAT_STREAM as i16,
     ),
-    FieldDef::CALL(
+    FieldDef::FUNC(
         "chatOnce",
         1,
         js_client_chatCompletions,
         MAGIC_CHAT_ONCE as i16,
     ),
-    FieldDef::CALL(
+    FieldDef::FUNC(
         "responses",
         1,
         js_client_responses,
         MAGIC_RESPONSES_STREAM as i16,
     ),
-    FieldDef::CALL(
+    FieldDef::FUNC(
         "responsesOnce",
         1,
         js_client_responses,
         MAGIC_RESPONSES_ONCE as i16,
     ),
-    FieldDef::CALL("dispose", 0, js_client_dispose, 0),
+    FieldDef::FUNC("dispose", 0, js_client_dispose, 0),
     FieldDef::GETSET("model", Some(js_client_getter), None, PROP_MODEL as _),
 ];
 

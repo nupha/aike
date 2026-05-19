@@ -521,16 +521,16 @@ fn js_event_names(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 }
 
 const CLASS_EVENT_EMITTER_PROTO: &[FieldDef] = &[
-    FieldDef::CALL("addListener", 2, js_add_listener, 0),
-    FieldDef::CALL("on", 2, js_add_listener, 0),
-    FieldDef::CALL("once", 2, js_add_listener, 1),
-    FieldDef::CALL("removeListener", 2, js_remove_listener, 0),
-    FieldDef::CALL("off", 2, js_remove_listener, 0),
-    FieldDef::CALL("emit", 1, js_emit, 0), // actually variadic
-    FieldDef::CALL("removeAllListeners", 0, js_remove_all_listeners, 0),
-    FieldDef::CALL("listeners", 1, js_listeners, 0),
-    FieldDef::CALL("listenerCount", 1, js_listener_count, 0),
-    FieldDef::CALL("eventNames", 0, js_event_names, 0),
+    FieldDef::FUNC("addListener", 2, js_add_listener, 0),
+    FieldDef::FUNC("on", 2, js_add_listener, 0),
+    FieldDef::FUNC("once", 2, js_add_listener, 1),
+    FieldDef::FUNC("removeListener", 2, js_remove_listener, 0),
+    FieldDef::FUNC("off", 2, js_remove_listener, 0),
+    FieldDef::FUNC("emit", 1, js_emit, 0), // actually variadic
+    FieldDef::FUNC("removeAllListeners", 0, js_remove_all_listeners, 0),
+    FieldDef::FUNC("listeners", 1, js_listeners, 0),
+    FieldDef::FUNC("listenerCount", 1, js_listener_count, 0),
+    FieldDef::FUNC("eventNames", 0, js_event_names, 0),
 ];
 
 pub struct JSEventEmitter;

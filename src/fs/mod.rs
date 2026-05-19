@@ -707,19 +707,19 @@ fn js_fs_stat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 }
 
 const MOD_FS_ENTRIES: &[FieldDef] = &[
-    FieldDef::CALL("setChroot", 1, js_fs_setChroot, 0),
-    FieldDef::CALL("open", 2, js_fs_open, 0),
-    FieldDef::CALL("readText", 1, js_fs_readText, 0),
-    FieldDef::CALL("readJSON", 1, js_fs_readJSON, 0),
-    FieldDef::CALL("readBytes", 1, js_fs_readBytes, 0),
-    FieldDef::CALL("writeText", 2, js_fs_writeText, 0),
-    FieldDef::CALL("writeJSON", 2, js_fs_writeJSON, 0),
-    FieldDef::CALL("writeBytes", 2, js_fs_writeBytes, 0),
-    FieldDef::CALL("appendText", 2, js_fs_appendText, 0),
-    FieldDef::CALL("write", 2, js_fs_write, 0),
-    FieldDef::CALL("readDir", 1, js_fs_readDir, 0),
-    FieldDef::CALL("ensureDir", 2, js_fs_ensureDir, 0),
-    FieldDef::CALL("stat", 1, js_fs_stat, 0),
+    FieldDef::FUNC("setChroot", 1, js_fs_setChroot, 0),
+    FieldDef::FUNC("open", 2, js_fs_open, 0),
+    FieldDef::FUNC("readText", 1, js_fs_readText, 0),
+    FieldDef::FUNC("readJSON", 1, js_fs_readJSON, 0),
+    FieldDef::FUNC("readBytes", 1, js_fs_readBytes, 0),
+    FieldDef::FUNC("writeText", 2, js_fs_writeText, 0),
+    FieldDef::FUNC("writeJSON", 2, js_fs_writeJSON, 0),
+    FieldDef::FUNC("writeBytes", 2, js_fs_writeBytes, 0),
+    FieldDef::FUNC("appendText", 2, js_fs_appendText, 0),
+    FieldDef::FUNC("write", 2, js_fs_write, 0),
+    FieldDef::FUNC("readDir", 1, js_fs_readDir, 0),
+    FieldDef::FUNC("ensureDir", 2, js_fs_ensureDir, 0),
+    FieldDef::FUNC("stat", 1, js_fs_stat, 0),
 ];
 
 pub fn init_mod_fs(ctx: &mut ScopedContext) -> Result<(), i32> {

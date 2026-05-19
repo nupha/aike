@@ -180,7 +180,7 @@ const MOD_LLAMA_ENTRIES: &[FieldDef] = &[
         ],
         JS_PROP_ENUMERABLE,
     ),
-    FieldDef::CALL("getDevices", 0, get_devices, 0),
+    FieldDef::FUNC("getDevices", 0, get_devices, 0),
 ];
 
 pub fn init_mod_llama(ctx: &mut ScopedContext) -> Result<(), i32> {

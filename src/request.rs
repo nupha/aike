@@ -384,9 +384,9 @@ fn js_response_body_as(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
 const RESPONSE_PROTO: &[FieldDef] = &[
     FieldDef::GETSET("body", Some(js_response_body), None, 0),
-    FieldDef::CALL("bytes", 0, js_response_body_as, BODY_AS_BYTES as i16),
-    FieldDef::CALL("text", 0, js_response_body_as, BODY_AS_TEXT as i16),
-    FieldDef::CALL("json", 0, js_response_body_as, BODY_AS_JSON as i16),
+    FieldDef::FUNC("bytes", 0, js_response_body_as, BODY_AS_BYTES as i16),
+    FieldDef::FUNC("text", 0, js_response_body_as, BODY_AS_TEXT as i16),
+    FieldDef::FUNC("json", 0, js_response_body_as, BODY_AS_JSON as i16),
 ];
 
 pub struct JSResponse;

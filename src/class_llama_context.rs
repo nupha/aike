@@ -514,13 +514,13 @@ const CLASS_CONTEXT_PROTO: &[FieldDef] = &[
         None,
         PROP_IS_DISPOSED as _,
     ),
-    FieldDef::CALL("decode", 2, js_context_decode, 0),
-    FieldDef::CALL("sample", 1, js_context_sample, 0),
-    FieldDef::CALL("reset", 0, js_context_reset, 0),
-    FieldDef::CALL("embedTokens", 1, js_context_embedTokens, 0),
-    FieldDef::CALL("getStats", 0, js_context_getStats, 0),
-    FieldDef::CALL("createEngine", 1, js_context_createEngine, 0),
-    FieldDef::CALL("dispose", 0, js_context_dispose, 0),
+    FieldDef::FUNC("decode", 2, js_context_decode, 0),
+    FieldDef::FUNC("sample", 1, js_context_sample, 0),
+    FieldDef::FUNC("reset", 0, js_context_reset, 0),
+    FieldDef::FUNC("embedTokens", 1, js_context_embedTokens, 0),
+    FieldDef::FUNC("getStats", 0, js_context_getStats, 0),
+    FieldDef::FUNC("createEngine", 1, js_context_createEngine, 0),
+    FieldDef::FUNC("dispose", 0, js_context_dispose, 0),
 ];
 
 pub struct JSLlamaContext;

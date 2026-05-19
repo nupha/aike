@@ -370,14 +370,14 @@ mod debug_api {
 }
 
 const CLASS_SAMPLER_CHAIN_PROTO: &[FieldDef] = &[
-    FieldDef::CALL("penalties", 1, js_samplerchain_penalties, 0),
-    FieldDef::CALL("topK", 1, js_samplerchain_topKP, TOP_K as _),
-    FieldDef::CALL("topP", 1, js_samplerchain_topKP, TOP_P as _),
-    FieldDef::CALL("temperature", 1, js_samplerchain_temperature, 0 as _),
+    FieldDef::FUNC("penalties", 1, js_samplerchain_penalties, 0),
+    FieldDef::FUNC("topK", 1, js_samplerchain_topKP, TOP_K as _),
+    FieldDef::FUNC("topP", 1, js_samplerchain_topKP, TOP_P as _),
+    FieldDef::FUNC("temperature", 1, js_samplerchain_temperature, 0 as _),
     #[cfg(debug_assertions)]
-    FieldDef::CALL("_debug_dispose", 0, debug_api::debug_dispose, 0),
+    FieldDef::FUNC("_debug_dispose", 0, debug_api::debug_dispose, 0),
     #[cfg(debug_assertions)]
-    FieldDef::CALL("_debug_cacheCount", 0, debug_api::debug_cache_count, 0),
+    FieldDef::FUNC("_debug_cacheCount", 0, debug_api::debug_cache_count, 0),
 ];
 
 pub struct JSSamplerChain;

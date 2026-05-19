@@ -1007,16 +1007,16 @@ const CLASS_MODEL_PROTO_ENTRIES: &[FieldDef] = &[
         Some(js_mode_setter),
         PROP_CHAT_TEMPLATE as _,
     ),
-    FieldDef::CALL("createContext", 1, js_model_createContext, 0),
-    FieldDef::CALL("createSamplerChain", 1, js_model_createSamplerChain, 0),
-    FieldDef::CALL("tokenize", 1, js_model_tokenize, 0),
-    FieldDef::CALL("detokenize", 1, js_model_detokenize, 0),
-    FieldDef::CALL("lookupTokenText", 1, js_model_lookupTokenText, 0),
-    FieldDef::CALL("isEog", 1, js_model_isEog, 0),
-    FieldDef::CALL("getMeta", 1, js_model_getMeta, 0),
-    FieldDef::CALL("getMetaKeys", 0, js_model_getMetaKeys, 0),
-    FieldDef::CALL("renderTemplate", 2, js_model_renderTemplate, 0),
-    FieldDef::CALL("dispose", 0, js_model_dispose, 0),
+    FieldDef::FUNC("createContext", 1, js_model_createContext, 0),
+    FieldDef::FUNC("createSamplerChain", 1, js_model_createSamplerChain, 0),
+    FieldDef::FUNC("tokenize", 1, js_model_tokenize, 0),
+    FieldDef::FUNC("detokenize", 1, js_model_detokenize, 0),
+    FieldDef::FUNC("lookupTokenText", 1, js_model_lookupTokenText, 0),
+    FieldDef::FUNC("isEog", 1, js_model_isEog, 0),
+    FieldDef::FUNC("getMeta", 1, js_model_getMeta, 0),
+    FieldDef::FUNC("getMetaKeys", 0, js_model_getMetaKeys, 0),
+    FieldDef::FUNC("renderTemplate", 2, js_model_renderTemplate, 0),
+    FieldDef::FUNC("dispose", 0, js_model_dispose, 0),
 ];
 
 fn js_model_load(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -1055,7 +1055,7 @@ fn js_model_load(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     Ok(promise.into())
 }
 
-const CLASS_MODEL_ENTRIES: &[FieldDef] = &[FieldDef::CALL("load", 1, js_model_load, 0)];
+const CLASS_MODEL_ENTRIES: &[FieldDef] = &[FieldDef::FUNC("load", 1, js_model_load, 0)];
 
 pub struct JSLlamaModel;
 
