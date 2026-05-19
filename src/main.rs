@@ -248,6 +248,7 @@ async fn main() -> ExitCode {
         gc_trace_os(tr);
         emitter_gc_trace(tr);
         gc_trace_timeout(tr);
+        fs::class_file_handle::gc_trace_file(tr);
     });
 
     // register native classes

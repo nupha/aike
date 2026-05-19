@@ -1,23 +1,32 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-use std::{cell::Cell, ffi::c_void, sync::Arc};
+use std::{
+    cell::{Cell, RefCell},
+    collections::HashMap,
+    ffi::c_void,
+    sync::Arc,
+};
 
 #[cfg(unix)]
 use std::os::fd::AsRawFd;
 #[cfg(windows)]
 use std::os::windows::io::AsRawHandle;
 
+use crossbeam::channel::{Receiver, Sender};
 use linkme::distributed_slice;
+use tokio::io::AsyncReadExt;
 use zuqe::{
-    CallContext, ClassDef, ClassID, FieldDef, JSResult, JSValue, Object, PollSender, Runtime,
-    ScopedContext,
+    CallContext, ClassDef, ClassID, ErrorKind, FieldDef, JSResult, JSValue, JobState, Object,
+    PollSender, Runtime, ScopedContext,
     builtins::{promise::Promise, typed_array::TypedArray},
+    gc_lite::{GcTrace, GcTraceCtx},
 };
 
 use crate::USER_CLASS_DEFS;
 
 const PROP_FD: i32 = 5;
+const BUF_SIZE: usize = 4096;
 
 enum FileHandleDesc {
     Stdin,
@@ -46,6 +55,114 @@ impl FileHandleDesc {
     }
 }
 
+// ---------------------------------------------------------------------------
+// onRead — async read loop with callback, modeled after timeout.rs
+// ---------------------------------------------------------------------------
+
+enum OnReadMsg {
+    Data(i32, Vec<u8>),
+    Eof(i32),
+    Error(i32, String),
+}
+
+struct OnReadEntry {
+    callback: JSValue,
+}
+
+struct OnReadState {
+    entries: HashMap<i32, OnReadEntry>,
+    rx: Receiver<OnReadMsg>,
+    tx: Sender<OnReadMsg>,
+}
+
+thread_local! {
+    static ON_READ_STATE: RefCell<Option<OnReadState>> = const { RefCell::new(None) };
+}
+
+pub(crate) fn gc_trace_file(tr: &mut GcTraceCtx) {
+    ON_READ_STATE.with_borrow(|opt| {
+        if let Some(s) = opt.as_ref() {
+            for entry in s.entries.values() {
+                entry.callback.trace(tr);
+            }
+        }
+    });
+}
+
+fn start_on_read_microtask(ctx: &mut ScopedContext) {
+    ctx.queue_job(
+        |cx| {
+            let msg =
+                ON_READ_STATE.with_borrow(|opt| opt.as_ref().and_then(|s| s.rx.try_recv().ok()));
+
+            match msg {
+                None => {
+                    let still_any = ON_READ_STATE
+                        .with_borrow(|opt| opt.as_ref().map_or(false, |s| !s.entries.is_empty()));
+                    if still_any {
+                        Ok(JobState::Again)
+                    } else {
+                        ON_READ_STATE.with_borrow_mut(|opt| *opt = None);
+                        Ok(JobState::Done)
+                    }
+                }
+                Some(OnReadMsg::Data(fd, data)) => {
+                    let cb = ON_READ_STATE.with_borrow(|opt| {
+                        opt.as_ref()
+                            .and_then(|s| s.entries.get(&fd).map(|e| e.callback))
+                    });
+                    if let Some(cb) = cb {
+                        if let Ok(arg) = TypedArray::create_from_vec_u8(cx, data).map(JSValue::from)
+                        {
+                            let _ = cb.call(cx, JSValue::UNDEFINED, &[arg]);
+                        }
+                    }
+                    Ok(JobState::Again)
+                }
+                Some(OnReadMsg::Eof(fd)) => {
+                    let cb = ON_READ_STATE.with_borrow_mut(|opt| {
+                        opt.as_mut()
+                            .and_then(|s| s.entries.remove(&fd).map(|e| e.callback))
+                    });
+                    if let Some(cb) = cb {
+                        let _ = cb.call(cx, JSValue::UNDEFINED, &[JSValue::NULL]);
+                    }
+                    let still_any = ON_READ_STATE
+                        .with_borrow(|opt| opt.as_ref().map_or(false, |s| !s.entries.is_empty()));
+                    if still_any {
+                        Ok(JobState::Again)
+                    } else {
+                        ON_READ_STATE.with_borrow_mut(|opt| *opt = None);
+                        Ok(JobState::Done)
+                    }
+                }
+                Some(OnReadMsg::Error(fd, err_msg)) => {
+                    let cb = ON_READ_STATE.with_borrow_mut(|opt| {
+                        opt.as_mut()
+                            .and_then(|s| s.entries.remove(&fd).map(|e| e.callback))
+                    });
+                    if let Some(cb) = cb {
+                        if let Some(err_obj) =
+                            cx.create_error_object(ErrorKind::Internal, &err_msg, false)
+                        {
+                            let _ = cb.call(cx, JSValue::UNDEFINED, &[err_obj.into()]);
+                        }
+                    }
+                    let still_any = ON_READ_STATE
+                        .with_borrow(|opt| opt.as_ref().map_or(false, |s| !s.entries.is_empty()));
+                    if still_any {
+                        Ok(JobState::Again)
+                    } else {
+                        ON_READ_STATE.with_borrow_mut(|opt| *opt = None);
+                        Ok(JobState::Done)
+                    }
+                }
+            }
+        },
+        (),
+    );
+}
+
 fn get_file_desc<'a>(ctx: &mut ScopedContext, val: &JSValue) -> Result<&'a FileHandleDesc, i32> {
     if let Some(obj) = val.as_object() {
         let opaque = obj
@@ -64,6 +181,119 @@ fn get_file_desc<'a>(ctx: &mut ScopedContext, val: &JSValue) -> Result<&'a FileH
         ctx.throw_type_error("expected FileHandle object");
         Err(-1)
     }
+}
+
+fn js_fh_onRead(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let this = cc.this();
+    let desc = get_file_desc(ctx, &this)?;
+    let raw_fd = desc.as_raw_fd();
+
+    // Cannot read from stdout/stderr
+    if matches!(desc, FileHandleDesc::Stdout | FileHandleDesc::Stderr) {
+        ctx.throw_type_error("cannot read from stdout/stderr");
+        return Err(-1);
+    }
+
+    let arg = cc.arg(0);
+
+    // Unregister: onRead(null)
+    if arg.is_null() {
+        ON_READ_STATE.with_borrow_mut(|opt| {
+            if let Some(s) = opt.as_mut() {
+                s.entries.remove(&raw_fd);
+            }
+        });
+        return Ok(JSValue::UNDEFINED);
+    }
+
+    let callback = arg.ensure_function(ctx)?;
+
+    // Initialize state if needed
+    let need_microtask = ON_READ_STATE.with_borrow(|opt| opt.is_none());
+    if need_microtask {
+        let (tx, rx) = crossbeam::channel::unbounded();
+        ON_READ_STATE.with_borrow_mut(|opt| {
+            *opt = Some(OnReadState {
+                entries: HashMap::new(),
+                rx,
+                tx,
+            });
+        });
+    }
+
+    // Replace callback if already registered, don't re-spawn task
+    let already_registered = ON_READ_STATE.with_borrow(|opt| {
+        opt.as_ref()
+            .map_or(false, |s| s.entries.contains_key(&raw_fd))
+    });
+
+    ON_READ_STATE.with_borrow_mut(|opt| {
+        if let Some(s) = opt.as_mut() {
+            s.entries.insert(raw_fd, OnReadEntry { callback });
+        }
+    });
+
+    // Spawn async read loop for new registrations
+    if !already_registered {
+        let tx = ON_READ_STATE.with_borrow(|opt| opt.as_ref().unwrap().tx.clone());
+
+        match desc {
+            FileHandleDesc::Stdin => {
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; BUF_SIZE];
+                    let mut stdin = tokio::io::stdin();
+                    loop {
+                        match stdin.read(&mut buf).await {
+                            Ok(0) => {
+                                let _ = tx.send(OnReadMsg::Eof(raw_fd));
+                                break;
+                            }
+                            Ok(n) => {
+                                let _ = tx.send(OnReadMsg::Data(raw_fd, buf[..n].to_vec()));
+                            }
+                            Err(e) => {
+                                let _ = tx.send(OnReadMsg::Error(raw_fd, e.to_string()));
+                                break;
+                            }
+                        }
+                    }
+                });
+            }
+            FileHandleDesc::File(fd) => {
+                let fd = fd.clone();
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; BUF_SIZE];
+                    loop {
+                        let result = {
+                            let mut file = fd.lock().await;
+                            file.read(&mut buf).await
+                        };
+                        match result {
+                            Ok(0) => {
+                                let _ = tx.send(OnReadMsg::Eof(raw_fd));
+                                break;
+                            }
+                            Ok(n) => {
+                                let _ = tx.send(OnReadMsg::Data(raw_fd, buf[..n].to_vec()));
+                            }
+                            Err(e) => {
+                                let _ = tx.send(OnReadMsg::Error(raw_fd, e.to_string()));
+                                break;
+                            }
+                        }
+                    }
+                });
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    // Start the polling microtask if state was just created
+    if need_microtask {
+        start_on_read_microtask(ctx);
+    }
+
+    Ok(JSValue::UNDEFINED)
 }
 
 /// text() — async read as string via the real fd
@@ -136,7 +366,6 @@ fn js_fh_json(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     match desc {
         FileHandleDesc::Stdin => {
             tokio::spawn(async move {
-                use tokio::io::AsyncReadExt;
                 let mut buf = String::new();
                 let raw = tokio::io::stdin()
                     .read_to_string(&mut buf)
@@ -194,7 +423,6 @@ fn js_fh_bytes(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     match desc {
         FileHandleDesc::Stdin => {
             tokio::spawn(async move {
-                use tokio::io::AsyncReadExt;
                 let mut buf = Vec::new();
                 let result = tokio::io::stdin()
                     .read_to_end(&mut buf)
@@ -263,8 +491,6 @@ fn js_fh_stat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
 /// read(maxCount?) — async read from fd at current position, returns Uint8Array
 fn js_fh_read(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    use tokio::io::AsyncReadExt;
-
     let this = cc.this();
     let desc = get_file_desc(ctx, &this)?;
 
@@ -589,6 +815,7 @@ const CLASS_FILE_HANDLE_PROTO: &[FieldDef] = &[
     FieldDef::CALL("write", 1, js_fh_writeAll, 0),
     FieldDef::CALL("flush", 0, js_fh_flush, 0),
     FieldDef::CALL("close", 0, js_fh_close, 0),
+    FieldDef::CALL("onRead", 1, js_fh_onRead, 0),
 ];
 
 pub struct JSFileHandle;
