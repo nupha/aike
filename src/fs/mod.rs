@@ -13,7 +13,7 @@ use zuqe::{
     builtins::{promise::Promise, typed_array::TypedArray},
 };
 
-use crate::fs::class_file_handle::{JSFileHandle, handle_get_path};
+use crate::fs::class_file_handle::{JSFileHandle, make_stats};
 
 thread_local! {
     /// Chroot support
@@ -380,16 +380,64 @@ fn js_fs_appendText(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 }
 
 // ---------------------------------------------------------------------------
-// createFile - create a lazy file handle
+// open - open a file and return a real FileHandle with fd
 // ---------------------------------------------------------------------------
-fn js_fs_createFile(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+fn js_fs_open(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let v = cc.arg(0).to_string(ctx)?;
     let path = prepend_chroot(&v.content().encode_utf8(false).to_string()).map_err(|e| {
         ctx.throw_internal_error(&e);
         -1
     })?;
 
-    JSFileHandle::new_instance(ctx, path.to_string_lossy().to_string()).map(JSValue::Object)
+    // Parse flags: default 'r'
+    let flags = if cc.length() > 1 && !cc.arg(1).is_undefined() {
+        let f = cc.arg(1).to_string(ctx)?;
+        f.content().encode_utf8(false).to_string()
+    } else {
+        "r".to_string()
+    };
+
+    let (promise, tx) = Promise::create_with_channel::<Result<tokio::fs::File, String>>(
+        ctx,
+        move |cx, payload| -> JSResult {
+            let file = payload.map_err(|e| {
+                cx.throw_internal_error(&e);
+                -1
+            })?;
+            JSFileHandle::new_instance(cx, JSValue::UNDEFINED, file).map(JSValue::Object)
+        },
+    )?;
+
+    tokio::spawn(async move {
+        let mut opts = tokio::fs::OpenOptions::new();
+        match flags.as_str() {
+            "r" => {
+                opts.read(true);
+            }
+            "r+" => {
+                opts.read(true).write(true);
+            }
+            "w" => {
+                opts.write(true).create(true).truncate(true);
+            }
+            "w+" => {
+                opts.read(true).write(true).create(true).truncate(true);
+            }
+            "a" => {
+                opts.append(true).create(true);
+            }
+            "a+" => {
+                opts.read(true).append(true).create(true);
+            }
+            _ => {
+                opts.read(true);
+            }
+        }
+        let result = opts.open(&path).await.map_err(|e| e.to_string());
+        let _ = PollSender::from(tx).send_async(result).await;
+    });
+
+    Ok(promise.into())
 }
 
 // ---------------------------------------------------------------------------
@@ -474,32 +522,10 @@ fn js_fs_write(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             return Ok(promise.into());
         }
         Err(_) => {
-            // fall through to FileHandle check
+            ctx.throw_type_error("unsupported data type for write");
+            Err(-1)
         }
     }
-
-    // FileHandle: read from source, write to dest
-    if JSFileHandle::is_instance(ctx, &cc.arg(1)) {
-        let src_path = handle_get_path(ctx, &cc.arg(1));
-        let (promise, tx) = make_void_promise(ctx)?;
-
-        tokio::spawn(async move {
-            let data = tokio::fs::read(&src_path).await.map_err(|e| e.to_string());
-            let res = match data {
-                Ok(bytes) => tokio::fs::write(&path, &bytes)
-                    .await
-                    .map_err(|e| e.to_string()),
-                Err(e) => Err(e),
-            };
-
-            let _ = PollSender::from(tx).send_async(res).await;
-        });
-
-        return Ok(promise.into());
-    }
-
-    ctx.throw_type_error("unsupported data type for write");
-    Err(-1)
 }
 
 // ---------------------------------------------------------------------------
@@ -622,13 +648,21 @@ fn js_fs_readDir(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             let mut entries = Vec::new();
             while let Some(entry) = dir.next_entry().await.map_err(|e| e.to_string())? {
                 let name = entry.file_name().to_string_lossy().to_string();
+                let ft = entry.file_type().await.map_err(|e| e.to_string())?;
+                let is_symlink = ft.is_symlink();
+
+                // TODO: restrict symlink access for chroot security
+                if is_symlink {
+                    eprintln!("warning: symlink '{}' in readDir may escape chroot", name);
+                }
+
                 let meta = entry.metadata().await.map_err(|e| e.to_string())?;
                 entries.push(DirentData {
                     name,
                     size: meta.len(),
                     is_file: meta.is_file(),
                     is_dir: meta.is_dir(),
-                    is_symlink: meta.is_symlink(),
+                    is_symlink,
                 });
             }
 
@@ -640,99 +674,6 @@ fn js_fs_readDir(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     });
 
     Ok(promise.into())
-}
-
-// ---------------------------------------------------------------------------
-// stat - get file stats
-// ---------------------------------------------------------------------------
-fn make_stats(ctx: &mut ScopedContext, meta: &std::fs::Metadata) -> Result<JSValue, i32> {
-    let mut obj = ctx.create_base_object()?;
-
-    let size = JSValue::from(meta.len() as i64);
-    obj.define_property_value_str(ctx, "size", size, zuqe::JS_PROP_ENUMERABLE)?;
-
-    if let Ok(created) = meta.created() {
-        let ms = created
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as f64;
-        obj.define_property_value_str(
-            ctx,
-            "createdAt",
-            JSValue::from(ms),
-            zuqe::JS_PROP_ENUMERABLE,
-        )?;
-    }
-
-    if let Ok(modified) = meta.modified() {
-        let ms = modified
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as f64;
-        obj.define_property_value_str(
-            ctx,
-            "modifiedAt",
-            JSValue::from(ms),
-            zuqe::JS_PROP_ENUMERABLE,
-        )?;
-    }
-
-    if let Ok(accessed) = meta.accessed() {
-        let ms = accessed
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as f64;
-        obj.define_property_value_str(
-            ctx,
-            "accessedAt",
-            JSValue::from(ms),
-            zuqe::JS_PROP_ENUMERABLE,
-        )?;
-    }
-
-    obj.define_property_value_str(
-        ctx,
-        "isFile",
-        JSValue::Bool(meta.is_file()),
-        zuqe::JS_PROP_ENUMERABLE,
-    )?;
-    obj.define_property_value_str(
-        ctx,
-        "isDirectory",
-        JSValue::Bool(meta.is_dir()),
-        zuqe::JS_PROP_ENUMERABLE,
-    )?;
-    obj.define_property_value_str(
-        ctx,
-        "isSymbolicLink",
-        JSValue::Bool(meta.is_symlink()),
-        zuqe::JS_PROP_ENUMERABLE,
-    )?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        obj.define_property_value_str(
-            ctx,
-            "mode",
-            JSValue::from(meta.mode() as i64),
-            zuqe::JS_PROP_ENUMERABLE,
-        )?;
-        obj.define_property_value_str(
-            ctx,
-            "uid",
-            JSValue::from(meta.uid() as i64),
-            zuqe::JS_PROP_ENUMERABLE,
-        )?;
-        obj.define_property_value_str(
-            ctx,
-            "gid",
-            JSValue::from(meta.gid() as i64),
-            zuqe::JS_PROP_ENUMERABLE,
-        )?;
-    }
-
-    Ok(obj.into())
 }
 
 fn js_fs_stat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -762,12 +703,9 @@ fn js_fs_stat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     Ok(promise.into())
 }
 
-// ---------------------------------------------------------------------------
-// Module definition
-// ---------------------------------------------------------------------------
 const MOD_FS_ENTRIES: &[FieldDef] = &[
     FieldDef::CALL("setChroot", 1, js_fs_setChroot, 0),
-    FieldDef::CALL("createFile", 1, js_fs_createFile, 0),
+    FieldDef::CALL("open", 2, js_fs_open, 0),
     FieldDef::CALL("readText", 1, js_fs_readText, 0),
     FieldDef::CALL("readJSON", 1, js_fs_readJSON, 0),
     FieldDef::CALL("readBytes", 1, js_fs_readBytes, 0),

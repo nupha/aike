@@ -1,105 +1,76 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-use std::{cell::Cell, ffi::c_void, path::Path};
+use std::{cell::Cell, ffi::c_void, sync::Arc};
+
+#[cfg(unix)]
+use std::os::fd::AsRawFd;
+#[cfg(windows)]
+use std::os::windows::io::AsRawHandle;
 
 use linkme::distributed_slice;
 use zuqe::{
     CallContext, ClassDef, ClassID, FieldDef, JSResult, JSValue, Object, PollSender, Runtime,
-    RuntimeImpl, ScopedContext,
+    ScopedContext,
     builtins::{promise::Promise, typed_array::TypedArray},
 };
 
-use crate::{USER_CLASS_DEFS, fs::strip_chroot};
+use crate::USER_CLASS_DEFS;
 
-// Magic values for GETSET properties
-const PROP_PATH: i32 = 0;
-const PROP_NAME: i32 = 1;
-const PROP_TYPE: i32 = 2;
-const PROP_SIZE: i32 = 3;
-const PROP_LAST_MODIFIED: i32 = 4;
+const PROP_FD: i32 = 5;
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-fn get_path_from_obj(
+enum FileHandleDesc {
+    Stdin,
+    Stdout,
+    Stderr,
+    OpenFile(Arc<tokio::sync::Mutex<tokio::fs::File>>),
+}
+
+impl FileHandleDesc {
+    fn as_raw_fd(&self) -> i32 {
+        #[cfg(unix)]
+        match self {
+            Self::Stdin => std::io::stdin().as_raw_fd(),
+            Self::Stdout => std::io::stdout().as_raw_fd(),
+            Self::Stderr => std::io::stderr().as_raw_fd(),
+            Self::OpenFile(fd) => fd.try_lock().map(|f| f.as_raw_fd()).unwrap_or(-1),
+        }
+
+        #[cfg(windows)]
+        match self {
+            Self::Stdin => 0,
+            Self::Stdout => 1,
+            Self::Stderr => 2,
+            Self::OpenFile { .. } => -1,
+        }
+    }
+}
+
+fn get_file_desc<'a>(
     ctx: &mut ScopedContext,
-    this: &JSValue,
+    obj: &JSValue,
     class_id: ClassID,
-) -> Result<String, i32> {
-    let obj = this.retrive_object_payload(ctx, class_id)?;
-    let opaque = obj.other().ok_or_else(|| -1)?.opaque();
-    if opaque.is_null() {
-        return Ok(String::new());
-    }
-    let s: &String = unsafe { &*opaque.cast::<String>() };
-    Ok(s.clone())
-}
+) -> Result<&'a FileHandleDesc, i32> {
+    let opaque = obj
+        .retrive_object_payload(ctx, class_id)?
+        .other()
+        .ok_or_else(|| -1)?
+        .opaque();
 
-/// Public helper used by mod.rs write() to extract path from a FileHandle JSValue.
-pub fn handle_get_path(ctx: &mut ScopedContext, val: &JSValue) -> String {
-    get_path_from_obj(ctx, val, JSFileHandle::class_id()).unwrap_or_default()
-}
-
-// ---------------------------------------------------------------------------
-// Getter: path, name, type, size, lastModified
-// ---------------------------------------------------------------------------
-fn js_fh_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let this = cc.this();
-    let class_id = JSFileHandle::class_id();
-    let path = get_path_from_obj(ctx, &this, class_id)?;
-
-    match cc.magic() {
-        PROP_PATH => {
-            let stripped = strip_chroot(&path);
-            ctx.create_string_from_utf8(stripped.into_bytes())
-                .map(JSValue::from)
-        }
-        PROP_NAME => {
-            let name = Path::new(&path)
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_default();
-            ctx.create_string_from_utf8(name.into_bytes())
-                .map(JSValue::from)
-        }
-        PROP_TYPE => {
-            let ext = Path::new(&path)
-                .extension()
-                .map(|e| e.to_string_lossy().to_string())
-                .unwrap_or_default();
-            ctx.create_string_from_utf8(ext.into_bytes())
-                .map(JSValue::from)
-        }
-        PROP_SIZE => {
-            // synchronously stat for getter
-            match std::fs::metadata(&path) {
-                Ok(m) => Ok(JSValue::from(m.len() as i64)),
-                Err(_) => Ok(JSValue::from(0i64)),
-            }
-        }
-        PROP_LAST_MODIFIED => match std::fs::metadata(&path) {
-            Ok(m) => {
-                let ms = m
-                    .modified()
-                    .ok()
-                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|d| d.as_millis() as f64)
-                    .unwrap_or(0.0);
-                Ok(JSValue::from(ms))
-            }
-            Err(_) => Ok(JSValue::from(0f64)),
-        },
-        _ => Ok(JSValue::UNDEFINED),
+    if !opaque.is_null() {
+        Ok(unsafe { &*opaque.cast::<FileHandleDesc>() })
+    } else {
+        ctx.throw_internal_error("invalid FileHandle");
+        Err(-1)
     }
 }
 
-// ---------------------------------------------------------------------------
-// Instance methods (all async via Promise + tokio)
-// ---------------------------------------------------------------------------
+/// text() — async read as string via the real fd
 fn js_fh_text(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    use tokio::io::{AsyncReadExt, AsyncSeekExt};
+
     let this = cc.this();
-    let path = get_path_from_obj(ctx, &this, JSFileHandle::class_id())?;
+    let desc = get_file_desc(ctx, &this, JSFileHandle::class_id())?;
 
     let (promise, tx) =
         Promise::create_with_channel::<Result<String, String>>(ctx, |cx, payload| -> JSResult {
@@ -111,22 +82,44 @@ fn js_fh_text(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 .map(JSValue::from)
         })?;
 
-    tokio::spawn(async move {
-        let _ = PollSender::from(tx)
-            .send_async(
-                tokio::fs::read_to_string(&path)
+    match desc {
+        FileHandleDesc::Stdin => {
+            tokio::spawn(async move {
+                let mut buf = String::new();
+                let result = tokio::io::stdin()
+                    .read_to_string(&mut buf)
                     .await
-                    .map_err(|e| e.to_string()),
-            )
-            .await;
-    });
+                    .map(|_| buf)
+                    .map_err(|e| e.to_string());
+                let _ = PollSender::from(tx).send_async(result).await;
+            });
+        }
+        FileHandleDesc::Stdout | FileHandleDesc::Stderr => {
+            let _ = tx.send(Err("cannot read from stdout/stderr".to_string()));
+        }
+        FileHandleDesc::OpenFile(fd) => {
+            let fd = fd.clone();
+            tokio::spawn(async move {
+                let mut file = fd.lock().await;
+                let _ = file.seek(std::io::SeekFrom::Start(0)).await;
+                let mut buf = String::new();
+                let result = file
+                    .read_to_string(&mut buf)
+                    .await
+                    .map(|_| buf)
+                    .map_err(|e| e.to_string());
+                let _ = PollSender::from(tx).send_async(result).await;
+            });
+        }
+    }
 
     Ok(promise.into())
 }
 
+/// json() — async read and parse as JSON via the real fd
 fn js_fh_json(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
-    let path = get_path_from_obj(ctx, &this, JSFileHandle::class_id())?;
+    let desc = get_file_desc(ctx, &this, JSFileHandle::class_id())?;
 
     let (promise, tx) = Promise::create_with_channel::<Result<serde_json::Value, String>>(
         ctx,
@@ -139,24 +132,54 @@ fn js_fh_json(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         },
     )?;
 
-    tokio::spawn(async move {
-        let raw = tokio::fs::read_to_string(&path)
-            .await
-            .map_err(|e| e.to_string());
-        let result = match raw {
-            Ok(s) => serde_json::from_str(&s).map_err(|e| e.to_string()),
-            Err(e) => Err(e),
-        };
-
-        let _ = PollSender::from(tx).send_async(result).await;
-    });
+    match desc {
+        FileHandleDesc::Stdin => {
+            tokio::spawn(async move {
+                use tokio::io::AsyncReadExt;
+                let mut buf = String::new();
+                let raw = tokio::io::stdin()
+                    .read_to_string(&mut buf)
+                    .await
+                    .map(|_| buf)
+                    .map_err(|e| e.to_string());
+                let result = match raw {
+                    Ok(s) => serde_json::from_str(&s).map_err(|e| e.to_string()),
+                    Err(e) => Err(e),
+                };
+                let _ = PollSender::from(tx).send_async(result).await;
+            });
+        }
+        FileHandleDesc::Stdout | FileHandleDesc::Stderr => {
+            let _ = tx.send(Err("cannot read from stdout/stderr".to_string()));
+        }
+        FileHandleDesc::OpenFile(fd) => {
+            let fd = fd.clone();
+            tokio::spawn(async move {
+                use tokio::io::{AsyncReadExt, AsyncSeekExt};
+                let mut file = fd.lock().await;
+                let _ = file.seek(std::io::SeekFrom::Start(0)).await;
+                let mut buf = String::new();
+                let raw = file
+                    .read_to_string(&mut buf)
+                    .await
+                    .map(|_| buf)
+                    .map_err(|e| e.to_string());
+                let result = match raw {
+                    Ok(s) => serde_json::from_str(&s).map_err(|e| e.to_string()),
+                    Err(e) => Err(e),
+                };
+                let _ = PollSender::from(tx).send_async(result).await;
+            });
+        }
+    }
 
     Ok(promise.into())
 }
 
+/// bytes() — async read as Uint8Array via the real fd
 fn js_fh_bytes(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
-    let path = get_path_from_obj(ctx, &this, JSFileHandle::class_id())?;
+    let desc = get_file_desc(ctx, &this, JSFileHandle::class_id())?;
 
     let (promise, tx) =
         Promise::create_with_channel::<Result<Vec<u8>, String>>(ctx, |cx, payload| -> JSResult {
@@ -167,44 +190,86 @@ fn js_fh_bytes(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             TypedArray::create_from_vec_u8(cx, bytes).map(JSValue::from)
         })?;
 
-    tokio::spawn(async move {
-        let _ = PollSender::from(tx)
-            .send_async(tokio::fs::read(&path).await.map_err(|e| e.to_string()))
-            .await;
-    });
+    match desc {
+        FileHandleDesc::Stdin => {
+            tokio::spawn(async move {
+                use tokio::io::AsyncReadExt;
+                let mut buf = Vec::new();
+                let result = tokio::io::stdin()
+                    .read_to_end(&mut buf)
+                    .await
+                    .map(|_| buf)
+                    .map_err(|e| e.to_string());
+                let _ = PollSender::from(tx).send_async(result).await;
+            });
+        }
+        FileHandleDesc::Stdout | FileHandleDesc::Stderr => {
+            let _ = tx.send(Err("cannot read from stdout/stderr".to_string()));
+        }
+        FileHandleDesc::OpenFile(fd) => {
+            let fd = fd.clone();
+            tokio::spawn(async move {
+                use tokio::io::{AsyncReadExt, AsyncSeekExt};
+                let mut file = fd.lock().await;
+                let _ = file.seek(std::io::SeekFrom::Start(0)).await;
+                let mut buf = Vec::new();
+                let result = file
+                    .read_to_end(&mut buf)
+                    .await
+                    .map(|_| buf)
+                    .map_err(|e| e.to_string());
+                let _ = PollSender::from(tx).send_async(result).await;
+            });
+        }
+    }
 
     Ok(promise.into())
 }
 
-fn js_fh_exists(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+/// stat() — async get file metadata via the fd
+fn js_fh_stat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
-    let path = get_path_from_obj(ctx, &this, JSFileHandle::class_id())?;
+    let desc = get_file_desc(ctx, &this, JSFileHandle::class_id())?;
 
-    let (promise, tx) =
-        Promise::create_with_channel::<Result<bool, String>>(ctx, |cx, payload| -> JSResult {
-            let ok = payload.map_err(|e| {
+    let (promise, tx) = Promise::create_with_channel::<Result<std::fs::Metadata, String>>(
+        ctx,
+        |cx, payload| -> JSResult {
+            let meta = payload.map_err(|e| {
                 cx.throw_internal_error(&e);
                 -1
             })?;
-            Ok(JSValue::Bool(ok))
-        })?;
+            make_stats(cx, &meta)
+        },
+    )?;
 
-    tokio::spawn(async move {
-        let _ = PollSender::from(tx)
-            .send_async(
-                tokio::fs::try_exists(&path)
-                    .await
-                    .map_err(|e| e.to_string()),
-            )
-            .await;
-    });
+    match desc {
+        FileHandleDesc::Stdin | FileHandleDesc::Stdout | FileHandleDesc::Stderr => {
+            // std streams: stat via /dev/stdin etc. is unreliable, return zero-stats
+            let _ = tx.send(Err("cannot stat standard stream".to_string()));
+        }
+        FileHandleDesc::OpenFile(fd) => {
+            let fd = Arc::clone(fd);
+            tokio::spawn(async move {
+                let file = fd.lock().await;
+                let result = file.metadata().await.map_err(|e| e.to_string());
+                let _ = PollSender::from(tx).send_async(result).await;
+            });
+        }
+    }
 
     Ok(promise.into())
 }
 
-fn js_fh_delete(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+/// puts() — async write strings via the real fd
+fn js_fh_puts(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
-    let path = get_path_from_obj(ctx, &this, JSFileHandle::class_id())?;
+    let desc = get_file_desc(ctx, &this, JSFileHandle::class_id())?;
+
+    let mut parts = Vec::new();
+    for arg in cc.arguments() {
+        let s = arg.to_string(ctx)?;
+        parts.push(s.content().encode_utf8(false).to_string());
+    }
 
     let (promise, tx) =
         Promise::create_with_channel::<Result<(), String>>(ctx, |cx, payload| -> JSResult {
@@ -215,58 +280,236 @@ fn js_fh_delete(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             Ok(JSValue::UNDEFINED)
         })?;
 
-    tokio::spawn(async move {
-        let _ = PollSender::from(tx)
-            .send_async(
-                tokio::fs::remove_file(&path)
-                    .await
-                    .map_err(|e| e.to_string()),
-            )
-            .await;
-    });
+    match desc {
+        FileHandleDesc::Stdin => {
+            let _ = tx.send(Err("cannot write to stdin".to_string()));
+        }
+        FileHandleDesc::Stdout | FileHandleDesc::Stderr => {
+            let is_stderr = matches!(desc, FileHandleDesc::Stderr);
+            tokio::spawn(async move {
+                use tokio::io::AsyncWriteExt;
+                let mut writer: Box<dyn tokio::io::AsyncWrite + Unpin + Send> = if is_stderr {
+                    Box::new(tokio::io::stderr())
+                } else {
+                    Box::new(tokio::io::stdout())
+                };
+                let mut result: Result<(), String> = Ok(());
+                for part in &parts {
+                    if let Err(e) = writer.write_all(part.as_bytes()).await {
+                        result = Err(e.to_string());
+                        break;
+                    }
+                }
+                let _ = writer.flush().await;
+                let _ = PollSender::from(tx).send_async(result).await;
+            });
+        }
+        FileHandleDesc::OpenFile(fd) => {
+            let fd = Arc::clone(fd);
+            tokio::spawn(async move {
+                use tokio::io::AsyncWriteExt;
+                let mut file = fd.lock().await;
+                let mut result: Result<(), String> = Ok(());
+                for part in &parts {
+                    if let Err(e) = file.write_all(part.as_bytes()).await {
+                        result = Err(e.to_string());
+                        break;
+                    }
+                }
+                let _ = PollSender::from(tx).send_async(result).await;
+            });
+        }
+    }
 
     Ok(promise.into())
 }
 
-fn js_fh_stream(_ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
-    // stream() is not yet implemented for MVP.
-    Ok(JSValue::NULL)
+/// flush() — async flush output
+fn js_fh_flush(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let this = cc.this();
+    let desc = get_file_desc(ctx, &this, JSFileHandle::class_id())?;
+
+    let (promise, tx) =
+        Promise::create_with_channel::<Result<(), String>>(ctx, |cx, payload| -> JSResult {
+            payload.map_err(|e| {
+                cx.throw_internal_error(&e);
+                -1
+            })?;
+            Ok(JSValue::UNDEFINED)
+        })?;
+
+    match desc {
+        FileHandleDesc::Stdin => {
+            let _ = tx.send(Ok(()));
+        }
+        FileHandleDesc::Stdout | FileHandleDesc::Stderr => {
+            let is_stderr = matches!(desc, FileHandleDesc::Stderr);
+            tokio::spawn(async move {
+                use tokio::io::AsyncWriteExt;
+                let mut writer: Box<dyn tokio::io::AsyncWrite + Unpin + Send> = if is_stderr {
+                    Box::new(tokio::io::stderr())
+                } else {
+                    Box::new(tokio::io::stdout())
+                };
+                let result = writer.flush().await.map_err(|e| e.to_string());
+                let _ = PollSender::from(tx).send_async(result).await;
+            });
+        }
+        FileHandleDesc::OpenFile(fd) => {
+            let fd = fd.clone();
+            tokio::spawn(async move {
+                use tokio::io::AsyncWriteExt;
+                let mut file = fd.lock().await;
+                let result = file.flush().await.map_err(|e| e.to_string());
+                let _ = PollSender::from(tx).send_async(result).await;
+            });
+        }
+    }
+
+    Ok(promise.into())
+}
+
+/// close() — sync close: drop the fd
+fn js_fh_close(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let mut this = cc.this();
+
+    if let Some(o) = this.as_object() {
+        let u = this
+            .retrive_object_payload_mut(ctx, o.class_id())?
+            .other_mut()
+            .unwrap();
+
+        if !u.opaque().is_null() {
+            unsafe {
+                let p = u.replace_opaque(std::ptr::null_mut());
+                drop(Box::from_raw(p.cast::<FileHandleDesc>()));
+            }
+        }
+
+        Ok(JSValue::UNDEFINED)
+    } else {
+        ctx.throw_type_error_not_an_object();
+        Err(-1)
+    }
 }
 
 // ---------------------------------------------------------------------------
-// Class definition
+// stat helper — shared between FileHandle.stat and fs.stat
 // ---------------------------------------------------------------------------
+
+pub(super) fn make_stats(
+    ctx: &mut ScopedContext,
+    meta: &std::fs::Metadata,
+) -> Result<JSValue, i32> {
+    let mut obj = ctx.create_base_object()?;
+
+    let size = JSValue::from(meta.len() as i64);
+    obj.define_property_value_str(ctx, "size", size, zuqe::JS_PROP_ENUMERABLE)?;
+
+    if let Ok(created) = meta.created() {
+        let ms = created
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as f64;
+        obj.define_property_value_str(
+            ctx,
+            "createdAt",
+            JSValue::from(ms),
+            zuqe::JS_PROP_ENUMERABLE,
+        )?;
+    }
+
+    if let Ok(modified) = meta.modified() {
+        let ms = modified
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as f64;
+        obj.define_property_value_str(
+            ctx,
+            "modifiedAt",
+            JSValue::from(ms),
+            zuqe::JS_PROP_ENUMERABLE,
+        )?;
+    }
+
+    if let Ok(accessed) = meta.accessed() {
+        let ms = accessed
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as f64;
+        obj.define_property_value_str(
+            ctx,
+            "accessedAt",
+            JSValue::from(ms),
+            zuqe::JS_PROP_ENUMERABLE,
+        )?;
+    }
+
+    obj.define_property_value_str(
+        ctx,
+        "isFile",
+        JSValue::Bool(meta.is_file()),
+        zuqe::JS_PROP_ENUMERABLE,
+    )?;
+    obj.define_property_value_str(
+        ctx,
+        "isDirectory",
+        JSValue::Bool(meta.is_dir()),
+        zuqe::JS_PROP_ENUMERABLE,
+    )?;
+    obj.define_property_value_str(
+        ctx,
+        "isSymbolicLink",
+        JSValue::Bool(meta.is_symlink()),
+        zuqe::JS_PROP_ENUMERABLE,
+    )?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        obj.define_property_value_str(
+            ctx,
+            "mode",
+            JSValue::from(meta.mode() as i64),
+            zuqe::JS_PROP_ENUMERABLE,
+        )?;
+        obj.define_property_value_str(
+            ctx,
+            "uid",
+            JSValue::from(meta.uid() as i64),
+            zuqe::JS_PROP_ENUMERABLE,
+        )?;
+        obj.define_property_value_str(
+            ctx,
+            "gid",
+            JSValue::from(meta.gid() as i64),
+            zuqe::JS_PROP_ENUMERABLE,
+        )?;
+    }
+
+    Ok(obj.into())
+}
+
+fn js_fh_fd(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let this = cc.this();
+    let desc = get_file_desc(ctx, &this, JSFileHandle::class_id())?;
+    Ok(JSValue::Int(desc.as_raw_fd()))
+}
+
 const CLASS_FILE_HANDLE_PROTO: &[FieldDef] = &[
-    // readonly getter properties
-    FieldDef::GETSET("path", Some(js_fh_getter), None, PROP_PATH as _),
-    FieldDef::GETSET("name", Some(js_fh_getter), None, PROP_NAME as _),
-    FieldDef::GETSET("type", Some(js_fh_getter), None, PROP_TYPE as _),
-    FieldDef::GETSET("size", Some(js_fh_getter), None, PROP_SIZE as _),
-    FieldDef::GETSET(
-        "lastModified",
-        Some(js_fh_getter),
-        None,
-        PROP_LAST_MODIFIED as _,
-    ),
-    // async methods
+    FieldDef::GETSET("fd", Some(js_fh_fd), None, PROP_FD as _),
     FieldDef::CALL("text", 0, js_fh_text, 0),
     FieldDef::CALL("json", 0, js_fh_json, 0),
     FieldDef::CALL("bytes", 0, js_fh_bytes, 0),
-    FieldDef::CALL("stream", 0, js_fh_stream, 0),
-    FieldDef::CALL("exists", 0, js_fh_exists, 0),
-    FieldDef::CALL("delete", 0, js_fh_delete, 0),
+    FieldDef::CALL("stat", 0, js_fh_stat, 0),
+    FieldDef::CALL("puts", 1, js_fh_puts, 0),
+    FieldDef::CALL("flush", 0, js_fh_flush, 0),
+    FieldDef::CALL("close", 0, js_fh_close, 0),
 ];
 
 pub struct JSFileHandle;
 
 impl JSFileHandle {
-    fn handle_dispose(_: &mut RuntimeImpl, opaque: *mut c_void, _: usize) {
-        if !opaque.is_null() {
-            let p = unsafe { Box::from_raw(opaque.cast::<String>()) };
-            drop(p);
-        }
-    }
-
     thread_local! {
         static CLASS_ID: Cell<ClassID> = const { Cell::new(0) };
     }
@@ -274,8 +517,13 @@ impl JSFileHandle {
     fn register(rt: &mut Runtime) -> Result<ClassID, i32> {
         let class_id = rt
             .register_class(
-                ClassDef::new("FileHandle", CLASS_FILE_HANDLE_PROTO, None)
-                    .on_dispose(Self::handle_dispose),
+                ClassDef::new("FileHandle", CLASS_FILE_HANDLE_PROTO, None).on_dispose(
+                    |_, opaque, _| {
+                        if !opaque.is_null() {
+                            let _ = unsafe { Box::from_raw(opaque.cast::<FileHandleDesc>()) };
+                        }
+                    },
+                ),
             )
             .expect("register class FileHandle failed");
 
@@ -288,20 +536,44 @@ impl JSFileHandle {
         Self::CLASS_ID.with(|x| x.get())
     }
 
-    pub fn new_instance(ctx: &mut ScopedContext, path: String) -> Result<Object, i32> {
+    fn new_instance_internal(
+        ctx: &mut ScopedContext,
+        new_target: JSValue,
+        desc: FileHandleDesc,
+    ) -> Result<Object, i32> {
         let class_id = Self::class_id();
-        let opaque = Box::into_raw(Box::new(path)).cast::<c_void>();
-        ctx.create_class_instance_with_opaque(JSValue::UNDEFINED, class_id, opaque)
+        let opaque = Box::into_raw(Box::new(desc)).cast::<c_void>();
+        ctx.create_class_instance_with_opaque(new_target, class_id, opaque)
             .map_err(|e| {
                 let p = e.other().unwrap();
-                let _ = unsafe { Box::from_raw(p.opaque().cast::<String>()) };
+                let _ = unsafe { Box::from_raw(p.opaque().cast::<FileHandleDesc>()) };
                 -1
             })
     }
 
-    /// Check if a JSValue is a FileHandle instance (via payload retrieval).
-    pub fn is_instance(ctx: &mut ScopedContext, val: &JSValue) -> bool {
-        val.retrive_object_payload(ctx, Self::class_id()).is_ok()
+    pub fn new_instance_stdin(ctx: &mut ScopedContext) -> Result<Object, i32> {
+        Self::new_instance_internal(ctx, JSValue::UNDEFINED, FileHandleDesc::Stdin)
+    }
+
+    pub fn new_instance_stdout(ctx: &mut ScopedContext) -> Result<Object, i32> {
+        Self::new_instance_internal(ctx, JSValue::UNDEFINED, FileHandleDesc::Stdout)
+    }
+
+    pub fn new_instance_stderr(ctx: &mut ScopedContext) -> Result<Object, i32> {
+        Self::new_instance_internal(ctx, JSValue::UNDEFINED, FileHandleDesc::Stderr)
+    }
+
+    /// Create a FileHandle from an already-opened tokio::fs::File
+    pub fn new_instance(
+        ctx: &mut ScopedContext,
+        new_target: JSValue,
+        file: tokio::fs::File,
+    ) -> Result<Object, i32> {
+        Self::new_instance_internal(
+            ctx,
+            new_target,
+            FileHandleDesc::OpenFile(Arc::new(tokio::sync::Mutex::new(file))),
+        )
     }
 }
 
