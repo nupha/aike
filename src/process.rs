@@ -14,7 +14,9 @@ use zuqe::{
     builtins::{promise::Promise, typed_array::TypedArray},
 };
 
-use crate::class_event_emitter::create_event_emitter_instance;
+use crate::{
+    class_event_emitter::create_event_emitter_instance, fs::class_file_handle::JSFileHandle,
+};
 
 /// Build `process` object exposing system info.
 /// The result is a proper EventEmitter instance so `process.on/emit/once`
@@ -91,6 +93,33 @@ pub(crate) fn build_process_object(
 
         let spawn_func = ctx.create_native_function(Callback::Func(js_spawn), "spawn", 0, 1)?;
         process.define_property_value_str(ctx, "spawn", spawn_func.into(), JS_PROP_C_W_E)?;
+    }
+
+    // stdin / stdout / stderr — enumerable, non-writable, non-configurable
+    {
+        let stdin_fh = JSFileHandle::new_instance_stdin(ctx)?;
+        process.define_property_value_str(
+            ctx,
+            "stdin",
+            stdin_fh.into(),
+            zuqe::JS_PROP_ENUMERABLE,
+        )?;
+
+        let stdout_fh = JSFileHandle::new_instance_stdout(ctx)?;
+        process.define_property_value_str(
+            ctx,
+            "stdout",
+            stdout_fh.into(),
+            zuqe::JS_PROP_ENUMERABLE,
+        )?;
+
+        let stderr_fh = JSFileHandle::new_instance_stderr(ctx)?;
+        process.define_property_value_str(
+            ctx,
+            "stderr",
+            stderr_fh.into(),
+            zuqe::JS_PROP_ENUMERABLE,
+        )?;
     }
 
     Ok(process)
