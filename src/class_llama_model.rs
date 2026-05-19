@@ -242,6 +242,8 @@ fn parse_model_options(ctx: &mut ScopedContext, cc: &CallContext) -> Result<Mode
 }
 
 fn js_model_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let new_target = cc.this();
+
     let v = cc.arg(0).to_string(ctx)?;
     let file_name = v.content().encode_utf8(false).to_string();
 
@@ -258,11 +260,13 @@ fn js_model_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 -1
             })?;
 
-    let mut obj = JSLlamaModel::new_instance(ctx, model)?;
+    let mut obj = JSLlamaModel::new_instance(ctx, new_target, model)?;
+
     let path = ctx
         .create_string_from_utf8(file_name.into_bytes())
         .map(JSValue::String)?;
     obj.define_property_value_str(ctx, MODEL_PATH_HIDDEN_KEY, path, 0)?;
+
     Ok(obj.into())
 }
 
@@ -687,7 +691,7 @@ fn js_model_createContext(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
     })?;
     llm_ctx.init_batch(ctx_params.n_batch as i32, 0, ctx_params.n_seq_max as i32);
 
-    let mut ctx_obj = JSLlamaContext::new_instance(ctx, llm_ctx)?;
+    let mut ctx_obj = JSLlamaContext::new_instance(ctx, JSValue::UNDEFINED, llm_ctx)?;
 
     // to keep model object referenced alive, model property is read-only
     ctx_obj.define_property_value_str(ctx, "model", this, JS_PROP_ENUMERABLE)?;
@@ -1028,7 +1032,7 @@ fn js_model_load(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 cx.throw_internal_error(&e);
                 -1
             })?;
-            let mut obj = JSLlamaModel::new_instance(cx, model)?;
+            let mut obj = JSLlamaModel::new_instance(cx, JSValue::UNDEFINED, model)?;
             let path = cx
                 .create_string_from_utf8(file_name.into_bytes())
                 .map(JSValue::String)?;
@@ -1116,10 +1120,14 @@ impl JSLlamaModel {
         Self::CLASS_ID.with(|x| x.get())
     }
 
-    pub fn new_instance(ctx: &mut ScopedContext, model: LlamaModel) -> Result<Object, i32> {
+    pub fn new_instance(
+        ctx: &mut ScopedContext,
+        new_target: JSValue,
+        model: LlamaModel,
+    ) -> Result<Object, i32> {
         let class_id = Self::class_id();
         let opaque = Box::into_raw(Box::new(model)).cast::<c_void>();
-        ctx.create_class_instance_with_opaque(class_id, opaque)
+        ctx.create_class_instance_with_opaque(new_target, class_id, opaque)
             .map_err(|e| {
                 let p = e.other().unwrap();
                 let _ = unsafe { Box::from_raw(p.opaque().cast::<LlamaModel>()) };

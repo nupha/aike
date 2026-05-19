@@ -186,7 +186,8 @@ pub fn js_model_createSamplerChain(ctx: &mut ScopedContext, cc: CallContext) -> 
     chain.add_sampler(&SamplerKind::Dist(0));
     chain.finalize_samplers();
 
-    let mut obj = JSSamplerChain::new_instance(ctx, Arc::new(Mutex::new(chain)))?;
+    let mut obj =
+        JSSamplerChain::new_instance(ctx, JSValue::UNDEFINED, Arc::new(Mutex::new(chain)))?;
     obj.define_property_value_str(ctx, "model", this, JS_PROP_ENUMERABLE)?;
 
     Ok(obj.into())
@@ -408,11 +409,12 @@ impl JSSamplerChain {
 
     pub fn new_instance(
         ctx: &mut ScopedContext,
+        new_target: JSValue,
         chain: Arc<Mutex<SamplerChain>>,
     ) -> Result<Object, i32> {
         let opaque = Arc::into_raw(chain) as *mut c_void;
 
-        ctx.create_class_instance_with_opaque(Self::class_id(), opaque)
+        ctx.create_class_instance_with_opaque(new_target, Self::class_id(), opaque)
             .map_err(|e| {
                 let p = e.other().unwrap();
                 let _ = unsafe { Arc::from_raw(p.opaque().cast::<Mutex<SamplerChain>>()) };

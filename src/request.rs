@@ -150,7 +150,11 @@ pub(crate) fn js_request(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
             // create Response instance
             let mut resp_obj = cx
-                .create_class_instance_with_opaque(JSResponse::class_id(), opaque)
+                .create_class_instance_with_opaque(
+                    JSValue::UNDEFINED,
+                    JSResponse::class_id(),
+                    opaque,
+                )
                 .map_err(|_| {
                     cx.throw_internal_error("failed to create Response instance");
                     -1

@@ -737,11 +737,12 @@ impl JSLlamaEngine {
 
     pub(super) fn new_instance(
         ctx: &mut ScopedContext,
+        new_target: JSValue,
         engine: Arc<Mutex<Engine>>,
     ) -> Result<Object, i32> {
         let opaque = Arc::into_raw(engine) as *mut c_void;
 
-        ctx.create_class_instance_with_opaque(Self::class_id(), opaque)
+        ctx.create_class_instance_with_opaque(new_target, Self::class_id(), opaque)
             .map_err(|e| {
                 let p = e.other().unwrap();
                 let _ = unsafe { Arc::from_raw(p.opaque().cast::<Mutex<Engine>>()) };

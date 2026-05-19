@@ -250,10 +250,14 @@ impl JSFile {
         Self::CLASS_ID.with(|x| x.get())
     }
 
-    fn new_instance_internal(ctx: &mut ScopedContext, fd: FileDesc) -> Result<Object, i32> {
+    fn new_instance_internal(
+        ctx: &mut ScopedContext,
+        new_target: JSValue,
+        fd: FileDesc,
+    ) -> Result<Object, i32> {
         let class_id = Self::class_id();
         let opaque = Box::into_raw(Box::new(fd)).cast::<c_void>();
-        ctx.create_class_instance_with_opaque(class_id, opaque)
+        ctx.create_class_instance_with_opaque(new_target, class_id, opaque)
             .map_err(|e| {
                 let p = e.other().unwrap();
                 let _ = unsafe { Box::from_raw(p.opaque().cast::<FileDesc>()) };
@@ -261,16 +265,16 @@ impl JSFile {
             })
     }
     pub fn new_instance(ctx: &mut ScopedContext, fh: std::fs::File) -> Result<Object, i32> {
-        Self::new_instance_internal(ctx, FileDesc::File(fh))
+        Self::new_instance_internal(ctx, JSValue::UNDEFINED, FileDesc::File(fh))
     }
     pub fn new_instance_stdin(ctx: &mut ScopedContext) -> Result<Object, i32> {
-        Self::new_instance_internal(ctx, FileDesc::Stdin)
+        Self::new_instance_internal(ctx, JSValue::UNDEFINED, FileDesc::Stdin)
     }
     pub fn new_instance_stdout(ctx: &mut ScopedContext) -> Result<Object, i32> {
-        Self::new_instance_internal(ctx, FileDesc::Stdout)
+        Self::new_instance_internal(ctx, JSValue::UNDEFINED, FileDesc::Stdout)
     }
     pub fn new_instance_stderr(ctx: &mut ScopedContext) -> Result<Object, i32> {
-        Self::new_instance_internal(ctx, FileDesc::Stderr)
+        Self::new_instance_internal(ctx, JSValue::UNDEFINED, FileDesc::Stderr)
     }
 }
 

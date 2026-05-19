@@ -211,17 +211,18 @@ fn sig_name(sig: u32) -> Option<&'static str> {
     })
 }
 
-fn js_constructor(ctx: &mut ScopedContext, _: CallContext) -> JSResult {
+fn js_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let class_id = JSEventEmitter::class_id();
+    let new_target = cc.this();
+
     let data = Box::new(EmitterData {
         listeners: RefCell::new(HashMap::new()),
         instance_id: NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         tracked_signals: RefCell::new(Vec::new()),
     });
-
     let opaque = Box::into_raw(data).cast::<c_void>();
-    let class_id = JSEventEmitter::class_id();
 
-    ctx.create_class_instance_with_opaque(class_id, opaque)
+    ctx.create_class_instance_with_opaque(new_target, class_id, opaque)
         .map_err(|_| {
             let _ = unsafe { Box::from_raw(opaque.cast::<EmitterData>()) };
             -1
@@ -602,7 +603,8 @@ pub(crate) fn create_event_emitter_instance(ctx: &mut ScopedContext) -> Result<O
         tracked_signals: RefCell::new(Vec::new()),
     });
     let opaque = Box::into_raw(data).cast::<c_void>();
-    ctx.create_class_instance_with_opaque(JSEventEmitter::class_id(), opaque)
+
+    ctx.create_class_instance_with_opaque(JSValue::UNDEFINED, JSEventEmitter::class_id(), opaque)
         .map_err(|_| {
             let _ = unsafe { Box::from_raw(opaque.cast::<EmitterData>()) };
             -1

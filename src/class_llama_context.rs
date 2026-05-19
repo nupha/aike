@@ -480,7 +480,7 @@ fn js_context_createEngine(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
             eng_params.slot_match_threshold,
             eng_params.max_tokens,
         );
-        let mut engine_obj = JSLlamaEngine::new_instance(ctx, engine)?;
+        let mut engine_obj = JSLlamaEngine::new_instance(ctx, JSValue::UNDEFINED, engine)?;
         let _ = engine_obj.define_property_value_str(ctx, "model", model_val, JS_PROP_ENUMERABLE);
 
         Ok(engine_obj.into())
@@ -553,11 +553,15 @@ impl JSLlamaContext {
         Self::CLASS_ID.with(|x| x.get())
     }
 
-    pub fn new_instance(ctx: &mut ScopedContext, llm_ctx: LlamaContext) -> Result<Object, i32> {
+    pub fn new_instance(
+        ctx: &mut ScopedContext,
+        new_target: JSValue,
+        llm_ctx: LlamaContext,
+    ) -> Result<Object, i32> {
         let state = Arc::new(LlamaContextWrap::new(llm_ctx));
         let opaque = Box::into_raw(Box::new(state)).cast::<c_void>();
 
-        ctx.create_class_instance_with_opaque(Self::class_id(), opaque)
+        ctx.create_class_instance_with_opaque(new_target, Self::class_id(), opaque)
             .map_err(|e| {
                 let p = e.other().unwrap();
                 let _ = unsafe { Box::from_raw(p.opaque().cast::<Arc<LlamaContextWrap>>()) };

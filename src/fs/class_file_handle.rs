@@ -291,7 +291,7 @@ impl JSFileHandle {
     pub fn new_instance(ctx: &mut ScopedContext, path: String) -> Result<Object, i32> {
         let class_id = Self::class_id();
         let opaque = Box::into_raw(Box::new(path)).cast::<c_void>();
-        ctx.create_class_instance_with_opaque(class_id, opaque)
+        ctx.create_class_instance_with_opaque(JSValue::UNDEFINED, class_id, opaque)
             .map_err(|e| {
                 let p = e.other().unwrap();
                 let _ = unsafe { Box::from_raw(p.opaque().cast::<String>()) };

@@ -26,8 +26,10 @@ use crate::{
     helpers::json_keys_camel_to_snake,
 };
 
-/// Constructor: new OpenAI({apiKey, baseUrl, model?, timeout?})
+/// Constructor: new Client({apiKey, baseUrl, model?, timeout?})
 fn js_client_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let new_target = cc.this();
+
     let opts = cc.arg(0);
     let opts_obj = opts.as_object().copied().ok_or_else(|| {
         ctx.throw_type_error("requires options object");
@@ -60,6 +62,7 @@ fn js_client_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     JSLlamaClient::new_instance(
         ctx,
+        new_target,
         default_model,
         base_url,
         api_key,
@@ -511,6 +514,7 @@ impl JSLlamaClient {
 
     pub fn new_instance(
         ctx: &mut ScopedContext,
+        new_target: JSValue,
         model: Option<String>,
         base_url: String,
         api_key: String,
@@ -529,7 +533,8 @@ impl JSLlamaClient {
             buffered_tool_call,
         });
         let opaque = Arc::into_raw(state).cast::<c_void>() as *mut c_void;
-        ctx.create_class_instance_with_opaque(Self::class_id(), opaque)
+
+        ctx.create_class_instance_with_opaque(new_target, Self::class_id(), opaque)
             .map_err(|e| {
                 let p = e.other().unwrap();
                 let _ = unsafe { Arc::from_raw(p.opaque().cast::<ClientState>()) };
