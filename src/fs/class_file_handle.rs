@@ -300,7 +300,10 @@ fn js_fh_read(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                     tokio::io::stdin()
                         .read(&mut buf)
                         .await
-                        .map(|n| buf.split_off(n))
+                        .map(|n| {
+                            buf.truncate(n);
+                            buf
+                        })
                         .map_err(|e| e.to_string())
                 };
                 let _ = PollSender::from(tx).send_async(result).await;
@@ -323,7 +326,10 @@ fn js_fh_read(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                     buf.resize(max_len, 0);
                     file.read(&mut buf)
                         .await
-                        .map(|n| buf.split_off(n))
+                        .map(|n| {
+                            buf.truncate(n);
+                            buf
+                        })
                         .map_err(|e| e.to_string())
                 };
                 let _ = PollSender::from(tx).send_async(result).await;
@@ -578,9 +584,8 @@ const CLASS_FILE_HANDLE_PROTO: &[FieldDef] = &[
     FieldDef::CALL("text", 0, js_fh_text, 0),
     FieldDef::CALL("json", 0, js_fh_json, 0),
     FieldDef::CALL("bytes", 0, js_fh_bytes, 0),
-    FieldDef::CALL("read", 0, js_fh_read, 0),
-    FieldDef::CALL("stat", 0, js_fh_stat, 0),
     FieldDef::CALL("read", 1, js_fh_read, 0),
+    FieldDef::CALL("stat", 0, js_fh_stat, 0),
     FieldDef::CALL("write", 1, js_fh_writeAll, 0),
     FieldDef::CALL("flush", 0, js_fh_flush, 0),
     FieldDef::CALL("close", 0, js_fh_close, 0),
