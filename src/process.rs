@@ -9,8 +9,8 @@ use std::{
 };
 
 use zuqe::{
-    Array, CallContext, Callback, JS_GPN_ENUM_ONLY, JS_GPN_INDEX_MASK, JS_PROP_C_W_E, JSResult,
-    JSValue, Object, ScopedContext,
+    Array, CallContext, Callback, FieldDef, JS_GPN_ENUM_ONLY, JS_GPN_INDEX_MASK, JS_PROP_C_W_E,
+    JSResult, JSValue, Object, ScopedContext,
     builtins::{promise::Promise, typed_array::TypedArray},
 };
 
@@ -95,32 +95,26 @@ pub(crate) fn build_process_object(
         process.define_property_value_str(ctx, "spawn", spawn_func.into(), JS_PROP_C_W_E)?;
     }
 
-    // stdin / stdout / stderr — enumerable, non-writable, non-configurable
-    {
-        let stdin_fh = JSFileHandle::new_instance_stdin(ctx)?;
-        process.define_property_value_str(
+    // lazy initialized property: stdin / stdout / stderr
+    process
+        .define_lazy_property_with(
             ctx,
             "stdin",
-            stdin_fh.into(),
+            |cx| JSFileHandle::new_instance_stdin(cx).map(JSValue::Object),
             zuqe::JS_PROP_ENUMERABLE,
-        )?;
-
-        let stdout_fh = JSFileHandle::new_instance_stdout(ctx)?;
-        process.define_property_value_str(
+        )?
+        .define_lazy_property_with(
             ctx,
             "stdout",
-            stdout_fh.into(),
+            |cx| JSFileHandle::new_instance_stdout(cx).map(JSValue::Object),
             zuqe::JS_PROP_ENUMERABLE,
-        )?;
-
-        let stderr_fh = JSFileHandle::new_instance_stderr(ctx)?;
-        process.define_property_value_str(
+        )?
+        .define_lazy_property_with(
             ctx,
             "stderr",
-            stderr_fh.into(),
+            |cx| JSFileHandle::new_instance_stderr(cx).map(JSValue::Object),
             zuqe::JS_PROP_ENUMERABLE,
         )?;
-    }
 
     Ok(process)
 }

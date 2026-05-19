@@ -4,7 +4,6 @@
 #![allow(non_snake_case)]
 
 mod class_event_emitter;
-mod class_file;
 mod class_llama_client;
 mod class_llama_client_responses;
 mod class_llama_context;
@@ -39,7 +38,6 @@ use zuqe::{
 
 use crate::{
     class_event_emitter::{JSEventEmitter, emitter_gc_trace, poll_emitter_signals},
-    class_file::JSFile,
     class_llama_client::JSLlamaClient,
     class_llama_context::JSLlamaContext,
     class_llama_engine::JSLlamaEngine,
@@ -272,7 +270,6 @@ async fn main() -> ExitCode {
                 JSLlamaEngine::class_id(),
                 JSLlamaClient::class_id(),
                 JSSamplerChain::class_id(),
-                JSFile::class_id(),
                 JSFileHandle::class_id(),
                 JSResponse::class_id(),
             ])?;

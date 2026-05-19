@@ -411,23 +411,26 @@ fn js_fs_open(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     tokio::spawn(async move {
         let mut opts = tokio::fs::OpenOptions::new();
         match flags.as_str() {
-            "r" => {
+            "r" | "rb" | "rrr" | "" => {
                 opts.read(true);
             }
-            "r+" => {
+            "r+" | "r+b" | "rb+" => {
                 opts.read(true).write(true);
             }
-            "w" => {
+            "w" | "wb" => {
                 opts.write(true).create(true).truncate(true);
             }
-            "w+" => {
+            "w+" | "w+b" | "wb+" => {
                 opts.read(true).write(true).create(true).truncate(true);
             }
-            "a" => {
+            "a" | "ab" => {
                 opts.append(true).create(true);
             }
-            "a+" => {
+            "a+" | "a+b" | "ab+" => {
                 opts.read(true).append(true).create(true);
+            }
+            "rw" => {
+                opts.read(true).write(true).create(true);
             }
             _ => {
                 opts.read(true);
