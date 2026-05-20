@@ -1,9 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-//! sys.rs — system utilities: evalScript, gc, now, isatty, tty window size,
-//! tty raw mode.
-
 use std::cell::Cell;
 
 use zuqe::{

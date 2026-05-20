@@ -155,7 +155,7 @@ async fn handle_chat_completions(
     let parse_reasoning: bool;
     let default_max_tokens: usize;
     let model_name: String;
-    let mut output_prepend = Vec::<i32>::new();
+    let output_prepend: Vec<i32>;
 
     // Build prompt tokens
     let prompt_tokens = {

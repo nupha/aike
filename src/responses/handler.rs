@@ -62,7 +62,7 @@ pub async fn handle_responses(
     let enable_thinking = req.reasoning.is_some();
     let tools = req.tools.as_ref().map(|t| responses_tools_to_chat_tools(t));
     let tool_choice = None;
-    let mut output_prepend = Vec::<i32>::new();
+    let output_prepend: Vec<i32>;
 
     let n_prompt_tokens;
     let respond_id;
