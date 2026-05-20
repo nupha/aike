@@ -240,6 +240,7 @@ async fn main() -> ExitCode {
 
     rt.gc_set_trace_handler(|gcx| {
         gc_trace_emitter(gcx);
+        zuq::signal::gc_trace_zuq_signals(gcx);
         gc_trace_timeout(gcx);
         gc_trace_file(gcx);
     });

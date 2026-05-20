@@ -2,22 +2,17 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
 //! zuq/mod.rs — unified entry point for the `zuq` global object.
-//!
-//! The `zuq` object inherits from EventEmitter so JS code can call
-//! `zuq.on('SIGINT', handler)` to receive process signals.
 
 mod proc;
+pub(crate) mod signal;
 mod spawn;
 mod sys;
 
 use zuqe::{
-    Array, FieldDef, JS_PROP_C_W_E, JS_PROP_CONFIGURABLE, JS_PROP_ENUMERABLE, JS_PROP_WRITABLE,
-    JSValue, ScopedContext,
+    Array, FieldDef, JS_PROP_C_W_E, JS_PROP_ENUMERABLE, JS_PROP_WRITABLE, JSValue, ScopedContext,
 };
 
-use crate::{
-    class_event_emitter::create_event_emitter_instance, fs::class_file_handle::JSFileHandle,
-};
+use crate::fs::class_file_handle::JSFileHandle;
 
 /// Build and register the `zuq` global object.
 ///
@@ -25,8 +20,10 @@ use crate::{
 /// All other fields are declared in one unified `entries` slice
 /// and installed with a single `install_fields` call.
 pub fn init_zuq(ctx: &mut ScopedContext, argv: &[String], exec_argv: &[String]) -> Result<(), i32> {
-    // zuq inherits EventEmitter so process signals can be emitted on it
-    let mut zuq = create_event_emitter_instance(ctx)?;
+    // zuq object inherits EventEmitter so process signals can be emitted on it
+    // let mut zuq =  class_event_emitter::create_event_emitter_instance(ctx)?;
+
+    let mut zuq = ctx.create_base_object()?;
 
     // argv / execArgv require runtime data — build JS arrays dynamically
     {
@@ -84,6 +81,8 @@ pub fn init_zuq(ctx: &mut ScopedContext, argv: &[String], exec_argv: &[String]) 
         FieldDef::FUNC("ttyGetWinSize", 1, sys::js_ttyGetWinSize, 0),
         FieldDef::FUNC("ttySetRaw", 1, sys::js_ttySetRaw, 0),
         FieldDef::FUNC("now", 0, sys::js_now, 0),
+        // --- signal ---
+        FieldDef::FUNC("onSignal", 2, signal::js_on_signal, 0),
         // signals
         // FieldDef::INT32("SIGINT", libc::SIGINT, JS_PROP_CONFIGURABLE),
         // FieldDef::INT32("SIGABRT", libc::SIGABRT, JS_PROP_CONFIGURABLE),
