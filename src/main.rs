@@ -15,14 +15,13 @@ mod fs;
 mod global;
 mod helpers;
 mod mod_llama;
-mod mod_std;
 mod output;
-mod process;
 mod request;
 mod responses;
 mod serve;
 mod timeout;
 mod worker;
+mod zuq;
 
 use std::{io::Write, process::ExitCode};
 
@@ -48,7 +47,6 @@ use crate::{
     },
     global::setup_globals,
     mod_llama::init_mod_llama,
-    mod_std::init_mod_std,
     request::JSResponse,
     timeout::gc_trace_timeout,
 };
@@ -272,7 +270,6 @@ async fn main() -> ExitCode {
             ])?;
 
             // register native modules
-            init_mod_std(cx)?;
             init_mod_llama(cx)?;
             init_mod_fs(cx)?;
 

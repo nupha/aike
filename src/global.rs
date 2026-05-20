@@ -4,11 +4,9 @@
 use std::ops::Deref;
 
 use colorized::{Colors, colorize_print};
-use zuqe::{
-    CallContext, Callback, JS_PROP_C_W_E, JS_PROP_WRITABLE, JSResult, JSValue, ScopedContext,
-};
+use zuqe::{CallContext, Callback, JS_PROP_C_W_E, JSResult, JSValue, ScopedContext};
 
-use crate::{process::build_process_object, request::js_request, timeout::install_timeout};
+use crate::{request::js_request, timeout::install_timeout, zuq::init_zuq};
 
 fn js_print(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let level = cc.magic() % 100;
@@ -84,11 +82,8 @@ pub fn setup_globals(
     // setTimeout, setInterval ...
     install_timeout(ctx, global)?;
 
-    // process
-    {
-        let process = build_process_object(ctx, argv, exec_argv)?;
-        global.define_property_value_str(ctx, "process", process.into(), JS_PROP_WRITABLE)?;
-    }
+    // zuq — runtime identity + stdio + spawn + sys, inherits EventEmitter
+    init_zuq(ctx, argv, exec_argv)?;
 
     // request
     {

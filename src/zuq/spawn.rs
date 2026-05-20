@@ -1,160 +1,23 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
+//! spawn.rs — spawnSync / spawn (async) child process support
+
 use std::{
     collections::HashMap,
     io::{Read, Write},
-    path::Path,
-    process::{Command, ExitCode, ExitStatus, Stdio},
+    process::{Command, ExitStatus, Stdio},
 };
 
 use zuqe::{
-    Array, CallContext, Callback, FieldDef, JS_GPN_ENUM_ONLY, JS_GPN_INDEX_MASK, JS_PROP_C_W_E,
-    JS_PROP_ENUMERABLE, JSResult, JSValue, Object, ScopedContext,
+    CallContext, Callback, JS_GPN_ENUM_ONLY, JS_GPN_INDEX_MASK, JS_PROP_C_W_E, JS_PROP_ENUMERABLE,
+    JSResult, JSValue, Object, ScopedContext,
     builtins::{promise::Promise, typed_array::TypedArray},
 };
 
-use crate::{
-    class_event_emitter::create_event_emitter_instance, fs::class_file_handle::JSFileHandle,
-};
+use crate::fs::class_file_handle::JSFileHandle;
 
-/// Build `process` object exposing system info.
-/// The result is a proper EventEmitter instance so `process.on/emit/once`
-/// work natively (matching Node.js/Bun behaviour).
-pub(crate) fn build_process_object(
-    ctx: &mut ScopedContext,
-    argv: &[String],
-    exec_argv: &[String],
-) -> Result<Object, i32> {
-    let mut process = create_event_emitter_instance(ctx)?;
-
-    // argv[0] = executable path, argv[1] = script path, argv[2+] = script args
-    {
-        let mut elems: Vec<JSValue> = Vec::with_capacity(argv.len());
-        for a in argv {
-            let s = ctx.create_string_from_utf8(a.as_bytes().to_vec())?;
-            elems.push(s.into());
-        }
-        let arr = Array::from_values(ctx, elems)?;
-        process.define_property_value_str(ctx, "argv", arr.into(), JS_PROP_C_W_E)?;
-    }
-
-    // execArgv — runtime-specific flags passed before the script path
-    {
-        let mut elems: Vec<JSValue> = Vec::with_capacity(exec_argv.len());
-        for a in exec_argv {
-            let s = ctx.create_string_from_utf8(a.as_bytes().to_vec())?;
-            elems.push(s.into());
-        }
-        let arr = Array::from_values(ctx, elems)?;
-        process.define_property_value_str(ctx, "execArgv", arr.into(), JS_PROP_C_W_E)?;
-    }
-
-    let entries = &[
-        FieldDef::FUNC("cwd", 0, js_cwd, 0),
-        FieldDef::FUNC("spawnSync", 0, js_spawn, 0),
-        FieldDef::FUNC("spawn", 0, js_spawn, 1),
-        FieldDef::FUNC("exit", 1, js_exit, 0),
-        FieldDef::VALUE(
-            "env",
-            |cx| -> JSResult {
-                let mut env_obj = cx.create_base_object()?;
-                // 1) Load .env defaults (lower priority)
-                for (key, value) in load_dotenv() {
-                    let v = cx.create_string_from_utf8(value.as_bytes().to_vec())?;
-                    env_obj.set_property_str(cx, &key, v.into())?;
-                }
-                // 2) Overlay real system env vars (higher priority), matching Bun behaviour
-                for (key, value) in std::env::vars() {
-                    let v = cx.create_string_from_utf8(value.as_bytes().to_vec())?;
-                    env_obj.set_property_str(cx, &key, v.into())?;
-                }
-                Ok(env_obj.into())
-            },
-            JS_PROP_C_W_E,
-        ),
-        FieldDef::VALUE(
-            "stdin",
-            |cx| JSFileHandle::new_instance_stdin(cx).map(JSValue::Object),
-            zuqe::JS_PROP_ENUMERABLE,
-        ),
-        FieldDef::VALUE(
-            "stdout",
-            |cx| JSFileHandle::new_instance_stdout(cx).map(JSValue::Object),
-            zuqe::JS_PROP_ENUMERABLE,
-        ),
-        FieldDef::VALUE(
-            "stderr",
-            |cx| JSFileHandle::new_instance_stderr(cx).map(JSValue::Object),
-            zuqe::JS_PROP_ENUMERABLE,
-        ),
-    ];
-
-    process.install_fields(ctx, entries)?;
-
-    Ok(process)
-}
-
-/// Load key=value pairs from `.env` in the current working directory.
-///
-/// Supports `#` comments, blank-line skips, and single/double-quoted values.
-fn load_dotenv() -> Vec<(String, String)> {
-    let path = Path::new(".env");
-    let content = match std::fs::read_to_string(path) {
-        Ok(c) => c,
-        Err(_) => return Vec::new(),
-    };
-
-    let mut vars = Vec::new();
-    for line in content.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        if let Some((k, v)) = line.split_once('=') {
-            let key = k.trim().to_string();
-            if key.is_empty() {
-                continue;
-            }
-            let mut val = v.trim().to_string();
-            // Strip surrounding single/double quotes
-            if val.len() >= 2 {
-                let b = val.as_bytes();
-                if (b[0] == b'"' && b[val.len() - 1] == b'"')
-                    || (b[0] == b'\'' && b[val.len() - 1] == b'\'')
-                {
-                    val = val[1..val.len() - 1].to_string();
-                }
-            }
-            vars.push((key, val));
-        }
-    }
-    vars
-}
-
-fn js_cwd(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
-    match std::env::current_dir() {
-        Ok(p) => ctx
-            .create_string_from_utf8(p.to_string_lossy().as_bytes().to_vec())
-            .map(JSValue::from),
-        Err(e) => {
-            ctx.throw_internal_error(&e.to_string());
-            Err(-1)
-        }
-    }
-}
-
-fn js_exit(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let code = if cc.length() > 0 && !cc.arg(0).is_undefined() {
-        cc.arg(0).to_number(ctx).map(|n| n.to_i32()).unwrap_or(0)
-    } else {
-        0
-    };
-    ctx.rt_mut().interrupt(ExitCode::from(code as u8));
-    Err(-1)
-}
-
-fn js_spawn(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+pub(super) fn js_spawn(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let is_async = cc.magic() == 1;
 
     // arg 0: command string
@@ -302,9 +165,7 @@ fn spawn_sync(
         let _ = r.read_to_end(&mut stderr_buf);
     }
 
-    //
     // wait sub process exit
-    //
     let exit_status = child.wait().map_err(|e| {
         ctx.throw_internal_error(&format!("wait failed: {e}"));
         -1
@@ -313,9 +174,6 @@ fn spawn_sync(
     let exit_code = exit_status.code();
     let signal_code = get_signal_code(&exit_status);
 
-    //
-    // make_spawn_result(ctx, pid, &stdout_buf, &stderr_buf, &exit_status)
-    //
     let mut result = ctx.create_base_object()?;
     let ta_out = TypedArray::create_from_vec_u8(ctx, stdout_buf)?;
     let ta_err = TypedArray::create_from_vec_u8(ctx, stderr_buf)?;
@@ -441,14 +299,9 @@ fn spawn_async(ctx: &mut ScopedContext, mut child: std::process::Child, pid: i32
     result.define_property_value_str(ctx, "isRunning", is_running_fn.into(), JS_PROP_C_W_E)?;
 
     // Run IO + wait on tokio's blocking thread pool.
-    // Child is spawned synchronously above (fast, non-blocking) so pid is
-    // available immediately.  Three parallel spawn_blocking tasks read
-    // stdout / stderr / wait concurrently, avoiding the classic pipe
-    // deadlock that occurs when one pipe fills while the other is never
-    // drained.
+    // Three parallel spawn_blocking tasks read stdout/stderr/wait concurrently,
+    // avoiding the classic pipe deadlock.
     tokio::spawn(async move {
-        // Wrap child in Option so we can borrow fields via &mut (not move)
-        // and avoid partial-move when taking pipes.
         let mut child_opt = Some(child);
 
         let stdout_handle = {
@@ -511,6 +364,49 @@ fn spawn_async(ctx: &mut ScopedContext, mut child: std::process::Child, pid: i32
     Ok(result.into())
 }
 
+/// kill(signal?) — send signal to child process.
+/// Reads `pid` from `this`, sends signal via libc::kill().
+fn js_child_kill(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let pid = pid_from_this(ctx, &cc);
+    if pid <= 0 {
+        return Ok(JSValue::Bool(false));
+    }
+
+    let sig = if cc.length() > 0 && !cc.arg(0).is_undefined() {
+        let arg = cc.arg(0);
+        if let Some(s) = arg.as_string() {
+            let name = s.content().encode_utf8(false);
+            parse_signal_name(&name).unwrap_or(libc::SIGTERM)
+        } else {
+            arg.to_number(ctx)?.to_i32()
+        }
+    } else {
+        libc::SIGTERM
+    };
+
+    let ret = unsafe { libc::kill(pid, sig) };
+    Ok(JSValue::Bool(ret == 0))
+}
+
+/// isRunning() — check if child process is still alive using kill(pid, 0).
+fn js_child_isRunning(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let pid = pid_from_this(ctx, &cc);
+    if pid <= 0 {
+        return Ok(JSValue::Bool(false));
+    }
+    let running = unsafe { libc::kill(pid, 0) == 0 };
+    Ok(JSValue::Bool(running))
+}
+
+/// Read `pid` from the `this` object's "pid" property.
+fn pid_from_this(ctx: &mut ScopedContext, cc: &CallContext) -> i32 {
+    let this = cc.this();
+    this.as_object()
+        .and_then(|obj| obj.get_property_str(ctx, "pid").ok())
+        .and_then(|v| v.to_number(ctx).ok().map(|n| n.to_i32()))
+        .unwrap_or(-1)
+}
+
 /// Extract a string property from an options object; returns None if missing.
 fn get_str_prop(ctx: &mut ScopedContext, obj: &Object, key: &str) -> Option<String> {
     let v = obj.get_property_str(ctx, key).ok()?;
@@ -519,7 +415,6 @@ fn get_str_prop(ctx: &mut ScopedContext, obj: &Object, key: &str) -> Option<Stri
 }
 
 /// Parse the `env` option: iterate the JS object and collect into a HashMap.
-/// Returns `Some(map)` when env is provided, `None` when not set.
 fn parse_env_obj(
     ctx: &mut ScopedContext,
     opts: &Object,
@@ -545,51 +440,6 @@ fn parse_env_obj(
         }
     }
     Ok(Some(map))
-}
-
-/// kill(signal?) — send signal to child process.
-/// Reads `pid` from `this`, sends signal via libc::kill().
-/// Returns `true` on success, `false` if process doesn't exist or error.
-fn js_child_kill(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let pid = pid_from_this(ctx, &cc);
-    if pid <= 0 {
-        return Ok(JSValue::Bool(false));
-    }
-
-    let sig = if cc.length() > 0 && !cc.arg(0).is_undefined() {
-        let arg = cc.arg(0);
-        if let Some(s) = arg.as_string() {
-            let name = s.content().encode_utf8(false);
-            parse_signal_name(&name).unwrap_or(libc::SIGTERM)
-        } else {
-            arg.to_number(ctx)?.to_i32()
-        }
-    } else {
-        libc::SIGTERM
-    };
-
-    let ret = unsafe { libc::kill(pid, sig) };
-    Ok(JSValue::Bool(ret == 0))
-}
-
-/// isRunning() — check if child process is still alive.
-/// Uses kill(pid, 0) which checks existence without sending a signal.
-fn js_child_isRunning(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let pid = pid_from_this(ctx, &cc);
-    if pid <= 0 {
-        return Ok(JSValue::Bool(false));
-    }
-    let running = unsafe { libc::kill(pid, 0) == 0 };
-    Ok(JSValue::Bool(running))
-}
-
-/// Read `pid` from the `this` object's "pid" property.
-fn pid_from_this(ctx: &mut ScopedContext, cc: &CallContext) -> i32 {
-    let this = cc.this();
-    this.as_object()
-        .and_then(|obj| obj.get_property_str(ctx, "pid").ok())
-        .and_then(|v| v.to_number(ctx).ok().map(|n| n.to_i32()))
-        .unwrap_or(-1)
 }
 
 /// Parse POSIX signal name to signal number.

@@ -1,16 +1,26 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
+//! sys.rs — system utilities: evalScript, gc, now, isatty, tty window size,
+//! tty raw mode, and POSIX signal constants.
+
 use std::cell::Cell;
 
 use zuqe::{
-    Array, CallContext, EvalFlags, EvalType, Exception, FieldDef, JS_PROP_C_W_E,
-    JS_PROP_CONFIGURABLE, JS_SetUncatchableError, JSResult, JSValue, ScopedContext,
+    Array, CallContext, EvalFlags, EvalType, Exception, JS_PROP_C_W_E, JS_SetUncatchableError,
+    JSResult, JSValue, ScopedContext,
 };
 
 use crate::class_event_emitter::OS_PENDING_SIGNALS;
 
-fn js_evalScript(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+// Declare windows crt functions
+#[cfg(windows)]
+unsafe extern "system" {
+    fn _get_osfhandle(fd: i32) -> windows_sys::Win32::Foundation::HANDLE;
+    fn _setmode(fd: i32, mode: i32) -> i32;
+}
+
+pub(super) fn js_evalScript(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut backtrace_barrier = false;
     let mut is_async = false;
 
@@ -77,19 +87,12 @@ fn js_evalScript(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     ret
 }
 
-fn js_gc(ctx: &mut ScopedContext, _: CallContext) -> JSResult {
+pub(super) fn js_gc(ctx: &mut ScopedContext, _: CallContext) -> JSResult {
     ctx.rt_mut().gc_request();
     Ok(JSValue::UNDEFINED)
 }
 
-// Declare windows crt functions
-#[cfg(windows)]
-unsafe extern "system" {
-    fn _get_osfhandle(fd: i32) -> windows_sys::Win32::Foundation::HANDLE;
-    fn _setmode(fd: i32, mode: i32) -> i32;
-}
-
-fn js_now(_: &mut ScopedContext, _: CallContext) -> JSResult {
+pub(super) fn js_now(_: &mut ScopedContext, _: CallContext) -> JSResult {
     Ok(JSValue::from(get_time_ns() as f64 / 1e6))
 }
 
@@ -115,12 +118,12 @@ fn get_time_ns() -> u64 {
     }
 }
 
-fn js_isatty(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+pub(super) fn js_isatty(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let fd = cc.arg(0).to_number(ctx)?.to_i32();
     Ok(JSValue::Bool(unsafe { libc::isatty(fd) != 0 }))
 }
 
-fn js_ttyGetWinSize(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+pub(super) fn js_ttyGetWinSize(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let fd = cc.arg(0).to_number(ctx)?.to_i32();
     let w: i32;
     let h: i32;
@@ -165,7 +168,7 @@ fn js_ttyGetWinSize(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     Ok(obj.into())
 }
 
-fn js_ttySetRaw(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+pub(super) fn js_ttySetRaw(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let fd = cc.arg(0).to_number(ctx)?.to_i32();
 
     #[cfg(unix)]
@@ -226,47 +229,4 @@ fn js_ttySetRaw(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     }
 
     Ok(JSValue::UNDEFINED)
-}
-
-const MOD_STD_ENTRIES: &[FieldDef] = &[
-    FieldDef::FUNC("evalScript", 1, js_evalScript, 0),
-    FieldDef::FUNC("gc", 0, js_gc, 0),
-    FieldDef::FUNC("isatty", 1, js_isatty, 0),
-    FieldDef::FUNC("ttyGetWinSize", 1, js_ttyGetWinSize, 0),
-    FieldDef::FUNC("ttySetRaw", 1, js_ttySetRaw, 0),
-    FieldDef::FUNC("now", 0, js_now, 0),
-    // signals
-    FieldDef::INT32("SIGINT", libc::SIGINT, JS_PROP_CONFIGURABLE),
-    FieldDef::INT32("SIGABRT", libc::SIGABRT, JS_PROP_CONFIGURABLE),
-    FieldDef::INT32("SIGFPE", libc::SIGFPE, JS_PROP_CONFIGURABLE),
-    FieldDef::INT32("SIGILL", libc::SIGILL, JS_PROP_CONFIGURABLE),
-    FieldDef::INT32("SIGSEGV", libc::SIGSEGV, JS_PROP_CONFIGURABLE),
-    FieldDef::INT32("SIGTERM", libc::SIGTERM, JS_PROP_CONFIGURABLE),
-    #[cfg(not(windows))]
-    FieldDef::INT32("SIGQUIT", libc::SIGQUIT, JS_PROP_CONFIGURABLE),
-    #[cfg(not(windows))]
-    FieldDef::INT32("SIGPIPE", libc::SIGPIPE, JS_PROP_CONFIGURABLE),
-    #[cfg(not(windows))]
-    FieldDef::INT32("SIGALRM", libc::SIGALRM, JS_PROP_CONFIGURABLE),
-    #[cfg(not(windows))]
-    FieldDef::INT32("SIGUSR1", libc::SIGUSR1, JS_PROP_CONFIGURABLE),
-    #[cfg(not(windows))]
-    FieldDef::INT32("SIGUSR2", libc::SIGUSR2, JS_PROP_CONFIGURABLE),
-    #[cfg(not(windows))]
-    FieldDef::INT32("SIGCHLD", libc::SIGCHLD, JS_PROP_CONFIGURABLE),
-    #[cfg(not(windows))]
-    FieldDef::INT32("SIGCONT", libc::SIGCONT, JS_PROP_CONFIGURABLE),
-    #[cfg(not(windows))]
-    FieldDef::INT32("SIGSTOP", libc::SIGSTOP, JS_PROP_CONFIGURABLE),
-    #[cfg(not(windows))]
-    FieldDef::INT32("SIGTSTP", libc::SIGTSTP, JS_PROP_CONFIGURABLE),
-    #[cfg(not(windows))]
-    FieldDef::INT32("SIGTTIN", libc::SIGTTIN, JS_PROP_CONFIGURABLE),
-    #[cfg(not(windows))]
-    FieldDef::INT32("SIGTTOU", libc::SIGTTOU, JS_PROP_CONFIGURABLE),
-];
-
-pub fn init_mod_std(ctx: &mut ScopedContext) -> Result<(), i32> {
-    ctx.create_module("std", MOD_STD_ENTRIES)?;
-    Ok(())
 }
