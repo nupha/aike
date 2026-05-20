@@ -27,7 +27,6 @@ use std::{io::Write, process::ExitCode};
 
 use clap::Parser;
 use colorized::{Colors::*, colorize_println};
-use libc;
 use linkme::distributed_slice;
 use zuqe::{
     ClassID, Context, EvalFlags, EvalType, Exception, ModuleDef, Runtime, ScopedContext,
@@ -35,7 +34,7 @@ use zuqe::{
 };
 
 use crate::{
-    class_event_emitter::{JSEventEmitter, gc_trace_emitter, poll_emitter_signals},
+    class_event_emitter::JSEventEmitter,
     class_llama_client::JSLlamaClient,
     class_llama_context::JSLlamaContext,
     class_llama_engine::JSLlamaEngine,
@@ -239,7 +238,6 @@ async fn main() -> ExitCode {
     rt.set_module_loader(None, js_module_loader, std::ptr::null_mut());
 
     rt.gc_set_trace_handler(|gcx| {
-        gc_trace_emitter(gcx);
         zuq::signal::gc_trace_zuq_signals(gcx);
         gc_trace_timeout(gcx);
         gc_trace_file(gcx);
@@ -273,16 +271,6 @@ async fn main() -> ExitCode {
             // register native modules
             init_mod_llama(cx)?;
             init_mod_fs(cx)?;
-
-            // EventEmitter signal polling
-            cx.add_tick_handler(poll_emitter_signals);
-
-            // Install SIGINT interrupt handler: when SIGINT bit is set in
-            // OS_PENDING_SIGNALS, the VM breaks execution.
-            cx.rt_mut().set_interrupt_handler(move |_| {
-                let s = crate::class_event_emitter::OS_PENDING_SIGNALS.get();
-                (s >> libc::SIGINT) & 1 != 0
-            });
 
             setup_globals(cx, &argv, &exec_argv)
         })

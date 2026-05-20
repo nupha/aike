@@ -2,16 +2,13 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
 //! sys.rs — system utilities: evalScript, gc, now, isatty, tty window size,
-//! tty raw mode, and POSIX signal constants.
+//! tty raw mode.
 
 use std::cell::Cell;
 
 use zuqe::{
-    Array, CallContext, EvalFlags, EvalType, Exception, JS_PROP_C_W_E, JS_SetUncatchableError,
-    JSResult, JSValue, ScopedContext,
+    Array, CallContext, EvalFlags, EvalType, JS_PROP_C_W_E, JSResult, JSValue, ScopedContext,
 };
-
-use crate::class_event_emitter::OS_PENDING_SIGNALS;
 
 // Declare windows crt functions
 #[cfg(windows)]
@@ -63,26 +60,6 @@ pub(super) fn js_evalScript(ctx: &mut ScopedContext, cc: CallContext) -> JSResul
             flags,
         )
     });
-
-    let lev = EVAL_SCRIPT_RECURSE.with(|s| {
-        let n = s.get();
-        s.set(n - 1);
-        n - 1
-    });
-    if lev == 0 {
-        OS_PENDING_SIGNALS.with(|s| {
-            let n = s.get() & !(1_u64 << libc::SIGINT);
-            s.set(n);
-        });
-
-        if ret.is_err() {
-            // convert the uncatchable "interrupted" error into a normal error
-            // so that it can be caught by the REPL
-            if let Exception::Error(v) = ctx.rt().exception() {
-                JS_SetUncatchableError(v, false);
-            }
-        }
-    }
 
     ret
 }

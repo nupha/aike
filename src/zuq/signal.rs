@@ -41,8 +41,8 @@ static SIGNAL_SENDERS: LazyLock<Mutex<HashMap<ThreadId, channel::Sender<u32>>>> 
 static SIGNAL_REFCOUNT: LazyLock<Mutex<HashMap<u32, u32>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-/// Signal name <-> number mapping
-fn signal_number(name: &str) -> Option<u32> {
+/// Signal name -> number mapping
+pub(crate) fn signal_number(name: &str) -> Option<u32> {
     Some(match name {
         "SIGINT" => libc::SIGINT,
         "SIGABRT" => libc::SIGABRT,
@@ -74,6 +74,41 @@ fn signal_number(name: &str) -> Option<u32> {
         "SIGTTOU" => libc::SIGTTOU,
         _ => return None,
     } as u32)
+}
+
+/// Reverse of signal_number: convert a signal number back to its name.
+pub(crate) fn signal_name(sig: u32) -> Option<&'static str> {
+    Some(match sig as i32 {
+        n if n == libc::SIGINT => "SIGINT",
+        n if n == libc::SIGABRT => "SIGABRT",
+        n if n == libc::SIGFPE => "SIGFPE",
+        n if n == libc::SIGILL => "SIGILL",
+        n if n == libc::SIGSEGV => "SIGSEGV",
+        n if n == libc::SIGTERM => "SIGTERM",
+        #[cfg(not(windows))]
+        n if n == libc::SIGQUIT => "SIGQUIT",
+        #[cfg(not(windows))]
+        n if n == libc::SIGPIPE => "SIGPIPE",
+        #[cfg(not(windows))]
+        n if n == libc::SIGALRM => "SIGALRM",
+        #[cfg(not(windows))]
+        n if n == libc::SIGUSR1 => "SIGUSR1",
+        #[cfg(not(windows))]
+        n if n == libc::SIGUSR2 => "SIGUSR2",
+        #[cfg(not(windows))]
+        n if n == libc::SIGCHLD => "SIGCHLD",
+        #[cfg(not(windows))]
+        n if n == libc::SIGCONT => "SIGCONT",
+        #[cfg(not(windows))]
+        n if n == libc::SIGSTOP => "SIGSTOP",
+        #[cfg(not(windows))]
+        n if n == libc::SIGTSTP => "SIGTSTP",
+        #[cfg(not(windows))]
+        n if n == libc::SIGTTIN => "SIGTTIN",
+        #[cfg(not(windows))]
+        n if n == libc::SIGTTOU => "SIGTTOU",
+        _ => return None,
+    })
 }
 
 /// Process-wide C signal handler — broadcasts to all registered senders
