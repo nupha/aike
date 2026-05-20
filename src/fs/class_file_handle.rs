@@ -19,14 +19,15 @@ use tokio::io::AsyncReadExt;
 use zuqe::{
     CallContext, ClassDef, ClassID, ErrorKind, FieldDef, JSResult, JSValue, JobState, Object,
     PollSender, Runtime, ScopedContext,
-    builtins::{promise::Promise, typed_array::TypedArray},
+    builtins::{iterator::AsyncIterableIterator, promise::Promise, typed_array::TypedArray},
     gc_lite::{GcTrace, GcTraceCtx},
 };
 
 use crate::USER_CLASS_DEFS;
 
 const PROP_FD: i32 = 5;
-const BUF_SIZE: usize = 4096;
+const BUF_SIZE_STDIN: usize = 16384;
+const BUF_SIZE_FILE: usize = 65536;
 
 enum FileHandleDesc {
     Stdin,
@@ -36,6 +37,14 @@ enum FileHandleDesc {
 }
 
 impl FileHandleDesc {
+    fn read_buf_size(&self) -> usize {
+        match self {
+            Self::File(_) => BUF_SIZE_FILE,
+            Self::Stdin => BUF_SIZE_STDIN,
+            Self::Stdout | Self::Stderr => 0,
+        }
+    }
+
     fn as_raw_fd(&self) -> i32 {
         #[cfg(unix)]
         match self {
@@ -238,8 +247,9 @@ fn js_fh_onData(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
         match desc {
             FileHandleDesc::Stdin => {
+                let buf_size = desc.read_buf_size();
                 tokio::spawn(async move {
-                    let mut buf = vec![0u8; BUF_SIZE];
+                    let mut buf = vec![0u8; buf_size];
                     let mut stdin = tokio::io::stdin();
                     loop {
                         match stdin.read(&mut buf).await {
@@ -260,8 +270,9 @@ fn js_fh_onData(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             }
             FileHandleDesc::File(fd) => {
                 let fd = fd.clone();
+                let buf_size = desc.read_buf_size();
                 tokio::spawn(async move {
-                    let mut buf = vec![0u8; BUF_SIZE];
+                    let mut buf = vec![0u8; buf_size];
                     loop {
                         let result = {
                             let mut file = fd.lock().await;
@@ -804,6 +815,101 @@ fn js_fh_fd(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     Ok(JSValue::Int(desc.as_raw_fd()))
 }
 
+// ---------------------------------------------------------------------------
+// [Symbol.asyncIterator] — `for await...of` support
+// ---------------------------------------------------------------------------
+
+/// Chunk message type for FileHandle async iteration
+enum FileChunk {
+    Data(Vec<u8>),
+    Eof,
+    Error(String),
+}
+
+/// [Symbol.asyncIterator]() — returns an AsyncIterableIterator for `for await...of`
+fn js_fh_asyncIterator(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let this = cc.this();
+    let desc = get_file_desc(ctx, &this)?;
+
+    if matches!(desc, FileHandleDesc::Stdout | FileHandleDesc::Stderr) {
+        ctx.throw_type_error("cannot iterate stdout/stderr");
+        return Err(-1);
+    }
+
+    let (tx, rx) = crossbeam::channel::bounded::<FileChunk>(8);
+
+    match desc {
+        FileHandleDesc::Stdin => {
+            let buf_size = desc.read_buf_size();
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; buf_size];
+                let mut stdin = tokio::io::stdin();
+                loop {
+                    match stdin.read(&mut buf).await {
+                        Ok(0) => {
+                            let _ = tx.send(FileChunk::Eof);
+                            break;
+                        }
+                        Ok(n) => {
+                            let _ = tx.send(FileChunk::Data(buf[..n].to_vec()));
+                        }
+                        Err(e) => {
+                            let _ = tx.send(FileChunk::Error(e.to_string()));
+                            break;
+                        }
+                    }
+                }
+            });
+        }
+        FileHandleDesc::File(fd) => {
+            let fd = fd.clone();
+            let buf_size = desc.read_buf_size();
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; buf_size];
+                loop {
+                    let result = {
+                        let mut file = fd.lock().await;
+                        file.read(&mut buf).await
+                    };
+                    match result {
+                        Ok(0) => {
+                            let _ = tx.send(FileChunk::Eof);
+                            break;
+                        }
+                        Ok(n) => {
+                            let _ = tx.send(FileChunk::Data(buf[..n].to_vec()));
+                        }
+                        Err(e) => {
+                            let _ = tx.send(FileChunk::Error(e.to_string()));
+                            break;
+                        }
+                    }
+                }
+            });
+        }
+        _ => unreachable!(),
+    }
+
+    let iter = AsyncIterableIterator::create_with_receiver::<FileChunk>(
+        ctx,
+        rx,
+        |cx, chunk| -> Result<Option<JSValue>, i32> {
+            match chunk {
+                FileChunk::Data(data) => TypedArray::create_from_vec_u8(cx, data)
+                    .map(JSValue::from)
+                    .map(Some),
+                FileChunk::Eof => Ok(None),
+                FileChunk::Error(e) => {
+                    cx.throw_internal_error(&e);
+                    Err(-1)
+                }
+            }
+        },
+    )?;
+
+    Ok(iter.into())
+}
+
 const CLASS_FILE_HANDLE_PROTO: &[FieldDef] = &[
     FieldDef::GETSET("fd", Some(js_fh_fd), None, PROP_FD as _),
     FieldDef::FUNC("text", 0, js_fh_text, 0),
@@ -815,6 +921,7 @@ const CLASS_FILE_HANDLE_PROTO: &[FieldDef] = &[
     FieldDef::FUNC("flush", 0, js_fh_flush, 0),
     FieldDef::FUNC("close", 0, js_fh_close, 0),
     FieldDef::FUNC("onData", 1, js_fh_onData, 0),
+    FieldDef::FUNC("[Symbol.asyncIterator]", 0, js_fh_asyncIterator, 0),
 ];
 
 pub struct JSFileHandle;
