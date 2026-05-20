@@ -305,8 +305,8 @@ async fn main() -> ExitCode {
             // eval result is a Promise
             promise_future = Some((*p).into_future(&mut scope)?);
         } else {
-            // print eval result
-            colorize_println(v.inspect(&mut rt).unwrap(), GreenFg);
+            // suppress eval result printing — it leaks "undefined" to child stdout
+            let _ = v;
         }
         Ok(())
     });
@@ -338,7 +338,8 @@ async fn main() -> ExitCode {
 
         match promise_res {
             Ok(result) => {
-                colorize_println(result.inspect(&mut rt).unwrap(), GreenFg);
+                // suppress eval result printing
+                let _ = result;
             }
             Err(reason) => {
                 // Promise reject
