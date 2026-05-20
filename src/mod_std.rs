@@ -4,8 +4,8 @@
 use std::cell::Cell;
 
 use zuqe::{
-    CallContext, EvalFlags, EvalType, Exception, FieldDef, JS_SetUncatchableError, JSResult,
-    JSValue, ScopedContext,
+    Array, CallContext, EvalFlags, EvalType, Exception, FieldDef, JS_PROP_C_W_E,
+    JS_PROP_CONFIGURABLE, JS_SetUncatchableError, JSResult, JSValue, ScopedContext,
 };
 
 use crate::class_event_emitter::OS_PENDING_SIGNALS;
@@ -82,9 +82,188 @@ fn js_gc(ctx: &mut ScopedContext, _: CallContext) -> JSResult {
     Ok(JSValue::UNDEFINED)
 }
 
+// Declare windows crt functions
+#[cfg(windows)]
+unsafe extern "system" {
+    fn _get_osfhandle(fd: i32) -> windows_sys::Win32::Foundation::HANDLE;
+    fn _setmode(fd: i32, mode: i32) -> i32;
+}
+
+fn js_now(_: &mut ScopedContext, _: CallContext) -> JSResult {
+    Ok(JSValue::from(get_time_ns() as f64 / 1e6))
+}
+
+#[inline]
+fn get_time_ns() -> u64 {
+    #[cfg(unix)]
+    {
+        let mut ts = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        unsafe {
+            libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts);
+        };
+        ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64
+    }
+
+    #[cfg(windows)]
+    {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |t| t.as_nanos() as u64)
+    }
+}
+
+fn js_isatty(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let fd = cc.arg(0).to_number(ctx)?.to_i32();
+    Ok(JSValue::Bool(unsafe { libc::isatty(fd) != 0 }))
+}
+
+fn js_ttyGetWinSize(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let fd = cc.arg(0).to_number(ctx)?.to_i32();
+    let w: i32;
+    let h: i32;
+
+    #[cfg(unix)]
+    {
+        let mut sz = libc::winsize {
+            ws_row: 0,
+            ws_col: 0,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        if unsafe { libc::ioctl(fd, libc::TIOCGWINSZ, &mut sz) == 0 }
+            && sz.ws_col >= 4
+            && sz.ws_row >= 4
+        {
+            w = sz.ws_col as i32;
+            h = sz.ws_row as i32;
+        } else {
+            return Ok(JSValue::NULL);
+        }
+    }
+
+    #[cfg(windows)]
+    unsafe {
+        use windows_sys::Win32::System::Console::{
+            CONSOLE_SCREEN_BUFFER_INFO, GetConsoleScreenBufferInfo,
+        };
+
+        let mut info = std::mem::zeroed::<CONSOLE_SCREEN_BUFFER_INFO>();
+        if GetConsoleScreenBufferInfo(_get_osfhandle(fd), &mut info) != 0 {
+            w = info.dwSize.X as i32;
+            h = info.dwSize.Y as i32;
+        } else {
+            return Ok(JSValue::NULL);
+        }
+    }
+
+    let mut obj = Array::create(ctx)?;
+    obj.define_property_value_u32(ctx, 0, JSValue::Int(w), JS_PROP_C_W_E)?;
+    obj.define_property_value_u32(ctx, 1, JSValue::Int(h), JS_PROP_C_W_E)?;
+    Ok(obj.into())
+}
+
+fn js_ttySetRaw(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let fd = cc.arg(0).to_number(ctx)?.to_i32();
+
+    #[cfg(unix)]
+    unsafe {
+        static mut OLD_TTY: libc::termios = unsafe { std::mem::zeroed::<libc::termios>() };
+
+        let mut tty = std::mem::zeroed::<libc::termios>();
+        libc::tcgetattr(fd, &mut tty);
+        OLD_TTY = tty;
+
+        tty.c_iflag &= !(libc::IGNBRK
+            | libc::BRKINT
+            | libc::PARMRK
+            | libc::ISTRIP
+            | libc::INLCR
+            | libc::IGNCR
+            | libc::ICRNL
+            | libc::IXON);
+        tty.c_oflag |= libc::OPOST;
+        tty.c_lflag &= !(libc::ECHO | libc::ECHONL | libc::ICANON | libc::IEXTEN);
+        tty.c_cflag &= !(libc::CSIZE | libc::PARENB);
+        tty.c_cflag |= libc::CS8;
+        tty.c_cc[libc::VMIN] = 1;
+        tty.c_cc[libc::VTIME] = 0;
+
+        libc::tcsetattr(fd, libc::TCSANOW, &tty);
+
+        extern "C" fn term_exit() {
+            unsafe {
+                libc::tcsetattr(0, libc::TCSANOW, &raw const OLD_TTY);
+            }
+        }
+        libc::atexit(term_exit);
+    }
+
+    #[cfg(windows)]
+    unsafe {
+        use windows_sys::Win32::System::Console::{
+            ENABLE_PROCESSED_OUTPUT, ENABLE_VIRTUAL_TERMINAL_INPUT,
+            ENABLE_VIRTUAL_TERMINAL_PROCESSING, ENABLE_WINDOW_INPUT, ENABLE_WRAP_AT_EOL_OUTPUT,
+            SetConsoleMode,
+        };
+
+        SetConsoleMode(
+            _get_osfhandle(fd),
+            ENABLE_WINDOW_INPUT | ENABLE_VIRTUAL_TERMINAL_INPUT,
+        );
+        _setmode(fd, libc::O_BINARY);
+
+        if fd == 0 {
+            SetConsoleMode(
+                _get_osfhandle(1),
+                ENABLE_PROCESSED_OUTPUT
+                    | ENABLE_WRAP_AT_EOL_OUTPUT
+                    | ENABLE_VIRTUAL_TERMINAL_PROCESSING,
+            );
+        }
+    }
+
+    Ok(JSValue::UNDEFINED)
+}
+
 const MOD_STD_ENTRIES: &[FieldDef] = &[
     FieldDef::FUNC("evalScript", 1, js_evalScript, 0),
     FieldDef::FUNC("gc", 0, js_gc, 0),
+    FieldDef::FUNC("isatty", 1, js_isatty, 0),
+    FieldDef::FUNC("ttyGetWinSize", 1, js_ttyGetWinSize, 0),
+    FieldDef::FUNC("ttySetRaw", 1, js_ttySetRaw, 0),
+    FieldDef::FUNC("now", 0, js_now, 0),
+    // signals
+    FieldDef::INT32("SIGINT", libc::SIGINT, JS_PROP_CONFIGURABLE),
+    FieldDef::INT32("SIGABRT", libc::SIGABRT, JS_PROP_CONFIGURABLE),
+    FieldDef::INT32("SIGFPE", libc::SIGFPE, JS_PROP_CONFIGURABLE),
+    FieldDef::INT32("SIGILL", libc::SIGILL, JS_PROP_CONFIGURABLE),
+    FieldDef::INT32("SIGSEGV", libc::SIGSEGV, JS_PROP_CONFIGURABLE),
+    FieldDef::INT32("SIGTERM", libc::SIGTERM, JS_PROP_CONFIGURABLE),
+    #[cfg(not(windows))]
+    FieldDef::INT32("SIGQUIT", libc::SIGQUIT, JS_PROP_CONFIGURABLE),
+    #[cfg(not(windows))]
+    FieldDef::INT32("SIGPIPE", libc::SIGPIPE, JS_PROP_CONFIGURABLE),
+    #[cfg(not(windows))]
+    FieldDef::INT32("SIGALRM", libc::SIGALRM, JS_PROP_CONFIGURABLE),
+    #[cfg(not(windows))]
+    FieldDef::INT32("SIGUSR1", libc::SIGUSR1, JS_PROP_CONFIGURABLE),
+    #[cfg(not(windows))]
+    FieldDef::INT32("SIGUSR2", libc::SIGUSR2, JS_PROP_CONFIGURABLE),
+    #[cfg(not(windows))]
+    FieldDef::INT32("SIGCHLD", libc::SIGCHLD, JS_PROP_CONFIGURABLE),
+    #[cfg(not(windows))]
+    FieldDef::INT32("SIGCONT", libc::SIGCONT, JS_PROP_CONFIGURABLE),
+    #[cfg(not(windows))]
+    FieldDef::INT32("SIGSTOP", libc::SIGSTOP, JS_PROP_CONFIGURABLE),
+    #[cfg(not(windows))]
+    FieldDef::INT32("SIGTSTP", libc::SIGTSTP, JS_PROP_CONFIGURABLE),
+    #[cfg(not(windows))]
+    FieldDef::INT32("SIGTTIN", libc::SIGTTIN, JS_PROP_CONFIGURABLE),
+    #[cfg(not(windows))]
+    FieldDef::INT32("SIGTTOU", libc::SIGTTOU, JS_PROP_CONFIGURABLE),
 ];
 
 pub fn init_mod_std(ctx: &mut ScopedContext) -> Result<(), i32> {

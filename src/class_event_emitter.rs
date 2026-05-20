@@ -63,7 +63,7 @@ impl EmitterData {
     }
 }
 
-pub(crate) fn emitter_gc_trace(tr: &mut GcTraceCtx) {
+pub(crate) fn gc_trace_emitter(tr: &mut GcTraceCtx) {
     SIGNAL_DISPATCH.with_borrow_mut(|dispatch| {
         for list in dispatch.values_mut() {
             for (_, cb) in list.iter_mut() {
