@@ -1,6 +1,8 @@
 use llama_cpp_ffi::{FileType, KVCacheType, list_devices};
 use zuqe::{Array, CallContext, FieldDef, JS_PROP_ENUMERABLE, JSResult, JSValue, ScopedContext};
 
+use crate::{class_llama_client::JSLlamaClient, class_llama_model::JSLlamaModel};
+
 fn get_devices(ctx: &mut ScopedContext, _: CallContext) -> JSResult {
     let devs = list_devices();
 
@@ -25,8 +27,8 @@ fn get_devices(ctx: &mut ScopedContext, _: CallContext) -> JSResult {
 }
 
 const MOD_LLAMA_ENTRIES: &[FieldDef] = &[
-    FieldDef::CLASS("Model", JS_PROP_ENUMERABLE),
-    FieldDef::CLASS("Client", JS_PROP_ENUMERABLE),
+    FieldDef::CLASS("Model", || JSLlamaModel::class_id(), JS_PROP_ENUMERABLE),
+    FieldDef::CLASS("Client", || JSLlamaClient::class_id(), JS_PROP_ENUMERABLE),
     FieldDef::OBJECT(
         "FileType",
         &[

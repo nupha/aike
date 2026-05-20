@@ -93,8 +93,8 @@ pub(crate) fn js_request(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             }
 
             // headers
-            let v = opts.get_property_str(ctx, "headers")?;
-            if let Some(hdr_obj) = v.as_object() {
+            let mut v = opts.get_property_str(ctx, "headers")?;
+            if let Some(hdr_obj) = v.as_object_mut() {
                 let pks = hdr_obj.get_own_property_names(
                     ctx,
                     zuqe::JS_GPN_ENUM_ONLY | zuqe::JS_GPN_INDEX_MASK,

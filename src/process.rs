@@ -9,8 +9,8 @@ use std::{
 };
 
 use zuqe::{
-    Array, CallContext, Callback, FieldDef, JS_GPN_ENUM_ONLY, JS_GPN_INDEX_MASK, JS_PROP_C_W_E,
-    JSResult, JSValue, Object, ScopedContext,
+    Array, CallContext, FieldDef, JS_GPN_ENUM_ONLY, JS_GPN_INDEX_MASK, JS_PROP_C_W_E, JSResult,
+    JSValue, Object, ScopedContext,
     builtins::{promise::Promise, typed_array::TypedArray},
 };
 
@@ -28,24 +28,6 @@ pub(crate) fn build_process_object(
 ) -> Result<Object, i32> {
     let mut process = create_event_emitter_instance(ctx)?;
 
-    {
-        let mut env_obj = ctx.create_base_object()?;
-
-        // 1) Load .env defaults (lower priority)
-        for (key, value) in load_dotenv() {
-            let v = ctx.create_string_from_utf8(value.as_bytes().to_vec())?;
-            env_obj.set_property_str(ctx, &key, v.into())?;
-        }
-        // 2) Overlay real system env vars (higher priority), matching Bun behaviour
-        for (key, value) in std::env::vars() {
-            let v = ctx.create_string_from_utf8(value.as_bytes().to_vec())?;
-            env_obj.set_property_str(ctx, &key, v.into())?;
-        }
-
-        process.define_property_value_str(ctx, "env", env_obj.into(), JS_PROP_C_W_E)?;
-    }
-
-    // argv — mimics Node.js / Bun process.argv
     // argv[0] = executable path, argv[1] = script path, argv[2+] = script args
     {
         let mut elems: Vec<JSValue> = Vec::with_capacity(argv.len());
@@ -68,53 +50,47 @@ pub(crate) fn build_process_object(
         process.define_property_value_str(ctx, "execArgv", arr.into(), JS_PROP_C_W_E)?;
     }
 
-    // cwd() — return current working directory
-    {
-        let cwd_func = ctx.create_native_function(Callback::Func(js_cwd), "cwd", 0, 0)?;
-        process.define_property_value_str(ctx, "cwd", cwd_func.into(), JS_PROP_C_W_E)?;
-    }
-
-    // exit(code) — signal graceful termination
-    {
-        let exit_func = ctx.create_native_function(Callback::Func(js_exit), "exit", 0, 0)?;
-        process.define_property_value_str(ctx, "exit", exit_func.into(), JS_PROP_C_W_E)?;
-    }
-
-    // spawnSync & spawn
-    {
-        let spawn_sync_func =
-            ctx.create_native_function(Callback::Func(js_spawn), "spawnSync", 0, 0)?;
-        process.define_property_value_str(
-            ctx,
-            "spawnSync",
-            spawn_sync_func.into(),
+    let entries = &[
+        FieldDef::FUNC("cwd", 0, js_cwd, 0),
+        FieldDef::FUNC("spawnSync", 0, js_spawn, 0),
+        FieldDef::FUNC("spawn", 0, js_spawn, 1),
+        FieldDef::FUNC("exit", 1, js_exit, 0),
+        FieldDef::VALUE(
+            "env",
+            |cx| -> JSResult {
+                let mut env_obj = cx.create_base_object()?;
+                // 1) Load .env defaults (lower priority)
+                for (key, value) in load_dotenv() {
+                    let v = cx.create_string_from_utf8(value.as_bytes().to_vec())?;
+                    env_obj.set_property_str(cx, &key, v.into())?;
+                }
+                // 2) Overlay real system env vars (higher priority), matching Bun behaviour
+                for (key, value) in std::env::vars() {
+                    let v = cx.create_string_from_utf8(value.as_bytes().to_vec())?;
+                    env_obj.set_property_str(cx, &key, v.into())?;
+                }
+                Ok(env_obj.into())
+            },
             JS_PROP_C_W_E,
-        )?;
-
-        let spawn_func = ctx.create_native_function(Callback::Func(js_spawn), "spawn", 0, 1)?;
-        process.define_property_value_str(ctx, "spawn", spawn_func.into(), JS_PROP_C_W_E)?;
-    }
-
-    // lazy initialized property: stdin / stdout / stderr
-    process
-        .define_lazy_property_with(
-            ctx,
+        ),
+        FieldDef::VALUE(
             "stdin",
             |cx| JSFileHandle::new_instance_stdin(cx).map(JSValue::Object),
             zuqe::JS_PROP_ENUMERABLE,
-        )?
-        .define_lazy_property_with(
-            ctx,
+        ),
+        FieldDef::VALUE(
             "stdout",
             |cx| JSFileHandle::new_instance_stdout(cx).map(JSValue::Object),
             zuqe::JS_PROP_ENUMERABLE,
-        )?
-        .define_lazy_property_with(
-            ctx,
+        ),
+        FieldDef::VALUE(
             "stderr",
             |cx| JSFileHandle::new_instance_stderr(cx).map(JSValue::Object),
             zuqe::JS_PROP_ENUMERABLE,
-        )?;
+        ),
+    ];
+
+    process.install_fields(ctx, entries)?;
 
     Ok(process)
 }
@@ -475,7 +451,7 @@ fn parse_env_obj(
     if v.is_undefined_or_null() {
         return Ok(None);
     }
-    let Some(env_obj) = v.as_object().copied() else {
+    let Some(mut env_obj) = v.as_object().copied() else {
         return Ok(None);
     };
 

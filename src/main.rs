@@ -292,6 +292,14 @@ async fn main() -> ExitCode {
 
             setup_globals(cx, &argv, &exec_argv)
         })
+        .inspect_err(|_| {
+            let exc = rt.take_exception();
+            rt.create_context(|cx| {
+                let t = exc.to_text(cx);
+                println!("{:?}", t);
+                Ok(())
+            });
+        })
         .unwrap();
 
     #[cfg(debug_assertions)]
