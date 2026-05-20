@@ -76,11 +76,11 @@ struct OnReadState {
 }
 
 thread_local! {
-    static ON_READ_STATE: RefCell<Option<OnReadState>> = const { RefCell::new(None) };
+    static ON_DATA_STATE: RefCell<Option<OnReadState>> = const { RefCell::new(None) };
 }
 
 pub(crate) fn gc_trace_file(tr: &mut GcTraceCtx) {
-    ON_READ_STATE.with_borrow(|opt| {
+    ON_DATA_STATE.with_borrow(|opt| {
         if let Some(s) = opt.as_ref() {
             for entry in s.entries.values() {
                 entry.callback.trace(tr);
@@ -93,21 +93,21 @@ fn start_on_read_microtask(ctx: &mut ScopedContext) {
     ctx.queue_job(
         |cx| {
             let msg =
-                ON_READ_STATE.with_borrow(|opt| opt.as_ref().and_then(|s| s.rx.try_recv().ok()));
+                ON_DATA_STATE.with_borrow(|opt| opt.as_ref().and_then(|s| s.rx.try_recv().ok()));
 
             match msg {
                 None => {
-                    let still_any = ON_READ_STATE
+                    let still_any = ON_DATA_STATE
                         .with_borrow(|opt| opt.as_ref().map_or(false, |s| !s.entries.is_empty()));
                     if still_any {
                         Ok(JobState::Again)
                     } else {
-                        ON_READ_STATE.with_borrow_mut(|opt| *opt = None);
+                        ON_DATA_STATE.with_borrow_mut(|opt| *opt = None);
                         Ok(JobState::Done)
                     }
                 }
                 Some(OnReadMsg::Data(fd, data)) => {
-                    let cb = ON_READ_STATE.with_borrow(|opt| {
+                    let cb = ON_DATA_STATE.with_borrow(|opt| {
                         opt.as_ref()
                             .and_then(|s| s.entries.get(&fd).map(|e| e.callback))
                     });
@@ -120,24 +120,24 @@ fn start_on_read_microtask(ctx: &mut ScopedContext) {
                     Ok(JobState::Again)
                 }
                 Some(OnReadMsg::Eof(fd)) => {
-                    let cb = ON_READ_STATE.with_borrow_mut(|opt| {
+                    let cb = ON_DATA_STATE.with_borrow_mut(|opt| {
                         opt.as_mut()
                             .and_then(|s| s.entries.remove(&fd).map(|e| e.callback))
                     });
                     if let Some(cb) = cb {
                         let _ = cb.call(cx, JSValue::UNDEFINED, &[JSValue::NULL]);
                     }
-                    let still_any = ON_READ_STATE
+                    let still_any = ON_DATA_STATE
                         .with_borrow(|opt| opt.as_ref().map_or(false, |s| !s.entries.is_empty()));
                     if still_any {
                         Ok(JobState::Again)
                     } else {
-                        ON_READ_STATE.with_borrow_mut(|opt| *opt = None);
+                        ON_DATA_STATE.with_borrow_mut(|opt| *opt = None);
                         Ok(JobState::Done)
                     }
                 }
                 Some(OnReadMsg::Error(fd, err_msg)) => {
-                    let cb = ON_READ_STATE.with_borrow_mut(|opt| {
+                    let cb = ON_DATA_STATE.with_borrow_mut(|opt| {
                         opt.as_mut()
                             .and_then(|s| s.entries.remove(&fd).map(|e| e.callback))
                     });
@@ -148,12 +148,12 @@ fn start_on_read_microtask(ctx: &mut ScopedContext) {
                             let _ = cb.call(cx, JSValue::UNDEFINED, &[err_obj.into()]);
                         }
                     }
-                    let still_any = ON_READ_STATE
+                    let still_any = ON_DATA_STATE
                         .with_borrow(|opt| opt.as_ref().map_or(false, |s| !s.entries.is_empty()));
                     if still_any {
                         Ok(JobState::Again)
                     } else {
-                        ON_READ_STATE.with_borrow_mut(|opt| *opt = None);
+                        ON_DATA_STATE.with_borrow_mut(|opt| *opt = None);
                         Ok(JobState::Done)
                     }
                 }
@@ -183,7 +183,7 @@ fn get_file_desc<'a>(ctx: &mut ScopedContext, val: &JSValue) -> Result<&'a FileH
     }
 }
 
-fn js_fh_onRead(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+fn js_fh_onData(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let desc = get_file_desc(ctx, &this)?;
     let raw_fd = desc.as_raw_fd();
@@ -196,9 +196,8 @@ fn js_fh_onRead(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     let arg = cc.arg(0);
 
-    // Unregister: onRead(null)
     if arg.is_null() {
-        ON_READ_STATE.with_borrow_mut(|opt| {
+        ON_DATA_STATE.with_borrow_mut(|opt| {
             if let Some(s) = opt.as_mut() {
                 s.entries.remove(&raw_fd);
             }
@@ -209,10 +208,10 @@ fn js_fh_onRead(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let callback = arg.ensure_function(ctx)?;
 
     // Initialize state if needed
-    let need_microtask = ON_READ_STATE.with_borrow(|opt| opt.is_none());
+    let need_microtask = ON_DATA_STATE.with_borrow(|opt| opt.is_none());
     if need_microtask {
         let (tx, rx) = crossbeam::channel::unbounded();
-        ON_READ_STATE.with_borrow_mut(|opt| {
+        ON_DATA_STATE.with_borrow_mut(|opt| {
             *opt = Some(OnReadState {
                 entries: HashMap::new(),
                 rx,
@@ -222,12 +221,12 @@ fn js_fh_onRead(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     }
 
     // Replace callback if already registered, don't re-spawn task
-    let already_registered = ON_READ_STATE.with_borrow(|opt| {
+    let already_registered = ON_DATA_STATE.with_borrow(|opt| {
         opt.as_ref()
             .map_or(false, |s| s.entries.contains_key(&raw_fd))
     });
 
-    ON_READ_STATE.with_borrow_mut(|opt| {
+    ON_DATA_STATE.with_borrow_mut(|opt| {
         if let Some(s) = opt.as_mut() {
             s.entries.insert(raw_fd, OnReadEntry { callback });
         }
@@ -235,7 +234,7 @@ fn js_fh_onRead(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     // Spawn async read loop for new registrations
     if !already_registered {
-        let tx = ON_READ_STATE.with_borrow(|opt| opt.as_ref().unwrap().tx.clone());
+        let tx = ON_DATA_STATE.with_borrow(|opt| opt.as_ref().unwrap().tx.clone());
 
         match desc {
             FileHandleDesc::Stdin => {
@@ -815,7 +814,7 @@ const CLASS_FILE_HANDLE_PROTO: &[FieldDef] = &[
     FieldDef::FUNC("write", 1, js_fh_writeAll, 0),
     FieldDef::FUNC("flush", 0, js_fh_flush, 0),
     FieldDef::FUNC("close", 0, js_fh_close, 0),
-    FieldDef::FUNC("onRead", 1, js_fh_onRead, 0),
+    FieldDef::FUNC("onData", 1, js_fh_onData, 0),
 ];
 
 pub struct JSFileHandle;

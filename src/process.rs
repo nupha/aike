@@ -3,14 +3,14 @@
 
 use std::{
     collections::HashMap,
-    io::Read,
+    io::{Read, Write},
     path::Path,
     process::{Command, ExitCode, ExitStatus, Stdio},
 };
 
 use zuqe::{
-    Array, CallContext, FieldDef, JS_GPN_ENUM_ONLY, JS_GPN_INDEX_MASK, JS_PROP_C_W_E, JSResult,
-    JSValue, Object, ScopedContext,
+    Array, CallContext, Callback, FieldDef, JS_GPN_ENUM_ONLY, JS_GPN_INDEX_MASK, JS_PROP_C_W_E,
+    JS_PROP_ENUMERABLE, JSResult, JSValue, Object, ScopedContext,
     builtins::{promise::Promise, typed_array::TypedArray},
 };
 
@@ -181,6 +181,9 @@ fn js_spawn(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut cwd = None;
     let mut env_opt: Option<HashMap<String, String>> = None;
 
+    // input option (sync only): string / TypedArray / ArrayBuffer → bytes to write to stdin
+    let mut input_data: Option<Vec<u8>> = None;
+
     // arg 2 (optional): options object
     if cc.length() > 2 {
         if let Some(opts) = cc.arg(2).as_object().copied() {
@@ -191,6 +194,25 @@ fn js_spawn(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             // env — replaces entire env when provided
             if let Some(env_map) = parse_env_obj(ctx, &opts)? {
                 env_opt = Some(env_map);
+            }
+
+            // input — extract bytes for spawnSync stdin
+            if !is_async {
+                let input_val = opts
+                    .get_property_str(ctx, "input")
+                    .unwrap_or(JSValue::UNDEFINED);
+                if !input_val.is_undefined_or_null() {
+                    if let Some(s) = input_val.as_string() {
+                        input_data = Some(s.content().encode_utf8(false).into_owned().into_bytes());
+                    } else if let Some(obj) = input_val.as_object() {
+                        let payload = obj.payload();
+                        if let Some(ta) = payload.typed_array() {
+                            input_data = Some(ta.bytes().to_vec());
+                        } else if let Some(ab) = payload.array_buffer() {
+                            input_data = Some(ab.bytes().to_vec());
+                        }
+                    }
+                }
             }
 
             // stdio modes
@@ -221,6 +243,11 @@ fn js_spawn(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         }
     }
 
+    // input implies stdin=pipe
+    if input_data.is_some() {
+        stdin_mode = Stdio::piped();
+    }
+
     let mut cmd_obj = Command::new(&cmd_str);
     cmd_obj.args(&args);
     cmd_obj.stdin(stdin_mode);
@@ -245,11 +272,27 @@ fn js_spawn(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     if is_async {
         spawn_async(ctx, subprocess, pid)
     } else {
-        spawn_sync(ctx, subprocess, pid)
+        spawn_sync(ctx, subprocess, pid, input_data)
     }
 }
 
-fn spawn_sync(ctx: &mut ScopedContext, mut child: std::process::Child, pid: i32) -> JSResult {
+fn spawn_sync(
+    ctx: &mut ScopedContext,
+    mut child: std::process::Child,
+    pid: i32,
+    input: Option<Vec<u8>>,
+) -> JSResult {
+    // Write input to stdin then close it, before reading output.
+    // This avoids deadlock when the child waits for stdin before producing output.
+    if let Some(data) = input {
+        if let Some(ref mut stdin) = child.stdin {
+            let _ = stdin.write_all(&data);
+            let _ = stdin.flush();
+        }
+    }
+    // Always close stdin (drop the pipe) so the child sees EOF
+    child.stdin.take();
+
     let mut stdout_buf = Vec::new();
     if let Some(ref mut r) = child.stdout {
         let _ = r.read_to_end(&mut stdout_buf);
@@ -301,7 +344,32 @@ fn spawn_sync(ctx: &mut ScopedContext, mut child: std::process::Child, pid: i32)
     Ok(result.into())
 }
 
-fn spawn_async(ctx: &mut ScopedContext, child: std::process::Child, pid: i32) -> JSResult {
+fn spawn_async(ctx: &mut ScopedContext, mut child: std::process::Child, pid: i32) -> JSResult {
+    // Take stdin pipe before moving child into async task,
+    // so we can create a FileHandle wrapper while ScopedContext is available.
+    // When stdin is not piped, this will be None → null.
+    let stdin_val = match child.stdin.take() {
+        Some(child_stdin) => {
+            #[cfg(unix)]
+            {
+                use std::os::fd::{FromRawFd, IntoRawFd};
+                let raw_fd = child_stdin.into_raw_fd();
+                let std_file = unsafe { std::fs::File::from_raw_fd(raw_fd) };
+                let tokio_file = tokio::fs::File::from_std(std_file);
+                match JSFileHandle::new_instance(ctx, JSValue::UNDEFINED, tokio_file) {
+                    Ok(obj) => JSValue::Object(obj),
+                    Err(_) => JSValue::NULL,
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = child_stdin;
+                JSValue::NULL
+            }
+        }
+        None => JSValue::NULL,
+    };
+
     let (prom_stdout, tx_stdout) = Promise::create_with_channel::<Result<Vec<u8>, String>>(
         ctx,
         |cx, data: Result<Vec<u8>, String>| -> JSResult {
@@ -341,12 +409,10 @@ fn spawn_async(ctx: &mut ScopedContext, child: std::process::Child, pid: i32) ->
         ctx,
         |cx, data| -> JSResult {
             match data {
-                Ok(sig) => match sig {
-                    Some(name) => cx
-                        .create_string_from_utf8(name.into_bytes())
-                        .map(JSValue::from),
-                    None => Ok(JSValue::NULL),
-                },
+                Ok(Some(name)) => cx
+                    .create_string_from_utf8(name.into_bytes())
+                    .map(JSValue::from),
+                Ok(None) => Ok(JSValue::NULL),
                 Err(e) => {
                     cx.throw_internal_error(&e);
                     Err(-1)
@@ -357,11 +423,22 @@ fn spawn_async(ctx: &mut ScopedContext, child: std::process::Child, pid: i32) ->
 
     // Build result object with Promises
     let mut result = ctx.create_base_object()?;
-    result.define_property_value_str(ctx, "pid", JSValue::from(pid), JS_PROP_C_W_E)?;
+
+    result.define_property_value_str(ctx, "pid", JSValue::Int(pid), JS_PROP_ENUMERABLE)?;
+    result.define_property_value_str(ctx, "stdin", stdin_val, JS_PROP_C_W_E)?;
     result.define_property_value_str(ctx, "stdout", prom_stdout.into(), JS_PROP_C_W_E)?;
     result.define_property_value_str(ctx, "stderr", prom_stderr.into(), JS_PROP_C_W_E)?;
     result.define_property_value_str(ctx, "exitCode", prom_exit.into(), JS_PROP_C_W_E)?;
     result.define_property_value_str(ctx, "signalCode", prom_signal.into(), JS_PROP_C_W_E)?;
+
+    // kill(signal?) — send signal to child process, default SIGTERM
+    let kill_fn = ctx.create_native_function(Callback::Func(js_child_kill), "kill", 1, 0)?;
+    result.define_property_value_str(ctx, "kill", kill_fn.into(), JS_PROP_C_W_E)?;
+
+    // isRunning() — check if child process is still alive
+    let is_running_fn =
+        ctx.create_native_function(Callback::Func(js_child_isRunning), "isRunning", 0, 0)?;
+    result.define_property_value_str(ctx, "isRunning", is_running_fn.into(), JS_PROP_C_W_E)?;
 
     // Run IO + wait on tokio's blocking thread pool.
     // Child is spawned synchronously above (fast, non-blocking) so pid is
@@ -468,6 +545,77 @@ fn parse_env_obj(
         }
     }
     Ok(Some(map))
+}
+
+/// kill(signal?) — send signal to child process.
+/// Reads `pid` from `this`, sends signal via libc::kill().
+/// Returns `true` on success, `false` if process doesn't exist or error.
+fn js_child_kill(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let pid = pid_from_this(ctx, &cc);
+    if pid <= 0 {
+        return Ok(JSValue::Bool(false));
+    }
+
+    let sig = if cc.length() > 0 && !cc.arg(0).is_undefined() {
+        let arg = cc.arg(0);
+        if let Some(s) = arg.as_string() {
+            let name = s.content().encode_utf8(false);
+            parse_signal_name(&name).unwrap_or(libc::SIGTERM)
+        } else {
+            arg.to_number(ctx)?.to_i32()
+        }
+    } else {
+        libc::SIGTERM
+    };
+
+    let ret = unsafe { libc::kill(pid, sig) };
+    Ok(JSValue::Bool(ret == 0))
+}
+
+/// isRunning() — check if child process is still alive.
+/// Uses kill(pid, 0) which checks existence without sending a signal.
+fn js_child_isRunning(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let pid = pid_from_this(ctx, &cc);
+    if pid <= 0 {
+        return Ok(JSValue::Bool(false));
+    }
+    let running = unsafe { libc::kill(pid, 0) == 0 };
+    Ok(JSValue::Bool(running))
+}
+
+/// Read `pid` from the `this` object's "pid" property.
+fn pid_from_this(ctx: &mut ScopedContext, cc: &CallContext) -> i32 {
+    let this = cc.this();
+    this.as_object()
+        .and_then(|obj| obj.get_property_str(ctx, "pid").ok())
+        .and_then(|v| v.to_number(ctx).ok().map(|n| n.to_i32()))
+        .unwrap_or(-1)
+}
+
+/// Parse POSIX signal name to signal number.
+fn parse_signal_name(name: &str) -> Option<i32> {
+    match name {
+        "SIGHUP" => Some(libc::SIGHUP),
+        "SIGINT" => Some(libc::SIGINT),
+        "SIGQUIT" => Some(libc::SIGQUIT),
+        "SIGILL" => Some(libc::SIGILL),
+        "SIGTRAP" => Some(libc::SIGTRAP),
+        "SIGABRT" => Some(libc::SIGABRT),
+        "SIGFPE" => Some(libc::SIGFPE),
+        "SIGKILL" => Some(libc::SIGKILL),
+        "SIGSEGV" => Some(libc::SIGSEGV),
+        "SIGPIPE" => Some(libc::SIGPIPE),
+        "SIGALRM" => Some(libc::SIGALRM),
+        "SIGTERM" => Some(libc::SIGTERM),
+        "SIGUSR1" => Some(libc::SIGUSR1),
+        "SIGUSR2" => Some(libc::SIGUSR2),
+        "SIGSTOP" => Some(libc::SIGSTOP),
+        "SIGTSTP" => Some(libc::SIGTSTP),
+        "SIGCONT" => Some(libc::SIGCONT),
+        "SIGTTIN" => Some(libc::SIGTTIN),
+        "SIGTTOU" => Some(libc::SIGTTOU),
+        _ => None,
+    }
 }
 
 /// Get signal number (Unix-only).
