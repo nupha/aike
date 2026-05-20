@@ -45,11 +45,6 @@ pub fn init_zuq(ctx: &mut ScopedContext, argv: &[String], exec_argv: &[String]) 
         zuq.define_property_value_str(ctx, "execArgv", arr.into(), JS_PROP_C_W_E)?;
     }
 
-    // All remaining fields combined into one slice:
-    //   proc  — cwd, exit, env
-    //   stdio — stdin, stdout, stderr  (inlined; stdio.rs had no other content)
-    //   spawn — spawnSync, spawn
-    //   sys   — evalScript, gc, now, isatty, tty*, signal consts
     let entries: &[FieldDef] = &[
         // --- proc ---
         FieldDef::FUNC("cwd", 0, proc::js_cwd, 0),
@@ -83,35 +78,6 @@ pub fn init_zuq(ctx: &mut ScopedContext, argv: &[String], exec_argv: &[String]) 
         FieldDef::FUNC("now", 0, sys::js_now, 0),
         // --- signal ---
         FieldDef::FUNC("onSignal", 2, signal::js_on_signal, 0),
-        // signals
-        // FieldDef::INT32("SIGINT", libc::SIGINT, JS_PROP_CONFIGURABLE),
-        // FieldDef::INT32("SIGABRT", libc::SIGABRT, JS_PROP_CONFIGURABLE),
-        // FieldDef::INT32("SIGFPE", libc::SIGFPE, JS_PROP_CONFIGURABLE),
-        // FieldDef::INT32("SIGILL", libc::SIGILL, JS_PROP_CONFIGURABLE),
-        // FieldDef::INT32("SIGSEGV", libc::SIGSEGV, JS_PROP_CONFIGURABLE),
-        // FieldDef::INT32("SIGTERM", libc::SIGTERM, JS_PROP_CONFIGURABLE),
-        // #[cfg(not(windows))]
-        // FieldDef::INT32("SIGQUIT", libc::SIGQUIT, JS_PROP_CONFIGURABLE),
-        // #[cfg(not(windows))]
-        // FieldDef::INT32("SIGPIPE", libc::SIGPIPE, JS_PROP_CONFIGURABLE),
-        // #[cfg(not(windows))]
-        // FieldDef::INT32("SIGALRM", libc::SIGALRM, JS_PROP_CONFIGURABLE),
-        // #[cfg(not(windows))]
-        // FieldDef::INT32("SIGUSR1", libc::SIGUSR1, JS_PROP_CONFIGURABLE),
-        // #[cfg(not(windows))]
-        // FieldDef::INT32("SIGUSR2", libc::SIGUSR2, JS_PROP_CONFIGURABLE),
-        // #[cfg(not(windows))]
-        // FieldDef::INT32("SIGCHLD", libc::SIGCHLD, JS_PROP_CONFIGURABLE),
-        // #[cfg(not(windows))]
-        // FieldDef::INT32("SIGCONT", libc::SIGCONT, JS_PROP_CONFIGURABLE),
-        // #[cfg(not(windows))]
-        // FieldDef::INT32("SIGSTOP", libc::SIGSTOP, JS_PROP_CONFIGURABLE),
-        // #[cfg(not(windows))]
-        // FieldDef::INT32("SIGTSTP", libc::SIGTSTP, JS_PROP_CONFIGURABLE),
-        // #[cfg(not(windows))]
-        // FieldDef::INT32("SIGTTIN", libc::SIGTTIN, JS_PROP_CONFIGURABLE),
-        // #[cfg(not(windows))]
-        // FieldDef::INT32("SIGTTOU", libc::SIGTTOU, JS_PROP_CONFIGURABLE),
     ];
 
     zuq.install_fields(ctx, entries)?;

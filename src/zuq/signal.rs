@@ -2,29 +2,6 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
 //! signal.rs — zuq.onSignal(signal, handler) for POSIX signal handling.
-//!
-//! # Design
-//!
-//! `libc::signal()` is **process-wide** — the OS delivers a signal to **any**
-//! thread in the process.  Each JS runtime (zuqe/QuickJS) runs in its own
-//! thread, and each runtime has its own `zuq` object.
-//!
-//! When a thread calls `zuq.onSignal("SIGINT", cb)`:
-//!   - A per-thread `crossbeam::channel` is created (tx/rx).
-//!   - The sender (`tx`) is registered into a **global** sender map, keyed by
-//!     `ThreadId`.
-//!   - A process-wide C handler is installed via `libc::signal()` (refcounted).
-//!   - A `queue_job` microtask is started for this thread.
-//!   - The callback is stored in the calling thread's `HANDLER_MAP` (TLS).
-//!
-//! When a signal fires, the C handler broadcasts the signal number to **all**
-//! registered senders via `try_send`.  Each thread's microtask reads from its
-//! own receiver and dispatches only its own registered callbacks.
-//!
-//! When a thread removes its last handler, its sender is removed from the
-//! global map and the microtask returns `JobState::Done`.  When the last
-//! thread removes its handler (refcount → 0), `libc::signal()` is restored
-//! to `SIG_DFL`.
 
 use std::{
     cell::RefCell,
