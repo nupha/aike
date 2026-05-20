@@ -6,7 +6,7 @@
 use std::{
     collections::HashMap,
     io::{Read, Write},
-    process::{Command, ExitStatus, Stdio},
+    process::{ExitStatus, Stdio},
 };
 
 use zuqe::{
@@ -111,30 +111,49 @@ pub(super) fn js_spawn(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         stdin_mode = Stdio::piped();
     }
 
-    let mut cmd_obj = Command::new(&cmd_str);
-    cmd_obj.args(&args);
-    cmd_obj.stdin(stdin_mode);
-    cmd_obj.stdout(stdout_mode);
-    cmd_obj.stderr(stderr_mode);
-
-    if let Some(dir) = cwd {
-        cmd_obj.current_dir(dir);
-    }
-    if let Some(env_map) = env_opt {
-        cmd_obj.env_clear();
-        cmd_obj.envs(env_map);
-    }
-
-    let subprocess = cmd_obj.spawn().map_err(|e| {
-        ctx.throw_internal_error(&format!("spawn failed: {e}"));
-        -1
-    })?;
-
-    let pid = subprocess.id() as i32;
-
     if is_async {
+        let mut cmd_obj = tokio::process::Command::new(&cmd_str);
+        cmd_obj.args(&args);
+        cmd_obj.stdin(stdin_mode);
+        cmd_obj.stdout(stdout_mode);
+        cmd_obj.stderr(stderr_mode);
+
+        if let Some(dir) = cwd {
+            cmd_obj.current_dir(dir);
+        }
+        if let Some(env_map) = env_opt {
+            cmd_obj.env_clear();
+            cmd_obj.envs(env_map);
+        }
+
+        let subprocess = cmd_obj.spawn().map_err(|e| {
+            ctx.throw_internal_error(&format!("spawn failed: {e}"));
+            -1
+        })?;
+
+        let pid = subprocess.id().map(|id| id as i32).unwrap_or(-1);
         spawn_async(ctx, subprocess, pid)
     } else {
+        let mut cmd_obj = std::process::Command::new(&cmd_str);
+        cmd_obj.args(&args);
+        cmd_obj.stdin(stdin_mode);
+        cmd_obj.stdout(stdout_mode);
+        cmd_obj.stderr(stderr_mode);
+
+        if let Some(dir) = cwd {
+            cmd_obj.current_dir(dir);
+        }
+        if let Some(env_map) = env_opt {
+            cmd_obj.env_clear();
+            cmd_obj.envs(env_map);
+        }
+
+        let subprocess = cmd_obj.spawn().map_err(|e| {
+            ctx.throw_internal_error(&format!("spawn failed: {e}"));
+            -1
+        })?;
+
+        let pid = subprocess.id() as i32;
         spawn_sync(ctx, subprocess, pid, input_data)
     }
 }
@@ -178,7 +197,7 @@ fn spawn_sync(
     let ta_out = TypedArray::create_from_vec_u8(ctx, stdout_buf)?;
     let ta_err = TypedArray::create_from_vec_u8(ctx, stderr_buf)?;
     let signal_str = signal_code.map_or(Ok(JSValue::NULL), |sig| {
-        ctx.create_string_from_str(signal_name(sig))
+        ctx.create_string_from_str(crate::zuq::signal::signal_name(sig as u32).unwrap_or("UNKNOWN"))
             .map(JSValue::from)
     })?;
 
@@ -202,7 +221,7 @@ fn spawn_sync(
     Ok(result.into())
 }
 
-fn spawn_async(ctx: &mut ScopedContext, mut child: std::process::Child, pid: i32) -> JSResult {
+fn spawn_async(ctx: &mut ScopedContext, mut child: tokio::process::Child, pid: i32) -> JSResult {
     // Take stdin pipe before moving child into async task,
     // so we can create a FileHandle wrapper while ScopedContext is available.
     // When stdin is not piped, this will be None → null.
@@ -210,13 +229,24 @@ fn spawn_async(ctx: &mut ScopedContext, mut child: std::process::Child, pid: i32
         Some(child_stdin) => {
             #[cfg(unix)]
             {
-                use std::os::fd::{FromRawFd, IntoRawFd};
-                let raw_fd = child_stdin.into_raw_fd();
-                let std_file = unsafe { std::fs::File::from_raw_fd(raw_fd) };
-                let tokio_file = tokio::fs::File::from_std(std_file);
-                match JSFileHandle::new_instance(ctx, JSValue::UNDEFINED, tokio_file) {
-                    Ok(obj) => JSValue::Object(obj),
-                    Err(_) => JSValue::NULL,
+                // tokio::process::ChildStdin doesn't implement IntoRawFd, so we
+                // borrow the fd via AsRawFd and dup() it, then let ChildStdin close
+                // its own copy when dropped.
+                use std::os::fd::{AsRawFd, FromRawFd};
+
+                let raw_fd = child_stdin.as_raw_fd();
+                let dup_fd = unsafe { libc::dup(raw_fd) };
+                if dup_fd < 0 {
+                    JSValue::NULL
+                } else {
+                    let std_file = unsafe { std::fs::File::from_raw_fd(dup_fd) };
+                    let tokio_file = tokio::fs::File::from_std(std_file);
+                    // drop child_stdin (closes the original tokio-managed fd)
+                    drop(child_stdin);
+                    match JSFileHandle::new_instance(ctx, JSValue::UNDEFINED, tokio_file) {
+                        Ok(obj) => JSValue::Object(obj),
+                        Err(_) => JSValue::NULL,
+                    }
                 }
             }
             #[cfg(not(unix))]
@@ -298,63 +328,46 @@ fn spawn_async(ctx: &mut ScopedContext, mut child: std::process::Child, pid: i32
         ctx.create_native_function(Callback::Func(js_child_isRunning), "isRunning", 0, 0)?;
     result.define_property_value_str(ctx, "isRunning", is_running_fn.into(), JS_PROP_C_W_E)?;
 
-    // Run IO + wait on tokio's blocking thread pool.
-    // Three parallel spawn_blocking tasks read stdout/stderr/wait concurrently,
-    // avoiding the classic pipe deadlock.
+    // Spawn a pure async task — use tokio::process::Child's async IO directly.
+    // Read stdout/stderr concurrently via tokio::join! to avoid pipe deadlock.
     tokio::spawn(async move {
-        let mut child_opt = Some(child);
+        use tokio::io::AsyncReadExt;
 
-        let stdout_handle = {
-            let mut pipe = child_opt.as_mut().unwrap().stdout.take();
-            tokio::task::spawn_blocking(move || {
+        // Take pipes before join to avoid borrowing child across concurrent futures.
+        let mut child_stdout = child.stdout.take();
+        let mut child_stderr = child.stderr.take();
+
+        let (stdout_buf, stderr_buf) = tokio::join!(
+            async {
                 let mut buf = Vec::new();
-                if let Some(ref mut r) = pipe {
-                    let _ = r.read_to_end(&mut buf);
+                if let Some(ref mut r) = child_stdout {
+                    let _ = r.read_to_end(&mut buf).await;
                 }
                 buf
-            })
-        };
-
-        let stderr_handle = {
-            let mut pipe = child_opt.as_mut().unwrap().stderr.take();
-            tokio::task::spawn_blocking(move || {
+            },
+            async {
                 let mut buf = Vec::new();
-                if let Some(ref mut r) = pipe {
-                    let _ = r.read_to_end(&mut buf);
+                if let Some(ref mut r) = child_stderr {
+                    let _ = r.read_to_end(&mut buf).await;
                 }
                 buf
-            })
-        };
+            },
+        );
 
-        let wait_handle = tokio::task::spawn_blocking(move || {
-            let mut child = child_opt
-                .take()
-                .expect("child_opt should be Some after pipes taken");
-            child.wait()
-        });
-
-        // Run all three blocking tasks in parallel
-        let (out_res, err_res, wait_res) = tokio::join!(stdout_handle, stderr_handle, wait_handle);
-
-        let stdout_buf = out_res.unwrap_or_default();
-        let stderr_buf = err_res.unwrap_or_default();
         let _ = tx_stdout.send(Ok(stdout_buf));
         let _ = tx_stderr.send(Ok(stderr_buf));
 
-        match wait_res {
-            Ok(Ok(status)) => {
+        match child.wait().await {
+            Ok(status) => {
                 let code = status.code().unwrap_or(-1);
                 let _ = tx_exit.send(Ok(code));
-                let sig = get_signal_code(&status).map(signal_name).map(String::from);
+                let sig = get_signal_code(&status)
+                    .and_then(|n| crate::zuq::signal::signal_name(n as u32))
+                    .map(String::from);
                 let _ = tx_signal.send(Ok(sig));
             }
-            Ok(Err(e)) => {
-                let msg = e.to_string();
-                let _ = tx_exit.send(Err(msg.clone()));
-                let _ = tx_signal.send(Err(msg));
-            }
             Err(e) => {
-                let msg = format!("wait panicked: {e}");
+                let msg = e.to_string();
                 let _ = tx_exit.send(Err(msg.clone()));
                 let _ = tx_signal.send(Err(msg));
             }
@@ -376,7 +389,9 @@ fn js_child_kill(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         let arg = cc.arg(0);
         if let Some(s) = arg.as_string() {
             let name = s.content().encode_utf8(false);
-            parse_signal_name(&name).unwrap_or(libc::SIGTERM)
+            crate::zuq::signal::signal_number(&name)
+                .map(|n| n as i32)
+                .unwrap_or(libc::SIGTERM)
         } else {
             arg.to_number(ctx)?.to_i32()
         }
@@ -442,32 +457,6 @@ fn parse_env_obj(
     Ok(Some(map))
 }
 
-/// Parse POSIX signal name to signal number.
-fn parse_signal_name(name: &str) -> Option<i32> {
-    match name {
-        "SIGHUP" => Some(libc::SIGHUP),
-        "SIGINT" => Some(libc::SIGINT),
-        "SIGQUIT" => Some(libc::SIGQUIT),
-        "SIGILL" => Some(libc::SIGILL),
-        "SIGTRAP" => Some(libc::SIGTRAP),
-        "SIGABRT" => Some(libc::SIGABRT),
-        "SIGFPE" => Some(libc::SIGFPE),
-        "SIGKILL" => Some(libc::SIGKILL),
-        "SIGSEGV" => Some(libc::SIGSEGV),
-        "SIGPIPE" => Some(libc::SIGPIPE),
-        "SIGALRM" => Some(libc::SIGALRM),
-        "SIGTERM" => Some(libc::SIGTERM),
-        "SIGUSR1" => Some(libc::SIGUSR1),
-        "SIGUSR2" => Some(libc::SIGUSR2),
-        "SIGSTOP" => Some(libc::SIGSTOP),
-        "SIGTSTP" => Some(libc::SIGTSTP),
-        "SIGCONT" => Some(libc::SIGCONT),
-        "SIGTTIN" => Some(libc::SIGTTIN),
-        "SIGTTOU" => Some(libc::SIGTTOU),
-        _ => None,
-    }
-}
-
 /// Get signal number (Unix-only).
 #[cfg(unix)]
 fn get_signal_code(status: &ExitStatus) -> Option<i32> {
@@ -477,31 +466,4 @@ fn get_signal_code(status: &ExitStatus) -> Option<i32> {
 #[cfg(not(unix))]
 fn get_signal_code(_status: &ExitStatus) -> Option<i32> {
     None
-}
-
-/// Map signal number to POSIX signal name (e.g. 9 → "SIGKILL").
-fn signal_name(sig: i32) -> &'static str {
-    match sig {
-        libc::SIGHUP => "SIGHUP",
-        libc::SIGINT => "SIGINT",
-        libc::SIGQUIT => "SIGQUIT",
-        libc::SIGILL => "SIGILL",
-        libc::SIGTRAP => "SIGTRAP",
-        libc::SIGABRT => "SIGABRT",
-        libc::SIGFPE => "SIGFPE",
-        libc::SIGKILL => "SIGKILL",
-        libc::SIGSEGV => "SIGSEGV",
-        libc::SIGPIPE => "SIGPIPE",
-        libc::SIGALRM => "SIGALRM",
-        libc::SIGTERM => "SIGTERM",
-        libc::SIGUSR1 => "SIGUSR1",
-        libc::SIGUSR2 => "SIGUSR2",
-        libc::SIGCHLD => "SIGCHLD",
-        libc::SIGCONT => "SIGCONT",
-        libc::SIGSTOP => "SIGSTOP",
-        libc::SIGTSTP => "SIGTSTP",
-        libc::SIGTTIN => "SIGTTIN",
-        libc::SIGTTOU => "SIGTTOU",
-        _ => "UNKNOWN",
-    }
 }
