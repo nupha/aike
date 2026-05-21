@@ -154,6 +154,8 @@ pub(crate) static USER_CLASS_DEFS: [fn(&mut Runtime) -> Result<ClassID, i32>];
 
 #[tokio::main]
 async fn main() -> ExitCode {
+    dotenv::dotenv().ok();
+
     #[cfg(debug_assertions)]
     {
         let log_file = std::fs::OpenOptions::new()

@@ -5,7 +5,7 @@ pub(crate) mod class_file_handle;
 
 use std::{
     cell::RefCell,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
 };
 
 use zuqe::{
@@ -23,20 +23,30 @@ thread_local! {
 /// Normalize a path by resolving . and .. components without following symlinks.
 fn normalize_path(path: &Path) -> PathBuf {
     let mut result = PathBuf::new();
+    let mut rooted = false;
 
     for component in path.components() {
         match component {
-            std::path::Component::Normal(name) => result.push(name),
-            std::path::Component::ParentDir => {
-                if result.as_os_str() != "/" && !result.as_os_str().is_empty() {
+            Component::Prefix(p) => {
+                result.push(p.as_os_str());
+            }
+            Component::RootDir => {
+                // Only set root once. On Windows, Prefix + RootDir forms an
+                // absolute path (e.g. C:\), and we must not overwrite Prefix.
+                if !rooted {
+                    result.push(component.as_os_str());
+                    rooted = true;
+                }
+            }
+            Component::Normal(name) => result.push(name),
+            Component::ParentDir => {
+                // PathBuf::pop() guards against popping beyond root on all
+                // platforms, so we only guard against popping an empty buf.
+                if !result.as_os_str().is_empty() {
                     result.pop();
                 }
             }
-            std::path::Component::CurDir => {}
-            std::path::Component::RootDir => {
-                result = PathBuf::from("/");
-            }
-            std::path::Component::Prefix(_) => result.push(component.as_os_str()),
+            Component::CurDir => {}
         }
     }
     result
@@ -50,17 +60,33 @@ fn prepend_chroot(user_path: &str) -> Result<PathBuf, String> {
         return Ok(PathBuf::from(user_path));
     };
 
-    // Build raw path: absolute user paths are relative to chroot
+    // Build raw path: absolute user paths are relative to chroot.
+    // Works cross-platform:
+    //   Unix:   "/foo"  → "foo"
+    //   Win:    "C:\foo" → "foo"  (strip Prefix + RootDir)
     let mut raw = chroot;
-    if user_path.starts_with('/') {
-        raw.push(&user_path[1..]);
+    let user_path = Path::new(user_path);
+    if user_path.has_root() {
+        // Strip leading prefix/root to get the relative portion.
+        // Covers all platforms:
+        //   Unix:   "/foo"                → "foo"   (has_root=true)
+        //   Win:    "C:\foo"  "D:\bar"     → "foo","bar" (has_root=true)
+        //   Win:    "\foo" (root-relative)  → "foo"   (has_root=true)
+        //   Win:    "/foo" (root-relative)  → "foo"   (has_root=true)
+        //   Either: "foo" (relative)        → else    (has_root=false)
+        let relative = user_path
+            .components()
+            .skip_while(|c| matches!(c, Component::Prefix(_) | Component::RootDir))
+            .map(|c| c.as_os_str())
+            .collect::<PathBuf>();
+        raw.push(relative);
     } else {
         raw.push(user_path);
     }
 
     let normalized = normalize_path(&raw);
 
-    // Security check: must stay within chroot
+    // Lexical check: must stay within chroot (fast path, no I/O)
     let allowed = CHROOT_PATH.with(|c| {
         c.borrow()
             .as_ref()
@@ -69,19 +95,37 @@ fn prepend_chroot(user_path: &str) -> Result<PathBuf, String> {
     if !allowed {
         return Err("forbidden: path outside chroot".to_string());
     }
-    Ok(normalized)
+
+    // Resolve symlinks: canonicalize the path if the file exists.
+    // This prevents symlink-escape attacks where a symlink inside
+    // the chroot points to a path outside (e.g. /etc/shadow).
+    // Writes to non-existent paths fall back to the lexical check above,
+    // which is safe because no symlink can be embedded in a non-existent path.
+    match std::fs::canonicalize(&normalized) {
+        Ok(real) => {
+            let fs_allowed =
+                CHROOT_PATH.with(|c| c.borrow().as_ref().map_or(false, |s| real.starts_with(s)));
+            if fs_allowed {
+                // Use real path so the kernel sees the resolved target
+                Ok(real)
+            } else {
+                Err("forbidden: symlink escape detected".to_string())
+            }
+        }
+        Err(_) => {
+            // Path doesn't exist yet (write, mkdir, etc.) —
+            // lexical path is the only option and safe
+            Ok(normalized)
+        }
+    }
 }
 
 /// Strip chroot prefix from a resolved path for external display.
 /// Returns the path as-is if no chroot is set.
-pub fn strip_chroot(full_path: &str) -> String {
+pub(crate) fn strip_chroot(full_path: &str) -> String {
     let Some(chroot) = CHROOT_PATH.with(|c| c.borrow().clone()) else {
         return full_path.to_string();
     };
-
-    if chroot.as_os_str() == "/" {
-        return full_path.to_string();
-    }
 
     let normalized = normalize_path(Path::new(full_path));
 
@@ -89,7 +133,9 @@ pub fn strip_chroot(full_path: &str) -> String {
         if stripped.as_os_str().is_empty() {
             "/".to_string()
         } else {
-            stripped.to_string_lossy().to_string()
+            // Normalize to forward slashes for cross-platform consistency:
+            // JS layer passes Unix-style paths, strip output should match.
+            stripped.to_string_lossy().replace('\\', "/")
         }
     } else {
         full_path.to_string()
