@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-mod proc;
 pub(crate) mod signal;
 mod spawn;
 mod sys;
@@ -11,10 +10,6 @@ use zuqe::{Array, FieldDef, JS_PROP_C_W_E, JS_PROP_ENUMERABLE, JSValue, ScopedCo
 use crate::fs::class_file_handle::JSFileHandle;
 
 /// Build and register the `Aike` global object.
-///
-/// argv and execArgv are dynamic so they are defined first.
-/// All other fields are declared in one unified `entries` slice
-/// and installed with a single `install_fields` call.
 pub fn init_aike(
     ctx: &mut ScopedContext,
     argv: &[String],
@@ -47,9 +42,9 @@ pub fn init_aike(
 
     let entries: &[FieldDef] = &[
         // --- proc ---
-        FieldDef::FUNC("cwd", 0, proc::js_cwd, 0),
-        FieldDef::FUNC("exit", 1, proc::js_exit, 0),
-        FieldDef::FUNC("env", 0, proc::js_env, 0),
+        FieldDef::FUNC("cwd", 0, sys::js_cwd, 0),
+        FieldDef::FUNC("exit", 1, sys::js_exit, 0),
+        FieldDef::FUNC("env", 0, sys::js_env, 0),
         // --- stdio ---
         FieldDef::VALUE(
             "stdin",

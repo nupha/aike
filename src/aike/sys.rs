@@ -7,6 +7,38 @@ use zuqe::{
     Array, CallContext, EvalFlags, EvalType, JS_PROP_C_W_E, JSResult, JSValue, ScopedContext,
 };
 
+pub(super) fn js_cwd(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
+    match std::env::current_dir() {
+        Ok(p) => ctx
+            .create_string_from_utf8(p.to_string_lossy().as_bytes().to_vec())
+            .map(JSValue::from),
+        Err(e) => {
+            ctx.throw_internal_error(&e.to_string());
+            Err(-1)
+        }
+    }
+}
+
+pub(super) fn js_exit(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    use std::process::ExitCode;
+    let code = if cc.length() > 0 && !cc.arg(0).is_undefined() {
+        cc.arg(0).to_number(ctx).map(|n| n.to_i32()).unwrap_or(0)
+    } else {
+        0
+    };
+    ctx.rt_mut().interrupt(ExitCode::from(code as u8));
+    Err(-1)
+}
+
+pub(super) fn js_env(cx: &mut ScopedContext, _cc: CallContext) -> JSResult {
+    let mut env_obj = cx.create_base_object()?;
+    for (key, value) in std::env::vars() {
+        let v = cx.create_string_from_utf8(value.as_bytes().to_vec())?;
+        env_obj.set_property_str(cx, &key, v.into())?;
+    }
+    Ok(env_obj.into())
+}
+
 // Declare windows crt functions
 #[cfg(windows)]
 unsafe extern "system" {
