@@ -1,29 +1,29 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-//! zuq/mod.rs — unified entry point for the `zuq` global object.
-
 mod proc;
 pub(crate) mod signal;
 mod spawn;
 mod sys;
 
-use zuqe::{
-    Array, FieldDef, JS_PROP_C_W_E, JS_PROP_ENUMERABLE, JS_PROP_WRITABLE, JSValue, ScopedContext,
-};
+use zuqe::{Array, FieldDef, JS_PROP_C_W_E, JS_PROP_ENUMERABLE, JSValue, ScopedContext};
 
 use crate::fs::class_file_handle::JSFileHandle;
 
-/// Build and register the `zuq` global object.
+/// Build and register the `Aike` global object.
 ///
 /// argv and execArgv are dynamic so they are defined first.
 /// All other fields are declared in one unified `entries` slice
 /// and installed with a single `install_fields` call.
-pub fn init_zuq(ctx: &mut ScopedContext, argv: &[String], exec_argv: &[String]) -> Result<(), i32> {
-    // zuq object inherits EventEmitter so process signals can be emitted on it
-    // let mut zuq =  class_event_emitter::create_event_emitter_instance(ctx)?;
+pub fn init_aike(
+    ctx: &mut ScopedContext,
+    argv: &[String],
+    exec_argv: &[String],
+) -> Result<(), i32> {
+    // Aike object inherits EventEmitter so process signals can be emitted on it
+    // let mut ns =  class_event_emitter::create_event_emitter_instance(ctx)?;
 
-    let mut zuq = ctx.create_base_object()?;
+    let mut ns = ctx.create_base_object()?;
 
     // argv / execArgv require runtime data — build JS arrays dynamically
     {
@@ -33,7 +33,7 @@ pub fn init_zuq(ctx: &mut ScopedContext, argv: &[String], exec_argv: &[String]) 
             elems.push(s.into());
         }
         let arr = Array::from_values(ctx, elems)?;
-        zuq.define_property_value_str(ctx, "argv", arr.into(), JS_PROP_C_W_E)?;
+        ns.define_property_value_str(ctx, "argv", arr.into(), JS_PROP_C_W_E)?;
     }
     {
         let mut elems: Vec<JSValue> = Vec::with_capacity(exec_argv.len());
@@ -42,7 +42,7 @@ pub fn init_zuq(ctx: &mut ScopedContext, argv: &[String], exec_argv: &[String]) 
             elems.push(s.into());
         }
         let arr = Array::from_values(ctx, elems)?;
-        zuq.define_property_value_str(ctx, "execArgv", arr.into(), JS_PROP_C_W_E)?;
+        ns.define_property_value_str(ctx, "execArgv", arr.into(), JS_PROP_C_W_E)?;
     }
 
     let entries: &[FieldDef] = &[
@@ -80,10 +80,10 @@ pub fn init_zuq(ctx: &mut ScopedContext, argv: &[String], exec_argv: &[String]) 
         FieldDef::FUNC("onSignal", 2, signal::js_on_signal, 0),
     ];
 
-    zuq.install_fields(ctx, entries)?;
+    ns.install_fields(ctx, entries)?;
 
-    // Expose as writable global `zuq`
-    let mut global = ctx.global_obj();
-    global.define_property_value_str(ctx, "zuq", zuq.into(), JS_PROP_WRITABLE)?;
+    // Expose as global `Aike`
+    ctx.global_obj()
+        .define_property_value_str(ctx, "Aike", ns.into(), JS_PROP_ENUMERABLE)?;
     Ok(())
 }

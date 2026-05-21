@@ -17,6 +17,8 @@ use zuqe::{
 
 use crate::fs::class_file_handle::JSFileHandle;
 
+use super::signal::signal_name;
+
 pub(super) fn js_spawn(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let is_async = cc.magic() == 1;
 
@@ -197,7 +199,7 @@ fn spawn_sync(
     let ta_out = TypedArray::create_from_vec_u8(ctx, stdout_buf)?;
     let ta_err = TypedArray::create_from_vec_u8(ctx, stderr_buf)?;
     let signal_str = signal_code.map_or(Ok(JSValue::NULL), |sig| {
-        ctx.create_string_from_str(crate::zuq::signal::signal_name(sig as u32).unwrap_or("UNKNOWN"))
+        ctx.create_string_from_str(signal_name(sig as u32).unwrap_or("UNKNOWN"))
             .map(JSValue::from)
     })?;
 
@@ -362,7 +364,7 @@ fn spawn_async(ctx: &mut ScopedContext, mut child: tokio::process::Child, pid: i
                 let code = status.code().unwrap_or(-1);
                 let _ = tx_exit.send(Ok(code));
                 let sig = get_signal_code(&status)
-                    .and_then(|n| crate::zuq::signal::signal_name(n as u32))
+                    .and_then(|n| crate::aike::signal::signal_name(n as u32))
                     .map(String::from);
                 let _ = tx_signal.send(Ok(sig));
             }
@@ -389,7 +391,7 @@ fn js_child_kill(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         let arg = cc.arg(0);
         if let Some(s) = arg.as_string() {
             let name = s.content().encode_utf8(false);
-            crate::zuq::signal::signal_number(&name)
+            crate::aike::signal::signal_number(&name)
                 .map(|n| n as i32)
                 .unwrap_or(libc::SIGTERM)
         } else {

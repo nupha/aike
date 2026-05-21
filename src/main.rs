@@ -3,6 +3,7 @@
 
 #![allow(non_snake_case)]
 
+mod aike;
 mod class_event_emitter;
 mod class_llama_client;
 mod class_llama_client_responses;
@@ -21,7 +22,6 @@ mod responses;
 mod serve;
 mod timeout;
 mod worker;
-mod zuq;
 
 use std::{io::Write, process::ExitCode};
 
@@ -238,7 +238,7 @@ async fn main() -> ExitCode {
     rt.set_module_loader(None, js_module_loader, std::ptr::null_mut());
 
     rt.gc_set_trace_handler(|gcx| {
-        zuq::signal::gc_trace_zuq_signals(gcx);
+        aike::signal::gc_trace_zuq_signals(gcx);
         gc_trace_timeout(gcx);
         gc_trace_file(gcx);
     });

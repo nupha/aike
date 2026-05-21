@@ -6,7 +6,7 @@ use std::ops::Deref;
 use colorized::{Colors, colorize_print};
 use zuqe::{CallContext, Callback, JS_PROP_C_W_E, JSResult, JSValue, ScopedContext};
 
-use crate::{request::js_request, timeout::install_timeout, zuq::init_zuq};
+use crate::{aike::init_aike, request::js_request, timeout::install_timeout};
 
 fn js_print(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let level = cc.magic() % 100;
@@ -82,8 +82,8 @@ pub fn setup_globals(
     // setTimeout, setInterval ...
     install_timeout(ctx, global)?;
 
-    // zuq — runtime identity + stdio + spawn + sys, inherits EventEmitter
-    init_zuq(ctx, argv, exec_argv)?;
+    // Aike — default namespace
+    init_aike(ctx, argv, exec_argv)?;
 
     // request
     {

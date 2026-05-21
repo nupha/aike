@@ -71,10 +71,10 @@ fn js_add_listener(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     let name = event_name(ctx, &cc.arg(0))?;
 
-    // Signal events must use zuq.onSignal instead
-    if crate::zuq::signal::signal_number(&name).is_some() {
+    // Signal events must use Aike.onSignal instead
+    if crate::aike::signal::signal_number(&name).is_some() {
         ctx.throw_type_error(&format!(
-            "cannot listen for signal '{name}' on EventEmitter; use zuq.onSignal() instead"
+            "cannot listen for signal '{name}' on EventEmitter; use Aike.onSignal() instead"
         ));
         return Err(-1);
     }
@@ -118,9 +118,9 @@ fn js_emit(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let name = event_name(ctx, &cc.arg(0))?;
 
     // Cannot emit system signals via EventEmitter
-    if crate::zuq::signal::signal_number(&name).is_some() {
+    if crate::aike::signal::signal_number(&name).is_some() {
         ctx.throw_type_error(&format!(
-            "cannot emit system signal '{name}' via EventEmitter; use zuq.onSignal() instead"
+            "cannot emit system signal '{name}' via EventEmitter; use Aike.onSignal() instead"
         ));
         return Err(-1);
     }
