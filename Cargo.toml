@@ -1,5 +1,5 @@
 [package]
-name = "llama-js"
+name = "aike"
 version = "0.1.0"
 edition = "2024"
 
@@ -48,9 +48,15 @@ tokio-stream = "0.1"
 tower-http = { version = "0.5", features = ["cors"] }
 uuid = { version = "1", features = ["v4"] }
 async-openai = { version = "0.37", features = ["chat-completion", "responses"] }
-reqwest = { version = "0.12", features = ["json", "stream"] }
+reqwest = { version = "0.12", features = [
+    "json",
+    "stream",
+    "gzip",
+    "brotli",
+    "deflate",
+] }
 tokio-util = { version = "0.7", features = ["io"] }
 
 [[bin]]
-name = "llama-js"
+name = "aike"
 path = "src/main.rs"
