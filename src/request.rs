@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-use std::{cell::Cell, ffi::c_void};
+use std::{cell::Cell, ffi::c_void, time::Duration};
 
 use crossbeam::channel;
 use linkme::distributed_slice;
@@ -15,11 +15,6 @@ use zuqe::{
 };
 
 use crate::USER_CLASS_DEFS;
-
-// ---------------------------------------------------------------------------
-// Opaque data stored on each Response instance.
-// Box-allocated, accessed only from the JS thread — no Arc/Mutex needed.
-// ---------------------------------------------------------------------------
 
 struct ResponseData {
     body_rx: Option<crossbeam::channel::Receiver<Vec<u8>>>,
@@ -61,10 +56,7 @@ struct ResponseMeta {
     content_length: Option<u64>,
 }
 
-// ---------------------------------------------------------------------------
-// request(url, options?)  –  returns Promise<Response>
-// ---------------------------------------------------------------------------
-
+/// request(url, options?)  –  returns Promise<HttpResponse>
 pub(crate) fn js_request(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let url_str = cc
         .arg(0)
@@ -77,6 +69,7 @@ pub(crate) fn js_request(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut method = String::from("GET");
     let mut req_headers: Vec<(String, String)> = Vec::new();
     let mut req_body: Option<String> = None;
+    let mut timeout: Option<Duration> = None;
 
     if cc.length() > 1 {
         let arg1 = cc.arg(1);
@@ -116,6 +109,16 @@ pub(crate) fn js_request(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             if !v.is_undefined_or_null() {
                 let s = v.to_string(ctx)?;
                 req_body = Some(s.content().encode_utf8(false).to_string());
+            }
+
+            // timeout (milliseconds) — None = no timeout per reqwest default
+            let timeout_ms = opts.get_property_str(ctx, "timeout")?;
+            if !timeout_ms.is_undefined() {
+                timeout.replace(
+                    timeout_ms
+                        .to_number(ctx)
+                        .map(|n| Duration::from_millis(n.to_u32() as u64))?,
+                );
             }
         }
     }
@@ -234,6 +237,9 @@ pub(crate) fn js_request(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         }
         if let Some(b) = &req_body {
             req = req.body(b.clone());
+        }
+        if let Some(dur) = timeout {
+            req = req.timeout(dur);
         }
 
         match req.send().await {
@@ -397,14 +403,15 @@ impl JSResponse {
     }
 
     fn register(rt: &mut Runtime) -> Result<ClassID, i32> {
-        let class_id =
-            rt.register_class(ClassDef::new("Response", RESPONSE_PROTO, None).on_dispose(
+        let class_id = rt.register_class(
+            ClassDef::new("HttpResponse", RESPONSE_PROTO, None).on_dispose(
                 |_, opaque: *mut c_void, _| {
                     if !opaque.is_null() {
                         drop(unsafe { Box::from_raw(opaque.cast::<ResponseData>()) });
                     }
                 },
-            ))?;
+            ),
+        )?;
         Self::CLASS_ID.with(|s| s.set(class_id));
         Ok(class_id)
     }

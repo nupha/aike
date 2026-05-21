@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-use std::{cell::Cell, ffi::c_void, sync::Arc};
+use std::{cell::Cell, ffi::c_void, sync::Arc, time::Duration};
 
 use futures_util::StreamExt;
 use linkme::distributed_slice;
@@ -60,6 +60,17 @@ fn js_client_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     //     .as_bool()
     //     .unwrap_or(false);
 
+    let timeout_ms = opts_obj.get_property_str(ctx, "timeout")?;
+    let timeout = if !timeout_ms.is_undefined() {
+        Some(
+            timeout_ms
+                .to_number(ctx)
+                .map(|n| Duration::from_millis(n.to_u32() as u64))?,
+        )
+    } else {
+        None
+    };
+
     JSLlamaClient::new_instance(
         ctx,
         new_target,
@@ -70,6 +81,7 @@ fn js_client_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         String::new(),
         HeaderMap::new(),
         buffered_tool_call,
+        timeout,
     )
     .map(|obj| obj.into())
 }
@@ -82,6 +94,8 @@ pub(crate) struct ClientState {
     pub(crate) custom_headers: HeaderMap,
     pub(crate) model_name: Option<String>,
     pub(crate) buffered_tool_call: bool,
+    /// Request timeout. `None` = no timeout (reqwest default, infinite wait).
+    pub(crate) timeout: Option<Duration>,
 }
 
 /// Get Arc<ClientState> from JS value (bumps strong count)
@@ -232,6 +246,10 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
 
     if !client_arc.api_key.is_empty() {
         client = client.header("Authorization", format!("Bearer {}", client_arc.api_key));
+    }
+
+    if let Some(dur) = client_arc.timeout {
+        client = client.timeout(dur);
     }
 
     if is_stream {
@@ -537,6 +555,7 @@ impl JSLlamaClient {
         project_id: String,
         custom_headers: HeaderMap,
         buffered_tool_call: bool,
+        timeout: Option<Duration>,
     ) -> Result<Object, i32> {
         let state = Arc::new(ClientState {
             model_name: model,
@@ -546,6 +565,7 @@ impl JSLlamaClient {
             project_id,
             custom_headers,
             buffered_tool_call,
+            timeout,
         });
         let opaque = Arc::into_raw(state).cast::<c_void>() as *mut c_void;
 

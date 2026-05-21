@@ -226,6 +226,7 @@ pub(super) fn js_client_responses(ctx: &mut ScopedContext, cc: CallContext) -> J
 
     let base_url = client_arc.base_url.clone();
     let api_key = client_arc.api_key.clone();
+    let timeout = client_arc.timeout;
 
     if is_stream {
         let result_slot = PromiseResultSlot::<ResponsesReply>::new();
@@ -251,13 +252,15 @@ pub(super) fn js_client_responses(ctx: &mut ScopedContext, cc: CallContext) -> J
             let http_client = reqwest::Client::new();
             let request_body = serde_json::to_string(&req).unwrap_or_default();
 
-            match http_client
+            let mut builder = http_client
                 .post(&url)
                 .header("Content-Type", "application/json")
                 .header("Authorization", format!("Bearer {}", api_key))
-                .body(request_body)
-                .send()
-                .await
+                .body(request_body);
+            if let Some(dur) = timeout {
+                builder = builder.timeout(dur);
+            }
+            match builder.send().await
             {
                 Ok(response) => {
                     use futures_util::StreamExt;
@@ -324,13 +327,15 @@ pub(super) fn js_client_responses(ctx: &mut ScopedContext, cc: CallContext) -> J
             let http_client = reqwest::Client::new();
             let request_body = serde_json::to_string(&req).unwrap_or_default();
 
-            let result = match http_client
+            let mut builder = http_client
                 .post(&url)
                 .header("Content-Type", "application/json")
                 .header("Authorization", format!("Bearer {}", api_key))
-                .body(request_body)
-                .send()
-                .await
+                .body(request_body);
+            if let Some(dur) = timeout {
+                builder = builder.timeout(dur);
+            }
+            let result = match builder.send().await
             {
                 Ok(response) => {
                     let status = response.status();
