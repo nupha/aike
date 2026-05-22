@@ -13,7 +13,7 @@ use zuqe::{
     },
 };
 
-use crate::class_llama_client::get_client_arc;
+use crate::{AIKE_LLM_BASE_URL, AIKE_LLM_MODEL, class_llama_client::get_client_arc};
 
 pub(super) const MAGIC_RESPONSES_STREAM: i32 = 4;
 pub(super) const MAGIC_RESPONSES_ONCE: i32 = 5;
@@ -138,7 +138,7 @@ pub(super) fn js_client_responses(ctx: &mut ScopedContext, cc: CallContext) -> J
         client_arc
             .model_name
             .clone()
-            .unwrap_or_else(|| "default".to_string())
+            .unwrap_or_else(|| AIKE_LLM_MODEL.to_string())
     };
 
     let mut req_builder = CreateResponseArgs::default();
@@ -260,8 +260,7 @@ pub(super) fn js_client_responses(ctx: &mut ScopedContext, cc: CallContext) -> J
             if let Some(dur) = timeout {
                 builder = builder.timeout(dur);
             }
-            match builder.send().await
-            {
+            match builder.send().await {
                 Ok(response) => {
                     use futures_util::StreamExt;
                     use tokio::io::AsyncBufReadExt;
@@ -335,8 +334,7 @@ pub(super) fn js_client_responses(ctx: &mut ScopedContext, cc: CallContext) -> J
             if let Some(dur) = timeout {
                 builder = builder.timeout(dur);
             }
-            let result = match builder.send().await
-            {
+            let result = match builder.send().await {
                 Ok(response) => {
                     let status = response.status();
                     let body = response.text().await.unwrap_or_default();

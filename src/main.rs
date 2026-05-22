@@ -152,9 +152,13 @@ fn parse_byte_size(ss: &str) -> Option<usize> {
 #[distributed_slice]
 pub(crate) static USER_CLASS_DEFS: [fn(&mut Runtime) -> Result<ClassID, i32>];
 
+pub(crate) const AIKE_LLM_BASE_URL: &str = dotenvy_macro::dotenv!("AIKE_LLM_BASE_URL");
+pub(crate) const AIKE_LLM_API_KEY: &str = dotenvy_macro::dotenv!("AIKE_LLM_API_KEY");
+pub(crate) const AIKE_LLM_MODEL: &str = dotenvy_macro::dotenv!("AIKE_LLM_MODEL");
+
 #[tokio::main]
 async fn main() -> ExitCode {
-    dotenv::dotenv().ok();
+    dotenvy::dotenv().ok();
 
     #[cfg(debug_assertions)]
     {
@@ -278,7 +282,7 @@ async fn main() -> ExitCode {
         })
         .inspect_err(|_| {
             let exc = rt.take_exception();
-            rt.create_context(|cx| {
+            let _ = rt.create_context(|cx| {
                 let t = exc.to_text(cx);
                 println!("{:?}", t);
                 Ok(())
