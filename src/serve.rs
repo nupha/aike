@@ -22,6 +22,9 @@ use tokio_stream::wrappers::UnboundedReceiverStream;
 use tower_http::cors::CorsLayer;
 use uuid::Uuid;
 
+#[cfg(feature = "enable_eval_log")]
+use crate::eval_logger::{EvalLogEntry, ToolCallLog, get_eval_logger};
+
 use crate::{
     engine::{Engine, GrammarConfig, TaskConfig},
     helpers::{
@@ -138,6 +141,12 @@ async fn handle_chat_completions(
     State(state): State<AppState>,
     Json(req): Json<CreateChatCompletionRequest>,
 ) -> Response {
+    #[cfg(feature = "enable_eval_log")]
+    let start_time = std::time::Instant::now();
+
+    #[cfg(feature = "enable_eval_log")]
+    let request_id = format!("req_{}", Uuid::new_v4().simple());
+
     if req.messages.is_empty() {
         return (
             StatusCode::BAD_REQUEST,
@@ -277,6 +286,18 @@ async fn handle_chat_completions(
     if is_stream {
         // streaming - sse
         let (tx, rx_tokio) = tokio::sync::mpsc::unbounded_channel::<String>();
+
+        #[cfg(feature = "enable_eval_log")]
+        let req_clone = req.clone();
+        #[cfg(feature = "enable_eval_log")]
+        let model_name_clone = model_name.clone();
+        #[cfg(feature = "enable_eval_log")]
+        let n_prompt_tokens_clone = n_prompt_tokens;
+        #[cfg(feature = "enable_eval_log")]
+        let request_id_clone = request_id.clone();
+        #[cfg(feature = "enable_eval_log")]
+        let start_time_clone = start_time;
+
         tokio::task::spawn_blocking(move || {
             redirect_engine_reply_to_chat_sse(
                 rx,
@@ -295,6 +316,19 @@ async fn handle_chat_completions(
                             let _ = tx.send(serialized);
                         }
                         ChunkSSE::Done => {
+                            #[cfg(feature = "enable_eval_log")]
+                            {
+                                // 流式结束，记录评估日志
+                                let latency = start_time_clone.elapsed().as_millis();
+                                log_eval_response_streaming(
+                                    &request_id_clone,
+                                    &req_clone,
+                                    latency,
+                                    n_prompt_tokens_clone,
+                                    &model_name_clone,
+                                );
+                            }
+
                             let _ = tx.send("[DONE]".to_string());
                         }
                         ChunkSSE::Error(e) => {
@@ -342,7 +376,23 @@ async fn handle_chat_completions(
         });
 
         match join.await {
-            Ok(Ok(val)) => Json(val).into_response(),
+            Ok(Ok(val)) => {
+                #[cfg(feature = "enable_eval_log")]
+                {
+                    // 记录评估日志
+                    let latency = start_time.elapsed().as_millis();
+                    log_eval_response(
+                        &request_id,
+                        &req,
+                        &val,
+                        latency,
+                        n_prompt_tokens,
+                        &model_name,
+                    );
+                }
+
+                Json(val).into_response()
+            }
             Ok(Err((code, err_info))) => (code, Json(err_info)).into_response(),
             Err(_) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -350,5 +400,147 @@ async fn handle_chat_completions(
             )
                 .into_response(),
         }
+    }
+}
+
+#[cfg(feature = "enable_eval_log")]
+fn log_eval_response(
+    request_id: &str,
+    req: &CreateChatCompletionRequest,
+    response: &serde_json::Value,
+    latency_ms: u128,
+    prompt_tokens: usize,
+    model_name: &str,
+) {
+    use async_openai::types::chat::Role;
+
+    // 从响应中提取内容
+    let mut output = String::new();
+    let mut reasoning = None;
+    let mut tool_calls = Vec::new();
+    let mut completion_tokens = 0;
+    let mut stop_reason = "unknown".to_string();
+
+    if let Some(choices) = response.get("choices").and_then(|c| c.as_array()) {
+        if let Some(choice) = choices.first() {
+            if let Some(message) = choice.get("message") {
+                if let Some(content) = message.get("content").and_then(|c| c.as_str()) {
+                    output = content.to_string();
+                }
+                if let Some(reasoning_content) =
+                    message.get("reasoning_content").and_then(|r| r.as_str())
+                {
+                    reasoning = Some(reasoning_content.to_string());
+                }
+                if let Some(calls) = message.get("tool_calls") {
+                    if let Some(arr) = calls.as_array() {
+                        for call in arr {
+                            if let Some(func) = call.get("function") {
+                                let name = func
+                                    .get("name")
+                                    .and_then(|n| n.as_str())
+                                    .unwrap_or("unknown");
+                                let args = func
+                                    .get("arguments")
+                                    .cloned()
+                                    .unwrap_or(serde_json::Value::Null);
+                                tool_calls.push(ToolCallLog {
+                                    tool_name: name.to_string(),
+                                    arguments: args,
+                                    success: true,
+                                    error: None,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+            if let Some(finish_reason) = choice.get("finish_reason").and_then(|f| f.as_str()) {
+                stop_reason = finish_reason.to_string();
+            }
+        }
+    }
+
+    if let Some(usage) = response.get("usage") {
+        completion_tokens = usage
+            .get("completion_tokens")
+            .and_then(|c| c.as_u64())
+            .unwrap_or(0) as usize;
+    }
+
+    let input = req
+        .messages
+        .iter()
+        .filter(|m| m.role == Role::User)
+        .filter_map(|m| m.content.as_ref())
+        .map(|c| c.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let entry = EvalLogEntry {
+        request_id: request_id.to_string(),
+        timestamp: chrono::Utc::now().to_rfc3339(),
+        input,
+        output,
+        reasoning,
+        tool_calls: if tool_calls.is_empty() {
+            None
+        } else {
+            Some(tool_calls)
+        },
+        latency_ms,
+        prompt_tokens,
+        completion_tokens,
+        stop_reason,
+        model: model_name.to_string(),
+        is_stream: req.stream.unwrap_or(false),
+        retrieval_context: None,
+        expected_output: None,
+    };
+
+    if let Err(e) = get_eval_logger().log(&entry) {
+        log::warn!("failed to log eval entry: {}", e);
+    }
+}
+
+#[cfg(feature = "enable_eval_log")]
+fn log_eval_response_streaming(
+    request_id: &str,
+    req: &CreateChatCompletionRequest,
+    latency_ms: u128,
+    prompt_tokens: usize,
+    model_name: &str,
+) {
+    use async_openai::types::chat::Role;
+
+    // 流式响应的日志记录（简化版，因为没有完整响应体）
+    let input = req
+        .messages
+        .iter()
+        .filter(|m| m.role == Role::User)
+        .filter_map(|m| m.content.as_ref())
+        .map(|c| c.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let entry = EvalLogEntry {
+        request_id: request_id.to_string(),
+        timestamp: chrono::Utc::now().to_rfc3339(),
+        input,
+        output: String::new(), // 流式响应在这里无法获取完整输出
+        reasoning: None,
+        tool_calls: None,
+        latency_ms,
+        prompt_tokens,
+        completion_tokens: 0,
+        stop_reason: "stream_done".to_string(),
+        model: model_name.to_string(),
+        is_stream: true,
+        retrieval_context: None,
+        expected_output: None,
+    };
+
+    if let Err(e) = get_eval_logger().log(&entry) {
+        log::warn!("failed to log eval entry: {}", e);
     }
 }
