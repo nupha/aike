@@ -52,6 +52,29 @@ fn normalize_path(path: &Path) -> PathBuf {
     result
 }
 
+fn set_chroot(path: Option<&str>) -> Result<(), String> {
+    if path.is_none() {
+        CHROOT_PATH.with(|c| {
+            *c.borrow_mut() = None;
+        });
+        return Ok(());
+    }
+
+    let normalized = normalize_path(Path::new(path.unwrap()));
+    let abs_path = std::fs::canonicalize(&normalized).map_err(|e| e.to_string())?;
+
+    // Verify the path exists and is a directory
+    let meta = std::fs::metadata(&normalized).map_err(|e| e.to_string())?;
+    if !meta.is_dir() {
+        return Err("chroot path must be a directory".to_string());
+    }
+    CHROOT_PATH.with(|s| {
+        *s.borrow_mut() = Some(abs_path);
+    });
+
+    Ok(())
+}
+
 /// Prepend chroot directory to a user path and normalize.
 /// Returns the path as-is if no chroot is set.
 /// Returns an error if the resolved path escapes the chroot boundary.
@@ -109,7 +132,12 @@ fn prepend_chroot(user_path: &str) -> Result<PathBuf, String> {
                 // Use real path so the kernel sees the resolved target
                 Ok(real)
             } else {
-                Err("forbidden: symlink escape detected".to_string())
+                Err(format!(
+                    "forbidden: symlink escape: {} -> {} {:?}",
+                    user_path.display(),
+                    real.display(),
+                    CHROOT_PATH.with(|c| c.borrow().as_ref().map(|s| s.to_owned()))
+                ))
             }
         }
         Err(_) => {
@@ -189,6 +217,28 @@ fn get_bytes_from_arg(ctx: &mut ScopedContext, arg: &mut JSValue) -> Result<Vec<
 
     ctx.throw_type_error("expect Uint8Array or ArrayBuffer");
     Err(-1)
+}
+
+fn js_fs_setChroot(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    if cc.length() == 0 {
+        ctx.throw_type_error("expecting path argument");
+        return Err(-1);
+    }
+
+    let arg = cc.arg(0);
+    let path = if arg.is_null() {
+        None
+    } else {
+        let v = arg.to_string(ctx)?;
+        Some(v.content().encode_utf8(false).to_string())
+    };
+
+    set_chroot(path.as_deref()).map_err(|e| {
+        ctx.throw_internal_error(&e);
+        -1
+    })?;
+
+    Ok(JSValue::UNDEFINED)
 }
 
 // ---------------------------------------------------------------------------
@@ -487,44 +537,6 @@ fn js_fs_open(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     });
 
     Ok(promise.into())
-}
-
-// ---------------------------------------------------------------------------
-// setChroot - set the chroot directory for this thread
-// ---------------------------------------------------------------------------
-fn js_fs_setChroot(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let arg = cc.arg(0);
-
-    // Unset chroot if arg is null or undefined
-    if arg.is_null() || arg.is_undefined() {
-        CHROOT_PATH.with(|c| {
-            *c.borrow_mut() = None;
-        });
-        return Ok(JSValue::UNDEFINED);
-    }
-
-    let v = arg.to_string(ctx)?;
-    let path = v.content().encode_utf8(false).to_string();
-    let normalized = normalize_path(Path::new(&path));
-
-    // Verify the path exists and is a directory
-    match std::fs::metadata(&normalized) {
-        Ok(meta) => {
-            if !meta.is_dir() {
-                ctx.throw_type_error("chroot path must be a directory");
-                return Err(-1);
-            }
-        }
-        Err(e) => {
-            ctx.throw_internal_error(&format!("chroot path error: {e}"));
-            return Err(-1);
-        }
-    }
-
-    CHROOT_PATH.with(|c| {
-        *c.borrow_mut() = Some(normalized);
-    });
-    Ok(JSValue::UNDEFINED)
 }
 
 // ---------------------------------------------------------------------------
