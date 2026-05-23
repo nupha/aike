@@ -573,6 +573,5 @@ def_native_object_with_payload!(
 
 #[distributed_slice(USER_CLASS_DEFS)]
 fn register_class_context(rt: &mut Runtime) -> Result<ClassID, i32> {
-    // JSLlamaContext::register(rt)
     rt.register_native_class_with_payload::<_, JSLlamaContext>()
 }
