@@ -10,8 +10,8 @@ use llama_cpp_ffi::{
     ModelOptions, PoolingType, RopeScalingType, SplitMode,
 };
 use zuqe::{
-    Array, CallContext, ClassCtorDef, ClassDef, ClassID, FieldDef, JS_PROP_ENUMERABLE, JSResult,
-    JSValue, Object, Runtime, ScopedContext,
+    Array, CallContext, ClassCtorDef, ClassID, FieldDef, JS_PROP_ENUMERABLE, JSResult, JSValue,
+    NativeObjectWithPayload, NativePayload, Object, Runtime, RuntimeImpl, ScopedContext,
     builtins::{promise::Promise, typed_array::TypedArray},
 };
 
@@ -21,6 +21,37 @@ use crate::{
     class_llama_sampler::js_model_createSamplerChain,
     helpers::{JinjaMessage, TemplateContext, create_minijinja_env},
 };
+
+#[derive(Debug, Clone)]
+#[repr(transparent)]
+pub(crate) struct ModelPayload(Box<LlamaModel>);
+
+impl NativePayload for ModelPayload {
+    unsafe fn into_raw(self) -> *mut c_void {
+        // Store Box<LlamaModel> as a Box so we can get &ModelPayload later
+        // ModelPayload is #[repr(transparent)] around Box<LlamaModel>
+        Box::into_raw(Box::new(self)).cast()
+    }
+
+    unsafe fn from_raw(ptr: *mut c_void) -> Self {
+        // Recover the Box<ModelPayload> and extract the ModelPayload
+        let boxed = unsafe { Box::from_raw(ptr.cast::<ModelPayload>()) };
+        *boxed
+    }
+
+    unsafe fn raw_as_ref<'a>(ptr: *mut c_void) -> &'a Self {
+        // ptr points to a Box<ModelPayload> on the heap
+        // We can safely cast it to &ModelPayload
+        let boxed_ptr = ptr.cast::<ModelPayload>();
+        unsafe { &*boxed_ptr }
+    }
+}
+
+impl From<LlamaModel> for ModelPayload {
+    fn from(model: LlamaModel) -> Self {
+        Self(Box::new(model))
+    }
+}
 
 const MODEL_PATH_HIDDEN_KEY: &str = "__modelPath";
 static LLAMA_LOG_BUFFER: OnceLock<Mutex<String>> = OnceLock::new();
@@ -260,7 +291,7 @@ fn js_model_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 -1
             })?;
 
-    let mut obj = JSLlamaModel::new_instance(ctx, new_target, model)?;
+    let mut obj = JSLlamaModel::new_instance(ctx, new_target, model.into())?;
 
     let path = ctx
         .create_string_from_utf8(file_name.into_bytes())
@@ -270,19 +301,28 @@ fn js_model_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     Ok(obj.into())
 }
 
-pub(super) fn get_llama_model(ctx: &mut ScopedContext, val: &JSValue) -> Result<LlamaModel, i32> {
-    let opaque = val
-        .retrive_object_payload(ctx, JSLlamaModel::class_id())?
-        .other()
+pub(super) fn get_llama_model(ctx: &mut ScopedContext, val: JSValue) -> Result<LlamaModel, i32> {
+    JSLlamaModel::try_from(val)
         .unwrap()
-        .opaque();
+        .payload()
+        .map(|m| *m.0.clone())
+        .ok_or_else(|| {
+            ctx.throw_type_error("invalid Model object");
+            -1
+        })
 
-    if !opaque.is_null() {
-        Ok(unsafe { (&*opaque.cast::<LlamaModel>()).clone() })
-    } else {
-        ctx.throw_type_error("invalid Model object");
-        Err(-1)
-    }
+    // let opaque = val
+    //     .retrive_object_payload(ctx, JSLlamaModel::class_id())?
+    //     .other()
+    //     .unwrap()
+    //     .opaque();
+
+    // if !opaque.is_null() {
+    //     Ok(unsafe { (&*opaque.cast::<LlamaModel>()).clone() })
+    // } else {
+    //     ctx.throw_type_error("invalid Model object");
+    //     Err(-1)
+    // }
 }
 
 const PROP_BOS_TOKEN: i32 = 1;
@@ -301,7 +341,7 @@ const PROP_CHAT_TEMPLATE: i32 = 13;
 
 fn js_mode_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
-    let model = get_llama_model(ctx, &this)?;
+    let model = get_llama_model(ctx, this)?;
 
     match cc.magic() {
         PROP_DESC => ctx
@@ -361,7 +401,7 @@ fn js_mode_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
 fn js_mode_setter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
-    let model = get_llama_model(ctx, &this)?;
+    let model = get_llama_model(ctx, this)?;
     let val = cc.arg(0);
 
     if cc.magic() == PROP_CHAT_TEMPLATE {
@@ -374,7 +414,7 @@ fn js_mode_setter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
 fn js_model_isEog(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
-    let model = get_llama_model(ctx, &this)?;
+    let model = get_llama_model(ctx, this)?;
     let token = cc.arg(0).to_number(ctx)?.to_i32();
     Ok(JSValue::Bool(model.is_eog(token)))
 }
@@ -668,7 +708,7 @@ pub(super) fn parse_context_params(
 
 fn js_model_createContext(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
-    let model = get_llama_model(ctx, &this)?;
+    let model = get_llama_model(ctx, this)?;
 
     let opts = if cc.length() > 0 {
         let v = cc.arg(0);
@@ -701,7 +741,7 @@ fn js_model_createContext(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
 
 fn js_model_tokenize(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
-    let llm_model = get_llama_model(ctx, &this)?;
+    let llm_model = get_llama_model(ctx, this)?;
     let text = cc.arg(0).to_string(ctx)?;
 
     let tokens = llm_model.tokenize(
@@ -721,7 +761,7 @@ fn js_model_tokenize(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
 fn js_model_detokenize(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
-    let model = get_llama_model(ctx, &this)?;
+    let model = get_llama_model(ctx, this)?;
 
     let arg0 = cc.arg(0);
     let tokens = parse_tokens(ctx, &arg0)?;
@@ -766,7 +806,7 @@ fn js_model_detokenize(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
 fn js_model_getMeta(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
-    let model = get_llama_model(ctx, &this)?;
+    let model = get_llama_model(ctx, this)?;
     let key = cc.arg(0).to_string(ctx)?;
     let key = CString::new(key.content().encode_utf8(false).as_ref()).map_err(|_| {
         ctx.throw_type_error("invalid meta key");
@@ -783,7 +823,7 @@ fn js_model_getMeta(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
 fn js_model_getMetaKeys(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
-    let model = get_llama_model(ctx, &this)?;
+    let model = get_llama_model(ctx, this)?;
     let count = model.meta_count();
 
     let mut lst = Vec::<JSValue>::with_capacity(count as usize);
@@ -802,7 +842,7 @@ fn js_model_getMetaKeys(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
 fn js_model_lookupTokenText(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
-    let model = get_llama_model(ctx, &this)?;
+    let model = get_llama_model(ctx, this)?;
     let token = cc.arg(0).to_number(ctx)?.to_i32();
 
     if let Some(text) = model.lookup_token_text(token) {
@@ -814,7 +854,7 @@ fn js_model_lookupTokenText(ctx: &mut ScopedContext, cc: CallContext) -> JSResul
 
 fn js_model_renderTemplate(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
-    let model = get_llama_model(ctx, &this)?;
+    let model = get_llama_model(ctx, this)?;
 
     let msgs_arr = cc.arg(0).as_object_Array().copied().ok_or_else(|| {
         ctx.throw_type_error("messages must be array");
@@ -1032,7 +1072,7 @@ fn js_model_load(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 cx.throw_internal_error(&e);
                 -1
             })?;
-            let mut obj = JSLlamaModel::new_instance(cx, JSValue::UNDEFINED, model)?;
+            let mut obj = JSLlamaModel::new_instance(cx, JSValue::UNDEFINED, model.into())?;
             let path = cx
                 .create_string_from_utf8(file_name.into_bytes())
                 .map(JSValue::String)?;
@@ -1057,15 +1097,103 @@ fn js_model_load(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
 const CLASS_MODEL_ENTRIES: &[FieldDef] = &[FieldDef::FUNC("load", 1, js_model_load, 0)];
 
-pub struct JSLlamaModel;
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[repr(transparent)]
+pub struct JSLlamaModel(Object);
 
 impl JSLlamaModel {
     thread_local! {
         static CLASS_ID: Cell<ClassID> = const { Cell::new(0) };
     }
 
-    /// register class
-    fn register(rt: &mut Runtime) -> Result<ClassID, i32> {
+    // /// register class
+    // fn register(rt: &mut Runtime) -> Result<ClassID, i32> {
+    //     unsafe {
+    //         extern "C" fn log_callback(
+    //             level: llama_cpp_ffi::ggml_log_level,
+    //             text: *const std::os::raw::c_char,
+    //             _user_data: *mut std::os::raw::c_void,
+    //         ) {
+    //             if text.is_null() {
+    //                 return;
+    //             }
+
+    //             if matches!(
+    //                 level,
+    //                 llama_cpp_ffi::ggml_log_level_GGML_LOG_LEVEL_WARN
+    //                     | llama_cpp_ffi::ggml_log_level_GGML_LOG_LEVEL_ERROR
+    //             ) {
+    //                 let msg = unsafe { CStr::from_ptr(text).to_string_lossy() };
+    //                 eprint!("{msg}");
+    //                 append_llama_log(&msg);
+    //             }
+    //         }
+
+    //         llama_cpp_ffi::llama_log_set(Some(log_callback), std::ptr::null_mut());
+    //         llama_cpp_ffi::llama_backend_init();
+    //     }
+
+    //     let class_id = rt.register_class_def(
+    //         ClassDef::new(
+    //             "Model",
+    //             CLASS_MODEL_PROTO_ENTRIES,
+    //             Some(
+    //                 ClassCtorDef::new(js_model_constructor, 2, false).entries(CLASS_MODEL_ENTRIES),
+    //             ),
+    //         )
+    //         .on_dispose(|_, opaque: *mut c_void, _| {
+    //             if !opaque.is_null() {
+    //                 drop(unsafe { Box::from_raw(opaque.cast::<LlamaModel>()) });
+    //             }
+    //         })
+    //         .on_unregister(|| unsafe {
+    //             llama_cpp_ffi::llama_backend_free();
+    //         }),
+    //     )?;
+
+    //     // save assigned class_id
+    //     Self::CLASS_ID.with(|s| s.set(class_id));
+    //     Ok(class_id)
+    // }
+
+    // pub fn new_instance(
+    //     ctx: &mut ScopedContext,
+    //     new_target: JSValue,
+    //     model: LlamaModel,
+    // ) -> Result<Object, i32> {
+    //     let class_id = Self::class_id();
+    //     let opaque = Box::into_raw(Box::new(model)).cast::<c_void>();
+    //     ctx.create_class_instance_with_opaque(new_target, class_id, opaque)
+    //         .map_err(|e| {
+    //             let p = e.other().unwrap();
+    //             let _ = unsafe { Box::from_raw(p.opaque().cast::<LlamaModel>()) };
+    //             -1
+    //         })
+    // }
+}
+
+impl NativeObjectWithPayload<ModelPayload> for JSLlamaModel {
+    fn class_name() -> &'static str {
+        "Model"
+    }
+
+    fn class_proto_entries() -> &'static [FieldDef] {
+        CLASS_MODEL_PROTO_ENTRIES
+    }
+
+    fn class_ctor_def() -> Option<ClassCtorDef> {
+        Some(ClassCtorDef::new(js_model_constructor, 2, false).entries(CLASS_MODEL_ENTRIES))
+    }
+
+    fn class_id() -> ClassID {
+        Self::CLASS_ID.with(|x| x.get())
+    }
+
+    fn set_class_id(class_id: ClassID) {
+        Self::CLASS_ID.with(|s| s.set(class_id));
+    }
+
+    fn on_register(_: &mut RuntimeImpl) {
         unsafe {
             extern "C" fn log_callback(
                 level: llama_cpp_ffi::ggml_log_level,
@@ -1090,53 +1218,44 @@ impl JSLlamaModel {
             llama_cpp_ffi::llama_log_set(Some(log_callback), std::ptr::null_mut());
             llama_cpp_ffi::llama_backend_init();
         }
-
-        let class_id = rt.register_class(
-            ClassDef::new(
-                "Model",
-                CLASS_MODEL_PROTO_ENTRIES,
-                Some(
-                    ClassCtorDef::new(js_model_constructor, 2, false).entries(CLASS_MODEL_ENTRIES),
-                ),
-            )
-            .on_dispose(|_, opaque: *mut c_void, _| {
-                if !opaque.is_null() {
-                    drop(unsafe { Box::from_raw(opaque.cast::<LlamaModel>()) });
-                }
-            })
-            .on_unregister(|| unsafe {
-                llama_cpp_ffi::llama_backend_free();
-            }),
-        )?;
-
-        // save assigned class_id
-        Self::CLASS_ID.with(|s| s.set(class_id));
-        Ok(class_id)
     }
 
-    /// get class id
-    #[inline(always)]
-    pub fn class_id() -> ClassID {
-        Self::CLASS_ID.with(|x| x.get())
+    fn on_unregister() {
+        unsafe {
+            llama_cpp_ffi::llama_backend_free();
+        }
     }
 
-    pub fn new_instance(
-        ctx: &mut ScopedContext,
-        new_target: JSValue,
-        model: LlamaModel,
-    ) -> Result<Object, i32> {
-        let class_id = Self::class_id();
-        let opaque = Box::into_raw(Box::new(model)).cast::<c_void>();
-        ctx.create_class_instance_with_opaque(new_target, class_id, opaque)
-            .map_err(|e| {
-                let p = e.other().unwrap();
-                let _ = unsafe { Box::from_raw(p.opaque().cast::<LlamaModel>()) };
-                -1
-            })
+    fn as_object(&self) -> &Object {
+        &self.0
+    }
+}
+
+impl TryFrom<Object> for JSLlamaModel {
+    type Error = i32;
+
+    fn try_from(o: Object) -> Result<Self, Self::Error> {
+        if o.class_id() == Self::class_id() {
+            Ok(Self(o))
+        } else {
+            Err(-1)
+        }
+    }
+}
+
+impl TryFrom<JSValue> for JSLlamaModel {
+    type Error = i32;
+
+    fn try_from(v: JSValue) -> Result<Self, Self::Error> {
+        if let JSValue::Object(o) = v {
+            TryFrom::<Object>::try_from(o)
+        } else {
+            Err(-1)
+        }
     }
 }
 
 #[distributed_slice(USER_CLASS_DEFS)]
 fn register_class_model(rt: &mut Runtime) -> Result<ClassID, i32> {
-    JSLlamaModel::register(rt)
+    rt.register_native_class_with_payload::<_, JSLlamaModel>()
 }

@@ -522,7 +522,7 @@ impl JSLlamaClient {
     }
 
     fn register(rt: &mut Runtime) -> Result<ClassID, i32> {
-        let class_id = rt.register_class(
+        let class_id = rt.register_class_def(
             ClassDef::new(
                 "Client",
                 CLASS_CLIENT_PROTO,

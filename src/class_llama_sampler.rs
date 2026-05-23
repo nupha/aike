@@ -43,7 +43,7 @@ pub(super) fn get_sampler_chain_arc(
 
 pub fn js_model_createSamplerChain(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
-    let model = get_llama_model(ctx, &this)?;
+    let model = get_llama_model(ctx, this)?;
 
     let mut chain = SamplerChain::new(model, false);
 
@@ -388,7 +388,7 @@ impl JSSamplerChain {
     }
 
     fn register(rt: &mut Runtime) -> Result<ClassID, i32> {
-        let class_id = rt.register_class(
+        let class_id = rt.register_class_def(
             ClassDef::new("SamplerChain", CLASS_SAMPLER_CHAIN_PROTO, None)
                 .on_dispose(Self::handle_dispose),
         )?;

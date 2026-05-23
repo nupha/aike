@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-use std::cell::Cell;
+use std::{cell::Cell, ffi::c_void};
 
 use linkme::distributed_slice;
 use zuqe::{
-    CallContext, ClassCtorDef, ClassDef, ClassID, FieldDef, JSResult, JSValue, Runtime,
-    ScopedContext,
+    CallContext, ClassCtorDef, ClassDef, ClassID, FieldDef, JSResult, JSValue, NativeObject,
+    Object, Runtime, ScopedContext,
 };
 
 use crate::USER_CLASS_DEFS;
@@ -271,31 +271,66 @@ const CLASS_TEXT_DECODER_PROTO: &[FieldDef] = &[
     FieldDef::FUNC("decode", 1, js_text_decoder_decode, 0),
 ];
 
-pub struct JSTextDecoder;
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct JSTextDecoder(Object);
 
 impl JSTextDecoder {
     thread_local! {
         static CLASS_ID: Cell<ClassID> = const { Cell::new(0) };
     }
+}
 
-    fn register(rt: &mut Runtime) -> Result<ClassID, i32> {
-        let class_id = rt.register_class(ClassDef::new(
-            "TextDecoder",
-            CLASS_TEXT_DECODER_PROTO,
-            Some(ClassCtorDef::new(js_text_decoder_constructor, 2, true).expose_to_global()),
-        ))?;
-
-        Self::CLASS_ID.with(|s| s.set(class_id));
-        Ok(class_id)
+impl NativeObject for JSTextDecoder {
+    fn class_name() -> &'static str {
+        "TextDecoder"
     }
 
-    #[inline(always)]
-    pub fn class_id() -> ClassID {
+    fn class_proto_entries() -> &'static [FieldDef] {
+        CLASS_TEXT_DECODER_PROTO
+    }
+
+    fn class_ctor_def() -> Option<ClassCtorDef> {
+        Some(ClassCtorDef::new(js_text_decoder_constructor, 2, true).expose_to_global())
+    }
+
+    fn class_id() -> ClassID {
         Self::CLASS_ID.with(|x| x.get())
+    }
+
+    fn set_class_id(class_id: ClassID) {
+        Self::CLASS_ID.with(|s| s.set(class_id));
+    }
+
+    fn as_object(&self) -> &Object {
+        &self.0
+    }
+}
+
+impl TryFrom<Object> for JSTextDecoder {
+    type Error = i32;
+
+    fn try_from(o: Object) -> Result<Self, Self::Error> {
+        if o.class_id() == Self::class_id() {
+            Ok(Self(o))
+        } else {
+            Err(-1)
+        }
+    }
+}
+
+impl TryFrom<JSValue> for JSTextDecoder {
+    type Error = i32;
+
+    fn try_from(v: JSValue) -> Result<Self, Self::Error> {
+        if let JSValue::Object(o) = v {
+            TryFrom::<Object>::try_from(o)
+        } else {
+            Err(-1)
+        }
     }
 }
 
 #[distributed_slice(USER_CLASS_DEFS)]
 fn register_class_text_decoder(rt: &mut Runtime) -> Result<ClassID, i32> {
-    JSTextDecoder::register(rt)
+    rt.register_native_class::<JSTextDecoder>()
 }

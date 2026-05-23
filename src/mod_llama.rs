@@ -1,5 +1,8 @@
 use llama_cpp_ffi::{FileType, KVCacheType, list_devices};
-use zuqe::{Array, CallContext, FieldDef, JS_PROP_ENUMERABLE, JSResult, JSValue, ScopedContext};
+use zuqe::{
+    Array, CallContext, FieldDef, JS_PROP_ENUMERABLE, JSResult, JSValue, NativeObjectWithPayload,
+    ScopedContext,
+};
 
 use crate::{class_llama_client::JSLlamaClient, class_llama_model::JSLlamaModel};
 

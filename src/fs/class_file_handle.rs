@@ -933,7 +933,7 @@ impl JSFileHandle {
 
     fn register(rt: &mut Runtime) -> Result<ClassID, i32> {
         let class_id = rt
-            .register_class(
+            .register_class_def(
                 ClassDef::new("FileHandle", CLASS_FILE_HANDLE_PROTO, None).on_dispose(
                     |_, opaque, _| {
                         if !opaque.is_null() {

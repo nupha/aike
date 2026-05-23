@@ -8,7 +8,8 @@ use async_openai::types::chat::{ReasoningEffort, StopConfiguration};
 use linkme::distributed_slice;
 use llama_cpp_ffi::ToolChoice as LarkToolChoice;
 use zuqe::{
-    CallContext, ClassDef, ClassID, FieldDef, JSResult, JSValue, Object, Runtime, ScopedContext,
+    CallContext, ClassDef, ClassID, FieldDef, JSResult, JSValue, NativePayload, Object, Runtime,
+    ScopedContext,
     builtins::{
         iterator::AsyncIterableIterator,
         promise::{Promise, PromiseResultSlot},
@@ -28,6 +29,31 @@ use crate::{
         redirect_engine_reply_to_responses_sse,
     },
 };
+
+#[derive(Clone)]
+#[repr(transparent)]
+pub(crate) struct LlamaEngine(Arc<Mutex<Engine>>);
+
+impl NativePayload for LlamaEngine {
+    unsafe fn into_raw(self) -> *mut c_void {
+        // Store LlamaEngine as a Box so we can get &LlamaEngine later
+        // LlamaEngine is #[repr(transparent)] around Arc<Mutex<Engine>>
+        Box::into_raw(Box::new(self)).cast()
+    }
+
+    unsafe fn from_raw(ptr: *mut c_void) -> Self {
+        // Recover the Box<LlamaEngine> and extract the LlamaEngine
+        let boxed = unsafe { Box::from_raw(ptr.cast::<LlamaEngine>()) };
+        *boxed
+    }
+
+    unsafe fn raw_as_ref<'a>(ptr: *mut c_void) -> &'a Self {
+        // ptr points to a Box<LlamaEngine> on the heap
+        // We can safely cast it to &LlamaEngine
+        let boxed_ptr = ptr.cast::<LlamaEngine>();
+        unsafe { &*boxed_ptr }
+    }
+}
 
 pub(crate) const ERR_CANCELLED: &str = "cancelled";
 pub(crate) const ERR_ENGINE_SHUTDOWN: &str = "engine shutdown";
@@ -717,7 +743,7 @@ impl JSLlamaEngine {
     }
 
     fn register(rt: &mut Runtime) -> Result<ClassID, i32> {
-        let class_id = rt.register_class(
+        let class_id = rt.register_class_def(
             ClassDef::new("Engine", CLASS_ENGINE_PROTO, None).on_dispose(
                 |_, opaque: *mut c_void, _| {
                     if !opaque.is_null() {

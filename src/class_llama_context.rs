@@ -532,7 +532,7 @@ impl JSLlamaContext {
 
     /// register class
     fn register(rt: &mut Runtime) -> Result<ClassID, i32> {
-        let class_id = rt.register_class(
+        let class_id = rt.register_class_def(
             ClassDef::new("Context", CLASS_CONTEXT_PROTO, None).on_dispose(
                 |_, opaque: *mut c_void, _| {
                     if !opaque.is_null() {

@@ -258,7 +258,7 @@ impl JSEventEmitter {
 
     fn register(rt: &mut Runtime) -> Result<ClassID, i32> {
         let class_id = rt
-            .register_class(
+            .register_class_def(
                 ClassDef::new(
                     "EventEmitter",
                     CLASS_EVENT_EMITTER_PROTO,
