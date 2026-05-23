@@ -13,11 +13,24 @@ use zuqe::{
     builtins::{promise::Promise, typed_array::TypedArray},
 };
 
-use crate::fs::class_file_handle::{JSFileHandle, make_stats};
+use crate::{
+    AIKE_SANDBOX_PATH,
+    fs::class_file_handle::{JSFileHandle, make_stats},
+};
 
 thread_local! {
     /// Chroot support
     static CHROOT_PATH: RefCell<Option<PathBuf>> = RefCell::new(None);
+
+    /// Sandbox restriction: limits all fs access to this directory.
+    /// None means no sandbox restriction.
+    static SANDBOX_PATH: RefCell<Option<PathBuf>> = RefCell::new(if AIKE_SANDBOX_PATH.is_empty() {
+        None
+    } else {
+        std::fs::canonicalize(std::path::PathBuf::from(AIKE_SANDBOX_PATH))
+        .ok()
+        .and_then(|p| if p.is_dir() { Some(p) } else { None })
+    });
 }
 
 /// Normalize a path by resolving . and .. components without following symlinks.
@@ -60,12 +73,9 @@ fn set_chroot(path: Option<&str>) -> Result<(), String> {
         return Ok(());
     }
 
-    let normalized = normalize_path(Path::new(path.unwrap()));
-    let abs_path = std::fs::canonicalize(&normalized).map_err(|e| e.to_string())?;
+    let abs_path = std::fs::canonicalize(Path::new(path.unwrap())).map_err(|e| e.to_string())?;
 
-    // Verify the path exists and is a directory
-    let meta = std::fs::metadata(&normalized).map_err(|e| e.to_string())?;
-    if !meta.is_dir() {
+    if !abs_path.is_dir() {
         return Err("chroot path must be a directory".to_string());
     }
     CHROOT_PATH.with(|s| {
@@ -75,12 +85,78 @@ fn set_chroot(path: Option<&str>) -> Result<(), String> {
     Ok(())
 }
 
-/// Prepend chroot directory to a user path and normalize.
-/// Returns the path as-is if no chroot is set.
-/// Returns an error if the resolved path escapes the chroot boundary.
-fn prepend_chroot(user_path: &str) -> Result<PathBuf, String> {
+fn set_sandbox(path: Option<&str>) -> Result<(), String> {
+    if path.is_none() {
+        SANDBOX_PATH.with(|c| {
+            *c.borrow_mut() = None;
+        });
+        return Ok(());
+    }
+
+    let abs_path = std::fs::canonicalize(Path::new(path.unwrap())).map_err(|e| e.to_string())?;
+
+    if !abs_path.is_dir() {
+        return Err("sandbox path must be a directory".to_string());
+    }
+    SANDBOX_PATH.with(|s| {
+        *s.borrow_mut() = Some(abs_path);
+    });
+
+    Ok(())
+}
+
+/// Check if a resolved path is within the sandbox boundary.
+fn is_inside_sandbox(resolved_path: &Path) -> bool {
+    let Some(sandbox) = SANDBOX_PATH.with(|c| c.borrow().clone()) else {
+        return true;
+    };
+    resolved_path.starts_with(&sandbox)
+}
+
+/// Resolve a user-provided path to a safe filesystem path by applying
+/// chroot isolation, sandbox restriction, and symlink-escape checks.
+///
+/// Processing order:
+/// 1. If CHROOT is set, prepend it to the user path and normalize.
+/// 2. Lexical boundary check: ensure the path stays within chroot.
+/// 3. Sandbox boundary check: ensure the path stays within SANDBOX_PATH.
+/// 4. Symlink resolution: canonicalize the path if it exists, then
+///    re-verify the sandbox boundary on the real path
+///    (prevents symlink-escape attacks).
+///
+/// Returns the resolved path as-is if neither CHROOT nor SANDBOX is set.
+/// When only SANDBOX is set, the path is resolved to absolute for boundary
+/// comparison but returned in its original form.
+/// Returns an error if any boundary check fails.
+fn resolve_safe_path(user_path: &str) -> Result<PathBuf, String> {
     let Some(chroot) = CHROOT_PATH.with(|c| c.borrow().clone()) else {
-        return Ok(PathBuf::from(user_path));
+        let p = PathBuf::from(user_path);
+        let has_sandbox = SANDBOX_PATH.with(|c| c.borrow().is_some());
+
+        if has_sandbox {
+            // Resolve to absolute for proper sandbox boundary comparison.
+            // canonicalize handles existing paths correctly (follows CWD).
+            // For writes to files that don't exist yet, canonicalize fails —
+            // we fall back to CWD + normalize so relative paths can still
+            // be compared against the absolute sandbox boundary.
+            let abs = match std::fs::canonicalize(&p) {
+                Ok(real) => real,
+                Err(_) => {
+                    // File doesn't exist yet (e.g. writeText to a new file).
+                    // Canonicalize requires an existing path, so we manually
+                    // resolve relative to CWD to get an absolute path for
+                    // sandbox comparison.
+                    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+                    normalize_path(&cwd.join(&p))
+                }
+            };
+
+            if !is_inside_sandbox(&abs) {
+                return Err(format!("forbidden: path outside sandbox: {}", user_path));
+            }
+        }
+
+        return Ok(p);
     };
 
     // Build raw path: absolute user paths are relative to chroot.
@@ -119,6 +195,14 @@ fn prepend_chroot(user_path: &str) -> Result<PathBuf, String> {
         return Err("forbidden: path outside chroot".to_string());
     }
 
+    // Sandbox check: after chroot resolution, verify sandbox boundary
+    if !is_inside_sandbox(&normalized) {
+        return Err(format!(
+            "forbidden: path outside sandbox: {}",
+            user_path.display()
+        ));
+    }
+
     // Resolve symlinks: canonicalize the path if the file exists.
     // This prevents symlink-escape attacks where a symlink inside
     // the chroot points to a path outside (e.g. /etc/shadow).
@@ -129,6 +213,13 @@ fn prepend_chroot(user_path: &str) -> Result<PathBuf, String> {
             let fs_allowed =
                 CHROOT_PATH.with(|c| c.borrow().as_ref().map_or(false, |s| real.starts_with(s)));
             if fs_allowed {
+                // Sandbox check on canonicalized path
+                if !is_inside_sandbox(&real) {
+                    return Err(format!(
+                        "forbidden: path outside sandbox: {}",
+                        user_path.display()
+                    ));
+                }
                 // Use real path so the kernel sees the resolved target
                 Ok(real)
             } else {
@@ -219,21 +310,40 @@ fn get_bytes_from_arg(ctx: &mut ScopedContext, arg: &mut JSValue) -> Result<Vec<
     Err(-1)
 }
 
-fn js_fs_setChroot(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    if cc.length() == 0 {
-        ctx.throw_type_error("expecting path argument");
-        return Err(-1);
-    }
+const BOUNDARY_SANDBOX: i32 = 0;
+const BOUNDARY_CHROOT: i32 = 1;
 
+fn js_fs_get_boundary(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let path = match cc.magic() {
+        BOUNDARY_SANDBOX => SANDBOX_PATH.with(|c| c.borrow().clone()),
+        BOUNDARY_CHROOT => CHROOT_PATH.with(|c| c.borrow().clone()),
+        _ => unreachable!(),
+    };
+    match path {
+        Some(p) => {
+            let s = p.to_string_lossy();
+            ctx.create_string_from_utf8(s.as_bytes().to_vec())
+                .map(JSValue::from)
+        }
+        None => Ok(JSValue::NULL),
+    }
+}
+
+fn js_fs_set_boundary(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let arg = cc.arg(0);
-    let path = if arg.is_null() {
+    let path = if arg.is_undefined_or_null() {
         None
     } else {
         let v = arg.to_string(ctx)?;
         Some(v.content().encode_utf8(false).to_string())
     };
 
-    set_chroot(path.as_deref()).map_err(|e| {
+    match cc.magic() {
+        BOUNDARY_SANDBOX => set_sandbox(path.as_deref()),
+        BOUNDARY_CHROOT => set_chroot(path.as_deref()),
+        _ => unreachable!(),
+    }
+    .map_err(|e| {
         ctx.throw_internal_error(&e);
         -1
     })?;
@@ -246,7 +356,7 @@ fn js_fs_setChroot(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 // ---------------------------------------------------------------------------
 fn js_fs_readText(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let v = cc.arg(0).to_string(ctx)?;
-    let path = prepend_chroot(&v.content().encode_utf8(false).to_string()).map_err(|e| {
+    let path = resolve_safe_path(&v.content().encode_utf8(false).to_string()).map_err(|e| {
         ctx.throw_internal_error(&e);
         -1
     })?;
@@ -279,7 +389,7 @@ fn js_fs_readText(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 // ---------------------------------------------------------------------------
 fn js_fs_readJSON(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let v = cc.arg(0).to_string(ctx)?;
-    let path = prepend_chroot(&v.content().encode_utf8(false).to_string()).map_err(|e| {
+    let path = resolve_safe_path(&v.content().encode_utf8(false).to_string()).map_err(|e| {
         ctx.throw_internal_error(&e);
         -1
     })?;
@@ -316,7 +426,7 @@ fn js_fs_readJSON(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 // ---------------------------------------------------------------------------
 fn js_fs_readBytes(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let v = cc.arg(0).to_string(ctx)?;
-    let path = prepend_chroot(&v.content().encode_utf8(false).to_string()).map_err(|e| {
+    let path = resolve_safe_path(&v.content().encode_utf8(false).to_string()).map_err(|e| {
         ctx.throw_internal_error(&e);
         -1
     })?;
@@ -344,7 +454,7 @@ fn js_fs_readBytes(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 // ---------------------------------------------------------------------------
 fn js_fs_writeText(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let v = cc.arg(0).to_string(ctx)?;
-    let path = prepend_chroot(&v.content().encode_utf8(false).to_string()).map_err(|e| {
+    let path = resolve_safe_path(&v.content().encode_utf8(false).to_string()).map_err(|e| {
         ctx.throw_internal_error(&e);
         -1
     })?;
@@ -371,7 +481,7 @@ fn js_fs_writeText(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 // ---------------------------------------------------------------------------
 fn js_fs_writeJSON(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let v = cc.arg(0).to_string(ctx)?;
-    let path = prepend_chroot(&v.content().encode_utf8(false).to_string()).map_err(|e| {
+    let path = resolve_safe_path(&v.content().encode_utf8(false).to_string()).map_err(|e| {
         ctx.throw_internal_error(&e);
         -1
     })?;
@@ -418,7 +528,7 @@ fn js_fs_writeJSON(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 // ---------------------------------------------------------------------------
 fn js_fs_writeBytes(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let v = cc.arg(0).to_string(ctx)?;
-    let path = prepend_chroot(&v.content().encode_utf8(false).to_string()).map_err(|e| {
+    let path = resolve_safe_path(&v.content().encode_utf8(false).to_string()).map_err(|e| {
         ctx.throw_internal_error(&e);
         -1
     })?;
@@ -444,7 +554,7 @@ fn js_fs_writeBytes(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 // ---------------------------------------------------------------------------
 fn js_fs_appendText(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let v = cc.arg(0).to_string(ctx)?;
-    let path = prepend_chroot(&v.content().encode_utf8(false).to_string()).map_err(|e| {
+    let path = resolve_safe_path(&v.content().encode_utf8(false).to_string()).map_err(|e| {
         ctx.throw_internal_error(&e);
         -1
     })?;
@@ -480,7 +590,7 @@ fn js_fs_appendText(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 // ---------------------------------------------------------------------------
 fn js_fs_open(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let v = cc.arg(0).to_string(ctx)?;
-    let path = prepend_chroot(&v.content().encode_utf8(false).to_string()).map_err(|e| {
+    let path = resolve_safe_path(&v.content().encode_utf8(false).to_string()).map_err(|e| {
         ctx.throw_internal_error(&e);
         -1
     })?;
@@ -544,7 +654,7 @@ fn js_fs_open(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 // ---------------------------------------------------------------------------
 fn js_fs_write(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let v = cc.arg(0).to_string(ctx)?;
-    let path = prepend_chroot(&v.content().encode_utf8(false).to_string()).map_err(|e| {
+    let path = resolve_safe_path(&v.content().encode_utf8(false).to_string()).map_err(|e| {
         ctx.throw_internal_error(&e);
         -1
     })?;
@@ -594,7 +704,7 @@ fn js_fs_write(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 // ---------------------------------------------------------------------------
 fn js_fs_ensureDir(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let v = cc.arg(0).to_string(ctx)?;
-    let path = prepend_chroot(&v.content().encode_utf8(false).to_string()).map_err(|e| {
+    let path = resolve_safe_path(&v.content().encode_utf8(false).to_string()).map_err(|e| {
         ctx.throw_internal_error(&e);
         -1
     })?;
@@ -679,7 +789,7 @@ fn make_dirent_obj(ctx: &mut ScopedContext, d: &DirentData) -> Result<JSValue, i
 // ---------------------------------------------------------------------------
 fn js_fs_readDir(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let v = cc.arg(0).to_string(ctx)?;
-    let path = prepend_chroot(&v.content().encode_utf8(false).to_string()).map_err(|e| {
+    let path = resolve_safe_path(&v.content().encode_utf8(false).to_string()).map_err(|e| {
         ctx.throw_internal_error(&e);
         -1
     })?;
@@ -739,7 +849,7 @@ fn js_fs_readDir(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
 fn js_fs_stat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let v = cc.arg(0).to_string(ctx)?;
-    let path = prepend_chroot(&v.content().encode_utf8(false).to_string()).map_err(|e| {
+    let path = resolve_safe_path(&v.content().encode_utf8(false).to_string()).map_err(|e| {
         ctx.throw_internal_error(&e);
         -1
     })?;
@@ -765,7 +875,10 @@ fn js_fs_stat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 }
 
 const MOD_FS_ENTRIES: &[FieldDef] = &[
-    FieldDef::FUNC("setChroot", 1, js_fs_setChroot, 0),
+    FieldDef::FUNC("getSandbox", 0, js_fs_get_boundary, BOUNDARY_SANDBOX as _),
+    FieldDef::FUNC("getChroot", 0, js_fs_get_boundary, BOUNDARY_CHROOT as _),
+    FieldDef::FUNC("setSandbox", 1, js_fs_set_boundary, BOUNDARY_SANDBOX as _),
+    FieldDef::FUNC("setChroot", 1, js_fs_set_boundary, BOUNDARY_CHROOT as _),
     FieldDef::FUNC("open", 2, js_fs_open, 0),
     FieldDef::FUNC("readText", 1, js_fs_readText, 0),
     FieldDef::FUNC("readJSON", 1, js_fs_readJSON, 0),

@@ -155,6 +155,7 @@ pub(crate) static USER_CLASS_DEFS: [fn(&mut Runtime) -> Result<ClassID, i32>];
 pub(crate) const AIKE_LLM_BASE_URL: &str = dotenvy_macro::dotenv!("AIKE_LLM_BASE_URL");
 pub(crate) const AIKE_LLM_API_KEY: &str = dotenvy_macro::dotenv!("AIKE_LLM_API_KEY");
 pub(crate) const AIKE_LLM_MODEL: &str = dotenvy_macro::dotenv!("AIKE_LLM_MODEL");
+pub(crate) const AIKE_SANDBOX_PATH: &str = dotenvy_macro::dotenv!("AIKE_SANDBOX_PATH");
 
 #[tokio::main]
 async fn main() -> ExitCode {
