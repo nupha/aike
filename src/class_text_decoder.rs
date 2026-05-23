@@ -132,15 +132,12 @@ fn js_text_decoder_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSRe
     };
 
     // Store encoding and options in object properties
-    let class_id = JSTextDecoder::class_id();
-    let mut instance =
-        match ctx.create_class_instance_with_opaque(new_target, class_id, std::ptr::null_mut()) {
-            Ok(inst) => inst,
-            Err(_) => {
-                ctx.throw_internal_error("Failed to create TextDecoder instance");
-                return Err(-1);
-            }
-        };
+    let mut obj = ctx
+        .create_class_instance(new_target, JSTextDecoder::class_id())
+        .map_err(|_| {
+            ctx.throw_internal_error("Failed to create TextDecoder instance");
+            -1
+        })?;
 
     // Store encoding as string property
     let enc_name = match encoding {
@@ -150,15 +147,15 @@ fn js_text_decoder_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSRe
         Encoding::Iso8859_1 => "iso-8859-1",
     };
     let enc_str = ctx.create_string_from_utf8(enc_name.as_bytes().to_vec())?;
-    instance.define_property_value_str(ctx, "__encoding", enc_str.into(), 0)?;
+    obj.define_property_value_str(ctx, "__encoding", enc_str.into(), 0)?;
 
     // Store fatal flag
-    instance.define_property_value_str(ctx, "__fatal", JSValue::Bool(fatal), 0)?;
+    obj.define_property_value_str(ctx, "__fatal", JSValue::Bool(fatal), 0)?;
 
     // Store ignoreBOM flag
-    instance.define_property_value_str(ctx, "__ignoreBom", JSValue::Bool(ignore_bom), 0)?;
+    obj.define_property_value_str(ctx, "__ignoreBom", JSValue::Bool(ignore_bom), 0)?;
 
-    Ok(instance.into())
+    Ok(obj.into())
 }
 
 fn js_text_decoder_decode(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
