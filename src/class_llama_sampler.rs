@@ -16,10 +16,10 @@ use crate::{USER_CLASS_DEFS, class_llama_model::get_llama_model};
 
 #[derive(Clone)]
 #[repr(transparent)]
-pub(crate) struct LlamaSamplerChain(pub(super) Arc<Mutex<SamplerChain>>);
+pub(crate) struct SamplerPayload(pub(super) Arc<Mutex<SamplerChain>>);
 
-impl NativePayload for LlamaSamplerChain {
-    unsafe fn into_raw(self) -> *mut c_void {
+impl NativePayload for SamplerPayload {
+    fn into_raw(self) -> *mut c_void {
         // Store LlamaSamplerChain as a Box so we can get &LlamaSamplerChain later
         // LlamaSamplerChain is #[repr(transparent)] around Arc<Mutex<SamplerChain>>
         Box::into_raw(Box::new(self)).cast()
@@ -39,13 +39,13 @@ impl NativePayload for LlamaSamplerChain {
     }
 }
 
-impl From<Arc<Mutex<SamplerChain>>> for LlamaSamplerChain {
+impl From<Arc<Mutex<SamplerChain>>> for SamplerPayload {
     fn from(engine: Arc<Mutex<SamplerChain>>) -> Self {
         Self(engine)
     }
 }
 
-fn get_sampler_chain(ctx: &mut ScopedContext, val: &JSValue) -> Result<LlamaSamplerChain, i32> {
+fn get_sampler_chain(ctx: &mut ScopedContext, val: &JSValue) -> Result<SamplerPayload, i32> {
     let ob = JSSamplerChain::try_from(val.clone()).unwrap();
     if let Some(p) = ob.payload() {
         Ok(p.clone())
@@ -58,7 +58,7 @@ fn get_sampler_chain(ctx: &mut ScopedContext, val: &JSValue) -> Result<LlamaSamp
 pub(super) fn get_sampler_chain_arc(
     ctx: &mut ScopedContext,
     val: &JSValue,
-) -> Result<LlamaSamplerChain, i32> {
+) -> Result<SamplerPayload, i32> {
     get_sampler_chain(ctx, val)
 }
 
@@ -370,8 +370,9 @@ const CLASS_SAMPLER_CHAIN_PROTO: &[FieldDef] = &[
 def_native_object_with_payload!(
     "SamplerChain",
     JSSamplerChain,
-    LlamaSamplerChain,
-    CLASS_SAMPLER_CHAIN_PROTO
+    SamplerPayload,
+    CLASS_SAMPLER_CHAIN_PROTO,
+    None
 );
 
 #[distributed_slice(USER_CLASS_DEFS)]

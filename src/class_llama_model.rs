@@ -28,7 +28,7 @@ use crate::{
 pub(crate) struct ModelPayload(Box<LlamaModel>);
 
 impl NativePayload for ModelPayload {
-    unsafe fn into_raw(self) -> *mut c_void {
+    fn into_raw(self) -> *mut c_void {
         // Store Box<LlamaModel> as a Box so we can get &ModelPayload later
         // ModelPayload is #[repr(transparent)] around Box<LlamaModel>
         Box::into_raw(Box::new(self)).cast()
@@ -36,14 +36,14 @@ impl NativePayload for ModelPayload {
 
     unsafe fn from_raw(ptr: *mut c_void) -> Self {
         // Recover the Box<ModelPayload> and extract the ModelPayload
-        let boxed = unsafe { Box::from_raw(ptr.cast::<ModelPayload>()) };
+        let boxed = unsafe { Box::from_raw(ptr.cast::<Self>()) };
         *boxed
     }
 
     unsafe fn raw_as_ref<'a>(ptr: *mut c_void) -> &'a Self {
         // ptr points to a Box<ModelPayload> on the heap
         // We can safely cast it to &ModelPayload
-        let boxed_ptr = ptr.cast::<ModelPayload>();
+        let boxed_ptr = ptr.cast::<Self>();
         unsafe { &*boxed_ptr }
     }
 }

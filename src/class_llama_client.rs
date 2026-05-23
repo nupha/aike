@@ -9,12 +9,13 @@ use reqwest::header::HeaderMap;
 use tokio::io::AsyncBufReadExt;
 use tokio_util::io::StreamReader;
 use zuqe::{
-    CallContext, ClassCtorDef, ClassDef, ClassID, FieldDef, JSResult, JSValue, Object, Runtime,
-    ScopedContext,
+    CallContext, ClassCtorDef, ClassID, FieldDef, JSResult, JSValue, NativeObjectWithPayload,
+    NativePayload, Object, Runtime, ScopedContext,
     builtins::{
         iterator::AsyncIterableIterator,
         promise::{Promise, PromiseResultSlot},
     },
+    def_native_object_with_payload,
 };
 
 use crate::{
@@ -25,6 +26,61 @@ use crate::{
     class_llama_engine::{MAGIC_CHAT_ONCE, MAGIC_CHAT_STREAM},
     helpers::json_keys_camel_to_snake,
 };
+
+#[derive(Debug)]
+pub(crate) struct ClientState {
+    pub(crate) base_url: String,
+    pub(crate) api_key: String,
+    pub(crate) org_id: String,
+    pub(crate) project_id: String,
+    pub(crate) custom_headers: HeaderMap,
+    pub(crate) model_name: Option<String>,
+    pub(crate) buffered_tool_call: bool,
+    /// Request timeout. `None` = no timeout (reqwest default, infinite wait).
+    pub(crate) timeout: Option<Duration>,
+}
+
+#[derive(Debug, Clone)]
+#[repr(transparent)]
+pub(crate) struct ClientPayload(Arc<ClientState>);
+
+impl NativePayload for ClientPayload {
+    fn into_raw(self) -> *mut c_void {
+        // Store Box<ClientPayload> to ensure pointer points to ClientPayload
+        Box::into_raw(Box::new(self)).cast::<c_void>()
+    }
+
+    unsafe fn from_raw(ptr: *mut c_void) -> Self {
+        // Recover Box<ClientPayload> and extract the ClientPayload
+        let boxed = unsafe { Box::from_raw(ptr.cast::<ClientPayload>()) };
+        *boxed
+    }
+
+    unsafe fn raw_as_ref<'a>(ptr: *mut c_void) -> &'a Self {
+        // ptr points to Box<ClientPayload> on the heap
+        // We can safely cast it to &ClientPayload
+        let boxed_ptr = ptr.cast::<ClientPayload>();
+        unsafe { &*boxed_ptr }
+    }
+}
+
+impl std::ops::Deref for ClientPayload {
+    type Target = Arc<ClientState>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+pub(crate) fn get_client(ctx: &mut ScopedContext, val: &JSValue) -> Result<ClientPayload, i32> {
+    let ob = JSLlamaClient::try_from(*val).unwrap();
+    if let Some(c) = ob.payload() {
+        Ok(c.clone())
+    } else {
+        ctx.throw_type_error("OpenAI client was disposed");
+        Err(-1)
+    }
+}
 
 /// Constructor: new Client({apiKey, baseUrl, model?, timeout?})
 fn js_client_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -72,53 +128,18 @@ fn js_client_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         None
     };
 
-    JSLlamaClient::new_instance(
-        ctx,
-        new_target,
-        default_model,
+    let state = ClientPayload(Arc::new(ClientState {
+        model_name: default_model,
         base_url,
         api_key,
-        String::new(),
-        String::new(),
-        HeaderMap::new(),
+        org_id: String::new(),
+        project_id: String::new(),
+        custom_headers: HeaderMap::new(),
         buffered_tool_call,
         timeout,
-    )
-    .map(|obj| obj.into())
-}
+    }));
 
-pub(crate) struct ClientState {
-    pub(crate) base_url: String,
-    pub(crate) api_key: String,
-    pub(crate) org_id: String,
-    pub(crate) project_id: String,
-    pub(crate) custom_headers: HeaderMap,
-    pub(crate) model_name: Option<String>,
-    pub(crate) buffered_tool_call: bool,
-    /// Request timeout. `None` = no timeout (reqwest default, infinite wait).
-    pub(crate) timeout: Option<Duration>,
-}
-
-/// Get Arc<ClientState> from JS value (bumps strong count)
-pub(crate) fn get_client_arc(
-    ctx: &mut ScopedContext,
-    val: &JSValue,
-) -> Result<Arc<ClientState>, i32> {
-    let payload = val
-        .retrive_object_payload(ctx, JSLlamaClient::class_id())?
-        .other()
-        .unwrap();
-    let opaque = payload.opaque();
-
-    if opaque.is_null() {
-        ctx.throw_type_error("OpenAI client was disposed");
-        Err(-1)
-    } else {
-        let ptr = opaque.cast::<ClientState>();
-        // SAFETY: opaque came from Arc::into_raw, bump strong count to create a new Arc
-        unsafe { Arc::increment_strong_count(ptr) };
-        Ok(unsafe { Arc::from_raw(ptr) })
-    }
+    JSLlamaClient::new_instance(ctx, new_target, state).map(|obj| obj.into())
 }
 
 /// Accumulates tool_call deltas until complete, then emits a single chunk.
@@ -205,7 +226,7 @@ enum ChatReply {
 
 fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
-    let client_arc = get_client_arc(ctx, &this)?;
+    let client_arc = get_client(ctx, &this)?;
     let is_stream = cc.magic() == MAGIC_CHAT_STREAM;
 
     // Single object argument
@@ -459,7 +480,7 @@ const PROP_MODEL: i32 = 0;
 
 fn js_client_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
-    let client_arc = get_client_arc(ctx, &this)?;
+    let client_arc = get_client(ctx, &this)?;
 
     match cc.magic() {
         PROP_MODEL => match &client_arc.model_name {
@@ -514,69 +535,15 @@ const CLASS_CLIENT_PROTO: &[FieldDef] = &[
     FieldDef::GETSET("model", Some(js_client_getter), None, PROP_MODEL as _),
 ];
 
-pub struct JSLlamaClient;
-
-impl JSLlamaClient {
-    thread_local! {
-        static CLASS_ID: Cell<ClassID> = const { Cell::new(0) };
-    }
-
-    fn register(rt: &mut Runtime) -> Result<ClassID, i32> {
-        let class_id = rt.register_class_def(
-            ClassDef::new(
-                "Client",
-                CLASS_CLIENT_PROTO,
-                Some(ClassCtorDef::new(js_client_constructor, 1, false)),
-            )
-            .on_dispose(|_, opaque: *mut c_void, _| {
-                if !opaque.is_null() {
-                    drop(unsafe { Arc::from_raw(opaque.cast::<ClientState>()) });
-                }
-            }),
-        )?;
-        Self::CLASS_ID.with(|s| s.set(class_id));
-        Ok(class_id)
-    }
-
-    #[inline(always)]
-    pub fn class_id() -> ClassID {
-        Self::CLASS_ID.with(|x| x.get())
-    }
-
-    pub fn new_instance(
-        ctx: &mut ScopedContext,
-        new_target: JSValue,
-        model: Option<String>,
-        base_url: String,
-        api_key: String,
-        org_id: String,
-        project_id: String,
-        custom_headers: HeaderMap,
-        buffered_tool_call: bool,
-        timeout: Option<Duration>,
-    ) -> Result<Object, i32> {
-        let state = Arc::new(ClientState {
-            model_name: model,
-            base_url,
-            api_key,
-            org_id,
-            project_id,
-            custom_headers,
-            buffered_tool_call,
-            timeout,
-        });
-        let opaque = Arc::into_raw(state).cast::<c_void>() as *mut c_void;
-
-        ctx.create_class_instance_with_opaque(new_target, Self::class_id(), opaque)
-            .map_err(|e| {
-                let p = e.other().unwrap();
-                let _ = unsafe { Arc::from_raw(p.opaque().cast::<ClientState>()) };
-                -1
-            })
-    }
-}
+def_native_object_with_payload!(
+    "Client",
+    JSLlamaClient,
+    ClientPayload,
+    CLASS_CLIENT_PROTO,
+    Some(ClassCtorDef::new(js_client_constructor, 1, false))
+);
 
 #[distributed_slice(USER_CLASS_DEFS)]
 fn register_class_openai(rt: &mut Runtime) -> Result<ClassID, i32> {
-    JSLlamaClient::register(rt)
+    rt.register_native_class_with_payload::<_, JSLlamaClient>()
 }

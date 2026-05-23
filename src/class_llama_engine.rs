@@ -36,7 +36,7 @@ use crate::{
 pub(crate) struct LlamaEngine(Arc<Mutex<Engine>>);
 
 impl NativePayload for LlamaEngine {
-    unsafe fn into_raw(self) -> *mut c_void {
+    fn into_raw(self) -> *mut c_void {
         // Store LlamaEngine as a Box so we can get &LlamaEngine later
         // LlamaEngine is #[repr(transparent)] around Arc<Mutex<Engine>>
         Box::into_raw(Box::new(self)).cast()
@@ -44,14 +44,14 @@ impl NativePayload for LlamaEngine {
 
     unsafe fn from_raw(ptr: *mut c_void) -> Self {
         // Recover the Box<LlamaEngine> and extract the LlamaEngine
-        let boxed = unsafe { Box::from_raw(ptr.cast::<LlamaEngine>()) };
+        let boxed = unsafe { Box::from_raw(ptr.cast::<Self>()) };
         *boxed
     }
 
     unsafe fn raw_as_ref<'a>(ptr: *mut c_void) -> &'a Self {
         // ptr points to a Box<LlamaEngine> on the heap
         // We can safely cast it to &LlamaEngine
-        let boxed_ptr = ptr.cast::<LlamaEngine>();
+        let boxed_ptr = ptr.cast::<Self>();
         unsafe { &*boxed_ptr }
     }
 }
@@ -727,7 +727,7 @@ const CLASS_ENGINE_PROTO: &[FieldDef] = &[
     FieldDef::FUNC("dispose", 0, js_engine_dispose, 0),
 ];
 
-def_native_object_with_payload!("Engine", JSEngine, LlamaEngine, CLASS_ENGINE_PROTO);
+def_native_object_with_payload!("Engine", JSEngine, LlamaEngine, CLASS_ENGINE_PROTO, None);
 
 #[distributed_slice(USER_CLASS_DEFS)]
 fn register_class_engine(rt: &mut Runtime) -> Result<ClassID, i32> {

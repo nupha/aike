@@ -13,7 +13,7 @@ use zuqe::{
     },
 };
 
-use crate::{AIKE_LLM_BASE_URL, AIKE_LLM_MODEL, class_llama_client::get_client_arc};
+use crate::{AIKE_LLM_MODEL, class_llama_client::get_client};
 
 pub(super) const MAGIC_RESPONSES_STREAM: i32 = 4;
 pub(super) const MAGIC_RESPONSES_ONCE: i32 = 5;
@@ -120,7 +120,7 @@ fn stream_event_to_js(ctx: &mut ScopedContext, event: &ResponseStreamEvent) -> J
 
 pub(super) fn js_client_responses(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
-    let client_arc = get_client_arc(ctx, &this)?;
+    let client_arc = get_client(ctx, &this)?;
     let is_stream = cc.magic() == MAGIC_RESPONSES_STREAM;
 
     let opts = cc.arg(0).as_object().copied().ok_or_else(|| {
