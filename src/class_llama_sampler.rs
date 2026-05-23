@@ -7,38 +7,59 @@ use std::{
 use linkme::distributed_slice;
 use llama_cpp_ffi::{SamplerChain, SamplerKind};
 use zuqe::{
-    CallContext, ClassDef, ClassID, FieldDef, IntOrFloat, JS_PROP_ENUMERABLE, JSResult, JSValue,
-    Object, Runtime, RuntimeImpl, ScopedContext,
+    CallContext, ClassID, FieldDef, IntOrFloat, JS_PROP_ENUMERABLE, JSResult, JSValue,
+    NativeObjectWithPayload, NativePayload, Object, Runtime, ScopedContext,
+    def_native_object_with_payload,
 };
 
 use crate::{USER_CLASS_DEFS, class_llama_model::get_llama_model};
 
-fn get_sampler_chain<'a>(
-    ctx: &mut ScopedContext,
-    val: &JSValue,
-) -> Result<&'a Mutex<SamplerChain>, i32> {
-    let payload = val
-        .retrive_object_payload(ctx, JSSamplerChain::class_id())?
-        .other()
-        .unwrap();
-    let opaque = payload.opaque();
-    if opaque.is_null() {
+#[derive(Clone)]
+#[repr(transparent)]
+pub(crate) struct LlamaSamplerChain(pub(super) Arc<Mutex<SamplerChain>>);
+
+impl NativePayload for LlamaSamplerChain {
+    unsafe fn into_raw(self) -> *mut c_void {
+        // Store LlamaSamplerChain as a Box so we can get &LlamaSamplerChain later
+        // LlamaSamplerChain is #[repr(transparent)] around Arc<Mutex<SamplerChain>>
+        Box::into_raw(Box::new(self)).cast()
+    }
+
+    unsafe fn from_raw(ptr: *mut c_void) -> Self {
+        // Recover the Box<LlamaSamplerChain> and extract the LlamaSamplerChain
+        let boxed = unsafe { Box::from_raw(ptr.cast::<Self>()) };
+        *boxed
+    }
+
+    unsafe fn raw_as_ref<'a>(ptr: *mut c_void) -> &'a Self {
+        // ptr points to a Box<LlamaSamplerChain> on the heap
+        // We can safely cast it to &LlamaSamplerChain
+        let boxed_ptr = ptr.cast::<Self>();
+        unsafe { &*boxed_ptr }
+    }
+}
+
+impl From<Arc<Mutex<SamplerChain>>> for LlamaSamplerChain {
+    fn from(engine: Arc<Mutex<SamplerChain>>) -> Self {
+        Self(engine)
+    }
+}
+
+fn get_sampler_chain(ctx: &mut ScopedContext, val: &JSValue) -> Result<LlamaSamplerChain, i32> {
+    let ob = JSSamplerChain::try_from(val.clone()).unwrap();
+    if let Some(p) = ob.payload() {
+        Ok(p.clone())
+    } else {
         ctx.throw_type_error("SamplerChain was disposed");
         Err(-1)
-    } else {
-        let k = unsafe { &*opaque.cast::<Mutex<SamplerChain>>() };
-        Ok(k)
     }
 }
 
 pub(super) fn get_sampler_chain_arc(
     ctx: &mut ScopedContext,
     val: &JSValue,
-) -> Result<Arc<Mutex<SamplerChain>>, i32> {
-    let chain_ref = get_sampler_chain(ctx, val)?;
-    let ptr = chain_ref as *const Mutex<SamplerChain>;
-    unsafe { Arc::increment_strong_count(ptr) };
-    Ok(unsafe { Arc::from_raw(ptr) })
+) -> Result<LlamaSamplerChain, i32> {
+    get_sampler_chain(ctx, val)
 }
 
 pub fn js_model_createSamplerChain(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -187,7 +208,7 @@ pub fn js_model_createSamplerChain(ctx: &mut ScopedContext, cc: CallContext) -> 
     chain.finalize_samplers();
 
     let mut obj =
-        JSSamplerChain::new_instance(ctx, JSValue::UNDEFINED, Arc::new(Mutex::new(chain)))?;
+        JSSamplerChain::new_instance(ctx, JSValue::UNDEFINED, Arc::new(Mutex::new(chain)).into())?;
     obj.define_property_value_str(ctx, "model", this, JS_PROP_ENUMERABLE)?;
 
     Ok(obj.into())
@@ -196,7 +217,7 @@ pub fn js_model_createSamplerChain(ctx: &mut ScopedContext, cc: CallContext) -> 
 fn js_samplerchain_penalties(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let chain = get_sampler_chain(ctx, &this)?;
-    let mut chain = chain.lock().unwrap();
+    let mut chain = chain.0.lock().unwrap();
 
     let mut repeat_last_n = 64_i32;
     let mut repeat_penalty = 1.1;
@@ -279,7 +300,7 @@ const TOP_P: i32 = 2;
 fn js_samplerchain_topKP(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let chain = get_sampler_chain(ctx, &this)?;
-    let mut chain = chain.lock().unwrap();
+    let mut chain = chain.0.lock().unwrap();
 
     let n = cc.arg(0).to_number(ctx)?;
     match cc.magic() {
@@ -303,7 +324,7 @@ fn js_samplerchain_topKP(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 fn js_samplerchain_temperature(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let chain = get_sampler_chain(ctx, &this)?;
-    let mut chain = chain.lock().unwrap();
+    let mut chain = chain.0.lock().unwrap();
 
     let d = cc.arg(0).to_number(ctx)?.to_f64();
     chain.add_sampler(&SamplerKind::Temperature {
@@ -318,7 +339,7 @@ fn js_samplerchain_temperature(ctx: &mut ScopedContext, cc: CallContext) -> JSRe
 fn add_grammar(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let chain = get_sampler_chain(ctx, &this)?;
-    let mut chain = chain.lock().unwrap();
+    let mut chain = chain.0.lock().unwrap();
 
     let g = cc.arg(0);
     if g.is_undefined_or_null() {
@@ -339,91 +360,21 @@ fn add_grammar(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     Ok(this)
 }
 
-#[cfg(debug_assertions)]
-mod debug_api {
-    use super::*;
-
-    pub(super) fn debug_dispose(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-        let this = cc.this();
-        let _guard = get_sampler_chain(ctx, &this)?.lock().unwrap();
-        let mut this = cc.this();
-        let payload = this
-            .retrive_object_payload_mut(ctx, JSSamplerChain::class_id())?
-            .other_mut()
-            .unwrap();
-        if !payload.opaque().is_null() {
-            unsafe {
-                let p = payload.replace_opaque(std::ptr::null_mut());
-                drop(Arc::from_raw(p.cast::<Mutex<SamplerChain>>()));
-            }
-        }
-        Ok(JSValue::UNDEFINED)
-    }
-
-    pub(super) fn debug_cache_count(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-        let this = cc.this();
-        let chain = get_sampler_chain(ctx, &this)?;
-        let chain = chain.lock().unwrap();
-        let n = chain.len();
-        Ok((n as i32).into())
-    }
-}
-
 const CLASS_SAMPLER_CHAIN_PROTO: &[FieldDef] = &[
     FieldDef::FUNC("penalties", 1, js_samplerchain_penalties, 0),
     FieldDef::FUNC("topK", 1, js_samplerchain_topKP, TOP_K as _),
     FieldDef::FUNC("topP", 1, js_samplerchain_topKP, TOP_P as _),
     FieldDef::FUNC("temperature", 1, js_samplerchain_temperature, 0 as _),
-    #[cfg(debug_assertions)]
-    FieldDef::FUNC("_debug_dispose", 0, debug_api::debug_dispose, 0),
-    #[cfg(debug_assertions)]
-    FieldDef::FUNC("_debug_cacheCount", 0, debug_api::debug_cache_count, 0),
 ];
 
-pub struct JSSamplerChain;
-
-impl JSSamplerChain {
-    thread_local! {
-        static CLASS_ID: Cell<ClassID> = const { Cell::new(0) };
-    }
-
-    fn register(rt: &mut Runtime) -> Result<ClassID, i32> {
-        let class_id = rt.register_class_def(
-            ClassDef::new("SamplerChain", CLASS_SAMPLER_CHAIN_PROTO, None)
-                .on_dispose(Self::handle_dispose),
-        )?;
-        Self::CLASS_ID.with(|s| s.set(class_id));
-        Ok(class_id)
-    }
-
-    fn handle_dispose(_: &mut RuntimeImpl, opaque: *mut c_void, _id: usize) {
-        if !opaque.is_null() {
-            drop(unsafe { Arc::from_raw(opaque.cast::<Mutex<SamplerChain>>()) });
-        }
-    }
-
-    #[inline(always)]
-    pub fn class_id() -> ClassID {
-        Self::CLASS_ID.with(|x| x.get())
-    }
-
-    pub fn new_instance(
-        ctx: &mut ScopedContext,
-        new_target: JSValue,
-        chain: Arc<Mutex<SamplerChain>>,
-    ) -> Result<Object, i32> {
-        let opaque = Arc::into_raw(chain) as *mut c_void;
-
-        ctx.create_class_instance_with_opaque(new_target, Self::class_id(), opaque)
-            .map_err(|e| {
-                let p = e.other().unwrap();
-                let _ = unsafe { Arc::from_raw(p.opaque().cast::<Mutex<SamplerChain>>()) };
-                -1
-            })
-    }
-}
+def_native_object_with_payload!(
+    "SamplerChain",
+    JSSamplerChain,
+    LlamaSamplerChain,
+    CLASS_SAMPLER_CHAIN_PROTO
+);
 
 #[distributed_slice(USER_CLASS_DEFS)]
 fn register_class_sampler(rt: &mut Runtime) -> Result<ClassID, i32> {
-    JSSamplerChain::register(rt)
+    rt.register_native_class_with_payload::<_, JSSamplerChain>()
 }

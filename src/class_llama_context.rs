@@ -11,13 +11,13 @@ use linkme::distributed_slice;
 use llama_cpp_ffi::{LlamaContext, SamplerChain};
 use zuqe::{
     CallContext, ClassDef, ClassID, FieldDef, IntOrFloat, JS_PROP_ENUMERABLE, JS_PROP_FORCE,
-    JSResult, JSValue, Object, Runtime, ScopedContext,
+    JSResult, JSValue, NativeObjectWithPayload, Object, Runtime, ScopedContext,
     builtins::{promise::Promise, typed_array::TypedArray},
 };
 
 use crate::{
     USER_CLASS_DEFS,
-    class_llama_engine::{JSLlamaEngine, parse_engine_params},
+    class_llama_engine::{JSEngine, parse_engine_params},
     class_llama_sampler::get_sampler_chain_arc,
     engine::{Engine, Token},
     worker::WorkerPool,
@@ -334,7 +334,7 @@ fn js_context_sample(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let tx_timeout = tx.clone();
     if let Err(e) = WorkerPool::singleton().add_job(
         move || {
-            let res = llm_ctx_wrap.sample_token(logits, sampler.lock().unwrap().deref_mut());
+            let res = llm_ctx_wrap.sample_token(logits, sampler.0.lock().unwrap().deref_mut());
             let _ = tx_submit.send(res);
         },
         Some(move || {
@@ -480,7 +480,7 @@ fn js_context_createEngine(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
             eng_params.slot_match_threshold,
             eng_params.max_tokens,
         );
-        let mut engine_obj = JSLlamaEngine::new_instance(ctx, JSValue::UNDEFINED, engine)?;
+        let mut engine_obj = JSEngine::new_instance(ctx, JSValue::UNDEFINED, engine.into())?;
         let _ = engine_obj.define_property_value_str(ctx, "model", model_val, JS_PROP_ENUMERABLE);
 
         Ok(engine_obj.into())

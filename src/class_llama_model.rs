@@ -13,6 +13,7 @@ use zuqe::{
     Array, CallContext, ClassCtorDef, ClassID, FieldDef, JS_PROP_ENUMERABLE, JSResult, JSValue,
     NativeObjectWithPayload, NativePayload, Object, Runtime, RuntimeImpl, ScopedContext,
     builtins::{promise::Promise, typed_array::TypedArray},
+    def_native_object_with_payload_base,
 };
 
 use crate::{
@@ -310,19 +311,6 @@ pub(super) fn get_llama_model(ctx: &mut ScopedContext, val: JSValue) -> Result<L
             ctx.throw_type_error("invalid Model object");
             -1
         })
-
-    // let opaque = val
-    //     .retrive_object_payload(ctx, JSLlamaModel::class_id())?
-    //     .other()
-    //     .unwrap()
-    //     .opaque();
-
-    // if !opaque.is_null() {
-    //     Ok(unsafe { (&*opaque.cast::<LlamaModel>()).clone() })
-    // } else {
-    //     ctx.throw_type_error("invalid Model object");
-    //     Err(-1)
-    // }
 }
 
 const PROP_BOS_TOKEN: i32 = 1;
@@ -1097,80 +1085,7 @@ fn js_model_load(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
 const CLASS_MODEL_ENTRIES: &[FieldDef] = &[FieldDef::FUNC("load", 1, js_model_load, 0)];
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-#[repr(transparent)]
-pub struct JSLlamaModel(Object);
-
-impl JSLlamaModel {
-    thread_local! {
-        static CLASS_ID: Cell<ClassID> = const { Cell::new(0) };
-    }
-
-    // /// register class
-    // fn register(rt: &mut Runtime) -> Result<ClassID, i32> {
-    //     unsafe {
-    //         extern "C" fn log_callback(
-    //             level: llama_cpp_ffi::ggml_log_level,
-    //             text: *const std::os::raw::c_char,
-    //             _user_data: *mut std::os::raw::c_void,
-    //         ) {
-    //             if text.is_null() {
-    //                 return;
-    //             }
-
-    //             if matches!(
-    //                 level,
-    //                 llama_cpp_ffi::ggml_log_level_GGML_LOG_LEVEL_WARN
-    //                     | llama_cpp_ffi::ggml_log_level_GGML_LOG_LEVEL_ERROR
-    //             ) {
-    //                 let msg = unsafe { CStr::from_ptr(text).to_string_lossy() };
-    //                 eprint!("{msg}");
-    //                 append_llama_log(&msg);
-    //             }
-    //         }
-
-    //         llama_cpp_ffi::llama_log_set(Some(log_callback), std::ptr::null_mut());
-    //         llama_cpp_ffi::llama_backend_init();
-    //     }
-
-    //     let class_id = rt.register_class_def(
-    //         ClassDef::new(
-    //             "Model",
-    //             CLASS_MODEL_PROTO_ENTRIES,
-    //             Some(
-    //                 ClassCtorDef::new(js_model_constructor, 2, false).entries(CLASS_MODEL_ENTRIES),
-    //             ),
-    //         )
-    //         .on_dispose(|_, opaque: *mut c_void, _| {
-    //             if !opaque.is_null() {
-    //                 drop(unsafe { Box::from_raw(opaque.cast::<LlamaModel>()) });
-    //             }
-    //         })
-    //         .on_unregister(|| unsafe {
-    //             llama_cpp_ffi::llama_backend_free();
-    //         }),
-    //     )?;
-
-    //     // save assigned class_id
-    //     Self::CLASS_ID.with(|s| s.set(class_id));
-    //     Ok(class_id)
-    // }
-
-    // pub fn new_instance(
-    //     ctx: &mut ScopedContext,
-    //     new_target: JSValue,
-    //     model: LlamaModel,
-    // ) -> Result<Object, i32> {
-    //     let class_id = Self::class_id();
-    //     let opaque = Box::into_raw(Box::new(model)).cast::<c_void>();
-    //     ctx.create_class_instance_with_opaque(new_target, class_id, opaque)
-    //         .map_err(|e| {
-    //             let p = e.other().unwrap();
-    //             let _ = unsafe { Box::from_raw(p.opaque().cast::<LlamaModel>()) };
-    //             -1
-    //         })
-    // }
-}
+def_native_object_with_payload_base!(JSLlamaModel, ModelPayload);
 
 impl NativeObjectWithPayload<ModelPayload> for JSLlamaModel {
     fn class_name() -> &'static str {
@@ -1228,30 +1143,6 @@ impl NativeObjectWithPayload<ModelPayload> for JSLlamaModel {
 
     fn as_object(&self) -> &Object {
         &self.0
-    }
-}
-
-impl TryFrom<Object> for JSLlamaModel {
-    type Error = i32;
-
-    fn try_from(o: Object) -> Result<Self, Self::Error> {
-        if o.class_id() == Self::class_id() {
-            Ok(Self(o))
-        } else {
-            Err(-1)
-        }
-    }
-}
-
-impl TryFrom<JSValue> for JSLlamaModel {
-    type Error = i32;
-
-    fn try_from(v: JSValue) -> Result<Self, Self::Error> {
-        if let JSValue::Object(o) = v {
-            TryFrom::<Object>::try_from(o)
-        } else {
-            Err(-1)
-        }
     }
 }
 
