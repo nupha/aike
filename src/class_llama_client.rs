@@ -52,14 +52,14 @@ impl NativePayload for ClientPayload {
 
     unsafe fn from_raw(ptr: *mut c_void) -> Self {
         // Recover Box<ClientPayload> and extract the ClientPayload
-        let boxed = unsafe { Box::from_raw(ptr.cast::<ClientPayload>()) };
+        let boxed = unsafe { Box::from_raw(ptr.cast::<Self>()) };
         *boxed
     }
 
     unsafe fn raw_as_ref<'a>(ptr: *mut c_void) -> &'a Self {
         // ptr points to Box<ClientPayload> on the heap
         // We can safely cast it to &ClientPayload
-        let boxed_ptr = ptr.cast::<ClientPayload>();
+        let boxed_ptr = ptr.cast::<Self>();
         unsafe { &*boxed_ptr }
     }
 }

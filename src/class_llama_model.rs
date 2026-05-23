@@ -719,7 +719,7 @@ fn js_model_createContext(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
     })?;
     llm_ctx.init_batch(ctx_params.n_batch as i32, 0, ctx_params.n_seq_max as i32);
 
-    let mut ctx_obj = JSLlamaContext::new_instance(ctx, JSValue::UNDEFINED, llm_ctx)?;
+    let mut ctx_obj = JSLlamaContext::new_instance(ctx, JSValue::UNDEFINED, llm_ctx.into())?;
 
     // to keep model object referenced alive, model property is read-only
     ctx_obj.define_property_value_str(ctx, "model", this, JS_PROP_ENUMERABLE)?;
