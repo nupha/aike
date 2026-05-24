@@ -13,7 +13,7 @@ use zuqe::{
     Array, CallContext, ClassCtorDef, ClassID, FieldDef, JS_PROP_ENUMERABLE, JSResult, JSValue,
     NativeObjectWithPayload, Object, Runtime, RuntimeImpl, ScopedContext,
     builtins::{promise::Promise, typed_array::TypedArray},
-    def_native_object_base,
+    def_native_object,
 };
 
 use crate::{
@@ -1067,19 +1067,17 @@ fn js_model_load(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
 const CLASS_MODEL_ENTRIES: &[FieldDef] = &[FieldDef::FUNC("load", 1, js_model_load, 0)];
 
-def_native_object_base!(
+def_native_object!(
     "Model",
     JSLlamaModel,
     CLASS_MODEL_PROTO_ENTRIES,
     Some(ClassCtorDef::new(js_model_constructor, 2, false).entries(CLASS_MODEL_ENTRIES)),
-    payload: ModelPayload
+    payload: ModelPayload,
+    on_class_register: JSLlamaModel::on_register,
+    on_class_unregister: JSLlamaModel::on_unregister
 );
 
-impl NativeObjectWithPayload<ModelPayload> for JSLlamaModel {
-    fn class_id() -> ClassID {
-        Self::CLASS_ID.with(|x| x.get())
-    }
-
+impl JSLlamaModel {
     fn on_register(_: &mut RuntimeImpl) {
         unsafe {
             extern "C" fn log_callback(
@@ -1111,10 +1109,6 @@ impl NativeObjectWithPayload<ModelPayload> for JSLlamaModel {
         unsafe {
             llama_cpp_ffi::llama_backend_free();
         }
-    }
-
-    fn as_object(&self) -> &Object {
-        &self.0
     }
 }
 

@@ -255,7 +255,7 @@ def_native_object!(
     CLASS_EVENT_EMITTER_PROTO,
     Some(ClassCtorDef::new(js_constructor, 0, true).expose_to_global()),
     payload: EmitterPayload,
-    payload_gc_trace: EmitterPayload::gc_trace
+    on_payload_gc: EmitterPayload::gc_trace
 );
 
 #[distributed_slice(USER_CLASS_DEFS)]
