@@ -340,68 +340,78 @@ fn js_text_decoder_decode(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
     // Parse options first (no borrow on decoder internals needed here).
     let mut stream = false;
     let mut call_fatal = decoder.fatal;
-    if cc.length() > 1 {
-        if let Some(opts) = cc.arg(1).as_object() {
-            let v = opts.get_property_str(ctx, "stream")?;
-            if !v.is_undefined() {
-                stream = v.to_bool()?;
-            }
-            let v = opts.get_property_str(ctx, "fatal")?;
-            if !v.is_undefined() {
-                call_fatal = v.to_bool()?;
-            }
-        }
-    }
 
     // Extract input as &[u8] (zero-copy) and process inline.
     // We keep the match arm as the outer scope so the &[u8] borrow stays valid.
-    match cc.arg(0) {
-        s @ JSValue::String(_) => return Ok(s),
-        JSValue::Object(o) => {
-            let p = o.payload();
-            let input_slice = if let Some(ab) = p.array_buffer() {
-                ab.bytes() // &[u8] borrowing from the JS object
-            } else if let Some(ta) = p.typed_array() {
-                ta.bytes()
-            } else {
-                ctx.throw_type_error("Input must be an ArrayBuffer or TypedArray");
-                return Err(-1);
-            };
-
-            let pending_old = std::mem::take(&mut *decoder.pending.borrow_mut());
-
-            let (result, pending_new) = if pending_old.is_empty() {
-                // Fast path: no pending bytes → pass &[u8] directly, zero allocation.
-                process_decoded(decoder, input_slice, call_fatal, stream).map_err(|e| {
-                    ctx.throw_type_error(&e);
-                    -1
-                })?
-            } else {
-                // Slow path:  has pending  → merge into Vec (pending already allocated).
-                let mut combined = pending_old;
-                combined.extend_from_slice(input_slice);
-                process_decoded(decoder, &combined, call_fatal, stream).map_err(|e| {
-                    ctx.throw_type_error(&e);
-                    -1
-                })?
-            };
-
-            if stream {
-                *decoder.pending.borrow_mut() = pending_new;
+    let mut ob: Option<Object> = None;
+    let input_slice = if cc.length() == 0 {
+        &[]
+    } else {
+        if cc.length() > 1 {
+            if let Some(opts) = cc.arg(1).as_object() {
+                let v = opts.get_property_str(ctx, "stream")?;
+                if !v.is_undefined() {
+                    stream = v.to_bool()?;
+                }
+                let v = opts.get_property_str(ctx, "fatal")?;
+                if !v.is_undefined() {
+                    call_fatal = v.to_bool()?;
+                }
             }
+        }
 
-            ctx.create_string_from_utf8(result.into_bytes())
-                .map(JSValue::String)
-                .map_err(|_| {
-                    ctx.throw_internal_error("Failed to create output string");
-                    -1
-                })
+        match cc.arg(0) {
+            s @ JSValue::String(_) => {
+                return Ok(s);
+            }
+            JSValue::Object(o) => {
+                ob.replace(o);
+                let p = ob.as_ref().map(|o| o.payload()).unwrap();
+
+                if let Some(ab) = p.array_buffer() {
+                    ab.bytes() // &[u8] borrowing from the JS object
+                } else if let Some(ta) = p.typed_array() {
+                    ta.bytes()
+                } else {
+                    ctx.throw_type_error("Input must be an ArrayBuffer or TypedArray");
+                    return Err(-1);
+                }
+            }
+            _ => {
+                ctx.throw_type_error("Input must be TypedArray, ArrayBuffer or Object");
+                return Err(-1);
+            }
         }
-        _ => {
-            ctx.throw_type_error("Input must be TypedArray, ArrayBuffer or Object");
-            Err(-1)
-        }
+    };
+
+    let pending_old = std::mem::take(&mut *decoder.pending.borrow_mut());
+
+    let (result, pending_new) = if pending_old.is_empty() {
+        // Fast path: no pending bytes → pass &[u8] directly, zero allocation.
+        process_decoded(decoder, input_slice, call_fatal, stream).map_err(|e| {
+            ctx.throw_type_error(&e);
+            -1
+        })?
+    } else {
+        // Slow path:  has pending  → merge into Vec (pending already allocated).
+        let mut combined = pending_old;
+        combined.extend_from_slice(input_slice);
+        process_decoded(decoder, &combined, call_fatal, stream).map_err(|e| {
+            ctx.throw_type_error(&e);
+            -1
+        })?
+    };
+
+    if stream {
+        *decoder.pending.borrow_mut() = pending_new;
     }
+
+    ctx.create_string_from_utf8(result.into_bytes())
+        .map(JSValue::String)
+        .map_err(|_| {
+            ctx.throw_internal_error("Failed to create output string");
+            -1
+        })
 }
 
 // ---------------------------------------------------------------------------
