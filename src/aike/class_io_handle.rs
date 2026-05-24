@@ -190,7 +190,7 @@ fn get_file_desc<'a>(ctx: &mut ScopedContext, val: &'a JSValue) -> Result<&'a Io
     val.as_native_object::<_, JSIoHandle>()
         .and_then(|o| o.payload())
         .ok_or_else(|| {
-            ctx.throw_internal_error("invalid FileHandle instance");
+            ctx.throw_internal_error("invalid IoHandle instance");
             -1
         })
 }
@@ -851,7 +851,7 @@ fn js_fh_close(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 }
 
 // ---------------------------------------------------------------------------
-// stat helper — shared between FileHandle.stat and fs.stat
+// stat helper — shared between IoHandle.stat and fs.stat
 // ---------------------------------------------------------------------------
 
 pub(crate) fn make_stats(
@@ -957,7 +957,7 @@ fn js_fh_fd(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 // [Symbol.asyncIterator] — `for await...of` support
 // ---------------------------------------------------------------------------
 
-/// Chunk message type for FileHandle async iteration
+/// Chunk message type for IoHandle async iteration
 enum FileChunk {
     Data(Vec<u8>),
     Eof,
@@ -1106,8 +1106,8 @@ impl JSIoHandle {
         Self::new_instance(ctx, JSValue::UNDEFINED, IoPayload::Stderr)
     }
 
-    /// Create a FileHandle from an already-opened tokio::fs::File
-    pub fn new_instance_with_file(
+    /// Create a IoHandle from an already-opened tokio::fs::File
+    pub fn new_instance_file(
         ctx: &mut ScopedContext,
         new_target: JSValue,
         file: tokio::fs::File,
@@ -1119,7 +1119,7 @@ impl JSIoHandle {
         )
     }
 
-    /// Create a FileHandle from an async pipe reader (ChildStdout/ChildStderr).
+    /// Create a IoHandle from an async pipe reader (ChildStdout/ChildStderr).
     /// `fd` is the platform-specific file descriptor (used for the `.fd` property).
     pub fn new_instance_pipe_read(
         ctx: &mut ScopedContext,
@@ -1133,7 +1133,7 @@ impl JSIoHandle {
         )
     }
 
-    /// Create a FileHandle from an async pipe writer (ChildStdin).
+    /// Create a IoHandle from an async pipe writer (ChildStdin).
     /// `fd` is the platform-specific file descriptor (used for the `.fd` property).
     pub fn new_instance_pipe_write(
         ctx: &mut ScopedContext,
