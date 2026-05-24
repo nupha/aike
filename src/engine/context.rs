@@ -15,6 +15,7 @@ use super::{
 /// The parallel inference engine.
 ///
 /// Contains both shared channel interfaces and LlamaContext worker state.
+#[derive(Debug)]
 pub struct Engine {
     pub(crate) input_tx: Sender<Box<EngineTask>>,
     pub(crate) ctrl_tx: Sender<EngineCtrlMsg>,

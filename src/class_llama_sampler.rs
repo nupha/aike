@@ -1,6 +1,5 @@
 use std::{
     cell::Cell,
-    ffi::c_void,
     sync::{Arc, Mutex},
 };
 
@@ -8,7 +7,7 @@ use linkme::distributed_slice;
 use llama_cpp_ffi::{SamplerChain, SamplerKind};
 use zuqe::{
     CallContext, ClassID, FieldDef, IntOrFloat, JS_PROP_ENUMERABLE, JSResult, JSValue,
-    NativeObjectWithPayload, NativePayload, Object, Runtime, ScopedContext, def_native_object,
+    NativeObjectWithPayload, Object, Runtime, ScopedContext, def_native_object,
 };
 
 use crate::{USER_CLASS_DEFS, class_llama_model::get_llama_model};
@@ -17,34 +16,13 @@ use crate::{USER_CLASS_DEFS, class_llama_model::get_llama_model};
 #[repr(transparent)]
 pub(crate) struct SamplerPayload(pub(super) Arc<Mutex<SamplerChain>>);
 
-impl NativePayload for SamplerPayload {
-    fn into_raw(self) -> *mut c_void {
-        // Store LlamaSamplerChain as a Box so we can get &LlamaSamplerChain later
-        // LlamaSamplerChain is #[repr(transparent)] around Arc<Mutex<SamplerChain>>
-        Box::into_raw(Box::new(self)).cast()
-    }
-
-    unsafe fn from_raw(ptr: *mut c_void) -> Self {
-        // Recover the Box<LlamaSamplerChain> and extract the LlamaSamplerChain
-        let boxed = unsafe { Box::from_raw(ptr.cast::<Self>()) };
-        *boxed
-    }
-
-    unsafe fn raw_as_ref<'a>(ptr: *mut c_void) -> &'a Self {
-        // ptr points to a Box<LlamaSamplerChain> on the heap
-        // We can safely cast it to &LlamaSamplerChain
-        let boxed_ptr = ptr.cast::<Self>();
-        unsafe { &*boxed_ptr }
-    }
-}
-
 impl From<Arc<Mutex<SamplerChain>>> for SamplerPayload {
     fn from(engine: Arc<Mutex<SamplerChain>>) -> Self {
         Self(engine)
     }
 }
 
-fn get_sampler_chain(ctx: &mut ScopedContext, val: &JSValue) -> Result<SamplerPayload, i32> {
+pub(super) fn get_sampler(ctx: &mut ScopedContext, val: &JSValue) -> Result<SamplerPayload, i32> {
     let ob = JSSamplerChain::try_from(val.clone()).unwrap();
     if let Some(p) = ob.payload() {
         Ok(p.clone())
@@ -54,18 +32,11 @@ fn get_sampler_chain(ctx: &mut ScopedContext, val: &JSValue) -> Result<SamplerPa
     }
 }
 
-pub(super) fn get_sampler_chain_arc(
-    ctx: &mut ScopedContext,
-    val: &JSValue,
-) -> Result<SamplerPayload, i32> {
-    get_sampler_chain(ctx, val)
-}
-
 pub fn js_model_createSamplerChain(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let model = get_llama_model(ctx, this)?;
 
-    let mut chain = SamplerChain::new(model, false);
+    let mut chain = SamplerChain::new(model.0, false);
 
     if cc.length() > 0 {
         let arr = cc.arg(0).as_object_Array().copied().ok_or_else(|| {
@@ -215,7 +186,7 @@ pub fn js_model_createSamplerChain(ctx: &mut ScopedContext, cc: CallContext) -> 
 
 fn js_samplerchain_penalties(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
-    let chain = get_sampler_chain(ctx, &this)?;
+    let chain = get_sampler(ctx, &this)?;
     let mut chain = chain.0.lock().unwrap();
 
     let mut repeat_last_n = 64_i32;
@@ -298,7 +269,7 @@ const TOP_P: i32 = 2;
 
 fn js_samplerchain_topKP(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
-    let chain = get_sampler_chain(ctx, &this)?;
+    let chain = get_sampler(ctx, &this)?;
     let mut chain = chain.0.lock().unwrap();
 
     let n = cc.arg(0).to_number(ctx)?;
@@ -322,7 +293,7 @@ fn js_samplerchain_topKP(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
 fn js_samplerchain_temperature(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
-    let chain = get_sampler_chain(ctx, &this)?;
+    let chain = get_sampler(ctx, &this)?;
     let mut chain = chain.0.lock().unwrap();
 
     let d = cc.arg(0).to_number(ctx)?.to_f64();
@@ -337,7 +308,7 @@ fn js_samplerchain_temperature(ctx: &mut ScopedContext, cc: CallContext) -> JSRe
 
 fn add_grammar(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
-    let chain = get_sampler_chain(ctx, &this)?;
+    let chain = get_sampler(ctx, &this)?;
     let mut chain = chain.0.lock().unwrap();
 
     let g = cc.arg(0);

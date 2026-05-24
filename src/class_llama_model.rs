@@ -1,6 +1,6 @@
 use std::{
     cell::Cell,
-    ffi::{CStr, CString, c_void},
+    ffi::{CStr, CString},
     sync::{Mutex, OnceLock},
 };
 
@@ -11,7 +11,7 @@ use llama_cpp_ffi::{
 };
 use zuqe::{
     Array, CallContext, ClassCtorDef, ClassID, FieldDef, JS_PROP_ENUMERABLE, JSResult, JSValue,
-    NativeObjectWithPayload, NativePayload, Object, Runtime, RuntimeImpl, ScopedContext,
+    NativeObjectWithPayload, Object, Runtime, RuntimeImpl, ScopedContext,
     builtins::{promise::Promise, typed_array::TypedArray},
     def_native_object_base,
 };
@@ -23,34 +23,16 @@ use crate::{
     helpers::{JinjaMessage, TemplateContext, create_minijinja_env},
 };
 
+/// define a newtype to let impl NativePayload possible
 #[derive(Debug, Clone)]
 #[repr(transparent)]
-pub(crate) struct ModelPayload(Box<LlamaModel>);
+pub(crate) struct ModelPayload(pub(super) LlamaModel);
 
-impl NativePayload for ModelPayload {
-    fn into_raw(self) -> *mut c_void {
-        // Store Box<LlamaModel> as a Box so we can get &ModelPayload later
-        // ModelPayload is #[repr(transparent)] around Box<LlamaModel>
-        Box::into_raw(Box::new(self)).cast()
-    }
+impl std::ops::Deref for ModelPayload {
+    type Target = LlamaModel;
 
-    unsafe fn from_raw(ptr: *mut c_void) -> Self {
-        // Recover the Box<ModelPayload> and extract the ModelPayload
-        let boxed = unsafe { Box::from_raw(ptr.cast::<Self>()) };
-        *boxed
-    }
-
-    unsafe fn raw_as_ref<'a>(ptr: *mut c_void) -> &'a Self {
-        // ptr points to a Box<ModelPayload> on the heap
-        // We can safely cast it to &ModelPayload
-        let boxed_ptr = ptr.cast::<Self>();
-        unsafe { &*boxed_ptr }
-    }
-}
-
-impl From<LlamaModel> for ModelPayload {
-    fn from(model: LlamaModel) -> Self {
-        Self(Box::new(model))
+    fn deref(&self) -> &Self::Target {
+        &self.0
     }
 }
 
@@ -292,7 +274,7 @@ fn js_model_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 -1
             })?;
 
-    let mut obj = JSLlamaModel::new_instance(ctx, new_target, model.into())?;
+    let mut obj = JSLlamaModel::new_instance(ctx, new_target, ModelPayload(model))?;
 
     let path = ctx
         .create_string_from_utf8(file_name.into_bytes())
@@ -302,11 +284,11 @@ fn js_model_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     Ok(obj.into())
 }
 
-pub(super) fn get_llama_model(ctx: &mut ScopedContext, val: JSValue) -> Result<LlamaModel, i32> {
+pub(super) fn get_llama_model(ctx: &mut ScopedContext, val: JSValue) -> Result<ModelPayload, i32> {
     JSLlamaModel::try_from(val)
         .unwrap()
         .payload()
-        .map(|m| *m.0.clone())
+        .cloned()
         .ok_or_else(|| {
             ctx.throw_type_error("invalid Model object");
             -1
@@ -713,7 +695,7 @@ fn js_model_createContext(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
     };
     let ctx_params = parse_context_params(ctx, opts.as_ref())?;
 
-    let mut llm_ctx = LlamaContext::new(model, ctx_params).map_err(|e| {
+    let mut llm_ctx = LlamaContext::new(model.0.clone(), ctx_params).map_err(|e| {
         ctx.throw_internal_error(&e);
         -1
     })?;
@@ -1060,7 +1042,7 @@ fn js_model_load(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 cx.throw_internal_error(&e);
                 -1
             })?;
-            let mut obj = JSLlamaModel::new_instance(cx, JSValue::UNDEFINED, model.into())?;
+            let mut obj = JSLlamaModel::new_instance(cx, JSValue::UNDEFINED, ModelPayload(model))?;
             let path = cx
                 .create_string_from_utf8(file_name.into_bytes())
                 .map(JSValue::String)?;

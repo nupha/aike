@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-use std::{cell::Cell, ffi::c_void, sync::Arc, time::Duration};
+use std::{cell::Cell, sync::Arc, time::Duration};
 
 use futures_util::StreamExt;
 use linkme::distributed_slice;
@@ -10,7 +10,7 @@ use tokio::io::AsyncBufReadExt;
 use tokio_util::io::StreamReader;
 use zuqe::{
     CallContext, ClassCtorDef, ClassID, FieldDef, JSResult, JSValue, NativeObjectWithPayload,
-    NativePayload, Object, Runtime, ScopedContext,
+    Object, Runtime, ScopedContext,
     builtins::{
         iterator::AsyncIterableIterator,
         promise::{Promise, PromiseResultSlot},
@@ -43,26 +43,6 @@ pub(crate) struct ClientState {
 #[derive(Debug, Clone)]
 #[repr(transparent)]
 pub(crate) struct ClientPayload(Arc<ClientState>);
-
-impl NativePayload for ClientPayload {
-    fn into_raw(self) -> *mut c_void {
-        // Store Box<ClientPayload> to ensure pointer points to ClientPayload
-        Box::into_raw(Box::new(self)).cast::<c_void>()
-    }
-
-    unsafe fn from_raw(ptr: *mut c_void) -> Self {
-        // Recover Box<ClientPayload> and extract the ClientPayload
-        let boxed = unsafe { Box::from_raw(ptr.cast::<Self>()) };
-        *boxed
-    }
-
-    unsafe fn raw_as_ref<'a>(ptr: *mut c_void) -> &'a Self {
-        // ptr points to Box<ClientPayload> on the heap
-        // We can safely cast it to &ClientPayload
-        let boxed_ptr = ptr.cast::<Self>();
-        unsafe { &*boxed_ptr }
-    }
-}
 
 impl std::ops::Deref for ClientPayload {
     type Target = Arc<ClientState>;

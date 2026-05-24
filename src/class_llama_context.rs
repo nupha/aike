@@ -1,7 +1,6 @@
 use std::{
     borrow::Cow,
     cell::Cell,
-    ffi::c_void,
     ops::DerefMut,
     sync::{Arc, Mutex},
     time::Duration,
@@ -11,7 +10,7 @@ use linkme::distributed_slice;
 use llama_cpp_ffi::{LlamaContext, SamplerChain};
 use zuqe::{
     CallContext, ClassID, FieldDef, IntOrFloat, JS_PROP_ENUMERABLE, JS_PROP_FORCE, JSResult,
-    JSValue, NativeObjectWithPayload, NativePayload, Object, Runtime, ScopedContext,
+    JSValue, NativeObjectWithPayload, Object, Runtime, ScopedContext,
     builtins::{promise::Promise, typed_array::TypedArray},
     def_native_object,
 };
@@ -19,7 +18,7 @@ use zuqe::{
 use crate::{
     USER_CLASS_DEFS,
     class_llama_engine::{JSEngine, parse_engine_params},
-    class_llama_sampler::get_sampler_chain_arc,
+    class_llama_sampler::get_sampler,
     engine::{Engine, Token},
     worker::WorkerPool,
 };
@@ -156,22 +155,6 @@ impl LlamaContextWrap {
 #[repr(transparent)]
 #[derive(Clone)]
 pub(crate) struct ContextPayload(Arc<LlamaContextWrap>);
-
-impl NativePayload for ContextPayload {
-    fn into_raw(self) -> *mut c_void {
-        Box::into_raw(Box::new(self)) as *mut c_void
-    }
-
-    unsafe fn from_raw(ptr: *mut c_void) -> Self {
-        let r = unsafe { Box::from_raw(ptr.cast::<Self>()) };
-        *r
-    }
-
-    unsafe fn raw_as_ref<'a>(ptr: *mut c_void) -> &'a Self {
-        let boxed_ptr = ptr.cast::<Self>();
-        unsafe { &*boxed_ptr }
-    }
-}
 
 impl From<LlamaContext> for ContextPayload {
     fn from(value: LlamaContext) -> Self {
@@ -356,7 +339,7 @@ fn js_context_sample(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     let logits = cc.arg(0).to_number(ctx)?.to_i32();
     let s = cc.arg(1);
-    let sampler = get_sampler_chain_arc(ctx, &s)?;
+    let sampler = get_sampler(ctx, &s)?;
 
     let (promise, tx) =
         Promise::create_with_channel::<Result<Token, String>>(ctx, |cx, data| -> JSResult {

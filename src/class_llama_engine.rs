@@ -1,6 +1,6 @@
 use std::{
     cell::Cell,
-    ffi::{CString, c_void},
+    ffi::CString,
     sync::{Arc, Mutex},
 };
 
@@ -8,8 +8,8 @@ use async_openai::types::chat::{ReasoningEffort, StopConfiguration};
 use linkme::distributed_slice;
 use llama_cpp_ffi::ToolChoice as LarkToolChoice;
 use zuqe::{
-    CallContext, ClassID, FieldDef, JSResult, JSValue, NativeObjectWithPayload, NativePayload,
-    Object, Runtime, ScopedContext,
+    CallContext, ClassID, FieldDef, JSResult, JSValue, NativeObjectWithPayload, Object, Runtime,
+    ScopedContext,
     builtins::{
         iterator::AsyncIterableIterator,
         promise::{Promise, PromiseResultSlot},
@@ -31,32 +31,19 @@ use crate::{
     },
 };
 
-#[derive(Clone)]
 #[repr(transparent)]
-pub(crate) struct LlamaEngine(Arc<Mutex<Engine>>);
+#[derive(Debug, Clone)]
+pub(crate) struct EnginePayload(Arc<Mutex<Engine>>);
 
-impl NativePayload for LlamaEngine {
-    fn into_raw(self) -> *mut c_void {
-        // Store LlamaEngine as a Box so we can get &LlamaEngine later
-        // LlamaEngine is #[repr(transparent)] around Arc<Mutex<Engine>>
-        Box::into_raw(Box::new(self)).cast()
-    }
+impl std::ops::Deref for EnginePayload {
+    type Target = Arc<Mutex<Engine>>;
 
-    unsafe fn from_raw(ptr: *mut c_void) -> Self {
-        // Recover the Box<LlamaEngine> and extract the LlamaEngine
-        let boxed = unsafe { Box::from_raw(ptr.cast::<Self>()) };
-        *boxed
-    }
-
-    unsafe fn raw_as_ref<'a>(ptr: *mut c_void) -> &'a Self {
-        // ptr points to a Box<LlamaEngine> on the heap
-        // We can safely cast it to &LlamaEngine
-        let boxed_ptr = ptr.cast::<Self>();
-        unsafe { &*boxed_ptr }
+    fn deref(&self) -> &Self::Target {
+        &self.0
     }
 }
 
-impl From<Arc<Mutex<Engine>>> for LlamaEngine {
+impl From<Arc<Mutex<Engine>>> for EnginePayload {
     fn from(engine: Arc<Mutex<Engine>>) -> Self {
         Self(engine)
     }
@@ -123,7 +110,7 @@ pub(super) fn parse_engine_params(
     })
 }
 
-fn get_engine<'a>(ctx: &mut ScopedContext, val: &JSValue) -> Result<LlamaEngine, i32> {
+fn get_engine<'a>(ctx: &mut ScopedContext, val: &JSValue) -> Result<EnginePayload, i32> {
     let engine = JSEngine::try_from(val.clone()).unwrap();
     if let Some(p) = engine.payload() {
         Ok(p.clone())
@@ -181,7 +168,7 @@ fn js_engine_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
 
     // Build prompt tokens
     let prompt_tokens = {
-        let engine = engine.0.lock().unwrap();
+        let engine = engine.lock().unwrap();
         let model = engine.model();
 
         model_name = engine.model_name().to_string();
@@ -224,7 +211,7 @@ fn js_engine_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
 
     let is_stream = cc.magic() == MAGIC_CHAT_STREAM;
     if req.model.is_empty() {
-        req.model = engine.0.lock().unwrap().model_name().into();
+        req.model = engine.lock().unwrap().model_name().into();
     }
 
     // Build task config
@@ -233,9 +220,7 @@ fn js_engine_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
         .top_p(req.top_p.unwrap_or(1.0))
         .max_tokens(
             req.max_completion_tokens
-                .map_or(engine.0.lock().unwrap().default_max_tokens(), |n| {
-                    n as usize
-                }),
+                .map_or(engine.lock().unwrap().default_max_tokens(), |n| n as usize),
         )
         .output_stream(is_stream)
         .enable_output_parser(parse_reasoning);
@@ -258,7 +243,7 @@ fn js_engine_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
 
         if tc != LarkToolChoice::None {
             task_config = task_config.grammar(GrammarConfig::new(
-                engine.0.lock().unwrap().model(),
+                engine.lock().unwrap().model(),
                 tools,
                 tc,
             ));
@@ -270,7 +255,6 @@ fn js_engine_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
 
     // Push task to engine
     let rx = engine
-        .0
         .lock()
         .unwrap()
         .push_task(prompt_tokens, task_config, output_prepend, None, true)
@@ -453,7 +437,7 @@ fn js_engine_responses(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     // Build prompt tokens
     let prompt_tokens = {
-        let engine = engine.0.lock().unwrap();
+        let engine = engine.lock().unwrap();
         let model = engine.model();
         parse_reasoning = engine.parse_reasoning();
 
@@ -495,12 +479,12 @@ fn js_engine_responses(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut task_config = TaskConfig::new()
         .temperature(temperature.unwrap_or(0.75))
         .top_p(top_p.unwrap_or(1.0))
-        .max_tokens(max_output_tokens.unwrap_or(engine.0.lock().unwrap().default_max_tokens()))
+        .max_tokens(max_output_tokens.unwrap_or(engine.lock().unwrap().default_max_tokens()))
         .output_stream(is_stream);
 
     if let Some(tools) = chat_tools.as_ref().filter(|t| !t.is_empty()) {
         task_config = task_config.grammar(GrammarConfig::new(
-            engine.0.lock().unwrap().model(),
+            engine.lock().unwrap().model(),
             tools,
             llama_cpp_ffi::ToolChoice::Auto,
         ));
@@ -508,11 +492,10 @@ fn js_engine_responses(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     let n_prompt_tokens = prompt_tokens.len();
     let respond_id = format!("res-{}", uuid::Uuid::new_v4().simple());
-    let model_name = engine.0.lock().unwrap().model_name().to_string();
+    let model_name = engine.lock().unwrap().model_name().to_string();
 
     // Push task to engine
     let rx = engine
-        .0
         .lock()
         .unwrap()
         .push_task(prompt_tokens, task_config, output_prepend, None, false)
@@ -619,13 +602,13 @@ fn js_engine_httpServe(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         }
     }
 
-    if engine.0.lock().unwrap().is_serving() {
+    if engine.lock().unwrap().is_serving() {
         ctx.throw_type_error("engine is already serving");
         return Err(-1);
     }
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
-    engine.0.lock().unwrap().set_serving(shutdown_tx);
+    engine.lock().unwrap().set_serving(shutdown_tx);
 
     // Start HTTP server
     let result_slot = PromiseResultSlot::<Result<(), String>>::new();
@@ -641,7 +624,7 @@ fn js_engine_httpServe(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     tokio::spawn(async move {
         let res = crate::serve::http_serve(engine.0.clone(), &host, port, shutdown_rx).await;
-        engine.0.lock().unwrap().unset_serving();
+        engine.lock().unwrap().unset_serving();
         let _ = result_slot.commit(res);
     });
 
@@ -651,27 +634,27 @@ fn js_engine_httpServe(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 fn js_engine_stopServe(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let engine = get_engine(ctx, &this)?;
-    engine.0.lock().unwrap().request_stop();
+    engine.lock().unwrap().request_stop();
     Ok(JSValue::UNDEFINED)
 }
 
 fn js_engine_isServing(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let engine = get_engine(ctx, &this)?;
-    Ok(JSValue::Bool(engine.0.lock().unwrap().is_serving()))
+    Ok(JSValue::Bool(engine.lock().unwrap().is_serving()))
 }
 
 fn js_engine_parseReasoning(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let engine = get_engine(ctx, &this)?;
-    Ok(JSValue::Bool(engine.0.lock().unwrap().parse_reasoning()))
+    Ok(JSValue::Bool(engine.lock().unwrap().parse_reasoning()))
 }
 
 fn js_engine_setParseReasoning(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let engine = get_engine(ctx, &this)?;
     let v = cc.arg(0).to_bool()?;
-    engine.0.lock().unwrap().set_parse_reasoning(v);
+    engine.lock().unwrap().set_parse_reasoning(v);
     Ok(JSValue::UNDEFINED)
 }
 
@@ -684,7 +667,7 @@ fn js_engine_dispose(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     if !payload.opaque().is_null() {
         unsafe {
             let p = payload.replace_opaque(std::ptr::null_mut());
-            drop(Arc::from_raw(p.cast::<Engine>()));
+            drop(Box::from_raw(p.cast::<EnginePayload>()));
         }
     }
     Ok(JSValue::UNDEFINED)
@@ -727,7 +710,7 @@ const CLASS_ENGINE_PROTO: &[FieldDef] = &[
     FieldDef::FUNC("dispose", 0, js_engine_dispose, 0),
 ];
 
-def_native_object!("Engine", JSEngine, LlamaEngine, CLASS_ENGINE_PROTO, None);
+def_native_object!("Engine", JSEngine, EnginePayload, CLASS_ENGINE_PROTO, None);
 
 #[distributed_slice(USER_CLASS_DEFS)]
 fn register_class_engine(rt: &mut Runtime) -> Result<ClassID, i32> {
