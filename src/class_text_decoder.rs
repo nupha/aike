@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-use std::cell::Cell;
+use std::{
+    cell::{Cell, RefCell},
+    ffi::c_void,
+};
 
 use linkme::distributed_slice;
 use zuqe::{
@@ -31,49 +34,43 @@ impl Encoding {
         }
     }
 
-    fn decode(&self, bytes: &[u8]) -> Result<String, String> {
+    fn label(&self) -> &'static str {
         match self {
-            Encoding::Utf8 => {
-                String::from_utf8(bytes.to_vec()).map_err(|e| format!("Invalid UTF-8: {}", e))
-            }
-            Encoding::Utf16Le => decode_utf16_le(bytes),
-            Encoding::Utf16Be => decode_utf16_be(bytes),
-            Encoding::Iso8859_1 => Ok(bytes.iter().map(|&b| b as char).collect()),
+            Encoding::Utf8 => "utf-8",
+            Encoding::Utf16Le => "utf-16le",
+            Encoding::Utf16Be => "utf-16be",
+            Encoding::Iso8859_1 => "iso-8859-1",
         }
     }
 }
 
-fn decode_utf16_le(bytes: &[u8]) -> Result<String, String> {
-    if bytes.len() % 2 != 0 {
-        return Err("Invalid UTF-16LE: odd number of bytes".to_string());
-    }
+// ---------------------------------------------------------------------------
+// TextDecoder opaque payload: stores all state in Rust memory
+// ---------------------------------------------------------------------------
 
-    let mut result = String::new();
-    for chunk in bytes.chunks(2) {
-        let code_point = u16::from_le_bytes([chunk[0], chunk[1]]) as u32;
-        match char::from_u32(code_point) {
-            Some(c) => result.push(c),
-            None => return Err(format!("Invalid UTF-16LE code point: U+{:04X}", code_point)),
-        }
-    }
-    Ok(result)
+pub(crate) struct TextDecoderPayload {
+    encoding: Encoding,
+    fatal: bool,
+    ignore_bom: bool,
+    bom_handled: Cell<bool>,
+    pending: RefCell<Vec<u8>>,
 }
 
-fn decode_utf16_be(bytes: &[u8]) -> Result<String, String> {
-    if bytes.len() % 2 != 0 {
-        return Err("Invalid UTF-16BE: odd number of bytes".to_string());
-    }
-
-    let mut result = String::new();
-    for chunk in bytes.chunks(2) {
-        let code_point = u16::from_be_bytes([chunk[0], chunk[1]]) as u32;
-        match char::from_u32(code_point) {
-            Some(c) => result.push(c),
-            None => return Err(format!("Invalid UTF-16BE code point: U+{:04X}", code_point)),
-        }
-    }
-    Ok(result)
+fn get_decoder<'a>(
+    ctx: &mut ScopedContext,
+    val: &'a JSValue,
+) -> Result<&'a TextDecoderPayload, i32> {
+    val.as_native_object::<TextDecoderPayload, JSTextDecoder>()
+        .and_then(|o| o.payload())
+        .ok_or_else(|| {
+            ctx.throw_internal_error("not a TextDecoder instance");
+            -1
+        })
 }
+
+// ---------------------------------------------------------------------------
+// Constructor
+// ---------------------------------------------------------------------------
 
 fn js_text_decoder_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let new_target = cc.this();
@@ -87,39 +84,23 @@ fn js_text_decoder_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSRe
             -1
         })?
     } else {
-        Encoding::Utf8 // Default encoding
+        Encoding::Utf8
     };
 
-    // Parse options
-    let fatal = if cc.length() > 1 {
+    // Parse constructor options: { fatal?, ignoreBOM? }
+    let mut fatal = false;
+    let mut ignore_bom = false;
+    if cc.length() > 1 {
         let arg1 = cc.arg(1);
         match arg1.as_object() {
             Some(opts) => {
                 let fatal_val = opts.get_property_str(ctx, "fatal")?;
                 if !fatal_val.is_undefined() {
-                    fatal_val.to_bool()?
-                } else {
-                    false
+                    fatal = fatal_val.to_bool()?;
                 }
-            }
-            None => {
-                ctx.throw_type_error("Options must be an object");
-                return Err(-1);
-            }
-        }
-    } else {
-        false
-    };
-
-    let ignore_bom = if cc.length() > 1 {
-        let arg1 = cc.arg(1);
-        match arg1.as_object() {
-            Some(opts) => {
                 let ignore_bom_val = opts.get_property_str(ctx, "ignoreBOM")?;
                 if !ignore_bom_val.is_undefined() {
-                    ignore_bom_val.to_bool()?
-                } else {
-                    false
+                    ignore_bom = ignore_bom_val.to_bool()?;
                 }
             }
             None => {
@@ -127,60 +108,259 @@ fn js_text_decoder_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSRe
                 return Err(-1);
             }
         }
-    } else {
-        false
-    };
+    }
 
-    // Store encoding and options in object properties
-    let mut obj = ctx
-        .create_class_instance(new_target, JSTextDecoder::class_id())
+    let data = Box::new(TextDecoderPayload {
+        encoding,
+        fatal,
+        ignore_bom,
+        bom_handled: Cell::new(false),
+        pending: RefCell::new(Vec::new()),
+    });
+    let opaque = Box::into_raw(data).cast::<c_void>();
+
+    ctx.create_class_instance_with_opaque(new_target, JSTextDecoder::class_id(), opaque)
         .map_err(|_| {
-            ctx.throw_internal_error("Failed to create TextDecoder instance");
+            let _ = unsafe { Box::from_raw(opaque.cast::<TextDecoderPayload>()) };
             -1
-        })?;
+        })
+        .map(JSValue::from)
+}
 
-    // Store encoding as string property
-    let enc_name = match encoding {
-        Encoding::Utf8 => "utf-8",
-        Encoding::Utf16Le => "utf-16le",
-        Encoding::Utf16Be => "utf-16be",
-        Encoding::Iso8859_1 => "iso-8859-1",
+// ---------------------------------------------------------------------------
+// UTF-8 streaming decoder
+//
+// Returns (decoded_string, pending_bytes).  When `stream` is true and the
+// input ends in the middle of a multi-byte sequence, the partial bytes are
+// returned as pending and decoding stops early.  When `stream` is false,
+// incomplete trailing sequences are treated as errors.
+// ---------------------------------------------------------------------------
+
+fn decode_utf8(bytes: &[u8], fatal: bool, stream: bool) -> Result<(String, Vec<u8>), String> {
+    let mut out = String::new();
+    let mut i = 0;
+    let len = bytes.len();
+
+    while i < len {
+        let b = bytes[i];
+
+        // Determine expected sequence length and min code point
+        let (seq_len, min_cp) = if b < 0x80 {
+            (1, 0u32)
+        } else if b >= 0xC2 && b <= 0xDF {
+            (2, 0x80)
+        } else if b >= 0xE0 && b <= 0xEF {
+            (3, 0x800)
+        } else if b >= 0xF0 && b <= 0xF4 {
+            (4, 0x10000)
+        } else {
+            // Stray continuation byte (0x80-0xBF), overlong lead (0xC0-0xC1),
+            // or invalid lead (0xF5-0xFF)
+            if fatal {
+                return Err("Invalid UTF-8 sequence: unexpected byte".into());
+            }
+            out.push('\u{FFFD}');
+            i += 1;
+            continue;
+        };
+
+        // Check if the full sequence fits in the available bytes
+        if seq_len > 1 && i + seq_len > len {
+            if stream {
+                // Save incomplete trailing bytes for the next chunk
+                return Ok((out, bytes[i..].to_vec()));
+            } else {
+                // Flush mode: incomplete sequence is an error
+                if fatal {
+                    return Err("Incomplete UTF-8 sequence on flush".into());
+                }
+                out.push('\u{FFFD}');
+                i += 1;
+                continue;
+            }
+        }
+
+        // Decode the multi-byte sequence
+        let mut cp = if seq_len == 1 {
+            // Single-byte: 0xxxxxxx, data is the full 7 bits
+            b as u32
+        } else {
+            // Multi-byte lead byte: bits depend on sequence length
+            (b & (0x7F >> seq_len)) as u32
+        };
+        let mut valid = seq_len == 1; // single-byte is always valid
+        if seq_len > 1 {
+            valid = true;
+            for j in 1..seq_len {
+                let cb = bytes[i + j];
+                if cb & 0xC0 != 0x80 {
+                    valid = false;
+                    break;
+                }
+                cp = (cp << 6) | (cb & 0x3F) as u32;
+            }
+        }
+
+        if !valid || cp < min_cp || (0xD800..=0xDFFF).contains(&cp) || cp > 0x10FFFF {
+            if fatal {
+                return Err("Invalid UTF-8 sequence".into());
+            }
+            out.push('\u{FFFD}');
+            i += 1;
+        } else {
+            // SAFETY: validated above
+            out.push(unsafe { char::from_u32_unchecked(cp) });
+            i += seq_len;
+        }
+    }
+
+    Ok((out, Vec::new()))
+}
+
+// ---------------------------------------------------------------------------
+// UTF-16 streaming decoder (both LE and BE)
+// ---------------------------------------------------------------------------
+
+fn decode_utf16(
+    bytes: &[u8],
+    le: bool,
+    fatal: bool,
+    stream: bool,
+) -> Result<(String, Vec<u8>), String> {
+    let odd = bytes.len() % 2;
+
+    // Determine how many whole code units we have
+    let complete_len = if odd == 0 {
+        bytes.len()
+    } else if stream {
+        bytes.len() - 1 // save the trailing byte as pending
+    } else {
+        bytes.len() // flush: include the odd byte, will error
     };
-    let enc_str = ctx.create_string_from_utf8(enc_name.as_bytes().to_vec())?;
-    obj.define_property_value_str(ctx, "__encoding", enc_str.into(), 0)?;
 
-    // Store fatal flag
-    obj.define_property_value_str(ctx, "__fatal", JSValue::Bool(fatal), 0)?;
+    let mut out = String::new();
+    let mut i = 0;
+    while i + 1 < complete_len {
+        let cu = if le {
+            u16::from_le_bytes([bytes[i], bytes[i + 1]])
+        } else {
+            u16::from_be_bytes([bytes[i], bytes[i + 1]])
+        };
 
-    // Store ignoreBOM flag
-    obj.define_property_value_str(ctx, "__ignoreBom", JSValue::Bool(ignore_bom), 0)?;
+        match char::from_u32(cu as u32) {
+            Some(c) => {
+                out.push(c);
+                i += 2;
+            }
+            None => {
+                if fatal {
+                    return Err("Invalid UTF-16 code unit".into());
+                }
+                out.push('\u{FFFD}');
+                i += 2;
+            }
+        }
+    }
 
-    Ok(obj.into())
+    // Handle trailing odd byte in flush mode
+    if odd != 0 && !stream && fatal {
+        return Err("Incomplete UTF-16 data on flush".into());
+    }
+    if odd != 0 && !stream {
+        out.push('\u{FFFD}');
+    }
+
+    let pending = if odd != 0 && stream {
+        vec![bytes[bytes.len() - 1]]
+    } else {
+        Vec::new()
+    };
+
+    Ok((out, pending))
+}
+
+/// Internal: decode &[u8] with BOM handling, returns (string, pending)
+fn process_decoded(
+    decoder: &TextDecoderPayload,
+    data: &[u8],
+    call_fatal: bool,
+    stream: bool,
+) -> Result<(String, Vec<u8>), String> {
+    // BOM stripping: only on the first decode() call; uses slice offset, no copy.
+    let bom_handled = decoder.bom_handled.get();
+
+    let slice = if !bom_handled && !decoder.ignore_bom && data.len() >= 2 {
+        let bom_len = match decoder.encoding {
+            Encoding::Utf8 => {
+                if data.len() >= 3 && data[0] == 0xEF && data[1] == 0xBB && data[2] == 0xBF {
+                    Some(3)
+                } else {
+                    None
+                }
+            }
+            Encoding::Utf16Le | Encoding::Iso8859_1 => {
+                if data[0] == 0xFF && data[1] == 0xFE {
+                    Some(2)
+                } else {
+                    None
+                }
+            }
+            Encoding::Utf16Be => {
+                if data[0] == 0xFE && data[1] == 0xFF {
+                    Some(2)
+                } else {
+                    None
+                }
+            }
+        };
+        match bom_len {
+            Some(n) => &data[n..],
+            None => data,
+        }
+    } else {
+        data
+    };
+    decoder.bom_handled.set(true);
+
+    match decoder.encoding {
+        Encoding::Utf8 => decode_utf8(slice, call_fatal, stream),
+        Encoding::Utf16Le => decode_utf16(slice, true, call_fatal, stream),
+        Encoding::Utf16Be => decode_utf16(slice, false, call_fatal, stream),
+        Encoding::Iso8859_1 => Ok((
+            slice.iter().map(|&b| b as char).collect::<String>(),
+            Vec::new(),
+        )),
+    }
 }
 
 fn js_text_decoder_decode(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
+    let decoder = get_decoder(ctx, &this)?;
 
-    // Get stored properties
-    let enc_val = this.get_property_str(ctx, "__encoding")?;
-    let enc_name = enc_val.to_string(ctx)?;
-    let encoding =
-        Encoding::from_str(enc_name.content().encode_utf8(false).as_ref()).ok_or_else(|| {
-            ctx.throw_internal_error("Invalid encoding stored");
-            -1
-        })?;
+    // Parse options first (no borrow on decoder internals needed here).
+    let mut stream = false;
+    let mut call_fatal = decoder.fatal;
+    if cc.length() > 1 {
+        if let Some(opts) = cc.arg(1).as_object() {
+            let v = opts.get_property_str(ctx, "stream")?;
+            if !v.is_undefined() {
+                stream = v.to_bool()?;
+            }
+            let v = opts.get_property_str(ctx, "fatal")?;
+            if !v.is_undefined() {
+                call_fatal = v.to_bool()?;
+            }
+        }
+    }
 
-    let fatal_val = this.get_property_str(ctx, "__fatal")?;
-    let fatal = fatal_val.to_bool()?;
-
-    // Get input buffer
+    // Extract input as &[u8] (zero-copy) and process inline.
+    // We keep the match arm as the outer scope so the &[u8] borrow stays valid.
     match cc.arg(0) {
         s @ JSValue::String(_) => return Ok(s),
         JSValue::Object(o) => {
             let p = o.payload();
-
-            let bytes = if let Some(ab) = p.array_buffer() {
-                ab.bytes()
+            let input_slice = if let Some(ab) = p.array_buffer() {
+                ab.bytes() // &[u8] borrowing from the JS object
             } else if let Some(ta) = p.typed_array() {
                 ta.bytes()
             } else {
@@ -188,76 +368,68 @@ fn js_text_decoder_decode(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
                 return Err(-1);
             };
 
-            // Handle BOM if not ignored
-            let ignore_bom_val = this.get_property_str(ctx, "__ignoreBom")?;
-            let ignore_bom = ignore_bom_val.to_bool()?;
-            let bytes_to_decode = if bytes.len() >= 2 && !ignore_bom {
-                // Check for BOM
-                if bytes[0] == 0xEF && bytes[1] == 0xBB {
-                    // UTF-8 BOM
-                    if bytes.len() >= 3 && bytes[2] == 0xBF {
-                        &bytes[3..]
-                    } else {
-                        &bytes[..]
-                    }
-                } else if bytes[0] == 0xFE && bytes[1] == 0xFF {
-                    // UTF-16 BE BOM
-                    &bytes[2..]
-                } else if bytes[0] == 0xFF && bytes[1] == 0xFE {
-                    // UTF-16 LE BOM
-                    &bytes[2..]
-                } else {
-                    &bytes[..]
-                }
+            let pending_old = std::mem::take(&mut *decoder.pending.borrow_mut());
+
+            let (result, pending_new) = if pending_old.is_empty() {
+                // Fast path: no pending bytes → pass &[u8] directly, zero allocation.
+                process_decoded(decoder, input_slice, call_fatal, stream).map_err(|e| {
+                    ctx.throw_type_error(&e);
+                    -1
+                })?
             } else {
-                &bytes[..]
+                // Slow path:  has pending  → merge into Vec (pending already allocated).
+                let mut combined = pending_old;
+                combined.extend_from_slice(input_slice);
+                process_decoded(decoder, &combined, call_fatal, stream).map_err(|e| {
+                    ctx.throw_type_error(&e);
+                    -1
+                })?
             };
 
-            // Decode
-            match encoding.decode(bytes_to_decode) {
-                Ok(s) => ctx
-                    .create_string_from_utf8(s.into_bytes())
-                    .map(JSValue::String),
-                Err(e) => {
-                    if fatal {
-                        ctx.throw_type_error(&e);
-                        Err(-1)
-                    } else {
-                        // Replace invalid sequences with U+FFFD
-                        Ok(ctx
-                            .create_string_from_utf8("".as_bytes().to_vec())
-                            .map(JSValue::String)
-                            .unwrap_or_else(|_| {
-                                JSValue::String(ctx.create_string_from_str("").unwrap())
-                            }))
-                    }
-                }
+            if stream {
+                *decoder.pending.borrow_mut() = pending_new;
             }
+
+            ctx.create_string_from_utf8(result.into_bytes())
+                .map(JSValue::String)
+                .map_err(|_| {
+                    ctx.throw_internal_error("Failed to create output string");
+                    -1
+                })
         }
         _ => {
             ctx.throw_type_error("Input must be TypedArray, ArrayBuffer or Object");
-            return Err(-1);
+            Err(-1)
         }
     }
 }
 
+// ---------------------------------------------------------------------------
+// Getters
+// ---------------------------------------------------------------------------
+
 fn js_text_decoder_encoding_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
-    let enc_val = this.get_property_str(ctx, "__encoding")?;
-    Ok(enc_val)
+    let decoder = get_decoder(ctx, &this)?;
+    let s = ctx.create_string_from_utf8(decoder.encoding.label().as_bytes().to_vec())?;
+    Ok(s.into())
 }
 
 fn js_text_decoder_fatal_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
-    let fatal_val = this.get_property_str(ctx, "__fatal")?;
-    Ok(fatal_val)
+    let decoder = get_decoder(ctx, &this)?;
+    Ok(JSValue::Bool(decoder.fatal))
 }
 
 fn js_text_decoder_ignore_bom_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
-    let ignore_bom_val = this.get_property_str(ctx, "__ignoreBom")?;
-    Ok(ignore_bom_val)
+    let decoder = get_decoder(ctx, &this)?;
+    Ok(JSValue::Bool(decoder.ignore_bom))
 }
+
+// ---------------------------------------------------------------------------
+// Class registration
+// ---------------------------------------------------------------------------
 
 const CLASS_TEXT_DECODER_PROTO: &[FieldDef] = &[
     FieldDef::GETSET("encoding", Some(js_text_decoder_encoding_getter), None, 0),
@@ -268,13 +440,13 @@ const CLASS_TEXT_DECODER_PROTO: &[FieldDef] = &[
         None,
         0,
     ),
-    FieldDef::FUNC("decode", 1, js_text_decoder_decode, 0),
+    FieldDef::FUNC("decode", 2, js_text_decoder_decode, 0),
 ];
 
 def_native_object!(
     "TextDecoder",
     JSTextDecoder,
-    (),
+    TextDecoderPayload,
     CLASS_TEXT_DECODER_PROTO,
     constructor: ClassCtorDef::new(js_text_decoder_constructor, 2, true).expose_to_global()
 );
