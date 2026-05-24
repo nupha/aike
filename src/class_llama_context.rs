@@ -550,8 +550,7 @@ def_native_object!(
     "Context",
     JSLlamaContext,
     ContextPayload,
-    CLASS_CONTEXT_PROTO,
-    None
+    CLASS_CONTEXT_PROTO
 );
 
 #[distributed_slice(USER_CLASS_DEFS)]

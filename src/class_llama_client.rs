@@ -520,7 +520,7 @@ def_native_object!(
     JSLlamaClient,
     ClientPayload,
     CLASS_CLIENT_PROTO,
-    Some(ClassCtorDef::new(js_client_constructor, 1, false))
+    constructor: ClassCtorDef::new(js_client_constructor, 1, false)
 );
 
 #[distributed_slice(USER_CLASS_DEFS)]

@@ -341,8 +341,7 @@ def_native_object!(
     "SamplerChain",
     JSSamplerChain,
     SamplerPayload,
-    CLASS_SAMPLER_CHAIN_PROTO,
-    None
+    CLASS_SAMPLER_CHAIN_PROTO
 );
 
 #[distributed_slice(USER_CLASS_DEFS)]
