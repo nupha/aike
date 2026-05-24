@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-//! spawn.rs — spawnSync / spawn (async) child process support
-
 use std::{
     collections::HashMap,
     io::{Read, Write},

@@ -845,6 +845,132 @@ fn js_fs_readDir(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     Ok(promise.into())
 }
 
+// ---------------------------------------------------------------------------
+// exists - check if a path exists
+// ---------------------------------------------------------------------------
+fn js_fs_exists(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let v = cc.arg(0).to_string(ctx)?;
+    let path = resolve_safe_path(&v.content().encode_utf8(false).to_string()).map_err(|e| {
+        ctx.throw_internal_error(&e);
+        -1
+    })?;
+
+    let (promise, tx) =
+        Promise::create_with_channel::<Result<bool, String>>(ctx, |cx, payload| -> JSResult {
+            let exists = payload.map_err(|e| {
+                cx.throw_internal_error(&e);
+                -1
+            })?;
+            Ok(JSValue::Bool(exists))
+        })?;
+
+    tokio::spawn(async move {
+        let _ = PollSender::from(tx)
+            .send_async(
+                tokio::fs::try_exists(&path)
+                    .await
+                    .map_err(|e| e.to_string()),
+            )
+            .await;
+    });
+
+    Ok(promise.into())
+}
+
+// ---------------------------------------------------------------------------
+// makeDir - create a directory
+//   makeDir(path)                    – non-recursive (fails if parent missing)
+//   makeDir(path, { recursive: true }) – recursive (like mkdir -p)
+// ---------------------------------------------------------------------------
+fn js_fs_makeDir(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let v = cc.arg(0).to_string(ctx)?;
+    let path = resolve_safe_path(&v.content().encode_utf8(false).to_string()).map_err(|e| {
+        ctx.throw_internal_error(&e);
+        -1
+    })?;
+
+    // Parse optional options: makeDir(path, { recursive?: boolean })
+    let recursive = if cc.length() > 1 {
+        let opts = cc.arg(1);
+        if opts.is_object() {
+            opts.get_property_str(ctx, "recursive")?
+                .to_bool()
+                .unwrap_or(false)
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+
+    let (promise, tx) = make_void_promise(ctx)?;
+
+    tokio::spawn(async move {
+        let r = if recursive {
+            tokio::fs::create_dir_all(&path)
+                .await
+                .map_err(|e| e.to_string())
+        } else {
+            tokio::fs::create_dir(&path)
+                .await
+                .map_err(|e| e.to_string())
+        };
+        let _ = PollSender::from(tx).send_async(r).await;
+    });
+
+    Ok(promise.into())
+}
+
+// ---------------------------------------------------------------------------
+// removeDir - remove an empty directory
+// ---------------------------------------------------------------------------
+fn js_fs_removeDir(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let v = cc.arg(0).to_string(ctx)?;
+    let path = resolve_safe_path(&v.content().encode_utf8(false).to_string()).map_err(|e| {
+        ctx.throw_internal_error(&e);
+        -1
+    })?;
+
+    let (promise, tx) = make_void_promise(ctx)?;
+
+    tokio::spawn(async move {
+        let _ = PollSender::from(tx)
+            .send_async(
+                tokio::fs::remove_dir(&path)
+                    .await
+                    .map_err(|e| e.to_string()),
+            )
+            .await;
+    });
+
+    Ok(promise.into())
+}
+
+// ---------------------------------------------------------------------------
+// remove - delete a file or symbolic link (POSIX unlink semantics)
+// ---------------------------------------------------------------------------
+fn js_fs_remove(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let v = cc.arg(0).to_string(ctx)?;
+    let path = resolve_safe_path(&v.content().encode_utf8(false).to_string()).map_err(|e| {
+        ctx.throw_internal_error(&e);
+        -1
+    })?;
+
+    let (promise, tx) = make_void_promise(ctx)?;
+
+    tokio::spawn(async move {
+        let _ = PollSender::from(tx)
+            .send_async(
+                tokio::fs::remove_file(&path)
+                    .await
+                    .map_err(|e| e.to_string()),
+            )
+            .await;
+    });
+
+    Ok(promise.into())
+}
+
 fn js_fs_stat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let v = cc.arg(0).to_string(ctx)?;
     let path = resolve_safe_path(&v.content().encode_utf8(false).to_string()).map_err(|e| {
@@ -886,9 +1012,13 @@ const MOD_FS_ENTRIES: &[FieldDef] = &[
     FieldDef::FUNC("writeBytes", 2, js_fs_writeBytes, 0),
     FieldDef::FUNC("appendText", 2, js_fs_appendText, 0),
     FieldDef::FUNC("write", 2, js_fs_write, 0),
+    FieldDef::FUNC("exists", 1, js_fs_exists, 0),
+    FieldDef::FUNC("remove", 1, js_fs_remove, 0),
+    FieldDef::FUNC("stat", 1, js_fs_stat, 0),
     FieldDef::FUNC("readDir", 1, js_fs_readDir, 0),
     FieldDef::FUNC("ensureDir", 2, js_fs_ensureDir, 0),
-    FieldDef::FUNC("stat", 1, js_fs_stat, 0),
+    FieldDef::FUNC("makeDir", 2, js_fs_makeDir, 0),
+    FieldDef::FUNC("removeDir", 1, js_fs_removeDir, 0),
 ];
 
 pub fn init_mod_fs(ctx: &mut ScopedContext) -> Result<(), i32> {

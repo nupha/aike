@@ -10,8 +10,7 @@ use std::{
 use linkme::distributed_slice;
 use zuqe::{
     Array, CallContext, ClassCtorDef, ClassID, FieldDef, JS_PROP_C_W_E, JSResult, JSValue,
-    NativeObject, NativePayload, Object, Runtime, ScopedContext, def_native_object,
-    gc_lite::GcTrace,
+    NativeObject, Object, Runtime, ScopedContext, def_native_object, gc_lite::GcTrace,
 };
 
 use crate::USER_CLASS_DEFS;
