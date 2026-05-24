@@ -518,9 +518,9 @@ const CLASS_CLIENT_PROTO: &[FieldDef] = &[
 def_native_object!(
     "Client",
     JSLlamaClient,
+    ClientPayload,
     CLASS_CLIENT_PROTO,
-    Some(ClassCtorDef::new(js_client_constructor, 1, false)),
-    payload: ClientPayload
+    Some(ClassCtorDef::new(js_client_constructor, 1, false))
 );
 
 #[distributed_slice(USER_CLASS_DEFS)]

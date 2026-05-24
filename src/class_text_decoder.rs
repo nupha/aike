@@ -274,6 +274,7 @@ const CLASS_TEXT_DECODER_PROTO: &[FieldDef] = &[
 def_native_object!(
     "TextDecoder",
     JSTextDecoder,
+    (),
     CLASS_TEXT_DECODER_PROTO,
     Some(ClassCtorDef::new(js_text_decoder_constructor, 2, true).expose_to_global())
 );

@@ -1070,9 +1070,9 @@ const CLASS_MODEL_ENTRIES: &[FieldDef] = &[FieldDef::FUNC("load", 1, js_model_lo
 def_native_object!(
     "Model",
     JSLlamaModel,
+    ModelPayload,
     CLASS_MODEL_PROTO_ENTRIES,
     Some(ClassCtorDef::new(js_model_constructor, 2, false).entries(CLASS_MODEL_ENTRIES)),
-    payload: ModelPayload,
     on_class_register: JSLlamaModel::on_register,
     on_class_unregister: JSLlamaModel::on_unregister
 );

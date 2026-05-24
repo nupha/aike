@@ -340,9 +340,9 @@ const CLASS_SAMPLER_CHAIN_PROTO: &[FieldDef] = &[
 def_native_object!(
     "SamplerChain",
     JSSamplerChain,
+    SamplerPayload,
     CLASS_SAMPLER_CHAIN_PROTO,
-    None,
-    payload: SamplerPayload
+    None
 );
 
 #[distributed_slice(USER_CLASS_DEFS)]

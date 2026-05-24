@@ -549,9 +549,9 @@ const CLASS_CONTEXT_PROTO: &[FieldDef] = &[
 def_native_object!(
     "Context",
     JSLlamaContext,
+    ContextPayload,
     CLASS_CONTEXT_PROTO,
-    None,
-    payload: ContextPayload
+    None
 );
 
 #[distributed_slice(USER_CLASS_DEFS)]
