@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
+mod class_io_handle;
 pub(crate) mod signal;
 mod spawn;
 mod sys;
 
-use zuqe::{Array, FieldDef, JS_PROP_C_W_E, JS_PROP_ENUMERABLE, JSValue, ScopedContext};
+pub(crate) use class_io_handle::{JSIoHandle, gc_trace_io, make_stats};
 
-use crate::fs::class_file_handle::JSFileHandle;
+use zuqe::{Array, FieldDef, JS_PROP_C_W_E, JS_PROP_ENUMERABLE, JSValue, ScopedContext};
 
 /// Build and register the `Aike` global object.
 pub fn init_aike(
@@ -48,17 +49,17 @@ pub fn init_aike(
         // --- stdio ---
         FieldDef::VALUE(
             "stdin",
-            |cx| JSFileHandle::new_instance_stdin(cx).map(JSValue::Object),
+            |cx| JSIoHandle::new_instance_stdin(cx).map(JSValue::Object),
             JS_PROP_ENUMERABLE,
         ),
         FieldDef::VALUE(
             "stdout",
-            |cx| JSFileHandle::new_instance_stdout(cx).map(JSValue::Object),
+            |cx| JSIoHandle::new_instance_stdout(cx).map(JSValue::Object),
             JS_PROP_ENUMERABLE,
         ),
         FieldDef::VALUE(
             "stderr",
-            |cx| JSFileHandle::new_instance_stderr(cx).map(JSValue::Object),
+            |cx| JSIoHandle::new_instance_stderr(cx).map(JSValue::Object),
             JS_PROP_ENUMERABLE,
         ),
         // --- spawn ---

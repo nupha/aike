@@ -35,6 +35,7 @@ use zuqe::{
 };
 
 use crate::{
+    aike::{JSIoHandle, gc_trace_io},
     class_event_emitter::JSEventEmitter,
     class_llama_client::JSLlamaClient,
     class_llama_context::JSLlamaContext,
@@ -42,10 +43,7 @@ use crate::{
     class_llama_model::JSLlamaModel,
     class_llama_sampler::JSSamplerChain,
     class_text_decoder::JSTextDecoder,
-    fs::{
-        class_file_handle::{JSFileHandle, gc_trace_file},
-        init_mod_fs,
-    },
+    fs::init_mod_fs,
     global::setup_globals,
     mod_llama::init_mod_llama,
     request::JSResponse,
@@ -249,7 +247,7 @@ async fn main() -> ExitCode {
     rt.gc_set_trace_handler(|gcx| {
         aike::signal::gc_trace_zuq_signals(gcx);
         gc_trace_timeout(gcx);
-        gc_trace_file(gcx);
+        gc_trace_io(gcx)
     });
 
     // register native classes
@@ -273,7 +271,7 @@ async fn main() -> ExitCode {
                 JSEngine::class_id(),
                 JSLlamaClient::class_id(),
                 JSSamplerChain::class_id(),
-                JSFileHandle::class_id(),
+                JSIoHandle::class_id(),
                 JSResponse::class_id(),
                 JSTextDecoder::class_id(),
             ])?;

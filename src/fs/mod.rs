@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-pub(crate) mod class_file_handle;
-
 use std::{
     cell::RefCell,
     path::{Component, Path, PathBuf},
@@ -15,7 +13,7 @@ use zuqe::{
 
 use crate::{
     AIKE_SANDBOX_PATH,
-    fs::class_file_handle::{JSFileHandle, make_stats},
+    aike::{JSIoHandle, make_stats},
 };
 
 thread_local! {
@@ -610,7 +608,7 @@ fn js_fs_open(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 cx.throw_internal_error(&e);
                 -1
             })?;
-            JSFileHandle::new_instance_with_file(cx, JSValue::UNDEFINED, file).map(JSValue::Object)
+            JSIoHandle::new_instance_with_file(cx, JSValue::UNDEFINED, file).map(JSValue::Object)
         },
     )?;
 

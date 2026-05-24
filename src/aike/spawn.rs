@@ -9,15 +9,16 @@ use std::{
     process::{ExitStatus, Stdio},
 };
 
+#[cfg(unix)]
+use std::os::fd::AsRawFd;
+
 use zuqe::{
     CallContext, Callback, JS_GPN_ENUM_ONLY, JS_GPN_INDEX_MASK, JS_PROP_C_W_E, JS_PROP_ENUMERABLE,
     JSResult, JSValue, Object, ScopedContext,
     builtins::{promise::Promise, typed_array::TypedArray},
 };
 
-use crate::fs::class_file_handle::JSFileHandle;
-
-use super::signal::signal_name;
+use super::{JSIoHandle, signal::signal_name};
 
 pub(super) fn js_spawn(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let is_async = cc.magic() == 1;
@@ -225,66 +226,53 @@ fn spawn_sync(
 
 fn spawn_async(ctx: &mut ScopedContext, mut child: tokio::process::Child, pid: i32) -> JSResult {
     // Take stdin pipe before moving child into async task,
-    // so we can create a FileHandle wrapper while ScopedContext is available.
+    // so we can create a PipeWrite FileHandle while ScopedContext is available.
     // When stdin is not piped, this will be None → null.
     let stdin_val = match child.stdin.take() {
         Some(child_stdin) => {
             #[cfg(unix)]
-            {
-                // tokio::process::ChildStdin doesn't implement IntoRawFd, so we
-                // borrow the fd via AsRawFd and dup() it, then let ChildStdin close
-                // its own copy when dropped.
-                use std::os::fd::{AsRawFd, FromRawFd};
-
-                let raw_fd = child_stdin.as_raw_fd();
-                let dup_fd = unsafe { libc::dup(raw_fd) };
-                if dup_fd < 0 {
-                    JSValue::NULL
-                } else {
-                    let std_file = unsafe { std::fs::File::from_raw_fd(dup_fd) };
-                    let tokio_file = tokio::fs::File::from_std(std_file);
-                    // drop child_stdin (closes the original tokio-managed fd)
-                    drop(child_stdin);
-
-                    match JSFileHandle::new_instance_with_file(ctx, JSValue::UNDEFINED, tokio_file)
-                    {
-                        Ok(obj) => JSValue::Object(obj),
-                        Err(_) => JSValue::NULL,
-                    }
-                }
-            }
+            let fd = child_stdin.as_raw_fd();
             #[cfg(not(unix))]
-            {
-                let _ = child_stdin;
-                JSValue::NULL
+            let fd = -1;
+            match JSIoHandle::new_instance_pipe_write(ctx, child_stdin, fd) {
+                Ok(obj) => JSValue::Object(obj),
+                Err(_) => JSValue::NULL,
             }
         }
         None => JSValue::NULL,
     };
 
-    let (prom_stdout, tx_stdout) = Promise::create_with_channel::<Result<Vec<u8>, String>>(
-        ctx,
-        |cx, data: Result<Vec<u8>, String>| -> JSResult {
-            match data {
-                Ok(buf) => TypedArray::create_from_vec_u8(cx, buf).map(JSValue::from),
-                Err(e) => {
-                    cx.throw_internal_error(&e);
-                    Err(-1)
-                }
+    // Take stdout pipe before moving child into async task,
+    // so we can create a PipeRead FileHandle while ScopedContext is available.
+    // When stdout is not piped, this will be None → null.
+    let stdout_val = match child.stdout.take() {
+        Some(child_stdout) => {
+            #[cfg(unix)]
+            let fd = child_stdout.as_raw_fd();
+            #[cfg(not(unix))]
+            let fd = -1;
+            match JSIoHandle::new_instance_pipe_read(ctx, child_stdout, fd) {
+                Ok(obj) => JSValue::Object(obj),
+                Err(_) => JSValue::NULL,
             }
-        },
-    )?;
+        }
+        None => JSValue::NULL,
+    };
 
-    let (prom_stderr, tx_stderr) =
-        Promise::create_with_channel::<Result<Vec<u8>, String>>(ctx, |cx, data| -> JSResult {
-            match data {
-                Ok(buf) => TypedArray::create_from_vec_u8(cx, buf).map(JSValue::from),
-                Err(e) => {
-                    cx.throw_internal_error(&e);
-                    Err(-1)
-                }
+    // Take stderr pipe before moving child into async task.
+    let stderr_val = match child.stderr.take() {
+        Some(child_stderr) => {
+            #[cfg(unix)]
+            let fd = child_stderr.as_raw_fd();
+            #[cfg(not(unix))]
+            let fd = -1;
+            match JSIoHandle::new_instance_pipe_read(ctx, child_stderr, fd) {
+                Ok(obj) => JSValue::Object(obj),
+                Err(_) => JSValue::NULL,
             }
-        })?;
+        }
+        None => JSValue::NULL,
+    };
 
     let (prom_exit, tx_exit) =
         Promise::create_with_channel::<Result<i32, String>>(ctx, |cx, data| -> JSResult {
@@ -318,8 +306,8 @@ fn spawn_async(ctx: &mut ScopedContext, mut child: tokio::process::Child, pid: i
 
     result.define_property_value_str(ctx, "pid", JSValue::Int(pid), JS_PROP_ENUMERABLE)?;
     result.define_property_value_str(ctx, "stdin", stdin_val, JS_PROP_C_W_E)?;
-    result.define_property_value_str(ctx, "stdout", prom_stdout.into(), JS_PROP_C_W_E)?;
-    result.define_property_value_str(ctx, "stderr", prom_stderr.into(), JS_PROP_C_W_E)?;
+    result.define_property_value_str(ctx, "stdout", stdout_val, JS_PROP_C_W_E)?;
+    result.define_property_value_str(ctx, "stderr", stderr_val, JS_PROP_C_W_E)?;
     result.define_property_value_str(ctx, "exitCode", prom_exit.into(), JS_PROP_C_W_E)?;
     result.define_property_value_str(ctx, "signalCode", prom_signal.into(), JS_PROP_C_W_E)?;
 
@@ -332,35 +320,9 @@ fn spawn_async(ctx: &mut ScopedContext, mut child: tokio::process::Child, pid: i
         ctx.create_native_function(Callback::Func(js_child_isRunning), "isRunning", 0, 0)?;
     result.define_property_value_str(ctx, "isRunning", is_running_fn.into(), JS_PROP_C_W_E)?;
 
-    // Spawn a pure async task — use tokio::process::Child's async IO directly.
-    // Read stdout/stderr concurrently via tokio::join! to avoid pipe deadlock.
+    // Spawn a pure async task — wait for child exit and resolve exitCode/signalCode.
+    // stdout/stderr are exposed as FileHandle objects for the consumer to read.
     tokio::spawn(async move {
-        use tokio::io::AsyncReadExt;
-
-        // Take pipes before join to avoid borrowing child across concurrent futures.
-        let mut child_stdout = child.stdout.take();
-        let mut child_stderr = child.stderr.take();
-
-        let (stdout_buf, stderr_buf) = tokio::join!(
-            async {
-                let mut buf = Vec::new();
-                if let Some(ref mut r) = child_stdout {
-                    let _ = r.read_to_end(&mut buf).await;
-                }
-                buf
-            },
-            async {
-                let mut buf = Vec::new();
-                if let Some(ref mut r) = child_stderr {
-                    let _ = r.read_to_end(&mut buf).await;
-                }
-                buf
-            },
-        );
-
-        let _ = tx_stdout.send(Ok(stdout_buf));
-        let _ = tx_stderr.send(Ok(stderr_buf));
-
         match child.wait().await {
             Ok(status) => {
                 let code = status.code().unwrap_or(-1);
