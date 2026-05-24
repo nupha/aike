@@ -13,7 +13,7 @@ use zuqe::{
     CallContext, ClassID, FieldDef, IntOrFloat, JS_PROP_ENUMERABLE, JS_PROP_FORCE, JSResult,
     JSValue, NativeObjectWithPayload, NativePayload, Object, Runtime, ScopedContext,
     builtins::{promise::Promise, typed_array::TypedArray},
-    def_native_object_with_payload,
+    def_native_object,
 };
 
 use crate::{
@@ -563,7 +563,7 @@ const CLASS_CONTEXT_PROTO: &[FieldDef] = &[
     FieldDef::FUNC("dispose", 0, js_context_dispose, 0),
 ];
 
-def_native_object_with_payload!(
+def_native_object!(
     "Context",
     JSLlamaContext,
     ContextPayload,

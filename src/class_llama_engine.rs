@@ -14,7 +14,7 @@ use zuqe::{
         iterator::AsyncIterableIterator,
         promise::{Promise, PromiseResultSlot},
     },
-    def_native_object_with_payload,
+    def_native_object,
 };
 
 use crate::{
@@ -727,7 +727,7 @@ const CLASS_ENGINE_PROTO: &[FieldDef] = &[
     FieldDef::FUNC("dispose", 0, js_engine_dispose, 0),
 ];
 
-def_native_object_with_payload!("Engine", JSEngine, LlamaEngine, CLASS_ENGINE_PROTO, None);
+def_native_object!("Engine", JSEngine, LlamaEngine, CLASS_ENGINE_PROTO, None);
 
 #[distributed_slice(USER_CLASS_DEFS)]
 fn register_class_engine(rt: &mut Runtime) -> Result<ClassID, i32> {

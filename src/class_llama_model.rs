@@ -13,7 +13,7 @@ use zuqe::{
     Array, CallContext, ClassCtorDef, ClassID, FieldDef, JS_PROP_ENUMERABLE, JSResult, JSValue,
     NativeObjectWithPayload, NativePayload, Object, Runtime, RuntimeImpl, ScopedContext,
     builtins::{promise::Promise, typed_array::TypedArray},
-    def_native_object_with_payload_base,
+    def_native_object_base,
 };
 
 use crate::{
@@ -1085,7 +1085,7 @@ fn js_model_load(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
 const CLASS_MODEL_ENTRIES: &[FieldDef] = &[FieldDef::FUNC("load", 1, js_model_load, 0)];
 
-def_native_object_with_payload_base!(JSLlamaModel, ModelPayload);
+def_native_object_base!(JSLlamaModel, ModelPayload);
 
 impl NativeObjectWithPayload<ModelPayload> for JSLlamaModel {
     fn class_name() -> &'static str {

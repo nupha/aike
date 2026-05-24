@@ -15,7 +15,7 @@ use zuqe::{
         iterator::AsyncIterableIterator,
         promise::{Promise, PromiseResultSlot},
     },
-    def_native_object_with_payload,
+    def_native_object,
 };
 
 use crate::{
@@ -535,7 +535,7 @@ const CLASS_CLIENT_PROTO: &[FieldDef] = &[
     FieldDef::GETSET("model", Some(js_client_getter), None, PROP_MODEL as _),
 ];
 
-def_native_object_with_payload!(
+def_native_object!(
     "Client",
     JSLlamaClient,
     ClientPayload,

@@ -8,8 +8,7 @@ use linkme::distributed_slice;
 use llama_cpp_ffi::{SamplerChain, SamplerKind};
 use zuqe::{
     CallContext, ClassID, FieldDef, IntOrFloat, JS_PROP_ENUMERABLE, JSResult, JSValue,
-    NativeObjectWithPayload, NativePayload, Object, Runtime, ScopedContext,
-    def_native_object_with_payload,
+    NativeObjectWithPayload, NativePayload, Object, Runtime, ScopedContext, def_native_object,
 };
 
 use crate::{USER_CLASS_DEFS, class_llama_model::get_llama_model};
@@ -367,7 +366,7 @@ const CLASS_SAMPLER_CHAIN_PROTO: &[FieldDef] = &[
     FieldDef::FUNC("temperature", 1, js_samplerchain_temperature, 0 as _),
 ];
 
-def_native_object_with_payload!(
+def_native_object!(
     "SamplerChain",
     JSSamplerChain,
     SamplerPayload,
