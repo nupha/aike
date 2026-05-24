@@ -245,7 +245,9 @@ fn spawn_async(ctx: &mut ScopedContext, mut child: tokio::process::Child, pid: i
                     let tokio_file = tokio::fs::File::from_std(std_file);
                     // drop child_stdin (closes the original tokio-managed fd)
                     drop(child_stdin);
-                    match JSFileHandle::new_instance(ctx, JSValue::UNDEFINED, tokio_file) {
+
+                    match JSFileHandle::new_instance_with_file(ctx, JSValue::UNDEFINED, tokio_file)
+                    {
                         Ok(obj) => JSValue::Object(obj),
                         Err(_) => JSValue::NULL,
                     }

@@ -4,7 +4,6 @@
 use std::{
     cell::{Cell, RefCell},
     collections::HashMap,
-    ffi::c_void,
     sync::Arc,
 };
 
@@ -17,9 +16,10 @@ use crossbeam::channel::{Receiver, Sender};
 use linkme::distributed_slice;
 use tokio::io::AsyncReadExt;
 use zuqe::{
-    CallContext, ClassDef, ClassID, ErrorKind, FieldDef, JSResult, JSValue, JobState, Object,
-    PollSender, Runtime, ScopedContext,
+    CallContext, ClassID, ErrorKind, FieldDef, JSResult, JSValue, JobState, Object, PollSender,
+    Runtime, ScopedContext,
     builtins::{iterator::AsyncIterableIterator, promise::Promise, typed_array::TypedArray},
+    def_native_object,
     gc_lite::{GcTrace, GcTraceCtx},
 };
 
@@ -29,14 +29,14 @@ const PROP_FD: i32 = 5;
 const BUF_SIZE_STDIN: usize = 16384;
 const BUF_SIZE_FILE: usize = 65536;
 
-enum FileHandleDesc {
+pub(crate) enum FileHandlePayload {
     Stdin,
     Stdout,
     Stderr,
     File(Arc<tokio::sync::Mutex<tokio::fs::File>>),
 }
 
-impl FileHandleDesc {
+impl FileHandlePayload {
     fn read_buf_size(&self) -> usize {
         match self {
             Self::File(_) => BUF_SIZE_FILE,
@@ -172,24 +172,16 @@ fn start_on_read_microtask(ctx: &mut ScopedContext) {
     );
 }
 
-fn get_file_desc<'a>(ctx: &mut ScopedContext, val: &JSValue) -> Result<&'a FileHandleDesc, i32> {
-    if let Some(obj) = val.as_object() {
-        let opaque = obj
-            .retrive_payload(ctx, obj.class_id())?
-            .other()
-            .ok_or_else(|| -1)?
-            .opaque();
-
-        if !opaque.is_null() {
-            Ok(unsafe { &*opaque.cast::<FileHandleDesc>() })
-        } else {
-            ctx.throw_internal_error("invalid FileHandle");
-            Err(-1)
-        }
-    } else {
-        ctx.throw_type_error("expected FileHandle object");
-        Err(-1)
-    }
+fn get_file_desc<'a>(
+    ctx: &mut ScopedContext,
+    val: &'a JSValue,
+) -> Result<&'a FileHandlePayload, i32> {
+    val.as_native_object::<_, JSFileHandle>()
+        .and_then(|o| o.payload())
+        .ok_or_else(|| {
+            ctx.throw_internal_error("invalid FileHandle instance");
+            -1
+        })
 }
 
 fn js_fh_onData(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -198,7 +190,7 @@ fn js_fh_onData(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let raw_fd = desc.as_raw_fd();
 
     // Cannot read from stdout/stderr
-    if matches!(desc, FileHandleDesc::Stdout | FileHandleDesc::Stderr) {
+    if matches!(desc, FileHandlePayload::Stdout | FileHandlePayload::Stderr) {
         ctx.throw_type_error("cannot read from stdout/stderr");
         return Err(-1);
     }
@@ -246,7 +238,7 @@ fn js_fh_onData(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         let tx = ON_DATA_STATE.with_borrow(|opt| opt.as_ref().unwrap().tx.clone());
 
         match desc {
-            FileHandleDesc::Stdin => {
+            FileHandlePayload::Stdin => {
                 let buf_size = desc.read_buf_size();
                 tokio::spawn(async move {
                     let mut buf = vec![0u8; buf_size];
@@ -268,7 +260,7 @@ fn js_fh_onData(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                     }
                 });
             }
-            FileHandleDesc::File(fd) => {
+            FileHandlePayload::File(fd) => {
                 let fd = fd.clone();
                 let buf_size = desc.read_buf_size();
                 tokio::spawn(async move {
@@ -324,7 +316,7 @@ fn js_fh_text(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         })?;
 
     match desc {
-        FileHandleDesc::Stdin => {
+        FileHandlePayload::Stdin => {
             tokio::spawn(async move {
                 let mut buf = String::new();
                 let result = tokio::io::stdin()
@@ -335,10 +327,10 @@ fn js_fh_text(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 let _ = PollSender::from(tx).send_async(result).await;
             });
         }
-        FileHandleDesc::Stdout | FileHandleDesc::Stderr => {
+        FileHandlePayload::Stdout | FileHandlePayload::Stderr => {
             let _ = tx.send(Err("cannot read from stdout/stderr".to_string()));
         }
-        FileHandleDesc::File(fd) => {
+        FileHandlePayload::File(fd) => {
             let fd = fd.clone();
             tokio::spawn(async move {
                 let mut file = fd.lock().await;
@@ -374,7 +366,7 @@ fn js_fh_json(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     )?;
 
     match desc {
-        FileHandleDesc::Stdin => {
+        FileHandlePayload::Stdin => {
             tokio::spawn(async move {
                 let mut buf = String::new();
                 let raw = tokio::io::stdin()
@@ -389,10 +381,10 @@ fn js_fh_json(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 let _ = PollSender::from(tx).send_async(result).await;
             });
         }
-        FileHandleDesc::Stdout | FileHandleDesc::Stderr => {
+        FileHandlePayload::Stdout | FileHandlePayload::Stderr => {
             let _ = tx.send(Err("cannot read from stdout/stderr".to_string()));
         }
-        FileHandleDesc::File(fd) => {
+        FileHandlePayload::File(fd) => {
             let fd = fd.clone();
             tokio::spawn(async move {
                 use tokio::io::{AsyncReadExt, AsyncSeekExt};
@@ -431,7 +423,7 @@ fn js_fh_bytes(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         })?;
 
     match desc {
-        FileHandleDesc::Stdin => {
+        FileHandlePayload::Stdin => {
             tokio::spawn(async move {
                 let mut buf = Vec::new();
                 let result = tokio::io::stdin()
@@ -442,10 +434,10 @@ fn js_fh_bytes(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 let _ = PollSender::from(tx).send_async(result).await;
             });
         }
-        FileHandleDesc::Stdout | FileHandleDesc::Stderr => {
+        FileHandlePayload::Stdout | FileHandlePayload::Stderr => {
             let _ = tx.send(Err("cannot read from stdout/stderr".to_string()));
         }
-        FileHandleDesc::File(fd) => {
+        FileHandlePayload::File(fd) => {
             let fd = fd.clone();
             tokio::spawn(async move {
                 use tokio::io::{AsyncReadExt, AsyncSeekExt};
@@ -482,11 +474,11 @@ fn js_fh_stat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     )?;
 
     match desc {
-        FileHandleDesc::Stdin | FileHandleDesc::Stdout | FileHandleDesc::Stderr => {
+        FileHandlePayload::Stdin | FileHandlePayload::Stdout | FileHandlePayload::Stderr => {
             // std streams: stat via /dev/stdin etc. is unreliable, return zero-stats
             let _ = tx.send(Err("cannot stat standard stream".to_string()));
         }
-        FileHandleDesc::File(fd) => {
+        FileHandlePayload::File(fd) => {
             let fd = Arc::clone(fd);
             tokio::spawn(async move {
                 let file = fd.lock().await;
@@ -523,7 +515,7 @@ fn js_fh_read(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut buf = Vec::with_capacity(max_len);
 
     match desc {
-        FileHandleDesc::Stdin => {
+        FileHandlePayload::Stdin => {
             tokio::spawn(async move {
                 let result = if max_len == 0 {
                     tokio::io::stdin()
@@ -545,10 +537,10 @@ fn js_fh_read(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 let _ = PollSender::from(tx).send_async(result).await;
             });
         }
-        FileHandleDesc::Stdout | FileHandleDesc::Stderr => {
+        FileHandlePayload::Stdout | FileHandlePayload::Stderr => {
             let _ = tx.send(Err("cannot read from stdout/stderr".to_string()));
         }
-        FileHandleDesc::File(fd) => {
+        FileHandlePayload::File(fd) => {
             let fd = fd.clone();
             tokio::spawn(async move {
                 let mut file = fd.lock().await;
@@ -614,11 +606,11 @@ fn js_fh_writeAll(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     // TODO: put arg to a gc tracing list, and move bytes raw ptr and length into async task.
 
     match desc {
-        FileHandleDesc::Stdin => {
+        FileHandlePayload::Stdin => {
             let _ = tx.send(Err("cannot write to stdin".to_string()));
         }
-        FileHandleDesc::Stdout | FileHandleDesc::Stderr => {
-            let is_stderr = matches!(desc, FileHandleDesc::Stderr);
+        FileHandlePayload::Stdout | FileHandlePayload::Stderr => {
+            let is_stderr = matches!(desc, FileHandlePayload::Stderr);
             tokio::spawn(async move {
                 let mut writer: Box<dyn tokio::io::AsyncWrite + Unpin + Send> = if is_stderr {
                     Box::new(tokio::io::stderr())
@@ -630,7 +622,7 @@ fn js_fh_writeAll(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 let _ = PollSender::from(tx).send_async(result).await;
             });
         }
-        FileHandleDesc::File(fd) => {
+        FileHandlePayload::File(fd) => {
             let fd = fd.clone();
             tokio::spawn(async move {
                 let mut file = fd.lock().await;
@@ -658,11 +650,11 @@ fn js_fh_flush(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         })?;
 
     match desc {
-        FileHandleDesc::Stdin => {
+        FileHandlePayload::Stdin => {
             let _ = tx.send(Ok(()));
         }
-        FileHandleDesc::Stdout | FileHandleDesc::Stderr => {
-            let is_stderr = matches!(desc, FileHandleDesc::Stderr);
+        FileHandlePayload::Stdout | FileHandlePayload::Stderr => {
+            let is_stderr = matches!(desc, FileHandlePayload::Stderr);
             tokio::spawn(async move {
                 use tokio::io::AsyncWriteExt;
                 let mut writer: Box<dyn tokio::io::AsyncWrite + Unpin + Send> = if is_stderr {
@@ -674,7 +666,7 @@ fn js_fh_flush(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 let _ = PollSender::from(tx).send_async(result).await;
             });
         }
-        FileHandleDesc::File(fd) => {
+        FileHandlePayload::File(fd) => {
             let fd = fd.clone();
             tokio::spawn(async move {
                 use tokio::io::AsyncWriteExt;
@@ -701,7 +693,7 @@ fn js_fh_close(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         if !u.opaque().is_null() {
             unsafe {
                 let p = u.replace_opaque(std::ptr::null_mut());
-                drop(Box::from_raw(p.cast::<FileHandleDesc>()));
+                drop(Box::from_raw(p.cast::<FileHandlePayload>()));
             }
         }
 
@@ -831,7 +823,7 @@ fn js_fh_asyncIterator(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let desc = get_file_desc(ctx, &this)?;
 
-    if matches!(desc, FileHandleDesc::Stdout | FileHandleDesc::Stderr) {
+    if matches!(desc, FileHandlePayload::Stdout | FileHandlePayload::Stderr) {
         ctx.throw_type_error("cannot iterate stdout/stderr");
         return Err(-1);
     }
@@ -839,7 +831,7 @@ fn js_fh_asyncIterator(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let (tx, rx) = crossbeam::channel::bounded::<FileChunk>(8);
 
     match desc {
-        FileHandleDesc::Stdin => {
+        FileHandlePayload::Stdin => {
             let buf_size = desc.read_buf_size();
             tokio::spawn(async move {
                 let mut buf = vec![0u8; buf_size];
@@ -861,7 +853,7 @@ fn js_fh_asyncIterator(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 }
             });
         }
-        FileHandleDesc::File(fd) => {
+        FileHandlePayload::File(fd) => {
             let fd = fd.clone();
             let buf_size = desc.read_buf_size();
             tokio::spawn(async move {
@@ -924,72 +916,36 @@ const CLASS_FILE_HANDLE_PROTO: &[FieldDef] = &[
     FieldDef::FUNC("[Symbol.asyncIterator]", 0, js_fh_asyncIterator, 0),
 ];
 
-pub struct JSFileHandle;
+def_native_object!(
+    "FileHandle",
+    JSFileHandle,
+    FileHandlePayload,
+    CLASS_FILE_HANDLE_PROTO
+);
 
 impl JSFileHandle {
-    thread_local! {
-        static CLASS_ID: Cell<ClassID> = const { Cell::new(0) };
-    }
-
-    fn register(rt: &mut Runtime) -> Result<ClassID, i32> {
-        let class_id = rt
-            .register_class_def(
-                ClassDef::new("FileHandle", CLASS_FILE_HANDLE_PROTO, None).on_dispose(
-                    |_, opaque, _| {
-                        if !opaque.is_null() {
-                            let _ = unsafe { Box::from_raw(opaque.cast::<FileHandleDesc>()) };
-                        }
-                    },
-                ),
-            )
-            .expect("register class FileHandle failed");
-
-        Self::CLASS_ID.with(|s| s.set(class_id));
-        Ok(class_id)
-    }
-
-    #[inline(always)]
-    pub fn class_id() -> ClassID {
-        Self::CLASS_ID.with(|x| x.get())
-    }
-
-    fn new_instance_internal(
-        ctx: &mut ScopedContext,
-        new_target: JSValue,
-        desc: FileHandleDesc,
-    ) -> Result<Object, i32> {
-        let class_id = Self::class_id();
-        let opaque = Box::into_raw(Box::new(desc)).cast::<c_void>();
-        ctx.create_class_instance_with_opaque(new_target, class_id, opaque)
-            .map_err(|e| {
-                let p = e.other().unwrap();
-                let _ = unsafe { Box::from_raw(p.opaque().cast::<FileHandleDesc>()) };
-                -1
-            })
-    }
-
     pub fn new_instance_stdin(ctx: &mut ScopedContext) -> Result<Object, i32> {
-        Self::new_instance_internal(ctx, JSValue::UNDEFINED, FileHandleDesc::Stdin)
+        Self::new_instance(ctx, JSValue::UNDEFINED, FileHandlePayload::Stdin)
     }
 
     pub fn new_instance_stdout(ctx: &mut ScopedContext) -> Result<Object, i32> {
-        Self::new_instance_internal(ctx, JSValue::UNDEFINED, FileHandleDesc::Stdout)
+        Self::new_instance(ctx, JSValue::UNDEFINED, FileHandlePayload::Stdout)
     }
 
     pub fn new_instance_stderr(ctx: &mut ScopedContext) -> Result<Object, i32> {
-        Self::new_instance_internal(ctx, JSValue::UNDEFINED, FileHandleDesc::Stderr)
+        Self::new_instance(ctx, JSValue::UNDEFINED, FileHandlePayload::Stderr)
     }
 
     /// Create a FileHandle from an already-opened tokio::fs::File
-    pub fn new_instance(
+    pub fn new_instance_with_file(
         ctx: &mut ScopedContext,
         new_target: JSValue,
         file: tokio::fs::File,
     ) -> Result<Object, i32> {
-        Self::new_instance_internal(
+        Self::new_instance(
             ctx,
             new_target,
-            FileHandleDesc::File(Arc::new(tokio::sync::Mutex::new(file))),
+            FileHandlePayload::File(Arc::new(tokio::sync::Mutex::new(file))),
         )
     }
 }
