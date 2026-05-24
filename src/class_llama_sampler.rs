@@ -340,12 +340,12 @@ const CLASS_SAMPLER_CHAIN_PROTO: &[FieldDef] = &[
 def_native_object!(
     "SamplerChain",
     JSSamplerChain,
-    SamplerPayload,
     CLASS_SAMPLER_CHAIN_PROTO,
-    None
+    None,
+    payload: SamplerPayload
 );
 
 #[distributed_slice(USER_CLASS_DEFS)]
 fn register_class_sampler(rt: &mut Runtime) -> Result<ClassID, i32> {
-    rt.register_native_class_with_payload::<_, JSSamplerChain>()
+    JSSamplerChain::register_native_class(rt)
 }

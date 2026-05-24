@@ -518,12 +518,12 @@ const CLASS_CLIENT_PROTO: &[FieldDef] = &[
 def_native_object!(
     "Client",
     JSLlamaClient,
-    ClientPayload,
     CLASS_CLIENT_PROTO,
-    Some(ClassCtorDef::new(js_client_constructor, 1, false))
+    Some(ClassCtorDef::new(js_client_constructor, 1, false)),
+    payload: ClientPayload
 );
 
 #[distributed_slice(USER_CLASS_DEFS)]
 fn register_class_openai(rt: &mut Runtime) -> Result<ClassID, i32> {
-    rt.register_native_class_with_payload::<_, JSLlamaClient>()
+    JSLlamaClient::register_native_class(rt)
 }

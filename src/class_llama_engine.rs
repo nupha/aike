@@ -710,9 +710,9 @@ const CLASS_ENGINE_PROTO: &[FieldDef] = &[
     FieldDef::FUNC("dispose", 0, js_engine_dispose, 0),
 ];
 
-def_native_object!("Engine", JSEngine, EnginePayload, CLASS_ENGINE_PROTO, None);
+def_native_object!("Engine", JSEngine, CLASS_ENGINE_PROTO, None, payload: EnginePayload);
 
 #[distributed_slice(USER_CLASS_DEFS)]
 fn register_class_engine(rt: &mut Runtime) -> Result<ClassID, i32> {
-    rt.register_native_class_with_payload::<_, JSEngine>()
+    JSEngine::register_native_class(rt)
 }

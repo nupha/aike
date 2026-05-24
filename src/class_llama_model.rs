@@ -1067,27 +1067,17 @@ fn js_model_load(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
 const CLASS_MODEL_ENTRIES: &[FieldDef] = &[FieldDef::FUNC("load", 1, js_model_load, 0)];
 
-def_native_object_base!(JSLlamaModel, ModelPayload);
+def_native_object_base!(
+    "Model",
+    JSLlamaModel,
+    CLASS_MODEL_PROTO_ENTRIES,
+    Some(ClassCtorDef::new(js_model_constructor, 2, false).entries(CLASS_MODEL_ENTRIES)),
+    payload: ModelPayload
+);
 
 impl NativeObjectWithPayload<ModelPayload> for JSLlamaModel {
-    fn class_name() -> &'static str {
-        "Model"
-    }
-
-    fn class_proto_entries() -> &'static [FieldDef] {
-        CLASS_MODEL_PROTO_ENTRIES
-    }
-
-    fn class_ctor_def() -> Option<ClassCtorDef> {
-        Some(ClassCtorDef::new(js_model_constructor, 2, false).entries(CLASS_MODEL_ENTRIES))
-    }
-
     fn class_id() -> ClassID {
         Self::CLASS_ID.with(|x| x.get())
-    }
-
-    fn set_class_id(class_id: ClassID) {
-        Self::CLASS_ID.with(|s| s.set(class_id));
     }
 
     fn on_register(_: &mut RuntimeImpl) {
@@ -1130,5 +1120,5 @@ impl NativeObjectWithPayload<ModelPayload> for JSLlamaModel {
 
 #[distributed_slice(USER_CLASS_DEFS)]
 fn register_class_model(rt: &mut Runtime) -> Result<ClassID, i32> {
-    rt.register_native_class_with_payload::<_, JSLlamaModel>()
+    JSLlamaModel::register_native_class(rt)
 }

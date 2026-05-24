@@ -9,33 +9,39 @@ use std::{
 
 use linkme::distributed_slice;
 use zuqe::{
-    Array, CallContext, ClassCtorDef, ClassDef, ClassID, FieldDef, JS_PROP_C_W_E, JSResult,
-    JSValue, Object, Runtime, RuntimeImpl, ScopedContext, gc_lite::GcTrace,
+    Array, CallContext, ClassCtorDef, ClassID, FieldDef, JS_PROP_C_W_E, JSResult, JSValue,
+    NativeObjectWithPayload, NativePayload, Object, Runtime, ScopedContext, def_native_object,
+    gc_lite::GcTrace,
 };
 
 use crate::USER_CLASS_DEFS;
 
-// Per-instance opaque data
-struct EmitterData {
+#[derive(Debug)]
+pub(crate) struct EmitterPayload {
     /// event_name -> list of (is_once, callback)
     listeners: RefCell<HashMap<String, Vec<(bool, JSValue)>>>,
 }
 
-/// retrive EmitterData from object
-fn get_emitter_data<'a>(ctx: &mut ScopedContext, val: &JSValue) -> Result<&'a EmitterData, i32> {
-    if let Some(o) = val.as_object() {
-        let payload = o
-            .retrive_payload(ctx, o.class_id())?
-            .other()
-            .ok_or_else(|| {
-                ctx.throw_internal_error("not a EventEmitter instance");
-                -1
-            })?;
-        Ok(unsafe { &*payload.opaque().cast::<EmitterData>() })
-    } else {
-        ctx.throw_internal_error("not a EventEmitter instance");
-        Err(-1)
+impl EmitterPayload {
+    fn gc_trace(&self, gcx: &mut zuqe::gc_lite::GcTraceCtx) {
+        // try_borrow: if emit is in progress (mut borrowed), skip this GC cycle
+        if let Ok(listeners) = self.listeners.try_borrow() {
+            for list in listeners.values() {
+                for (_, cb) in list {
+                    cb.trace(gcx);
+                }
+            }
+        }
     }
+}
+
+fn get_emitter<'a>(ctx: &mut ScopedContext, val: &'a JSValue) -> Result<&'a EmitterPayload, i32> {
+    val.as_native_object::<EmitterPayload, JSEventEmitter>()
+        .and_then(|o| o.payload())
+        .ok_or_else(|| {
+            ctx.throw_internal_error("not an EventEmitter instance");
+            -1
+        })
 }
 
 /// Convert event name string to a name owned String.
@@ -48,14 +54,14 @@ fn js_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let class_id = JSEventEmitter::class_id();
     let new_target = cc.this();
 
-    let data = Box::new(EmitterData {
+    let data = Box::new(EmitterPayload {
         listeners: RefCell::new(HashMap::new()),
     });
     let opaque = Box::into_raw(data).cast::<c_void>();
 
     ctx.create_class_instance_with_opaque(new_target, class_id, opaque)
         .map_err(|_| {
-            let _ = unsafe { Box::from_raw(opaque.cast::<EmitterData>()) };
+            let _ = unsafe { Box::from_raw(opaque.cast::<EmitterPayload>()) };
             -1
         })
         .map(JSValue::from)
@@ -79,7 +85,7 @@ fn js_add_listener(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         return Err(-1);
     }
 
-    let data = get_emitter_data(ctx, &this)?;
+    let data = get_emitter(ctx, &this)?;
 
     // Regular events: stored in per-instance listeners map.
     data.listeners
@@ -94,7 +100,7 @@ fn js_add_listener(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 /// removeListener(event, listener) / off(event, listener)
 fn js_remove_listener(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
-    let data = get_emitter_data(ctx, &this)?;
+    let data = get_emitter(ctx, &this)?;
 
     let name = event_name(ctx, &cc.arg(0))?;
     let listener = cc.arg(1);
@@ -114,7 +120,7 @@ fn js_remove_listener(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 /// emit(event, ...args)
 fn js_emit(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
-    let data = get_emitter_data(ctx, &this)?;
+    let data = get_emitter(ctx, &this)?;
     let name = event_name(ctx, &cc.arg(0))?;
 
     // Cannot emit system signals via EventEmitter
@@ -172,7 +178,7 @@ fn js_emit(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 /// removeAllListeners([event])
 fn js_remove_all_listeners(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
-    let data = get_emitter_data(ctx, &this)?;
+    let data = get_emitter(ctx, &this)?;
 
     if cc.length() > 0 && !cc.arg(0).is_undefined() {
         let name = event_name(ctx, &cc.arg(0))?;
@@ -187,7 +193,7 @@ fn js_remove_all_listeners(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
 /// listeners(event) — returns callbacks for a specific event
 fn js_listeners(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
-    let data = get_emitter_data(ctx, &this)?;
+    let data = get_emitter(ctx, &this)?;
     let name = event_name(ctx, &cc.arg(0))?;
 
     let mut arr = Array::create(ctx)?;
@@ -206,7 +212,7 @@ fn js_listeners(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 /// listenerCount(event)
 fn js_listener_count(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
-    let data = get_emitter_data(ctx, &this)?;
+    let data = get_emitter(ctx, &this)?;
     let name = event_name(ctx, &cc.arg(0))?;
 
     let count = data.listeners.borrow().get(&name).map_or(0, |l| l.len());
@@ -217,7 +223,7 @@ fn js_listener_count(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 /// eventNames() — returns all registered event names
 fn js_event_names(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
-    let data = get_emitter_data(ctx, &this)?;
+    let data = get_emitter(ctx, &this)?;
     let mut arr = Array::create(ctx)?;
     let mut idx = 0u32;
 
@@ -243,70 +249,16 @@ const CLASS_EVENT_EMITTER_PROTO: &[FieldDef] = &[
     FieldDef::FUNC("eventNames", 0, js_event_names, 0),
 ];
 
-pub struct JSEventEmitter;
-
-impl JSEventEmitter {
-    thread_local! {
-        static CLASS_ID: Cell<ClassID> = const { Cell::new(0) };
-    }
-
-    fn handle_dispose(_: &mut RuntimeImpl, opaque: *mut c_void, _: usize) {
-        if !opaque.is_null() {
-            let _ = unsafe { Box::from_raw(opaque.cast::<EmitterData>()) };
-        }
-    }
-
-    fn register(rt: &mut Runtime) -> Result<ClassID, i32> {
-        let class_id = rt
-            .register_class_def(
-                ClassDef::new(
-                    "EventEmitter",
-                    CLASS_EVENT_EMITTER_PROTO,
-                    Some(ClassCtorDef::new(js_constructor, 0, true).expose_to_global()),
-                )
-                .on_gc_trace(|opaque: *mut c_void, gcx: &mut zuqe::gc_lite::GcTraceCtx| {
-                    if !opaque.is_null() {
-                        let data = unsafe { &*(opaque.cast::<EmitterData>()) };
-                        // try_borrow: if emit is in progress (mut borrowed), skip this GC cycle
-                        if let Ok(listeners) = data.listeners.try_borrow() {
-                            for list in listeners.values() {
-                                for (_, cb) in list {
-                                    cb.trace(gcx);
-                                }
-                            }
-                        }
-                    }
-                })
-                .on_dispose(Self::handle_dispose),
-            )
-            .expect("register class EventEmitter failed");
-
-        Self::CLASS_ID.with(|s| s.set(class_id));
-        Ok(class_id)
-    }
-
-    #[inline(always)]
-    pub fn class_id() -> ClassID {
-        Self::CLASS_ID.with(|x| x.get())
-    }
-}
-
-/// Create a standalone EventEmitter instance with its own EmitterData.
-/// Useful when an object needs to behave as an EventEmitter (e.g. process).
-pub(crate) fn create_event_emitter_instance(ctx: &mut ScopedContext) -> Result<Object, i32> {
-    let data = Box::new(EmitterData {
-        listeners: RefCell::new(HashMap::new()),
-    });
-    let opaque = Box::into_raw(data).cast::<c_void>();
-
-    ctx.create_class_instance_with_opaque(JSValue::UNDEFINED, JSEventEmitter::class_id(), opaque)
-        .map_err(|_| {
-            let _ = unsafe { Box::from_raw(opaque.cast::<EmitterData>()) };
-            -1
-        })
-}
+def_native_object!(
+    "EventEmitter",
+    JSEventEmitter,
+    CLASS_EVENT_EMITTER_PROTO,
+    Some(ClassCtorDef::new(js_constructor, 0, true).expose_to_global()),
+    payload: EmitterPayload,
+    payload_gc_trace: EmitterPayload::gc_trace
+);
 
 #[distributed_slice(USER_CLASS_DEFS)]
 fn register_class_event_emitter(rt: &mut Runtime) -> Result<ClassID, i32> {
-    JSEventEmitter::register(rt)
+    JSEventEmitter::register_native_class(rt)
 }

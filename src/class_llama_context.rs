@@ -549,12 +549,12 @@ const CLASS_CONTEXT_PROTO: &[FieldDef] = &[
 def_native_object!(
     "Context",
     JSLlamaContext,
-    ContextPayload,
     CLASS_CONTEXT_PROTO,
-    None
+    None,
+    payload: ContextPayload
 );
 
 #[distributed_slice(USER_CLASS_DEFS)]
 fn register_class_context(rt: &mut Runtime) -> Result<ClassID, i32> {
-    rt.register_native_class_with_payload::<_, JSLlamaContext>()
+    JSLlamaContext::register_native_class(rt)
 }
