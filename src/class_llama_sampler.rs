@@ -347,5 +347,5 @@ def_native_object!(
 
 #[distributed_slice(USER_CLASS_DEFS)]
 fn register_class_sampler(rt: &mut Runtime) -> Result<ClassID, i32> {
-    JSSamplerChain::register_native_class(rt)
+    JSSamplerChain::register(rt)
 }

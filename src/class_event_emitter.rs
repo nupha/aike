@@ -260,5 +260,5 @@ def_native_object!(
 
 #[distributed_slice(USER_CLASS_DEFS)]
 fn register_class_event_emitter(rt: &mut Runtime) -> Result<ClassID, i32> {
-    JSEventEmitter::register_native_class(rt)
+    JSEventEmitter::register(rt)
 }

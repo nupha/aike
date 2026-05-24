@@ -281,5 +281,5 @@ def_native_object!(
 
 #[distributed_slice(USER_CLASS_DEFS)]
 fn register_class_text_decoder(rt: &mut Runtime) -> Result<ClassID, i32> {
-    JSTextDecoder::register_native_class(rt)
+    JSTextDecoder::register(rt)
 }

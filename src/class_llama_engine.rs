@@ -714,5 +714,5 @@ def_native_object!("Engine", JSEngine, EnginePayload, CLASS_ENGINE_PROTO, None);
 
 #[distributed_slice(USER_CLASS_DEFS)]
 fn register_class_engine(rt: &mut Runtime) -> Result<ClassID, i32> {
-    JSEngine::register_native_class(rt)
+    JSEngine::register(rt)
 }

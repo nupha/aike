@@ -1114,5 +1114,5 @@ impl JSLlamaModel {
 
 #[distributed_slice(USER_CLASS_DEFS)]
 fn register_class_model(rt: &mut Runtime) -> Result<ClassID, i32> {
-    JSLlamaModel::register_native_class(rt)
+    JSLlamaModel::register(rt)
 }
