@@ -9,8 +9,8 @@ use reqwest::header::HeaderMap;
 use tokio::io::AsyncBufReadExt;
 use tokio_util::io::StreamReader;
 use zuqe::{
-    CallContext, ClassCtorDef, ClassID, FieldDef, JSResult, JSValue, NativeObjectWithPayload,
-    Object, Runtime, ScopedContext,
+    CallContext, ClassCtorDef, ClassID, FieldDef, JSResult, JSValue, NativeObject, Object, Runtime,
+    ScopedContext,
     builtins::{
         iterator::AsyncIterableIterator,
         promise::{Promise, PromiseResultSlot},

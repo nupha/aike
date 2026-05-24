@@ -10,7 +10,7 @@ use linkme::distributed_slice;
 use llama_cpp_ffi::{LlamaContext, SamplerChain};
 use zuqe::{
     CallContext, ClassID, FieldDef, IntOrFloat, JS_PROP_ENUMERABLE, JS_PROP_FORCE, JSResult,
-    JSValue, NativeObjectWithPayload, Object, Runtime, ScopedContext,
+    JSValue, NativeObject, Object, Runtime, ScopedContext,
     builtins::{promise::Promise, typed_array::TypedArray},
     def_native_object,
 };

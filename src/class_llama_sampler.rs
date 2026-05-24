@@ -7,7 +7,7 @@ use linkme::distributed_slice;
 use llama_cpp_ffi::{SamplerChain, SamplerKind};
 use zuqe::{
     CallContext, ClassID, FieldDef, IntOrFloat, JS_PROP_ENUMERABLE, JSResult, JSValue,
-    NativeObjectWithPayload, Object, Runtime, ScopedContext, def_native_object,
+    NativeObject, Object, Runtime, ScopedContext, def_native_object,
 };
 
 use crate::{USER_CLASS_DEFS, class_llama_model::get_llama_model};

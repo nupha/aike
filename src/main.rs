@@ -30,7 +30,7 @@ use clap::Parser;
 use colorized::{Colors::*, colorize_println};
 use linkme::distributed_slice;
 use zuqe::{
-    ClassID, Context, EvalFlags, EvalType, Exception, ModuleDef, NativeObjectWithPayload, Runtime,
+    ClassID, Context, EvalFlags, EvalType, Exception, ModuleDef, NativeObject, Runtime,
     ScopedContext, builtins::promise::PromiseFuture,
 };
 

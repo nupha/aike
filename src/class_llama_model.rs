@@ -11,7 +11,7 @@ use llama_cpp_ffi::{
 };
 use zuqe::{
     Array, CallContext, ClassCtorDef, ClassID, FieldDef, JS_PROP_ENUMERABLE, JSResult, JSValue,
-    NativeObjectWithPayload, Object, Runtime, RuntimeImpl, ScopedContext,
+    NativeObject, Object, Runtime, RuntimeImpl, ScopedContext,
     builtins::{promise::Promise, typed_array::TypedArray},
     def_native_object,
 };

@@ -1,6 +1,6 @@
 use llama_cpp_ffi::{FileType, KVCacheType, list_devices};
 use zuqe::{
-    Array, CallContext, FieldDef, JS_PROP_ENUMERABLE, JSResult, JSValue, NativeObjectWithPayload,
+    Array, CallContext, FieldDef, JS_PROP_ENUMERABLE, JSResult, JSValue, NativeObject,
     ScopedContext,
 };
 

@@ -8,7 +8,7 @@ use async_openai::types::chat::{ReasoningEffort, StopConfiguration};
 use linkme::distributed_slice;
 use llama_cpp_ffi::ToolChoice as LarkToolChoice;
 use zuqe::{
-    CallContext, ClassID, FieldDef, JSResult, JSValue, NativeObjectWithPayload, Object, Runtime,
+    CallContext, ClassID, FieldDef, JSResult, JSValue, NativeObject, Object, Runtime,
     ScopedContext,
     builtins::{
         iterator::AsyncIterableIterator,
