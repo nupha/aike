@@ -698,7 +698,7 @@ fn js_fs_write(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 }
 
 // ---------------------------------------------------------------------------
-// ensureDir - ensure directory exists
+// ensureDir - ensure directory exists (idempotent, default recursive)
 // ---------------------------------------------------------------------------
 fn js_fs_ensureDir(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let v = cc.arg(0).to_string(ctx)?;
@@ -711,14 +711,13 @@ fn js_fs_ensureDir(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let recursive = if cc.length() > 1 {
         let opts = cc.arg(1);
         if opts.is_object() {
-            opts.get_property_str(ctx, "recursive")?
-                .to_bool()
-                .unwrap_or(false)
+            opts.get_property_str(ctx, "recursive")?.to_bool()?
         } else {
-            false
+            ctx.throw_type_error("options must be an object");
+            return Err(-1);
         }
     } else {
-        false
+        true
     };
 
     let (promise, tx) = make_void_promise(ctx)?;
