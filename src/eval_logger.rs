@@ -1,9 +1,12 @@
+use std::{
+    fs::OpenOptions,
+    io::Write,
+    path::PathBuf,
+    sync::{Mutex, OnceLock},
+    time::Instant,
+};
+
 use serde::{Deserialize, Serialize};
-use std::fs::OpenOptions;
-use std::io::Write;
-use std::path::PathBuf;
-use std::sync::Mutex;
-use std::time::Instant;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct EvalLogEntry {
@@ -11,6 +14,12 @@ pub struct EvalLogEntry {
     pub request_id: String,
     /// 时间戳
     pub timestamp: String,
+    /// 对话语义角色（assistant / tool）
+    pub role: String,
+    /// 数据产生域（server / engine / react / reflect / crystallize / memory）
+    pub domain: String,
+    /// 数据发射个体（ravenclaw: agent 名，llama-js: 模块.功能）
+    pub source: String,
     /// 用户输入
     pub input: String,
     /// 模型输出
@@ -102,9 +111,6 @@ impl EvalLogger {
         Ok(())
     }
 }
-
-/// 全局评估日志器（懒加载单例）
-use std::sync::OnceLock;
 
 static EVAL_LOGGER: OnceLock<EvalLogger> = OnceLock::new();
 

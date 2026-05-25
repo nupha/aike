@@ -31,6 +31,9 @@ use crate::{
     },
 };
 
+#[cfg(feature = "enable_eval_log")]
+use crate::eval_logger::{EvalLogEntry, ToolCallLog, get_eval_logger};
+
 #[repr(transparent)]
 #[derive(Debug, Clone)]
 pub(crate) struct EnginePayload(Arc<Mutex<Engine>>);
@@ -267,6 +270,19 @@ fn js_engine_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
         .stream_options
         .is_some_and(|s| s.include_usage.unwrap_or(false));
 
+    // 提取输入用于评估日志（在 req 被 move 前）
+    #[cfg(feature = "enable_eval_log")]
+    let log_input = {
+        use async_openai::types::chat::Role;
+        req.messages
+            .iter()
+            .filter(|m| m.role == Role::User)
+            .filter_map(|m| m.content.as_ref())
+            .map(|c| c.to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
     if is_stream {
         // Streaming: AsyncIterableIterator
         let (chunk_tx, chunk_rx) = crossbeam::channel::bounded::<crate::output::ChunkSSE>(8);
@@ -318,6 +334,9 @@ fn js_engine_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
             })?;
 
         std::thread::spawn(move || {
+            #[cfg(feature = "enable_eval_log")]
+            let start = std::time::Instant::now();
+
             let result = collect_engine_reply_to_json(
                 rx,
                 std::time::Duration::from_secs(u64::MAX),
@@ -327,6 +346,70 @@ fn js_engine_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
                 n_prompt_tokens,
                 include_usage,
             );
+
+            #[cfg(feature = "enable_eval_log")]
+            if let Ok(ref val) = result {
+                let latency = start.elapsed().as_millis();
+                let mut output = String::new();
+                let mut tool_calls = Vec::new();
+                if let Some(choices) = val.get("choices").and_then(|c| c.as_array()) {
+                    if let Some(choice) = choices.first() {
+                        if let Some(message) = choice.get("message") {
+                            if let Some(content) = message.get("content").and_then(|c| c.as_str()) {
+                                output = content.to_string();
+                            }
+                            if let Some(calls) =
+                                message.get("tool_calls").and_then(|c| c.as_array())
+                            {
+                                for call in calls {
+                                    if let Some(func) = call.get("function") {
+                                        let name = func
+                                            .get("name")
+                                            .and_then(|n| n.as_str())
+                                            .unwrap_or("unknown");
+                                        let args = func
+                                            .get("arguments")
+                                            .cloned()
+                                            .unwrap_or(serde_json::Value::Null);
+                                        tool_calls.push(ToolCallLog {
+                                            tool_name: name.to_string(),
+                                            arguments: args,
+                                            success: true,
+                                            error: None,
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                let entry = EvalLogEntry {
+                    request_id: respond_id.clone(),
+                    timestamp: chrono::Utc::now().to_rfc3339(),
+                    role: "assistant".to_string(),
+                    domain: "chat".to_string(),
+                    source: "engine".to_string(),
+                    input: log_input,
+                    output,
+                    reasoning: None,
+                    tool_calls: if tool_calls.is_empty() {
+                        None
+                    } else {
+                        Some(tool_calls)
+                    },
+                    latency_ms: latency,
+                    prompt_tokens: n_prompt_tokens,
+                    completion_tokens: 0,
+                    stop_reason: "stop".to_string(),
+                    model: model_name.clone(),
+                    is_stream: false,
+                    retrieval_context: None,
+                    expected_output: None,
+                };
+                let _ = get_eval_logger().log(&entry);
+            }
+
             let _ = result_slot.commit(result);
         });
 
