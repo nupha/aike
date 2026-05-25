@@ -19,11 +19,12 @@ use zuqe::{
 };
 
 use crate::{
-    AIKE_LLM_API_KEY, AIKE_LLM_BASE_URL, AIKE_LLM_MODEL, USER_CLASS_DEFS,
+    USER_CLASS_DEFS,
     class_llama_client_responses::{
         MAGIC_RESPONSES_ONCE, MAGIC_RESPONSES_STREAM, js_client_responses,
     },
     class_llama_engine::{MAGIC_CHAT_ONCE, MAGIC_CHAT_STREAM},
+    get_llm_api_key, get_llm_base_url, get_llm_model,
     helpers::json_keys_camel_to_snake,
 };
 
@@ -76,7 +77,7 @@ fn js_client_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let base_url = if let Some(s) = base_url_val.as_string() {
         s.content().encode_utf8(false).to_string()
     } else {
-        AIKE_LLM_BASE_URL.to_string()
+        get_llm_base_url()
         // "https://api.openai.com/v1".to_string()
     };
 
@@ -84,7 +85,7 @@ fn js_client_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         .get_property_str(ctx, "apiKey")?
         .as_string()
         .map(|s| s.content().encode_utf8(false).to_string())
-        .unwrap_or_else(|| AIKE_LLM_API_KEY.to_string());
+        .unwrap_or_else(get_llm_api_key);
 
     let default_model: Option<String> = opts_obj
         .get_property_str(ctx, "model")?
@@ -228,12 +229,10 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
         let model_val = obj
             .get("model")
             .and_then(|v| v.as_str())
-            .unwrap_or(AIKE_LLM_MODEL);
+            .map(String::from)
+            .unwrap_or_else(get_llm_model);
 
-        obj.insert(
-            "model".to_string(),
-            serde_json::Value::String(model_val.to_string()),
-        );
+        obj.insert("model".to_string(), serde_json::Value::String(model_val));
     }
 
     // Use reqwest to make HTTP request, build client

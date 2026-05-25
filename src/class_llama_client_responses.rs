@@ -13,7 +13,7 @@ use zuqe::{
     },
 };
 
-use crate::{AIKE_LLM_MODEL, class_llama_client::get_client};
+use crate::{class_llama_client::get_client, get_llm_model};
 
 pub(super) const MAGIC_RESPONSES_STREAM: i32 = 4;
 pub(super) const MAGIC_RESPONSES_ONCE: i32 = 5;
@@ -135,10 +135,7 @@ pub(super) fn js_client_responses(ctx: &mut ScopedContext, cc: CallContext) -> J
     let model = if let Some(s) = model_val.as_string() {
         s.content().encode_utf8(false).to_string()
     } else {
-        client_arc
-            .model_name
-            .clone()
-            .unwrap_or_else(|| AIKE_LLM_MODEL.to_string())
+        client_arc.model_name.clone().unwrap_or_else(get_llm_model)
     };
 
     let mut req_builder = CreateResponseArgs::default();

@@ -11,10 +11,7 @@ use zuqe::{
     builtins::{promise::Promise, typed_array::TypedArray},
 };
 
-use crate::{
-    AIKE_SANDBOX_PATH,
-    aike::{JSIoHandle, make_stats},
-};
+use crate::aike::{JSIoHandle, make_stats};
 
 thread_local! {
     /// Chroot support
@@ -22,12 +19,15 @@ thread_local! {
 
     /// Sandbox restriction: limits all fs access to this directory.
     /// None means no sandbox restriction.
-    static SANDBOX_PATH: RefCell<Option<PathBuf>> = RefCell::new(if AIKE_SANDBOX_PATH.is_empty() {
-        None
-    } else {
-        std::fs::canonicalize(std::path::PathBuf::from(AIKE_SANDBOX_PATH))
-        .ok()
-        .and_then(|p| if p.is_dir() { Some(p) } else { None })
+    static SANDBOX_PATH: RefCell<Option<PathBuf>> = RefCell::new({
+        let p = crate::get_sandbox_path();
+        if p.is_empty() {
+            None
+        } else {
+            std::fs::canonicalize(std::path::PathBuf::from(p))
+                .ok()
+                .and_then(|p| if p.is_dir() { Some(p) } else { None })
+        }
     });
 }
 

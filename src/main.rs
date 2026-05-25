@@ -152,10 +152,18 @@ fn parse_byte_size(ss: &str) -> Option<usize> {
 #[distributed_slice]
 pub(crate) static USER_CLASS_DEFS: [fn(&mut Runtime) -> Result<ClassID, i32>];
 
-pub(crate) const AIKE_LLM_BASE_URL: &str = dotenvy_macro::dotenv!("AIKE_LLM_BASE_URL");
-pub(crate) const AIKE_LLM_API_KEY: &str = dotenvy_macro::dotenv!("AIKE_LLM_API_KEY");
-pub(crate) const AIKE_LLM_MODEL: &str = dotenvy_macro::dotenv!("AIKE_LLM_MODEL");
-pub(crate) const AIKE_SANDBOX_PATH: &str = dotenvy_macro::dotenv!("AIKE_SANDBOX_PATH");
+pub(crate) fn get_llm_base_url() -> String {
+    std::env::var("AIKE_LLM_BASE_URL").unwrap_or_default()
+}
+pub(crate) fn get_llm_api_key() -> String {
+    std::env::var("AIKE_LLM_API_KEY").unwrap_or_default()
+}
+pub(crate) fn get_llm_model() -> String {
+    std::env::var("AIKE_LLM_MODEL").unwrap_or_default()
+}
+pub(crate) fn get_sandbox_path() -> String {
+    std::env::var("AIKE_SANDBOX_PATH").unwrap_or_default()
+}
 
 #[tokio::main]
 async fn main() -> ExitCode {
