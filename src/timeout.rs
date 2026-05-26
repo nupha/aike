@@ -25,7 +25,7 @@ enum TimerMsg {
 
 struct TimerEntry {
     /// JS function callback — must be GC-traced
-    callback: JSValue,
+    callback: Object,
     /// None for setTimeout; Some(ms) for setInterval
     interval_ms: Option<u64>,
     /// tx clone used to re-send Fired for interval repetition
@@ -180,9 +180,7 @@ fn start_timer_microtask(ctx: &mut ScopedContext) {
 // ---------------------------------------------------------------------------
 
 fn register_timer(ctx: &mut ScopedContext, cc: CallContext, is_interval: bool) -> JSResult {
-    let func = cc.arg(0);
-    func.ensure_function(ctx)?;
-
+    let callback = cc.arg(0).into_callable(ctx)?;
     let delay_ms = if cc.length() >= 2 {
         cc.arg(1).to_number(ctx)?.to_i32().max(0) as u64
     } else {
@@ -199,7 +197,7 @@ fn register_timer(ctx: &mut ScopedContext, cc: CallContext, is_interval: bool) -
         s.entries.insert(
             id,
             TimerEntry {
-                callback: func,
+                callback,
                 interval_ms: if is_interval { Some(delay_ms) } else { None },
                 tx: tx.clone(),
             },

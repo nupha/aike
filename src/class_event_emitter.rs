@@ -13,12 +13,12 @@ use zuqe::{
     NativeObject, Object, Runtime, ScopedContext, def_native_object, gc_lite::GcTrace,
 };
 
-use crate::USER_CLASS_DEFS;
+use crate::{USER_CLASS_DEFS, aike::signal::signal_number};
 
 #[derive(Debug)]
 pub(crate) struct EmitterPayload {
     /// event_name -> list of (is_once, callback)
-    listeners: RefCell<HashMap<String, Vec<(bool, JSValue)>>>,
+    listeners: RefCell<HashMap<String, Vec<(bool, Object)>>>,
 }
 
 impl EmitterPayload {
@@ -71,23 +71,22 @@ fn js_add_listener(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let is_once = cc.magic() == 1;
     let this = cc.this();
 
-    let listener = cc.arg(1);
-    listener.ensure_function(ctx)?;
-
+    let listener = cc.arg(1).into_callable(ctx)?;
     let name = event_name(ctx, &cc.arg(0))?;
 
     // Signal events must use Aike.onSignal instead
-    if crate::aike::signal::signal_number(&name).is_some() {
+    if signal_number(&name).is_some() {
         ctx.throw_type_error(&format!(
             "cannot listen for signal '{name}' on EventEmitter; use Aike.onSignal() instead"
         ));
         return Err(-1);
     }
 
-    let data = get_emitter(ctx, &this)?;
+    let emitter = get_emitter(ctx, &this)?;
 
     // Regular events: stored in per-instance listeners map.
-    data.listeners
+    emitter
+        .listeners
         .borrow_mut()
         .entry(name)
         .or_default()
@@ -102,14 +101,14 @@ fn js_remove_listener(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let data = get_emitter(ctx, &this)?;
 
     let name = event_name(ctx, &cc.arg(0))?;
-    let listener = cc.arg(1);
-
-    // Regular event: remove from per-instance listeners map.
-    let mut listeners = data.listeners.borrow_mut();
-    if let Some(list) = listeners.get_mut(&name) {
-        list.retain(|(_, cb)| *cb != listener);
-        if list.is_empty() {
-            listeners.remove(&name);
+    if let Ok(listener) = cc.arg(1).into_object(ctx) {
+        // Regular event: remove from per-instance listeners map.
+        let mut listeners = data.listeners.borrow_mut();
+        if let Some(list) = listeners.get_mut(&name) {
+            list.retain(|(_, cb)| listener.ne(cb));
+            if list.is_empty() {
+                listeners.remove(&name);
+            }
         }
     }
 
@@ -119,59 +118,43 @@ fn js_remove_listener(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 /// emit(event, ...args)
 fn js_emit(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
-    let data = get_emitter(ctx, &this)?;
-    let name = event_name(ctx, &cc.arg(0))?;
+    let emitter = get_emitter(ctx, &this)?;
 
-    // Cannot emit system signals via EventEmitter
-    if crate::aike::signal::signal_number(&name).is_some() {
+    let name = event_name(ctx, &cc.arg(0))?;
+    if signal_number(&name).is_some() {
         ctx.throw_type_error(&format!(
             "cannot emit system signal '{name}' via EventEmitter; use Aike.onSignal() instead"
         ));
         return Err(-1);
     }
 
-    // Collect args (skip event name)
-    let mut args: Vec<JSValue> = Vec::with_capacity(cc.length().saturating_sub(1));
-    for i in 1..cc.length() {
-        args.push(cc.arg(i));
-    }
+    let callbacks = emitter.listeners.borrow_mut().remove(&name);
+    if let Some(mut lst) = callbacks {
+        debug_assert!(!lst.is_empty());
 
-    let mut fired = false;
+        // Collect args (skip eventName)
+        let args = if cc.length() > 1 {
+            &cc.arguments()[1..]
+        } else {
+            &[]
+        };
 
-    // Regular event: read from per-instance listeners map.
-    // Clone first so borrow is released before JS execution (GC may run).
-    let callbacks: Vec<(bool, JSValue)> = {
-        let listeners = data.listeners.borrow();
-        listeners.get(&name).map(|l| l.clone()).unwrap_or_default()
-    };
-
-    let mut to_remove: Vec<usize> = Vec::new();
-    for (i, (is_once, cb)) in callbacks.iter().enumerate() {
-        if cb.call(ctx, JSValue::UNDEFINED, &args).is_err() {
-            // Ignore listener errors per Node.js convention
-            let _ = ctx.rt().exception();
-        }
-        fired = true;
-        if *is_once {
-            to_remove.push(i);
-        }
-    }
-
-    // Remove once-listeners in reverse index order
-    if !to_remove.is_empty() {
-        let mut list = data.listeners.borrow_mut();
-        if let Some(l) = list.get_mut(&name) {
-            to_remove.sort_unstable_by(|a, b| b.cmp(a));
-            for i in to_remove {
-                l.remove(i);
+        lst.retain(|(once, cb)| {
+            if cb.call(ctx, JSValue::UNDEFINED, args).is_err() {
+                let _ = ctx.rt().exception(); // Ignore listener errors per Node.js convention
             }
-            if l.is_empty() {
-                list.remove(&name);
-            }
-        }
-    }
+            !*once
+        });
 
-    Ok(JSValue::Bool(fired))
+        // put callbacks back into listeners map if there are any
+        if !lst.is_empty() {
+            emitter.listeners.borrow_mut().insert(name, lst);
+        }
+
+        Ok(JSValue::Bool(true))
+    } else {
+        Ok(JSValue::Bool(false))
+    }
 }
 
 /// removeAllListeners([event])
@@ -200,7 +183,7 @@ fn js_listeners(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     if let Some(list) = data.listeners.borrow().get(&name) {
         for (_, cb) in list {
-            arr.define_property_value_u32(ctx, idx, *cb, JS_PROP_C_W_E)?;
+            arr.define_property_value_u32(ctx, idx, (*cb).into(), JS_PROP_C_W_E)?;
             idx += 1;
         }
     }
@@ -211,11 +194,10 @@ fn js_listeners(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 /// listenerCount(event)
 fn js_listener_count(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
-    let data = get_emitter(ctx, &this)?;
+    let emitter = get_emitter(ctx, &this)?;
     let name = event_name(ctx, &cc.arg(0))?;
 
-    let count = data.listeners.borrow().get(&name).map_or(0, |l| l.len());
-
+    let count = emitter.listeners.borrow().get(&name).map_or(0, |l| l.len());
     Ok(JSValue::from(count as i32))
 }
 

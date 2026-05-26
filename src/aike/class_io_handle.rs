@@ -89,7 +89,7 @@ enum OnReadMsg {
 }
 
 struct OnReadEntry {
-    callback: JSValue,
+    callback: Object,
 }
 
 struct OnReadState {
@@ -207,7 +207,6 @@ fn js_fh_onData(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     }
 
     let arg = cc.arg(0);
-
     if arg.is_null() {
         ON_DATA_STATE.with_borrow_mut(|opt| {
             if let Some(s) = opt.as_mut() {
@@ -216,8 +215,7 @@ fn js_fh_onData(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         });
         return Ok(JSValue::UNDEFINED);
     }
-
-    let callback = arg.ensure_function(ctx)?;
+    let callback = arg.into_callable(ctx)?;
 
     // Initialize state if needed
     let need_microtask = ON_DATA_STATE.with_borrow(|opt| opt.is_none());

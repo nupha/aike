@@ -214,8 +214,8 @@ pub(super) fn js_on_signal(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
             uninstall_c_handler(sig_num);
         }
     } else {
-        // --- Register handler ---
-        handler.ensure_function(ctx)?;
+        // Register handler
+        handler.ensure_callable(ctx)?;
 
         // Atomically: check emptiness, detect new signal, store callback.
         let (was_empty, is_new) = HANDLER_MAP.with(|map| {
