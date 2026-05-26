@@ -29,7 +29,7 @@ use crate::{
 };
 
 #[derive(Debug)]
-pub(crate) struct ClientState {
+pub(crate) struct ClientPayload {
     pub(crate) base_url: String,
     pub(crate) api_key: String,
     pub(crate) org_id: String,
@@ -41,24 +41,15 @@ pub(crate) struct ClientState {
     pub(crate) timeout: Option<Duration>,
 }
 
-#[derive(Debug, Clone)]
-#[repr(transparent)]
-pub(crate) struct ClientPayload(Arc<ClientState>);
-
-impl std::ops::Deref for ClientPayload {
-    type Target = Arc<ClientState>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-pub(crate) fn get_client(ctx: &mut ScopedContext, val: &JSValue) -> Result<ClientPayload, i32> {
+pub(crate) fn get_client(
+    ctx: &mut ScopedContext,
+    val: &JSValue,
+) -> Result<Arc<ClientPayload>, i32> {
     let ob = JSLlamaClient::try_from(*val).unwrap();
     if let Some(c) = ob.payload() {
         Ok(c.clone())
     } else {
-        ctx.throw_type_error("OpenAI client was disposed");
+        ctx.throw_type_error("Client was disposed");
         Err(-1)
     }
 }
@@ -78,7 +69,6 @@ fn js_client_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         s.content().encode_utf8(false).to_string()
     } else {
         get_llm_base_url()
-        // "https://api.openai.com/v1".to_string()
     };
 
     let api_key = opts_obj
@@ -109,18 +99,21 @@ fn js_client_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         None
     };
 
-    let state = ClientPayload(Arc::new(ClientState {
-        model_name: default_model,
-        base_url,
-        api_key,
-        org_id: String::new(),
-        project_id: String::new(),
-        custom_headers: HeaderMap::new(),
-        buffered_tool_call,
-        timeout,
-    }));
-
-    JSLlamaClient::new_instance(ctx, new_target, state).map(|obj| obj.into())
+    JSLlamaClient::new_instance(
+        ctx,
+        new_target,
+        Arc::new(ClientPayload {
+            model_name: default_model,
+            base_url,
+            api_key,
+            org_id: String::new(),
+            project_id: String::new(),
+            custom_headers: HeaderMap::new(),
+            buffered_tool_call,
+            timeout,
+        }),
+    )
+    .map(|obj| obj.into())
 }
 
 /// Accumulates tool_call deltas until complete, then emits a single chunk.
@@ -470,18 +463,12 @@ fn js_client_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     }
 }
 
-fn js_client_dispose(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let mut this = cc.this();
-    let payload = this
-        .retrive_object_payload_mut(ctx, JSLlamaClient::class_id())?
-        .other_mut()
-        .unwrap();
-    if !payload.opaque().is_null() {
-        unsafe {
-            let p = payload.replace_opaque(std::ptr::null_mut());
-            drop(Arc::from_raw(p.cast::<ClientState>()));
-        }
-    }
+fn js_client_dispose(_: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let _ = cc
+        .this()
+        .as_native_object_mut::<_, JSLlamaClient>()
+        .and_then(|ob| ob.take_payload());
+
     Ok(JSValue::UNDEFINED)
 }
 
@@ -517,7 +504,7 @@ const CLASS_CLIENT_PROTO: &[FieldDef] = &[
 def_native_object!(
     "Client",
     JSLlamaClient,
-    ClientPayload,
+    Arc<ClientPayload>,
     CLASS_CLIENT_PROTO,
     constructor: ClassCtorDef::new(js_client_constructor, 1, false)
 );

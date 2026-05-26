@@ -66,7 +66,7 @@ pub(crate) struct LlamaContextWrap {
 }
 
 impl LlamaContextWrap {
-    fn new(llm_ctx: LlamaContext) -> Self {
+    pub(super) fn new(llm_ctx: LlamaContext) -> Self {
         Self {
             inner: Mutex::new(Some(llm_ctx)),
         }
@@ -152,24 +152,6 @@ impl LlamaContextWrap {
     }
 }
 
-#[repr(transparent)]
-#[derive(Clone)]
-pub(crate) struct ContextPayload(Arc<LlamaContextWrap>);
-
-impl From<LlamaContext> for ContextPayload {
-    fn from(value: LlamaContext) -> Self {
-        Self(Arc::new(LlamaContextWrap::new(value)))
-    }
-}
-
-impl std::ops::Deref for ContextPayload {
-    type Target = Arc<LlamaContextWrap>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
 #[derive(Clone, Copy)]
 struct ContextStatsData {
     memory_used: i64,
@@ -178,7 +160,7 @@ struct ContextStatsData {
     max_tokens: i64,
 }
 
-fn get_llama_context(ctx: &mut ScopedContext, val: &JSValue) -> Result<ContextPayload, i32> {
+fn get_llama_context(ctx: &mut ScopedContext, val: &JSValue) -> Result<Arc<LlamaContextWrap>, i32> {
     let ob = JSLlamaContext::try_from(*val).unwrap();
     ob.payload()
         .ok_or_else(|| {
@@ -186,43 +168,20 @@ fn get_llama_context(ctx: &mut ScopedContext, val: &JSValue) -> Result<ContextPa
             -1
         })
         .cloned()
-
-    // let payload = val
-    //     .retrive_object_payload(ctx, JSLlamaContext::class_id())?
-    //     .other()
-    //     .unwrap();
-    // let opaque = payload.opaque();
-
-    // if opaque.is_null() {
-    //     ctx.throw_type_error("Context was disposed");
-    //     Err(-1)
-    // } else {
-    //     Ok(unsafe { (&*opaque.cast::<Arc<LlamaContextWrap>>()).clone() })
-    // }
 }
 
 fn take_llame_context(
     ctx: &mut ScopedContext,
     mut this: JSValue,
-) -> Result<Option<(LlamaContext, JSValue)>, i32> {
-    let p = unsafe {
-        let payload = this
-            .retrive_object_payload_mut(ctx, JSLlamaContext::class_id())?
-            .other_mut()
-            .unwrap();
-
-        payload.replace_opaque(std::ptr::null_mut())
-    };
-
-    if !p.is_null() {
+) -> Result<Option<(Arc<LlamaContextWrap>, JSValue)>, i32> {
+    if let Some(p) = this
+        .as_native_object_mut::<_, JSLlamaContext>()
+        .and_then(|ob| ob.take_payload())
+    {
         let model_val = this.get_property_str(ctx, "model")?;
         this.delete_property_str(ctx, "model", JS_PROP_FORCE)?; // force delete
 
-        let llm_ctx = unsafe {
-            let a = Box::from_raw(p.cast::<Arc<LlamaContextWrap>>());
-            a.inner.lock().unwrap().take().unwrap()
-        };
-        Ok(Some((llm_ctx, model_val)))
+        Ok(Some((p, model_val)))
     } else {
         Ok(None)
     }
@@ -357,7 +316,7 @@ fn js_context_sample(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let tx_timeout = tx.clone();
     if let Err(e) = WorkerPool::singleton().add_job(
         move || {
-            let res = llm_ctx_wrap.sample_token(logits, sampler.0.lock().unwrap().deref_mut());
+            let res = llm_ctx_wrap.sample_token(logits, sampler.lock().unwrap().deref_mut());
             let _ = tx_submit.send(res);
         },
         Some(move || {
@@ -492,7 +451,9 @@ fn js_context_createEngine(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
     let eng_params = parse_engine_params(ctx, opts.as_ref())?;
 
     // take LlamaContext out of the this object
-    if let Some((llm_ctx, model_val)) = take_llame_context(ctx, cc.this())? {
+    if let Some((p, model_val)) = take_llame_context(ctx, cc.this())? {
+        let llm_ctx = p.inner.lock().unwrap().take().unwrap();
+
         if llm_ctx.n_seq_max() == 1 {
             log::warn!("createEngine: context sequences is 1, only one parallel slot available");
         }
@@ -549,7 +510,7 @@ const CLASS_CONTEXT_PROTO: &[FieldDef] = &[
 def_native_object!(
     "Context",
     JSLlamaContext,
-    ContextPayload,
+    Arc<LlamaContextWrap>,
     CLASS_CONTEXT_PROTO
 );
 

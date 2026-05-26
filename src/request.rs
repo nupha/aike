@@ -1,22 +1,23 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-use std::{cell::Cell, ffi::c_void, time::Duration};
+use std::{cell::Cell, time::Duration};
 
 use crossbeam::channel;
 use linkme::distributed_slice;
 use zuqe::{
-    CallContext, ClassDef, ClassID, FieldDef, JSResult, JSValue, Runtime, ScopedContext,
+    CallContext, ClassID, FieldDef, JSResult, JSValue, NativeObject, Runtime, ScopedContext,
     builtins::{
         iterator::AsyncIterableIterator,
         promise::{Promise, PromiseResultSlot},
         typed_array::TypedArray,
     },
+    def_native_object,
 };
 
 use crate::USER_CLASS_DEFS;
 
-struct ResponseData {
+pub(crate) struct ResponseData {
     body_rx: Option<crossbeam::channel::Receiver<Vec<u8>>>,
 }
 
@@ -145,23 +146,13 @@ pub(crate) fn js_request(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 -1
             })?;
 
-            // create opaque data (body_rx stored for lazy body / text / json)
-            let data = Box::new(ResponseData {
-                body_rx: Some(body_rx),
-            });
-            let opaque = Box::into_raw(data).cast::<c_void>() as *mut c_void;
-
-            // create Response instance
-            let mut resp_obj = cx
-                .create_class_instance_with_opaque(
-                    JSValue::UNDEFINED,
-                    JSResponse::class_id(),
-                    opaque,
-                )
-                .map_err(|_| {
-                    cx.throw_internal_error("failed to create Response instance");
-                    -1
-                })?;
+            let mut resp_obj = JSResponse::new_instance(
+                cx,
+                JSValue::UNDEFINED,
+                Box::new(ResponseData {
+                    body_rx: Some(body_rx),
+                }),
+            )?;
 
             resp_obj.define_property_value_str(
                 cx,
@@ -384,10 +375,6 @@ fn js_response_body_as(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     Ok(promise.into())
 }
 
-// ---------------------------------------------------------------------------
-// Class registration
-// ---------------------------------------------------------------------------
-
 const RESPONSE_PROTO: &[FieldDef] = &[
     FieldDef::GETSET("body", Some(js_response_body), None, 0),
     FieldDef::FUNC("bytes", 0, js_response_body_as, BODY_AS_BYTES as i16),
@@ -395,32 +382,12 @@ const RESPONSE_PROTO: &[FieldDef] = &[
     FieldDef::FUNC("json", 0, js_response_body_as, BODY_AS_JSON as i16),
 ];
 
-pub struct JSResponse;
-
-impl JSResponse {
-    thread_local! {
-        static CLASS_ID: Cell<ClassID> = const { Cell::new(0) };
-    }
-
-    fn register(rt: &mut Runtime) -> Result<ClassID, i32> {
-        let class_id = rt.register_class_def(
-            ClassDef::new("HttpResponse", RESPONSE_PROTO, None).on_dispose(
-                |_, opaque: *mut c_void, _| {
-                    if !opaque.is_null() {
-                        drop(unsafe { Box::from_raw(opaque.cast::<ResponseData>()) });
-                    }
-                },
-            ),
-        )?;
-        Self::CLASS_ID.with(|s| s.set(class_id));
-        Ok(class_id)
-    }
-
-    #[inline(always)]
-    pub fn class_id() -> ClassID {
-        Self::CLASS_ID.with(|x| x.get())
-    }
-}
+def_native_object!(
+    "HttpResponse",
+    JSResponse,
+    Box<ResponseData>,
+    RESPONSE_PROTO
+);
 
 #[distributed_slice(USER_CLASS_DEFS)]
 fn register_class_response(rt: &mut Runtime) -> Result<ClassID, i32> {

@@ -1,7 +1,7 @@
 use std::{
     cell::Cell,
     ffi::{CStr, CString},
-    sync::{Mutex, OnceLock},
+    sync::{Arc, Mutex, OnceLock},
 };
 
 use linkme::distributed_slice;
@@ -18,23 +18,12 @@ use zuqe::{
 
 use crate::{
     USER_CLASS_DEFS,
-    class_llama_context::{JSLlamaContext, parse_tokens},
+    class_llama_context::{JSLlamaContext, LlamaContextWrap, parse_tokens},
     class_llama_sampler::js_model_createSamplerChain,
     helpers::{JinjaMessage, TemplateContext, create_minijinja_env},
 };
 
-/// define a newtype to let impl NativePayload possible
-#[derive(Debug, Clone)]
-#[repr(transparent)]
-pub(crate) struct ModelPayload(pub(super) LlamaModel);
-
-impl std::ops::Deref for ModelPayload {
-    type Target = LlamaModel;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
+pub(crate) type ModelPayload = Box<LlamaModel>;
 
 const MODEL_PATH_HIDDEN_KEY: &str = "__modelPath";
 static LLAMA_LOG_BUFFER: OnceLock<Mutex<String>> = OnceLock::new();
@@ -274,7 +263,7 @@ fn js_model_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 -1
             })?;
 
-    let mut obj = JSLlamaModel::new_instance(ctx, new_target, ModelPayload(model))?;
+    let mut obj = JSLlamaModel::new_instance(ctx, new_target, Box::new(model))?;
 
     let path = ctx
         .create_string_from_utf8(file_name.into_bytes())
@@ -284,15 +273,25 @@ fn js_model_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     Ok(obj.into())
 }
 
-pub(super) fn get_llama_model(ctx: &mut ScopedContext, val: JSValue) -> Result<ModelPayload, i32> {
-    JSLlamaModel::try_from(val)
-        .unwrap()
-        .payload()
-        .cloned()
+pub(super) fn get_llama_model<'a>(
+    ctx: &mut ScopedContext,
+    val: &'a JSValue,
+) -> Result<&'a LlamaModel, i32> {
+    val.as_native_object::<_, JSLlamaModel>()
+        .and_then(|ob| ob.payload())
         .ok_or_else(|| {
             ctx.throw_type_error("invalid Model object");
             -1
         })
+
+    // JSLlamaModel::try_from(val)
+    //     .unwrap()
+    //     .payload()
+    //     .cloned()
+    //     .ok_or_else(|| {
+    //         ctx.throw_type_error("invalid Model object");
+    //         -1
+    //     })
 }
 
 const PROP_BOS_TOKEN: i32 = 1;
@@ -311,7 +310,7 @@ const PROP_CHAT_TEMPLATE: i32 = 13;
 
 fn js_mode_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
-    let model = get_llama_model(ctx, this)?;
+    let model = get_llama_model(ctx, &this)?;
 
     match cc.magic() {
         PROP_DESC => ctx
@@ -371,7 +370,7 @@ fn js_mode_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
 fn js_mode_setter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
-    let model = get_llama_model(ctx, this)?;
+    let model = get_llama_model(ctx, &this)?;
     let val = cc.arg(0);
 
     if cc.magic() == PROP_CHAT_TEMPLATE {
@@ -384,7 +383,7 @@ fn js_mode_setter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
 fn js_model_isEog(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
-    let model = get_llama_model(ctx, this)?;
+    let model = get_llama_model(ctx, &this)?;
     let token = cc.arg(0).to_number(ctx)?.to_i32();
     Ok(JSValue::Bool(model.is_eog(token)))
 }
@@ -678,7 +677,7 @@ pub(super) fn parse_context_params(
 
 fn js_model_createContext(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
-    let model = get_llama_model(ctx, this)?;
+    let model = get_llama_model(ctx, &this)?;
 
     let opts = if cc.length() > 0 {
         let v = cc.arg(0);
@@ -695,13 +694,17 @@ fn js_model_createContext(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
     };
     let ctx_params = parse_context_params(ctx, opts.as_ref())?;
 
-    let mut llm_ctx = LlamaContext::new(model.0.clone(), ctx_params).map_err(|e| {
+    let mut llm_ctx = LlamaContext::new(model.clone(), ctx_params).map_err(|e| {
         ctx.throw_internal_error(&e);
         -1
     })?;
     llm_ctx.init_batch(ctx_params.n_batch as i32, 0, ctx_params.n_seq_max as i32);
 
-    let mut ctx_obj = JSLlamaContext::new_instance(ctx, JSValue::UNDEFINED, llm_ctx.into())?;
+    let mut ctx_obj = JSLlamaContext::new_instance(
+        ctx,
+        JSValue::UNDEFINED,
+        Arc::new(LlamaContextWrap::new(llm_ctx)),
+    )?;
 
     // to keep model object referenced alive, model property is read-only
     ctx_obj.define_property_value_str(ctx, "model", this, JS_PROP_ENUMERABLE)?;
@@ -711,7 +714,7 @@ fn js_model_createContext(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
 
 fn js_model_tokenize(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
-    let llm_model = get_llama_model(ctx, this)?;
+    let llm_model = get_llama_model(ctx, &this)?;
     let text = cc.arg(0).to_string(ctx)?;
 
     let tokens = llm_model.tokenize(
@@ -731,7 +734,7 @@ fn js_model_tokenize(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
 fn js_model_detokenize(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
-    let model = get_llama_model(ctx, this)?;
+    let model = get_llama_model(ctx, &this)?;
 
     let arg0 = cc.arg(0);
     let tokens = parse_tokens(ctx, &arg0)?;
@@ -776,7 +779,7 @@ fn js_model_detokenize(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
 fn js_model_getMeta(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
-    let model = get_llama_model(ctx, this)?;
+    let model = get_llama_model(ctx, &this)?;
     let key = cc.arg(0).to_string(ctx)?;
     let key = CString::new(key.content().encode_utf8(false).as_ref()).map_err(|_| {
         ctx.throw_type_error("invalid meta key");
@@ -793,7 +796,7 @@ fn js_model_getMeta(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
 fn js_model_getMetaKeys(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
-    let model = get_llama_model(ctx, this)?;
+    let model = get_llama_model(ctx, &this)?;
     let count = model.meta_count();
 
     let mut lst = Vec::<JSValue>::with_capacity(count as usize);
@@ -812,7 +815,7 @@ fn js_model_getMetaKeys(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
 fn js_model_lookupTokenText(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
-    let model = get_llama_model(ctx, this)?;
+    let model = get_llama_model(ctx, &this)?;
     let token = cc.arg(0).to_number(ctx)?.to_i32();
 
     if let Some(text) = model.lookup_token_text(token) {
@@ -824,7 +827,7 @@ fn js_model_lookupTokenText(ctx: &mut ScopedContext, cc: CallContext) -> JSResul
 
 fn js_model_renderTemplate(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
-    let model = get_llama_model(ctx, this)?;
+    let model = get_llama_model(ctx, &this)?;
 
     let msgs_arr = cc.arg(0).as_object_Array().copied().ok_or_else(|| {
         ctx.throw_type_error("messages must be array");
@@ -971,20 +974,8 @@ fn js_model_renderTemplate(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
         .map(JSValue::String)
 }
 
-fn js_model_dispose(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let mut this = cc.this();
-    let payload = this
-        .retrive_object_payload_mut(ctx, JSLlamaModel::class_id())?
-        .other_mut()
-        .unwrap();
-
-    if !payload.opaque().is_null() {
-        unsafe {
-            let p = payload.replace_opaque(std::ptr::null_mut());
-            drop(Box::from_raw(p.cast::<LlamaModel>()));
-        }
-    }
-
+fn js_model_dispose(_: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let _ = JSLlamaModel::try_from(cc.this()).unwrap().take_payload();
     Ok(JSValue::UNDEFINED)
 }
 
@@ -1042,12 +1033,12 @@ fn js_model_load(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 cx.throw_internal_error(&e);
                 -1
             })?;
-            let mut obj = JSLlamaModel::new_instance(cx, JSValue::UNDEFINED, ModelPayload(model))?;
+            let mut obj = JSLlamaModel::new_instance(cx, JSValue::UNDEFINED, Box::new(model))?;
             let path = cx
                 .create_string_from_utf8(file_name.into_bytes())
                 .map(JSValue::String)?;
             obj.define_property_value_str(cx, MODEL_PATH_HIDDEN_KEY, path, 0)?;
-            Ok(JSValue::Object(obj))
+            Ok(obj.into())
         },
     )?;
 

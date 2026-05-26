@@ -8,8 +8,7 @@ use async_openai::types::chat::{ReasoningEffort, StopConfiguration};
 use linkme::distributed_slice;
 use llama_cpp_ffi::ToolChoice as LarkToolChoice;
 use zuqe::{
-    CallContext, ClassID, FieldDef, JSResult, JSValue, NativeObject, Object, Runtime,
-    ScopedContext,
+    CallContext, ClassID, FieldDef, JSResult, JSValue, Object, Runtime, ScopedContext,
     builtins::{
         iterator::AsyncIterableIterator,
         promise::{Promise, PromiseResultSlot},
@@ -34,23 +33,7 @@ use crate::{
 #[cfg(feature = "enable_eval_log")]
 use crate::eval_logger::{EvalLogEntry, ToolCallLog, get_eval_logger};
 
-#[repr(transparent)]
-#[derive(Debug, Clone)]
-pub(crate) struct EnginePayload(Arc<Mutex<Engine>>);
-
-impl std::ops::Deref for EnginePayload {
-    type Target = Arc<Mutex<Engine>>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl From<Arc<Mutex<Engine>>> for EnginePayload {
-    fn from(engine: Arc<Mutex<Engine>>) -> Self {
-        Self(engine)
-    }
-}
+pub(crate) type EnginePayload = Arc<Mutex<Engine>>;
 
 pub(crate) const ERR_CANCELLED: &str = "cancelled";
 pub(crate) const ERR_ENGINE_SHUTDOWN: &str = "engine shutdown";
@@ -706,7 +689,7 @@ fn js_engine_httpServe(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         })?;
 
     tokio::spawn(async move {
-        let res = crate::serve::http_serve(engine.0.clone(), &host, port, shutdown_rx).await;
+        let res = crate::serve::http_serve(engine.clone(), &host, port, shutdown_rx).await;
         engine.lock().unwrap().unset_serving();
         let _ = result_slot.commit(res);
     });
@@ -722,8 +705,7 @@ fn js_engine_stopServe(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 }
 
 fn js_engine_isServing(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let this = cc.this();
-    let engine = get_engine(ctx, &this)?;
+    let engine = get_engine(ctx, &cc.this())?;
     Ok(JSValue::Bool(engine.lock().unwrap().is_serving()))
 }
 
@@ -741,18 +723,12 @@ fn js_engine_setParseReasoning(ctx: &mut ScopedContext, cc: CallContext) -> JSRe
     Ok(JSValue::UNDEFINED)
 }
 
-fn js_engine_dispose(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let mut this = cc.this();
-    let payload = this
-        .retrive_object_payload_mut(ctx, JSEngine::class_id())?
-        .other_mut()
-        .unwrap();
-    if !payload.opaque().is_null() {
-        unsafe {
-            let p = payload.replace_opaque(std::ptr::null_mut());
-            drop(Box::from_raw(p.cast::<EnginePayload>()));
-        }
-    }
+fn js_engine_dispose(_: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let _ = cc
+        .this()
+        .as_native_object_mut::<_, JSEngine>()
+        .and_then(|ob| ob.take_payload());
+
     Ok(JSValue::UNDEFINED)
 }
 

@@ -233,7 +233,7 @@ fn spawn_async(ctx: &mut ScopedContext, mut child: tokio::process::Child, pid: i
             #[cfg(not(unix))]
             let fd = -1;
             match JSIoHandle::new_instance_pipe_write(ctx, child_stdin, fd) {
-                Ok(obj) => JSValue::Object(obj),
+                Ok(nob) => JSValue::from(nob),
                 Err(_) => JSValue::NULL,
             }
         }
@@ -250,7 +250,7 @@ fn spawn_async(ctx: &mut ScopedContext, mut child: tokio::process::Child, pid: i
             #[cfg(not(unix))]
             let fd = -1;
             match JSIoHandle::new_instance_pipe_read(ctx, child_stdout, fd) {
-                Ok(obj) => JSValue::Object(obj),
+                Ok(nob) => JSValue::from(nob),
                 Err(_) => JSValue::NULL,
             }
         }
@@ -265,7 +265,7 @@ fn spawn_async(ctx: &mut ScopedContext, mut child: tokio::process::Child, pid: i
             #[cfg(not(unix))]
             let fd = -1;
             match JSIoHandle::new_instance_pipe_read(ctx, child_stderr, fd) {
-                Ok(obj) => JSValue::Object(obj),
+                Ok(nob) => JSValue::from(nob),
                 Err(_) => JSValue::NULL,
             }
         }

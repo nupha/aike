@@ -4,13 +4,12 @@
 use std::{
     cell::{Cell, RefCell},
     collections::HashMap,
-    ffi::c_void,
 };
 
 use linkme::distributed_slice;
 use zuqe::{
-    Array, CallContext, ClassCtorDef, ClassID, FieldDef, JS_PROP_C_W_E, JSResult, JSValue,
-    NativeObject, Object, Runtime, ScopedContext, def_native_object, gc_lite::GcTrace,
+    Array, CallContext, ClassCtorDef, ClassID, FieldDef, JS_PROP_C_W_E, JSResult, JSValue, Object,
+    Runtime, ScopedContext, def_native_object, gc_lite::GcTrace,
 };
 
 use crate::{USER_CLASS_DEFS, aike::signal::signal_number};
@@ -35,7 +34,7 @@ impl EmitterPayload {
 }
 
 fn get_emitter<'a>(ctx: &mut ScopedContext, val: &'a JSValue) -> Result<&'a EmitterPayload, i32> {
-    val.as_native_object::<EmitterPayload, JSEventEmitter>()
+    val.as_native_object::<_, JSEventEmitter>()
         .and_then(|o| o.payload())
         .ok_or_else(|| {
             ctx.throw_internal_error("not an EventEmitter instance");
@@ -50,20 +49,14 @@ fn event_name(ctx: &mut ScopedContext, val: &JSValue) -> Result<String, i32> {
 }
 
 fn js_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let class_id = JSEventEmitter::class_id();
-    let new_target = cc.this();
-
-    let data = Box::new(EmitterPayload {
-        listeners: RefCell::new(HashMap::new()),
-    });
-    let opaque = Box::into_raw(data).cast::<c_void>();
-
-    ctx.create_class_instance_with_opaque(new_target, class_id, opaque)
-        .map_err(|_| {
-            let _ = unsafe { Box::from_raw(opaque.cast::<EmitterPayload>()) };
-            -1
-        })
-        .map(JSValue::from)
+    JSEventEmitter::new_instance(
+        ctx,
+        cc.this(),
+        Box::new(EmitterPayload {
+            listeners: RefCell::new(HashMap::new()),
+        }),
+    )
+    .map(JSValue::from)
 }
 
 /// addListener(event, listener) / on(event, listener)
@@ -233,7 +226,7 @@ const CLASS_EVENT_EMITTER_PROTO: &[FieldDef] = &[
 def_native_object!(
     "EventEmitter",
     JSEventEmitter,
-    EmitterPayload,
+    Box<EmitterPayload>,
     CLASS_EVENT_EMITTER_PROTO,
     constructor: ClassCtorDef::new(js_constructor, 0, true).expose_to_global(),
     on_payload_gc: EmitterPayload::gc_trace

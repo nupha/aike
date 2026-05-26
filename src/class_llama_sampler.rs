@@ -6,21 +6,13 @@ use std::{
 use linkme::distributed_slice;
 use llama_cpp_ffi::{SamplerChain, SamplerKind};
 use zuqe::{
-    CallContext, ClassID, FieldDef, IntOrFloat, JS_PROP_ENUMERABLE, JSResult, JSValue,
-    NativeObject, Object, Runtime, ScopedContext, def_native_object,
+    CallContext, ClassID, FieldDef, IntOrFloat, JS_PROP_ENUMERABLE, JSResult, JSValue, Object,
+    Runtime, ScopedContext, def_native_object,
 };
 
 use crate::{USER_CLASS_DEFS, class_llama_model::get_llama_model};
 
-#[derive(Clone)]
-#[repr(transparent)]
-pub(crate) struct SamplerPayload(pub(super) Arc<Mutex<SamplerChain>>);
-
-impl From<Arc<Mutex<SamplerChain>>> for SamplerPayload {
-    fn from(engine: Arc<Mutex<SamplerChain>>) -> Self {
-        Self(engine)
-    }
-}
+pub(crate) type SamplerPayload = Arc<Mutex<SamplerChain>>;
 
 pub(super) fn get_sampler(ctx: &mut ScopedContext, val: &JSValue) -> Result<SamplerPayload, i32> {
     let ob = JSSamplerChain::try_from(val.clone()).unwrap();
@@ -34,9 +26,8 @@ pub(super) fn get_sampler(ctx: &mut ScopedContext, val: &JSValue) -> Result<Samp
 
 pub fn js_model_createSamplerChain(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
-    let model = get_llama_model(ctx, this)?;
-
-    let mut chain = SamplerChain::new(model.0, false);
+    let model = get_llama_model(ctx, &this)?;
+    let mut chain = SamplerChain::new(model.clone(), false);
 
     if cc.length() > 0 {
         let arr = cc.arg(0).as_object_Array().copied().ok_or_else(|| {
@@ -187,7 +178,7 @@ pub fn js_model_createSamplerChain(ctx: &mut ScopedContext, cc: CallContext) -> 
 fn js_samplerchain_penalties(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let chain = get_sampler(ctx, &this)?;
-    let mut chain = chain.0.lock().unwrap();
+    let mut chain = chain.lock().unwrap();
 
     let mut repeat_last_n = 64_i32;
     let mut repeat_penalty = 1.1;
@@ -270,7 +261,7 @@ const TOP_P: i32 = 2;
 fn js_samplerchain_topKP(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let chain = get_sampler(ctx, &this)?;
-    let mut chain = chain.0.lock().unwrap();
+    let mut chain = chain.lock().unwrap();
 
     let n = cc.arg(0).to_number(ctx)?;
     match cc.magic() {
@@ -294,7 +285,7 @@ fn js_samplerchain_topKP(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 fn js_samplerchain_temperature(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let chain = get_sampler(ctx, &this)?;
-    let mut chain = chain.0.lock().unwrap();
+    let mut chain = chain.lock().unwrap();
 
     let d = cc.arg(0).to_number(ctx)?.to_f64();
     chain.add_sampler(&SamplerKind::Temperature {
@@ -309,7 +300,7 @@ fn js_samplerchain_temperature(ctx: &mut ScopedContext, cc: CallContext) -> JSRe
 fn add_grammar(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let chain = get_sampler(ctx, &this)?;
-    let mut chain = chain.0.lock().unwrap();
+    let mut chain = chain.lock().unwrap();
 
     let g = cc.arg(0);
     if g.is_undefined_or_null() {

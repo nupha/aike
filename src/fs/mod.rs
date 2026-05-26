@@ -608,7 +608,7 @@ fn js_fs_open(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 cx.throw_internal_error(&e);
                 -1
             })?;
-            JSIoHandle::new_instance_file(cx, JSValue::UNDEFINED, file).map(JSValue::Object)
+            JSIoHandle::new_instance_file(cx, JSValue::UNDEFINED, file).map(JSValue::from)
         },
     )?;
 

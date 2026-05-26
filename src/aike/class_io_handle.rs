@@ -186,7 +186,7 @@ fn start_on_read_microtask(ctx: &mut ScopedContext) {
     );
 }
 
-fn get_file_desc<'a>(ctx: &mut ScopedContext, val: &'a JSValue) -> Result<&'a IoPayload, i32> {
+fn get_io<'a>(ctx: &mut ScopedContext, val: &'a JSValue) -> Result<&'a IoPayload, i32> {
     val.as_native_object::<_, JSIoHandle>()
         .and_then(|o| o.payload())
         .ok_or_else(|| {
@@ -197,7 +197,7 @@ fn get_file_desc<'a>(ctx: &mut ScopedContext, val: &'a JSValue) -> Result<&'a Io
 
 fn js_fh_onData(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
-    let desc = get_file_desc(ctx, &this)?;
+    let desc = get_io(ctx, &this)?;
     let raw_fd = desc.as_raw_fd();
 
     // Cannot read from stdout/stderr
@@ -344,7 +344,7 @@ fn js_fh_text(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
     let this = cc.this();
-    let desc = get_file_desc(ctx, &this)?;
+    let desc = get_io(ctx, &this)?;
 
     let (promise, tx) =
         Promise::create_with_channel::<Result<String, String>>(ctx, |cx, payload| -> JSResult {
@@ -409,7 +409,7 @@ fn js_fh_text(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 /// json() — async read and parse as JSON via the real fd
 fn js_fh_json(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
-    let desc = get_file_desc(ctx, &this)?;
+    let desc = get_io(ctx, &this)?;
 
     let (promise, tx) = Promise::create_with_channel::<Result<serde_json::Value, String>>(
         ctx,
@@ -488,7 +488,7 @@ fn js_fh_json(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 /// bytes() — async read as Uint8Array via the real fd
 fn js_fh_bytes(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
-    let desc = get_file_desc(ctx, &this)?;
+    let desc = get_io(ctx, &this)?;
 
     let (promise, tx) =
         Promise::create_with_channel::<Result<Vec<u8>, String>>(ctx, |cx, payload| -> JSResult {
@@ -553,7 +553,7 @@ fn js_fh_bytes(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 /// stat() — async get file metadata via the fd
 fn js_fh_stat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
-    let desc = get_file_desc(ctx, &this)?;
+    let desc = get_io(ctx, &this)?;
 
     let (promise, tx) = Promise::create_with_channel::<Result<std::fs::Metadata, String>>(
         ctx,
@@ -590,7 +590,7 @@ fn js_fh_stat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 /// read(maxCount?) — async read from fd at current position, returns Uint8Array
 fn js_fh_read(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
-    let desc = get_file_desc(ctx, &this)?;
+    let desc = get_io(ctx, &this)?;
 
     // Optional length arg; 0 = read to EOF
     let max_len: usize = if cc.length() > 0 && !cc.arg(0).is_undefined() {
@@ -694,7 +694,7 @@ fn js_fh_writeAll(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     use tokio::io::AsyncWriteExt;
 
     let this = cc.this();
-    let desc = get_file_desc(ctx, &this)?;
+    let desc = get_io(ctx, &this)?;
 
     let arg = cc.arg(0);
 
@@ -771,7 +771,7 @@ fn js_fh_writeAll(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 /// flush() — async flush output
 fn js_fh_flush(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
-    let desc = get_file_desc(ctx, &this)?;
+    let desc = get_io(ctx, &this)?;
 
     let (promise, tx) =
         Promise::create_with_channel::<Result<(), String>>(ctx, |cx, payload| -> JSResult {
@@ -824,28 +824,10 @@ fn js_fh_flush(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     Ok(promise.into())
 }
 
-/// close() — sync close: drop the fd
-fn js_fh_close(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let mut this = cc.this();
-
-    if let Some(o) = this.as_object() {
-        let u = this
-            .retrive_object_payload_mut(ctx, o.class_id())?
-            .other_mut()
-            .unwrap();
-
-        if !u.opaque().is_null() {
-            unsafe {
-                let p = u.replace_opaque(std::ptr::null_mut());
-                drop(Box::from_raw(p.cast::<IoPayload>()));
-            }
-        }
-
-        Ok(JSValue::UNDEFINED)
-    } else {
-        ctx.throw_type_error_not_an_object();
-        Err(-1)
-    }
+/// close() — drop the io
+fn js_fh_close(_: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let _ = JSIoHandle::try_from(cc.this()).unwrap().take_payload();
+    Ok(JSValue::UNDEFINED)
 }
 
 // ---------------------------------------------------------------------------
@@ -947,7 +929,7 @@ pub(crate) fn make_stats(
 
 fn js_fh_fd(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
-    let desc = get_file_desc(ctx, &this)?;
+    let desc = get_io(ctx, &this)?;
     Ok(JSValue::Int(desc.as_raw_fd()))
 }
 
@@ -965,7 +947,7 @@ enum FileChunk {
 /// [Symbol.asyncIterator]() — returns an AsyncIterableIterator for `for await...of`
 fn js_fh_asyncIterator(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
-    let desc = get_file_desc(ctx, &this)?;
+    let desc = get_io(ctx, &this)?;
 
     if matches!(desc, IoPayload::Stdout | IoPayload::Stderr) {
         ctx.throw_type_error("cannot iterate stdout/stderr");
@@ -1089,19 +1071,24 @@ const CLASS_IO_HANDLE_PROTO: &[FieldDef] = &[
     FieldDef::FUNC("[Symbol.asyncIterator]", 0, js_fh_asyncIterator, 0),
 ];
 
-def_native_object!("IoHandle", JSIoHandle, IoPayload, CLASS_IO_HANDLE_PROTO);
+def_native_object!(
+    "IoHandle",
+    JSIoHandle,
+    Box<IoPayload>,
+    CLASS_IO_HANDLE_PROTO
+);
 
 impl JSIoHandle {
-    pub fn new_instance_stdin(ctx: &mut ScopedContext) -> Result<Object, i32> {
-        Self::new_instance(ctx, JSValue::UNDEFINED, IoPayload::Stdin)
+    pub fn new_instance_stdin(ctx: &mut ScopedContext) -> Result<Self, i32> {
+        Self::new_instance(ctx, JSValue::UNDEFINED, Box::new(IoPayload::Stdin))
     }
 
-    pub fn new_instance_stdout(ctx: &mut ScopedContext) -> Result<Object, i32> {
-        Self::new_instance(ctx, JSValue::UNDEFINED, IoPayload::Stdout)
+    pub fn new_instance_stdout(ctx: &mut ScopedContext) -> Result<Self, i32> {
+        Self::new_instance(ctx, JSValue::UNDEFINED, Box::new(IoPayload::Stdout))
     }
 
-    pub fn new_instance_stderr(ctx: &mut ScopedContext) -> Result<Object, i32> {
-        Self::new_instance(ctx, JSValue::UNDEFINED, IoPayload::Stderr)
+    pub fn new_instance_stderr(ctx: &mut ScopedContext) -> Result<Self, i32> {
+        Self::new_instance(ctx, JSValue::UNDEFINED, Box::new(IoPayload::Stderr))
     }
 
     /// Create a IoHandle from an already-opened tokio::fs::File
@@ -1109,11 +1096,11 @@ impl JSIoHandle {
         ctx: &mut ScopedContext,
         new_target: JSValue,
         file: tokio::fs::File,
-    ) -> Result<Object, i32> {
+    ) -> Result<Self, i32> {
         Self::new_instance(
             ctx,
             new_target,
-            IoPayload::File(Arc::new(tokio::sync::Mutex::new(file))),
+            Box::new(IoPayload::File(Arc::new(tokio::sync::Mutex::new(file)))),
         )
     }
 
@@ -1123,11 +1110,14 @@ impl JSIoHandle {
         ctx: &mut ScopedContext,
         reader: impl tokio::io::AsyncRead + Unpin + Send + 'static,
         fd: i32,
-    ) -> Result<Object, i32> {
+    ) -> Result<Self, i32> {
         Self::new_instance(
             ctx,
             JSValue::UNDEFINED,
-            IoPayload::PipeRead(Arc::new(tokio::sync::Mutex::new(Box::new(reader))), fd),
+            Box::new(IoPayload::PipeRead(
+                Arc::new(tokio::sync::Mutex::new(Box::new(reader))),
+                fd,
+            )),
         )
     }
 
@@ -1137,11 +1127,14 @@ impl JSIoHandle {
         ctx: &mut ScopedContext,
         writer: impl tokio::io::AsyncWrite + Unpin + Send + 'static,
         fd: i32,
-    ) -> Result<Object, i32> {
+    ) -> Result<Self, i32> {
         Self::new_instance(
             ctx,
             JSValue::UNDEFINED,
-            IoPayload::PipeWrite(Arc::new(tokio::sync::Mutex::new(Box::new(writer))), fd),
+            Box::new(IoPayload::PipeWrite(
+                Arc::new(tokio::sync::Mutex::new(Box::new(writer))),
+                fd,
+            )),
         )
     }
 }

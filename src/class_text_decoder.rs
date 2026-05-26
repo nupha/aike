@@ -60,7 +60,7 @@ fn get_decoder<'a>(
     ctx: &mut ScopedContext,
     val: &'a JSValue,
 ) -> Result<&'a TextDecoderPayload, i32> {
-    val.as_native_object::<TextDecoderPayload, JSTextDecoder>()
+    val.as_native_object::<_, JSTextDecoder>()
         .and_then(|o| o.payload())
         .ok_or_else(|| {
             ctx.throw_internal_error("not a TextDecoder instance");
@@ -68,10 +68,7 @@ fn get_decoder<'a>(
         })
 }
 
-// ---------------------------------------------------------------------------
-// Constructor
-// ---------------------------------------------------------------------------
-
+/// Constructor
 fn js_text_decoder_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let new_target = cc.this();
 
@@ -110,21 +107,18 @@ fn js_text_decoder_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSRe
         }
     }
 
-    let data = Box::new(TextDecoderPayload {
-        encoding,
-        fatal,
-        ignore_bom,
-        bom_handled: Cell::new(false),
-        pending: RefCell::new(Vec::new()),
-    });
-    let opaque = Box::into_raw(data).cast::<c_void>();
-
-    ctx.create_class_instance_with_opaque(new_target, JSTextDecoder::class_id(), opaque)
-        .map_err(|_| {
-            let _ = unsafe { Box::from_raw(opaque.cast::<TextDecoderPayload>()) };
-            -1
-        })
-        .map(JSValue::from)
+    JSTextDecoder::new_instance(
+        ctx,
+        new_target,
+        Box::new(TextDecoderPayload {
+            encoding,
+            fatal,
+            ignore_bom,
+            bom_handled: Cell::new(false),
+            pending: RefCell::new(Vec::new()),
+        }),
+    )
+    .map(JSValue::from)
 }
 
 // ---------------------------------------------------------------------------
@@ -456,7 +450,7 @@ const CLASS_TEXT_DECODER_PROTO: &[FieldDef] = &[
 def_native_object!(
     "TextDecoder",
     JSTextDecoder,
-    TextDecoderPayload,
+    Box<TextDecoderPayload>,
     CLASS_TEXT_DECODER_PROTO,
     constructor: ClassCtorDef::new(js_text_decoder_constructor, 2, true).expose_to_global()
 );
