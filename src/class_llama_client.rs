@@ -37,6 +37,8 @@ pub(crate) struct ClientPayload {
     pub(crate) custom_headers: HeaderMap,
     pub(crate) model_name: Option<String>,
     pub(crate) buffered_tool_call: bool,
+    /// default extra body field for openai
+    pub(crate) extra_body: serde_json::Value,
     /// Request timeout. `None` = no timeout (reqwest default, infinite wait).
     pub(crate) timeout: Option<Duration>,
 }
@@ -82,6 +84,17 @@ fn js_client_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         .as_string()
         .map(|s| s.content().encode_utf8(false).to_string());
 
+    // check extra_body field
+    let extra_body: serde_json::Value = match opts_obj.get_property_str(ctx, "extraBody")? {
+        JSValue::UNDEFINED | JSValue::NULL => serde_json::Value::Null,
+        JSValue::Object(o) => o.to_serde_json(ctx)?,
+        _ => {
+            ctx.throw_type_error("extraBody must be one of undefined, null or object");
+            return Err(-1);
+        }
+    };
+    debug_assert!(extra_body.is_null() || extra_body.is_object());
+
     let buffered_tool_call = true;
     // let buffered_tool_call = opts_obj
     //     .get_property_str(ctx, "bufferedToolCall")?
@@ -110,6 +123,7 @@ fn js_client_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             project_id: String::new(),
             custom_headers: HeaderMap::new(),
             buffered_tool_call,
+            extra_body,
             timeout,
         }),
     )
@@ -200,7 +214,7 @@ enum ChatReply {
 
 fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
-    let client_arc = get_client(ctx, &this)?;
+    let client = get_client(ctx, &this)?;
     let is_stream = cc.magic() == MAGIC_CHAT_STREAM;
 
     // Single object argument
@@ -228,26 +242,43 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
         obj.insert("model".to_string(), serde_json::Value::String(model_val));
     }
 
+    // Merge default extra_body with per-request extra_body.
+    // Client default extra_body serves as base, per-request fields override.
+    if let Some(default_body) = client.extra_body.as_object() {
+        let mut merged = default_body.clone();
+        if let Some(req_body) = req_json
+            .as_object()
+            .and_then(|o| o.get("extra_body"))
+            .and_then(|v| v.as_object())
+        {
+            for (k, v) in req_body.iter() {
+                merged.insert(k.clone(), v.clone());
+            }
+        }
+
+        if let Some(obj) = req_json.as_object_mut() {
+            obj.insert("extra_body".to_string(), serde_json::Value::Object(merged));
+        }
+    }
+
     // Use reqwest to make HTTP request, build client
-    let http_client = reqwest::Client::new();
-    let mut client = http_client
-        .post(&format!("{}/chat/completions", client_arc.base_url))
+    let mut req_builder = reqwest::Client::new()
+        .post(&format!("{}/chat/completions", client.base_url))
         .body(serde_json::to_string(&req_json).unwrap_or_default())
         .header("Content-Type", "application/json");
 
-    if !client_arc.api_key.is_empty() {
-        client = client.header("Authorization", format!("Bearer {}", client_arc.api_key));
+    if !client.api_key.is_empty() {
+        req_builder = req_builder.header("Authorization", format!("Bearer {}", client.api_key));
     }
-
-    if let Some(dur) = client_arc.timeout {
-        client = client.timeout(dur);
+    if let Some(dur) = client.timeout {
+        req_builder = req_builder.timeout(dur);
     }
 
     if is_stream {
         // Streaming: AsyncIterableIterator
         let result_slot = PromiseResultSlot::<ChatReply>::new();
         let slot = result_slot.clone();
-        let buffered_tool_call = client_arc.buffered_tool_call;
+        let buffered_tool_call = client.buffered_tool_call;
 
         tokio::spawn(async move {
             async fn commit_slot(slot: &PromiseResultSlot<ChatReply>, mut msg: ChatReply) {
@@ -274,7 +305,7 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
                 }
             }
 
-            match client.send().await {
+            match req_builder.send().await {
                 Ok(response) => {
                     // Check HTTP status before reading SSE stream.
                     // non-2xx bodies are plain JSON, not SSE — they would be
@@ -412,7 +443,7 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
             })?;
 
         tokio::spawn(async move {
-            let result = match client.send().await {
+            let result = match req_builder.send().await {
                 Ok(response) => {
                     let status = response.status();
                     let body = response.text().await.unwrap_or_default();
