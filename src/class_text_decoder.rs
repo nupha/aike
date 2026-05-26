@@ -1,14 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-use std::{
-    cell::{Cell, RefCell},
-    ffi::c_void,
-};
+use std::cell::{Cell, RefCell};
 
 use linkme::distributed_slice;
 use zuqe::{
-    CallContext, ClassCtorDef, ClassID, FieldDef, JSResult, JSValue, NativeObject, Object, Runtime,
+    CallContext, ClassCtorDef, ClassID, FieldDef, JSResult, JSValue, Object, Runtime,
     ScopedContext, def_native_object,
 };
 

@@ -1,16 +1,15 @@
 use std::{
     borrow::Cow,
     cell::Cell,
-    ops::DerefMut,
     sync::{Arc, Mutex},
     time::Duration,
 };
 
 use linkme::distributed_slice;
-use llama_cpp_ffi::{LlamaContext, SamplerChain};
+use llama_cpp_ffi::LlamaContext;
 use zuqe::{
     CallContext, ClassID, FieldDef, IntOrFloat, JS_PROP_ENUMERABLE, JS_PROP_FORCE, JSResult,
-    JSValue, NativeObject, Runtime, ScopedContext,
+    JSValue, Runtime, ScopedContext,
     builtins::{promise::Promise, typed_array::TypedArray},
     def_native_object,
 };
@@ -57,181 +56,86 @@ const PROP_BATCH_SIZE: i32 = 2;
 const PROP_SEQUENCES: i32 = 3;
 const PROP_IS_DISPOSED: i32 = 4;
 
-/// TODO: use Arc<Mutex<LlamaContext>> instead
-#[repr(transparent)]
-pub(crate) struct LlmContextPayload {
-    inner: Mutex<Option<LlamaContext>>,
-}
-
-impl LlmContextPayload {
-    pub(super) fn new(llm_ctx: LlamaContext) -> Self {
-        Self {
-            inner: Mutex::new(Some(llm_ctx)),
-        }
-    }
-
-    fn with_ctx_mut<R>(
-        &self,
-        f: impl FnOnce(&mut LlamaContext) -> Result<R, String>,
-    ) -> Result<R, String> {
-        let mut guard = self.inner.lock().unwrap();
-        let llm_ctx = guard
-            .as_mut()
-            .ok_or_else(|| "Context was disposed".to_string())?;
-        f(llm_ctx)
-    }
-
-    fn decode_tokens(
-        &self,
-        tokens: Vec<i32>,
-        start_pos: i32,
-        logits_last: bool,
-    ) -> Result<Option<i32>, String> {
-        self.with_ctx_mut(|llm_ctx| {
-            let seq_id = 0;
-            let len = tokens.len();
-            let batch = llm_ctx.batch_mut();
-            let mut logits_index: Option<i32> = None;
-
-            for (i, &t) in tokens.iter().enumerate() {
-                unsafe {
-                    *batch.token.add(i) = t;
-                    *batch.pos.add(i) = start_pos + i as i32;
-                    *(*batch.seq_id.add(i)).add(0) = seq_id;
-                    *batch.n_seq_id.add(i) = 1;
-                    let has_logits = logits_last && i == len - 1;
-                    *batch.logits.add(i) = if has_logits { 1 } else { 0 };
-                    if has_logits {
-                        logits_index = Some(i as i32);
-                    }
-                }
-            }
-
-            batch.n_tokens = len as _;
-            llm_ctx.decode()?;
-
-            Ok(logits_index)
-        })
-    }
-
-    fn sample_token(&self, logits: i32, chain: &mut SamplerChain) -> Result<i32, String> {
-        self.with_ctx_mut(|llm_ctx| {
-            let token = chain.sample(llm_ctx.as_ptr(), logits);
-            Ok(token)
-        })
-    }
-
-    fn reset(&self) -> Result<(), String> {
-        self.with_ctx_mut(|llm_ctx| {
-            llm_ctx.clear_memory(true);
-            Ok(())
-        })
-    }
-
-    fn embed_tokens(&self, tokens: Vec<i32>) -> Result<Vec<f32>, String> {
-        self.with_ctx_mut(|llm_ctx| llm_ctx.embed_tokens(&tokens, 0))
-    }
-
-    fn get_stats(&self) -> Result<ContextStatsData, String> {
-        self.with_ctx_mut(|llm_ctx| {
-            let memory_used = llm_ctx.state_size() as i64;
-            let kv_cache_size = llm_ctx.n_ctx_seq() as i64;
-            let pos_max = llm_ctx.memory_seq_pos_max(0);
-            let used_tokens = if pos_max >= 0 { pos_max as i64 + 1 } else { 0 };
-            let max_tokens = llm_ctx.n_ctx_seq() as i64;
-
-            Ok(ContextStatsData {
-                memory_used,
-                kv_cache_size,
-                used_tokens,
-                max_tokens,
+fn get_llm_ctx(
+    ctx: &mut ScopedContext,
+    val: JSValue,
+) -> Result<Arc<Mutex<Option<LlamaContext>>>, i32> {
+    #[cfg(debug_assertions)]
+    {
+        JSLlmContext::try_from(val)
+            .unwrap()
+            .payload()
+            .map(|p| {
+                debug_assert!(!p.lock().unwrap().is_none());
+                p.clone()
             })
-        })
+            .ok_or_else(|| {
+                ctx.throw_type_error("LLM Context was disposed");
+                -1
+            })
+    }
+
+    #[cfg(not(debug_assertions))]
+    {
+        JSLlmContext::try_from(val)
+            .unwrap()
+            .payload()
+            .cloned()
+            .ok_or_else(|| {
+                ctx.throw_type_error("LLM Context was disposed");
+                -1
+            })
     }
 }
 
-#[derive(Clone, Copy)]
-struct ContextStatsData {
-    memory_used: i64,
-    kv_cache_size: i64,
-    used_tokens: i64,
-    max_tokens: i64,
-}
-
-fn get_llm_context(ctx: &mut ScopedContext, val: JSValue) -> Result<Arc<LlmContextPayload>, i32> {
-    JSLlmContext::try_from(val)
-        .unwrap()
-        .payload()
-        .ok_or_else(|| {
-            ctx.throw_type_error("LLM Context was disposed");
-            -1
-        })
-        .cloned()
-}
-
-fn take_llm_context(
+fn take_llm_ctx(
     ctx: &mut ScopedContext,
     mut this: JSValue,
-) -> Result<Option<(Arc<LlmContextPayload>, JSValue)>, i32> {
-    if let Some(p) = this
+) -> Result<Option<(LlamaContext, JSValue)>, i32> {
+    if let Some(llm_ctx) = this
         .as_native_object_mut::<_, JSLlmContext>()
-        .and_then(|ob| ob.take_payload())
+        .and_then(|o| o.take_payload())
     {
+        let lc = llm_ctx.lock().unwrap().take();
+        debug_assert!(!lc.is_none());
+
         let model_val = this.get_property_str(ctx, "model")?;
         this.delete_property_str(ctx, "model", JS_PROP_FORCE)?; // force delete
 
-        Ok(Some((p, model_val)))
+        Ok(Some((lc.unwrap(), model_val)))
     } else {
         Ok(None)
     }
 }
 
 fn js_context_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let mut this = cc.this();
+    let this = cc.this();
 
     if cc.magic() == PROP_IS_DISPOSED {
-        let p = this
-            .retrive_object_payload_mut(ctx, JSLlmContext::class_id())?
-            .other_mut()
+        return Ok(this
+            .as_native_object::<_, JSLlmContext>()
             .unwrap()
-            .opaque();
-        return Ok(JSValue::Bool(p.is_null()));
+            .payload()
+            .is_none()
+            .into());
     }
 
-    let llm_ctx_wrap = get_llm_context(ctx, this)?;
+    let llm_ctx = get_llm_ctx(ctx, this)?;
+    let llm = llm_ctx.lock().unwrap();
+    let lc = llm.as_ref().unwrap();
 
     let val: JSValue = match cc.magic() {
-        PROP_CTX_SIZE => llm_ctx_wrap
-            .with_ctx_mut(|llm_ctx| Ok(llm_ctx.n_ctx()))
-            .map_err(|e| {
-                ctx.throw_type_error(&e);
-                -1
-            })?
-            .into(),
-        PROP_BATCH_SIZE => llm_ctx_wrap
-            .with_ctx_mut(|llm_ctx| Ok(llm_ctx.n_ubatch()))
-            .map_err(|e| {
-                ctx.throw_type_error(&e);
-                -1
-            })?
-            .into(),
-        PROP_SEQUENCES => llm_ctx_wrap
-            .with_ctx_mut(|llm_ctx| Ok(llm_ctx.n_seq_max()))
-            .map_err(|e| {
-                ctx.throw_type_error(&e);
-                -1
-            })?
-            .into(),
-
+        PROP_CTX_SIZE => lc.n_ctx().into(),
+        PROP_BATCH_SIZE => lc.n_ubatch().into(),
+        PROP_SEQUENCES => lc.n_seq_max().into(),
         _ => JSValue::UNDEFINED,
     };
-
     Ok(val)
 }
 
 fn js_context_decode(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let mut this = cc.this();
-    let llm_ctx_wrap = get_llm_context(ctx, this)?;
+    let this = cc.this();
+    let llm_ctx = get_llm_ctx(ctx, this)?;
 
     let arg0 = cc.arg(0);
     let tokens = parse_tokens(ctx, &arg0)?.into_owned();
@@ -278,7 +182,35 @@ fn js_context_decode(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let tx_timeout = tx.clone();
     if let Err(e) = WorkerPool::singleton().add_job(
         move || {
-            let res = llm_ctx_wrap.decode_tokens(tokens, n_past, logits_last);
+            //let res = llm_ctx.decode_tokens(tokens, n_past, logits_last);
+
+            let res = {
+                let seq_id = 0;
+                let len = tokens.len();
+                let mut logits_index: Option<i32> = None;
+
+                let mut llm = llm_ctx.lock().unwrap();
+                let llm = llm.as_mut().unwrap();
+                let batch = llm.batch_mut();
+
+                for (i, &t) in tokens.iter().enumerate() {
+                    unsafe {
+                        *batch.token.add(i) = t;
+                        *batch.pos.add(i) = n_past + i as i32;
+                        *(*batch.seq_id.add(i)).add(0) = seq_id;
+                        *batch.n_seq_id.add(i) = 1;
+                        let has_logits = logits_last && i == len - 1;
+                        *batch.logits.add(i) = if has_logits { 1 } else { 0 };
+                        if has_logits {
+                            logits_index = Some(i as i32);
+                        }
+                    }
+                }
+
+                batch.n_tokens = len as _;
+                llm.decode().map(|_| logits_index)
+            };
+
             let _ = tx_submit.send(res);
         },
         Some(move || {
@@ -293,7 +225,7 @@ fn js_context_decode(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
 fn js_context_sample(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
-    let llm_ctx = get_llm_context(ctx, this)?;
+    let llm_ctx = get_llm_ctx(ctx, this)?;
 
     let logits = cc.arg(0).to_number(ctx)?.to_i32();
     let s = cc.arg(1);
@@ -315,7 +247,15 @@ fn js_context_sample(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let tx_timeout = tx.clone();
     if let Err(e) = WorkerPool::singleton().add_job(
         move || {
-            let res = llm_ctx.sample_token(logits, sampler.lock().unwrap().deref_mut());
+            // let res = llm_ctx.sample_token(logits, sampler.lock().unwrap().deref_mut());
+            let res = {
+                let llm = llm_ctx.lock().unwrap();
+                let token = sampler
+                    .lock()
+                    .unwrap()
+                    .sample(llm.as_ref().unwrap().as_ptr(), logits);
+                Ok(token)
+            };
             let _ = tx_submit.send(res);
         },
         Some(move || {
@@ -329,7 +269,7 @@ fn js_context_sample(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 }
 
 fn js_context_reset(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let llm_ctx = get_llm_context(ctx, cc.this())?;
+    let llm_ctx = get_llm_ctx(ctx, cc.this())?;
 
     let (promise, tx) =
         Promise::create_with_channel(ctx, |cx, payload: Result<(), String>| -> JSResult {
@@ -346,8 +286,8 @@ fn js_context_reset(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let tx_timeout = tx.clone();
     if let Err(e) = WorkerPool::singleton().add_job(
         move || {
-            let res = llm_ctx.reset();
-            let _ = tx_submit.send(res);
+            llm_ctx.lock().unwrap().as_mut().unwrap().clear_memory(true);
+            let _ = tx_submit.send(Ok(()));
         },
         Some(move || {
             let _ = tx_timeout.send(Err("AcquireTimeout".to_string()));
@@ -359,11 +299,18 @@ fn js_context_reset(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 }
 
 fn js_context_getStats(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let llm_ctx = get_llm_context(ctx, cc.this())?;
+    #[derive(Clone, Copy)]
+    struct StatsData {
+        memory_used: i64,
+        kv_cache_size: i64,
+        used_tokens: i64,
+        max_tokens: i64,
+    }
 
-    let (promise, tx) = Promise::create_with_channel(
-        ctx,
-        |cx, payload: Result<ContextStatsData, String>| -> JSResult {
+    let llm_ctx = get_llm_ctx(ctx, cc.this())?;
+
+    let (promise, tx) =
+        Promise::create_with_channel(ctx, |cx, payload: Result<StatsData, String>| -> JSResult {
             let stats = payload.map_err(|e| {
                 cx.throw_internal_error(&e);
                 -1
@@ -374,15 +321,31 @@ fn js_context_getStats(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             obj.set_property_str(cx, "usedTokens", stats.used_tokens.into())?;
             obj.set_property_str(cx, "maxTokens", stats.max_tokens.into())?;
             Ok(obj.into())
-        },
-    )?;
+        })?;
 
     let tx_submit = tx.clone();
     let tx_timeout = tx.clone();
+
     if let Err(e) = WorkerPool::singleton().add_job(
         move || {
-            let res = llm_ctx.get_stats();
-            let _ = tx_submit.send(res);
+            let stat = {
+                let lc = llm_ctx.lock().unwrap();
+                let lc = lc.as_ref().unwrap();
+
+                let memory_used = lc.state_size() as i64;
+                let kv_cache_size = lc.n_ctx_seq() as i64;
+                let pos_max = lc.memory_seq_pos_max(0);
+                let used_tokens = if pos_max >= 0 { pos_max as i64 + 1 } else { 0 };
+                let max_tokens = lc.n_ctx_seq() as i64;
+
+                StatsData {
+                    memory_used,
+                    kv_cache_size,
+                    used_tokens,
+                    max_tokens,
+                }
+            };
+            let _ = tx_submit.send(Ok(stat));
         },
         Some(move || {
             let _ = tx_timeout.send(Err("AcquireTimeout".to_string()));
@@ -394,7 +357,7 @@ fn js_context_getStats(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 }
 
 fn js_context_embedTokens(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let llm_ctx = get_llm_context(ctx, cc.this())?;
+    let llm_ctx = get_llm_ctx(ctx, cc.this())?;
 
     let arg0 = cc.arg(0);
     let tokens = parse_tokens(ctx, &arg0)?.into_owned();
@@ -414,11 +377,19 @@ fn js_context_embedTokens(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
                 }
             }
         })?;
+
     let tx_submit = tx.clone();
     let tx_timeout = tx.clone();
     if let Err(e) = WorkerPool::singleton().add_job(
         move || {
-            let _ = tx_submit.send(llm_ctx.embed_tokens(tokens));
+            let res = llm_ctx
+                .lock()
+                .unwrap()
+                .as_mut()
+                .unwrap()
+                .embed_tokens(&tokens, 0);
+
+            let _ = tx_submit.send(res);
         },
         Some(move || {
             let _ = tx_timeout.send(Err("AcquireTimeout".to_string()));
@@ -447,10 +418,8 @@ fn js_context_createEngine(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
     };
     let eng_params = parse_engine_params(ctx, opts.as_ref())?;
 
-    // take LlamaContext out of the this object
-    if let Some((p, model_val)) = take_llm_context(ctx, cc.this())? {
-        let llm_ctx = p.inner.lock().unwrap().take().unwrap();
-
+    // take LlamaContext from the `this` object
+    if let Some((llm_ctx, model_val)) = take_llm_ctx(ctx, cc.this())? {
         if llm_ctx.n_seq_max() == 1 {
             log::warn!("createEngine: context sequences is 1, only one parallel slot available");
         }
@@ -461,6 +430,7 @@ fn js_context_createEngine(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
             eng_params.slot_match_threshold,
             eng_params.max_tokens,
         );
+
         let mut engine_obj = JSEngine::new_instance(ctx, JSValue::UNDEFINED, engine.into())?;
         let _ = engine_obj.define_property_value_str(ctx, "model", model_val, JS_PROP_ENUMERABLE);
 
@@ -472,7 +442,7 @@ fn js_context_createEngine(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
 }
 
 fn js_context_dispose(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    take_llm_context(ctx, cc.this())?;
+    take_llm_ctx(ctx, cc.this())?;
     Ok(JSValue::UNDEFINED)
 }
 
@@ -507,7 +477,7 @@ const CLASS_CONTEXT_PROTO: &[FieldDef] = &[
 def_native_object!(
     "Context",
     JSLlmContext,
-    Arc<LlmContextPayload>,
+    Arc<Mutex<Option<LlamaContext>>>,
     CLASS_CONTEXT_PROTO
 );
 

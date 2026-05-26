@@ -22,7 +22,7 @@ use crate::{
 };
 
 use super::{
-    class_context::{JSLlmContext, LlmContextPayload, parse_tokens},
+    class_context::{JSLlmContext, parse_tokens},
     class_sampler::js_model_createSamplerChain,
 };
 
@@ -703,11 +703,8 @@ fn js_model_createContext(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
     })?;
     llm_ctx.init_batch(ctx_params.n_batch as i32, 0, ctx_params.n_seq_max as i32);
 
-    let mut ctx_obj = JSLlmContext::new_instance(
-        ctx,
-        JSValue::UNDEFINED,
-        Arc::new(LlmContextPayload::new(llm_ctx)),
-    )?;
+    let mut ctx_obj =
+        JSLlmContext::new_instance(ctx, JSValue::UNDEFINED, Arc::new(Mutex::new(Some(llm_ctx))))?;
 
     // to keep model object referenced alive, model property is read-only
     ctx_obj.define_property_value_str(ctx, "model", this, JS_PROP_ENUMERABLE)?;
