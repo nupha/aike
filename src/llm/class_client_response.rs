@@ -13,7 +13,9 @@ use zuqe::{
     },
 };
 
-use crate::{class_llama_client::get_client, get_llm_model};
+use crate::get_llm_model;
+
+use super::class_client::get_client;
 
 pub(super) const MAGIC_RESPONSES_STREAM: i32 = 4;
 pub(super) const MAGIC_RESPONSES_ONCE: i32 = 5;

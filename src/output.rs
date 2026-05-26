@@ -19,9 +19,9 @@ use async_openai::types::{
 use uuid::Uuid;
 
 use crate::{
-    class_llama_engine::{ERR_CANCELLED, ERR_ENGINE_SHUTDOWN},
     engine::{EngineReply, GeneratedContent, StopReason},
     helpers::now_unix_s,
+    llm::{ERR_CANCELLED, ERR_ENGINE_SHUTDOWN},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq)]

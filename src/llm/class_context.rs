@@ -10,17 +10,20 @@ use linkme::distributed_slice;
 use llama_cpp_ffi::{LlamaContext, SamplerChain};
 use zuqe::{
     CallContext, ClassID, FieldDef, IntOrFloat, JS_PROP_ENUMERABLE, JS_PROP_FORCE, JSResult,
-    JSValue, NativeObject, Object, Runtime, ScopedContext,
+    JSValue, NativeObject, Runtime, ScopedContext,
     builtins::{promise::Promise, typed_array::TypedArray},
     def_native_object,
 };
 
 use crate::{
     USER_CLASS_DEFS,
-    class_llama_engine::{JSEngine, parse_engine_params},
-    class_llama_sampler::get_sampler,
     engine::{Engine, Token},
     worker::WorkerPool,
+};
+
+use super::{
+    class_engine::{JSEngine, parse_engine_params},
+    class_sampler::get_sampler,
 };
 
 /// 解析 JavaScript 值中的 token 数据

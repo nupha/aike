@@ -18,9 +18,12 @@ use zuqe::{
 
 use crate::{
     USER_CLASS_DEFS,
-    class_llama_context::{JSLlamaContext, LlamaContextWrap, parse_tokens},
-    class_llama_sampler::js_model_createSamplerChain,
     helpers::{JinjaMessage, TemplateContext, create_minijinja_env},
+};
+
+use super::{
+    class_context::{JSLlamaContext, LlamaContextWrap, parse_tokens},
+    class_sampler::js_model_createSamplerChain,
 };
 
 pub(crate) type ModelPayload = Box<LlamaModel>;

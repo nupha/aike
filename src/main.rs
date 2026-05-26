@@ -5,18 +5,12 @@
 
 mod aike;
 mod class_event_emitter;
-mod class_llama_client;
-mod class_llama_client_responses;
-mod class_llama_context;
-mod class_llama_engine;
-mod class_llama_model;
-mod class_llama_sampler;
 mod class_text_decoder;
 mod engine;
 mod fs;
 mod global;
 mod helpers;
-mod mod_llama;
+mod llm;
 mod output;
 mod request;
 mod responses;
@@ -37,15 +31,10 @@ use zuqe::{
 use crate::{
     aike::{JSIoHandle, gc_trace_io},
     class_event_emitter::JSEventEmitter,
-    class_llama_client::JSLlamaClient,
-    class_llama_context::JSLlamaContext,
-    class_llama_engine::JSEngine,
-    class_llama_model::JSLlamaModel,
-    class_llama_sampler::JSSamplerChain,
     class_text_decoder::JSTextDecoder,
     fs::init_mod_fs,
     global::setup_globals,
-    mod_llama::init_mod_llama,
+    llm::{JSEngine, JSLlamaClient, JSLlamaContext, JSLlamaModel, JSSamplerChain, init_mod_llama},
     request::JSResponse,
     timeout::gc_trace_timeout,
 };

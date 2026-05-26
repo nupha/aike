@@ -10,7 +10,9 @@ use zuqe::{
     Runtime, ScopedContext, def_native_object,
 };
 
-use crate::{USER_CLASS_DEFS, class_llama_model::get_llama_model};
+use crate::USER_CLASS_DEFS;
+
+use super::class_model::get_llama_model;
 
 pub(crate) type SamplerPayload = Arc<Mutex<SamplerChain>>;
 

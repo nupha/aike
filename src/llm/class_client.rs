@@ -18,13 +18,13 @@ use zuqe::{
 };
 
 use crate::{
-    USER_CLASS_DEFS,
-    class_llama_client_responses::{
-        MAGIC_RESPONSES_ONCE, MAGIC_RESPONSES_STREAM, js_client_responses,
-    },
-    class_llama_engine::{MAGIC_CHAT_ONCE, MAGIC_CHAT_STREAM},
-    get_llm_api_key, get_llm_base_url, get_llm_model,
+    USER_CLASS_DEFS, get_llm_api_key, get_llm_base_url, get_llm_model,
     helpers::json_keys_camel_to_snake,
+};
+
+use super::{
+    class_client_response::{MAGIC_RESPONSES_ONCE, MAGIC_RESPONSES_STREAM, js_client_responses},
+    class_engine::{MAGIC_CHAT_ONCE, MAGIC_CHAT_STREAM},
 };
 
 #[derive(Debug)]

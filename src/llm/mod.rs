@@ -1,10 +1,23 @@
+mod class_client;
+mod class_client_response;
+mod class_context;
+mod class_engine;
+mod class_model;
+mod class_sampler;
+
+pub(crate) use {
+    class_client::JSLlamaClient,
+    class_context::JSLlamaContext,
+    class_engine::{ERR_CANCELLED, ERR_ENGINE_SHUTDOWN, JSEngine},
+    class_model::JSLlamaModel,
+    class_sampler::JSSamplerChain,
+};
+
 use llama_cpp_ffi::{FileType, KVCacheType, list_devices};
 use zuqe::{
     Array, CallContext, FieldDef, JS_PROP_ENUMERABLE, JSResult, JSValue, NativeObject,
     ScopedContext,
 };
-
-use crate::{class_llama_client::JSLlamaClient, class_llama_model::JSLlamaModel};
 
 fn get_devices(ctx: &mut ScopedContext, _: CallContext) -> JSResult {
     let devs = list_devices();
@@ -30,8 +43,16 @@ fn get_devices(ctx: &mut ScopedContext, _: CallContext) -> JSResult {
 }
 
 const MOD_LLAMA_ENTRIES: &[FieldDef] = &[
-    FieldDef::CLASS("Model", || JSLlamaModel::class_id(), JS_PROP_ENUMERABLE),
-    FieldDef::CLASS("Client", || JSLlamaClient::class_id(), JS_PROP_ENUMERABLE),
+    FieldDef::CLASS(
+        "Model",
+        || class_model::JSLlamaModel::class_id(),
+        JS_PROP_ENUMERABLE,
+    ),
+    FieldDef::CLASS(
+        "Client",
+        || class_client::JSLlamaClient::class_id(),
+        JS_PROP_ENUMERABLE,
+    ),
     FieldDef::OBJECT(
         "FileType",
         &[
