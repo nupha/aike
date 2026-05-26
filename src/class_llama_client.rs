@@ -9,8 +9,7 @@ use reqwest::header::HeaderMap;
 use tokio::io::AsyncBufReadExt;
 use tokio_util::io::StreamReader;
 use zuqe::{
-    CallContext, ClassCtorDef, ClassID, FieldDef, JSResult, JSValue, NativeObject, Object, Runtime,
-    ScopedContext,
+    CallContext, ClassCtorDef, ClassID, FieldDef, JSResult, JSValue, Runtime, ScopedContext,
     builtins::{
         iterator::AsyncIterableIterator,
         promise::{Promise, PromiseResultSlot},
@@ -37,17 +36,14 @@ pub(crate) struct ClientPayload {
     pub(crate) custom_headers: HeaderMap,
     pub(crate) model_name: Option<String>,
     pub(crate) buffered_tool_call: bool,
-    /// default extra body field for openai
+    /// default extra_body field for openai request
     pub(crate) extra_body: serde_json::Value,
     /// Request timeout. `None` = no timeout (reqwest default, infinite wait).
     pub(crate) timeout: Option<Duration>,
 }
 
-pub(crate) fn get_client(
-    ctx: &mut ScopedContext,
-    val: &JSValue,
-) -> Result<Arc<ClientPayload>, i32> {
-    let ob = JSLlamaClient::try_from(*val).unwrap();
+pub(crate) fn get_client(ctx: &mut ScopedContext, val: JSValue) -> Result<Arc<ClientPayload>, i32> {
+    let ob = JSLlamaClient::try_from(val).unwrap();
     if let Some(c) = ob.payload() {
         Ok(c.clone())
     } else {
@@ -84,9 +80,22 @@ fn js_client_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         .as_string()
         .map(|s| s.content().encode_utf8(false).to_string());
 
-    // check extra_body field
+    // extra_body
     let extra_body: serde_json::Value = match opts_obj.get_property_str(ctx, "extraBody")? {
-        JSValue::UNDEFINED | JSValue::NULL => serde_json::Value::Null,
+        JSValue::NULL => serde_json::Value::Null,
+        JSValue::UNDEFINED => {
+            let s = std::env::var("AIKE_LLM_EXTRA_BODY").unwrap_or_default();
+            if !s.is_empty() {
+                if let Ok(o) = serde_json::from_str(&s) {
+                    o
+                } else {
+                    eprintln!("[WARN] envvar AIKE_LLM_EXTRA_BODY is invalid JSON");
+                    serde_json::Value::Null
+                }
+            } else {
+                serde_json::Value::Null
+            }
+        }
         JSValue::Object(o) => o.to_serde_json(ctx)?,
         _ => {
             ctx.throw_type_error("extraBody must be one of undefined, null or object");
@@ -214,7 +223,7 @@ enum ChatReply {
 
 fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
-    let client = get_client(ctx, &this)?;
+    let client = get_client(ctx, this)?;
     let is_stream = cc.magic() == MAGIC_CHAT_STREAM;
 
     // Single object argument
@@ -260,6 +269,8 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
             obj.insert("extra_body".to_string(), serde_json::Value::Object(merged));
         }
     }
+
+    println!("[O.] req {req_json:?}");
 
     // Use reqwest to make HTTP request, build client
     let mut req_builder = reqwest::Client::new()
@@ -483,10 +494,10 @@ const PROP_MODEL: i32 = 0;
 
 fn js_client_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
-    let client_arc = get_client(ctx, &this)?;
+    let client = get_client(ctx, this)?;
 
     match cc.magic() {
-        PROP_MODEL => match &client_arc.model_name {
+        PROP_MODEL => match &client.model_name {
             Some(name) => ctx.create_string_from_str(name).map(JSValue::String),
             None => Ok(JSValue::NULL),
         },

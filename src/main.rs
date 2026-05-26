@@ -167,7 +167,9 @@ pub(crate) fn get_sandbox_path() -> String {
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    dotenvy::dotenv().ok();
+    if let Err(e) = dotenvy::dotenv() {
+        eprintln!("[INFO] .env not loaded: {e}");
+    }
 
     #[cfg(debug_assertions)]
     {
