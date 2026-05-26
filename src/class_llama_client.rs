@@ -290,27 +290,13 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
         let buffered_tool_call = client.buffered_tool_call;
 
         tokio::spawn(async move {
-            async fn commit_slot(slot: &PromiseResultSlot<ChatReply>, mut msg: ChatReply) {
-                loop {
-                    match slot.commit(msg) {
-                        Ok(()) => {
-                            return;
-                        }
-                        Err(ret) => {
-                            // slot is full, yield and do commit later
-                            msg = ret;
-                            tokio::task::yield_now().await;
-                        }
-                    }
-                }
-            }
-
             async fn flush_buf(
                 slot: &PromiseResultSlot<ChatReply>,
                 buf: &mut Option<ToolCallBuffer>,
             ) {
                 if let Some(state) = buf.take() {
-                    commit_slot(slot, ChatReply::Chunk(state.into_chunk())).await;
+                    slot.commit_async(ChatReply::Chunk(state.into_chunk()))
+                        .await;
                 }
             }
 
@@ -327,7 +313,7 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
                             .ok()
                             .and_then(|j| j["error"]["message"].as_str().map(String::from))
                             .unwrap_or_else(|| format!("HTTP {} : {}", status, body));
-                        commit_slot(&slot, ChatReply::Error(msg)).await;
+                        slot.commit_async(ChatReply::Error(msg)).await;
                         return;
                     }
 
@@ -362,7 +348,7 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
                                         .as_str()
                                         .unwrap_or(data)
                                         .to_string();
-                                    commit_slot(&slot, ChatReply::Error(err_msg)).await;
+                                    slot.commit_async(ChatReply::Error(err_msg)).await;
                                     break;
                                 }
 
@@ -400,24 +386,24 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
                                             {
                                                 obj.remove("tool_calls");
                                             }
-                                            commit_slot(&slot, ChatReply::Chunk(finish)).await;
+                                            slot.commit_async(ChatReply::Chunk(finish)).await;
                                         }
                                     } else {
                                         // Non-tool_call (content, finish_reason, etc.) → flush then passthrough
                                         flush_buf(&slot, &mut buf).await;
-                                        commit_slot(&slot, ChatReply::Chunk(json)).await;
+                                        slot.commit_async(ChatReply::Chunk(json)).await;
                                     }
                                 } else {
-                                    commit_slot(&slot, ChatReply::Chunk(json)).await;
+                                    slot.commit_async(ChatReply::Chunk(json)).await;
                                 }
                             }
                         }
                     }
 
-                    commit_slot(&slot, ChatReply::Done).await;
+                    slot.commit_async(ChatReply::Done).await;
                 }
                 Err(e) => {
-                    commit_slot(&slot, ChatReply::Error(e.to_string())).await;
+                    slot.commit_async(ChatReply::Error(e.to_string())).await;
                 }
             }
         });
