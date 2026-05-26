@@ -23,9 +23,6 @@ use super::{
     engine::{Engine, Token},
 };
 
-/// 解析 JavaScript 值中的 token 数据
-/// 支持 Int32Array、普通数组(fast array)或单个整数
-/// 返回 Cow 以允许调用方决定是否需要 owned 数据
 pub(super) fn parse_tokens<'a>(
     ctx: &mut ScopedContext,
     val: &'a JSValue,
@@ -161,20 +158,18 @@ struct ContextStatsData {
     max_tokens: i64,
 }
 
-fn get_llama_context(
-    ctx: &mut ScopedContext,
-    val: &JSValue,
-) -> Result<Arc<LlmContextPayload>, i32> {
-    let ob = JSLlmContext::try_from(*val).unwrap();
-    ob.payload()
+fn get_llm_context(ctx: &mut ScopedContext, val: JSValue) -> Result<Arc<LlmContextPayload>, i32> {
+    JSLlmContext::try_from(val)
+        .unwrap()
+        .payload()
         .ok_or_else(|| {
-            ctx.throw_type_error("Context was disposed");
+            ctx.throw_type_error("LLM Context was disposed");
             -1
         })
         .cloned()
 }
 
-fn take_llame_context(
+fn take_llm_context(
     ctx: &mut ScopedContext,
     mut this: JSValue,
 ) -> Result<Option<(Arc<LlmContextPayload>, JSValue)>, i32> {
@@ -203,7 +198,7 @@ fn js_context_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         return Ok(JSValue::Bool(p.is_null()));
     }
 
-    let llm_ctx_wrap = get_llama_context(ctx, &mut this)?;
+    let llm_ctx_wrap = get_llm_context(ctx, this)?;
 
     let val: JSValue = match cc.magic() {
         PROP_CTX_SIZE => llm_ctx_wrap
@@ -236,7 +231,7 @@ fn js_context_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
 fn js_context_decode(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut this = cc.this();
-    let llm_ctx_wrap = get_llama_context(ctx, &mut this)?;
+    let llm_ctx_wrap = get_llm_context(ctx, this)?;
 
     let arg0 = cc.arg(0);
     let tokens = parse_tokens(ctx, &arg0)?.into_owned();
@@ -297,8 +292,8 @@ fn js_context_decode(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 }
 
 fn js_context_sample(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let mut this = cc.this();
-    let llm_ctx_wrap = get_llama_context(ctx, &mut this)?;
+    let this = cc.this();
+    let llm_ctx = get_llm_context(ctx, this)?;
 
     let logits = cc.arg(0).to_number(ctx)?.to_i32();
     let s = cc.arg(1);
@@ -320,7 +315,7 @@ fn js_context_sample(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let tx_timeout = tx.clone();
     if let Err(e) = WorkerPool::singleton().add_job(
         move || {
-            let res = llm_ctx_wrap.sample_token(logits, sampler.lock().unwrap().deref_mut());
+            let res = llm_ctx.sample_token(logits, sampler.lock().unwrap().deref_mut());
             let _ = tx_submit.send(res);
         },
         Some(move || {
@@ -334,8 +329,7 @@ fn js_context_sample(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 }
 
 fn js_context_reset(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let mut this = cc.this();
-    let llm_ctx_wrap = get_llama_context(ctx, &mut this)?;
+    let llm_ctx = get_llm_context(ctx, cc.this())?;
 
     let (promise, tx) =
         Promise::create_with_channel(ctx, |cx, payload: Result<(), String>| -> JSResult {
@@ -352,7 +346,7 @@ fn js_context_reset(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let tx_timeout = tx.clone();
     if let Err(e) = WorkerPool::singleton().add_job(
         move || {
-            let res = llm_ctx_wrap.reset();
+            let res = llm_ctx.reset();
             let _ = tx_submit.send(res);
         },
         Some(move || {
@@ -365,8 +359,7 @@ fn js_context_reset(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 }
 
 fn js_context_getStats(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let mut this = cc.this();
-    let llm_ctx_wrap = get_llama_context(ctx, &mut this)?;
+    let llm_ctx = get_llm_context(ctx, cc.this())?;
 
     let (promise, tx) = Promise::create_with_channel(
         ctx,
@@ -388,7 +381,7 @@ fn js_context_getStats(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let tx_timeout = tx.clone();
     if let Err(e) = WorkerPool::singleton().add_job(
         move || {
-            let res = llm_ctx_wrap.get_stats();
+            let res = llm_ctx.get_stats();
             let _ = tx_submit.send(res);
         },
         Some(move || {
@@ -401,8 +394,7 @@ fn js_context_getStats(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 }
 
 fn js_context_embedTokens(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let mut this = cc.this();
-    let llm_ctx_wrap = get_llama_context(ctx, &mut this)?;
+    let llm_ctx = get_llm_context(ctx, cc.this())?;
 
     let arg0 = cc.arg(0);
     let tokens = parse_tokens(ctx, &arg0)?.into_owned();
@@ -426,7 +418,7 @@ fn js_context_embedTokens(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
     let tx_timeout = tx.clone();
     if let Err(e) = WorkerPool::singleton().add_job(
         move || {
-            let _ = tx_submit.send(llm_ctx_wrap.embed_tokens(tokens));
+            let _ = tx_submit.send(llm_ctx.embed_tokens(tokens));
         },
         Some(move || {
             let _ = tx_timeout.send(Err("AcquireTimeout".to_string()));
@@ -434,6 +426,7 @@ fn js_context_embedTokens(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
     ) {
         let _ = tx.send(Err(e.to_string()));
     }
+
     Ok(promise.into())
 }
 
@@ -455,7 +448,7 @@ fn js_context_createEngine(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
     let eng_params = parse_engine_params(ctx, opts.as_ref())?;
 
     // take LlamaContext out of the this object
-    if let Some((p, model_val)) = take_llame_context(ctx, cc.this())? {
+    if let Some((p, model_val)) = take_llm_context(ctx, cc.this())? {
         let llm_ctx = p.inner.lock().unwrap().take().unwrap();
 
         if llm_ctx.n_seq_max() == 1 {
@@ -479,7 +472,7 @@ fn js_context_createEngine(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
 }
 
 fn js_context_dispose(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    take_llame_context(ctx, cc.this())?;
+    take_llm_context(ctx, cc.this())?;
     Ok(JSValue::UNDEFINED)
 }
 
