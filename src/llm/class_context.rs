@@ -15,15 +15,12 @@ use zuqe::{
     def_native_object,
 };
 
-use crate::{
-    USER_CLASS_DEFS,
-    engine::{Engine, Token},
-    worker::WorkerPool,
-};
+use crate::{USER_CLASS_DEFS, worker::WorkerPool};
 
 use super::{
     class_engine::{JSEngine, parse_engine_params},
     class_sampler::get_sampler,
+    engine::{Engine, Token},
 };
 
 /// 解析 JavaScript 值中的 token 数据

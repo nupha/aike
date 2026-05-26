@@ -13,8 +13,8 @@ use futures_util::StreamExt;
 use uuid::Uuid;
 
 use crate::{
-    engine::{EngineReply, GrammarConfig, TaskConfig},
     helpers::{PromptThinkPattern, apply_chat_template, detect_prompt_think_pattern},
+    llm::engine::{EngineReply, GrammarConfig, TaskConfig},
     output::{
         ChunkSSE, ParserKind, collect_engine_reply_to_json, redirect_engine_reply_to_responses_sse,
     },

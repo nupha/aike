@@ -4,6 +4,7 @@ mod class_context;
 mod class_engine;
 mod class_model;
 mod class_sampler;
+pub(crate) mod engine;
 
 pub(crate) use {
     class_client::JSLlamaClient,

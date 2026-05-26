@@ -18,7 +18,6 @@ use zuqe::{
 
 use crate::{
     USER_CLASS_DEFS,
-    engine::{Engine, GrammarConfig, TaskConfig},
     helpers::{
         PromptThinkPattern, apply_chat_template, detect_prompt_think_pattern,
         parse_chat_completion_req, to_lark_tool_choice,
@@ -32,7 +31,10 @@ use crate::{
 #[cfg(feature = "enable_eval_log")]
 use crate::eval_logger::{EvalLogEntry, ToolCallLog, get_eval_logger};
 
-use super::class_client_response::{parse_responses_input, parse_responses_reasoning};
+use super::{
+    class_client_response::{parse_responses_input, parse_responses_reasoning},
+    engine::{Engine, GrammarConfig, TaskConfig},
+};
 
 pub(crate) type EnginePayload = Arc<Mutex<Engine>>;
 

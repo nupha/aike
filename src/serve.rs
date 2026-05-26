@@ -26,11 +26,11 @@ use uuid::Uuid;
 use crate::eval_logger::{EvalLogEntry, ToolCallLog, get_eval_logger};
 
 use crate::{
-    engine::{Engine, GrammarConfig, TaskConfig},
     helpers::{
         PromptThinkPattern, apply_chat_template, detect_prompt_think_pattern, now_unix_s,
         to_lark_tool_choice,
     },
+    llm::engine::{Engine, GrammarConfig, TaskConfig},
     output::{
         ChunkSSE, ParserKind, collect_engine_reply_to_json, redirect_engine_reply_to_chat_sse,
     },
