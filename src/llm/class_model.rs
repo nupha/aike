@@ -22,7 +22,7 @@ use crate::{
 };
 
 use super::{
-    class_context::{JSLlamaContext, LlamaContextWrap, parse_tokens},
+    class_context::{JSLlmContext, LlmContextPayload, parse_tokens},
     class_sampler::js_model_createSamplerChain,
 };
 
@@ -266,7 +266,7 @@ fn js_model_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 -1
             })?;
 
-    let mut obj = JSLlamaModel::new_instance(ctx, new_target, Box::new(model))?;
+    let mut obj = JSLlmModel::new_instance(ctx, new_target, Box::new(model))?;
 
     let path = ctx
         .create_string_from_utf8(file_name.into_bytes())
@@ -280,7 +280,7 @@ pub(super) fn get_llama_model<'a>(
     ctx: &mut ScopedContext,
     val: &'a JSValue,
 ) -> Result<&'a LlamaModel, i32> {
-    val.as_native_object::<_, JSLlamaModel>()
+    val.as_native_object::<_, JSLlmModel>()
         .and_then(|ob| ob.payload())
         .ok_or_else(|| {
             ctx.throw_type_error("invalid Model object");
@@ -703,10 +703,10 @@ fn js_model_createContext(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
     })?;
     llm_ctx.init_batch(ctx_params.n_batch as i32, 0, ctx_params.n_seq_max as i32);
 
-    let mut ctx_obj = JSLlamaContext::new_instance(
+    let mut ctx_obj = JSLlmContext::new_instance(
         ctx,
         JSValue::UNDEFINED,
-        Arc::new(LlamaContextWrap::new(llm_ctx)),
+        Arc::new(LlmContextPayload::new(llm_ctx)),
     )?;
 
     // to keep model object referenced alive, model property is read-only
@@ -978,7 +978,7 @@ fn js_model_renderTemplate(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
 }
 
 fn js_model_dispose(_: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let _ = JSLlamaModel::try_from(cc.this()).unwrap().take_payload();
+    let _ = JSLlmModel::try_from(cc.this()).unwrap().take_payload();
     Ok(JSValue::UNDEFINED)
 }
 
@@ -1036,7 +1036,7 @@ fn js_model_load(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 cx.throw_internal_error(&e);
                 -1
             })?;
-            let mut obj = JSLlamaModel::new_instance(cx, JSValue::UNDEFINED, Box::new(model))?;
+            let mut obj = JSLlmModel::new_instance(cx, JSValue::UNDEFINED, Box::new(model))?;
             let path = cx
                 .create_string_from_utf8(file_name.into_bytes())
                 .map(JSValue::String)?;
@@ -1063,15 +1063,15 @@ const CLASS_MODEL_ENTRIES: &[FieldDef] = &[FieldDef::FUNC("load", 1, js_model_lo
 
 def_native_object!(
     "Model",
-    JSLlamaModel,
+    JSLlmModel,
     ModelPayload,
     CLASS_MODEL_PROTO_ENTRIES,
     constructor: ClassCtorDef::new(js_model_constructor, 2, false).entries(CLASS_MODEL_ENTRIES),
-    on_class_register: JSLlamaModel::on_register,
-    on_class_unregister: JSLlamaModel::on_unregister
+    on_class_register: JSLlmModel::on_register,
+    on_class_unregister: JSLlmModel::on_unregister
 );
 
-impl JSLlamaModel {
+impl JSLlmModel {
     fn on_register(_: &mut RuntimeImpl) {
         unsafe {
             extern "C" fn log_callback(
@@ -1108,5 +1108,5 @@ impl JSLlamaModel {
 
 #[distributed_slice(USER_CLASS_DEFS)]
 fn register_class_model(rt: &mut Runtime) -> Result<ClassID, i32> {
-    JSLlamaModel::register(rt)
+    JSLlmModel::register(rt)
 }

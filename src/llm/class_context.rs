@@ -60,12 +60,13 @@ const PROP_BATCH_SIZE: i32 = 2;
 const PROP_SEQUENCES: i32 = 3;
 const PROP_IS_DISPOSED: i32 = 4;
 
+/// TODO: use Arc<Mutex<LlamaContext>> instead
 #[repr(transparent)]
-pub(crate) struct LlamaContextWrap {
+pub(crate) struct LlmContextPayload {
     inner: Mutex<Option<LlamaContext>>,
 }
 
-impl LlamaContextWrap {
+impl LlmContextPayload {
     pub(super) fn new(llm_ctx: LlamaContext) -> Self {
         Self {
             inner: Mutex::new(Some(llm_ctx)),
@@ -160,8 +161,11 @@ struct ContextStatsData {
     max_tokens: i64,
 }
 
-fn get_llama_context(ctx: &mut ScopedContext, val: &JSValue) -> Result<Arc<LlamaContextWrap>, i32> {
-    let ob = JSLlamaContext::try_from(*val).unwrap();
+fn get_llama_context(
+    ctx: &mut ScopedContext,
+    val: &JSValue,
+) -> Result<Arc<LlmContextPayload>, i32> {
+    let ob = JSLlmContext::try_from(*val).unwrap();
     ob.payload()
         .ok_or_else(|| {
             ctx.throw_type_error("Context was disposed");
@@ -173,9 +177,9 @@ fn get_llama_context(ctx: &mut ScopedContext, val: &JSValue) -> Result<Arc<Llama
 fn take_llame_context(
     ctx: &mut ScopedContext,
     mut this: JSValue,
-) -> Result<Option<(Arc<LlamaContextWrap>, JSValue)>, i32> {
+) -> Result<Option<(Arc<LlmContextPayload>, JSValue)>, i32> {
     if let Some(p) = this
-        .as_native_object_mut::<_, JSLlamaContext>()
+        .as_native_object_mut::<_, JSLlmContext>()
         .and_then(|ob| ob.take_payload())
     {
         let model_val = this.get_property_str(ctx, "model")?;
@@ -192,7 +196,7 @@ fn js_context_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     if cc.magic() == PROP_IS_DISPOSED {
         let p = this
-            .retrive_object_payload_mut(ctx, JSLlamaContext::class_id())?
+            .retrive_object_payload_mut(ctx, JSLlmContext::class_id())?
             .other_mut()
             .unwrap()
             .opaque();
@@ -509,12 +513,12 @@ const CLASS_CONTEXT_PROTO: &[FieldDef] = &[
 
 def_native_object!(
     "Context",
-    JSLlamaContext,
-    Arc<LlamaContextWrap>,
+    JSLlmContext,
+    Arc<LlmContextPayload>,
     CLASS_CONTEXT_PROTO
 );
 
 #[distributed_slice(USER_CLASS_DEFS)]
 fn register_class_context(rt: &mut Runtime) -> Result<ClassID, i32> {
-    JSLlamaContext::register(rt)
+    JSLlmContext::register(rt)
 }

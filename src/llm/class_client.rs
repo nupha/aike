@@ -43,7 +43,7 @@ pub(crate) struct ClientPayload {
 }
 
 pub(crate) fn get_client(ctx: &mut ScopedContext, val: JSValue) -> Result<Arc<ClientPayload>, i32> {
-    let ob = JSLlamaClient::try_from(val).unwrap();
+    let ob = JSLlmClient::try_from(val).unwrap();
     if let Some(c) = ob.payload() {
         Ok(c.clone())
     } else {
@@ -121,7 +121,7 @@ fn js_client_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         None
     };
 
-    JSLlamaClient::new_instance(
+    JSLlmClient::new_instance(
         ctx,
         new_target,
         Arc::new(ClientPayload {
@@ -492,7 +492,7 @@ fn js_client_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 fn js_client_dispose(_: &mut ScopedContext, cc: CallContext) -> JSResult {
     let _ = cc
         .this()
-        .as_native_object_mut::<_, JSLlamaClient>()
+        .as_native_object_mut::<_, JSLlmClient>()
         .and_then(|ob| ob.take_payload());
 
     Ok(JSValue::UNDEFINED)
@@ -529,7 +529,7 @@ const CLASS_CLIENT_PROTO: &[FieldDef] = &[
 
 def_native_object!(
     "Client",
-    JSLlamaClient,
+    JSLlmClient,
     Arc<ClientPayload>,
     CLASS_CLIENT_PROTO,
     constructor: ClassCtorDef::new(js_client_constructor, 1, false)
@@ -537,5 +537,5 @@ def_native_object!(
 
 #[distributed_slice(USER_CLASS_DEFS)]
 fn register_class_openai(rt: &mut Runtime) -> Result<ClassID, i32> {
-    JSLlamaClient::register(rt)
+    JSLlmClient::register(rt)
 }

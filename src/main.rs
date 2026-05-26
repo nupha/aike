@@ -33,7 +33,7 @@ use crate::{
     class_text_decoder::JSTextDecoder,
     fs::init_mod_fs,
     global::setup_globals,
-    llm::{JSEngine, JSLlamaClient, JSLlamaContext, JSLlamaModel, JSSamplerChain, init_mod_llama},
+    llm::{JSEngine, JSLlmClient, JSLlmContext, JSLlmModel, JSSamplerChain, init_mod_llm},
     request::JSResponse,
     timeout::gc_trace_timeout,
 };
@@ -264,10 +264,10 @@ async fn main() -> ExitCode {
             // use classes
             cx.use_classes(&[
                 JSEventEmitter::class_id(),
-                JSLlamaModel::class_id(),
-                JSLlamaContext::class_id(),
+                JSLlmModel::class_id(),
+                JSLlmContext::class_id(),
                 JSEngine::class_id(),
-                JSLlamaClient::class_id(),
+                JSLlmClient::class_id(),
                 JSSamplerChain::class_id(),
                 JSIoHandle::class_id(),
                 JSResponse::class_id(),
@@ -275,7 +275,7 @@ async fn main() -> ExitCode {
             ])?;
 
             // register native modules
-            init_mod_llama(cx)?;
+            init_mod_llm(cx)?;
             init_mod_fs(cx)?;
 
             setup_globals(cx, &argv, &exec_argv)

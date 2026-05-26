@@ -7,10 +7,10 @@ mod class_sampler;
 pub(crate) mod engine;
 
 pub(crate) use {
-    class_client::JSLlamaClient,
-    class_context::JSLlamaContext,
+    class_client::JSLlmClient,
+    class_context::JSLlmContext,
     class_engine::{ERR_CANCELLED, ERR_ENGINE_SHUTDOWN, JSEngine},
-    class_model::JSLlamaModel,
+    class_model::JSLlmModel,
     class_sampler::JSSamplerChain,
 };
 
@@ -46,12 +46,12 @@ fn get_devices(ctx: &mut ScopedContext, _: CallContext) -> JSResult {
 const MOD_LLAMA_ENTRIES: &[FieldDef] = &[
     FieldDef::CLASS(
         "Model",
-        || class_model::JSLlamaModel::class_id(),
+        || class_model::JSLlmModel::class_id(),
         JS_PROP_ENUMERABLE,
     ),
     FieldDef::CLASS(
         "Client",
-        || class_client::JSLlamaClient::class_id(),
+        || class_client::JSLlmClient::class_id(),
         JS_PROP_ENUMERABLE,
     ),
     FieldDef::OBJECT(
@@ -210,7 +210,7 @@ const MOD_LLAMA_ENTRIES: &[FieldDef] = &[
     FieldDef::FUNC("getDevices", 0, get_devices, 0),
 ];
 
-pub fn init_mod_llama(ctx: &mut ScopedContext) -> Result<(), i32> {
+pub fn init_mod_llm(ctx: &mut ScopedContext) -> Result<(), i32> {
     ctx.create_module("llama", MOD_LLAMA_ENTRIES)?;
     Ok(())
 }
