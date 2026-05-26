@@ -270,8 +270,6 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
         }
     }
 
-    println!("[O.] req {req_json:?}");
-
     // Use reqwest to make HTTP request, build client
     let mut req_builder = reqwest::Client::new()
         .post(&format!("{}/chat/completions", client.base_url))
