@@ -492,7 +492,7 @@ fn js_client_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 fn js_client_dispose(_: &mut ScopedContext, cc: CallContext) -> JSResult {
     let _ = cc
         .this()
-        .as_native_object_mut::<_, JSLlmClient>()
+        .as_native_object_mut::<JSLlmClient>()
         .and_then(|ob| ob.take_payload());
 
     Ok(JSValue::UNDEFINED)

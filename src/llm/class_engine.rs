@@ -729,7 +729,7 @@ fn js_engine_setParseReasoning(ctx: &mut ScopedContext, cc: CallContext) -> JSRe
 fn js_engine_dispose(_: &mut ScopedContext, cc: CallContext) -> JSResult {
     let _ = cc
         .this()
-        .as_native_object_mut::<_, JSEngine>()
+        .as_native_object_mut::<JSEngine>()
         .and_then(|ob| ob.take_payload());
 
     Ok(JSValue::UNDEFINED)

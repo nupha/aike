@@ -280,7 +280,7 @@ pub(super) fn get_llama_model<'a>(
     ctx: &mut ScopedContext,
     val: &'a JSValue,
 ) -> Result<&'a LlamaModel, i32> {
-    val.as_native_object::<_, JSLlmModel>()
+    val.as_native_object::<JSLlmModel>()
         .and_then(|ob| ob.payload())
         .ok_or_else(|| {
             ctx.throw_type_error("invalid Model object");

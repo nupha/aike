@@ -187,7 +187,7 @@ fn start_on_read_microtask(ctx: &mut ScopedContext) {
 }
 
 fn get_io<'a>(ctx: &mut ScopedContext, val: &'a JSValue) -> Result<&'a IoPayload, i32> {
-    val.as_native_object::<_, JSIoHandle>()
+    val.as_native_object::<JSIoHandle>()
         .and_then(|o| o.payload())
         .ok_or_else(|| {
             ctx.throw_internal_error("invalid IoHandle instance");

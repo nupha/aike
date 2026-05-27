@@ -93,7 +93,7 @@ fn take_llm_ctx(
     mut this: JSValue,
 ) -> Result<Option<(LlamaContext, JSValue)>, i32> {
     if let Some(llm_ctx) = this
-        .as_native_object_mut::<_, JSLlmContext>()
+        .as_native_object_mut::<JSLlmContext>()
         .and_then(|o| o.take_payload())
     {
         let lc = llm_ctx.lock().unwrap().take();
@@ -113,7 +113,7 @@ fn js_context_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     if cc.magic() == PROP_IS_DISPOSED {
         return Ok(this
-            .as_native_object::<_, JSLlmContext>()
+            .as_native_object::<JSLlmContext>()
             .unwrap()
             .payload()
             .is_none()

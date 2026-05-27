@@ -34,7 +34,7 @@ impl EmitterPayload {
 }
 
 fn get_emitter<'a>(ctx: &mut ScopedContext, val: &'a JSValue) -> Result<&'a EmitterPayload, i32> {
-    val.as_native_object::<_, JSEventEmitter>()
+    val.as_native_object::<JSEventEmitter>()
         .and_then(|o| o.payload())
         .ok_or_else(|| {
             ctx.throw_internal_error("not an EventEmitter instance");

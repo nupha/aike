@@ -57,7 +57,7 @@ fn get_decoder<'a>(
     ctx: &mut ScopedContext,
     val: &'a JSValue,
 ) -> Result<&'a TextDecoderPayload, i32> {
-    val.as_native_object::<_, JSTextDecoder>()
+    val.as_native_object::<JSTextDecoder>()
         .and_then(|o| o.payload())
         .ok_or_else(|| {
             ctx.throw_internal_error("not a TextDecoder instance");
