@@ -17,47 +17,8 @@ thread_local! {
     static TIMERS: RefCell<HashMap<String, Instant>> = RefCell::new(HashMap::new());
 }
 
-fn js_print(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let level = cc.magic() % 100;
-    let inspect = true;
-
-    let color = || match level {
-        1 => Colors::CyanFg,   // debug
-        2 => Colors::GreenFg,  // info
-        3 => Colors::YellowFg, // warn
-        4 => Colors::RedFg,    // error
-        _ => Colors::WhiteFg,
-    };
-
-    for i in 0..cc.length() {
-        if i > 0 {
-            colorize_print(" ", color());
-        }
-
-        let arg = cc.arg(i);
-
-        colorize_print(
-            if inspect {
-                arg.inspect(ctx.rt_mut())?.to_string()
-            } else {
-                format!("{}", arg.to_string(ctx)?.deref())
-            },
-            color(),
-        );
-    }
-
-    if cc.magic() < 100 {
-        println!();
-    }
-
-    Ok(JSValue::UNDEFINED)
-}
-
-// --- Console methods ---
-
 fn js_console_print(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let level = cc.magic();
-    let clr = || match level {
+    let clr = || match cc.magic() {
         1 => Colors::CyanFg,
         2 => Colors::GreenFg,
         3 => Colors::YellowFg,
@@ -335,11 +296,6 @@ pub fn setup_globals(
     let mut global = ctx.global_obj();
 
     {
-        // let print_no_nl = ctx.create_native_function(Callback::Func(js_print), "print", 0, 100)?;
-        // global.set_property_str(ctx, "print", print_no_nl.into())?;
-        // let debug_no_nl = ctx.create_native_function(Callback::Func(js_print), "debug", 0, 101)?;
-        // global.set_property_str(ctx, "debug", debug_no_nl.into())?;
-
         let mut console = ctx.create_base_object()?;
 
         console.install_fields(
