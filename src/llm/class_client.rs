@@ -139,6 +139,37 @@ fn js_client_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     .map(|obj| obj.into())
 }
 
+/// Normalize message format in `choices[]` to standard shape.
+/// For both streaming delta and non-streaming message.
+fn normalize_message_shape(obj: &mut serde_json::Value) {
+    if let Some(choices) = obj["choices"].as_array_mut() {
+        for choice in choices.iter_mut() {
+            // The target is either ‘delta’ (streaming) or ‘message’ (non-streaming).
+            let target = match choice.as_object_mut() {
+                Some(m) => {
+                    if let Some(v) = m.get_mut("delta") {
+                        v.as_object_mut()
+                    } else if let Some(v) = m.get_mut("message") {
+                        v.as_object_mut()
+                    } else {
+                        None
+                    }
+                }
+                None => None,
+            };
+
+            if let Some(target) = target {
+                // 1. fix reasoning → reasoning_content
+                if let Some(val) = target.remove("reasoning") {
+                    if !target.contains_key("reasoning_content") {
+                        target.insert("reasoning_content".to_string(), val);
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Accumulates tool_call deltas until complete, then emits a single chunk.
 struct ToolCallBuffer {
     idx: usize,
@@ -338,7 +369,7 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
                                 break;
                             }
 
-                            if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
+                            if let Ok(mut json) = serde_json::from_str::<serde_json::Value>(data) {
                                 if json.get("error").is_some() {
                                     if buf.is_some() {
                                         flush_buf(&slot, &mut buf).await;
@@ -386,14 +417,20 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
                                             {
                                                 obj.remove("tool_calls");
                                             }
+                                            // Normalize message format in choices[] delta
+                                            normalize_message_shape(&mut finish);
                                             slot.commit_async(ChatReply::Chunk(finish)).await;
                                         }
                                     } else {
                                         // Non-tool_call (content, finish_reason, etc.) → flush then passthrough
                                         flush_buf(&slot, &mut buf).await;
+                                        // Normalize message format in choices[] delta
+                                        normalize_message_shape(&mut json);
                                         slot.commit_async(ChatReply::Chunk(json)).await;
                                     }
                                 } else {
+                                    // Normalize message format in choices[] delta
+                                    normalize_message_shape(&mut json);
                                     slot.commit_async(ChatReply::Chunk(json)).await;
                                 }
                             }
@@ -445,7 +482,7 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
 
                     if status.is_success() {
                         match serde_json::from_str::<serde_json::Value>(&body) {
-                            Ok(json) => {
+                            Ok(mut json) => {
                                 // Check for error in response
                                 if json.get("error").is_some() {
                                     let err_msg = json["error"]["message"]
@@ -454,6 +491,8 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
                                         .to_string();
                                     Err(err_msg)
                                 } else {
+                                    // Normalize message format in choices[] message
+                                    normalize_message_shape(&mut json);
                                     Ok(json)
                                 }
                             }
