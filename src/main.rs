@@ -11,6 +11,7 @@ mod global;
 mod helpers;
 mod llm;
 mod output;
+mod repl;
 mod request;
 mod responses;
 mod serve;
@@ -99,8 +100,8 @@ struct Args {
     )]
     stack_size: String,
 
-    #[arg(help = "file to execute")]
-    filename: String,
+    #[arg(help = "file to execute (omit for REPL mode)")]
+    filename: Option<String>,
 
     #[arg(
         allow_hyphen_values = true,
@@ -184,10 +185,15 @@ async fn main() -> ExitCode {
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(|_| "zjs".to_string());
 
+    let filename: Option<String> = args.filename;
+
     let argv: Vec<String> = {
         let mut v = Vec::with_capacity(2 + args.script_args.len());
         v.push(exe_path);
-        v.push(args.filename.clone());
+        match &filename {
+            Some(f) => v.push(f.clone()),
+            None => v.push("<repl>".to_string()),
+        }
         v.extend(args.script_args.iter().cloned());
         v
     };
@@ -200,15 +206,6 @@ async fn main() -> ExitCode {
         v.push(format!("--memory-limit={}", args.memory_limit));
         v.push(format!("--stack-size={}", args.stack_size));
         v
-    };
-
-    let filename = args.filename;
-    let script = match std::fs::read_to_string(&filename) {
-        Ok(s) => s,
-        Err(e) => {
-            colorize_println(format!("can't load file: {e}"), RedFg);
-            std::process::exit(-1);
-        }
     };
 
     // Create runtime
@@ -253,9 +250,6 @@ async fn main() -> ExitCode {
         class_reg_fn(&mut rt).unwrap();
     }
 
-    let is_module =
-        args.module || filename.ends_with(".mjs") || ModuleDef::detect_module(script.as_bytes());
-
     // create context and setup
     let mut ctx = rt
         .create_context(|cx| {
@@ -293,12 +287,32 @@ async fn main() -> ExitCode {
     #[cfg(debug_assertions)]
     debug_assert_eq!(ctx.gc_heap().scope_max_depth(), 0, "no scope now");
 
+    // REPL mode: no filename provided
+    let Some(ref_filename) = filename else {
+        return repl::run_repl(&mut rt, &mut ctx).await;
+    };
+
+    //
+    // Run script file mode
+    //
+    let script = match std::fs::read_to_string(&ref_filename) {
+        Ok(s) => s,
+        Err(e) => {
+            colorize_println(format!("can't load file: {e}"), RedFg);
+            std::process::exit(-1);
+        }
+    };
+
+    let is_module = args.module
+        || ref_filename.ends_with(".mjs")
+        || ModuleDef::detect_module(script.as_bytes());
+
     let mut promise_future: Option<PromiseFuture> = None;
 
     let res = ctx.with_new_scope(|mut scope| -> Result<(), i32> {
         let v = scope.eval(
             script.as_bytes(),
-            &filename,
+            ref_filename.as_str(),
             if is_module {
                 EvalType::Module
             } else {
@@ -316,9 +330,6 @@ async fn main() -> ExitCode {
         }
         Ok(())
     });
-
-    #[cfg(debug_assertions)]
-    debug_assert_eq!(ctx.gc_heap().scope_max_depth(), 0);
 
     if res.is_err() {
         // eval error
