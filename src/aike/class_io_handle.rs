@@ -4,6 +4,7 @@
 use std::{
     cell::{Cell, RefCell},
     collections::HashMap,
+    io::Write,
     sync::{
         Arc,
         atomic::{AtomicI32, Ordering},
@@ -666,10 +667,8 @@ fn js_fh_read(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     Ok(promise.into())
 }
 
-/// async write all
+/// write() — sync for stdout/stderr (per Node.js standard), async for files/pipes
 fn js_fh_writeAll(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    use tokio::io::AsyncWriteExt;
-
     let this = cc.this();
     let desc = get_io(ctx, &this)?;
 
@@ -692,43 +691,54 @@ fn js_fh_writeAll(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         return Err(-1);
     };
 
-    let (promise, tx) =
-        Promise::create_with_channel::<Result<(), String>>(ctx, |cx, payload| -> JSResult {
-            payload.map_err(|e| {
-                cx.throw_internal_error(&e);
-                -1
-            })?;
-            Ok(JSValue::UNDEFINED)
-        })?;
-
-    // TODO: put arg to a gc tracing list, and move bytes raw ptr and length into async task.
-
     match desc {
         IoPayload::Stdin => {
-            let _ = tx.send(Err("cannot write to stdin".to_string()));
+            ctx.throw_type_error("cannot write to stdin");
+            Err(-1)
         }
-        IoPayload::Stdout | IoPayload::Stderr => {
-            let is_stderr = matches!(desc, IoPayload::Stderr);
-            tokio::spawn(async move {
-                let mut writer: Box<dyn tokio::io::AsyncWrite + Unpin + Send> = if is_stderr {
-                    Box::new(tokio::io::stderr())
-                } else {
-                    Box::new(tokio::io::stdout())
-                };
-                let result = writer.write_all(&data).await.map_err(|e| e.to_string());
-                let _ = writer.flush().await;
-                let _ = PollSender::from(tx).send_async(result).await;
-            });
+        IoPayload::Stdout => {
+            let mut out = std::io::stdout().lock();
+            let ok = out.write_all(&data).is_ok();
+            let _ = out.flush();
+            Ok(JSValue::Bool(ok))
+        }
+        IoPayload::Stderr => {
+            let mut out = std::io::stderr().lock();
+            let ok = out.write_all(&data).is_ok();
+            let _ = out.flush();
+            Ok(JSValue::Bool(ok))
         }
         IoPayload::File(fd, _) => {
+            let (promise, tx) = Promise::create_with_channel::<Result<(), String>>(
+                ctx,
+                |cx, payload| -> JSResult {
+                    payload.map_err(|e| {
+                        cx.throw_internal_error(&e);
+                        -1
+                    })?;
+                    Ok(JSValue::UNDEFINED)
+                },
+            )?;
             let fd = fd.clone();
             tokio::spawn(async move {
                 let mut file = fd.lock().await;
                 let result = file.write_all(&data).await.map_err(|e| e.to_string());
                 let _ = PollSender::from(tx).send_async(result).await;
             });
+            Ok(promise.into())
         }
         IoPayload::PipeWrite(writer, _) => {
+            use tokio::io::AsyncWriteExt;
+            let (promise, tx) = Promise::create_with_channel::<Result<(), String>>(
+                ctx,
+                |cx, payload| -> JSResult {
+                    payload.map_err(|e| {
+                        cx.throw_internal_error(&e);
+                        -1
+                    })?;
+                    Ok(JSValue::UNDEFINED)
+                },
+            )?;
             let writer = writer.clone();
             tokio::spawn(async move {
                 let mut w = writer.lock().await;
@@ -736,69 +746,74 @@ fn js_fh_writeAll(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 let _ = w.flush().await;
                 let _ = PollSender::from(tx).send_async(result).await;
             });
+            Ok(promise.into())
         }
         IoPayload::PipeRead(..) => {
-            let _ = tx.send(Err("cannot write to pipe reader".to_string()));
+            ctx.throw_type_error("cannot write to pipe reader");
+            Err(-1)
         }
     }
-
-    Ok(promise.into())
 }
 
-/// flush() — async flush output
+/// flush() — sync for stdout/stderr, async for files/pipes
 fn js_fh_flush(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let desc = get_io(ctx, &this)?;
 
-    let (promise, tx) =
-        Promise::create_with_channel::<Result<(), String>>(ctx, |cx, payload| -> JSResult {
-            payload.map_err(|e| {
-                cx.throw_internal_error(&e);
-                -1
-            })?;
-            Ok(JSValue::UNDEFINED)
-        })?;
-
     match desc {
-        IoPayload::Stdin => {
-            let _ = tx.send(Ok(()));
+        IoPayload::Stdin => Ok(JSValue::UNDEFINED),
+        IoPayload::Stdout => {
+            use std::io::Write;
+            let _ = std::io::stdout().flush();
+            Ok(JSValue::UNDEFINED)
         }
-        IoPayload::Stdout | IoPayload::Stderr => {
-            let is_stderr = matches!(desc, IoPayload::Stderr);
-            tokio::spawn(async move {
-                use tokio::io::AsyncWriteExt;
-                let mut writer: Box<dyn tokio::io::AsyncWrite + Unpin + Send> = if is_stderr {
-                    Box::new(tokio::io::stderr())
-                } else {
-                    Box::new(tokio::io::stdout())
-                };
-                let result = writer.flush().await.map_err(|e| e.to_string());
-                let _ = PollSender::from(tx).send_async(result).await;
-            });
+        IoPayload::Stderr => {
+            use std::io::Write;
+            let _ = std::io::stderr().flush();
+            Ok(JSValue::UNDEFINED)
         }
         IoPayload::File(fd, _) => {
+            use tokio::io::AsyncWriteExt;
+            let (promise, tx) = Promise::create_with_channel::<Result<(), String>>(
+                ctx,
+                |cx, payload| -> JSResult {
+                    payload.map_err(|e| {
+                        cx.throw_internal_error(&e);
+                        -1
+                    })?;
+                    Ok(JSValue::UNDEFINED)
+                },
+            )?;
             let fd = fd.clone();
             tokio::spawn(async move {
-                use tokio::io::AsyncWriteExt;
                 let mut file = fd.lock().await;
                 let result = file.flush().await.map_err(|e| e.to_string());
                 let _ = PollSender::from(tx).send_async(result).await;
             });
+            Ok(promise.into())
         }
         IoPayload::PipeWrite(writer, _) => {
+            use tokio::io::AsyncWriteExt;
+            let (promise, tx) = Promise::create_with_channel::<Result<(), String>>(
+                ctx,
+                |cx, payload| -> JSResult {
+                    payload.map_err(|e| {
+                        cx.throw_internal_error(&e);
+                        -1
+                    })?;
+                    Ok(JSValue::UNDEFINED)
+                },
+            )?;
             let writer = writer.clone();
             tokio::spawn(async move {
                 let mut w = writer.lock().await;
                 let result = w.flush().await.map_err(|e| e.to_string());
                 let _ = PollSender::from(tx).send_async(result).await;
             });
+            Ok(promise.into())
         }
-        IoPayload::PipeRead(..) => {
-            let _ = tx.send(Ok(()));
-        }
+        IoPayload::PipeRead(..) => Ok(JSValue::UNDEFINED),
     }
-
-    Ok(promise.into())
 }
 
 /// close() — drop the io
