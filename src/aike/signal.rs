@@ -10,7 +10,7 @@ use std::{
 
 use crossbeam::channel;
 use zuqe::{
-    CallContext, JSResult, JSValue, JobState, ScopedContext,
+    CallContext, JSResult, JSValue, ScopedContext,
     gc_lite::{GcTrace, GcTraceCtx},
 };
 
@@ -159,25 +159,18 @@ pub fn gc_trace_zuq_signals(gcx: &mut GcTraceCtx) {
 /// sender for this thread is dropped (all handlers removed), the microtask
 /// sees `Disconnected` and returns `Done`.
 fn start_signal_microtask(ctx: &mut ScopedContext, rx: channel::Receiver<u32>) {
-    ctx.queue_job(
-        move |cx| loop {
-            match rx.try_recv() {
-                Ok(sig_num) => {
-                    let cb = HANDLER_MAP.with(|map| map.borrow().get(&sig_num).copied());
-                    if let Some(cb) = cb {
-                        let _ = cb.call(cx, JSValue::UNDEFINED, &[]);
-                    }
-                }
-                Err(channel::TryRecvError::Empty) => {
-                    return Ok(JobState::Again);
-                }
-                Err(channel::TryRecvError::Disconnected) => {
-                    // Sender dropped (all handlers removed) — stop.
-                    return Ok(JobState::Done);
-                }
+    crate::helpers::start_channel_poller(
+        ctx,
+        rx,
+        |sig_num, cx| {
+            let cb = HANDLER_MAP.with(|map| map.borrow().get(&sig_num).copied());
+            if let Some(cb) = cb {
+                let _ = cb.call(cx, JSValue::UNDEFINED, &[]);
             }
+            true // always continue polling
         },
-        (),
+        || !HANDLER_MAP.with(|map| map.borrow().is_empty()),
+        || {}, // no persistent state to clear for signals
     );
 }
 

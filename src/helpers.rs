@@ -5,11 +5,13 @@ use async_openai::types::chat::{
     ChatCompletionToolChoiceOption, ChatCompletionTools, CreateChatCompletionRequest,
     ReasoningEffort, ResponseFormat, ToolChoiceOptions,
 };
+use crossbeam::channel::TryRecvError;
 use llama_cpp_ffi::{LlamaModel, ToolChoice as LarkToolChoice};
 use minijinja::Environment;
 use minijinja_contrib::pycompat;
 use serde::Serialize;
 use serde_json::Value as JsonValue;
+use zuqe::{JobState, ScopedContext};
 
 #[derive(Debug, Serialize)]
 pub(crate) struct JinjaMessage {
@@ -420,4 +422,50 @@ pub(crate) fn now_unix_s() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64
+}
+
+/// Start a persistent polling microtask driven by a crossbeam channel.
+///
+/// The poller calls `handler(msg, cx)` for each received message. If the
+/// handler returns `true` the poller continues (`Again`); `false` triggers
+/// a call to `on_finish()` and terminates (`Done`).
+///
+/// When the channel is empty the poller checks `has_entries()`. If there
+/// are still live entries it polls again; otherwise it calls `on_finish()`
+/// and terminates.  A disconnected channel always triggers termination.
+pub(crate) fn start_channel_poller<T, F>(
+    ctx: &mut ScopedContext,
+    rx: crossbeam::channel::Receiver<T>,
+    handler: F,
+    has_entries: impl Fn() -> bool + 'static,
+    on_finish: impl Fn() + 'static,
+) where
+    T: 'static,
+    F: Fn(T, &mut ScopedContext) -> bool + 'static,
+{
+    ctx.queue_job(
+        move |cx| match rx.try_recv() {
+            Ok(msg) => {
+                if handler(msg, cx) {
+                    Ok(JobState::Again)
+                } else {
+                    on_finish();
+                    Ok(JobState::Done)
+                }
+            }
+            Err(TryRecvError::Empty) => {
+                if has_entries() {
+                    Ok(JobState::Again)
+                } else {
+                    on_finish();
+                    Ok(JobState::Done)
+                }
+            }
+            Err(TryRecvError::Disconnected) => {
+                on_finish();
+                Ok(JobState::Done)
+            }
+        },
+        (),
+    );
 }

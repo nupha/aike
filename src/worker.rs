@@ -1,7 +1,7 @@
 use std::{
     collections::VecDeque,
     sync::{
-        Arc, Mutex, OnceLock,
+        Arc, Condvar, Mutex, OnceLock,
         atomic::{AtomicUsize, Ordering},
         mpsc::{self, RecvTimeoutError, TrySendError},
     },
@@ -60,8 +60,20 @@ struct WorkerState {
 
 struct Inner {
     state: Mutex<WorkerState>,
+    condvar: Condvar,
 }
 
+/// Background OS-thread pool that offloads blocking LlamaContext operations
+/// (decode, sample, reset, embed, etc.) so they don't block the JS event loop.
+///
+/// Workers communicate results back to JS via Promise channels
+/// (see `llm/class_context.rs` for usage).
+///
+/// Created lazily via `singleton()`.  Tuned via environment variables:
+/// - `LLAMA_JS_MIN_WORKERS`   (default: 1)
+/// - `LLAMA_JS_MAX_WORKERS`   (default: max(2, cpu/2) capped to 8)
+/// - `LLAMA_JS_WAIT_QUEUE_CAPACITY` (default: 4096)
+/// - `LLAMA_JS_ACQUIRE_TIMEOUT_MS`  (default: no timeout)
 pub(crate) struct WorkerPool {
     inner: Arc<Inner>,
 }
@@ -108,6 +120,7 @@ impl WorkerPool {
                     acquire_timeout_ms,
                     pending_jobs: VecDeque::new(),
                 }),
+                condvar: Condvar::new(),
             });
 
             {
@@ -120,7 +133,7 @@ impl WorkerPool {
 
             {
                 let inner2 = inner.clone();
-                thread::spawn(move || pending_jobs_manager(inner2));
+                thread::spawn(move || timeout_handler_loop(inner2));
             }
 
             WorkerPool { inner }
@@ -162,6 +175,9 @@ impl WorkerPool {
                         on_timeout,
                         deadline,
                     });
+                    drop(st);
+                    // Wake the manager thread so it recalculates its wait.
+                    self.inner.condvar.notify_all();
                     Ok(())
                 }
             }
@@ -169,13 +185,34 @@ impl WorkerPool {
     }
 }
 
-fn pending_jobs_manager(inner: Arc<Inner>) {
+/// Background thread: periodically checks pending jobs and fires timeout
+/// callbacks for those that have exceeded their deadline.
+///
+/// This is the sole purpose of this function — it does NOT manage job
+/// scheduling, worker dispatch, or any other aspect of the WorkerPool.
+/// When no work is outstanding the Condvar keeps the thread parked
+/// (zero CPU usage).
+fn timeout_handler_loop(inner: Arc<Inner>) {
     loop {
-        thread::sleep(Duration::from_millis(50));
+        // Check for expired timeouts at most once per second.
+        // Between checks, wait on the Condvar so we don't busy-wait.
+        // If a new pending job is added (add_job_internal notifies the
+        // condvar) the wait is cut short and we re-evaluate immediately.
+        let timed_out = {
+            let st = inner.state.lock().unwrap();
+            let (_guard, result) = inner
+                .condvar
+                .wait_timeout(st, Duration::from_secs(1))
+                .unwrap();
+            drop(_guard);
+            result.timed_out()
+        };
 
-        let callbacks = collect_expired_timeout_callbacks(&inner);
-        for cb in callbacks {
-            cb();
+        if timed_out {
+            let callbacks = collect_expired_timeout_callbacks(&inner);
+            for cb in callbacks {
+                cb();
+            }
         }
     }
 }

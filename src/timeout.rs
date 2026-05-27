@@ -5,7 +5,7 @@ use std::{cell::RefCell, collections::HashMap};
 
 use crossbeam::channel::{Receiver, Sender};
 use zuqe::{
-    CallContext, Callback, JS_PROP_C_W_E, JSResult, JSValue, JobState, Object, ScopedContext,
+    CallContext, Callback, JS_PROP_C_W_E, JSResult, JSValue, Object, ScopedContext,
     gc_lite::{GcTrace, GcTraceCtx},
 };
 
@@ -45,7 +45,7 @@ struct TimerState {
 
 impl TimerState {
     fn new() -> Self {
-        let (tx, rx) = crossbeam::channel::unbounded::<TimerMsg>();
+        let (tx, rx) = crossbeam::channel::bounded::<TimerMsg>(64);
         Self {
             next_id: 1,
             entries: HashMap::new(),
@@ -104,32 +104,21 @@ fn start_timer_microtask(ctx: &mut ScopedContext) {
         debug_assert!(opt.is_some());
     });
 
-    ctx.queue_job(
-        |cx| {
-            let msg =
-                TIMER_STATE.with_borrow(|opt| opt.as_ref().and_then(|s| s.rx.try_recv().ok()));
+    let rx = TIMER_STATE.with_borrow(|opt| opt.as_ref().unwrap().rx.clone());
+
+    crate::helpers::start_channel_poller(
+        ctx,
+        rx,
+        |msg, cx| {
             match msg {
-                None => {
-                    // Channel empty — check if there are still live entries.
-                    let still_any = TIMER_STATE
-                        .with_borrow(|opt| opt.as_ref().map_or(false, |s| !s.entries.is_empty()));
-                    if still_any {
-                        Ok(JobState::Again)
-                    } else {
-                        // All timers done; drop the state entirely.
-                        TIMER_STATE.with_borrow_mut(|opt| *opt = None);
-                        Ok(JobState::Done)
-                    }
-                }
-                Some(TimerMsg::Cancelled(id)) => {
+                TimerMsg::Cancelled(id) => {
                     TIMER_STATE.with_borrow_mut(|opt| {
                         if let Some(s) = opt.as_mut() {
                             s.entries.remove(&id);
                         }
                     });
-                    Ok(JobState::Again)
                 }
-                Some(TimerMsg::Fired(id)) => {
+                TimerMsg::Fired(id) => {
                     let (callback, interval_ms, tx) = TIMER_STATE.with_borrow_mut(|opt| {
                         if let Some(s) = opt.as_mut() {
                             if let Some(e) = s.entries.get(&id) {
@@ -166,12 +155,12 @@ fn start_timer_microtask(ctx: &mut ScopedContext) {
                             }
                         }
                     }
-
-                    Ok(JobState::Again)
                 }
             }
+            true // always continue polling
         },
-        (),
+        || TIMER_STATE.with_borrow(|opt| opt.as_ref().map_or(false, |s| !s.entries.is_empty())),
+        || TIMER_STATE.with_borrow_mut(|opt| *opt = None),
     );
 }
 

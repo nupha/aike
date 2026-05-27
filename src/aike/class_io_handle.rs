@@ -4,7 +4,10 @@
 use std::{
     cell::{Cell, RefCell},
     collections::HashMap,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicI32, Ordering},
+    },
 };
 
 #[cfg(unix)]
@@ -16,8 +19,7 @@ use crossbeam::channel::{Receiver, Sender};
 use linkme::distributed_slice;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use zuqe::{
-    CallContext, ClassID, ErrorKind, FieldDef, JSResult, JSValue, JobState, Object, PollSender,
-    Runtime, ScopedContext,
+    CallContext, ClassID, FieldDef, JSResult, JSValue, Object, PollSender, Runtime, ScopedContext,
     builtins::{iterator::AsyncIterableIterator, promise::Promise, typed_array::TypedArray},
     def_native_object,
     gc_lite::{GcTrace, GcTraceCtx},
@@ -30,12 +32,20 @@ const BUF_SIZE_STDIN: usize = 16384;
 const BUF_SIZE_FILE: usize = 65536;
 const BUF_SIZE_PIPE: usize = 4096;
 
+/// Allocate a monotonically increasing virtual fd for stable identification.
+/// Used as a fallback when the OS fd is temporarily unavailable (e.g. File
+/// locked by a concurrent reader).
+fn alloc_fd() -> i32 {
+    static NEXT_VIRTUAL_FD: AtomicI32 = AtomicI32::new(256);
+    NEXT_VIRTUAL_FD.fetch_add(1, Ordering::Relaxed)
+}
+
 /// Various IO handle: File, Pipe
 pub(crate) enum IoPayload {
     Stdin,
     Stdout,
     Stderr,
-    File(Arc<tokio::sync::Mutex<tokio::fs::File>>),
+    File(Arc<tokio::sync::Mutex<tokio::fs::File>>, i32),
     PipeRead(
         Arc<tokio::sync::Mutex<Box<dyn tokio::io::AsyncRead + Unpin + Send>>>,
         i32,
@@ -49,7 +59,7 @@ pub(crate) enum IoPayload {
 impl IoPayload {
     fn read_buf_size(&self) -> usize {
         match self {
-            Self::File(_) => BUF_SIZE_FILE,
+            Self::File(..) => BUF_SIZE_FILE,
             Self::Stdin => BUF_SIZE_STDIN,
             Self::Stdout | Self::Stderr => 0,
             Self::PipeRead(..) => BUF_SIZE_PIPE,
@@ -63,7 +73,7 @@ impl IoPayload {
             Self::Stdin => std::io::stdin().as_raw_fd(),
             Self::Stdout => std::io::stdout().as_raw_fd(),
             Self::Stderr => std::io::stderr().as_raw_fd(),
-            Self::File(fd) => fd.try_lock().map(|f| f.as_raw_fd()).unwrap_or(-1),
+            Self::File(fd, virt_fd) => fd.try_lock().map(|f| f.as_raw_fd()).unwrap_or(*virt_fd),
             Self::PipeRead(_, f) | Self::PipeWrite(_, f) => *f,
         }
 
@@ -113,23 +123,14 @@ pub(crate) fn gc_trace_io(tr: &mut GcTraceCtx) {
 }
 
 fn start_on_read_microtask(ctx: &mut ScopedContext) {
-    ctx.queue_job(
-        |cx| {
-            let msg =
-                ON_DATA_STATE.with_borrow(|opt| opt.as_ref().and_then(|s| s.rx.try_recv().ok()));
+    let rx = ON_DATA_STATE.with_borrow(|opt| opt.as_ref().unwrap().rx.clone());
 
+    crate::helpers::start_channel_poller(
+        ctx,
+        rx,
+        |msg, cx| {
             match msg {
-                None => {
-                    let still_any = ON_DATA_STATE
-                        .with_borrow(|opt| opt.as_ref().map_or(false, |s| !s.entries.is_empty()));
-                    if still_any {
-                        Ok(JobState::Again)
-                    } else {
-                        ON_DATA_STATE.with_borrow_mut(|opt| *opt = None);
-                        Ok(JobState::Done)
-                    }
-                }
-                Some(OnReadMsg::Data(fd, data)) => {
+                OnReadMsg::Data(fd, data) => {
                     let cb = ON_DATA_STATE.with_borrow(|opt| {
                         opt.as_ref()
                             .and_then(|s| s.entries.get(&fd).map(|e| e.callback))
@@ -140,9 +141,8 @@ fn start_on_read_microtask(ctx: &mut ScopedContext) {
                             let _ = cb.call(cx, JSValue::UNDEFINED, &[arg]);
                         }
                     }
-                    Ok(JobState::Again)
                 }
-                Some(OnReadMsg::Eof(fd)) => {
+                OnReadMsg::Eof(fd) => {
                     let cb = ON_DATA_STATE.with_borrow_mut(|opt| {
                         opt.as_mut()
                             .and_then(|s| s.entries.remove(&fd).map(|e| e.callback))
@@ -150,40 +150,82 @@ fn start_on_read_microtask(ctx: &mut ScopedContext) {
                     if let Some(cb) = cb {
                         let _ = cb.call(cx, JSValue::UNDEFINED, &[JSValue::NULL]);
                     }
-                    let still_any = ON_DATA_STATE
-                        .with_borrow(|opt| opt.as_ref().map_or(false, |s| !s.entries.is_empty()));
-                    if still_any {
-                        Ok(JobState::Again)
-                    } else {
-                        ON_DATA_STATE.with_borrow_mut(|opt| *opt = None);
-                        Ok(JobState::Done)
-                    }
                 }
-                Some(OnReadMsg::Error(fd, err_msg)) => {
+                OnReadMsg::Error(fd, err_msg) => {
                     let cb = ON_DATA_STATE.with_borrow_mut(|opt| {
                         opt.as_mut()
                             .and_then(|s| s.entries.remove(&fd).map(|e| e.callback))
                     });
                     if let Some(cb) = cb {
                         if let Some(err_obj) =
-                            cx.create_error_object(ErrorKind::Internal, &err_msg, false)
+                            cx.create_error_object(zuqe::ErrorKind::Internal, &err_msg, false)
                         {
                             let _ = cb.call(cx, JSValue::UNDEFINED, &[err_obj.into()]);
                         }
                     }
-                    let still_any = ON_DATA_STATE
-                        .with_borrow(|opt| opt.as_ref().map_or(false, |s| !s.entries.is_empty()));
-                    if still_any {
-                        Ok(JobState::Again)
-                    } else {
-                        ON_DATA_STATE.with_borrow_mut(|opt| *opt = None);
-                        Ok(JobState::Done)
-                    }
                 }
             }
+            true // always continue polling
         },
-        (),
+        || ON_DATA_STATE.with_borrow(|opt| opt.as_ref().map_or(false, |s| !s.entries.is_empty())),
+        || ON_DATA_STATE.with_borrow_mut(|opt| *opt = None),
     );
+}
+
+/// Spawn an async read loop for an owned reader (Stdin — no locking).
+fn spawn_direct_read(
+    tx: Sender<OnReadMsg>,
+    fd: i32,
+    buf_size: usize,
+    mut reader: impl tokio::io::AsyncRead + Unpin + Send + 'static,
+) {
+    tokio::spawn(async move {
+        let mut buf = vec![0u8; buf_size];
+        loop {
+            match reader.read(&mut buf).await {
+                Ok(0) => {
+                    let _ = tx.send(OnReadMsg::Eof(fd));
+                    break;
+                }
+                Ok(n) => {
+                    let _ = tx.send(OnReadMsg::Data(fd, buf[..n].to_vec()));
+                }
+                Err(e) => {
+                    let _ = tx.send(OnReadMsg::Error(fd, e.to_string()));
+                    break;
+                }
+            }
+        }
+    });
+}
+
+/// Spawn an async read loop for a lock-based reader (File, PipeRead).
+/// The Mutex is acquired once per iteration so other tasks can interleave.
+fn spawn_locked_read<M: tokio::io::AsyncRead + Unpin + Send + 'static>(
+    tx: Sender<OnReadMsg>,
+    fd: i32,
+    buf_size: usize,
+    mutex: Arc<tokio::sync::Mutex<M>>,
+) {
+    tokio::spawn(async move {
+        let mut buf = vec![0u8; buf_size];
+        loop {
+            let mut guard = mutex.lock().await;
+            match guard.read(&mut buf).await {
+                Ok(0) => {
+                    let _ = tx.send(OnReadMsg::Eof(fd));
+                    break;
+                }
+                Ok(n) => {
+                    let _ = tx.send(OnReadMsg::Data(fd, buf[..n].to_vec()));
+                }
+                Err(e) => {
+                    let _ = tx.send(OnReadMsg::Error(fd, e.to_string()));
+                    break;
+                }
+            }
+        }
+    });
 }
 
 fn get_io<'a>(ctx: &mut ScopedContext, val: &'a JSValue) -> Result<&'a IoPayload, i32> {
@@ -220,7 +262,7 @@ fn js_fh_onData(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     // Initialize state if needed
     let need_microtask = ON_DATA_STATE.with_borrow(|opt| opt.is_none());
     if need_microtask {
-        let (tx, rx) = crossbeam::channel::unbounded();
+        let (tx, rx) = crossbeam::channel::bounded::<OnReadMsg>(256);
         ON_DATA_STATE.with_borrow_mut(|opt| {
             *opt = Some(OnReadState {
                 entries: HashMap::new(),
@@ -248,78 +290,13 @@ fn js_fh_onData(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
         match desc {
             IoPayload::Stdin => {
-                let buf_size = desc.read_buf_size();
-                tokio::spawn(async move {
-                    let mut buf = vec![0u8; buf_size];
-                    let mut stdin = tokio::io::stdin();
-                    loop {
-                        match stdin.read(&mut buf).await {
-                            Ok(0) => {
-                                let _ = tx.send(OnReadMsg::Eof(raw_fd));
-                                break;
-                            }
-                            Ok(n) => {
-                                let _ = tx.send(OnReadMsg::Data(raw_fd, buf[..n].to_vec()));
-                            }
-                            Err(e) => {
-                                let _ = tx.send(OnReadMsg::Error(raw_fd, e.to_string()));
-                                break;
-                            }
-                        }
-                    }
-                });
+                spawn_direct_read(tx, raw_fd, desc.read_buf_size(), tokio::io::stdin());
             }
-            IoPayload::File(fd) => {
-                let fd = fd.clone();
-                let buf_size = desc.read_buf_size();
-                tokio::spawn(async move {
-                    let mut buf = vec![0u8; buf_size];
-                    loop {
-                        let result = {
-                            let mut file = fd.lock().await;
-                            file.read(&mut buf).await
-                        };
-                        match result {
-                            Ok(0) => {
-                                let _ = tx.send(OnReadMsg::Eof(raw_fd));
-                                break;
-                            }
-                            Ok(n) => {
-                                let _ = tx.send(OnReadMsg::Data(raw_fd, buf[..n].to_vec()));
-                            }
-                            Err(e) => {
-                                let _ = tx.send(OnReadMsg::Error(raw_fd, e.to_string()));
-                                break;
-                            }
-                        }
-                    }
-                });
+            IoPayload::File(fd, _) => {
+                spawn_locked_read(tx, raw_fd, desc.read_buf_size(), fd.clone());
             }
             IoPayload::PipeRead(reader, _) => {
-                let reader = reader.clone();
-                let buf_size = BUF_SIZE_PIPE;
-                tokio::spawn(async move {
-                    let mut buf = vec![0u8; buf_size];
-                    loop {
-                        let result = {
-                            let mut r = reader.lock().await;
-                            r.read(&mut buf).await
-                        };
-                        match result {
-                            Ok(0) => {
-                                let _ = tx.send(OnReadMsg::Eof(raw_fd));
-                                break;
-                            }
-                            Ok(n) => {
-                                let _ = tx.send(OnReadMsg::Data(raw_fd, buf[..n].to_vec()));
-                            }
-                            Err(e) => {
-                                let _ = tx.send(OnReadMsg::Error(raw_fd, e.to_string()));
-                                break;
-                            }
-                        }
-                    }
-                });
+                spawn_locked_read(tx, raw_fd, BUF_SIZE_PIPE, reader.clone());
             }
             IoPayload::PipeWrite(..) => {
                 let _ = tx.send(OnReadMsg::Error(
@@ -371,7 +348,7 @@ fn js_fh_text(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         IoPayload::Stdout | IoPayload::Stderr => {
             let _ = tx.send(Err("cannot read from stdout/stderr".to_string()));
         }
-        IoPayload::File(fd) => {
+        IoPayload::File(fd, _) => {
             let fd = fd.clone();
             tokio::spawn(async move {
                 let mut file = fd.lock().await;
@@ -441,7 +418,7 @@ fn js_fh_json(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         IoPayload::Stdout | IoPayload::Stderr => {
             let _ = tx.send(Err("cannot read from stdout/stderr".to_string()));
         }
-        IoPayload::File(fd) => {
+        IoPayload::File(fd, _) => {
             let fd = fd.clone();
             tokio::spawn(async move {
                 use tokio::io::{AsyncReadExt, AsyncSeekExt};
@@ -514,7 +491,7 @@ fn js_fh_bytes(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         IoPayload::Stdout | IoPayload::Stderr => {
             let _ = tx.send(Err("cannot read from stdout/stderr".to_string()));
         }
-        IoPayload::File(fd) => {
+        IoPayload::File(fd, _) => {
             let fd = fd.clone();
             tokio::spawn(async move {
                 use tokio::io::{AsyncReadExt, AsyncSeekExt};
@@ -571,7 +548,7 @@ fn js_fh_stat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             // std streams: stat via /dev/stdin etc. is unreliable, return zero-stats
             let _ = tx.send(Err("cannot stat standard stream".to_string()));
         }
-        IoPayload::File(fd) => {
+        IoPayload::File(fd, _) => {
             let fd = Arc::clone(fd);
             tokio::spawn(async move {
                 let file = fd.lock().await;
@@ -636,7 +613,7 @@ fn js_fh_read(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         IoPayload::Stdout | IoPayload::Stderr => {
             let _ = tx.send(Err("cannot read from stdout/stderr".to_string()));
         }
-        IoPayload::File(fd) => {
+        IoPayload::File(fd, _) => {
             let fd = fd.clone();
             tokio::spawn(async move {
                 let mut file = fd.lock().await;
@@ -743,7 +720,7 @@ fn js_fh_writeAll(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 let _ = PollSender::from(tx).send_async(result).await;
             });
         }
-        IoPayload::File(fd) => {
+        IoPayload::File(fd, _) => {
             let fd = fd.clone();
             tokio::spawn(async move {
                 let mut file = fd.lock().await;
@@ -799,7 +776,7 @@ fn js_fh_flush(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 let _ = PollSender::from(tx).send_async(result).await;
             });
         }
-        IoPayload::File(fd) => {
+        IoPayload::File(fd, _) => {
             let fd = fd.clone();
             tokio::spawn(async move {
                 use tokio::io::AsyncWriteExt;
@@ -979,7 +956,7 @@ fn js_fh_asyncIterator(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 }
             });
         }
-        IoPayload::File(fd) => {
+        IoPayload::File(fd, _) => {
             let fd = fd.clone();
             let buf_size = desc.read_buf_size();
             tokio::spawn(async move {
@@ -1100,7 +1077,10 @@ impl JSIoHandle {
         Self::new_instance(
             ctx,
             new_target,
-            Box::new(IoPayload::File(Arc::new(tokio::sync::Mutex::new(file)))),
+            Box::new(IoPayload::File(
+                Arc::new(tokio::sync::Mutex::new(file)),
+                alloc_fd(),
+            )),
         )
     }
 
