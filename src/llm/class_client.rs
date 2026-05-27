@@ -9,7 +9,8 @@ use reqwest::header::HeaderMap;
 use tokio::io::AsyncBufReadExt;
 use tokio_util::io::StreamReader;
 use zuqe::{
-    CallContext, ClassCtorDef, ClassID, FieldDef, JSResult, JSValue, Runtime, ScopedContext,
+    CallContext, ClassCtorDef, ClassID, FieldDef, JS_PROP_WRITABLE, JSResult, JSValue, Runtime,
+    ScopedContext,
     builtins::{
         iterator::AsyncIterableIterator,
         promise::{Promise, PromiseResultSlot},
@@ -137,7 +138,17 @@ fn js_client_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             timeout,
         }),
     )
-    .map(|obj| obj.into())
+    .and_then(|mut obj| {
+        // Initialize hidden internal property for responseNormalizer,
+        // pre-created so the setter can use simple set_property_str.
+        let _ = obj.as_object_mut().define_property_value_str(
+            ctx,
+            INNER_PROP_RESPONSE_NORMALIZER,
+            JSValue::NULL,
+            JS_PROP_WRITABLE,
+        );
+        Ok(obj.into())
+    })
 }
 
 /// Normalize message format in `choices[]` to standard shape.
@@ -315,6 +326,14 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
         req_builder = req_builder.timeout(dur);
     }
 
+    // Read custom response normalizer from instance property
+    let normalizer = if let Some(obj) = this.as_object() {
+        obj.get_property_str(ctx, INNER_PROP_RESPONSE_NORMALIZER)?
+    } else {
+        JSValue::UNDEFINED
+    };
+    let has_normalizer = normalizer.is_callable();
+
     if is_stream {
         // Streaming: AsyncIterableIterator
         let result_slot = PromiseResultSlot::<ChatReply>::new();
@@ -424,19 +443,25 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
                                                 obj.remove("tool_calls");
                                             }
                                             // Normalize message format in choices[] delta
-                                            normalize_message_shape(&mut finish);
+                                            if !has_normalizer {
+                                                normalize_message_shape(&mut finish);
+                                            }
                                             slot.commit_async(ChatReply::Chunk(finish)).await;
                                         }
                                     } else {
                                         // Non-tool_call (content, finish_reason, etc.) → flush then passthrough
                                         flush_buf(&slot, &mut buf).await;
                                         // Normalize message format in choices[] delta
-                                        normalize_message_shape(&mut json);
+                                        if !has_normalizer {
+                                            normalize_message_shape(&mut json);
+                                        }
                                         slot.commit_async(ChatReply::Chunk(json)).await;
                                     }
                                 } else {
                                     // Normalize message format in choices[] delta
-                                    normalize_message_shape(&mut json);
+                                    if !has_normalizer {
+                                        normalize_message_shape(&mut json);
+                                    }
                                     slot.commit_async(ChatReply::Chunk(json)).await;
                                 }
                             }
@@ -451,12 +476,21 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
             }
         });
 
+        let normalizer_clone = normalizer.clone();
         AsyncIterableIterator::create_with_result_slot(
             ctx,
             result_slot,
-            |cx, msg| -> Result<Option<JSValue>, i32> {
+            move |cx, msg| -> Result<Option<JSValue>, i32> {
                 match msg {
-                    ChatReply::Chunk(chunk) => JSValue::from_serde_json(cx, &chunk).map(Some),
+                    ChatReply::Chunk(chunk) => {
+                        let val = JSValue::from_serde_json(cx, &chunk)?;
+                        let val = if normalizer_clone.is_callable() {
+                            normalizer_clone.call(cx, JSValue::UNDEFINED, &[val])?
+                        } else {
+                            val
+                        };
+                        Ok(Some(val))
+                    }
                     ChatReply::Done => Ok(None),
                     ChatReply::Error(e) => {
                         cx.throw_internal_error(&e);
@@ -469,16 +503,28 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
     } else {
         // Non-streaming: Promise - Use reqwest to preserve extension fields
         let result_slot = PromiseResultSlot::<Result<serde_json::Value, String>>::new();
-        let promise =
-            Promise::create_with_result_slot(ctx, result_slot.clone(), |cx, data| -> JSResult {
+        let normalizer_ns = normalizer;
+        let promise = Promise::create_with_result_slot(
+            ctx,
+            result_slot.clone(),
+            move |cx, data| -> JSResult {
                 match data {
-                    Ok(resp) => JSValue::from_serde_json(cx, &resp),
+                    Ok(resp) => {
+                        let val = JSValue::from_serde_json(cx, &resp)?;
+                        let val = if normalizer_ns.is_callable() {
+                            normalizer_ns.call(cx, JSValue::UNDEFINED, &[val])?
+                        } else {
+                            val
+                        };
+                        Ok(val)
+                    }
                     Err(e) => {
                         cx.throw_internal_error(&e);
                         Err(-1)
                     }
                 }
-            })?;
+            },
+        )?;
 
         tokio::spawn(async move {
             let result = match req_builder.send().await {
@@ -498,7 +544,9 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
                                     Err(err_msg)
                                 } else {
                                     // Normalize message format in choices[] message
-                                    normalize_message_shape(&mut json);
+                                    if !has_normalizer {
+                                        normalize_message_shape(&mut json);
+                                    }
                                     Ok(json)
                                 }
                             }
@@ -520,6 +568,10 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
 
 /// Getter magic constants
 const PROP_MODEL: i32 = 0;
+const PROP_RESPONSE_NORMALIZER: i32 = 1;
+
+/// Internal property key for responseNormalizer, hidden from JS enumeration
+const INNER_PROP_RESPONSE_NORMALIZER: &str = "_responseNormalizer";
 
 fn js_client_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
@@ -532,6 +584,29 @@ fn js_client_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         },
         _ => Ok(JSValue::UNDEFINED),
     }
+}
+
+fn js_client_get_normalizer(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let this = cc.this();
+    let val = if let Some(obj) = this.as_object() {
+        obj.get_property_str(ctx, INNER_PROP_RESPONSE_NORMALIZER)?
+    } else {
+        JSValue::UNDEFINED
+    };
+    Ok(val)
+}
+
+fn js_client_set_normalizer(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let mut this = cc.this();
+    let val = cc.arg(0);
+    if !val.is_null() && !val.is_callable() {
+        ctx.throw_internal_error("responseNormalizer must be a function or null");
+        return Err(-1);
+    }
+    if let Some(obj) = this.as_object_mut() {
+        obj.set_property_str(ctx, INNER_PROP_RESPONSE_NORMALIZER, val)?;
+    }
+    Ok(JSValue::UNDEFINED)
 }
 
 fn js_client_dispose(_: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -570,6 +645,12 @@ const CLASS_CLIENT_PROTO: &[FieldDef] = &[
     ),
     FieldDef::FUNC("dispose", 0, js_client_dispose, 0),
     FieldDef::GETSET("model", Some(js_client_getter), None, PROP_MODEL as _),
+    FieldDef::GETSET(
+        "responseNormalizer",
+        Some(js_client_get_normalizer),
+        Some(js_client_set_normalizer),
+        PROP_RESPONSE_NORMALIZER as _,
+    ),
 ];
 
 def_native_object!(

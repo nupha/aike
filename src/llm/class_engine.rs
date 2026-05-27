@@ -22,7 +22,6 @@ use crate::{
         PromptThinkPattern, apply_chat_template, detect_prompt_think_pattern,
         parse_chat_completion_req, to_lark_tool_choice,
     },
-    llm::OUTMSG_FIELD_CHOICES,
     output::{
         ChunkSSE, ParserKind, collect_engine_reply_to_json, redirect_engine_reply_to_chat_sse,
         redirect_engine_reply_to_responses_sse,
@@ -339,7 +338,10 @@ fn js_engine_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
                 let latency = start.elapsed().as_millis();
                 let mut output = String::new();
                 let mut tool_calls = Vec::new();
-                if let Some(choices) = val.get(OUTMSG_FIELD_CHOICES).and_then(|c| c.as_array()) {
+                if let Some(choices) = val
+                    .get(crate::llm::OUTMSG_FIELD_CHOICES)
+                    .and_then(|c| c.as_array())
+                {
                     if let Some(choice) = choices.first() {
                         if let Some(message) = choice.get("message") {
                             if let Some(content) = message.get("content").and_then(|c| c.as_str()) {
