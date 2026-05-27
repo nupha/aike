@@ -1096,7 +1096,7 @@ impl JSLlmModel {
         }
     }
 
-    fn on_unregister() {
+    fn on_unregister(_: &mut RuntimeImpl) {
         unsafe {
             llama_cpp_ffi::llama_backend_free();
         }
