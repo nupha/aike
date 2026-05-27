@@ -14,6 +14,13 @@ pub(crate) use {
     class_sampler::JSSamplerChain,
 };
 
+// Standard OpenAI Chat Completion response field names
+pub(crate) const OUTMSG_FIELD_CONTENT: &str = "content";
+pub(crate) const OUTMSG_FIELD_REASONING: &str = "reasoning_content";
+pub(crate) const OUTMSG_FIELD_TOOL_CALLS: &str = "tool_calls";
+pub(crate) const OUTMSG_FIELD_FINISH_REASON: &str = "finish_reason";
+pub(crate) const OUTMSG_FIELD_CHOICES: &str = "choices";
+
 use llama_cpp_ffi::{FileType, KVCacheType, list_devices};
 use zuqe::{
     Array, CallContext, FieldDef, JS_PROP_ENUMERABLE, JSResult, JSValue, NativeObject,

@@ -1,3 +1,4 @@
+use crate::llm::OUTMSG_FIELD_REASONING;
 use async_openai::types::{
     chat::{
         ChatChoice, ChatChoiceStream, ChatCompletionMessageToolCall,
@@ -21,7 +22,7 @@ use uuid::Uuid;
 use crate::{
     helpers::now_unix_s,
     llm::{
-        ERR_CANCELLED, ERR_ENGINE_SHUTDOWN,
+        ERR_CANCELLED, ERR_ENGINE_SHUTDOWN, OUTMSG_FIELD_CHOICES,
         engine::{EngineReply, GeneratedContent, StopReason},
     },
 };
@@ -90,11 +91,11 @@ impl GeneratedContent {
                 })
                 .unwrap();
 
-                // Add reasoning_content field
-                if let Some(choices) = chunk["choices"].as_array_mut() {
+                // Add reasoning content
+                if let Some(choices) = chunk[OUTMSG_FIELD_CHOICES].as_array_mut() {
                     if let Some(choice) = choices.first_mut() {
                         if let Some(delta) = choice["delta"].as_object_mut() {
-                            delta.insert("reasoning_content".to_string(), text.into());
+                            delta.insert(OUTMSG_FIELD_REASONING.to_string(), text.into());
                         }
                     }
                 }
@@ -188,7 +189,7 @@ pub(crate) fn redirect_engine_reply_to_chat_sse(
 
                 // Set role on first chunk
                 if first_chunk {
-                    chunk["choices"][0]["delta"]["role"] =
+                    chunk[OUTMSG_FIELD_CHOICES][0]["delta"]["role"] =
                         serde_json::Value::String("assistant".to_string());
                     first_chunk = false;
                 }
@@ -367,12 +368,12 @@ pub(crate) fn collect_engine_reply_to_json(
 
                         // add extra reasoning_content field
                         if !reasoning.is_empty()
-                            && let Some(choices) = resp["choices"].as_array_mut()
+                            && let Some(choices) = resp[OUTMSG_FIELD_CHOICES].as_array_mut()
                             && let Some(choice) = choices.first_mut()
                             && let Some(msg) = choice["message"].as_object_mut()
                         {
                             msg.insert(
-                                "reasoning_content".to_string(),
+                                OUTMSG_FIELD_REASONING.to_string(),
                                 serde_json::Value::String(reasoning),
                             );
                         }

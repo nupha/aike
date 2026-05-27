@@ -421,18 +421,25 @@ fn log_eval_response(
     let mut completion_tokens = 0;
     let mut stop_reason = "unknown".to_string();
 
-    if let Some(choices) = response.get("choices").and_then(|c| c.as_array()) {
+    if let Some(choices) = response
+        .get(crate::llm::OUTMSG_FIELD_CHOICES)
+        .and_then(|c| c.as_array())
+    {
         if let Some(choice) = choices.first() {
             if let Some(message) = choice.get("message") {
-                if let Some(content) = message.get("content").and_then(|c| c.as_str()) {
-                    output = content.to_string();
-                }
-                if let Some(reasoning_content) =
-                    message.get("reasoning_content").and_then(|r| r.as_str())
+                if let Some(c) = message
+                    .get(crate::llm::OUTMSG_FIELD_CONTENT)
+                    .and_then(|c| c.as_str())
                 {
-                    reasoning = Some(reasoning_content.to_string());
+                    output = c.to_string();
                 }
-                if let Some(calls) = message.get("tool_calls") {
+                if let Some(c) = message
+                    .get(crate::llm::OUTMSG_FIELD_REASONING)
+                    .and_then(|r| r.as_str())
+                {
+                    reasoning = Some(c.to_string());
+                }
+                if let Some(calls) = message.get(crate::llm::OUTMSG_FIELD_TOOL_CALLS) {
                     if let Some(arr) = calls.as_array() {
                         for call in arr {
                             if let Some(func) = call.get("function") {

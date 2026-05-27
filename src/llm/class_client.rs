@@ -23,6 +23,7 @@ use crate::{
 };
 
 use super::{
+    OUTMSG_FIELD_CHOICES, OUTMSG_FIELD_REASONING,
     class_client_response::{MAGIC_RESPONSES_ONCE, MAGIC_RESPONSES_STREAM, js_client_responses},
     class_engine::{MAGIC_CHAT_ONCE, MAGIC_CHAT_STREAM},
 };
@@ -142,7 +143,7 @@ fn js_client_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 /// Normalize message format in `choices[]` to standard shape.
 /// For both streaming delta and non-streaming message.
 fn normalize_message_shape(obj: &mut serde_json::Value) {
-    if let Some(choices) = obj["choices"].as_array_mut() {
+    if let Some(choices) = obj[OUTMSG_FIELD_CHOICES].as_array_mut() {
         for choice in choices.iter_mut() {
             // The target is either ‘delta’ (streaming) or ‘message’ (non-streaming).
             let target = match choice.as_object_mut() {
@@ -161,8 +162,8 @@ fn normalize_message_shape(obj: &mut serde_json::Value) {
             if let Some(target) = target {
                 // 1. fix reasoning → reasoning_content
                 if let Some(val) = target.remove("reasoning") {
-                    if !target.contains_key("reasoning_content") {
-                        target.insert("reasoning_content".to_string(), val);
+                    if !target.contains_key(OUTMSG_FIELD_REASONING) {
+                        target.insert(OUTMSG_FIELD_REASONING.to_string(), val);
                     }
                 }
             }
@@ -386,7 +387,8 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
                                 if buffered_tool_call {
                                     // Check for tool_calls in this chunk
                                     if let Some(tcs) =
-                                        json["choices"][0]["delta"]["tool_calls"].as_array()
+                                        json[OUTMSG_FIELD_CHOICES][0]["delta"]["tool_calls"]
+                                            .as_array()
                                         && !tcs.is_empty()
                                     {
                                         // Accumulate tool_call deltas
@@ -406,14 +408,18 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
 
                                         // check finish_reason AFTER processing tool_calls
                                         // (non-standard servers may emit both in one chunk)
-                                        if json["choices"][0]["finish_reason"].as_str().is_some() {
+                                        if json[OUTMSG_FIELD_CHOICES][0]["finish_reason"]
+                                            .as_str()
+                                            .is_some()
+                                        {
                                             flush_buf(&slot, &mut buf).await;
 
                                             // MUST NOT emit the original json as-is: it still carries the last
                                             // tool_calls delta. Emit a clean finish-only chunk instead.
                                             let mut finish = json.clone();
                                             if let Some(obj) =
-                                                finish["choices"][0]["delta"].as_object_mut()
+                                                finish[OUTMSG_FIELD_CHOICES][0]["delta"]
+                                                    .as_object_mut()
                                             {
                                                 obj.remove("tool_calls");
                                             }
