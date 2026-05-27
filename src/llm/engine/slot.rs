@@ -108,7 +108,7 @@ impl Engine {
         seq_hint: Option<usize>,
         prompt_tokens: &[Token],
         use_cache: bool,
-        match_threshold: f32,
+        _match_threshold: f32,
     ) -> Option<(usize, bool)> {
         if let Some(hint) = seq_hint
             && let Some(slot) = slots.get(hint)
