@@ -11,7 +11,7 @@ use reedline::{
     FileBackedHistory, Highlighter, HistoryItem, Prompt, PromptEditMode, PromptHistorySearch,
     Reedline, Signal, StyledText,
 };
-use zuqe::{Context, EvalFlags, EvalType, Exception, JSValue, Runtime};
+use zuqe::{Context, EvalFlags, EvalType, Exception, Runtime, builtins::promise::PromiseState};
 
 // ---------------------------------------------------------------------------
 // Styles — computed once with LazyLock (Rust 1.80+)
@@ -891,78 +891,98 @@ pub(crate) async fn run_repl(rt: &mut Runtime, ctx: &mut Context<'_>) -> ExitCod
 
                 let eval_code = transform_imports(&code_trimmed);
 
-                let result = ctx.with_new_scope(|mut scope| -> Result<JSValue, ()> {
-                    scope
-                        .eval(
-                            eval_code.as_bytes(),
-                            "<repl>",
-                            EvalType::Global,
-                            EvalFlags::COMPILE_TO_ASYNC,
-                        )
-                        .map_err(|_| ())
-                });
+                let mut eval_error: Option<String> = None;
 
-                let val = match result {
-                    Ok(v) => v,
-                    Err(()) => {
-                        let exc = rt.take_exception();
-                        ctx.with_new_scope(|mut cx| -> Result<(), ()> {
+                ctx.with_new_scope(|mut scope| {
+                    match scope.eval(
+                        eval_code.as_bytes(),
+                        "<repl>",
+                        EvalType::Global,
+                        EvalFlags::COMPILE_TO_ASYNC,
+                    ) {
+                        Ok(v) => {
+                            // Check if the result is a Promise that's already settled.
+                            // (COMPILE_TO_ASYNC wraps code in async IIFE; if the body
+                            // throws synchronously, the Promise is rejected at eval time.)
+                            if let Some(p) = v.as_object_Promise() {
+                                // Handle settled Promises entirely inside this scope
+                                match p.state() {
+                                    PromiseState::Fulfilled => {
+                                        let result = p.result();
+                                        if let Ok(s) = result.inspect(scope.rt_mut()) {
+                                            println!("{}", s);
+                                        }
+                                    }
+                                    PromiseState::Rejected => {
+                                        let reason = p.result();
+                                        if let Ok(s) = reason.to_string(&mut scope) {
+                                            colorize_println(s.encode_utf8(false), RedFg);
+                                        }
+                                    }
+                                    PromiseState::Pending => {
+                                        // Promise is still pending (e.g. code contains `await`).
+                                        // Use into_future + event-loop to settle it.
+                                        if let Ok(fut) = (*p).into_future(&mut scope) {
+                                            let promise_res = tokio::task::block_in_place(|| {
+                                                tokio::runtime::Handle::current().block_on(async {
+                                                    tokio::join!(rt.run_async(), fut)
+                                                })
+                                            })
+                                            .1;
+                                            match promise_res {
+                                                Ok(resolved) => {
+                                                    if let Ok(s) = resolved.inspect(scope.rt_mut())
+                                                    {
+                                                        println!("{}", s);
+                                                    }
+                                                }
+                                                Err(reason) => {
+                                                    if let Ok(s) = reason.to_string(&mut scope) {
+                                                        colorize_println(
+                                                            s.encode_utf8(false),
+                                                            RedFg,
+                                                        );
+                                                    }
+                                                }
+                                            }
+                                        } else {
+                                            // into_future failed, try to inspect directly
+                                            if let Ok(s) = v.inspect(scope.rt_mut()) {
+                                                println!("{}", s);
+                                            }
+                                        }
+                                    }
+                                }
+                            } else {
+                                // Non-Promise value, print it directly
+                                if let Ok(s) = v.inspect(scope.rt_mut()) {
+                                    println!("{}", s);
+                                }
+                            }
+                        }
+                        Err(_) => {
+                            let exc = rt.take_exception();
                             match exc {
                                 Exception::Error(e) => {
-                                    let s = e.to_string(&mut cx).map_err(|_| ())?;
-                                    colorize_println(s.encode_utf8(false), RedFg);
+                                    if let Ok(s) = e.to_string(&mut scope) {
+                                        eval_error = Some(s.encode_utf8(false).to_string());
+                                    }
                                 }
                                 Exception::Interrupted(_) => {
-                                    colorize_println("interrupted", RedFg);
+                                    eval_error = Some("interrupted".to_string());
                                 }
                                 Exception::OutOfMemory => {
-                                    colorize_println("out of memory", RedFg);
+                                    eval_error = Some("out of memory".to_string());
                                 }
                                 Exception::No | Exception::TooManyClasses => {}
                             }
-                            Ok(())
-                        })
-                        .ok();
-                        continue;
+                        }
                     }
-                };
-
-                let promise_fut = ctx.with_new_scope(|mut scope| -> Option<_> {
-                    let p = val.as_object_Promise()?;
-                    let fut = (*p).into_future(&mut scope).ok()?;
-                    Some(fut)
                 });
 
-                if let Some(fut) = promise_fut {
-                    let (_rt_res, promise_res) = tokio::join!(rt.run_async(), fut);
-
-                    match promise_res {
-                        Ok(resolved) => {
-                            ctx.with_new_scope(|mut cx| -> Result<(), ()> {
-                                if let Ok(s) = resolved.inspect(cx.rt_mut()) {
-                                    println!("{}", s);
-                                }
-                                Ok(())
-                            })
-                            .ok();
-                        }
-                        Err(reason) => {
-                            ctx.with_new_scope(|mut cx| -> Result<(), ()> {
-                                let s = reason.to_string(&mut cx).map_err(|_| ())?;
-                                colorize_println(s.encode_utf8(false), RedFg);
-                                Ok(())
-                            })
-                            .ok();
-                        }
-                    }
-                } else {
-                    ctx.with_new_scope(|mut cx| -> Result<(), ()> {
-                        if let Ok(s) = val.inspect(cx.rt_mut()) {
-                            println!("{}", s);
-                        }
-                        Ok(())
-                    })
-                    .ok();
+                if let Some(err) = eval_error {
+                    colorize_println(err, RedFg);
+                    continue;
                 }
             }
             _ => break,
