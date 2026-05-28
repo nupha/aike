@@ -275,8 +275,8 @@ async fn main() -> ExitCode {
             setup_globals(cx, &argv, &exec_argv)
         })
         .inspect_err(|_| {
-            let exc = rt.take_exception();
             let _ = rt.create_context(|cx| {
+                let exc = cx.take_exception();
                 let t = exc.to_text(cx);
                 println!("{:?}", t);
                 Ok(())
@@ -333,7 +333,7 @@ async fn main() -> ExitCode {
 
     if res.is_err() {
         // eval error
-        return match rt.take_exception() {
+        return match rt.exception() {
             Exception::Interrupted(code) => code,
             Exception::Error(e) => ctx.with_new_scope(|mut cx| {
                 colorize_println(e.to_string(&mut cx).unwrap().encode_utf8(false), GreenFg);

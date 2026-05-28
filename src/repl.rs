@@ -961,7 +961,7 @@ pub(crate) async fn run_repl(rt: &mut Runtime, ctx: &mut Context<'_>) -> ExitCod
                             }
                         }
                         Err(_) => {
-                            let exc = rt.take_exception();
+                            let exc = rt.exception();
                             match exc {
                                 Exception::Error(e) => {
                                     if let Ok(s) = e.to_string(&mut scope) {
