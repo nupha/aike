@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-use std::{cell::RefCell, collections::HashMap};
+use std::{
+    cell::{Cell, RefCell},
+    collections::HashMap,
+};
 
 use crossbeam::channel::{Receiver, Sender};
 use zuqe::{
@@ -46,24 +49,30 @@ struct TimerState {
 impl TimerState {
     fn new() -> Self {
         let (tx, rx) = crossbeam::channel::bounded::<TimerMsg>(64);
+        let next_id = TIMER_SERIAL.with(|t| {
+            let id = t.get();
+            t.set(id + 1);
+            id
+        });
         Self {
-            next_id: 1,
+            next_id,
             entries: HashMap::new(),
             tx,
             rx,
         }
     }
 
-    fn alloc_id(&mut self) -> u32 {
-        let id = self.next_id;
-        self.next_id = self.next_id.wrapping_add(1).max(1);
-        id
+    #[inline(always)]
+    fn timer_id(&mut self) -> u32 {
+        self.next_id
     }
 }
 
 thread_local! {
     // Some(_) = polling microtask is active; None = no background job running.
     static TIMER_STATE: RefCell<Option<TimerState>> = const { RefCell::new(None) };
+
+    static TIMER_SERIAL: Cell<u32> = const { Cell::new(1) };
 }
 
 // ---------------------------------------------------------------------------
@@ -87,7 +96,6 @@ pub(crate) fn gc_trace_timeout(tr: &mut GcTraceCtx) {
 fn spawn_timer(id: u32, delay_ms: u64, tx: Sender<TimerMsg>) {
     tokio::spawn(async move {
         tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
-        // If the receiver is gone the timer was cleared; ignore the error.
         let _ = tx.send(TimerMsg::Fired(id));
     });
 }
@@ -98,7 +106,7 @@ fn spawn_timer(id: u32, delay_ms: u64, tx: Sender<TimerMsg>) {
 
 /// Enqueue the polling microtask.  Called only when TIMER_STATE is Some
 /// (state already initialized by the caller).
-fn start_timer_microtask(ctx: &mut ScopedContext) {
+fn add_timeout_nofitier(ctx: &mut ScopedContext) {
     #[cfg(debug_assertions)]
     TIMER_STATE.with_borrow_mut(|opt| {
         debug_assert!(opt.is_some());
@@ -110,6 +118,8 @@ fn start_timer_microtask(ctx: &mut ScopedContext) {
         ctx,
         rx,
         |msg, cx| {
+            println!("[O.o] timer msg: {:?}", msg);
+
             match msg {
                 TimerMsg::Cancelled(id) => {
                     TIMER_STATE.with_borrow_mut(|opt| {
@@ -157,8 +167,15 @@ fn start_timer_microtask(ctx: &mut ScopedContext) {
             }
             true // always continue polling
         },
-        || TIMER_STATE.with_borrow(|opt| opt.as_ref().is_some_and(|s| !s.entries.is_empty())),
-        || TIMER_STATE.with_borrow_mut(|opt| *opt = None),
+        || {
+            TIMER_STATE.with_borrow(|s| s.as_ref().is_some_and(|s| !s.entries.is_empty()))
+            // true
+        },
+        || {
+            TIMER_STATE.with_borrow_mut(|s| {
+                s.take();
+            })
+        },
     );
 }
 
@@ -176,10 +193,10 @@ fn register_timer(ctx: &mut ScopedContext, cc: CallContext, is_interval: bool) -
 
     // If no active job, initialize fresh state and prepare to start one.
     // If already active, reuse the existing tx from the live state.
-    let (id, tx, need_job) = TIMER_STATE.with_borrow_mut(|opt| {
+    let (id, tx, need_listener) = TIMER_STATE.with_borrow_mut(|opt| {
         let start_job = opt.is_none();
         let s = opt.get_or_insert_with(TimerState::new);
-        let id = s.alloc_id();
+        let id = s.timer_id();
         let tx = s.tx.clone();
         s.entries.insert(
             id,
@@ -192,10 +209,10 @@ fn register_timer(ctx: &mut ScopedContext, cc: CallContext, is_interval: bool) -
         (id, tx, start_job)
     });
 
-    spawn_timer(id, delay_ms, tx);
+    spawn_timer(id, delay_ms, tx.clone());
 
-    if need_job {
-        start_timer_microtask(ctx);
+    if need_listener {
+        add_timeout_nofitier(ctx);
     }
 
     Ok(JSValue::from(id as i32))
@@ -223,7 +240,6 @@ fn clear_timer(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     Ok(JSValue::UNDEFINED)
 }
 
-// magic() values for js_timer
 const MAGIC_SET_TIMEOUT: i16 = 0;
 const MAGIC_SET_INTERVAL: i16 = 1;
 const MAGIC_CLEAR: i16 = 2; // clearTimeout and clearInterval share the same impl
