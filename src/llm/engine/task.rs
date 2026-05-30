@@ -177,12 +177,12 @@ impl GeneratedContent {
 
 /// Helper function to check if a GeneratedContent matches the given state
 fn matches_content(content: &GeneratedContent, state: &OutputState) -> bool {
-    match (content, state) {
-        (GeneratedContent::Text(_), OutputState::Text) => true,
-        (GeneratedContent::Reasoning(_), OutputState::Reasoning) => true,
-        (GeneratedContent::ToolCall(_), OutputState::ToolCall) => true,
-        _ => false,
-    }
+    matches!(
+        (content, state),
+        (GeneratedContent::Text(_), OutputState::Text)
+            | (GeneratedContent::Reasoning(_), OutputState::Reasoning)
+            | (GeneratedContent::ToolCall(_), OutputState::ToolCall)
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

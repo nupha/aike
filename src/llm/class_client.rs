@@ -138,17 +138,17 @@ fn js_client_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             timeout,
         }),
     )
-    .and_then(|mut obj| {
+    .and_then(|mut o| {
         // Initialize hidden internal property for responseNormalizer,
         // pre-created so the setter can use simple set_property_str.
-        let _ = obj.as_object_mut().define_property_value_str(
+        o.as_object_mut().define_property_value_str(
             ctx,
             INNER_PROP_RESPONSE_NORMALIZER,
             JSValue::NULL,
             JS_PROP_WRITABLE,
-        );
-        Ok(obj.into())
+        )
     })
+    .map(JSValue::from)
 }
 
 /// Normalize message format in `choices[]` to standard shape.
@@ -172,10 +172,10 @@ fn normalize_message_shape(obj: &mut serde_json::Value) {
 
             if let Some(target) = target {
                 // 1. fix reasoning → reasoning_content
-                if let Some(val) = target.remove("reasoning") {
-                    if !target.contains_key(OUTMSG_FIELD_REASONING) {
-                        target.insert(OUTMSG_FIELD_REASONING.to_string(), val);
-                    }
+                if let Some(val) = target.remove("reasoning")
+                    && !target.contains_key(OUTMSG_FIELD_REASONING)
+                {
+                    target.insert(OUTMSG_FIELD_REASONING.to_string(), val);
                 }
             }
         }
@@ -315,7 +315,7 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
 
     // Use reqwest to make HTTP request, build client
     let mut req_builder = reqwest::Client::new()
-        .post(&format!("{}/chat/completions", client.base_url))
+        .post(format!("{}/chat/completions", client.base_url))
         .body(serde_json::to_string(&req_json).unwrap_or_default())
         .header("Content-Type", "application/json");
 
@@ -371,7 +371,7 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
                     // parse SSE manually
                     let byte_stream = response
                         .bytes_stream()
-                        .map(|r| r.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e)));
+                        .map(|r| r.map_err(std::io::Error::other));
 
                     let reader = StreamReader::new(byte_stream);
                     let mut lines = tokio::io::BufReader::new(reader).lines();
@@ -380,8 +380,7 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
                     while let Ok(Some(line)) = lines.next_line().await {
                         let line = line.trim().to_string();
 
-                        if line.starts_with("data: ") {
-                            let data = &line[6..];
+                        if let Some(data) = line.strip_prefix("data: ") {
                             if data == "[DONE]" {
                                 if buf.is_some() {
                                     flush_buf(&slot, &mut buf).await;
@@ -476,7 +475,6 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
             }
         });
 
-        let normalizer_clone = normalizer.clone();
         AsyncIterableIterator::create_with_result_slot(
             ctx,
             result_slot,
@@ -484,8 +482,8 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
                 match msg {
                     ChatReply::Chunk(chunk) => {
                         let val = JSValue::from_serde_json(cx, &chunk)?;
-                        let val = if normalizer_clone.is_callable() {
-                            normalizer_clone.call(cx, JSValue::UNDEFINED, &[val])?
+                        let val = if normalizer.is_callable() {
+                            normalizer.call(cx, JSValue::UNDEFINED, &[val])?
                         } else {
                             val
                         };

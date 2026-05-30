@@ -378,10 +378,10 @@ pub(crate) fn json_keys_camel_to_snake(val: &mut JsonValue) {
             let keys: Vec<String> = map.keys().cloned().collect();
             for key in keys {
                 let snake = camel_to_snake(&key);
-                if snake != key {
-                    if let Some(v) = map.remove(&key) {
-                        map.insert(snake, v);
-                    }
+                if snake != key
+                    && let Some(v) = map.remove(&key)
+                {
+                    map.insert(snake, v);
                 }
             }
             // recurse into values

@@ -99,8 +99,8 @@ pub(super) fn parse_engine_params(
     })
 }
 
-fn get_engine<'a>(ctx: &mut ScopedContext, val: &JSValue) -> Result<EnginePayload, i32> {
-    let engine = JSEngine::try_from(val.clone()).unwrap();
+fn get_engine(ctx: &mut ScopedContext, val: &JSValue) -> Result<EnginePayload, i32> {
+    let engine = JSEngine::try_from(*val).unwrap();
     if let Some(p) = engine.payload() {
         Ok(p.clone())
     } else {

@@ -120,10 +120,10 @@ fn start_timer_microtask(ctx: &mut ScopedContext) {
                 }
                 TimerMsg::Fired(id) => {
                     let (callback, interval_ms, tx) = TIMER_STATE.with_borrow_mut(|opt| {
-                        if let Some(s) = opt.as_mut() {
-                            if let Some(e) = s.entries.get(&id) {
-                                return (Some(e.callback), e.interval_ms, Some(e.tx.clone()));
-                            }
+                        if let Some(s) = opt.as_mut()
+                            && let Some(e) = s.entries.get(&id)
+                        {
+                            return (Some(e.callback), e.interval_ms, Some(e.tx.clone()));
                         }
                         (None, None, None)
                     });
@@ -138,12 +138,10 @@ fn start_timer_microtask(ctx: &mut ScopedContext) {
                             Some(ms) => {
                                 // Re-arm only if not cleared inside the callback
                                 let still_alive = TIMER_STATE.with_borrow(|opt| {
-                                    opt.as_ref().map_or(false, |s| s.entries.contains_key(&id))
+                                    opt.as_ref().is_some_and(|s| s.entries.contains_key(&id))
                                 });
-                                if still_alive {
-                                    if let Some(tx) = tx_opt {
-                                        spawn_timer(id, ms, tx);
-                                    }
+                                if still_alive && let Some(tx) = tx_opt {
+                                    spawn_timer(id, ms, tx);
                                 }
                             }
                             None => {
@@ -159,7 +157,7 @@ fn start_timer_microtask(ctx: &mut ScopedContext) {
             }
             true // always continue polling
         },
-        || TIMER_STATE.with_borrow(|opt| opt.as_ref().map_or(false, |s| !s.entries.is_empty())),
+        || TIMER_STATE.with_borrow(|opt| opt.as_ref().is_some_and(|s| !s.entries.is_empty())),
         || TIMER_STATE.with_borrow_mut(|opt| *opt = None),
     );
 }
@@ -215,10 +213,10 @@ fn clear_timer(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let id = id as u32;
 
     TIMER_STATE.with_borrow_mut(|opt| {
-        if let Some(s) = opt.as_mut() {
-            if s.entries.remove(&id).is_some() {
-                let _ = s.tx.send(TimerMsg::Cancelled(id));
-            }
+        if let Some(s) = opt.as_mut()
+            && s.entries.remove(&id).is_some()
+        {
+            let _ = s.tx.send(TimerMsg::Cancelled(id));
         }
     });
 

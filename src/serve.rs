@@ -224,7 +224,7 @@ async fn handle_chat_completions(
     let mut task_config = TaskConfig::new()
         .max_tokens(
             req.max_completion_tokens
-                .unwrap_or_else(|| default_max_tokens as u32) as usize,
+                .unwrap_or(default_max_tokens as u32) as usize,
         )
         .temperature(req.temperature.unwrap_or(DEFAULT_TEMPERATURE))
         .top_p(req.top_p.unwrap_or(DEFAULT_TOP_P))

@@ -267,14 +267,13 @@ pub(super) fn js_client_responses(ctx: &mut ScopedContext, cc: CallContext) -> J
 
                     let byte_stream = response
                         .bytes_stream()
-                        .map(|r| r.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e)));
+                        .map(|r| r.map_err(std::io::Error::other));
                     let reader = StreamReader::new(byte_stream);
                     let mut lines = tokio::io::BufReader::new(reader).lines();
 
                     while let Ok(Some(line)) = lines.next_line().await {
                         let line = line.trim().to_string();
-                        if line.starts_with("data: ") {
-                            let data = &line[6..];
+                        if let Some(data) = line.strip_prefix("data: ") {
                             if data == "[DONE]" {
                                 break;
                             }

@@ -24,8 +24,8 @@ use clap::Parser;
 use colorized::{Colors::*, colorize_println};
 use linkme::distributed_slice;
 use zuqe::{
-    ClassID, Context, EvalFlags, EvalType, Exception, ModuleDef, NativeObject, Runtime,
-    ScopedContext, builtins::promise::PromiseFuture,
+    ClassID, EvalFlags, EvalType, Exception, ModuleDef, NativeObject, Runtime, ScopedContext,
+    builtins::promise::PromiseFuture,
 };
 
 use crate::{
@@ -253,7 +253,7 @@ async fn main() -> ExitCode {
     // create context and setup
     let mut ctx = rt
         .create_context(|cx| {
-            Context::ECMA_CONTEXT_SETUP(cx)?;
+            ScopedContext::ECMA_CONTEXT_SETUP(cx)?;
 
             // use classes
             cx.use_classes(&[
@@ -284,9 +284,6 @@ async fn main() -> ExitCode {
         })
         .unwrap();
 
-    #[cfg(debug_assertions)]
-    debug_assert_eq!(ctx.gc_heap().scope_max_depth(), 0, "no scope now");
-
     // REPL mode: no filename provided
     let Some(ref_filename) = filename else {
         return repl::run_repl(&mut rt, &mut ctx).await;
@@ -309,44 +306,54 @@ async fn main() -> ExitCode {
 
     let mut promise_future: Option<PromiseFuture> = None;
 
-    let res = ctx.with_new_scope(|mut scope| -> Result<(), i32> {
-        let v = scope.eval(
-            script.as_bytes(),
-            ref_filename.as_str(),
-            if is_module {
-                EvalType::Module
-            } else {
-                EvalType::Global
-            },
-            EvalFlags::empty(),
-        )?;
+    let res = ctx.with_new_scope(|mut scope| {
+        let r = (|| -> Result<(), i32> {
+            let v = scope.eval(
+                script.as_bytes(),
+                ref_filename.as_str(),
+                if is_module {
+                    EvalType::Module
+                } else {
+                    EvalType::Global
+                },
+                EvalFlags::empty(),
+            )?;
 
-        if let Some(p) = v.as_object_Promise() {
-            // eval result is a Promise
-            promise_future = Some((*p).into_future(&mut scope)?);
-        } else {
-            // suppress eval result printing — it leaks "undefined" to child stdout
-            let _ = v;
-        }
-        Ok(())
+            if let Some(p) = v.as_object_Promise() {
+                // eval result is a Promise
+                promise_future = Some((*p).into_future(&mut scope)?);
+            } else {
+                // suppress eval result printing — it leaks "undefined" to child stdout
+                let _ = v;
+            }
+            Ok(())
+        })();
+        scope.return_value(r)
     });
 
     if res.is_err() {
         // eval error
-        return match rt.exception() {
-            Exception::Interrupted(code) => code,
-            Exception::Error(e) => ctx.with_new_scope(|mut cx| {
-                colorize_println(e.to_string(&mut cx).unwrap().encode_utf8(false), GreenFg);
-                ExitCode::FAILURE
-            }),
-            Exception::OutOfMemory => {
-                colorize_println("out of memory", RedFg);
-                ExitCode::FAILURE
-            }
-            Exception::No | Exception::TooManyClasses => {
-                unreachable!();
-            }
-        };
+        let exit_code = ctx.with_new_scope(|mut cx| {
+            let code: u8 = match cx.take_exception() {
+                Exception::Interrupted(ec) => {
+                    // ExitCode doesn't implement ScopeResult, convert to u8
+                    format!("{:?}", ec).parse::<u8>().unwrap_or(1)
+                }
+                Exception::Error(e) => {
+                    colorize_println(e.to_string(&mut cx).unwrap().encode_utf8(false), GreenFg);
+                    1
+                }
+                Exception::OutOfMemory => {
+                    colorize_println("out of memory", RedFg);
+                    1
+                }
+                Exception::No | Exception::TooManyClasses => {
+                    unreachable!();
+                }
+            };
+            cx.return_value(code)
+        });
+        return ExitCode::from(exit_code);
     }
 
     // await till all background jobs are finished
@@ -362,7 +369,7 @@ async fn main() -> ExitCode {
                 // Promise reject
                 let err_msg = ctx.with_new_scope(|mut cx| {
                     let s = reason.to_string(&mut cx).unwrap();
-                    s.encode_utf8(false).to_string()
+                    cx.return_value(s.encode_utf8(false).to_string())
                 });
                 colorize_println(err_msg, RedFg);
             }
@@ -383,6 +390,7 @@ async fn main() -> ExitCode {
         Err(Exception::Error(err)) => {
             ctx.with_new_scope(|mut cx| {
                 colorize_println(err.to_string(&mut cx).unwrap().encode_utf8(false), RedFg);
+                cx.return_value(())
             });
             ExitCode::FAILURE
         }

@@ -11,7 +11,9 @@ use reedline::{
     FileBackedHistory, Highlighter, HistoryItem, Prompt, PromptEditMode, PromptHistorySearch,
     Reedline, Signal, StyledText,
 };
-use zuqe::{Context, EvalFlags, EvalType, Exception, Runtime, builtins::promise::PromiseState};
+use zuqe::{
+    EvalFlags, EvalType, Exception, Runtime, TopLevelContext, builtins::promise::PromiseState,
+};
 
 // ---------------------------------------------------------------------------
 // Styles — computed once with LazyLock (Rust 1.80+)
@@ -801,7 +803,7 @@ fn parse_named_bindings(bytes: &[u8], pos: &mut usize, len: usize) -> Vec<(Strin
 /// - Detects multi-line input via bracket/string balance.
 /// - Transforms static imports to dynamic `import()` for global-scope evaluation.
 /// - Handles Ctrl-C (cancel current input, double Ctrl-C to quit) and Ctrl-D.
-pub(crate) async fn run_repl(rt: &mut Runtime, ctx: &mut Context<'_>) -> ExitCode {
+pub(crate) async fn run_repl(rt: &mut Runtime, ctx: &mut TopLevelContext<'_>) -> ExitCode {
     let hist_path = history_path();
     let history = match FileBackedHistory::with_file(1000, hist_path) {
         Ok(h) => h,
@@ -894,90 +896,98 @@ pub(crate) async fn run_repl(rt: &mut Runtime, ctx: &mut Context<'_>) -> ExitCod
                 let mut eval_error: Option<String> = None;
 
                 ctx.with_new_scope(|mut scope| {
-                    match scope.eval(
-                        eval_code.as_bytes(),
-                        "<repl>",
-                        EvalType::Global,
-                        EvalFlags::COMPILE_TO_ASYNC,
-                    ) {
-                        Ok(v) => {
-                            // Check if the result is a Promise that's already settled.
-                            // (COMPILE_TO_ASYNC wraps code in async IIFE; if the body
-                            // throws synchronously, the Promise is rejected at eval time.)
-                            if let Some(p) = v.as_object_Promise() {
-                                // Handle settled Promises entirely inside this scope
-                                match p.state() {
-                                    PromiseState::Fulfilled => {
-                                        let result = p.result();
-                                        if let Ok(s) = result.inspect(scope.rt_mut()) {
-                                            println!("{}", s);
-                                        }
-                                    }
-                                    PromiseState::Rejected => {
-                                        let reason = p.result();
-                                        if let Ok(s) = reason.to_string(&mut scope) {
-                                            colorize_println(s.encode_utf8(false), RedFg);
-                                        }
-                                    }
-                                    PromiseState::Pending => {
-                                        // Promise is still pending (e.g. code contains `await`).
-                                        // Use into_future + event-loop to settle it.
-                                        if let Ok(fut) = (*p).into_future(&mut scope) {
-                                            let promise_res = tokio::task::block_in_place(|| {
-                                                tokio::runtime::Handle::current().block_on(async {
-                                                    tokio::join!(rt.run_async(), fut)
-                                                })
-                                            })
-                                            .1;
-                                            match promise_res {
-                                                Ok(resolved) => {
-                                                    if let Ok(s) = resolved.inspect(scope.rt_mut())
-                                                    {
-                                                        println!("{}", s);
-                                                    }
-                                                }
-                                                Err(reason) => {
-                                                    if let Ok(s) = reason.to_string(&mut scope) {
-                                                        colorize_println(
-                                                            s.encode_utf8(false),
-                                                            RedFg,
-                                                        );
-                                                    }
-                                                }
-                                            }
-                                        } else {
-                                            // into_future failed, try to inspect directly
-                                            if let Ok(s) = v.inspect(scope.rt_mut()) {
+                    let r = (|| -> Result<(), i32> {
+                        match scope.eval(
+                            eval_code.as_bytes(),
+                            "<repl>",
+                            EvalType::Global,
+                            EvalFlags::COMPILE_TO_ASYNC,
+                        ) {
+                            Ok(v) => {
+                                // Check if the result is a Promise that's already settled.
+                                // (COMPILE_TO_ASYNC wraps code in async IIFE; if the body
+                                // throws synchronously, the Promise is rejected at eval time.)
+                                if let Some(p) = v.as_object_Promise() {
+                                    // Handle settled Promises entirely inside this scope
+                                    match p.state() {
+                                        PromiseState::Fulfilled => {
+                                            let result = p.result();
+                                            if let Ok(s) = result.inspect(&mut scope) {
                                                 println!("{}", s);
                                             }
                                         }
+                                        PromiseState::Rejected => {
+                                            let reason = p.result();
+                                            if let Ok(s) = reason.to_string(&mut scope) {
+                                                colorize_println(s.encode_utf8(false), RedFg);
+                                            }
+                                        }
+                                        PromiseState::Pending => {
+                                            // Promise is still pending (e.g. code contains `await`).
+                                            // Use into_future + event-loop to settle it.
+                                            if let Ok(fut) = (*p).into_future(&mut scope) {
+                                                let promise_res =
+                                                    tokio::task::block_in_place(|| {
+                                                        tokio::runtime::Handle::current().block_on(
+                                                            async {
+                                                                tokio::join!(rt.run_async(), fut)
+                                                            },
+                                                        )
+                                                    })
+                                                    .1;
+                                                match promise_res {
+                                                    Ok(resolved) => {
+                                                        if let Ok(s) = resolved.inspect(&mut scope)
+                                                        {
+                                                            println!("{}", s);
+                                                        }
+                                                    }
+                                                    Err(reason) => {
+                                                        if let Ok(s) = reason.to_string(&mut scope)
+                                                        {
+                                                            colorize_println(
+                                                                s.encode_utf8(false),
+                                                                RedFg,
+                                                            );
+                                                        }
+                                                    }
+                                                }
+                                            } else {
+                                                // into_future failed, try to inspect directly
+                                                if let Ok(s) = v.inspect(&mut scope) {
+                                                    println!("{}", s);
+                                                }
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    // Non-Promise value, print it directly
+                                    if let Ok(s) = v.inspect(&mut scope) {
+                                        println!("{}", s);
                                     }
                                 }
-                            } else {
-                                // Non-Promise value, print it directly
-                                if let Ok(s) = v.inspect(scope.rt_mut()) {
-                                    println!("{}", s);
+                            }
+                            Err(_) => {
+                                let exc = rt.exception();
+                                match exc {
+                                    Exception::Error(e) => {
+                                        if let Ok(s) = e.to_string(&mut scope) {
+                                            eval_error = Some(s.encode_utf8(false).to_string());
+                                        }
+                                    }
+                                    Exception::Interrupted(_) => {
+                                        eval_error = Some("interrupted".to_string());
+                                    }
+                                    Exception::OutOfMemory => {
+                                        eval_error = Some("out of memory".to_string());
+                                    }
+                                    Exception::No | Exception::TooManyClasses => {}
                                 }
                             }
                         }
-                        Err(_) => {
-                            let exc = rt.exception();
-                            match exc {
-                                Exception::Error(e) => {
-                                    if let Ok(s) = e.to_string(&mut scope) {
-                                        eval_error = Some(s.encode_utf8(false).to_string());
-                                    }
-                                }
-                                Exception::Interrupted(_) => {
-                                    eval_error = Some("interrupted".to_string());
-                                }
-                                Exception::OutOfMemory => {
-                                    eval_error = Some("out of memory".to_string());
-                                }
-                                Exception::No | Exception::TooManyClasses => {}
-                            }
-                        }
-                    }
+                        Ok(())
+                    })();
+                    scope.return_value(r)
                 });
 
                 if let Some(err) = eval_error {

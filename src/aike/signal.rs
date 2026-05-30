@@ -139,7 +139,7 @@ fn uninstall_c_handler(sig_num: u32) {
         if *count == 0 {
             refcount.remove(&sig_num);
             unsafe {
-                libc::signal(sig_num as i32, libc::SIG_DFL as usize);
+                libc::signal(sig_num as i32, libc::SIG_DFL);
             }
         }
     }

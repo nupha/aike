@@ -138,11 +138,11 @@ fn decode_utf8(bytes: &[u8], fatal: bool, stream: bool) -> Result<(String, Vec<u
         // Determine expected sequence length and min code point
         let (seq_len, min_cp) = if b < 0x80 {
             (1, 0u32)
-        } else if b >= 0xC2 && b <= 0xDF {
+        } else if (0xC2..=0xDF).contains(&b) {
             (2, 0x80)
-        } else if b >= 0xE0 && b <= 0xEF {
+        } else if (0xE0..=0xEF).contains(&b) {
             (3, 0x800)
-        } else if b >= 0xF0 && b <= 0xF4 {
+        } else if (0xF0..=0xF4).contains(&b) {
             (4, 0x10000)
         } else {
             // Stray continuation byte (0x80-0xBF), overlong lead (0xC0-0xC1),
@@ -338,16 +338,17 @@ fn js_text_decoder_decode(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
     let input_slice = if cc.length() == 0 {
         &[]
     } else {
-        if cc.length() > 1 {
-            if let Some(opts) = cc.arg(1).as_object() {
-                let v = opts.get_property_str(ctx, "stream")?;
-                if !v.is_undefined() {
-                    stream = v.to_bool()?;
-                }
-                let v = opts.get_property_str(ctx, "fatal")?;
-                if !v.is_undefined() {
-                    call_fatal = v.to_bool()?;
-                }
+        if cc.length() > 1
+            && let Some(opts) = cc.arg(1).as_object()
+        {
+            let v = opts.get_property_str(ctx, "stream")?;
+            if !v.is_undefined() {
+                stream = v.to_bool()?;
+            }
+
+            let v = opts.get_property_str(ctx, "fatal")?;
+            if !v.is_undefined() {
+                call_fatal = v.to_bool()?;
             }
         }
 

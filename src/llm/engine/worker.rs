@@ -15,12 +15,18 @@ use super::{
 
 /// Helper function to check if a GeneratedContent matches the parser state
 fn matches_content_state(content: &GeneratedContent, state: super::output::OutputState) -> bool {
-    match (content, state) {
-        (GeneratedContent::Text(_), super::output::OutputState::Text) => true,
-        (GeneratedContent::Reasoning(_), super::output::OutputState::Reasoning) => true,
-        (GeneratedContent::ToolCall(_), super::output::OutputState::ToolCall) => true,
-        _ => false,
-    }
+    matches!(
+        (content, state),
+        (GeneratedContent::Text(_), super::output::OutputState::Text)
+            | (
+                GeneratedContent::Reasoning(_),
+                super::output::OutputState::Reasoning
+            )
+            | (
+                GeneratedContent::ToolCall(_),
+                super::output::OutputState::ToolCall
+            )
+    )
 }
 
 pub fn worker_loop(

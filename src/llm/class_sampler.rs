@@ -17,7 +17,7 @@ use super::class_model::get_llama_model;
 pub(crate) type SamplerPayload = Arc<Mutex<SamplerChain>>;
 
 pub(super) fn get_sampler(ctx: &mut ScopedContext, val: &JSValue) -> Result<SamplerPayload, i32> {
-    let ob = JSSamplerChain::try_from(val.clone()).unwrap();
+    let ob = JSSamplerChain::try_from(*val).unwrap();
     if let Some(p) = ob.payload() {
         Ok(p.clone())
     } else {
@@ -171,7 +171,7 @@ pub fn js_model_createSamplerChain(ctx: &mut ScopedContext, cc: CallContext) -> 
     chain.finalize_samplers();
 
     let mut obj =
-        JSSamplerChain::new_instance(ctx, JSValue::UNDEFINED, Arc::new(Mutex::new(chain)).into())?;
+        JSSamplerChain::new_instance(ctx, JSValue::UNDEFINED, Arc::new(Mutex::new(chain)))?;
     obj.define_property_value_str(ctx, "model", this, JS_PROP_ENUMERABLE)?;
 
     Ok(obj.into())

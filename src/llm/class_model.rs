@@ -882,7 +882,8 @@ fn js_model_renderTemplate(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
         })?;
 
         let json = ctx.with_new_scope(|mut scope| {
-            scope.json_stringify(opts.into(), JSValue::UNDEFINED, JSValue::UNDEFINED)
+            let r = scope.json_stringify(opts.into(), JSValue::UNDEFINED, JSValue::UNDEFINED);
+            scope.return_value(r)
         })?;
 
         if let Some(json_str) = json.as_string()

@@ -27,12 +27,12 @@ pub(super) fn js_spawn(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     // arg 1 (optional): args array
     let mut args: Vec<String> = Vec::new();
-    if cc.length() > 1 {
-        if let Some(arr) = cc.arg(1).as_object_Array() {
-            for v in arr.payload().values() {
-                if let Some(s) = v.as_string() {
-                    args.push(s.content().encode_utf8(false).to_string());
-                }
+    if cc.length() > 1
+        && let Some(arr) = cc.arg(1).as_object_Array()
+    {
+        for v in arr.payload().values() {
+            if let Some(s) = v.as_string() {
+                args.push(s.content().encode_utf8(false).to_string());
             }
         }
     }
@@ -49,60 +49,60 @@ pub(super) fn js_spawn(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut input_data: Option<Vec<u8>> = None;
 
     // arg 2 (optional): options object
-    if cc.length() > 2 {
-        if let Some(opts) = cc.arg(2).as_object().copied() {
-            if let Some(v) = get_str_prop(ctx, &opts, "cwd") {
-                cwd = Some(v);
-            }
+    if cc.length() > 2
+        && let Some(opts) = cc.arg(2).as_object().copied()
+    {
+        if let Some(v) = get_str_prop(ctx, &opts, "cwd") {
+            cwd = Some(v);
+        }
 
-            // env — replaces entire env when provided
-            if let Some(env_map) = parse_env_obj(ctx, &opts)? {
-                env_opt = Some(env_map);
-            }
+        // env — replaces entire env when provided
+        if let Some(env_map) = parse_env_obj(ctx, &opts)? {
+            env_opt = Some(env_map);
+        }
 
-            // input — extract bytes for spawnSync stdin
-            if !is_async {
-                let input_val = opts
-                    .get_property_str(ctx, "input")
-                    .unwrap_or(JSValue::UNDEFINED);
-                if !input_val.is_undefined_or_null() {
-                    if let Some(s) = input_val.as_string() {
-                        input_data = Some(s.content().encode_utf8(false).into_owned().into_bytes());
-                    } else if let Some(obj) = input_val.as_object() {
-                        let payload = obj.payload();
-                        if let Some(ta) = payload.typed_array() {
-                            input_data = Some(ta.bytes().to_vec());
-                        } else if let Some(ab) = payload.array_buffer() {
-                            input_data = Some(ab.bytes().to_vec());
-                        }
+        // input — extract bytes for spawnSync stdin
+        if !is_async {
+            let input_val = opts
+                .get_property_str(ctx, "input")
+                .unwrap_or(JSValue::UNDEFINED);
+            if !input_val.is_undefined_or_null() {
+                if let Some(s) = input_val.as_string() {
+                    input_data = Some(s.content().encode_utf8(false).into_owned().into_bytes());
+                } else if let Some(obj) = input_val.as_object() {
+                    let payload = obj.payload();
+                    if let Some(ta) = payload.typed_array() {
+                        input_data = Some(ta.bytes().to_vec());
+                    } else if let Some(ab) = payload.array_buffer() {
+                        input_data = Some(ab.bytes().to_vec());
                     }
                 }
             }
+        }
 
-            // stdio modes
-            if let Some(mode) = get_str_prop(ctx, &opts, "stdin") {
-                match mode.as_str() {
-                    "pipe" => stdin_mode = Stdio::piped(),
-                    "inherit" => stdin_mode = Stdio::inherit(),
-                    "ignore" => stdin_mode = Stdio::null(),
-                    _ => {}
-                }
+        // stdio modes
+        if let Some(mode) = get_str_prop(ctx, &opts, "stdin") {
+            match mode.as_str() {
+                "pipe" => stdin_mode = Stdio::piped(),
+                "inherit" => stdin_mode = Stdio::inherit(),
+                "ignore" => stdin_mode = Stdio::null(),
+                _ => {}
             }
-            if let Some(mode) = get_str_prop(ctx, &opts, "stdout") {
-                match mode.as_str() {
-                    "pipe" => stdout_mode = Stdio::piped(),
-                    "inherit" => stdout_mode = Stdio::inherit(),
-                    "ignore" => stdout_mode = Stdio::null(),
-                    _ => {}
-                }
+        }
+        if let Some(mode) = get_str_prop(ctx, &opts, "stdout") {
+            match mode.as_str() {
+                "pipe" => stdout_mode = Stdio::piped(),
+                "inherit" => stdout_mode = Stdio::inherit(),
+                "ignore" => stdout_mode = Stdio::null(),
+                _ => {}
             }
-            if let Some(mode) = get_str_prop(ctx, &opts, "stderr") {
-                match mode.as_str() {
-                    "pipe" => stderr_mode = Stdio::piped(),
-                    "inherit" => stderr_mode = Stdio::inherit(),
-                    "ignore" => stderr_mode = Stdio::null(),
-                    _ => {}
-                }
+        }
+        if let Some(mode) = get_str_prop(ctx, &opts, "stderr") {
+            match mode.as_str() {
+                "pipe" => stderr_mode = Stdio::piped(),
+                "inherit" => stderr_mode = Stdio::inherit(),
+                "ignore" => stderr_mode = Stdio::null(),
+                _ => {}
             }
         }
     }
@@ -167,11 +167,11 @@ fn spawn_sync(
 ) -> JSResult {
     // Write input to stdin then close it, before reading output.
     // This avoids deadlock when the child waits for stdin before producing output.
-    if let Some(data) = input {
-        if let Some(ref mut stdin) = child.stdin {
-            let _ = stdin.write_all(&data);
-            let _ = stdin.flush();
-        }
+    if let Some(data) = input
+        && let Some(ref mut stdin) = child.stdin
+    {
+        let _ = stdin.write_all(&data);
+        let _ = stdin.flush();
     }
     // Always close stdin (drop the pipe) so the child sees EOF
     child.stdin.take();

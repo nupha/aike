@@ -97,7 +97,7 @@ fn take_llm_ctx(
         .and_then(|o| o.take_payload())
     {
         let lc = llm_ctx.lock().unwrap().take();
-        debug_assert!(!lc.is_none());
+        debug_assert!(lc.is_some());
 
         let model_val = this.get_property_str(ctx, "model")?;
         this.delete_property_str(ctx, "model", JS_PROP_FORCE)?; // force delete
@@ -431,7 +431,7 @@ fn js_context_createEngine(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
             eng_params.max_tokens,
         );
 
-        let mut engine_obj = JSEngine::new_instance(ctx, JSValue::UNDEFINED, engine.into())?;
+        let mut engine_obj = JSEngine::new_instance(ctx, JSValue::UNDEFINED, engine)?;
         let _ = engine_obj.define_property_value_str(ctx, "model", model_val, JS_PROP_ENUMERABLE);
 
         Ok(engine_obj.into())

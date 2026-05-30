@@ -199,12 +199,10 @@ fn js_event_names(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let data = get_emitter(ctx, &this)?;
     let mut arr = Array::create(ctx)?;
-    let mut idx = 0u32;
 
-    for key in data.listeners.borrow().keys() {
+    for (idx, key) in data.listeners.borrow().keys().enumerate() {
         let s = ctx.create_string_from_utf8(key.as_bytes().to_vec())?;
-        arr.define_property_value_u32(ctx, idx, s.into(), JS_PROP_C_W_E)?;
-        idx += 1;
+        arr.define_property_value_u32(ctx, idx as _, s.into(), JS_PROP_C_W_E)?;
     }
 
     Ok(arr.into())

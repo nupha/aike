@@ -136,11 +136,10 @@ fn start_on_read_microtask(ctx: &mut ScopedContext) {
                         opt.as_ref()
                             .and_then(|s| s.entries.get(&fd).map(|e| e.callback))
                     });
-                    if let Some(cb) = cb {
-                        if let Ok(arg) = TypedArray::create_from_vec_u8(cx, data).map(JSValue::from)
-                        {
-                            let _ = cb.call(cx, JSValue::UNDEFINED, &[arg]);
-                        }
+                    if let Some(cb) = cb
+                        && let Ok(arg) = TypedArray::create_from_vec_u8(cx, data).map(JSValue::from)
+                    {
+                        let _ = cb.call(cx, JSValue::UNDEFINED, &[arg]);
                     }
                 }
                 OnReadMsg::Eof(fd) => {
@@ -157,18 +156,17 @@ fn start_on_read_microtask(ctx: &mut ScopedContext) {
                         opt.as_mut()
                             .and_then(|s| s.entries.remove(&fd).map(|e| e.callback))
                     });
-                    if let Some(cb) = cb {
-                        if let Some(err_obj) =
+                    if let Some(cb) = cb
+                        && let Some(err_obj) =
                             cx.create_error_object(zuqe::ErrorKind::Internal, &err_msg, false)
-                        {
-                            let _ = cb.call(cx, JSValue::UNDEFINED, &[err_obj.into()]);
-                        }
+                    {
+                        let _ = cb.call(cx, JSValue::UNDEFINED, &[err_obj.into()]);
                     }
                 }
             }
             true // always continue polling
         },
-        || ON_DATA_STATE.with_borrow(|opt| opt.as_ref().map_or(false, |s| !s.entries.is_empty())),
+        || ON_DATA_STATE.with_borrow(|opt| opt.as_ref().is_some_and(|s| !s.entries.is_empty())),
         || ON_DATA_STATE.with_borrow_mut(|opt| *opt = None),
     );
 }
@@ -276,7 +274,7 @@ fn js_fh_onData(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     // Replace callback if already registered, don't re-spawn task
     let already_registered = ON_DATA_STATE.with_borrow(|opt| {
         opt.as_ref()
-            .map_or(false, |s| s.entries.contains_key(&raw_fd))
+            .is_some_and(|s| s.entries.contains_key(&raw_fd))
     });
 
     ON_DATA_STATE.with_borrow_mut(|opt| {
