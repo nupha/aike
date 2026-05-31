@@ -14,9 +14,7 @@ use reedline::{
     ColumnarMenu, FileBackedHistory, HistoryItem, KeyCode, KeyModifiers, MenuBuilder, Reedline,
     ReedlineEvent, ReedlineMenu, Signal, default_emacs_keybindings,
 };
-use zuqe::{
-    EvalFlags, EvalType, Exception, Runtime, TopLevelContext, builtins::promise::PromiseState,
-};
+use zuqe::{Context, EvalFlags, EvalType, Exception, Runtime, builtins::promise::PromiseState};
 
 use super::completion::{
     AikeCompleter, AikeHinter, CompletionRequest, CompletionResponse, CompletionState,
@@ -146,7 +144,7 @@ fn handle_input(
     cmd_tx: &tokio::sync::mpsc::UnboundedSender<ReadlineCmd>,
     print_tx: &crossbeam::channel::Sender<String>,
     rt: &mut Runtime,
-    ctx: &mut TopLevelContext<'_>,
+    ctx: &mut Context<'_>,
 ) -> bool {
     match sig {
         Signal::CtrlC => {
@@ -304,7 +302,7 @@ fn handle_input(
 }
 
 /// Main REPL loop.
-pub(crate) async fn run_repl(rt: &mut Runtime, ctx: &mut TopLevelContext<'_>) -> ExitCode {
+pub(crate) async fn run_repl(rt: &mut Runtime, ctx: &mut Context<'_>) -> ExitCode {
     let hist_path = history_path();
     let history = match FileBackedHistory::with_file(1000, hist_path) {
         Ok(h) => h,
