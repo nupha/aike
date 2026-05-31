@@ -21,7 +21,7 @@ pub(crate) enum InputCommand {
 }
 
 /// Start the REPL event loop.
-pub(crate) async fn run<'c>(_rt: &mut zuqe::Runtime, ctx: &mut zuqe::Context<'c>) {
+pub(crate) async fn run<'c>(rt: &mut zuqe::Runtime, ctx: &mut zuqe::Context<'c>) {
     let completion_state = CompletionState::new();
 
     // Build rustyline editor
@@ -155,6 +155,9 @@ pub(crate) async fn run<'c>(_rt: &mut zuqe::Runtime, ctx: &mut zuqe::Context<'c>
 
     loop {
         tokio::select! {
+            // Drive the runtime tick.
+            _ =  rt.run_async() => {}
+
             // input line
             cmd = input_rx.recv() => {
                 let Some(cmd) = cmd else { break; };
