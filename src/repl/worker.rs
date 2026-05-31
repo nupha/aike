@@ -110,6 +110,8 @@ pub(crate) async fn run<'c>(_rt: &mut zuqe::Runtime, ctx: &mut zuqe::Context<'c>
         };
 
         std::thread::spawn(move || {
+            println!("Wake up, Aike. Type .help to show hints.\n");
+
             loop {
                 match editor.readline(prompt.raw()) {
                     Ok(line) => {
@@ -117,15 +119,19 @@ pub(crate) async fn run<'c>(_rt: &mut zuqe::Runtime, ctx: &mut zuqe::Context<'c>
                         if trimmed.is_empty() {
                             continue;
                         }
-                        if trimmed == ".quit" || trimmed == ".exit" {
-                            let _ = input_tx.blocking_send(InputCommand::Quit);
-                            break;
+                        match trimmed {
+                            ".exit" => {
+                                let _ = input_tx.blocking_send(InputCommand::Quit);
+                                break;
+                            }
+                            _ => {
+                                let _ =
+                                    input_tx.blocking_send(InputCommand::Eval(trimmed.to_string()));
+                            }
                         }
-                        let _ = input_tx.blocking_send(InputCommand::Eval(trimmed.to_string()));
                     }
                     Err(ReadlineError::Interrupted) => {
-                        // Ctrl-C: print ^C and continue
-                        // rustyline handles Ctrl-C by returning Interrupted
+                        // Ctrl-C
                         continue;
                     }
                     Err(ReadlineError::Eof) => {
@@ -151,42 +157,52 @@ pub(crate) async fn run<'c>(_rt: &mut zuqe::Runtime, ctx: &mut zuqe::Context<'c>
         tokio::select! {
             // input line
             cmd = input_rx.recv() => {
-                let Some(cmd) = cmd else { break };
+                let Some(cmd) = cmd else { break; };
                 match cmd {
-                    InputCommand::Quit => break,
+                    InputCommand::Quit =>{ break; },
                     InputCommand::Eval(line) => {
-                        let mut outputs: Vec<String> = Vec::new();
-                        let mut eval_error: Option<String> = None;
+                        match line.as_str() {
+                            ".help" => {
+                                if let Ok(mut p) = printer.lock() {
+                                    let _ = p.print(HELP.to_string());
+                                }
+                                continue;
+                            }
+                            _ => {
+                                let mut outputs: Vec<String> = Vec::new();
+                                let mut eval_error: Option<String> = None;
 
-                        ctx.with_new_scope(|mut scope| {
-                            match scope.eval(
-                                line.as_bytes(),
-                                "<repl>",
-                                zuqe::EvalType::Global,
-                                zuqe::EvalFlags::empty(),
-                            ) {
-                                Ok(val) => {
-                                    let result = val
-                                        .inspect(&mut scope)
-                                        .unwrap_or_else(|_| "<error>".to_string());
-                                    if !result.is_empty() && result != "undefined" {
-                                        outputs.push(result);
+                                ctx.with_new_scope(|mut scope| {
+                                    match scope.eval(
+                                        line.as_bytes(),
+                                        "<repl>",
+                                        zuqe::EvalType::Global,
+                                        zuqe::EvalFlags::empty(),
+                                    ) {
+                                        Ok(val) => {
+                                            let result = val
+                                                .inspect(&mut scope)
+                                                .unwrap_or_else(|_| "<error>".to_string());
+                                            if !result.is_empty() && result != "undefined" {
+                                                outputs.push(result);
+                                            }
+                                        }
+                                        Err(e) => {
+                                            eval_error = Some(e.to_string());
+                                        }
+                                    }
+
+                                    scope.return_value(())
+                                });
+
+                                if let Ok(mut p) = printer.lock() {
+                                    for msg in outputs {
+                                        let _ = p.print(msg);
+                                    }
+                                    if let Some(err) = eval_error {
+                                        let _ = p.print(format!("\x1b[31m{}\x1b[0m", err));
                                     }
                                 }
-                                Err(e) => {
-                                    eval_error = Some(e.to_string());
-                                }
-                            }
-
-                            scope.return_value(())
-                        });
-
-                        if let Ok(mut p) = printer.lock() {
-                            for msg in outputs {
-                                let _ = p.print(msg);
-                            }
-                            if let Some(err) = eval_error {
-                                let _ = p.print(format!("\x1b[31m{}\x1b[0m", err));
                             }
                         }
                     }
@@ -206,3 +222,10 @@ pub(crate) async fn run<'c>(_rt: &mut zuqe::Runtime, ctx: &mut zuqe::Context<'c>
 
     let _ = readline_handle.join();
 }
+
+const HELP: &str = "\
+\x1b[33m.help\x1b[0m    Show this help message
+\x1b[33m.exit\x1b[0m    Exit the REPL
+\x1b[33mTab\x1b[0m      Trigger completion
+\x1b[33mCtrl-C\x1b[0m   Cancel current input
+\x1b[33mCtrl-D\x1b[0m   Exit the REPL";
