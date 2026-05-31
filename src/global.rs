@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-use std::{cell::RefCell, collections::HashMap, ops::Deref, time::Instant};
+use std::{cell::RefCell, collections::HashMap, ops::Deref, sync::OnceLock, time::Instant};
 
-use colorized::{Colors, colorize_print};
+use colorized::{Colors, colorize_this};
 use zuqe::{
     CallContext, Callback, EvalFlags, EvalType, FieldDef, JS_PROP_C_W_E, JSResult, JSValue,
     ScopedContext,
@@ -17,6 +17,26 @@ thread_local! {
     static TIMERS: RefCell<HashMap<String, Instant>> = RefCell::new(HashMap::new());
 }
 
+/// Optional output hook for redirecting console.log (and friends) output.
+/// When set, console functions send output through this hook instead of writing
+/// directly to stdout. Used by the REPL to route output through reedline's
+/// ExternalPrinter so it isn't overwritten by input line repaint.
+static CONSOLE_OUTPUT_HOOK: OnceLock<Box<dyn Fn(String) + Send + Sync>> = OnceLock::new();
+
+/// Set the console output hook (called from REPL setup).
+pub fn set_console_output_hook(hook: Box<dyn Fn(String) + Send + Sync>) {
+    let _ = CONSOLE_OUTPUT_HOOK.set(hook);
+}
+
+/// Print a line to console output, either through the output hook or directly to stdout.
+fn console_println(msg: String) {
+    if let Some(hook) = CONSOLE_OUTPUT_HOOK.get() {
+        hook(msg);
+    } else {
+        println!("{}", msg);
+    }
+}
+
 fn js_console_print(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let clr = || match cc.magic() {
         1 => Colors::CyanFg,
@@ -26,55 +46,58 @@ fn js_console_print(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         _ => Colors::WhiteFg,
     };
 
+    let mut out = String::new();
     let indent = GROUP_INDENT.with(|n| *n.borrow());
     for _ in 0..indent {
-        colorize_print("  ", clr());
+        out.push_str(&colorize_this("  ", clr()));
     }
 
     for i in 0..cc.length() {
         if i > 0 {
-            colorize_print(" ", clr());
+            out.push_str(&colorize_this(" ", clr()));
         }
         let arg = cc.arg(i);
-        colorize_print(&arg.inspect(ctx)?, clr());
+        out.push_str(&colorize_this(&arg.inspect(ctx)?, clr()));
     }
-    println!();
+    console_println(out);
 
     Ok(JSValue::UNDEFINED)
 }
 
 fn js_console_assert(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     if cc.length() == 0 || !cc.arg(0).to_bool()? {
+        let mut out = String::new();
         let indent = GROUP_INDENT.with(|n| *n.borrow());
         for _ in 0..indent {
-            colorize_print("  ", Colors::RedFg);
+            out.push_str(&colorize_this("  ", Colors::RedFg));
         }
 
-        colorize_print("Assertion failed", Colors::RedFg);
+        out.push_str(&colorize_this("Assertion failed", Colors::RedFg));
         for i in 1..cc.length() {
-            colorize_print(" ", Colors::RedFg);
-            colorize_print(&cc.arg(i).inspect(ctx)?, Colors::RedFg);
+            out.push_str(&colorize_this(" ", Colors::RedFg));
+            out.push_str(&colorize_this(&cc.arg(i).inspect(ctx)?, Colors::RedFg));
         }
-        println!();
+        console_println(out);
     }
     Ok(JSValue::UNDEFINED)
 }
 
 fn js_console_trace(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let indent = GROUP_INDENT.with(|n| *n.borrow());
+    let mut out = String::new();
     for _ in 0..indent {
-        colorize_print("  ", Colors::WhiteFg);
+        out.push_str(&colorize_this("  ", Colors::WhiteFg));
     }
 
-    colorize_print("Trace", Colors::WhiteFg);
+    out.push_str(&colorize_this("Trace", Colors::WhiteFg));
     if cc.length() > 0 {
-        colorize_print(":", Colors::WhiteFg);
+        out.push_str(&colorize_this(":", Colors::WhiteFg));
         for i in 0..cc.length() {
-            colorize_print(" ", Colors::WhiteFg);
-            colorize_print(cc.arg(i).inspect(ctx)?, Colors::WhiteFg);
+            out.push_str(&colorize_this(" ", Colors::WhiteFg));
+            out.push_str(&colorize_this(cc.arg(i).inspect(ctx)?, Colors::WhiteFg));
         }
     }
-    println!();
+    console_println(out);
 
     // Append stack trace via JS eval
     let _ = ctx.with_new_scope(|mut scope| {
@@ -87,11 +110,12 @@ fn js_console_trace(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         {
             let stack_str = format!("{}", s.deref());
             for line in stack_str.lines().skip(1) {
+                let mut out = String::new();
                 for _ in 0..indent {
-                    colorize_print("  ", Colors::WhiteFg);
+                    out.push_str(&colorize_this("  ", Colors::WhiteFg));
                 }
-                colorize_print(line, Colors::WhiteFg);
-                println!();
+                out.push_str(&colorize_this(line, Colors::WhiteFg));
+                console_println(out);
             }
         }
         scope.return_value(Ok::<(), i32>(()))
@@ -102,12 +126,14 @@ fn js_console_trace(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
 fn js_console_dir(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let indent = GROUP_INDENT.with(|n| *n.borrow());
+    let mut out = String::new();
     for _ in 0..indent {
-        colorize_print("  ", Colors::WhiteFg);
+        out.push_str(&colorize_this("  ", Colors::WhiteFg));
     }
     if cc.length() > 0 {
-        println!("{}", cc.arg(0).inspect(ctx)?);
+        out.push_str(&cc.arg(0).inspect(ctx)?);
     }
+    console_println(out);
     Ok(JSValue::UNDEFINED)
 }
 
@@ -125,12 +151,13 @@ fn js_console_count(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         *n
     });
 
+    let mut out = String::new();
     let indent = GROUP_INDENT.with(|n| *n.borrow());
     for _ in 0..indent {
-        colorize_print("  ", Colors::WhiteFg);
+        out.push_str(&colorize_this("  ", Colors::WhiteFg));
     }
-    colorize_print(format!("{label}: {count}"), Colors::WhiteFg);
-    println!();
+    out.push_str(&colorize_this(format!("{label}: {count}"), Colors::WhiteFg));
+    console_println(out);
 
     Ok(JSValue::UNDEFINED)
 }
@@ -159,12 +186,16 @@ fn js_console_time(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     TIMERS.with(|t| {
         let mut map = t.borrow_mut();
         if map.contains_key(&label) {
+            let mut out = String::new();
             let indent = GROUP_INDENT.with(|n| *n.borrow());
             for _ in 0..indent {
-                colorize_print("  ", Colors::YellowFg);
+                out.push_str(&colorize_this("  ", Colors::YellowFg));
             }
-            colorize_print(format!("Timer '{label}' already exists"), Colors::YellowFg);
-            println!();
+            out.push_str(&colorize_this(
+                format!("Timer '{label}' already exists"),
+                Colors::YellowFg,
+            ));
+            console_println(out);
         } else {
             map.insert(label, Instant::now());
         }
@@ -186,23 +217,30 @@ fn js_console_time_log(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             .map(|start| start.elapsed().as_secs_f64() * 1000.0)
     });
 
+    let mut out = String::new();
     let indent = GROUP_INDENT.with(|n| *n.borrow());
     for _ in 0..indent {
-        colorize_print("  ", Colors::WhiteFg);
+        out.push_str(&colorize_this("  ", Colors::WhiteFg));
     }
 
     match elapsed_ms {
         Some(ms) => {
-            colorize_print(format!("{label}: {ms:.1} ms"), Colors::WhiteFg);
+            out.push_str(&colorize_this(
+                format!("{label}: {ms:.1} ms"),
+                Colors::WhiteFg,
+            ));
             for i in 1..cc.length() {
-                colorize_print(" ", Colors::WhiteFg);
-                colorize_print(&cc.arg(i).inspect(ctx)?, Colors::WhiteFg);
+                out.push_str(&colorize_this(" ", Colors::WhiteFg));
+                out.push_str(&colorize_this(&cc.arg(i).inspect(ctx)?, Colors::WhiteFg));
             }
-            println!();
+            console_println(out);
         }
         None => {
-            colorize_print(format!("Timer '{label}' does not exist"), Colors::YellowFg);
-            println!();
+            out.push_str(&colorize_this(
+                format!("Timer '{label}' does not exist"),
+                Colors::YellowFg,
+            ));
+            console_println(out);
         }
     }
 
@@ -222,19 +260,26 @@ fn js_console_time_end(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             .map(|start| start.elapsed().as_secs_f64() * 1000.0)
     });
 
+    let mut out = String::new();
     let indent = GROUP_INDENT.with(|n| *n.borrow());
     for _ in 0..indent {
-        colorize_print("  ", Colors::WhiteFg);
+        out.push_str(&colorize_this("  ", Colors::WhiteFg));
     }
 
     match elapsed {
         Some(ms) => {
-            colorize_print(format!("{label}: {ms:.1} ms"), Colors::WhiteFg);
-            println!();
+            out.push_str(&colorize_this(
+                format!("{label}: {ms:.1} ms"),
+                Colors::WhiteFg,
+            ));
+            console_println(out);
         }
         None => {
-            colorize_print(format!("Timer '{label}' does not exist"), Colors::YellowFg);
-            println!();
+            out.push_str(&colorize_this(
+                format!("Timer '{label}' does not exist"),
+                Colors::YellowFg,
+            ));
+            console_println(out);
         }
     }
 
@@ -260,24 +305,24 @@ fn js_console_group_end(_ctx: &mut ScopedContext, _cc: CallContext) -> JSResult 
 
 fn js_console_clear(_ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
     // ANSI clear screen + home cursor
-    colorize_print("\x1b[2J\x1b[H", Colors::WhiteFg);
+    console_println(colorize_this("\x1b[2J\x1b[H", Colors::WhiteFg));
     Ok(JSValue::UNDEFINED)
 }
 
 fn js_console_table(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     if cc.length() == 0 {
-        println!();
+        console_println(String::new());
         return Ok(JSValue::UNDEFINED);
     }
 
     let data = cc.arg(0);
     if data.is_undefined() || data.is_null() {
-        println!("undefined");
+        console_println("undefined".to_string());
         return Ok(JSValue::UNDEFINED);
     }
 
     // Fallback: inspect-print the value
-    println!("{}", data.inspect(ctx)?);
+    console_println(data.inspect(ctx)?);
     Ok(JSValue::UNDEFINED)
 }
 

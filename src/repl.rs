@@ -883,11 +883,17 @@ fn compute_completions(scope: &mut ScopedContext, line: &str, pos: usize) -> (Ve
     let prefix = &line[word_start..pos];
 
     // Determine the context object.
-    // If there's a '.' before the word, evaluate the left side.
+    // If there's a '.' before the word, evaluate the identifier before the dot.
     let ctx_obj = if word_start >= 2 && bytes[word_start - 1] == b'.' {
-        let expr = &line[..word_start - 1];
+        // Walk backwards from the dot to find the start of the identifier.
+        let ident_end = word_start - 1;
+        let mut ident_start = ident_end;
+        while ident_start > 0 && is_js_word_char(bytes[ident_start - 1]) {
+            ident_start -= 1;
+        }
+        let ident = &line[ident_start..ident_end];
         match scope.eval(
-            expr.as_bytes(),
+            ident.as_bytes(),
             "<completion>",
             EvalType::Global,
             EvalFlags::empty(),
@@ -1091,6 +1097,13 @@ pub(crate) async fn run_repl(rt: &mut Runtime, ctx: &mut TopLevelContext<'_>) ->
     // Receive the ExternalPrinter sender from the readline thread.
     let printer_sender: crossbeam::channel::Sender<String> = printer_sender_rx.recv().unwrap();
 
+    // Redirect console.log (and friends) output through ExternalPrinter so it
+    // isn't overwritten by reedline's input line repaint.
+    let printer_sender_clone = printer_sender.clone();
+    crate::global::set_console_output_hook(Box::new(move |msg| {
+        let _ = printer_sender_clone.send(msg);
+    }));
+
     // Helper: print a line through ExternalPrinter (safe during read_line).
     let eprint = |msg: String| {
         let _ = printer_sender.send(msg);
@@ -1103,7 +1116,7 @@ pub(crate) async fn run_repl(rt: &mut Runtime, ctx: &mut TopLevelContext<'_>) ->
             if let Ok(req) = rx.try_recv() {
                 let result = Arc::new(Mutex::new(None::<(Vec<String>, usize)>));
                 let result_clone = result.clone();
-                let _ = ctx.with_new_scope(|mut scope| {
+                ctx.with_new_scope(|mut scope| {
                     let r = compute_completions(&mut scope, &req.line, req.pos);
                     *result_clone.lock().unwrap() = Some(r);
                     scope.return_value(())
