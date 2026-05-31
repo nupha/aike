@@ -306,9 +306,9 @@ async fn main() -> ExitCode {
 
     let mut promise_future: Option<PromiseFuture> = None;
 
-    let res = ctx.with_new_scope(|mut scope| {
-        let r = (|| -> Result<(), i32> {
-            let v = scope.eval(
+    let res = ctx.with_new_scope(|mut cx| {
+        let r = cx
+            .eval(
                 script.as_bytes(),
                 ref_filename.as_str(),
                 if is_module {
@@ -317,23 +317,24 @@ async fn main() -> ExitCode {
                     EvalType::Global
                 },
                 EvalFlags::empty(),
-            )?;
+            )
+            .map(|v| v.as_object_Promise().copied());
 
-            if let Some(p) = v.as_object_Promise() {
-                // eval result is a Promise
-                promise_future = Some((*p).into_future(&mut scope)?);
-            } else {
-                // suppress eval result printing — it leaks "undefined" to child stdout
-                let _ = v;
-            }
-            Ok(())
-        })();
-        scope.return_value(r)
+        match r {
+            Ok(Some(p)) => match p.into_future(&mut cx) {
+                Ok(fut) => {
+                    promise_future = Some(fut);
+                    cx.return_value(Ok(()))
+                }
+                Err(_) => cx.return_value(Err(-1)),
+            },
+            Ok(None) => cx.return_value(Ok(())),
+            Err(_) => cx.return_value(Err(-1)),
+        }
     });
 
     if res.is_err() {
-        // eval error
-        let exit_code = ctx.with_new_scope(|mut cx| {
+        let exit_code = ctx.with_root_scope(|mut cx| {
             let code: u8 = match cx.take_exception() {
                 Exception::Interrupted(ec) => {
                     // ExitCode doesn't implement ScopeResult, convert to u8
@@ -347,18 +348,24 @@ async fn main() -> ExitCode {
                     colorize_println("out of memory", RedFg);
                     1
                 }
-                Exception::No | Exception::TooManyClasses => {
+                Exception::No => {
+                    #[cfg(debug_assertions)]
+                    unreachable!();
+                    #[cfg(not(debug_assertions))]
+                    0
+                }
+                Exception::TooManyClasses => {
                     unreachable!();
                 }
             };
-            cx.return_value(code)
+            code
         });
         return ExitCode::from(exit_code);
     }
 
     // await till all background jobs are finished
-    let run_result = if let Some(js_fut) = promise_future {
-        let (rt_res, promise_res) = tokio::join!(rt.run_async(), js_fut);
+    let result = if let Some(fut) = promise_future {
+        let (rt_res, promise_res) = tokio::join!(rt.run_async(), fut);
 
         match promise_res {
             Ok(result) => {
@@ -380,7 +387,7 @@ async fn main() -> ExitCode {
         rt.run_async().await
     };
 
-    match run_result {
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(Exception::OutOfMemory) => {
             colorize_println("out of memory", RedFg);
