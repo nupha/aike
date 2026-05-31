@@ -6,6 +6,7 @@
 mod aike;
 mod class_event_emitter;
 mod class_text_decoder;
+mod color;
 mod fs;
 mod global;
 mod helpers;
@@ -21,7 +22,7 @@ mod worker;
 use std::{io::Write, process::ExitCode};
 
 use clap::Parser;
-use colorized::{Colors::*, colorize_println};
+use color::{Color::*, colorize_println};
 use linkme::distributed_slice;
 use zuqe::{
     ClassID, EvalFlags, EvalType, Exception, ModuleDef, NativeObject, Runtime, ScopedContext,

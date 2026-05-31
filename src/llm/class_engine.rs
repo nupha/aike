@@ -375,7 +375,7 @@ fn js_engine_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
 
                 let entry = EvalLogEntry {
                     request_id: respond_id.clone(),
-                    timestamp: chrono::Utc::now().to_rfc3339(),
+                    timestamp: crate::helpers::format_timestamp_rfc3339(),
                     role: "assistant".to_string(),
                     domain: "chat".to_string(),
                     source: "engine".to_string(),

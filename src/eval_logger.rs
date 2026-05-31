@@ -83,7 +83,7 @@ impl EvalLogger {
         let mut guard = self.current_file.lock().unwrap();
 
         if guard.is_none() {
-            let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S");
+            let timestamp = crate::helpers::format_timestamp_compact();
             let file_path = self.log_dir.join(format!("eval_{}.jsonl", timestamp));
 
             let file = OpenOptions::new()

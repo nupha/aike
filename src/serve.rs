@@ -486,7 +486,7 @@ fn log_eval_response(
 
     let entry = EvalLogEntry {
         request_id: request_id.to_string(),
-        timestamp: chrono::Utc::now().to_rfc3339(),
+        timestamp: crate::helpers::format_timestamp_rfc3339(),
         role: "assistant".to_string(),
         domain: "chat".to_string(),
         source: "serve".to_string(),
@@ -535,7 +535,7 @@ fn log_eval_response_streaming(
 
     let entry = EvalLogEntry {
         request_id: request_id.to_string(),
-        timestamp: chrono::Utc::now().to_rfc3339(),
+        timestamp: crate::helpers::format_timestamp_rfc3339(),
         role: "assistant".to_string(),
         domain: "chat.stream".to_string(),
         source: "serve".to_string(),
