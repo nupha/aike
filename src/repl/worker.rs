@@ -11,8 +11,8 @@ use std::{
 };
 
 use reedline::{
-    ColumnarMenu, FileBackedHistory, HistoryItem, KeyCode, KeyModifiers, MenuBuilder, Reedline,
-    ReedlineEvent, ReedlineMenu, Signal, default_emacs_keybindings,
+    ColumnarMenu, FileBackedHistory, KeyCode, KeyModifiers, MenuBuilder, Reedline, ReedlineEvent,
+    ReedlineMenu, Signal, default_emacs_keybindings,
 };
 use zuqe::{Context, EvalFlags, EvalType, Exception, Runtime, builtins::promise::PromiseState};
 
@@ -39,11 +39,6 @@ fn print_repl_help() {
     println!("  Multi-line input is automatically detected (unbalanced brackets).");
     println!("  Press Ctrl-C to cancel multi-line input.");
     println!("  Press Ctrl-D to exit.");
-}
-
-fn add_history(editor: &mut Reedline, line: &str) {
-    let item = HistoryItem::from_command_line(line);
-    let _ = editor.history_mut().save(item);
 }
 
 /// Check whether `code` has balanced brackets/braces and closed strings/comments.
@@ -130,7 +125,6 @@ fn is_input_complete(code: &str) -> bool {
 /// Commands sent from the main thread to the readline thread.
 enum ReadlineCmd {
     SetMultiline(bool),
-    AddHistory(String),
     Shutdown,
 }
 
@@ -181,7 +175,6 @@ fn handle_input(
                     ".help" => print_repl_help(),
                     _ => unreachable!(),
                 }
-                let _ = cmd_tx.send(ReadlineCmd::AddHistory(trimmed.to_string()));
                 return true;
             }
 
@@ -200,8 +193,6 @@ fn handle_input(
             if code_trimmed.is_empty() {
                 return true;
             }
-
-            let _ = cmd_tx.send(ReadlineCmd::AddHistory(code_trimmed.to_string()));
 
             let mut outputs: Vec<String> = Vec::new();
             let mut eval_error: Option<String> = None;
@@ -388,9 +379,6 @@ pub(crate) async fn run_repl(rt: &mut Runtime, ctx: &mut Context<'_>) -> ExitCod
                     while let Ok(cmd) = cmd_rx.try_recv() {
                         match cmd {
                             ReadlineCmd::SetMultiline(v) => prompt.is_multiline = v,
-                            ReadlineCmd::AddHistory(entry) => {
-                                add_history(&mut editor, &entry);
-                            }
                             ReadlineCmd::Shutdown => {
                                 let _ = editor.history_mut().sync();
                                 return;
