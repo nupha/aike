@@ -814,20 +814,37 @@ pub(crate) async fn run_repl(rt: &mut Runtime, ctx: &mut TopLevelContext<'_>) ->
     let highlighter = AikePrompt {
         is_multiline: false,
     };
-    let mut editor = Reedline::create()
-        .with_history(Box::new(history))
-        .with_highlighter(Box::new(highlighter));
-
     let mut prompt = AikePrompt {
         is_multiline: false,
     };
+    let mut editor = Box::new(
+        Reedline::create()
+            .with_history(Box::new(history))
+            .with_highlighter(Box::new(highlighter)),
+    );
     let mut multi_line = String::new();
     let mut last_was_ctrl_c = false;
 
     println!("\x1b[32mWelcome to Aike REPL! Type /help for info.\x1b[0m");
 
     loop {
-        let sig = match editor.read_line(&prompt) {
+        // Drive the zuqe event loop on the current thread between REPL iterations.
+        // This processes pending async tasks (e.g. resolved promises, I/O callbacks).
+        if rt.run_async().await.is_err() {
+            break;
+        }
+
+        let (new_editor, new_prompt, input) = tokio::task::spawn_blocking(move || {
+            let mut ed = editor; // editor.take().unwrap();
+            let sig = ed.read_line(&prompt);
+            (ed, prompt, sig)
+        })
+        .await
+        .unwrap();
+        editor = new_editor; //Some(new_editor);
+        prompt = new_prompt;
+
+        let sig = match input {
             Ok(s) => s,
             Err(_) => break,
         };
@@ -869,7 +886,7 @@ pub(crate) async fn run_repl(rt: &mut Runtime, ctx: &mut TopLevelContext<'_>) ->
                         "/help" => print_repl_help(),
                         _ => unreachable!(),
                     }
-                    add_history(&mut editor, trimmed);
+                    add_history(editor.as_mut(), trimmed);
                     continue;
                 }
 
@@ -889,7 +906,7 @@ pub(crate) async fn run_repl(rt: &mut Runtime, ctx: &mut TopLevelContext<'_>) ->
                     continue;
                 }
 
-                add_history(&mut editor, &code_trimmed);
+                add_history(editor.as_mut(), &code_trimmed);
 
                 let eval_code = transform_imports(&code_trimmed);
 

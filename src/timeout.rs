@@ -118,8 +118,6 @@ fn add_timeout_nofitier(ctx: &mut ScopedContext) {
         ctx,
         rx,
         |msg, cx| {
-            println!("[O.o] timer msg: {:?}", msg);
-
             match msg {
                 TimerMsg::Cancelled(id) => {
                     TIMER_STATE.with_borrow_mut(|opt| {
