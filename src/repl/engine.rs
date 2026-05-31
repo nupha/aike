@@ -19,7 +19,8 @@ use zuqe::{
 };
 
 use super::completion::{
-    AikeCompleter, CompletionRequest, CompletionResponse, js_compute_completions,
+    AikeCompleter, AikeHinter, CompletionRequest, CompletionResponse, CompletionState,
+    js_compute_completions,
 };
 use super::prompt::AikePrompt;
 
@@ -339,11 +340,9 @@ pub(crate) async fn run_repl(rt: &mut Runtime, ctx: &mut TopLevelContext<'_>) ->
     let (input_tx, mut input_rx) = tokio::sync::mpsc::channel::<Signal>(1);
     // Channel: main thread -> readline thread.
     let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::unbounded_channel::<ReadlineCmd>();
-    // Completion channels: readline thread <-> main thread.
-    let (completion_req_tx, mut completion_req_rx) =
-        tokio::sync::mpsc::unbounded_channel::<CompletionRequest>();
-    let (completion_res_tx, completion_res_rx) =
-        tokio::sync::mpsc::unbounded_channel::<CompletionResponse>();
+    // Single channel pair: hinter sends requests, main thread responds.
+    let (req_tx, mut req_rx) = tokio::sync::mpsc::unbounded_channel::<CompletionRequest>();
+    let (res_tx, res_rx) = tokio::sync::mpsc::unbounded_channel::<CompletionResponse>();
 
     //
     // Spawn the blocking read line thread
@@ -354,13 +353,6 @@ pub(crate) async fn run_repl(rt: &mut Runtime, ctx: &mut TopLevelContext<'_>) ->
             let shutdown_flag2 = shutdown_flag.clone();
 
             move || {
-                let completer = Box::new(AikeCompleter {
-                    req_tx: completion_req_tx,
-                    resp_rx: completion_res_rx,
-                });
-                let completion_menu =
-                    Box::new(ColumnarMenu::default().with_name("completion_menu"));
-
                 // Set up keybindings: Tab triggers completion menu.
                 let mut keybindings = default_emacs_keybindings();
                 keybindings.add_binding(
@@ -373,11 +365,17 @@ pub(crate) async fn run_repl(rt: &mut Runtime, ctx: &mut TopLevelContext<'_>) ->
                 );
                 let edit_mode = Box::new(reedline::Emacs::new(keybindings));
 
+                let completion_menu =
+                    Box::new(ColumnarMenu::default().with_name("completion_menu"));
+
+                let state = Arc::new(Mutex::new(CompletionState::new(req_tx, res_rx)));
+
                 let mut editor = Box::new(
                     Reedline::create()
                         .with_history(Box::new(history))
                         .with_highlighter(Box::new(highlighter))
-                        .with_completer(completer)
+                        .with_completer(Box::new(AikeCompleter::new(state.clone())))
+                        .with_hinter(Box::new(AikeHinter::new(state)))
                         .with_menu(ReedlineMenu::EngineCompleter(completion_menu))
                         .with_edit_mode(edit_mode)
                         .with_external_printer(external_printer)
@@ -435,8 +433,8 @@ pub(crate) async fn run_repl(rt: &mut Runtime, ctx: &mut TopLevelContext<'_>) ->
             // Drive the runtime tick.
             _ = rt.run_async() => {}
 
-            // Handle completion requests from the readline thread.
-            Some(req) = completion_req_rx.recv() => {
+            // Handle completion/hint requests from the readline thread.
+            Some(req) = req_rx.recv() => {
                 let choices = Arc::new(Mutex::new(None::<(Vec<String>, usize)>));
                 let choices2 = choices.clone();
                 ctx.with_new_scope(|mut cx| {
@@ -445,7 +443,7 @@ pub(crate) async fn run_repl(rt: &mut Runtime, ctx: &mut TopLevelContext<'_>) ->
                     cx.return_value(())
                 });
                 if let Some((suggestions, word_start)) = choices.lock().unwrap().take() {
-                    let _ = completion_res_tx.send(CompletionResponse {
+                    let _ = res_tx.send(CompletionResponse {
                         suggestions,
                         word_start,
                     });

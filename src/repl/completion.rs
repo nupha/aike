@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-use reedline::{Completer, Span, Suggestion};
+use std::sync::{Arc, Mutex};
+
+use reedline::{Completer, Hinter, Span, Suggestion};
 use zuqe::{EvalFlags, EvalType, JSValue, ScopedContext};
 
 /// Completion request sent from the readline thread to the main thread.
@@ -17,47 +19,257 @@ pub(crate) struct CompletionResponse {
     pub word_start: usize,
 }
 
-/// A reedline `Completer` that forwards completion requests to the main thread
-/// via a channel, where zuqe can evaluate JS expressions to enumerate properties.
-pub(crate) struct AikeCompleter {
+/// All mutable state shared between the completer and the hinter, wrapped in
+/// a single `Arc<Mutex<>>` so both can hold a cheap clone.
+pub(crate) struct CompletionState {
     pub req_tx: tokio::sync::mpsc::UnboundedSender<CompletionRequest>,
-    pub resp_rx: tokio::sync::mpsc::UnboundedReceiver<CompletionResponse>,
+    pub res_rx: tokio::sync::mpsc::UnboundedReceiver<CompletionResponse>,
+    /// The suffix portion of the hint (plain text, no ANSI).  Used by
+    /// `complete_hint()` and `next_hint_token()`.  The completer derives the
+    /// full completion string from `line[word_start..pos] + hint_suffix`.
+    pub hint_suffix: Option<String>,
+    /// Full candidate list for the completion menu popup.
+    pub candidates: Vec<Suggestion>,
+    /// Byte offset where the word being completed starts.
+    pub word_start: usize,
+    /// The cursor position at which the state was last populated.
+    pub cached_pos: usize,
+}
+
+impl CompletionState {
+    pub fn new(
+        req_tx: tokio::sync::mpsc::UnboundedSender<CompletionRequest>,
+        res_rx: tokio::sync::mpsc::UnboundedReceiver<CompletionResponse>,
+    ) -> Self {
+        Self {
+            req_tx,
+            res_rx,
+            hint_suffix: None,
+            candidates: Vec::new(),
+            word_start: 0,
+            cached_pos: 0,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// AikeCompleter — triggered on Tab
+// ---------------------------------------------------------------------------
+
+/// Reedline `Completer` that uses the state populated by the hinter.
+pub(crate) struct AikeCompleter {
+    state: Arc<Mutex<CompletionState>>,
+}
+
+impl AikeCompleter {
+    pub fn new(state: Arc<Mutex<CompletionState>>) -> Self {
+        Self { state }
+    }
 }
 
 impl Completer for AikeCompleter {
     fn complete(&mut self, line: &str, pos: usize) -> Vec<Suggestion> {
+        let mut state = self.state.lock().unwrap();
+
+        // If the cursor moved since the last update, fetch fresh data.
+        if pos != state.cached_pos {
+            state
+                .req_tx
+                .send(CompletionRequest {
+                    line: line.to_string(),
+                    pos,
+                })
+                .ok();
+            let resp = state.res_rx.blocking_recv();
+            match resp {
+                Some(r) if !r.suggestions.is_empty() => {
+                    let prefix = &line[r.word_start..pos];
+                    let span = Span::new(r.word_start, pos);
+                    state.candidates = r
+                        .suggestions
+                        .iter()
+                        .map(|v| Suggestion {
+                            value: v.clone(),
+                            span,
+                            ..Suggestion::default()
+                        })
+                        .collect();
+                    state.word_start = r.word_start;
+                    state.cached_pos = pos;
+                    state.hint_suffix = find_prefix_suffix(&r.suggestions, prefix);
+                }
+                _ => {
+                    state.hint_suffix = None;
+                    state.candidates.clear();
+                    state.cached_pos = pos;
+                    return Vec::new();
+                }
+            }
+        }
+
+        if let Some(ref suffix) = state.hint_suffix {
+            let prefix = &line[state.word_start..pos];
+            let full = format!("{}{}", prefix, suffix);
+            let span = Span::new(state.word_start, pos);
+            vec![Suggestion {
+                value: full,
+                span,
+                ..Suggestion::default()
+            }]
+        } else if !state.candidates.is_empty() {
+            let word_start = state.word_start;
+            let candidates = state.candidates.clone();
+            drop(state);
+            let mut result = candidates;
+            for s in &mut result {
+                s.span = Span::new(word_start, pos);
+            }
+            result
+        } else {
+            Vec::new()
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// AikeHinter — triggered on every keystroke
+// ---------------------------------------------------------------------------
+
+/// Reedline `Hinter` that shows a dimmed inline hint when one candidate is a
+/// prefix of another (e.g. `readFile` → `readFileSync`).
+pub(crate) struct AikeHinter {
+    state: Arc<Mutex<CompletionState>>,
+}
+
+impl AikeHinter {
+    pub fn new(state: Arc<Mutex<CompletionState>>) -> Self {
+        Self { state }
+    }
+}
+
+impl Hinter for AikeHinter {
+    fn handle(
+        &mut self,
+        line: &str,
+        pos: usize,
+        _history: &dyn reedline::History,
+        _use_ansi_coloring: bool,
+        _cwd: &str,
+    ) -> String {
         if line.is_empty() || pos == 0 {
-            return Vec::new();
+            let mut state = self.state.lock().unwrap();
+            state.hint_suffix = None;
+            state.candidates.clear();
+            state.word_start = 0;
+            state.cached_pos = pos;
+            return String::new();
         }
 
-        let req = CompletionRequest {
-            line: line.to_string(),
-            pos,
+        let mut state = self.state.lock().unwrap();
+        state
+            .req_tx
+            .send(CompletionRequest {
+                line: line.to_string(),
+                pos,
+            })
+            .ok();
+
+        let resp = match state.res_rx.blocking_recv() {
+            Some(r) if !r.suggestions.is_empty() => r,
+            _ => {
+                state.hint_suffix = None;
+                state.candidates.clear();
+                state.cached_pos = pos;
+                return String::new();
+            }
         };
 
-        if self.req_tx.send(req).is_err() {
-            return Vec::new();
-        }
-
-        let resp = match self.resp_rx.blocking_recv() {
-            Some(r) => r,
-            None => return Vec::new(),
-        };
-
-        if resp.suggestions.is_empty() {
-            return Vec::new();
-        }
+        let prefix = &line[resp.word_start..pos];
 
         let span = Span::new(resp.word_start, pos);
-        resp.suggestions
-            .into_iter()
-            .map(|value| Suggestion {
-                value,
+        state.candidates = resp
+            .suggestions
+            .iter()
+            .map(|v| Suggestion {
+                value: v.clone(),
                 span,
                 ..Suggestion::default()
             })
-            .collect()
+            .collect();
+        state.word_start = resp.word_start;
+        state.cached_pos = pos;
+
+        let hint_suffix = find_prefix_suffix(&resp.suggestions, prefix);
+        state.hint_suffix = hint_suffix.clone();
+
+        if let Some(ref suffix) = hint_suffix {
+            format!("\x1b[2m{}\x1b[0m", suffix)
+        } else {
+            String::new()
+        }
     }
+
+    fn complete_hint(&self) -> String {
+        self.state
+            .lock()
+            .unwrap()
+            .hint_suffix
+            .clone()
+            .unwrap_or_default()
+    }
+
+    fn next_hint_token(&self) -> String {
+        let hint = self.complete_hint();
+        hint.split_once(|c: char| c.is_whitespace())
+            .map(|(token, _)| token.to_string())
+            .unwrap_or(hint)
+    }
+}
+
+/// If one candidate is a strict prefix of another, return the suffix after
+/// `prefix` from the shorter (prefix) candidate.  Otherwise return `None`.
+///
+/// Example: candidates=["Array","ArrayBuffer"], prefix="Arr"
+///   → Some("ay")   (because "Array" is a prefix of "ArrayBuffer")
+///
+/// Example: candidates=["Array","ArrayBuffer"], prefix="Array"
+///   → Some("Buffer")
+fn find_prefix_suffix(candidates: &[String], prefix: &str) -> Option<String> {
+    let prefix_candidates: Vec<&str> = candidates
+        .iter()
+        .map(|s| s.as_str())
+        .filter(|s| {
+            candidates
+                .iter()
+                .any(|other| other.as_str() != *s && other.starts_with(*s))
+        })
+        .collect();
+    let target = prefix_candidates
+        .iter()
+        .find(|s| s.len() > prefix.len() && s.starts_with(prefix))?;
+    Some(target[prefix.len()..].to_string())
+}
+
+/// Compute the longest common prefix of a list of strings.
+fn longest_common_prefix(strings: &[String]) -> String {
+    if strings.is_empty() {
+        return String::new();
+    }
+    let first = &strings[0];
+    let mut end = first.len();
+    for s in &strings[1..] {
+        end = end.min(s.len());
+        for (i, (a, b)) in first[..end].bytes().zip(s.bytes()).enumerate() {
+            if a != b {
+                end = i;
+                break;
+            }
+        }
+        if end == 0 {
+            break;
+        }
+    }
+    first[..end].to_string()
 }
 
 /// Check if `c` is a JS word character (alphanumeric, _, $).
