@@ -32,8 +32,8 @@ fn history_path() -> PathBuf {
 
 fn print_repl_help() {
     println!("Aike REPL commands:");
-    println!("  /exit, /quit  exit the REPL");
-    println!("  /help         show this help");
+    println!("  .exit         exit the REPL");
+    println!("  .help         show this help");
     println!();
     println!("JS evaluation:");
     println!("  Type any JavaScript expression and press Enter to evaluate.");
@@ -177,10 +177,10 @@ fn handle_input(
             }
 
             let trimmed = line.trim();
-            if multi_line.is_empty() && matches!(trimmed, "/exit" | "/quit" | "/help") {
+            if multi_line.is_empty() && matches!(trimmed, ".exit" | ".help") {
                 match trimmed {
-                    "/exit" | "/quit" => return false,
-                    "/help" => print_repl_help(),
+                    ".exit" => return false,
+                    ".help" => print_repl_help(),
                     _ => unreachable!(),
                 }
                 let _ = cmd_tx.send(ReadlineCmd::AddHistory(trimmed.to_string()));
@@ -425,8 +425,7 @@ pub(crate) async fn run_repl(rt: &mut Runtime, ctx: &mut TopLevelContext<'_>) ->
     //
     // repl loop in js thread
     //
-    let _ =
-        print_tx.send("\x1b[32mWelcome to Aike REPL! Type /help for info.\x1b[0m\n".to_string());
+    let _ = print_tx.send("\x1b[32mWake up, Aike. Type .help for hint.\x1b[0m\n".to_string());
 
     loop {
         tokio::select! {
