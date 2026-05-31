@@ -1048,6 +1048,7 @@ pub(crate) async fn run_repl(rt: &mut Runtime, ctx: &mut TopLevelContext<'_>) ->
                     .with_menu(ReedlineMenu::EngineCompleter(completion_menu))
                     .with_edit_mode(edit_mode)
                     .with_external_printer(external_printer)
+                    .with_quick_completions(true)
                     .with_break_signal(shutdown_flag_clone),
             );
             let mut prompt = AikePrompt {
