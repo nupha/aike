@@ -23,10 +23,6 @@ use super::completion::{
 };
 use super::prompt::AikePrompt;
 
-// ---------------------------------------------------------------------------
-// REPL helpers
-// ---------------------------------------------------------------------------
-
 fn history_path() -> PathBuf {
     std::env::var("HOME")
         .map(|h| PathBuf::from(h).join(".aike_history"))
@@ -324,7 +320,20 @@ pub(crate) async fn run_repl(rt: &mut Runtime, ctx: &mut TopLevelContext<'_>) ->
     let mut multi_line = String::new();
     // shutdow flag
     let shutdown_flag = Arc::new(AtomicBool::new(false));
-    let shutdown_flag_clone = shutdown_flag.clone();
+
+    // Create ExternalPrinter in the main thread. The sender is cloned for use
+    // in the main thread; the ExternalPrinter itself is moved into the readline
+    // thread's closure.
+    let external_printer = reedline::ExternalPrinter::<String>::new(1024);
+    let print_tx = external_printer.sender();
+    // Redirect console.log (and friends) output through ExternalPrinter so it
+    // isn't overwritten by reedline's input line repaint.
+    crate::global::set_console_output_hook({
+        let print_tx2 = print_tx.clone();
+        Box::new(move |msg| {
+            let _ = print_tx2.send(msg);
+        })
+    });
 
     // Channel: readline thread -> main thread.
     let (input_tx, mut input_rx) = tokio::sync::mpsc::channel::<Signal>(1);
@@ -336,90 +345,80 @@ pub(crate) async fn run_repl(rt: &mut Runtime, ctx: &mut TopLevelContext<'_>) ->
     let (completion_res_tx, completion_res_rx) =
         tokio::sync::mpsc::unbounded_channel::<CompletionResponse>();
 
-    // Create ExternalPrinter in the main thread. The sender is cloned for use
-    // in the main thread; the ExternalPrinter itself is moved into the readline
-    // thread's closure.
-    let external_printer = reedline::ExternalPrinter::<String>::new(1024);
-    let print_tx = external_printer.sender();
-
-    // Redirect console.log (and friends) output through ExternalPrinter so it
-    // isn't overwritten by reedline's input line repaint.
-    crate::global::set_console_output_hook({
-        let print_tx2 = print_tx.clone();
-        Box::new(move |msg| {
-            let _ = print_tx2.send(msg);
-        })
-    });
-
     //
     // Spawn the blocking read line thread
     //
     let readline_thread = std::thread::Builder::new()
         .name("readline".into())
-        .spawn(move || {
-            let completer = Box::new(AikeCompleter {
-                req_tx: completion_req_tx,
-                resp_rx: completion_res_rx,
-            });
-            let completion_menu = Box::new(ColumnarMenu::default().with_name("completion_menu"));
+        .spawn({
+            let shutdown_flag2 = shutdown_flag.clone();
 
-            // Set up keybindings: Tab triggers completion menu.
-            let mut keybindings = default_emacs_keybindings();
-            keybindings.add_binding(
-                KeyModifiers::NONE,
-                KeyCode::Tab,
-                ReedlineEvent::UntilFound(vec![
-                    ReedlineEvent::Menu("completion_menu".to_string()),
-                    ReedlineEvent::MenuNext,
-                ]),
-            );
-            let edit_mode = Box::new(reedline::Emacs::new(keybindings));
+            move || {
+                let completer = Box::new(AikeCompleter {
+                    req_tx: completion_req_tx,
+                    resp_rx: completion_res_rx,
+                });
+                let completion_menu =
+                    Box::new(ColumnarMenu::default().with_name("completion_menu"));
 
-            let mut editor = Box::new(
-                Reedline::create()
-                    .with_history(Box::new(history))
-                    .with_highlighter(Box::new(highlighter))
-                    .with_completer(completer)
-                    .with_menu(ReedlineMenu::EngineCompleter(completion_menu))
-                    .with_edit_mode(edit_mode)
-                    .with_external_printer(external_printer)
-                    .with_quick_completions(true)
-                    .with_break_signal(shutdown_flag_clone),
-            );
-            let mut prompt = AikePrompt {
-                is_multiline: false,
-            };
+                // Set up keybindings: Tab triggers completion menu.
+                let mut keybindings = default_emacs_keybindings();
+                keybindings.add_binding(
+                    KeyModifiers::NONE,
+                    KeyCode::Tab,
+                    ReedlineEvent::UntilFound(vec![
+                        ReedlineEvent::Menu("completion_menu".to_string()),
+                        ReedlineEvent::MenuNext,
+                    ]),
+                );
+                let edit_mode = Box::new(reedline::Emacs::new(keybindings));
 
-            loop {
-                while let Ok(cmd) = cmd_rx.try_recv() {
-                    match cmd {
-                        ReadlineCmd::SetMultiline(v) => prompt.is_multiline = v,
-                        ReadlineCmd::AddHistory(entry) => {
-                            add_history(&mut editor, &entry);
-                        }
-                        ReadlineCmd::Shutdown => {
-                            let _ = editor.history_mut().sync();
-                            return;
-                        }
-                    }
-                }
-
-                let sig = match editor.read_line(&prompt) {
-                    Ok(s) => s,
-                    Err(_) => {
-                        let _ = input_tx.blocking_send(Signal::CtrlD);
-                        return;
-                    }
+                let mut editor = Box::new(
+                    Reedline::create()
+                        .with_history(Box::new(history))
+                        .with_highlighter(Box::new(highlighter))
+                        .with_completer(completer)
+                        .with_menu(ReedlineMenu::EngineCompleter(completion_menu))
+                        .with_edit_mode(edit_mode)
+                        .with_external_printer(external_printer)
+                        .with_quick_completions(true)
+                        .with_break_signal(shutdown_flag2),
+                );
+                let mut prompt = AikePrompt {
+                    is_multiline: false,
                 };
 
-                if matches!(sig, Signal::ExternalBreak(_)) {
-                    let _ = editor.history_mut().sync();
-                    return;
-                }
+                loop {
+                    while let Ok(cmd) = cmd_rx.try_recv() {
+                        match cmd {
+                            ReadlineCmd::SetMultiline(v) => prompt.is_multiline = v,
+                            ReadlineCmd::AddHistory(entry) => {
+                                add_history(&mut editor, &entry);
+                            }
+                            ReadlineCmd::Shutdown => {
+                                let _ = editor.history_mut().sync();
+                                return;
+                            }
+                        }
+                    }
 
-                if input_tx.blocking_send(sig).is_err() {
-                    let _ = editor.history_mut().sync();
-                    return;
+                    let sig = match editor.read_line(&prompt) {
+                        Ok(s) => s,
+                        Err(_) => {
+                            let _ = input_tx.blocking_send(Signal::CtrlD);
+                            return;
+                        }
+                    };
+
+                    if matches!(sig, Signal::ExternalBreak(_)) {
+                        let _ = editor.history_mut().sync();
+                        return;
+                    }
+
+                    if input_tx.blocking_send(sig).is_err() {
+                        let _ = editor.history_mut().sync();
+                        return;
+                    }
                 }
             }
         })
