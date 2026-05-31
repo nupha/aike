@@ -8,29 +8,28 @@ cuda = ["llama-cpp-ffi/cuda"]
 metal = ["llama-cpp-ffi/metal"]
 enable_eval_log = []            # 启用 DeepEval 评估日志采集
 
+[profile.release]
+panic = "abort"
+overflow-checks = false
+debug = false
+opt-level = 3
+lto = "fat"
+strip = "symbols"
+codegen-units = 1
+
+[profile.release.package."*"]
+overflow-checks = false
+debug = false
+opt-level = 3
+strip = "symbols"
 
 [dependencies]
-llama-cpp-ffi = { path = "../llama-cpp-ffi", features = ["cmake_static"] }
-swiftlet-incremental = { path = "../swiftlet-incremental" }
 zuqe = { path = "../../../devel/zhuque", features = [
     "crossbeam_channel",
     "serde_json_support",
 ] }
+swiftlet-incremental = { path = "../swiftlet-incremental" }
 crossbeam = "0.8"
-serde = { version = "1.0", features = ["derive"] }
-serde_yaml = "0.9"
-serde_json = "1"
-dotenvy = "0.15"
-dotenvy_macro = "0.15"
-glob = "0.3"
-colorized = "1.0"
-libc = "0.2"
-clap = { version = "4.5", features = ["derive"] }
-anyhow = { version = "1", default-features = false }
-env_logger = "0.9"
-log = "0.4"
-smallvec = "1.13"
-linkme = "0.3"
 tokio = { version = "1", features = [
     "macros",
     "rt-multi-thread",
@@ -41,6 +40,27 @@ tokio = { version = "1", features = [
     "io-std",
     "process",
 ] }
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "stream",
+    "gzip",
+    "brotli",
+    "deflate",
+    "rustls-tls",
+] }
+llama-cpp-ffi = { path = "../llama-cpp-ffi", features = ["cmake_static"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1"
+dotenvy = "0.15"
+dotenvy_macro = "0.15"
+glob = "0.3"
+colorized = "1.0"
+libc = "0.2"
+clap = { version = "4.5", features = ["derive"] }
+env_logger = "0.9"
+log = "0.4"
+smallvec = "1.13"
+linkme = "0.3"
 minijinja = { version = "2", features = ["serde"] }
 minijinja-contrib = { version = "2", features = ["pycompat"] }
 chrono = "0.4"
@@ -50,16 +70,16 @@ async-stream = "0.3"
 tokio-stream = "0.1"
 tower-http = { version = "0.5", features = ["cors"] }
 uuid = { version = "1", features = ["v4"] }
-async-openai = { version = "0.37", features = ["chat-completion", "responses"] }
-reqwest = { version = "0.12", features = [
-    "json",
-    "stream",
-    "gzip",
-    "brotli",
-    "deflate",
+async-openai = { version = "0.37", default-features = false, features = [
+    "chat-completion",
+    "responses",
+    "rustls",
 ] }
 tokio-util = { version = "0.7", features = ["io"] }
-reedline = { version = "0.48", features = ["idle_callback", "external_printer"] }
+reedline = { version = "0.48", features = [
+    "idle_callback",
+    "external_printer",
+] }
 nu-ansi-term = "0.50"
 
 [[bin]]
