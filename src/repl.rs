@@ -1,9 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-use std::borrow::Cow;
-use std::path::PathBuf;
-use std::process::ExitCode;
+use std::{
+    borrow::Cow,
+    path::PathBuf,
+    process::ExitCode,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 
 use colorized::{Colors::*, colorize_println};
 use nu_ansi_term::Style;
@@ -814,209 +820,247 @@ pub(crate) async fn run_repl(rt: &mut Runtime, ctx: &mut TopLevelContext<'_>) ->
     let highlighter = AikePrompt {
         is_multiline: false,
     };
-    let mut prompt = AikePrompt {
-        is_multiline: false,
-    };
-    let mut editor = Box::new(
-        Reedline::create()
-            .with_history(Box::new(history))
-            .with_highlighter(Box::new(highlighter)),
-    );
     let mut multi_line = String::new();
     let mut last_was_ctrl_c = false;
 
     println!("\x1b[32mWelcome to Aike REPL! Type /help for info.\x1b[0m");
 
-    loop {
-        // Drive the zuqe event loop on the current thread between REPL iterations.
-        // This processes pending async tasks (e.g. resolved promises, I/O callbacks).
-        if rt.run_async().await.is_err() {
-            break;
-        }
+    // Channel: readline thread -> main thread.
+    let (input_tx, mut input_rx) = tokio::sync::mpsc::channel::<Signal>(1);
 
-        let (new_editor, new_prompt, input) = tokio::task::spawn_blocking(move || {
-            let mut ed = editor; // editor.take().unwrap();
-            let sig = ed.read_line(&prompt);
-            (ed, prompt, sig)
-        })
-        .await
-        .unwrap();
-        editor = new_editor; //Some(new_editor);
-        prompt = new_prompt;
+    // Channel: main thread -> readline thread.
+    enum ReadlineCmd {
+        SetMultiline(bool),
+        AddHistory(String),
+        Shutdown,
+    }
+    let (cmd_tx, cmd_rx) = std::sync::mpsc::channel::<ReadlineCmd>();
 
-        let sig = match input {
-            Ok(s) => s,
-            Err(_) => break,
-        };
+    let shutdown_flag = Arc::new(AtomicBool::new(false));
+    let shutdown_flag_clone = shutdown_flag.clone();
 
-        match sig {
-            Signal::CtrlC => {
-                multi_line.clear();
-                prompt.is_multiline = false;
-                if last_was_ctrl_c {
-                    println!("^C");
-                    break;
-                }
-                last_was_ctrl_c = true;
-                println!("^C(Press Ctrl-C again to quit)");
-                continue;
-            }
-            Signal::CtrlD => {
-                if !multi_line.is_empty() {
-                    colorize_println("(cancelled)", YellowFg);
-                    multi_line.clear();
-                    prompt.is_multiline = false;
-                    continue;
-                }
-                break;
-            }
-            Signal::Success(line) => {
-                last_was_ctrl_c = false;
+    // Spawn a dedicated OS thread for reedline's blocking read_line.
+    let readline_thread = std::thread::Builder::new()
+        .name("readline".into())
+        .spawn(move || {
+            // Recreate editor with break signal support.
+            let mut editor = Box::new(
+                Reedline::create()
+                    .with_history(Box::new(history))
+                    .with_highlighter(Box::new(highlighter))
+                    .with_break_signal(shutdown_flag_clone),
+            );
+            let mut prompt = AikePrompt {
+                is_multiline: false,
+            };
 
-                if line.trim().is_empty() && multi_line.is_empty() {
-                    continue;
-                }
-
-                let trimmed = line.trim();
-                // Only treat exact /exit /quit /help as commands,
-                // so /ab/ (a regex literal) falls through to JS eval.
-                if multi_line.is_empty() && matches!(trimmed, "/exit" | "/quit" | "/help") {
-                    match trimmed {
-                        "/exit" | "/quit" => break,
-                        "/help" => print_repl_help(),
-                        _ => unreachable!(),
+            loop {
+                while let Ok(cmd) = cmd_rx.try_recv() {
+                    match cmd {
+                        ReadlineCmd::SetMultiline(v) => prompt.is_multiline = v,
+                        ReadlineCmd::AddHistory(entry) => {
+                            add_history(&mut editor, &entry);
+                        }
+                        ReadlineCmd::Shutdown => {
+                            let _ = editor.history_mut().sync();
+                            return;
+                        }
                     }
-                    add_history(editor.as_mut(), trimmed);
-                    continue;
                 }
 
-                multi_line.push_str(&line);
-                multi_line.push('\n');
+                let sig = match editor.read_line(&prompt) {
+                    Ok(s) => s,
+                    Err(_) => {
+                        let _ = input_tx.blocking_send(Signal::CtrlD);
+                        return;
+                    }
+                };
 
-                if !is_input_complete(&multi_line) {
-                    prompt.is_multiline = true;
-                    continue;
+                // ExternalBreak means the main thread requested shutdown.
+                if matches!(sig, Signal::ExternalBreak(_)) {
+                    let _ = editor.history_mut().sync();
+                    return;
                 }
 
-                prompt.is_multiline = false;
-                let code = std::mem::take(&mut multi_line);
-                let code_trimmed = code.trim().to_string();
-
-                if code_trimmed.is_empty() {
-                    continue;
+                if input_tx.blocking_send(sig).is_err() {
+                    let _ = editor.history_mut().sync();
+                    return;
                 }
+            }
+        })
+        .unwrap();
 
-                add_history(editor.as_mut(), &code_trimmed);
+    loop {
+        tokio::select! {
+            // Drive the zuqe event loop while waiting for user input.
+            // This ensures setTimeout and other async callbacks fire promptly.
+            _ = rt.run_async() => {}
 
-                let eval_code = transform_imports(&code_trimmed);
+            // Read input line and eval
+            Some(sig) = input_rx.recv() => {
+                match sig {
+                    Signal::CtrlC => {
+                        multi_line.clear();
+                        let _ = cmd_tx.send(ReadlineCmd::SetMultiline(false));
+                        if last_was_ctrl_c {
+                            println!("^C");
+                            break;
+                        }
+                        last_was_ctrl_c = true;
+                        println!("^C(Press Ctrl-C again to quit)");
+                        continue;
+                    }
+                    Signal::CtrlD => {
+                        if !multi_line.is_empty() {
+                            colorize_println("(cancelled)", YellowFg);
+                            multi_line.clear();
+                            let _ = cmd_tx.send(ReadlineCmd::SetMultiline(false));
+                            continue;
+                        }
+                        break;
+                    }
+                    Signal::Success(line) => {
+                        last_was_ctrl_c = false;
 
-                let mut eval_error: Option<String> = None;
+                        if line.trim().is_empty() && multi_line.is_empty() {
+                            continue;
+                        }
 
-                ctx.with_new_scope(|mut scope| {
-                    let r = (|| -> Result<(), i32> {
-                        match scope.eval(
-                            eval_code.as_bytes(),
-                            "<repl>",
-                            EvalType::Global,
-                            EvalFlags::COMPILE_TO_ASYNC,
-                        ) {
-                            Ok(v) => {
-                                // Check if the result is a Promise that's already settled.
-                                // (COMPILE_TO_ASYNC wraps code in async IIFE; if the body
-                                // throws synchronously, the Promise is rejected at eval time.)
-                                if let Some(p) = v.as_object_Promise() {
-                                    // Handle settled Promises entirely inside this scope
-                                    match p.state() {
-                                        PromiseState::Fulfilled => {
-                                            let result = p.result();
-                                            if let Ok(s) = result.inspect(&mut scope) {
-                                                println!("{}", s);
-                                            }
-                                        }
-                                        PromiseState::Rejected => {
-                                            let reason = p.result();
-                                            if let Ok(s) = reason.to_string(&mut scope) {
-                                                colorize_println(s.encode_utf8(false), RedFg);
-                                            }
-                                        }
-                                        PromiseState::Pending => {
-                                            // Promise is still pending (e.g. code contains `await`).
-                                            // Use into_future + event-loop to settle it.
-                                            if let Ok(fut) = (*p).into_future(&mut scope) {
-                                                let promise_res =
-                                                    tokio::task::block_in_place(|| {
-                                                        tokio::runtime::Handle::current().block_on(
-                                                            async {
-                                                                tokio::join!(rt.run_async(), fut)
-                                                            },
-                                                        )
-                                                    })
-                                                    .1;
-                                                match promise_res {
-                                                    Ok(resolved) => {
-                                                        if let Ok(s) = resolved.inspect(&mut scope)
-                                                        {
+                        let trimmed = line.trim();
+                        if multi_line.is_empty() && matches!(trimmed, "/exit" | "/quit" | "/help") {
+                            match trimmed {
+                                "/exit" | "/quit" => break,
+                                "/help" => print_repl_help(),
+                                _ => unreachable!(),
+                            }
+                            let _ = cmd_tx.send(ReadlineCmd::AddHistory(trimmed.to_string()));
+                            continue;
+                        }
+
+                        multi_line.push_str(&line);
+                        multi_line.push('\n');
+
+                        if !is_input_complete(&multi_line) {
+                            let _ = cmd_tx.send(ReadlineCmd::SetMultiline(true));
+                            continue;
+                        }
+
+                        let _ = cmd_tx.send(ReadlineCmd::SetMultiline(false));
+                        let code = std::mem::take(&mut multi_line);
+                        let code_trimmed = code.trim().to_string();
+
+                        if code_trimmed.is_empty() {
+                            continue;
+                        }
+
+                        let _ = cmd_tx.send(ReadlineCmd::AddHistory(code_trimmed.clone()));
+
+                        let eval_code = transform_imports(&code_trimmed);
+
+                        let mut eval_error: Option<String> = None;
+
+                        ctx.with_new_scope(|mut scope| {
+                            let r = (|| -> Result<(), i32> {
+                                match scope.eval(
+                                    eval_code.as_bytes(),
+                                    "<repl>",
+                                    EvalType::Global,
+                                    EvalFlags::COMPILE_TO_ASYNC,
+                                ) {
+                                    Ok(v) => {
+                                        if let Some(p) = v.as_object_Promise() {
+                                            match p.state() {
+                                                PromiseState::Fulfilled => {
+                                                    let result = p.result();
+                                                    if let Ok(s) = result.inspect(&mut scope) {
+                                                        println!("{}", s);
+                                                    }
+                                                }
+                                                PromiseState::Rejected => {
+                                                    let reason = p.result();
+                                                    if let Ok(s) = reason.to_string(&mut scope) {
+                                                        colorize_println(s.encode_utf8(false), RedFg);
+                                                    }
+                                                }
+                                                PromiseState::Pending => {
+                                                    if let Ok(fut) = (*p).into_future(&mut scope) {
+                                                        let promise_res =
+                                                            tokio::task::block_in_place(|| {
+                                                                tokio::runtime::Handle::current().block_on(
+                                                                    async {
+                                                                        tokio::join!(rt.run_async(), fut)
+                                                                    },
+                                                                )
+                                                            })
+                                                            .1;
+                                                        match promise_res {
+                                                            Ok(resolved) => {
+                                                                if let Ok(s) = resolved.inspect(&mut scope) {
+                                                                    println!("{}", s);
+                                                                }
+                                                            }
+                                                            Err(reason) => {
+                                                                if let Ok(s) = reason.to_string(&mut scope) {
+                                                                    colorize_println(
+                                                                        s.encode_utf8(false),
+                                                                        RedFg,
+                                                                    );
+                                                                }
+                                                            }
+                                                        }
+                                                    } else {
+                                                        if let Ok(s) = v.inspect(&mut scope) {
                                                             println!("{}", s);
                                                         }
                                                     }
-                                                    Err(reason) => {
-                                                        if let Ok(s) = reason.to_string(&mut scope)
-                                                        {
-                                                            colorize_println(
-                                                                s.encode_utf8(false),
-                                                                RedFg,
-                                                            );
-                                                        }
-                                                    }
                                                 }
-                                            } else {
-                                                // into_future failed, try to inspect directly
-                                                if let Ok(s) = v.inspect(&mut scope) {
-                                                    println!("{}", s);
-                                                }
+                                            }
+                                        } else {
+                                            if let Ok(s) = v.inspect(&mut scope) {
+                                                println!("{}", s);
                                             }
                                         }
                                     }
-                                } else {
-                                    // Non-Promise value, print it directly
-                                    if let Ok(s) = v.inspect(&mut scope) {
-                                        println!("{}", s);
-                                    }
-                                }
-                            }
-                            Err(_) => {
-                                let exc = rt.exception();
-                                match exc {
-                                    Exception::Error(e) => {
-                                        if let Ok(s) = e.to_string(&mut scope) {
-                                            eval_error = Some(s.encode_utf8(false).to_string());
+                                    Err(_) => {
+                                        let exc = rt.exception();
+                                        match exc {
+                                            Exception::Error(e) => {
+                                                if let Ok(s) = e.to_string(&mut scope) {
+                                                    eval_error = Some(s.encode_utf8(false).to_string());
+                                                }
+                                            }
+                                            Exception::Interrupted(_) => {
+                                                eval_error = Some("interrupted".to_string());
+                                            }
+                                            Exception::OutOfMemory => {
+                                                eval_error = Some("out of memory".to_string());
+                                            }
+                                            Exception::No | Exception::TooManyClasses => {}
                                         }
                                     }
-                                    Exception::Interrupted(_) => {
-                                        eval_error = Some("interrupted".to_string());
-                                    }
-                                    Exception::OutOfMemory => {
-                                        eval_error = Some("out of memory".to_string());
-                                    }
-                                    Exception::No | Exception::TooManyClasses => {}
                                 }
-                            }
-                        }
-                        Ok(())
-                    })();
-                    scope.return_value(r)
-                });
+                                Ok(())
+                            })();
+                            scope.return_value(r)
+                        });
 
-                if let Some(err) = eval_error {
-                    colorize_println(err, RedFg);
-                    continue;
+                        if let Some(err) = eval_error {
+                            colorize_println(err, RedFg);
+                            continue;
+                        }
+                    }
+                    _ => break,
                 }
             }
-            _ => break,
         }
     }
 
-    let _ = editor.history_mut().sync();
+    let _ = cmd_tx.send(ReadlineCmd::Shutdown);
+    // Signal the readline thread to break out of read_line immediately.
+    shutdown_flag.store(true, Ordering::Relaxed);
+    drop(input_rx);
+
+    let _ = readline_thread.join();
     println!();
     ExitCode::SUCCESS
 }
