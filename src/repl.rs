@@ -6,19 +6,20 @@ use std::{
     path::PathBuf,
     process::ExitCode,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
 };
 
-use colorized::{Colors::*, colorize_println};
 use nu_ansi_term::Style;
 use reedline::{
-    FileBackedHistory, Highlighter, HistoryItem, Prompt, PromptEditMode, PromptHistorySearch,
-    Reedline, Signal, StyledText,
+    ColumnarMenu, Completer, ExternalPrinter, FileBackedHistory, Highlighter, HistoryItem, KeyCode,
+    KeyModifiers, MenuBuilder, Prompt, PromptEditMode, PromptHistorySearch, Reedline,
+    ReedlineEvent, ReedlineMenu, Signal, Span, StyledText, Suggestion, default_emacs_keybindings,
 };
 use zuqe::{
-    EvalFlags, EvalType, Exception, Runtime, TopLevelContext, builtins::promise::PromiseState,
+    EvalFlags, EvalType, Exception, JSValue, Runtime, ScopedContext, TopLevelContext,
+    builtins::promise::PromiseState,
 };
 
 // ---------------------------------------------------------------------------
@@ -800,6 +801,164 @@ fn parse_named_bindings(bytes: &[u8], pos: &mut usize, len: usize) -> Vec<(Strin
 }
 
 // ---------------------------------------------------------------------------
+// Completion
+// ---------------------------------------------------------------------------
+
+/// Completion request sent from the readline thread to the main thread.
+struct CompletionRequest {
+    line: String,
+    pos: usize,
+}
+
+/// Completion response sent from the main thread back to the readline thread.
+struct CompletionResponse {
+    suggestions: Vec<String>,
+    /// Byte offset within `line` where the word being completed starts.
+    word_start: usize,
+}
+
+/// A reedline `Completer` that forwards completion requests to the main thread
+/// via a channel, where zuqe can evaluate JS expressions to enumerate properties.
+struct AikeCompleter {
+    req_tx: std::sync::mpsc::Sender<CompletionRequest>,
+    resp_rx: std::sync::mpsc::Receiver<CompletionResponse>,
+}
+
+impl Completer for AikeCompleter {
+    fn complete(&mut self, line: &str, pos: usize) -> Vec<Suggestion> {
+        if line.is_empty() || pos == 0 {
+            return Vec::new();
+        }
+
+        let req = CompletionRequest {
+            line: line.to_string(),
+            pos,
+        };
+
+        if self.req_tx.send(req).is_err() {
+            return Vec::new();
+        }
+
+        let resp = match self.resp_rx.recv() {
+            Ok(r) => r,
+            Err(_) => return Vec::new(),
+        };
+
+        if resp.suggestions.is_empty() {
+            return Vec::new();
+        }
+
+        let span = Span::new(resp.word_start, pos);
+        resp.suggestions
+            .into_iter()
+            .map(|value| Suggestion {
+                value,
+                span,
+                ..Suggestion::default()
+            })
+            .collect()
+    }
+}
+
+/// Check if `c` is a JS word character (alphanumeric, _, $).
+fn is_js_word_char(c: u8) -> bool {
+    c.is_ascii_alphanumeric() || c == b'_' || c == b'$'
+}
+
+/// Given a line and cursor position, compute completions using zuqe.
+///
+/// Mirrors the logic from `repl.js` `get_completions()`:
+/// 1. Extract the word at cursor
+/// 2. Find the object before the dot (if any)
+/// 3. Enumerate its own properties + prototype chain
+/// 4. Filter by prefix match
+fn compute_completions(scope: &mut ScopedContext, line: &str, pos: usize) -> (Vec<String>, usize) {
+    let bytes = line.as_bytes();
+
+    // Find the start of the word at cursor.
+    let mut word_start = pos;
+    while word_start > 0 && is_js_word_char(bytes[word_start - 1]) {
+        word_start -= 1;
+    }
+    let prefix = &line[word_start..pos];
+
+    // Determine the context object.
+    // If there's a '.' before the word, evaluate the left side.
+    let ctx_obj = if word_start >= 2 && bytes[word_start - 1] == b'.' {
+        let expr = &line[..word_start - 1];
+        match scope.eval(
+            expr.as_bytes(),
+            "<completion>",
+            EvalType::Global,
+            EvalFlags::empty(),
+        ) {
+            Ok(v) => v,
+            Err(_) => return (Vec::new(), word_start),
+        }
+    } else {
+        // No dot: complete from global scope.
+        if word_start > 0 && is_js_word_char(bytes[word_start - 1]) {
+            return (Vec::new(), word_start);
+        }
+        scope.global_obj().into()
+    };
+
+    // Enumerate properties from the object and its prototype chain.
+    let mut props: Vec<String> = Vec::new();
+    let mut obj = ctx_obj;
+
+    for _ in 0..10 {
+        let Some(mut o) = obj.as_object_mut() else {
+            break;
+        };
+        let pks = match o.get_own_property_names(scope, 1) {
+            Ok(p) => p,
+            Err(_) => break,
+        };
+        for pk in pks.iter() {
+            if pk.atom.to_array_index(scope.rt()).is_some() {
+                continue;
+            }
+            let Ok(name_val) = pk.atom.to_value(scope) else {
+                continue;
+            };
+            let Ok(name_str) = name_val.to_string(scope) else {
+                continue;
+            };
+            let name_str = name_str.content().encode_utf8(false).to_string();
+            if name_str.starts_with(prefix) {
+                props.push(name_str);
+            }
+        }
+        // Walk the prototype chain.
+        let proto = match o.shape().and_then(|s| s.proto()) {
+            Some(p) => p,
+            None => break,
+        };
+        obj = JSValue::from(proto);
+    }
+
+    // Sort: internal names (starting with '_') last.
+    props.sort_by(|a, b| {
+        let a_underscore = a.starts_with('_');
+        let b_underscore = b.starts_with('_');
+        if a_underscore != b_underscore {
+            return if a_underscore {
+                std::cmp::Ordering::Greater
+            } else {
+                std::cmp::Ordering::Less
+            };
+        }
+        a.cmp(b)
+    });
+
+    // Deduplicate.
+    props.dedup();
+
+    (props, word_start)
+}
+
+// ---------------------------------------------------------------------------
 // REPL main loop
 // ---------------------------------------------------------------------------
 
@@ -839,15 +998,50 @@ pub(crate) async fn run_repl(rt: &mut Runtime, ctx: &mut TopLevelContext<'_>) ->
     let shutdown_flag = Arc::new(AtomicBool::new(false));
     let shutdown_flag_clone = shutdown_flag.clone();
 
+    // Completion channels: readline thread <-> main thread.
+    let (completion_req_tx, completion_req_rx) = std::sync::mpsc::channel::<CompletionRequest>();
+    let (completion_resp_tx, completion_resp_rx) = std::sync::mpsc::channel::<CompletionResponse>();
+
+    // Channel: readline thread -> main thread for the ExternalPrinter sender.
+    let (printer_sender_tx, printer_sender_rx) =
+        std::sync::mpsc::channel::<crossbeam::channel::Sender<String>>();
+
     // Spawn a dedicated OS thread for reedline's blocking read_line.
     let readline_thread = std::thread::Builder::new()
         .name("readline".into())
         .spawn(move || {
+            let completer = Box::new(AikeCompleter {
+                req_tx: completion_req_tx,
+                resp_rx: completion_resp_rx,
+            });
+            let completion_menu = Box::new(ColumnarMenu::default().with_name("completion_menu"));
+
+            // Set up keybindings: Tab triggers completion menu.
+            let mut keybindings = default_emacs_keybindings();
+            keybindings.add_binding(
+                KeyModifiers::NONE,
+                KeyCode::Tab,
+                ReedlineEvent::UntilFound(vec![
+                    ReedlineEvent::Menu("completion_menu".to_string()),
+                    ReedlineEvent::MenuNext,
+                ]),
+            );
+            let edit_mode = Box::new(reedline::Emacs::new(keybindings));
+
+            // ExternalPrinter allows safe printing while read_line is active.
+            let external_printer = ExternalPrinter::<String>::default();
+            let printer_sender = external_printer.sender();
+            let _ = printer_sender_tx.send(printer_sender);
+
             // Recreate editor with break signal support.
             let mut editor = Box::new(
                 Reedline::create()
                     .with_history(Box::new(history))
                     .with_highlighter(Box::new(highlighter))
+                    .with_completer(completer)
+                    .with_menu(ReedlineMenu::EngineCompleter(completion_menu))
+                    .with_edit_mode(edit_mode)
+                    .with_external_printer(external_printer)
                     .with_break_signal(shutdown_flag_clone),
             );
             let mut prompt = AikePrompt {
@@ -890,7 +1084,39 @@ pub(crate) async fn run_repl(rt: &mut Runtime, ctx: &mut TopLevelContext<'_>) ->
         })
         .unwrap();
 
+    // Wrap completion request receiver in Arc<Mutex> so we can check it
+    // from the select! loop without blocking.
+    let completion_req_rx = Arc::new(Mutex::new(completion_req_rx));
+
+    // Receive the ExternalPrinter sender from the readline thread.
+    let printer_sender: crossbeam::channel::Sender<String> = printer_sender_rx.recv().unwrap();
+
+    // Helper: print a line through ExternalPrinter (safe during read_line).
+    let eprint = |msg: String| {
+        let _ = printer_sender.send(msg);
+    };
+
     loop {
+        // Check for pending completion requests (non-blocking).
+        {
+            let rx = completion_req_rx.lock().unwrap();
+            if let Ok(req) = rx.try_recv() {
+                let result = Arc::new(Mutex::new(None::<(Vec<String>, usize)>));
+                let result_clone = result.clone();
+                let _ = ctx.with_new_scope(|mut scope| {
+                    let r = compute_completions(&mut scope, &req.line, req.pos);
+                    *result_clone.lock().unwrap() = Some(r);
+                    scope.return_value(())
+                });
+                if let Some((suggestions, word_start)) = result.lock().unwrap().take() {
+                    let _ = completion_resp_tx.send(CompletionResponse {
+                        suggestions,
+                        word_start,
+                    });
+                }
+            }
+        }
+
         tokio::select! {
             // Drive the zuqe event loop while waiting for user input.
             // This ensures setTimeout and other async callbacks fire promptly.
@@ -903,16 +1129,16 @@ pub(crate) async fn run_repl(rt: &mut Runtime, ctx: &mut TopLevelContext<'_>) ->
                         multi_line.clear();
                         let _ = cmd_tx.send(ReadlineCmd::SetMultiline(false));
                         if last_was_ctrl_c {
-                            println!("^C");
+                            eprint("^C".to_string());
                             break;
                         }
                         last_was_ctrl_c = true;
-                        println!("^C(Press Ctrl-C again to quit)");
+                        eprint("^C(Press Ctrl-C again to quit)".to_string());
                         continue;
                     }
                     Signal::CtrlD => {
                         if !multi_line.is_empty() {
-                            colorize_println("(cancelled)", YellowFg);
+                            eprint("\x1b[33m(cancelled)\x1b[0m".to_string());
                             multi_line.clear();
                             let _ = cmd_tx.send(ReadlineCmd::SetMultiline(false));
                             continue;
@@ -959,7 +1185,7 @@ pub(crate) async fn run_repl(rt: &mut Runtime, ctx: &mut TopLevelContext<'_>) ->
 
                         let mut eval_error: Option<String> = None;
 
-                        ctx.with_new_scope(|mut scope| {
+                        let _ = ctx.with_new_scope(|mut scope| {
                             let r = (|| -> Result<(), i32> {
                                 match scope.eval(
                                     eval_code.as_bytes(),
@@ -973,13 +1199,13 @@ pub(crate) async fn run_repl(rt: &mut Runtime, ctx: &mut TopLevelContext<'_>) ->
                                                 PromiseState::Fulfilled => {
                                                     let result = p.result();
                                                     if let Ok(s) = result.inspect(&mut scope) {
-                                                        println!("{}", s);
+                                                        eprint(s);
                                                     }
                                                 }
                                                 PromiseState::Rejected => {
                                                     let reason = p.result();
                                                     if let Ok(s) = reason.to_string(&mut scope) {
-                                                        colorize_println(s.encode_utf8(false), RedFg);
+                                                        eprint(format!("\x1b[31m{}\x1b[0m", s.encode_utf8(false)));
                                                     }
                                                 }
                                                 PromiseState::Pending => {
@@ -996,28 +1222,28 @@ pub(crate) async fn run_repl(rt: &mut Runtime, ctx: &mut TopLevelContext<'_>) ->
                                                         match promise_res {
                                                             Ok(resolved) => {
                                                                 if let Ok(s) = resolved.inspect(&mut scope) {
-                                                                    println!("{}", s);
+                                                                    eprint(s);
                                                                 }
                                                             }
                                                             Err(reason) => {
                                                                 if let Ok(s) = reason.to_string(&mut scope) {
-                                                                    colorize_println(
+                                                                    eprint(format!(
+                                                                        "\x1b[31m{}\x1b[0m",
                                                                         s.encode_utf8(false),
-                                                                        RedFg,
-                                                                    );
+                                                                    ));
                                                                 }
                                                             }
                                                         }
                                                     } else {
                                                         if let Ok(s) = v.inspect(&mut scope) {
-                                                            println!("{}", s);
+                                                            eprint(s);
                                                         }
                                                     }
                                                 }
                                             }
                                         } else {
                                             if let Ok(s) = v.inspect(&mut scope) {
-                                                println!("{}", s);
+                                                eprint(s);
                                             }
                                         }
                                     }
@@ -1045,7 +1271,7 @@ pub(crate) async fn run_repl(rt: &mut Runtime, ctx: &mut TopLevelContext<'_>) ->
                         });
 
                         if let Some(err) = eval_error {
-                            colorize_println(err, RedFg);
+                            eprint(format!("\x1b[31m{}\x1b[0m", err));
                             continue;
                         }
                     }
