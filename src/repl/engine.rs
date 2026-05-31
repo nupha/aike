@@ -19,7 +19,7 @@ use zuqe::{
 };
 
 use super::completion::{
-    AikeCompleter, CompletionRequest, CompletionResponse, compute_completions,
+    AikeCompleter, CompletionRequest, CompletionResponse, js_compute_completions,
 };
 use super::prompt::AikePrompt;
 
@@ -50,10 +50,6 @@ fn add_history(editor: &mut Reedline, line: &str) {
     let item = HistoryItem::from_command_line(line);
     let _ = editor.history_mut().save(item);
 }
-
-// ---------------------------------------------------------------------------
-// Multi-line input detection
-// ---------------------------------------------------------------------------
 
 /// Check whether `code` has balanced brackets/braces and closed strings/comments.
 /// Returns `true` when the input is syntactically complete for evaluation.
@@ -136,20 +132,12 @@ fn is_input_complete(code: &str) -> bool {
         && !in_block_comment
 }
 
-// ---------------------------------------------------------------------------
-// Readline thread command
-// ---------------------------------------------------------------------------
-
 /// Commands sent from the main thread to the readline thread.
 enum ReadlineCmd {
     SetMultiline(bool),
     AddHistory(String),
     Shutdown,
 }
-
-// ---------------------------------------------------------------------------
-// Signal handling
-// ---------------------------------------------------------------------------
 
 /// Process a single signal from the readline thread.
 ///
@@ -158,28 +146,26 @@ fn handle_input(
     sig: Signal,
     multi_line: &mut String,
     last_was_ctrl_c: &mut bool,
-    cmd_tx: &std::sync::mpsc::Sender<ReadlineCmd>,
-    printer_sender: &crossbeam::channel::Sender<String>,
+    cmd_tx: &tokio::sync::mpsc::UnboundedSender<ReadlineCmd>,
+    print_tx: &crossbeam::channel::Sender<String>,
     rt: &mut Runtime,
     ctx: &mut TopLevelContext<'_>,
-    completion_req_rx: &Arc<Mutex<std::sync::mpsc::Receiver<CompletionRequest>>>,
-    completion_resp_tx: &std::sync::mpsc::Sender<CompletionResponse>,
 ) -> bool {
     match sig {
         Signal::CtrlC => {
             multi_line.clear();
             let _ = cmd_tx.send(ReadlineCmd::SetMultiline(false));
             if *last_was_ctrl_c {
-                let _ = printer_sender.send("^C".to_string());
+                let _ = print_tx.send("^C".to_string());
                 return false;
             }
             *last_was_ctrl_c = true;
-            let _ = printer_sender.send("^C(Press Ctrl-C again to quit)".to_string());
+            let _ = print_tx.send("^C(Press Ctrl-C again to quit)".to_string());
             true
         }
         Signal::CtrlD => {
             if !multi_line.is_empty() {
-                let _ = printer_sender.send("\x1b[33m(cancelled)\x1b[0m".to_string());
+                let _ = print_tx.send("\x1b[33m(cancelled)\x1b[0m".to_string());
                 multi_line.clear();
                 let _ = cmd_tx.send(ReadlineCmd::SetMultiline(false));
                 return true;
@@ -222,95 +208,96 @@ fn handle_input(
 
             let _ = cmd_tx.send(ReadlineCmd::AddHistory(code_trimmed.to_string()));
 
+            let mut outputs: Vec<String> = Vec::new();
             let mut eval_error: Option<String> = None;
 
             ctx.with_new_scope(|mut scope| {
-                let r = (|| -> Result<(), i32> {
-                    match scope.eval(
-                        code_trimmed.as_bytes(),
-                        "<repl>",
-                        EvalType::Global,
-                        EvalFlags::COMPILE_TO_ASYNC,
-                    ) {
-                        Ok(v) => {
-                            if let Some(p) = v.as_object_Promise() {
-                                match p.state() {
-                                    PromiseState::Fulfilled => {
-                                        let result = p.result();
-                                        if let Ok(s) = result.inspect(&mut scope) {
-                                            let _ = printer_sender.send(s);
-                                        }
-                                    }
-                                    PromiseState::Rejected => {
-                                        let reason = p.result();
-                                        if let Ok(s) = reason.to_string(&mut scope) {
-                                            let _ = printer_sender.send(format!(
-                                                "\x1b[31m{}\x1b[0m",
-                                                s.encode_utf8(false)
-                                            ));
-                                        }
-                                    }
-                                    PromiseState::Pending => {
-                                        if let Ok(fut) = (*p).into_future(&mut scope) {
-                                            let promise_res = tokio::task::block_in_place(|| {
-                                                tokio::runtime::Handle::current().block_on(async {
-                                                    tokio::join!(rt.run_async(), fut)
-                                                })
-                                            })
-                                            .1;
-                                            match promise_res {
-                                                Ok(resolved) => {
-                                                    if let Ok(s) = resolved.inspect(&mut scope) {
-                                                        let _ = printer_sender.send(s);
-                                                    }
-                                                }
-                                                Err(reason) => {
-                                                    if let Ok(s) = reason.to_string(&mut scope) {
-                                                        let _ = printer_sender.send(format!(
-                                                            "\x1b[31m{}\x1b[0m",
-                                                            s.encode_utf8(false),
-                                                        ));
-                                                    }
-                                                }
-                                            }
-                                        } else {
-                                            if let Ok(s) = v.inspect(&mut scope) {
-                                                let _ = printer_sender.send(s);
-                                            }
-                                        }
+                match scope.eval(
+                    code_trimmed.as_bytes(),
+                    "<repl>",
+                    EvalType::Global,
+                    EvalFlags::COMPILE_TO_ASYNC,
+                ) {
+                    Ok(v) => {
+                        if let Some(p) = v.as_object_Promise() {
+                            match p.state() {
+                                PromiseState::Fulfilled => {
+                                    let result = p.result();
+                                    if let Ok(s) = result.inspect(&mut scope) {
+                                        outputs.push(s);
                                     }
                                 }
-                            } else {
-                                if let Ok(s) = v.inspect(&mut scope) {
-                                    let _ = printer_sender.send(s);
+                                PromiseState::Rejected => {
+                                    let reason = p.result();
+                                    if let Ok(s) = reason.to_string(&mut scope) {
+                                        outputs.push(format!(
+                                            "\x1b[31m{}\x1b[0m",
+                                            s.encode_utf8(false)
+                                        ));
+                                    }
+                                }
+                                PromiseState::Pending => {
+                                    if let Ok(fut) = (*p).into_future(&mut scope) {
+                                        let promise_res = tokio::task::block_in_place(|| {
+                                            tokio::runtime::Handle::current().block_on(async {
+                                                tokio::join!(rt.run_async(), fut)
+                                            })
+                                        })
+                                        .1;
+                                        match promise_res {
+                                            Ok(resolved) => {
+                                                if let Ok(s) = resolved.inspect(&mut scope) {
+                                                    outputs.push(s);
+                                                }
+                                            }
+                                            Err(reason) => {
+                                                if let Ok(s) = reason.to_string(&mut scope) {
+                                                    outputs.push(format!(
+                                                        "\x1b[31m{}\x1b[0m",
+                                                        s.encode_utf8(false),
+                                                    ));
+                                                }
+                                            }
+                                        }
+                                    } else {
+                                        if let Ok(s) = v.inspect(&mut scope) {
+                                            outputs.push(s);
+                                        }
+                                    }
                                 }
                             }
-                        }
-                        Err(_) => {
-                            let exc = rt.exception();
-                            match exc {
-                                Exception::Error(e) => {
-                                    if let Ok(s) = e.to_string(&mut scope) {
-                                        eval_error = Some(s.encode_utf8(false).to_string());
-                                    }
-                                }
-                                Exception::Interrupted(_) => {
-                                    eval_error = Some("interrupted".to_string());
-                                }
-                                Exception::OutOfMemory => {
-                                    eval_error = Some("out of memory".to_string());
-                                }
-                                Exception::No | Exception::TooManyClasses => {}
+                        } else {
+                            if let Ok(s) = v.inspect(&mut scope) {
+                                outputs.push(s);
                             }
                         }
                     }
-                    Ok(())
-                })();
-                scope.return_value(r)
+                    Err(_) => {
+                        let exc = rt.exception();
+                        match exc {
+                            Exception::Error(e) => {
+                                if let Ok(s) = e.to_string(&mut scope) {
+                                    eval_error = Some(s.encode_utf8(false).to_string());
+                                }
+                            }
+                            Exception::Interrupted(_) => {
+                                eval_error = Some("interrupted".to_string());
+                            }
+                            Exception::OutOfMemory => {
+                                eval_error = Some("out of memory".to_string());
+                            }
+                            Exception::No | Exception::TooManyClasses => {}
+                        }
+                    }
+                }
+                scope.return_value(())
             });
 
+            for msg in outputs {
+                let _ = print_tx.send(msg);
+            }
             if let Some(err) = eval_error {
-                let _ = printer_sender.send(format!("\x1b[31m{}\x1b[0m", err));
+                let _ = print_tx.send(format!("\x1b[31m{}\x1b[0m", err));
             }
 
             true
@@ -319,15 +306,7 @@ fn handle_input(
     }
 }
 
-// ---------------------------------------------------------------------------
-// REPL main loop
-// ---------------------------------------------------------------------------
-
 /// Main REPL loop.
-///
-/// - Uses reedline for line editing, history, and syntax highlighting.
-/// - Detects multi-line input via bracket/string balance.
-/// - Handles Ctrl-C (cancel current input, double Ctrl-C to quit) and Ctrl-D.
 pub(crate) async fn run_repl(rt: &mut Runtime, ctx: &mut TopLevelContext<'_>) -> ExitCode {
     let hist_path = history_path();
     let history = match FileBackedHistory::with_file(1000, hist_path) {
@@ -339,35 +318,48 @@ pub(crate) async fn run_repl(rt: &mut Runtime, ctx: &mut TopLevelContext<'_>) ->
     let highlighter = AikePrompt {
         is_multiline: false,
     };
-    let mut multi_line = String::new();
+
     let mut last_was_ctrl_c = false;
-
-    println!("\x1b[32mWelcome to Aike REPL! Type /help for info.\x1b[0m");
-
-    // Channel: readline thread -> main thread.
-    let (input_tx, mut input_rx) = tokio::sync::mpsc::channel::<Signal>(1);
-
-    // Channel: main thread -> readline thread.
-    let (cmd_tx, cmd_rx) = std::sync::mpsc::channel::<ReadlineCmd>();
-
+    // imcomplete input pending buffer
+    let mut multi_line = String::new();
+    // shutdow flag
     let shutdown_flag = Arc::new(AtomicBool::new(false));
     let shutdown_flag_clone = shutdown_flag.clone();
 
+    // Channel: readline thread -> main thread.
+    let (input_tx, mut input_rx) = tokio::sync::mpsc::channel::<Signal>(1);
+    // Channel: main thread -> readline thread.
+    let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::unbounded_channel::<ReadlineCmd>();
     // Completion channels: readline thread <-> main thread.
-    let (completion_req_tx, completion_req_rx) = std::sync::mpsc::channel::<CompletionRequest>();
-    let (completion_resp_tx, completion_resp_rx) = std::sync::mpsc::channel::<CompletionResponse>();
+    let (completion_req_tx, mut completion_req_rx) =
+        tokio::sync::mpsc::unbounded_channel::<CompletionRequest>();
+    let (completion_res_tx, completion_res_rx) =
+        tokio::sync::mpsc::unbounded_channel::<CompletionResponse>();
 
-    // Channel: readline thread -> main thread for the ExternalPrinter sender.
-    let (printer_sender_tx, printer_sender_rx) =
-        std::sync::mpsc::channel::<crossbeam::channel::Sender<String>>();
+    // Create ExternalPrinter in the main thread. The sender is cloned for use
+    // in the main thread; the ExternalPrinter itself is moved into the readline
+    // thread's closure.
+    let external_printer = reedline::ExternalPrinter::<String>::new(1024);
+    let print_tx = external_printer.sender();
 
-    // Spawn a dedicated OS thread for reedline's blocking read_line.
+    // Redirect console.log (and friends) output through ExternalPrinter so it
+    // isn't overwritten by reedline's input line repaint.
+    crate::global::set_console_output_hook({
+        let print_tx2 = print_tx.clone();
+        Box::new(move |msg| {
+            let _ = print_tx2.send(msg);
+        })
+    });
+
+    //
+    // Spawn the blocking read line thread
+    //
     let readline_thread = std::thread::Builder::new()
         .name("readline".into())
         .spawn(move || {
             let completer = Box::new(AikeCompleter {
                 req_tx: completion_req_tx,
-                resp_rx: completion_resp_rx,
+                resp_rx: completion_res_rx,
             });
             let completion_menu = Box::new(ColumnarMenu::default().with_name("completion_menu"));
 
@@ -382,11 +374,6 @@ pub(crate) async fn run_repl(rt: &mut Runtime, ctx: &mut TopLevelContext<'_>) ->
                 ]),
             );
             let edit_mode = Box::new(reedline::Emacs::new(keybindings));
-
-            // ExternalPrinter allows safe printing while read_line is active.
-            let external_printer = reedline::ExternalPrinter::<String>::default();
-            let printer_sender = external_printer.sender();
-            let _ = printer_sender_tx.send(printer_sender);
 
             let mut editor = Box::new(
                 Reedline::create()
@@ -438,44 +425,33 @@ pub(crate) async fn run_repl(rt: &mut Runtime, ctx: &mut TopLevelContext<'_>) ->
         })
         .unwrap();
 
-    // Wrap completion request receiver in Arc<Mutex> so we can check it
-    // from the select! loop without blocking.
-    let completion_req_rx = Arc::new(Mutex::new(completion_req_rx));
-
-    // Receive the ExternalPrinter sender from the readline thread.
-    let printer_sender: crossbeam::channel::Sender<String> = printer_sender_rx.recv().unwrap();
-
-    // Redirect console.log (and friends) output through ExternalPrinter so it
-    // isn't overwritten by reedline's input line repaint.
-    let printer_sender_clone = printer_sender.clone();
-    crate::global::set_console_output_hook(Box::new(move |msg| {
-        let _ = printer_sender_clone.send(msg);
-    }));
+    //
+    // repl loop in js thread
+    //
+    let _ =
+        print_tx.send("\x1b[32mWelcome to Aike REPL! Type /help for info.\x1b[0m\n".to_string());
 
     loop {
-        // Check for pending completion requests (non-blocking).
-        {
-            let rx = completion_req_rx.lock().unwrap();
-            if let Ok(req) = rx.try_recv() {
-                let result = Arc::new(Mutex::new(None::<(Vec<String>, usize)>));
-                let result_clone = result.clone();
-                ctx.with_new_scope(|mut scope| {
-                    let r = compute_completions(&mut scope, &req.line, req.pos);
-                    *result_clone.lock().unwrap() = Some(r);
-                    scope.return_value(())
+        tokio::select! {
+            // Drive the runtime tick.
+            _ = rt.run_async() => {}
+
+            // Handle completion requests from the readline thread.
+            Some(req) = completion_req_rx.recv() => {
+                let choices = Arc::new(Mutex::new(None::<(Vec<String>, usize)>));
+                let choices2 = choices.clone();
+                ctx.with_new_scope(|mut cx| {
+                    let r = js_compute_completions(&mut cx, &req.line, req.pos);
+                    choices2.lock().unwrap().replace(r);
+                    cx.return_value(())
                 });
-                if let Some((suggestions, word_start)) = result.lock().unwrap().take() {
-                    let _ = completion_resp_tx.send(CompletionResponse {
+                if let Some((suggestions, word_start)) = choices.lock().unwrap().take() {
+                    let _ = completion_res_tx.send(CompletionResponse {
                         suggestions,
                         word_start,
                     });
                 }
             }
-        }
-
-        tokio::select! {
-            // Drive the runtime tick.
-            _ = rt.run_async() => {}
 
             // Read input and process.
             Some(sig) = input_rx.recv() => {
@@ -484,11 +460,9 @@ pub(crate) async fn run_repl(rt: &mut Runtime, ctx: &mut TopLevelContext<'_>) ->
                     &mut multi_line,
                     &mut last_was_ctrl_c,
                     &cmd_tx,
-                    &printer_sender,
+                    &print_tx,
                     rt,
                     ctx,
-                    &completion_req_rx,
-                    &completion_resp_tx,
                 ) {
                     break;
                 }

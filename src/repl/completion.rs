@@ -20,8 +20,8 @@ pub(crate) struct CompletionResponse {
 /// A reedline `Completer` that forwards completion requests to the main thread
 /// via a channel, where zuqe can evaluate JS expressions to enumerate properties.
 pub(crate) struct AikeCompleter {
-    pub req_tx: std::sync::mpsc::Sender<CompletionRequest>,
-    pub resp_rx: std::sync::mpsc::Receiver<CompletionResponse>,
+    pub req_tx: tokio::sync::mpsc::UnboundedSender<CompletionRequest>,
+    pub resp_rx: tokio::sync::mpsc::UnboundedReceiver<CompletionResponse>,
 }
 
 impl Completer for AikeCompleter {
@@ -39,9 +39,9 @@ impl Completer for AikeCompleter {
             return Vec::new();
         }
 
-        let resp = match self.resp_rx.recv() {
-            Ok(r) => r,
-            Err(_) => return Vec::new(),
+        let resp = match self.resp_rx.blocking_recv() {
+            Some(r) => r,
+            None => return Vec::new(),
         };
 
         if resp.suggestions.is_empty() {
@@ -72,7 +72,7 @@ fn is_js_word_char(c: u8) -> bool {
 /// 2. Find the object before the dot (if any)
 /// 3. Enumerate its own properties + prototype chain
 /// 4. Filter by prefix match
-pub(crate) fn compute_completions(
+pub(crate) fn js_compute_completions(
     scope: &mut ScopedContext,
     line: &str,
     pos: usize,
@@ -112,7 +112,7 @@ pub(crate) fn compute_completions(
     let mut obj = ctx_obj;
 
     for _ in 0..10 {
-        let Some(mut o) = obj.as_object_mut() else {
+        let Some(o) = obj.as_object_mut() else {
             break;
         };
         let pks = match o.get_own_property_names(scope, 1) {

@@ -105,6 +105,7 @@ impl Highlighter for AikePrompt {
 // Syntax colouring — ported from repl.js colorize_js()
 // ---------------------------------------------------------------------------
 
+#[allow(unused_assignments)]
 fn colorize_js(code: &str) -> StyledText {
     let bytes = code.as_bytes();
     let len = bytes.len();
@@ -123,7 +124,7 @@ fn colorize_js(code: &str) -> StyledText {
     macro_rules! flush {
         () => {{
             if i > seg_start {
-                styled.push((cur_style.clone(), code[seg_start..i].to_string()));
+                styled.push((*cur_style, code[seg_start..i].to_string()));
             }
             seg_start = i;
         }};
@@ -132,9 +133,9 @@ fn colorize_js(code: &str) -> StyledText {
     macro_rules! emit_token {
         ($st:expr, $token:expr) => {{
             if seg_start < i {
-                styled.push((cur_style.clone(), code[seg_start..i].to_string()));
+                styled.push((*cur_style, code[seg_start..i].to_string()));
             }
-            styled.push(($st.clone(), $token.to_string()));
+            styled.push((*$st, $token.to_string()));
             seg_start = i;
         }};
     }
@@ -212,7 +213,7 @@ fn colorize_js(code: &str) -> StyledText {
             if c == b'*' && i + 1 < len && bytes[i + 1] == b'/' {
                 let end = i + 2;
                 if end > seg_start {
-                    styled.push((STYLE_COMMENT.clone(), code[seg_start..end].to_string()));
+                    styled.push((*STYLE_COMMENT, code[seg_start..end].to_string()));
                 }
                 seg_start = end;
                 i = end;
@@ -361,7 +362,7 @@ fn colorize_js(code: &str) -> StyledText {
                 can_regex = true;
 
                 if is_js_keyword(word) {
-                    styled.push((STYLE_KEYWORD.clone(), word.to_string()));
+                    styled.push((*STYLE_KEYWORD, word.to_string()));
                     seg_start = i;
                     if is_js_no_regex(word) {
                         can_regex = false;
@@ -372,13 +373,13 @@ fn colorize_js(code: &str) -> StyledText {
                         j += 1;
                     }
                     if j < len && bytes[j] == b'(' {
-                        styled.push((STYLE_FUNCTION.clone(), word.to_string()));
+                        styled.push((*STYLE_FUNCTION, word.to_string()));
                         seg_start = i;
                     } else if is_js_type(word) {
-                        styled.push((STYLE_TYPE.clone(), word.to_string()));
+                        styled.push((*STYLE_TYPE, word.to_string()));
                         seg_start = i;
                     } else {
-                        styled.push((STYLE_IDENTIFIER.clone(), word.to_string()));
+                        styled.push((*STYLE_IDENTIFIER, word.to_string()));
                         seg_start = i;
                         can_regex = false;
                     }
@@ -394,10 +395,10 @@ fn colorize_js(code: &str) -> StyledText {
 
     if in_single || in_double || in_backtick {
         if i > seg_start {
-            styled.push((STYLE_ERROR.clone(), code[seg_start..i].to_string()));
+            styled.push((*STYLE_ERROR, code[seg_start..i].to_string()));
         }
     } else if i > seg_start {
-        styled.push((cur_style.clone(), code[seg_start..i].to_string()));
+        styled.push((*cur_style, code[seg_start..i].to_string()));
     }
 
     styled
