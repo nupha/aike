@@ -218,28 +218,49 @@ impl Hinter for AikeHinter {
     }
 }
 
-/// If one candidate is a strict prefix of another, return the suffix after
-/// `prefix` from the shorter (prefix) candidate.  Otherwise return `None`.
+/// Compute the longest common prefix among all candidates that start with
+/// `prefix`, then return the suffix after `prefix`.
+///
+/// Example: candidates=["setTimeout","setInterval"], prefix="setT"
+///   → Some("imeout")   (longest common prefix of matching candidates is "setTimeout")
 ///
 /// Example: candidates=["Array","ArrayBuffer"], prefix="Arr"
-///   → Some("ay")   (because "Array" is a prefix of "ArrayBuffer")
+///   → Some("ay")       (longest common prefix is "Array")
 ///
-/// Example: candidates=["Array","ArrayBuffer"], prefix="Array"
-///   → Some("Buffer")
+/// Example: candidates=["readFile","readFileSync"], prefix="readF"
+///   → Some("ile")      (longest common prefix is "readFile")
 fn find_prefix_suffix(candidates: &[String], prefix: &str) -> Option<String> {
-    let prefix_candidates: Vec<&str> = candidates
+    let matching: Vec<&str> = candidates
         .iter()
         .map(|s| s.as_str())
-        .filter(|s| {
-            candidates
-                .iter()
-                .any(|other| other.as_str() != *s && other.starts_with(*s))
-        })
+        .filter(|s| s.starts_with(prefix) && s.len() > prefix.len())
         .collect();
-    let target = prefix_candidates
+
+    if matching.is_empty() {
+        return None;
+    }
+
+    // Find the longest common prefix among all matching candidates.
+    let common = matching
         .iter()
-        .find(|s| s.len() > prefix.len() && s.starts_with(prefix))?;
-    Some(target[prefix.len()..].to_string())
+        .copied()
+        .reduce(|a, b| {
+            let common_len = a
+                .as_bytes()
+                .iter()
+                .zip(b.as_bytes())
+                .take_while(|(x, y)| x == y)
+                .count();
+            &a[..common_len]
+        })
+        .unwrap();
+
+    // Return the portion of the common prefix that extends beyond the user's input.
+    if common.len() > prefix.len() {
+        Some(common[prefix.len()..].to_string())
+    } else {
+        None
+    }
 }
 
 /// Given a line and cursor position, compute completions using zuqe.
