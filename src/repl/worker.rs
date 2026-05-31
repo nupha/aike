@@ -1,462 +1,208 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-use std::{
-    path::PathBuf,
-    process::ExitCode,
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
-    },
+use std::sync::{Arc, Mutex};
+
+use rustyline::{
+    Editor, ExternalPrinter as _, Prompt, config::Builder as ConfigBuilder, error::ReadlineError,
+    history::FileHistory,
 };
 
-use reedline::{
-    ColumnarMenu, FileBackedHistory, KeyCode, KeyModifiers, MenuBuilder, Reedline, ReedlineEvent,
-    ReedlineMenu, Signal, default_emacs_keybindings,
+use crate::repl::{
+    completion::{AikeHelper, CompletionState, js_compute_completions},
+    prompt::AikePrompt,
 };
-use zuqe::{Context, EvalFlags, EvalType, Exception, Runtime, builtins::promise::PromiseState};
 
-use super::completion::{
-    AikeCompleter, AikeHinter, CompletionRequest, CompletionResponse, CompletionState,
-    js_compute_completions,
-};
-use super::prompt::AikePrompt;
-
-fn history_path() -> PathBuf {
-    std::env::var("HOME")
-        .map(|h| PathBuf::from(h).join(".aike_history"))
-        .unwrap_or_else(|_| PathBuf::from(".aike_history"))
+/// Commands sent from the readline thread to the JS thread.
+#[derive(Debug)]
+pub(crate) enum InputCommand {
+    Eval(String),
+    Quit,
 }
 
-fn print_repl_help() {
-    println!("Aike REPL commands:");
-    println!("  .exit         exit the REPL");
-    println!("  .help         show this help");
-    println!();
-    println!("JS evaluation:");
-    println!("  Type any JavaScript expression and press Enter to evaluate.");
-    println!("  Dynamic import() is supported (returns a Promise).");
-    println!("  Multi-line input is automatically detected (unbalanced brackets).");
-    println!("  Press Ctrl-C to cancel multi-line input.");
-    println!("  Press Ctrl-D to exit.");
-}
+/// Start the REPL event loop.
+pub(crate) async fn run<'c>(_rt: &mut zuqe::Runtime, ctx: &mut zuqe::Context<'c>) {
+    let completion_state = CompletionState::new();
 
-/// Check whether `code` has balanced brackets/braces and closed strings/comments.
-/// Returns `true` when the input is syntactically complete for evaluation.
-fn is_input_complete(code: &str) -> bool {
-    let bytes = code.as_bytes();
-    let mut parens: i32 = 0;
-    let mut brackets: i32 = 0;
-    let mut braces: i32 = 0;
-    let mut in_single = false;
-    let mut in_double = false;
-    let mut in_backtick = false;
-    let mut in_block_comment = false;
-    let mut escape = false;
-    let mut i = 0;
+    // Build rustyline editor
+    let config = ConfigBuilder::new().auto_add_history(true).build();
 
-    while i < bytes.len() {
-        let c = bytes[i];
+    let mut editor =
+        Editor::<AikeHelper, FileHistory>::with_config(config).expect("Editor::with_config");
 
-        if escape {
-            escape = false;
-            i += 1;
-            continue;
-        }
+    // Create ExternalPrinter first so it can be shared with the helper
+    let printer = editor
+        .create_external_printer()
+        .expect("create_external_printer");
+    let printer = Arc::new(Mutex::new(printer));
 
-        if c == b'\\' && (in_single || in_double || in_backtick) {
-            escape = true;
-            i += 1;
-            continue;
-        }
+    let mut helper = AikeHelper::new(completion_state.clone());
+    let printer_for_candidates = printer.clone();
+    helper.print_candidates = Some({
+        Arc::new(move |candidates| {
+            let term_width = crossterm::terminal::size()
+                .map(|(w, _)| w as usize)
+                .unwrap_or(80);
+            let max_width = candidates.iter().map(|c| c.name.len()).max().unwrap_or(0) + 2;
+            let n_cols = std::cmp::max(1, (term_width + 1) / max_width);
+            let n_rows = candidates.len().div_ceil(n_cols);
 
-        if in_block_comment {
-            if c == b'*' && i + 1 < bytes.len() && bytes[i + 1] == b'/' {
-                in_block_comment = false;
-                i += 2;
-            } else {
-                i += 1;
-            }
-            continue;
-        }
-
-        if !in_single && !in_double && !in_backtick && c == b'/' && i + 1 < bytes.len() {
-            match bytes[i + 1] {
-                b'/' => {
-                    i += 2;
-                    while i < bytes.len() && bytes[i] != b'\n' {
-                        i += 1;
+            // Print candidate list below the input line using ExternalPrinter.
+            // ExternalPrinter saves the current input line, prints the message,
+            // then restores the input line. The leading \n ensures the list
+            // appears below the input line rather than on top of it.
+            let mut out = String::new();
+            out.push('\n');
+            for row in 0..n_rows {
+                for col in 0..n_cols {
+                    let idx = col * n_rows + row;
+                    if idx >= candidates.len() {
+                        break;
                     }
-                    continue;
-                }
-                b'*' => {
-                    in_block_comment = true;
-                    i += 2;
-                    continue;
-                }
-                _ => {}
-            }
-        }
-
-        match c {
-            b'\'' if !in_double && !in_backtick => in_single ^= true,
-            b'"' if !in_single && !in_backtick => in_double ^= true,
-            b'`' if !in_single && !in_double => in_backtick ^= true,
-            b'(' if !in_single && !in_double && !in_backtick => parens += 1,
-            b')' if !in_single && !in_double && !in_backtick => parens -= 1,
-            b'[' if !in_single && !in_double && !in_backtick => brackets += 1,
-            b']' if !in_single && !in_double && !in_backtick => brackets -= 1,
-            b'{' if !in_single && !in_double && !in_backtick => braces += 1,
-            b'}' if !in_single && !in_double && !in_backtick => braces -= 1,
-            _ => {}
-        }
-        i += 1;
-    }
-
-    parens == 0
-        && brackets == 0
-        && braces == 0
-        && !in_single
-        && !in_double
-        && !in_backtick
-        && !in_block_comment
-}
-
-/// Commands sent from the main thread to the readline thread.
-enum ReadlineCmd {
-    SetMultiline(bool),
-    Shutdown,
-}
-
-/// Process a single signal from the readline thread.
-///
-/// Returns `true` to continue the REPL loop, `false` to exit.
-fn handle_input(
-    sig: Signal,
-    multi_line: &mut String,
-    last_was_ctrl_c: &mut bool,
-    cmd_tx: &tokio::sync::mpsc::UnboundedSender<ReadlineCmd>,
-    print_tx: &crossbeam::channel::Sender<String>,
-    rt: &mut Runtime,
-    ctx: &mut Context<'_>,
-) -> bool {
-    match sig {
-        Signal::CtrlC => {
-            multi_line.clear();
-            let _ = cmd_tx.send(ReadlineCmd::SetMultiline(false));
-            if *last_was_ctrl_c {
-                let _ = print_tx.send("^C".to_string());
-                return false;
-            }
-            *last_was_ctrl_c = true;
-            let _ = print_tx.send("^C(Press Ctrl-C again to quit)".to_string());
-            true
-        }
-        Signal::CtrlD => {
-            if !multi_line.is_empty() {
-                let _ = print_tx.send("\x1b[33m(cancelled)\x1b[0m".to_string());
-                multi_line.clear();
-                let _ = cmd_tx.send(ReadlineCmd::SetMultiline(false));
-                return true;
-            }
-            false
-        }
-        Signal::Success(line) => {
-            *last_was_ctrl_c = false;
-
-            if line.trim().is_empty() && multi_line.is_empty() {
-                return true;
-            }
-
-            let trimmed = line.trim();
-            if multi_line.is_empty() && matches!(trimmed, ".exit" | ".help") {
-                match trimmed {
-                    ".exit" => return false,
-                    ".help" => print_repl_help(),
-                    _ => unreachable!(),
-                }
-                return true;
-            }
-
-            multi_line.push_str(&line);
-            multi_line.push('\n');
-
-            if !is_input_complete(multi_line) {
-                let _ = cmd_tx.send(ReadlineCmd::SetMultiline(true));
-                return true;
-            }
-
-            let _ = cmd_tx.send(ReadlineCmd::SetMultiline(false));
-            let code = std::mem::take(multi_line);
-            let code_trimmed = code.trim();
-
-            if code_trimmed.is_empty() {
-                return true;
-            }
-
-            let mut outputs: Vec<String> = Vec::new();
-            let mut eval_error: Option<String> = None;
-
-            ctx.with_new_scope(|mut scope| {
-                match scope.eval(
-                    code_trimmed.as_bytes(),
-                    "<repl>",
-                    EvalType::Global,
-                    EvalFlags::COMPILE_TO_ASYNC,
-                ) {
-                    Ok(v) => {
-                        if let Some(p) = v.as_object_Promise() {
-                            match p.state() {
-                                PromiseState::Fulfilled => {
-                                    let result = p.result();
-                                    if let Ok(s) = result.inspect(&mut scope) {
-                                        outputs.push(s);
-                                    }
-                                }
-                                PromiseState::Rejected => {
-                                    let reason = p.result();
-                                    if let Ok(s) = reason.to_string(&mut scope) {
-                                        outputs.push(format!(
-                                            "\x1b[31m{}\x1b[0m",
-                                            s.encode_utf8(false)
-                                        ));
-                                    }
-                                }
-                                PromiseState::Pending => {
-                                    if let Ok(fut) = (*p).into_future(&mut scope) {
-                                        let promise_res = tokio::task::block_in_place(|| {
-                                            tokio::runtime::Handle::current().block_on(async {
-                                                tokio::join!(rt.run_async(), fut)
-                                            })
-                                        })
-                                        .1;
-                                        match promise_res {
-                                            Ok(resolved) => {
-                                                if let Ok(s) = resolved.inspect(&mut scope) {
-                                                    outputs.push(s);
-                                                }
-                                            }
-                                            Err(reason) => {
-                                                if let Ok(s) = reason.to_string(&mut scope) {
-                                                    outputs.push(format!(
-                                                        "\x1b[31m{}\x1b[0m",
-                                                        s.encode_utf8(false),
-                                                    ));
-                                                }
-                                            }
-                                        }
-                                    } else {
-                                        if let Ok(s) = v.inspect(&mut scope) {
-                                            outputs.push(s);
-                                        }
-                                    }
-                                }
-                            }
-                        } else {
-                            if let Ok(s) = v.inspect(&mut scope) {
-                                outputs.push(s);
-                            }
-                        }
-                    }
-                    Err(_) => {
-                        let exc = rt.exception();
-                        match exc {
-                            Exception::Error(e) => {
-                                if let Ok(s) = e.to_string(&mut scope) {
-                                    eval_error = Some(s.encode_utf8(false).to_string());
-                                }
-                            }
-                            Exception::Interrupted(_) => {
-                                eval_error = Some("interrupted".to_string());
-                            }
-                            Exception::OutOfMemory => {
-                                eval_error = Some("out of memory".to_string());
-                            }
-                            Exception::No | Exception::TooManyClasses => {}
+                    let name = &candidates[idx].name;
+                    out.push_str(name);
+                    if col != n_cols - 1 {
+                        let padding = max_width - name.len();
+                        for _ in 0..padding {
+                            out.push(' ');
                         }
                     }
                 }
-                scope.return_value(())
-            });
-
-            for msg in outputs {
-                let _ = print_tx.send(msg);
-            }
-            if let Some(err) = eval_error {
-                let _ = print_tx.send(format!("\x1b[31m{}\x1b[0m", err));
+                out.push('\n');
             }
 
-            true
+            if let Ok(mut p) = printer_for_candidates.lock() {
+                let _ = p.print(out);
+            }
+        })
+    });
+    editor.set_helper(Some(helper));
+
+    // Set up history file
+    let history_path = dirs::data_dir().map(|d| d.join("aike").join("repl_history.txt"));
+    if let Some(ref path) = history_path {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
         }
-        _ => false,
+        let _ = editor.load_history(path);
     }
-}
 
-/// Main REPL loop.
-pub(crate) async fn run_repl(rt: &mut Runtime, ctx: &mut Context<'_>) -> ExitCode {
-    let hist_path = history_path();
-    let history = match FileBackedHistory::with_file(1000, hist_path) {
-        Ok(h) => h,
-        Err(_) => {
-            FileBackedHistory::new(1000).unwrap_or_else(|_| FileBackedHistory::new(50).unwrap())
-        }
-    };
-    let highlighter = AikePrompt {
-        is_multiline: false,
-    };
-
-    let mut last_was_ctrl_c = false;
-    // imcomplete input pending buffer
-    let mut multi_line = String::new();
-    // shutdow flag
-    let shutdown_flag = Arc::new(AtomicBool::new(false));
-
-    // Create ExternalPrinter in the main thread. The sender is cloned for use
-    // in the main thread; the ExternalPrinter itself is moved into the readline
-    // thread's closure.
-    let external_printer = reedline::ExternalPrinter::<String>::new(1024);
-    let print_tx = external_printer.sender();
-    // Redirect console.log (and friends) output through ExternalPrinter so it
-    // isn't overwritten by reedline's input line repaint.
+    // Redirect console.log output through ExternalPrinter
     crate::global::set_console_output_hook({
-        let print_tx2 = print_tx.clone();
+        let printer = printer.clone();
         Box::new(move |msg| {
-            let _ = print_tx2.send(msg);
+            if let Ok(mut p) = printer.lock() {
+                let _ = p.print(msg);
+            }
         })
     });
 
-    // Channel: readline thread -> main thread.
-    let (input_tx, mut input_rx) = tokio::sync::mpsc::channel::<Signal>(1);
-    // Channel: main thread -> readline thread.
-    let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::unbounded_channel::<ReadlineCmd>();
-    // Single channel pair: hinter sends requests, main thread responds.
-    let (req_tx, mut req_rx) = tokio::sync::mpsc::unbounded_channel::<CompletionRequest>();
-    let (res_tx, res_rx) = tokio::sync::mpsc::unbounded_channel::<CompletionResponse>();
-
     //
-    // Spawn the blocking read line thread
+    // Spawn readline thread
     //
-    let readline_thread = std::thread::Builder::new()
-        .name("readline".into())
-        .spawn({
-            let shutdown_flag2 = shutdown_flag.clone();
+    let (input_tx, mut input_rx) = tokio::sync::mpsc::channel::<InputCommand>(64);
 
-            move || {
-                // Set up keybindings: Tab triggers completion menu.
-                let mut keybindings = default_emacs_keybindings();
-                keybindings.add_binding(
-                    KeyModifiers::NONE,
-                    KeyCode::Tab,
-                    ReedlineEvent::UntilFound(vec![
-                        ReedlineEvent::Menu("completion_menu".to_string()),
-                        ReedlineEvent::MenuNext,
-                    ]),
-                );
-                let edit_mode = Box::new(reedline::Emacs::new(keybindings));
+    let readline_handle = {
+        let input_tx = input_tx.clone();
+        let mut editor = editor;
+        let prompt = AikePrompt {
+            is_multiline: false,
+        };
 
-                let completion_menu =
-                    Box::new(ColumnarMenu::default().with_name("completion_menu"));
-
-                let state = Arc::new(Mutex::new(CompletionState::new(req_tx, res_rx)));
-
-                let mut editor = Box::new(
-                    Reedline::create()
-                        .with_history(Box::new(history))
-                        .with_highlighter(Box::new(highlighter))
-                        .with_completer(Box::new(AikeCompleter::new(state.clone())))
-                        .with_hinter(Box::new(AikeHinter::new(state)))
-                        .with_menu(ReedlineMenu::EngineCompleter(completion_menu))
-                        .with_edit_mode(edit_mode)
-                        .with_external_printer(external_printer)
-                        .with_quick_completions(true)
-                        .with_break_signal(shutdown_flag2),
-                );
-                let mut prompt = AikePrompt {
-                    is_multiline: false,
-                };
-
-                loop {
-                    while let Ok(cmd) = cmd_rx.try_recv() {
-                        match cmd {
-                            ReadlineCmd::SetMultiline(v) => prompt.is_multiline = v,
-                            ReadlineCmd::Shutdown => {
-                                let _ = editor.history_mut().sync();
-                                return;
-                            }
+        std::thread::spawn(move || {
+            loop {
+                match editor.readline(prompt.raw()) {
+                    Ok(line) => {
+                        let trimmed = line.trim();
+                        if trimmed.is_empty() {
+                            continue;
                         }
-                    }
-
-                    let sig = match editor.read_line(&prompt) {
-                        Ok(s) => s,
-                        Err(_) => {
-                            let _ = input_tx.blocking_send(Signal::CtrlD);
-                            return;
+                        if trimmed == ".quit" || trimmed == ".exit" {
+                            let _ = input_tx.blocking_send(InputCommand::Quit);
+                            break;
                         }
-                    };
-
-                    if matches!(sig, Signal::ExternalBreak(_)) {
-                        let _ = editor.history_mut().sync();
-                        return;
+                        let _ = input_tx.blocking_send(InputCommand::Eval(trimmed.to_string()));
                     }
-
-                    if input_tx.blocking_send(sig).is_err() {
-                        let _ = editor.history_mut().sync();
-                        return;
+                    Err(ReadlineError::Interrupted) => {
+                        // Ctrl-C: print ^C and continue
+                        // rustyline handles Ctrl-C by returning Interrupted
+                        continue;
+                    }
+                    Err(ReadlineError::Eof) => {
+                        // Ctrl-D: quit
+                        let _ = input_tx.blocking_send(InputCommand::Quit);
+                        break;
+                    }
+                    Err(err) => {
+                        eprintln!("Readline error: {:?}", err);
+                        break;
                     }
                 }
             }
         })
-        .unwrap();
+    };
 
     //
-    // repl loop in js thread
+    // Main JS event loop
     //
-    let _ = print_tx.send("\x1b[32mWake up, Aike. Type .help for hint.\x1b[0m\n".to_string());
+    let mut req_rx = completion_state.req_rx.lock().await;
 
     loop {
         tokio::select! {
-            // Drive the runtime tick.
-            _ = rt.run_async() => {}
+            // input line
+            cmd = input_rx.recv() => {
+                let Some(cmd) = cmd else { break };
+                match cmd {
+                    InputCommand::Quit => break,
+                    InputCommand::Eval(line) => {
+                        let mut outputs: Vec<String> = Vec::new();
+                        let mut eval_error: Option<String> = None;
 
-            // Handle completion/hint requests from the readline thread.
-            Some(req) = req_rx.recv() => {
-                let choices = Arc::new(Mutex::new(None::<(Vec<String>, usize)>));
-                let choices2 = choices.clone();
-                ctx.with_new_scope(|mut cx| {
-                    let r = js_compute_completions(&mut cx, &req.line, req.pos);
-                    choices2.lock().unwrap().replace(r);
-                    cx.return_value(())
-                });
-                if let Some((suggestions, word_start)) = choices.lock().unwrap().take() {
-                    let _ = res_tx.send(CompletionResponse {
-                        suggestions,
-                        word_start,
-                    });
+                        ctx.with_new_scope(|mut scope| {
+                            match scope.eval(
+                                line.as_bytes(),
+                                "<repl>",
+                                zuqe::EvalType::Global,
+                                zuqe::EvalFlags::empty(),
+                            ) {
+                                Ok(val) => {
+                                    let result = val
+                                        .inspect(&mut scope)
+                                        .unwrap_or_else(|_| "<error>".to_string());
+                                    if !result.is_empty() && result != "undefined" {
+                                        outputs.push(result);
+                                    }
+                                }
+                                Err(e) => {
+                                    eval_error = Some(e.to_string());
+                                }
+                            }
+
+                            scope.return_value(())
+                        });
+
+                        if let Ok(mut p) = printer.lock() {
+                            for msg in outputs {
+                                let _ = p.print(msg);
+                            }
+                            if let Some(err) = eval_error {
+                                let _ = p.print(format!("\x1b[31m{}\x1b[0m", err));
+                            }
+                        }
+                    }
                 }
             }
 
-            // Read input and process.
-            Some(sig) = input_rx.recv() => {
-                if !handle_input(
-                    sig,
-                    &mut multi_line,
-                    &mut last_was_ctrl_c,
-                    &cmd_tx,
-                    &print_tx,
-                    rt,
-                    ctx,
-                ) {
-                    break;
-                }
+            // completion request
+            req = req_rx.recv() => {
+                let Some(req) = req else { continue };
+                ctx.with_new_scope(|mut scope| {
+                    js_compute_completions(&mut scope, req);
+                    scope.return_value(())
+                });
             }
         }
     }
 
-    let _ = cmd_tx.send(ReadlineCmd::Shutdown);
-    shutdown_flag.store(true, Ordering::Relaxed);
-    drop(input_rx);
-
-    let _ = readline_thread.join();
-    println!();
-    ExitCode::SUCCESS
+    let _ = readline_handle.join();
 }

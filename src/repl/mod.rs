@@ -5,4 +5,4 @@ mod completion;
 mod prompt;
 mod worker;
 
-pub(crate) use worker::run_repl;
+pub(crate) use worker::run;

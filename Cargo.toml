@@ -74,10 +74,11 @@ async-openai = { version = "0.37", default-features = false, features = [
     "rustls",
 ] }
 tokio-util = { version = "0.7", features = ["io"] }
-reedline = { version = "0.48", features = [
-    "idle_callback",
-    "external_printer",
-] }
+rustyline = { version = "18", features = ["with-file-history"] }
+rustyline-derive = "0.12"
+parking_lot = "0.12"
+dirs = "6"
+crossterm = "0.28"
 nu-ansi-term = "0.50"
 
 [[bin]]

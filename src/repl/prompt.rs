@@ -4,7 +4,8 @@
 use std::borrow::Cow;
 
 use nu_ansi_term::Style;
-use reedline::{Highlighter, Prompt, PromptEditMode, PromptHistorySearch, StyledText};
+use rustyline::Prompt;
+use rustyline::highlight::{CmdKind, Highlighter};
 
 // ---------------------------------------------------------------------------
 // Styles — computed once with LazyLock (Rust 1.80+)
@@ -63,41 +64,30 @@ pub(crate) struct AikePrompt {
 }
 
 impl Prompt for AikePrompt {
-    fn render_prompt_left(&self) -> Cow<'_, str> {
+    fn raw(&self) -> &str {
         if self.is_multiline {
-            Cow::Borrowed("   ... ")
+            "   ... "
         } else {
-            Cow::Borrowed("\x1b[32maike>\x1b[0m ")
+            "aike> "
         }
     }
 
-    fn render_prompt_right(&self) -> Cow<'_, str> {
-        Cow::Borrowed("")
-    }
-
-    fn render_prompt_indicator(&self, _edit_mode: PromptEditMode) -> Cow<'_, str> {
-        Cow::Borrowed("")
-    }
-
-    fn render_prompt_multiline_indicator(&self) -> Cow<'_, str> {
+    fn styled(&self) -> &str {
         if self.is_multiline {
-            Cow::Borrowed("   ... ")
+            "   ... "
         } else {
-            Cow::Borrowed("")
+            "\x1b[32maike>\x1b[0m "
         }
-    }
-
-    fn render_prompt_history_search_indicator(
-        &self,
-        _history_search: PromptHistorySearch,
-    ) -> Cow<'_, str> {
-        Cow::Borrowed("")
     }
 }
 
 impl Highlighter for AikePrompt {
-    fn highlight(&self, line: &str, _cursor: usize) -> StyledText {
-        colorize_js(line)
+    fn highlight<'l>(&self, line: &'l str, _pos: usize) -> Cow<'l, str> {
+        Cow::Owned(colorize_js(line))
+    }
+
+    fn highlight_char(&self, _line: &str, _pos: usize, _cmd: CmdKind) -> bool {
+        true
     }
 }
 
@@ -106,10 +96,10 @@ impl Highlighter for AikePrompt {
 // ---------------------------------------------------------------------------
 
 #[allow(unused_assignments)]
-fn colorize_js(code: &str) -> StyledText {
+fn colorize_js(code: &str) -> String {
     let bytes = code.as_bytes();
     let len = bytes.len();
-    let mut styled = StyledText::new();
+    let mut out = String::new();
     let mut seg_start: usize = 0;
     let mut cur_style: &Style = &STYLE_DEFAULT;
     let mut i = 0;
@@ -124,7 +114,7 @@ fn colorize_js(code: &str) -> StyledText {
     macro_rules! flush {
         () => {{
             if i > seg_start {
-                styled.push((*cur_style, code[seg_start..i].to_string()));
+                out.push_str(&cur_style.paint(&code[seg_start..i]).to_string());
             }
             seg_start = i;
         }};
@@ -133,9 +123,9 @@ fn colorize_js(code: &str) -> StyledText {
     macro_rules! emit_token {
         ($st:expr, $token:expr) => {{
             if seg_start < i {
-                styled.push((*cur_style, code[seg_start..i].to_string()));
+                out.push_str(&cur_style.paint(&code[seg_start..i]).to_string());
             }
-            styled.push((*$st, $token.to_string()));
+            out.push_str(&$st.paint($token).to_string());
             seg_start = i;
         }};
     }
@@ -213,7 +203,7 @@ fn colorize_js(code: &str) -> StyledText {
             if c == b'*' && i + 1 < len && bytes[i + 1] == b'/' {
                 let end = i + 2;
                 if end > seg_start {
-                    styled.push((*STYLE_COMMENT, code[seg_start..end].to_string()));
+                    out.push_str(&STYLE_COMMENT.paint(&code[seg_start..end]).to_string());
                 }
                 seg_start = end;
                 i = end;
@@ -362,7 +352,7 @@ fn colorize_js(code: &str) -> StyledText {
                 can_regex = true;
 
                 if is_js_keyword(word) {
-                    styled.push((*STYLE_KEYWORD, word.to_string()));
+                    out.push_str(&STYLE_KEYWORD.paint(word).to_string());
                     seg_start = i;
                     if is_js_no_regex(word) {
                         can_regex = false;
@@ -373,13 +363,13 @@ fn colorize_js(code: &str) -> StyledText {
                         j += 1;
                     }
                     if j < len && bytes[j] == b'(' {
-                        styled.push((*STYLE_FUNCTION, word.to_string()));
+                        out.push_str(&STYLE_FUNCTION.paint(word).to_string());
                         seg_start = i;
                     } else if is_js_type(word) {
-                        styled.push((*STYLE_TYPE, word.to_string()));
+                        out.push_str(&STYLE_TYPE.paint(word).to_string());
                         seg_start = i;
                     } else {
-                        styled.push((*STYLE_IDENTIFIER, word.to_string()));
+                        out.push_str(&STYLE_IDENTIFIER.paint(word).to_string());
                         seg_start = i;
                         can_regex = false;
                     }
@@ -395,13 +385,13 @@ fn colorize_js(code: &str) -> StyledText {
 
     if in_single || in_double || in_backtick {
         if i > seg_start {
-            styled.push((*STYLE_ERROR, code[seg_start..i].to_string()));
+            out.push_str(&STYLE_ERROR.paint(&code[seg_start..i]).to_string());
         }
     } else if i > seg_start {
-        styled.push((*cur_style, code[seg_start..i].to_string()));
+        out.push_str(&cur_style.paint(&code[seg_start..i]).to_string());
     }
 
-    styled
+    out
 }
 
 fn is_js_keyword(w: &str) -> bool {

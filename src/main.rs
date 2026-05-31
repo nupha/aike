@@ -287,7 +287,8 @@ async fn main() -> ExitCode {
 
     // REPL mode: no filename provided
     let Some(ref_filename) = filename else {
-        return repl::run_repl(&mut rt, &mut ctx).await;
+        repl::run(&mut rt, &mut ctx).await;
+        return ExitCode::SUCCESS;
     };
 
     //
