@@ -52,10 +52,6 @@ impl CompletionState {
     }
 }
 
-// ---------------------------------------------------------------------------
-// AikeCompleter — triggered on Tab
-// ---------------------------------------------------------------------------
-
 /// Reedline `Completer` that uses the state populated by the hinter.
 pub(crate) struct AikeCompleter {
     state: Arc<Mutex<CompletionState>>,
@@ -130,10 +126,6 @@ impl Completer for AikeCompleter {
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// AikeHinter — triggered on every keystroke
-// ---------------------------------------------------------------------------
 
 /// Reedline `Hinter` that shows a dimmed inline hint when one candidate is a
 /// prefix of another (e.g. `readFile` → `readFileSync`).
@@ -250,33 +242,6 @@ fn find_prefix_suffix(candidates: &[String], prefix: &str) -> Option<String> {
     Some(target[prefix.len()..].to_string())
 }
 
-/// Compute the longest common prefix of a list of strings.
-fn longest_common_prefix(strings: &[String]) -> String {
-    if strings.is_empty() {
-        return String::new();
-    }
-    let first = &strings[0];
-    let mut end = first.len();
-    for s in &strings[1..] {
-        end = end.min(s.len());
-        for (i, (a, b)) in first[..end].bytes().zip(s.bytes()).enumerate() {
-            if a != b {
-                end = i;
-                break;
-            }
-        }
-        if end == 0 {
-            break;
-        }
-    }
-    first[..end].to_string()
-}
-
-/// Check if `c` is a JS word character (alphanumeric, _, $).
-fn is_js_word_char(c: u8) -> bool {
-    c.is_ascii_alphanumeric() || c == b'_' || c == b'$'
-}
-
 /// Given a line and cursor position, compute completions using zuqe.
 ///
 /// Mirrors the logic from `repl.js` `get_completions()`:
@@ -289,10 +254,15 @@ pub(crate) fn js_compute_completions(
     line: &str,
     pos: usize,
 ) -> (Vec<String>, usize) {
+    /// Check if `c` is a JS word character (alphanumeric, _, $).
+    fn is_word_char(c: u8) -> bool {
+        c.is_ascii_alphanumeric() || c == b'_' || c == b'$'
+    }
+
     let bytes = line.as_bytes();
 
     let mut word_start = pos;
-    while word_start > 0 && is_js_word_char(bytes[word_start - 1]) {
+    while word_start > 0 && is_word_char(bytes[word_start - 1]) {
         word_start -= 1;
     }
     let prefix = &line[word_start..pos];
@@ -300,7 +270,7 @@ pub(crate) fn js_compute_completions(
     let ctx_obj = if word_start >= 2 && bytes[word_start - 1] == b'.' {
         let ident_end = word_start - 1;
         let mut ident_start = ident_end;
-        while ident_start > 0 && is_js_word_char(bytes[ident_start - 1]) {
+        while ident_start > 0 && is_word_char(bytes[ident_start - 1]) {
             ident_start -= 1;
         }
         let ident = &line[ident_start..ident_end];
@@ -314,7 +284,7 @@ pub(crate) fn js_compute_completions(
             Err(_) => return (Vec::new(), word_start),
         }
     } else {
-        if word_start > 0 && is_js_word_char(bytes[word_start - 1]) {
+        if word_start > 0 && is_word_char(bytes[word_start - 1]) {
             return (Vec::new(), word_start);
         }
         scope.global_obj().into()
