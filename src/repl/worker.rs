@@ -4,8 +4,8 @@
 use std::sync::{Arc, Mutex};
 
 use rustyline::{
-    Editor, ExternalPrinter as _, Prompt, config::Builder as ConfigBuilder, error::ReadlineError,
-    history::FileHistory,
+    Editor, ExternalPrinter as _, Prompt, config::Builder as ConfigBuilder, config::CompletionType,
+    error::ReadlineError, history::FileHistory,
 };
 
 use crate::repl::{
@@ -25,7 +25,10 @@ pub(crate) async fn run<'c>(rt: &mut zuqe::Runtime, ctx: &mut zuqe::Context<'c>)
     let completion_state = CompletionState::new();
 
     // Build rustyline editor
-    let config = ConfigBuilder::new().auto_add_history(false).build();
+    let config = ConfigBuilder::new()
+        .auto_add_history(false)
+        .completion_type(CompletionType::List)
+        .build();
 
     let mut editor =
         Editor::<AikeHelper, FileHistory>::with_config(config).expect("Editor::with_config");
@@ -134,12 +137,11 @@ pub(crate) async fn run<'c>(rt: &mut zuqe::Runtime, ctx: &mut zuqe::Context<'c>)
                                     input_tx.blocking_send(InputCommand::Eval(trimmed.to_string()));
 
                                 // Meta-commands (.exit, .help) should not appear in history.
-                                if !trimmed.starts_with('.') {
-                                    if let Ok(true) = editor.add_history_entry(trimmed)
-                                        && let Some(ref path) = history_path
-                                    {
-                                        let _ = editor.save_history(path);
-                                    }
+                                if !trimmed.starts_with('.')
+                                    && let Ok(true) = editor.add_history_entry(trimmed)
+                                    && let Some(ref path) = history_path
+                                {
+                                    let _ = editor.save_history(path);
                                 }
                             }
                         }

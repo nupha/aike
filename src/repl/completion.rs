@@ -132,12 +132,22 @@ impl Completer for AikeHelper {
         );
 
         if let Some(suffix) = hint_suffix {
-            // Complete to the common prefix
+            // Complete to the common prefix first, then include all
+            // matching candidates for subsequent Tab cycling.
             let full = format!("{}{}", prefix, suffix);
-            let pairs = vec![Pair {
+            let mut pairs = vec![Pair {
                 display: full.clone(),
-                replacement: full,
+                replacement: full.clone(),
             }];
+            // Add remaining candidates that share this prefix for cycling
+            for c in &resp.candidates {
+                if c.name != full && c.name.starts_with(&full) {
+                    pairs.push(Pair {
+                        display: c.name.clone(),
+                        replacement: c.name.clone(),
+                    });
+                }
+            }
             return Ok((resp.start, pairs));
         }
 
