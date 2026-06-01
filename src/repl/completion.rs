@@ -11,6 +11,7 @@ use rustyline::highlight::Highlighter;
 use rustyline::hint::Hinter;
 use rustyline::validate::Validator;
 use rustyline_derive::Helper;
+use zuqe::JSValue;
 
 use crate::repl::prompt::AikePrompt;
 
@@ -288,6 +289,53 @@ fn find_prefix_suffix(candidates: &[String], prefix: &str) -> Option<String> {
     }
 }
 
+/// Resolve the object before the cursor by recursively walking the property path.
+///
+/// Mirrors `get_context_object()` from `repl.js`:
+/// For `Aike.stdout.`, evaluates `Aike`, then accesses `.stdout` on the result.
+/// Returns `JSValue::UNDEFINED` if resolution fails.
+fn resolve_context_obj(scope: &mut zuqe::ScopedContext<'_>, line: &str, pos: usize) -> JSValue {
+    fn is_word_char(c: u8) -> bool {
+        c.is_ascii_alphanumeric() || c == b'_' || c == b'$'
+    }
+
+    let bytes = line.as_bytes();
+
+    // At start or preceded by an operator character → global object
+    if pos == 0 || b" ~!%^&*(-+={[|:;,<>?/".contains(&bytes[pos - 1]) {
+        return scope.global_obj().into();
+    }
+
+    // Preceded by a dot → resolve the left-hand side and access the property
+    if pos >= 2 && bytes[pos - 1] == b'.' {
+        let prop_end = pos - 1;
+        let mut prop_start = prop_end;
+        while prop_start > 0 && is_word_char(bytes[prop_start - 1]) {
+            prop_start -= 1;
+        }
+        let prop_name = &line[prop_start..prop_end];
+
+        // Recursively resolve the object before the dot
+        let obj = resolve_context_obj(scope, line, prop_start);
+        if obj.is_undefined_or_null() {
+            return JSValue::UNDEFINED;
+        }
+        let Some(o) = obj.as_object() else {
+            return JSValue::UNDEFINED;
+        };
+        match o.get_property_str(scope, prop_name) {
+            Ok(v) => v,
+            Err(_) => JSValue::UNDEFINED,
+        }
+    } else {
+        // Preceded by a word character but no dot → cursor is mid-word, can't resolve
+        if is_word_char(bytes[pos - 1]) {
+            return JSValue::UNDEFINED;
+        }
+        scope.global_obj().into()
+    }
+}
+
 /// Compute completions by calling the JS engine.
 /// Called from the JS thread when a completion request is detected.
 pub(crate) fn js_compute_completions(scope: &mut zuqe::ScopedContext<'_>, req: CompletionRequest) {
@@ -304,38 +352,14 @@ pub(crate) fn js_compute_completions(scope: &mut zuqe::ScopedContext<'_>, req: C
     }
     let prefix = &req.line[word_start..pos];
 
-    let ctx_obj = if word_start >= 2 && bytes[word_start - 1] == b'.' {
-        let ident_end = word_start - 1;
-        let mut ident_start = ident_end;
-        while ident_start > 0 && is_word_char(bytes[ident_start - 1]) {
-            ident_start -= 1;
-        }
-        let ident = &req.line[ident_start..ident_end];
-        match scope.eval(
-            ident.as_bytes(),
-            "<completion>",
-            zuqe::EvalType::Global,
-            zuqe::EvalFlags::empty(),
-        ) {
-            Ok(v) => v,
-            Err(_) => {
-                let _ = req.resp_tx.send(CompletionResponse {
-                    candidates: Vec::new(),
-                    start: word_start,
-                });
-                return;
-            }
-        }
-    } else {
-        if word_start > 0 && is_word_char(bytes[word_start - 1]) {
-            let _ = req.resp_tx.send(CompletionResponse {
-                candidates: Vec::new(),
-                start: word_start,
-            });
-            return;
-        }
-        scope.global_obj().into()
-    };
+    let ctx_obj = resolve_context_obj(scope, &req.line, word_start);
+    if ctx_obj.is_undefined() {
+        let _ = req.resp_tx.send(CompletionResponse {
+            candidates: Vec::new(),
+            start: word_start,
+        });
+        return;
+    }
 
     let mut props: Vec<String> = Vec::new();
     let mut obj = ctx_obj;
@@ -363,9 +387,9 @@ pub(crate) fn js_compute_completions(scope: &mut zuqe::ScopedContext<'_>, req: C
                 props.push(name_str);
             }
         }
-        let proto = match o.shape().and_then(|s| s.proto()) {
-            Some(p) => p,
-            None => break,
+        let proto = match o.prototype(scope) {
+            Ok(Some(p)) => p,
+            _ => break,
         };
         obj = zuqe::JSValue::from(proto);
     }

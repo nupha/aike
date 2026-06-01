@@ -41,11 +41,6 @@ pub fn init_aike(
         ns.define_property_value_str(ctx, "execArgv", arr.into(), JS_PROP_C_W_E)?;
     }
 
-    // Create cached stdio handles (created once, stored as properties on Aike)
-    let stdin_obj = JSIoHandle::new_instance_stdin(ctx)?;
-    let stdout_obj = JSIoHandle::new_instance_stdout(ctx)?;
-    let stderr_obj = JSIoHandle::new_instance_stderr(ctx)?;
-
     let entries: &[FieldDef] = &[
         // --- proc ---
         FieldDef::FUNC("cwd", 0, sys::js_cwd, 0),
@@ -63,14 +58,25 @@ pub fn init_aike(
         FieldDef::FUNC("now", 0, sys::js_now, 0),
         // --- signal ---
         FieldDef::FUNC("onSignal", 2, signal::js_on_signal, 0),
+        // --- stdio ---
+        FieldDef::LAZY_VALUE(
+            "stdin",
+            |cx| JSIoHandle::new_instance_stdin(cx).map(JSValue::from),
+            JS_PROP_ENUMERABLE,
+        ),
+        FieldDef::LAZY_VALUE(
+            "stdout",
+            |cx| JSIoHandle::new_instance_stdout(cx).map(JSValue::from),
+            JS_PROP_ENUMERABLE,
+        ),
+        FieldDef::LAZY_VALUE(
+            "stderr",
+            |cx| JSIoHandle::new_instance_stderr(cx).map(JSValue::from),
+            JS_PROP_ENUMERABLE,
+        ),
     ];
 
     ns.install_fields(ctx, entries)?;
-
-    // Store stdio handles as plain properties (cached, not re-created on each access)
-    ns.define_property_value_str(ctx, "stdin", stdin_obj.into(), JS_PROP_ENUMERABLE)?;
-    ns.define_property_value_str(ctx, "stdout", stdout_obj.into(), JS_PROP_ENUMERABLE)?;
-    ns.define_property_value_str(ctx, "stderr", stderr_obj.into(), JS_PROP_ENUMERABLE)?;
 
     // Expose as global `Aike`
     ctx.global_obj()

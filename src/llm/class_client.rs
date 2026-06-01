@@ -146,9 +146,10 @@ fn js_client_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             INNER_PROP_RESPONSE_NORMALIZER,
             JSValue::NULL,
             JS_PROP_WRITABLE,
-        )
+        )?;
+
+        Ok(JSValue::from(o))
     })
-    .map(JSValue::from)
 }
 
 /// Normalize message format in `choices[]` to standard shape.
