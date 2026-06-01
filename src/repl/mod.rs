@@ -7,9 +7,12 @@ mod worker;
 
 pub(crate) use worker::run;
 
-use std::sync::{
-    Mutex, OnceLock,
-    atomic::{AtomicBool, Ordering},
+use std::{
+    borrow::Cow,
+    sync::{
+        Mutex, OnceLock,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use rustyline::ExternalPrinter;
@@ -28,7 +31,7 @@ pub(super) fn init_printer(printer: Box<dyn ExternalPrinter + Send>) {
 
 /// Print a message to the terminal. Uses ExternalPrinter during readline()
 /// (raw mode) and direct stdout otherwise.
-pub(crate) fn print_output(msg: &str) {
+pub(crate) fn print_output<'a>(msg: Cow<'a, str>) {
     if IN_READLINE.load(Ordering::Acquire)
         && let Some(mut p) = PRINTER.get().and_then(|x| x.lock().ok())
     {

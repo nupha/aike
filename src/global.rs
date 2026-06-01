@@ -21,8 +21,9 @@ thread_local! {
     static TIMERS: RefCell<HashMap<String, Instant>> = RefCell::new(HashMap::new());
 }
 
+#[inline(always)]
 fn console_println(msg: String) {
-    crate::repl::print_output(&msg);
+    crate::repl::print_output(msg.into());
 }
 
 fn js_console_print(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {

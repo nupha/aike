@@ -22,6 +22,48 @@ pub(crate) enum InputCommand {
     Quit,
 }
 
+fn process_input_line(
+    ctx: &mut zuqe::Context<'_>,
+    line: &str,
+    ack_tx: &std::sync::mpsc::Sender<()>,
+) {
+    match line {
+        ".help" => {
+            print_output(HELP.into());
+        }
+        _ => {
+            ctx.with_new_scope(|mut cx| {
+                match cx.eval(
+                    line.as_bytes(),
+                    "<repl>",
+                    zuqe::EvalType::Global,
+                    zuqe::EvalFlags::empty(),
+                ) {
+                    Ok(val) => {
+                        let result = val
+                            .inspect(&mut cx)
+                            .unwrap_or_else(|_| "<fail to display>".to_string());
+                        print_output(result.into());
+                    }
+                    Err(_) => {
+                        let t = cx.take_exception().to_text(&mut cx);
+                        let mut msg = t.message;
+                        if let Some(tb) = t.traceback {
+                            msg.push('\n');
+                            msg.push_str(&tb);
+                        }
+                        print_output(format!("\x1b[31m{}\x1b[0m", msg).into());
+                    }
+                }
+
+                cx.return_value(())
+            });
+
+            let _ = ack_tx.send(());
+        }
+    }
+}
+
 /// Start the REPL event loop.
 pub(crate) async fn run<'c>(rt: &mut zuqe::Runtime, ctx: &mut zuqe::Context<'c>) {
     let completion_state = CompletionState::new();
@@ -75,7 +117,7 @@ pub(crate) async fn run<'c>(rt: &mut zuqe::Runtime, ctx: &mut zuqe::Context<'c>)
                 out.push('\n');
             }
 
-            print_output(&out);
+            print_output(out.into());
         })
     });
     editor.set_helper(Some(helper));
@@ -180,44 +222,7 @@ pub(crate) async fn run<'c>(rt: &mut zuqe::Runtime, ctx: &mut zuqe::Context<'c>)
                 match cmd {
                     InputCommand::Quit =>{ break; },
                     InputCommand::Eval(line) => {
-                        match line.as_str() {
-                            ".help" => {
-                                print_output(HELP);
-                                continue;
-                            }
-                            _ => {
-                                let _ = ctx.with_root_scope(|mut cx| {
-                                    match cx.eval(
-                                        line.as_bytes(),
-                                        "<repl>",
-                                        zuqe::EvalType::Global,
-                                        zuqe::EvalFlags::empty(),
-                                    ) {
-                                        Ok(val) => {
-                                            let result = val
-                                                .inspect(&mut cx)
-                                                .unwrap_or_else(|_| "<fail to display>".to_string());
-                                            if !result.is_empty() {
-                                                print_output(&result);
-                                            }
-                                        }
-                                        Err(_) => {
-                                            let t = cx.take_exception().to_text(&mut cx);
-                                            let mut msg = t.message;
-                                            if let Some(tb) = t.traceback {
-                                                msg.push('\n');
-                                                msg.push_str(&tb);
-                                            }
-                                            print_output(&format!("\x1b[31m{}\x1b[0m", msg));
-                                        }
-                                    }
-
-                                    cx.return_value(())
-                                });
-
-                                let _ = ack_tx.send(());
-                            }
-                        }
+                        process_input_line(ctx, &line, &ack_tx);
                     }
                 }
             }
