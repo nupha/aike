@@ -1,15 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, atomic::Ordering};
 
 use rustyline::{
-    Editor, ExternalPrinter as _, Prompt, config::Builder as ConfigBuilder, config::CompletionType,
-    error::ReadlineError, history::FileHistory,
+    Editor, Prompt, config::Builder as ConfigBuilder, config::CompletionType, error::ReadlineError,
+    history::FileHistory,
 };
 
 use crate::repl::{
+    IN_READLINE,
     completion::{AikeHelper, CompletionState, js_compute_completions},
+    init_printer, print_output,
     prompt::AikePrompt,
 };
 
@@ -33,27 +35,14 @@ pub(crate) async fn run<'c>(rt: &mut zuqe::Runtime, ctx: &mut zuqe::Context<'c>)
     let mut editor =
         Editor::<AikeHelper, FileHistory>::with_config(config).expect("Editor::with_config");
 
-    // Create ExternalPrinter first so it can be shared with the helper
-    let printer = Arc::new(Mutex::new(
-        editor
-            .create_external_printer()
-            .expect("create_external_printer"),
-    ));
-
-    // Redirect console.log output through ExternalPrinter
-    crate::global::set_console_output_hook({
-        let printer = printer.clone();
-        Box::new(move |msg| {
-            if let Ok(mut p) = printer.lock() {
-                let _ = p.print(msg);
-            }
-        })
-    });
+    // Create ExternalPrinter and register it globally.
+    let printer = editor
+        .create_external_printer()
+        .expect("create_external_printer");
+    init_printer(Box::new(printer));
 
     let mut helper = AikeHelper::new(completion_state.clone());
     helper.print_candidates = Some({
-        let printer = printer.clone();
-
         Arc::new(move |candidates| {
             let term_width = crossterm::terminal::size()
                 .map(|(w, _)| w as usize)
@@ -86,9 +75,7 @@ pub(crate) async fn run<'c>(rt: &mut zuqe::Runtime, ctx: &mut zuqe::Context<'c>)
                 out.push('\n');
             }
 
-            if let Ok(mut p) = printer.lock() {
-                let _ = p.print(out);
-            }
+            print_output(&out);
         })
     });
     editor.set_helper(Some(helper));
@@ -106,6 +93,7 @@ pub(crate) async fn run<'c>(rt: &mut zuqe::Runtime, ctx: &mut zuqe::Context<'c>)
     // Spawn readline thread
     //
     let (input_tx, mut input_rx) = tokio::sync::mpsc::channel::<InputCommand>(64);
+    let (ack_tx, ack_rx) = std::sync::mpsc::channel::<()>();
 
     let readline_handle = {
         let input_tx = input_tx.clone();
@@ -119,7 +107,11 @@ pub(crate) async fn run<'c>(rt: &mut zuqe::Runtime, ctx: &mut zuqe::Context<'c>)
             println!("Wake up, Aike. Type .help to show hints.\n");
 
             loop {
-                match editor.readline(prompt.raw()) {
+                IN_READLINE.store(true, Ordering::Release);
+                let readline_result = editor.readline(prompt.raw());
+                IN_READLINE.store(false, Ordering::Release);
+
+                match readline_result {
                     Ok(line) => {
                         let trimmed = line.trim();
                         if trimmed.is_empty() {
@@ -145,6 +137,9 @@ pub(crate) async fn run<'c>(rt: &mut zuqe::Runtime, ctx: &mut zuqe::Context<'c>)
                                 {
                                     let _ = editor.save_history(path);
                                 }
+
+                                // Wait for JS thread to finish eval (ACK).
+                                let _ = ack_rx.recv();
                             }
                         }
                     }
@@ -187,17 +182,12 @@ pub(crate) async fn run<'c>(rt: &mut zuqe::Runtime, ctx: &mut zuqe::Context<'c>)
                     InputCommand::Eval(line) => {
                         match line.as_str() {
                             ".help" => {
-                                if let Ok(mut p) = printer.lock() {
-                                    let _ = p.print(HELP.to_string());
-                                }
+                                print_output(HELP);
                                 continue;
                             }
                             _ => {
-                                let mut outputs: Vec<String> = Vec::new();
-                                let mut eval_error: Option<String> = None;
-
-                                ctx.with_new_scope(|mut scope| {
-                                    match scope.eval(
+                                let _ = ctx.with_root_scope(|mut cx| {
+                                    match cx.eval(
                                         line.as_bytes(),
                                         "<repl>",
                                         zuqe::EvalType::Global,
@@ -205,35 +195,27 @@ pub(crate) async fn run<'c>(rt: &mut zuqe::Runtime, ctx: &mut zuqe::Context<'c>)
                                     ) {
                                         Ok(val) => {
                                             let result = val
-                                                .inspect(&mut scope)
-                                                .unwrap_or_else(|_| "<error>".to_string());
-                                            if !result.is_empty() && result != "undefined" {
-                                                outputs.push(result);
+                                                .inspect(&mut cx)
+                                                .unwrap_or_else(|_| "<fail to display>".to_string());
+                                            if !result.is_empty() {
+                                                print_output(&result);
                                             }
                                         }
                                         Err(_) => {
-                                            let exc = scope.take_exception();
-                                            let t = exc.to_text(&mut scope);
+                                            let t = cx.take_exception().to_text(&mut cx);
                                             let mut msg = t.message;
                                             if let Some(tb) = t.traceback {
                                                 msg.push('\n');
                                                 msg.push_str(&tb);
                                             }
-                                            eval_error = Some(msg);
+                                            print_output(&format!("\x1b[31m{}\x1b[0m", msg));
                                         }
                                     }
 
-                                    scope.return_value(())
+                                    cx.return_value(())
                                 });
 
-                                if let Ok(mut p) = printer.lock() {
-                                    for msg in outputs {
-                                        let _ = p.print(msg);
-                                    }
-                                    if let Some(err) = eval_error {
-                                        let _ = p.print(format!("\x1b[31m{}\x1b[0m", err));
-                                    }
-                                }
+                                let _ = ack_tx.send(());
                             }
                         }
                     }

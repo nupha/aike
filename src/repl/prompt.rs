@@ -271,9 +271,11 @@ fn colorize_js(code: &str) -> String {
                             }
                             flush!();
                             cur_style = &STYLE_DEFAULT;
+                            can_regex = false;
                         }
                         _ => {
                             i += 1;
+                            can_regex = true;
                         }
                     }
                 } else {
@@ -309,9 +311,9 @@ fn colorize_js(code: &str) -> String {
             b'+' | b'-' => {
                 if i + 1 < len && bytes[i + 1] == c {
                     i += 2;
-                } else {
-                    i += 1;
+                    continue;
                 }
+                i += 1;
                 can_regex = true;
             }
 
@@ -350,7 +352,7 @@ fn colorize_js(code: &str) -> String {
 
                 can_regex = true;
 
-                if is_js_keyword(word) {
+                if js_is_keyword(word) {
                     out.push_str(&STYLE_KEYWORD.paint(word).to_string());
                     seg_start = i;
                     if is_js_no_regex(word) {
@@ -393,7 +395,7 @@ fn colorize_js(code: &str) -> String {
     out
 }
 
-fn is_js_keyword(w: &str) -> bool {
+fn js_is_keyword(w: &str) -> bool {
     matches!(
         w,
         "break"
@@ -445,12 +447,6 @@ fn is_js_keyword(w: &str) -> bool {
             | "eval"
             | "arguments"
             | "await"
-            | "async"
-            | "of"
-            | "from"
-            | "as"
-            | "get"
-            | "set"
     )
 }
 
@@ -470,5 +466,5 @@ fn is_js_no_regex(w: &str) -> bool {
 }
 
 fn is_js_type(w: &str) -> bool {
-    matches!(w, "void" | "var" | "let" | "const" | "typeof")
+    matches!(w, "void" | "var")
 }

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-use std::{cell::RefCell, collections::HashMap, ops::Deref, sync::OnceLock, time::Instant};
+use std::{cell::RefCell, collections::HashMap, ops::Deref, time::Instant};
 
 use zuqe::{
     CallContext, Callback, EvalFlags, EvalType, FieldDef, JS_PROP_C_W_E, JSResult, JSValue,
@@ -21,24 +21,8 @@ thread_local! {
     static TIMERS: RefCell<HashMap<String, Instant>> = RefCell::new(HashMap::new());
 }
 
-/// Optional output hook for redirecting console.log (and friends) output.
-/// When set, console functions send output through this hook instead of writing
-/// directly to stdout. Used by the REPL to route output through reedline's
-/// ExternalPrinter so it isn't overwritten by input line repaint.
-static CONSOLE_OUTPUT_HOOK: OnceLock<Box<dyn Fn(String) + Send + Sync>> = OnceLock::new();
-
-/// Set the console output hook (called from REPL setup).
-pub fn set_console_output_hook(hook: Box<dyn Fn(String) + Send + Sync>) {
-    let _ = CONSOLE_OUTPUT_HOOK.set(hook);
-}
-
-/// Print a line to console output, either through the output hook or directly to stdout.
 fn console_println(msg: String) {
-    if let Some(hook) = CONSOLE_OUTPUT_HOOK.get() {
-        hook(msg);
-    } else {
-        println!("{}", msg);
-    }
+    crate::repl::print_output(&msg);
 }
 
 fn js_console_print(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
