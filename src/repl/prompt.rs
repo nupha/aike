@@ -4,53 +4,48 @@
 use std::borrow::Cow;
 
 use nu_ansi_term::Style;
-use rustyline::Prompt;
-use rustyline::highlight::{CmdKind, Highlighter};
+use rustyline::{
+    Prompt,
+    highlight::{CmdKind, Highlighter},
+};
 
-// ---------------------------------------------------------------------------
-// Styles — computed once with LazyLock (Rust 1.80+)
-//
-// Notes on color choices:
-//   - The user's terminal does not render bold, so we rely on distinct ANSI
-//     base colours rather than bold/bright variants.
-//   - Light* variants are used where a bright colour is needed for contrast.
-// ---------------------------------------------------------------------------
-
-/// Plain terminal default (white/light on dark backgrounds).
-static STYLE_DEFAULT: std::sync::LazyLock<Style> = std::sync::LazyLock::new(Style::new);
-
-/// Dark gray — clearly dimmer than default text.
-static STYLE_COMMENT: std::sync::LazyLock<Style> =
-    std::sync::LazyLock::new(|| Style::new().italic().fg(nu_ansi_term::Color::DarkGray));
-
-/// Bold cyan — kept as-is (user confirmed this colour works).
-static STYLE_STRING: std::sync::LazyLock<Style> =
-    std::sync::LazyLock::new(|| Style::new().bold().fg(nu_ansi_term::Color::Cyan));
-
-/// Cyan + italic — distinguish regex from plain string (terminal can't render bold).
-static STYLE_REGEX: std::sync::LazyLock<Style> =
-    std::sync::LazyLock::new(|| Style::new().italic().fg(nu_ansi_term::Color::Cyan));
-
-/// Yellow — clearly different from everything else.
-static STYLE_NUMBER: std::sync::LazyLock<Style> =
-    std::sync::LazyLock::new(|| Style::new().fg(nu_ansi_term::Color::Yellow));
-
-/// Bright blue — distinct from default, comments, strings, numbers.
-static STYLE_KEYWORD: std::sync::LazyLock<Style> =
-    std::sync::LazyLock::new(|| Style::new().bold().fg(nu_ansi_term::Color::LightBlue));
-
-/// Bright green — distinct from blue keywords and default text.
-static STYLE_FUNCTION: std::sync::LazyLock<Style> =
+/// Default text / identifier color (bright_green).
+static STYLE_DEFAULT: std::sync::LazyLock<Style> =
     std::sync::LazyLock::new(|| Style::new().fg(nu_ansi_term::Color::LightGreen));
 
-/// Magenta — uncommon colour that stands out.
+/// Comment (white).
+static STYLE_COMMENT: std::sync::LazyLock<Style> =
+    std::sync::LazyLock::new(|| Style::new().fg(nu_ansi_term::Color::White));
+
+/// String literal (bright_cyan).
+static STYLE_STRING: std::sync::LazyLock<Style> =
+    std::sync::LazyLock::new(|| Style::new().fg(nu_ansi_term::Color::Cyan));
+
+/// Regex literal (cyan).
+static STYLE_REGEX: std::sync::LazyLock<Style> =
+    std::sync::LazyLock::new(|| Style::new().fg(nu_ansi_term::Color::Cyan));
+
+/// Number literal (green).
+static STYLE_NUMBER: std::sync::LazyLock<Style> =
+    std::sync::LazyLock::new(|| Style::new().fg(nu_ansi_term::Color::Green));
+
+/// Keyword (bright_white → LightGray in nu_ansi_term).
+static STYLE_KEYWORD: std::sync::LazyLock<Style> =
+    std::sync::LazyLock::new(|| Style::new().fg(nu_ansi_term::Color::LightGray));
+
+/// Function call (bright_yellow).
+static STYLE_FUNCTION: std::sync::LazyLock<Style> =
+    std::sync::LazyLock::new(|| Style::new().fg(nu_ansi_term::Color::LightYellow));
+
+/// Type annotation (bright_magenta).
 static STYLE_TYPE: std::sync::LazyLock<Style> =
-    std::sync::LazyLock::new(|| Style::new().fg(nu_ansi_term::Color::Magenta));
+    std::sync::LazyLock::new(|| Style::new().fg(nu_ansi_term::Color::LightMagenta));
 
-/// Terminal default — same as STYLE_DEFAULT (no colour).
-static STYLE_IDENTIFIER: std::sync::LazyLock<Style> = std::sync::LazyLock::new(Style::new);
+/// Identifier (bright_green — same as default).
+static STYLE_IDENTIFIER: std::sync::LazyLock<Style> =
+    std::sync::LazyLock::new(|| Style::new().fg(nu_ansi_term::Color::LightGreen));
 
-/// Red — obvious error indicator.
+/// Error (red).
 static STYLE_ERROR: std::sync::LazyLock<Style> =
     std::sync::LazyLock::new(|| Style::new().fg(nu_ansi_term::Color::Red));
 
@@ -68,7 +63,7 @@ impl Prompt for AikePrompt {
         if self.is_multiline {
             "   ... "
         } else {
-            "aike> "
+            "aike > "
         }
     }
 
@@ -292,6 +287,7 @@ fn colorize_js(code: &str) -> String {
                 seg_start = i;
                 cur_style = &STYLE_STRING;
                 in_single = true;
+                can_regex = false;
             }
             b'"' => {
                 emit_token!(&*STYLE_STRING, &code[i..i + 1]);
@@ -299,6 +295,7 @@ fn colorize_js(code: &str) -> String {
                 seg_start = i;
                 cur_style = &STYLE_STRING;
                 in_double = true;
+                can_regex = false;
             }
             b'`' => {
                 emit_token!(&*STYLE_STRING, &code[i..i + 1]);
@@ -306,6 +303,7 @@ fn colorize_js(code: &str) -> String {
                 seg_start = i;
                 cur_style = &STYLE_STRING;
                 in_backtick = true;
+                can_regex = false;
             }
 
             b'+' | b'-' => {
@@ -339,6 +337,7 @@ fn colorize_js(code: &str) -> String {
                 }
                 flush!();
                 cur_style = &STYLE_DEFAULT;
+                can_regex = false;
             }
 
             _ if is_word(c) => {
@@ -446,6 +445,12 @@ fn is_js_keyword(w: &str) -> bool {
             | "eval"
             | "arguments"
             | "await"
+            | "async"
+            | "of"
+            | "from"
+            | "as"
+            | "get"
+            | "set"
     )
 }
 
@@ -465,5 +470,5 @@ fn is_js_no_regex(w: &str) -> bool {
 }
 
 fn is_js_type(w: &str) -> bool {
-    matches!(w, "void" | "var")
+    matches!(w, "void" | "var" | "let" | "const" | "typeof")
 }
