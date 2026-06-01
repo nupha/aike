@@ -18,11 +18,12 @@ use crate::repl::prompt::AikePrompt;
 // Completion types
 // ---------------------------------------------------------------------------
 
+type CandidatePrinter = Arc<dyn Fn(&[CompletionCandidate]) + Send + Sync>;
+
 /// A completion candidate returned by the JS engine.
 #[derive(Debug, Clone)]
 pub(crate) struct CompletionCandidate {
     pub(crate) name: String,
-    pub(crate) kind: String,
 }
 
 /// Request sent to the JS thread for completions.
@@ -38,7 +39,6 @@ pub(crate) struct CompletionRequest {
 pub(crate) struct CompletionResponse {
     pub(crate) candidates: Vec<CompletionCandidate>,
     pub(crate) start: usize,
-    pub(crate) end: usize,
 }
 
 /// State shared between the REPL and completion system.
@@ -70,7 +70,7 @@ impl CompletionState {
 pub(crate) struct AikeHelper {
     pub(crate) prompt: AikePrompt,
     pub(crate) completion_state: CompletionState,
-    pub(crate) print_candidates: Option<Arc<dyn Fn(&[CompletionCandidate]) + Send + Sync>>,
+    pub(crate) print_candidates: Option<CandidatePrinter>,
 }
 
 impl AikeHelper {
@@ -322,7 +322,6 @@ pub(crate) fn js_compute_completions(scope: &mut zuqe::ScopedContext<'_>, req: C
                 let _ = req.resp_tx.send(CompletionResponse {
                     candidates: Vec::new(),
                     start: word_start,
-                    end: pos,
                 });
                 return;
             }
@@ -332,7 +331,6 @@ pub(crate) fn js_compute_completions(scope: &mut zuqe::ScopedContext<'_>, req: C
             let _ = req.resp_tx.send(CompletionResponse {
                 candidates: Vec::new(),
                 start: word_start,
-                end: pos,
             });
             return;
         }
@@ -389,15 +387,11 @@ pub(crate) fn js_compute_completions(scope: &mut zuqe::ScopedContext<'_>, req: C
 
     let candidates: Vec<CompletionCandidate> = props
         .into_iter()
-        .map(|name| CompletionCandidate {
-            name,
-            kind: String::new(),
-        })
+        .map(|name| CompletionCandidate { name })
         .collect();
 
     let _ = req.resp_tx.send(CompletionResponse {
         candidates,
         start: word_start,
-        end: pos,
     });
 }

@@ -34,14 +34,26 @@ pub(crate) async fn run<'c>(rt: &mut zuqe::Runtime, ctx: &mut zuqe::Context<'c>)
         Editor::<AikeHelper, FileHistory>::with_config(config).expect("Editor::with_config");
 
     // Create ExternalPrinter first so it can be shared with the helper
-    let printer = editor
-        .create_external_printer()
-        .expect("create_external_printer");
-    let printer = Arc::new(Mutex::new(printer));
+    let printer = Arc::new(Mutex::new(
+        editor
+            .create_external_printer()
+            .expect("create_external_printer"),
+    ));
+
+    // Redirect console.log output through ExternalPrinter
+    crate::global::set_console_output_hook({
+        let printer = printer.clone();
+        Box::new(move |msg| {
+            if let Ok(mut p) = printer.lock() {
+                let _ = p.print(msg);
+            }
+        })
+    });
 
     let mut helper = AikeHelper::new(completion_state.clone());
-    let printer_for_candidates = printer.clone();
     helper.print_candidates = Some({
+        let printer = printer.clone();
+
         Arc::new(move |candidates| {
             let term_width = crossterm::terminal::size()
                 .map(|(w, _)| w as usize)
@@ -74,7 +86,7 @@ pub(crate) async fn run<'c>(rt: &mut zuqe::Runtime, ctx: &mut zuqe::Context<'c>)
                 out.push('\n');
             }
 
-            if let Ok(mut p) = printer_for_candidates.lock() {
+            if let Ok(mut p) = printer.lock() {
                 let _ = p.print(out);
             }
         })
@@ -89,16 +101,6 @@ pub(crate) async fn run<'c>(rt: &mut zuqe::Runtime, ctx: &mut zuqe::Context<'c>)
         }
         let _ = editor.load_history(path);
     }
-
-    // Redirect console.log output through ExternalPrinter
-    crate::global::set_console_output_hook({
-        let printer = printer.clone();
-        Box::new(move |msg| {
-            if let Ok(mut p) = printer.lock() {
-                let _ = p.print(msg);
-            }
-        })
-    });
 
     //
     // Spawn readline thread
