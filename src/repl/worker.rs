@@ -25,7 +25,7 @@ pub(crate) async fn run<'c>(rt: &mut zuqe::Runtime, ctx: &mut zuqe::Context<'c>)
     let completion_state = CompletionState::new();
 
     // Build rustyline editor
-    let config = ConfigBuilder::new().auto_add_history(true).build();
+    let config = ConfigBuilder::new().auto_add_history(false).build();
 
     let mut editor =
         Editor::<AikeHelper, FileHistory>::with_config(config).expect("Editor::with_config");
@@ -108,6 +108,7 @@ pub(crate) async fn run<'c>(rt: &mut zuqe::Runtime, ctx: &mut zuqe::Context<'c>)
         let prompt = AikePrompt {
             is_multiline: false,
         };
+        let history_path = history_path.clone();
 
         std::thread::spawn(move || {
             println!("Wake up, Aike. Type .help to show hints.\n");
@@ -119,14 +120,27 @@ pub(crate) async fn run<'c>(rt: &mut zuqe::Runtime, ctx: &mut zuqe::Context<'c>)
                         if trimmed.is_empty() {
                             continue;
                         }
+
                         match trimmed {
                             ".exit" => {
+                                if let Some(ref path) = history_path {
+                                    let _ = editor.save_history(path);
+                                }
                                 let _ = input_tx.blocking_send(InputCommand::Quit);
                                 break;
                             }
                             _ => {
                                 let _ =
                                     input_tx.blocking_send(InputCommand::Eval(trimmed.to_string()));
+
+                                // Meta-commands (.exit, .help) should not appear in history.
+                                if !trimmed.starts_with('.') {
+                                    if let Ok(true) = editor.add_history_entry(trimmed)
+                                        && let Some(ref path) = history_path
+                                    {
+                                        let _ = editor.save_history(path);
+                                    }
+                                }
                             }
                         }
                     }
@@ -136,6 +150,9 @@ pub(crate) async fn run<'c>(rt: &mut zuqe::Runtime, ctx: &mut zuqe::Context<'c>)
                     }
                     Err(ReadlineError::Eof) => {
                         // Ctrl-D: quit
+                        if let Some(ref path) = history_path {
+                            let _ = editor.save_history(path);
+                        }
                         let _ = input_tx.blocking_send(InputCommand::Quit);
                         break;
                     }
@@ -158,7 +175,7 @@ pub(crate) async fn run<'c>(rt: &mut zuqe::Runtime, ctx: &mut zuqe::Context<'c>)
             // Drive the runtime tick.
             _ =  rt.run_async() => {}
 
-            // input line
+            // read input line
             cmd = input_rx.recv() => {
                 let Some(cmd) = cmd else { break; };
                 match cmd {
