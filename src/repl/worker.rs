@@ -4,8 +4,9 @@
 use std::sync::{Arc, atomic::Ordering};
 
 use rustyline::{
-    Cmd, Editor, KeyCode, KeyEvent, Modifiers, Prompt, config::Builder as ConfigBuilder,
-    config::CompletionType, error::ReadlineError, history::FileHistory,
+    Cmd, ConditionalEventHandler, Editor, Event, EventContext, EventHandler, KeyCode, KeyEvent,
+    Modifiers, Prompt, RepeatCount, config::Builder as ConfigBuilder, config::CompletionType,
+    error::ReadlineError, history::FileHistory,
 };
 
 use crate::repl::{
@@ -20,6 +21,34 @@ use crate::repl::{
 pub(crate) enum InputCommand {
     Eval(String),
     Quit,
+}
+
+/// Event handler that clears the hint cache before performing history navigation.
+struct HistoryHandler {
+    completion_state: CompletionState,
+    cmd: Cmd,
+}
+
+impl HistoryHandler {
+    fn new(completion_state: CompletionState, cmd: Cmd) -> Self {
+        Self {
+            completion_state,
+            cmd,
+        }
+    }
+}
+
+impl ConditionalEventHandler for HistoryHandler {
+    fn handle(
+        &self,
+        _evt: &Event,
+        _n: RepeatCount,
+        _positive: bool,
+        _ctx: &EventContext<'_>,
+    ) -> Option<Cmd> {
+        self.completion_state.clear_hint();
+        Some(self.cmd.clone())
+    }
 }
 
 fn process_input_line(
@@ -124,14 +153,23 @@ pub(crate) async fn run<'c>(rt: &mut zuqe::Runtime, ctx: &mut zuqe::Context<'c>)
     });
     editor.set_helper(Some(helper));
 
-    // Bind Up/Down to prefix-based history search
+    // Bind Up/Down to history navigation.
+    // Uses PreviousHistory/NextHistory (not HistorySearchBackward/Forward)
+    // so the cursor moves to the end of the line after loading a history entry.
+    // HistoryHandler clears the hint cache before navigation.
     editor.bind_sequence(
         KeyEvent(KeyCode::Up, Modifiers::NONE),
-        Cmd::HistorySearchBackward,
+        EventHandler::Conditional(Box::new(HistoryHandler::new(
+            completion_state.clone(),
+            Cmd::PreviousHistory,
+        ))),
     );
     editor.bind_sequence(
         KeyEvent(KeyCode::Down, Modifiers::NONE),
-        Cmd::HistorySearchForward,
+        EventHandler::Conditional(Box::new(HistoryHandler::new(
+            completion_state.clone(),
+            Cmd::NextHistory,
+        ))),
     );
 
     // Set up history file

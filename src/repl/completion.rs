@@ -60,6 +60,10 @@ impl CompletionState {
             hint_cache: Arc::new(parking_lot::Mutex::new(None)),
         }
     }
+
+    pub(crate) fn clear_hint(&self) {
+        *self.hint_cache.lock() = None;
+    }
 }
 
 // ---------------------------------------------------------------------------
