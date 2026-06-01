@@ -15,7 +15,7 @@ use crate::aike::{JSIoHandle, make_stats};
 
 thread_local! {
     /// Chroot support
-    static CHROOT_PATH: RefCell<Option<PathBuf>> = RefCell::new(None);
+    static CHROOT_PATH: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
 
     /// Sandbox restriction: limits all fs access to this directory.
     /// None means no sandbox restriction.
@@ -702,14 +702,14 @@ fn js_fs_write(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 // ---------------------------------------------------------------------------
 fn js_fs_ensureDir(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let v = cc.arg(0).to_string(ctx)?;
-    let path = resolve_safe_path(&v.content().encode_utf8(false).to_string()).map_err(|e| {
+    let path = resolve_safe_path(v.content().encode_utf8(false).as_ref()).map_err(|e| {
         ctx.throw_internal_error(&e);
         -1
     })?;
 
     // Parse optional options object: ensureDir(path, { recursive?: boolean })
-    let recursive = if cc.length() > 1 {
-        let opts = cc.arg(1);
+    let opts = cc.arg(1);
+    let recursive = if !opts.is_undefined() {
         if opts.is_object() {
             opts.get_property_str(ctx, "recursive")?.to_bool()?
         } else {
