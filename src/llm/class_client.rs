@@ -568,6 +568,10 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
 /// Getter magic constants
 const PROP_MODEL: i32 = 0;
 const PROP_RESPONSE_NORMALIZER: i32 = 1;
+const PROP_BASE_URL: i32 = 2;
+const PROP_BUFFERED_TOOL_CALL: i32 = 3;
+const PROP_EXTRA_BODY: i32 = 4;
+const PROP_TIMEOUT: i32 = 5;
 
 /// Internal property key for responseNormalizer, hidden from JS enumeration
 const INNER_PROP_RESPONSE_NORMALIZER: &str = "_responseNormalizer";
@@ -579,6 +583,21 @@ fn js_client_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     match cc.magic() {
         PROP_MODEL => match &client.model_name {
             Some(name) => ctx.create_string_from_str(name).map(JSValue::String),
+            None => Ok(JSValue::NULL),
+        },
+        PROP_BASE_URL => ctx
+            .create_string_from_str(&client.base_url)
+            .map(JSValue::String),
+        PROP_BUFFERED_TOOL_CALL => Ok(JSValue::Bool(client.buffered_tool_call)),
+        PROP_EXTRA_BODY => {
+            if client.extra_body.is_null() {
+                Ok(JSValue::NULL)
+            } else {
+                JSValue::from_serde_json(ctx, &client.extra_body)
+            }
+        }
+        PROP_TIMEOUT => match client.timeout {
+            Some(dur) => Ok(JSValue::from(dur.as_millis() as f64)),
             None => Ok(JSValue::NULL),
         },
         _ => Ok(JSValue::UNDEFINED),
@@ -644,6 +663,20 @@ const CLASS_CLIENT_PROTO: &[FieldDef] = &[
     ),
     FieldDef::FUNC("dispose", 0, js_client_dispose, 0),
     FieldDef::GETSET("model", Some(js_client_getter), None, PROP_MODEL as _),
+    FieldDef::GETSET("baseUrl", Some(js_client_getter), None, PROP_BASE_URL as _),
+    FieldDef::GETSET(
+        "bufferedToolCall",
+        Some(js_client_getter),
+        None,
+        PROP_BUFFERED_TOOL_CALL as _,
+    ),
+    FieldDef::GETSET(
+        "extraBody",
+        Some(js_client_getter),
+        None,
+        PROP_EXTRA_BODY as _,
+    ),
+    FieldDef::GETSET("timeout", Some(js_client_getter), None, PROP_TIMEOUT as _),
     FieldDef::GETSET(
         "responseNormalizer",
         Some(js_client_get_normalizer),
