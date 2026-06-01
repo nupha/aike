@@ -74,7 +74,7 @@ async-openai = { version = "0.37", default-features = false, features = [
     "rustls",
 ] }
 tokio-util = { version = "0.7", features = ["io"] }
-rustyline = { version = "18", features = ["with-file-history"] }
+rustyline = { version = "18", features = ["with-file-history", "custom-bindings"] }
 rustyline-derive = "0.12"
 parking_lot = "0.12"
 dirs = "6"

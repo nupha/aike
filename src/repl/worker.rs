@@ -4,8 +4,8 @@
 use std::sync::{Arc, atomic::Ordering};
 
 use rustyline::{
-    Editor, Prompt, config::Builder as ConfigBuilder, config::CompletionType, error::ReadlineError,
-    history::FileHistory,
+    Cmd, Editor, KeyCode, KeyEvent, Modifiers, Prompt, config::Builder as ConfigBuilder,
+    config::CompletionType, error::ReadlineError, history::FileHistory,
 };
 
 use crate::repl::{
@@ -78,10 +78,12 @@ pub(crate) async fn run<'c>(rt: &mut zuqe::Runtime, ctx: &mut zuqe::Context<'c>)
         Editor::<AikeHelper, FileHistory>::with_config(config).expect("Editor::with_config");
 
     // Create ExternalPrinter and register it globally.
-    let printer = editor
-        .create_external_printer()
-        .expect("create_external_printer");
-    init_printer(Box::new(printer));
+    let printer = Box::new(
+        editor
+            .create_external_printer()
+            .expect("create_external_printer"),
+    );
+    init_printer(printer);
 
     let mut helper = AikeHelper::new(completion_state.clone());
     helper.print_candidates = Some({
@@ -121,6 +123,16 @@ pub(crate) async fn run<'c>(rt: &mut zuqe::Runtime, ctx: &mut zuqe::Context<'c>)
         })
     });
     editor.set_helper(Some(helper));
+
+    // Bind Up/Down to prefix-based history search
+    editor.bind_sequence(
+        KeyEvent(KeyCode::Up, Modifiers::NONE),
+        Cmd::HistorySearchBackward,
+    );
+    editor.bind_sequence(
+        KeyEvent(KeyCode::Down, Modifiers::NONE),
+        Cmd::HistorySearchForward,
+    );
 
     // Set up history file
     let history_path = dirs::data_dir().map(|d| d.join("aike").join("repl_history.txt"));
