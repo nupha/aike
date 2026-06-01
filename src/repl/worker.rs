@@ -211,8 +211,15 @@ pub(crate) async fn run<'c>(rt: &mut zuqe::Runtime, ctx: &mut zuqe::Context<'c>)
                                                 outputs.push(result);
                                             }
                                         }
-                                        Err(e) => {
-                                            eval_error = Some(e.to_string());
+                                        Err(_) => {
+                                            let exc = scope.take_exception();
+                                            let t = exc.to_text(&mut scope);
+                                            let mut msg = t.message;
+                                            if let Some(tb) = t.traceback {
+                                                msg.push('\n');
+                                                msg.push_str(&tb);
+                                            }
+                                            eval_error = Some(msg);
                                         }
                                     }
 

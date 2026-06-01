@@ -131,23 +131,19 @@ impl Completer for AikeHelper {
             prefix,
         );
 
-        if let Some(suffix) = hint_suffix {
-            // Complete to the common prefix first, then include all
-            // matching candidates for subsequent Tab cycling.
-            let full = format!("{}{}", prefix, suffix);
-            let mut pairs = vec![Pair {
-                display: full.clone(),
-                replacement: full.clone(),
-            }];
-            // Add remaining candidates that share this prefix for cycling
-            for c in &resp.candidates {
-                if c.name != full && c.name.starts_with(&full) {
-                    pairs.push(Pair {
-                        display: c.name.clone(),
-                        replacement: c.name.clone(),
-                    });
-                }
-            }
+        if hint_suffix.is_some() {
+            // A common prefix exists among candidates. Return all matching
+            // candidates as-is — rustyline's List mode will automatically
+            // complete to the longest common prefix and display the list.
+            let pairs: Vec<Pair> = resp
+                .candidates
+                .iter()
+                .filter(|c| c.name.starts_with(prefix))
+                .map(|c| Pair {
+                    display: c.name.clone(),
+                    replacement: c.name.clone(),
+                })
+                .collect();
             return Ok((resp.start, pairs));
         }
 
