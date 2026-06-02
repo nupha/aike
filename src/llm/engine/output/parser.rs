@@ -57,23 +57,16 @@ impl OutputParser {
     pub fn push_token(&mut self, text: &str) -> Result<(bool, OutputEvents), String> {
         let mut events: OutputEvents = smallvec![];
 
-        // Append token text to buffer
-        self.buf.push_str(text);
-
         // Try to detect tag boundaries
         match self.current_state {
             OutputState::Text => {
-                // Look for open tags
+                // Append token text to buffer first, then look for open tags
+                self.buf.push_str(text);
+
                 for boundary in &self.boundaries {
                     if let Some(pos) = self.buf.find(boundary.open_tag) {
-                        // Text before the open tag
-                        let before = self.buf[..pos].to_string();
                         // Text after the open tag (starts new content)
                         self.buf = self.buf[pos + boundary.open_tag.len()..].to_string();
-
-                        // If there was text before the tag, it stays as Text content
-                        // (the caller already appended it via add_text=true from previous tokens)
-                        // We don't need to emit it as an event — it's already in current_content
 
                         events.push(match boundary.content_type {
                             OutputState::Reasoning => OutputStateChange::ReasoningStart,
@@ -88,16 +81,67 @@ impl OutputParser {
                 }
             }
             OutputState::Reasoning | OutputState::ToolCall => {
-                // Look for close tag matching current state
+                // Multi-token close tag detection:
+                // Check if text is part of the close tag before appending to buf.
+                // This handles cases where the close tag spans multiple tokens
+                // (e.g. Qwen3.5 generates </tool_call> as 4 BPE tokens: </ + tool + _call + >).
+                //
+                // Three cases:
+                // 1. text is a prefix of ct (e.g. text="</", ct="</tool_call>")
+                // 2. buf ends with a prefix of ct, and text continues ct
+                //    (e.g. buf="...</", text="tool", ct="</tool_call>")
+                // 3. buf + text ends with ct (full match, single or multi-token)
                 for boundary in &self.boundaries {
                     if boundary.content_type != self.current_state {
                         continue;
                     }
-                    if self.buf.ends_with(boundary.close_tag) {
-                        // Strip the close tag from buffer
-                        let content_len = self.buf.len() - boundary.close_tag.len();
-                        let content = self.buf[..content_len].to_string();
-                        self.buf = content;
+                    let ct = boundary.close_tag;
+
+                    if ct.starts_with(text) {
+                        // text is part of the close tag — append to buf but don't add to content
+                        self.buf.push_str(text);
+                        // If text is the complete close tag (single token), trigger end event now
+                        if text == ct {
+                            self.buf.clear();
+                            events.push(match self.current_state {
+                                OutputState::Reasoning => OutputStateChange::ReasoningEnd,
+                                OutputState::ToolCall => OutputStateChange::ToolCallEnd,
+                                _ => unreachable!(),
+                            });
+                            self.current_state = OutputState::Text;
+                        }
+                        return Ok((false, events));
+                    }
+
+                    // Check if buf ends with a prefix of ct, and text continues ct
+                    for prefix_len in (1..ct.len()).rev() {
+                        let prefix = &ct[..prefix_len];
+                        if self.buf.ends_with(prefix) {
+                            let rest = &ct[prefix_len..];
+                            if rest.starts_with(text) {
+                                // text continues the close tag — append to buf but don't add to content
+                                self.buf.push_str(text);
+                                // If buf now contains the complete close tag, trigger end event
+                                if self.buf.ends_with(ct) {
+                                    self.buf.clear();
+                                    events.push(match self.current_state {
+                                        OutputState::Reasoning => OutputStateChange::ReasoningEnd,
+                                        OutputState::ToolCall => OutputStateChange::ToolCallEnd,
+                                        _ => unreachable!(),
+                                    });
+                                    self.current_state = OutputState::Text;
+                                }
+                                return Ok((false, events));
+                            }
+                            break;
+                        }
+                    }
+
+                    // Append text to buf, then check for full close tag match
+                    self.buf.push_str(text);
+                    if self.buf.ends_with(ct) {
+                        let content_len = self.buf.len() - ct.len();
+                        self.buf = self.buf[..content_len].to_string();
 
                         events.push(match self.current_state {
                             OutputState::Reasoning => OutputStateChange::ReasoningEnd,
@@ -106,9 +150,11 @@ impl OutputParser {
                         });
                         self.current_state = OutputState::Text;
 
-                        // Don't add the close tag text to content
                         return Ok((false, events));
                     }
+
+                    // Close tag not matched — text is content
+                    return Ok((true, events));
                 }
             }
         }
