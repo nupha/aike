@@ -116,8 +116,12 @@ impl OutputParser {
 
         // Push token to parser for grammar validation
         if let Err(e) = self.parser.push_token_str(&text, terminal) {
+            println!(
+                "[O.o][OutputParser::push_token] token={llm_token}, terminal={terminal:?}, text={text}",
+            );
+
             self.reset();
-            return Err(format!("Output error: {e}"));
+            return Err(format!("Output error: {e}, token={llm_token}, text={text}"));
         }
 
         let mut new_state: Option<OutputState> = None;

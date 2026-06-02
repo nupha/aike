@@ -226,7 +226,9 @@ impl TaskState {
                 }
                 Err(e) => {
                     append_token_utf8 = false;
-                    eprintln!("[OutputParser] Error: {}", e);
+
+                    #[cfg(debug_assertions)]
+                    eprintln!("[O.o][TaskState::add_output_token] Error: {e}, token={token}");
                 }
             }
         }
@@ -238,7 +240,7 @@ impl TaskState {
 
     fn handle_output_event(&mut self, event: OutputStateChange) {
         #[cfg(debug_assertions)]
-        eprintln!("[OutputParser] Parsing output event: {event:?} ");
+        eprintln!("[O.o] TaskState::handle_output_event({event:?})");
 
         // At chunk boundary (state change) and in stream mode: send current content
         if self.config.output_stream {
