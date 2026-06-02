@@ -116,9 +116,20 @@ impl OutputParser {
 
         // Push token to parser for grammar validation
         if let Err(e) = self.parser.push_token_str(&text, terminal) {
-            println!(
+            eprintln!(
                 "[O.o][OutputParser::push_token] token={llm_token}, terminal={terminal:?}, text={text}",
             );
+
+            // FAIL GUARD: If the parser rejects a TOK_* terminal, try to push it as TEXT instead.
+            // This handles cases where the model outputs a special token in an unexpected
+            // context (e.g., nested tool_call or stray boundary token).
+            if terminal != "TEXT" {
+                if self.parser.push_token_str(&text, "TEXT").is_ok() {
+                    // Accepted as plain text — keep current state, add text
+                    add_text = true;
+                    return Ok((add_text, events));
+                }
+            }
 
             self.reset();
             return Err(format!("Output error: {e}, token={llm_token}, text={text}"));

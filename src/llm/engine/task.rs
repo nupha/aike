@@ -229,6 +229,31 @@ impl TaskState {
 
                     #[cfg(debug_assertions)]
                     eprintln!("[O.o][TaskState::add_output_token] Error: {e}, token={token}");
+
+                    // Sync current_content state with parser after error
+                    // (parser may have been reset internally)
+                    let parser_state = parser.current_state();
+                    let needs_sync = {
+                        let last = self.current_content.last().unwrap();
+                        !matches!(
+                            (last, parser_state),
+                            (GeneratedContent::Text(_), OutputState::Text)
+                                | (GeneratedContent::Reasoning(_), OutputState::Reasoning)
+                                | (GeneratedContent::ToolCall(_), OutputState::ToolCall)
+                        )
+                    };
+                    if needs_sync {
+                        let new_content = match parser_state {
+                            OutputState::Text => GeneratedContent::Text(String::new()),
+                            OutputState::Reasoning => GeneratedContent::Reasoning(String::new()),
+                            OutputState::ToolCall => GeneratedContent::ToolCall(String::new()),
+                        };
+                        let last_content = self.current_content.last_mut().unwrap();
+                        let old = std::mem::replace(last_content, new_content);
+                        if self.config.output_stream && !old.as_str().is_empty() {
+                            let _ = self.output_tx.send(EngineReply::Content(old));
+                        }
+                    }
                 }
             }
         }
