@@ -154,7 +154,7 @@ pub async fn handle_responses(
         respond_id = format!("res-{}", Uuid::new_v4().simple());
         model_name = engine.model_name().to_string();
 
-        rx = match engine.push_task(prompt_tokens, task_config, output_prepend, None, false) {
+        rx = match engine.push_task(prompt_tokens, task_config, output_prepend, None) {
             Ok(r) => r,
             Err(e) => {
                 return (

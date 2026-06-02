@@ -52,9 +52,7 @@ pub(super) fn js_spawn(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     if cc.length() > 2
         && let Some(opts) = cc.arg(2).as_object().copied()
     {
-        if let Some(v) = get_str_prop(ctx, &opts, "cwd") {
-            cwd = Some(v);
-        }
+        cwd = get_str_prop(ctx, &opts, "cwd");
 
         // env — replaces entire env when provided
         if let Some(env_map) = parse_env_obj(ctx, &opts)? {

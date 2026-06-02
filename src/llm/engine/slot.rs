@@ -67,7 +67,7 @@ impl Engine {
             return Err(format!("invalid seq id {}", seq_id));
         }
 
-        let mut n_common: usize = {
+        let n_common: usize = {
             let cached = self.cached_tokens();
             let slot_cache = &cached[seq_id];
             let max_common = slot_cache.len().min(prompt_tokens.len());
@@ -83,11 +83,16 @@ impl Engine {
             cnt
         };
 
+        if n_common == 0 {
+            self.clear_slot(seq_id);
+            return Ok(0);
+        }
+
         let llm = self.llm_ctx_mut();
         let removed = llm.memory_seq_rm(seq_id as i32, n_common as i32, -1);
         if !removed {
-            llm.memory_seq_rm(seq_id as i32, 0, -1);
-            n_common = 0;
+            self.clear_slot(seq_id);
+            return Ok(0);
         }
 
         self.cached_tokens_mut()[seq_id].truncate(n_common);
@@ -107,14 +112,13 @@ impl Engine {
         slots: &[Slot],
         seq_hint: Option<usize>,
         prompt_tokens: &[Token],
-        use_cache: bool,
         _match_threshold: f32,
     ) -> Option<(usize, bool)> {
         if let Some(hint) = seq_hint
             && let Some(slot) = slots.get(hint)
             && matches!(slot.state, SlotState::Idle)
         {
-            let can_reuse = use_cache && self.common_prefix_len(slot.seq_id, prompt_tokens) > 0;
+            let can_reuse = self.common_prefix_len(slot.seq_id, prompt_tokens) > 0;
             return Some((hint, can_reuse));
         }
         let idle_indices = slots
@@ -135,7 +139,7 @@ impl Engine {
             }
         }
 
-        Some((lru_idx, false))
+        Some((lru_idx, true))
     }
 
     /// reset state for given slot id

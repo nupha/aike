@@ -1,7 +1,11 @@
 use std::{
     collections::{HashSet, VecDeque},
     io::Write,
+    time::Duration,
 };
+
+/// Maximum time a task can wait in the deferred queue before being rejected as Busy.
+const TASK_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 
 use async_openai::types::chat::ChatCompletionTools;
 use crossbeam::channel::{Receiver, Sender};
@@ -134,7 +138,10 @@ pub struct EngineTask {
     pub output_tx: Sender<EngineReply>,
 
     pub seq_hint: Option<usize>,
-    pub use_cache: bool,
+
+    /// Set to Some(Instant) when the task is deferred due to all slots busy.
+    /// If the wait exceeds TASK_WAIT_TIMEOUT, the task is rejected with Busy.
+    pub timestamp: Option<std::time::Instant>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -255,11 +262,8 @@ impl TaskState {
                     }
                     append_token_utf8 = add_text;
                 }
-                Err(e) => {
+                Err(_) => {
                     append_token_utf8 = false;
-
-                    #[cfg(debug_assertions)]
-                    eprintln!("[O.o][TaskState::add_output_token] Error: {e}, token={token}");
 
                     // Sync current_content state with parser after error
                     // (parser may have been reset internally)
@@ -295,9 +299,6 @@ impl TaskState {
     }
 
     fn handle_output_event(&mut self, event: OutputStateChange) {
-        #[cfg(debug_assertions)]
-        eprintln!("[O.o] TaskState::handle_output_event({event:?})");
-
         // At chunk boundary (state change) and in stream mode: send current content
         if self.config.output_stream {
             for content in self.current_content.drain(..) {
@@ -372,6 +373,7 @@ impl TaskState {
 pub enum SchedResult {
     Scheduled,
     Deferred(Box<EngineTask>),
+    Busy(Box<EngineTask>),
     Rejected,
 }
 
@@ -477,10 +479,14 @@ impl Engine {
             slots,
             task.seq_hint,
             &task.prompt_tokens,
-            task.use_cache,
             prefix_match_threshold,
         ) else {
-            return SchedResult::Deferred(task);
+            let now = std::time::Instant::now();
+            return if now.duration_since(*task.timestamp.get_or_insert(now)) > TASK_WAIT_TIMEOUT {
+                SchedResult::Busy(task)
+            } else {
+                SchedResult::Deferred(task)
+            };
         };
 
         let seq_id = slots[slot_idx].seq_id;

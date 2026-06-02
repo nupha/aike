@@ -265,7 +265,6 @@ async fn handle_chat_completions(
         task_config,
         output_prepend,
         None,
-        false,
     ) {
         Ok(rx) => rx,
         Err(e) => {

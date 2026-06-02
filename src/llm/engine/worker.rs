@@ -81,6 +81,11 @@ pub fn worker_loop(
                     .sched_task(task, &mut slots, slot_match_threshold)
                 {
                     SchedResult::Scheduled | SchedResult::Rejected => {}
+                    SchedResult::Busy(task) => {
+                        let _ = task.output_tx.send(EngineReply::Error(
+                            "all slots are busy, try again later".to_string(),
+                        ));
+                    }
                     SchedResult::Deferred(input) => {
                         enqueue_task(input, &mut ready_inputs, &mut deferred_inputs);
                         break;

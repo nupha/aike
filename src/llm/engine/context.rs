@@ -323,7 +323,6 @@ impl Engine {
         config: TaskConfig,
         output_prepend: Vec<Token>,
         seq_hint: Option<usize>,
-        use_cache: bool,
     ) -> Result<Receiver<EngineReply>, SendError<Box<EngineTask>>> {
         let (output_tx, output_rx) = crossbeam::channel::bounded::<EngineReply>(1);
 
@@ -333,7 +332,7 @@ impl Engine {
             output_prepend,
             output_tx,
             seq_hint,
-            use_cache,
+            timestamp: None,
         });
         self.input_tx.send(task)?;
 
