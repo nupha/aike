@@ -39,7 +39,7 @@ pub(crate) struct ClientPayload {
     //
     // default params
     //
-    pub(crate) model_name: Option<String>,
+    pub(crate) model_name: String,
     pub(crate) max_tokens: usize,
     pub(crate) extra_body: serde_json::Value,
 }
@@ -73,7 +73,6 @@ fn js_client_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     } else {
         0
     };
-    let mut buffered_tool_call = true;
     let mut timeout_ms = 0;
     let mut extra_body = {
         let s = std::env::var("AIKE_LLM_EXTRA_BODY").unwrap_or_default();
@@ -88,6 +87,7 @@ fn js_client_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             serde_json::Value::Null
         }
     };
+    let mut buffered_tool_call = true;
 
     let new_target = cc.this();
 
@@ -160,7 +160,7 @@ fn js_client_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     }
 
     let payload = Arc::new(ClientPayload {
-        model_name: if model.is_empty() { None } else { Some(model) },
+        model_name: model,
         base_url,
         api_key,
         org_id: String::new(),
@@ -323,10 +323,11 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
 
     if let Some(req) = req_json.as_object_mut() {
         // model
-        if req.get("model").is_none()
-            && let Some(m) = &client.model_name
-        {
-            req.insert("model".into(), serde_json::Value::String(m.to_string()));
+        if req.get("model").is_none_or(|v| !v.is_string()) {
+            req.insert(
+                "model".into(),
+                serde_json::Value::String(client.model_name.to_string()),
+            );
         }
 
         // max_tokens
@@ -622,10 +623,9 @@ fn js_client_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let client = get_client(ctx, this)?;
 
     match cc.magic() {
-        PROP_MODEL => match &client.model_name {
-            Some(name) => ctx.create_string_from_str(name).map(JSValue::String),
-            None => Ok(JSValue::NULL),
-        },
+        PROP_MODEL => ctx
+            .create_string_from_str(&client.model_name)
+            .map(JSValue::String),
         PROP_BASE_URL => ctx
             .create_string_from_str(&client.base_url)
             .map(JSValue::String),

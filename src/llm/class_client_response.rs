@@ -137,7 +137,7 @@ pub(super) fn js_client_responses(ctx: &mut ScopedContext, cc: CallContext) -> J
     let model = if let Some(s) = model_val.as_string() {
         s.content().encode_utf8(false).to_string()
     } else {
-        client_arc.model_name.clone().unwrap_or_else(get_llm_model)
+        client_arc.model_name.clone()
     };
 
     let mut req_builder = CreateResponseArgs::default();
