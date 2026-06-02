@@ -1,9 +1,6 @@
 mod parser;
 
-pub use parser::OutputParser;
-
-/// Callback type for validating whether a given name is a single token in vocab or not.
-pub type LlmTokenValidator = Box<dyn Fn(&str) -> bool + Send + Sync>;
+pub use parser::{OutputParser, TagBoundary};
 
 /// Represents the semantic state of LLM output.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -1,15 +1,17 @@
-use std::collections::{HashSet, VecDeque};
-use std::io::Write;
+use std::{
+    collections::{HashSet, VecDeque},
+    io::Write,
+};
 
 use async_openai::types::chat::ChatCompletionTools;
 use crossbeam::channel::{Receiver, Sender};
-use llama_cpp_ffi::{LlamaModel, ToolChoice};
+use llama_cpp_ffi::{ContentType, LlamaModel, SamplerChain, ToolChoice};
 
-use crate::helpers::{build_tools_grammar, now_unix_s};
+use crate::helpers::now_unix_s;
 
 use super::{
     context::Engine,
-    output::{LlmTokenValidator, OutputParser, OutputState, OutputStateChange},
+    output::{OutputParser, OutputState, OutputStateChange, TagBoundary},
     slot::{Slot, SlotState},
     worker::remove_cancelled_inputs,
 };
@@ -26,9 +28,22 @@ impl GrammarConfig {
     pub fn new(model: &LlamaModel, tools: &[ChatCompletionTools], tool_choice: ToolChoice) -> Self {
         debug_assert!(!tools.is_empty());
 
+        let tool_iter = tools.iter().filter_map(|t| match t {
+            ChatCompletionTools::Function(f) => {
+                let name = f.function.name.clone();
+                let params = f
+                    .function
+                    .parameters
+                    .clone()
+                    .unwrap_or(serde_json::json!({"type": "object", "properties": {}}));
+                Some((name, params))
+            }
+            _ => None,
+        });
+
         Self {
-            lark_grammar: build_tools_grammar(
-                tools,
+            lark_grammar: SamplerChain::build_tools_grammar(
+                tool_iter,
                 tool_choice,
                 model.arch().tool_call_boundaries(),
             ),
@@ -227,9 +242,13 @@ impl TaskState {
             let _ = writeln!(log, "[tok={token}] {text}");
         }
 
-        // Push token to parser and get events
+        // Decode token text for parser
+        let piece = model.token_to_piece(token);
+        let token_text = String::from_utf8_lossy(&piece);
+
+        // Push token text to parser and get events
         if let Some(ref mut parser) = self.output_parser {
-            match parser.push_token(token) {
+            match parser.push_token(&token_text) {
                 Ok((add_text, event_list)) => {
                     for event in event_list {
                         self.handle_output_event(event);
@@ -271,7 +290,7 @@ impl TaskState {
         }
 
         if append_token_utf8 {
-            self.append_utf8_bytes(&model.token_to_piece(token));
+            self.append_utf8_bytes(&piece);
         }
     }
 
@@ -489,34 +508,56 @@ impl Engine {
 
         // Create output parser if enabled
         let output_parser: Option<OutputParser> = if task.config.enable_output_parser {
-            let grammar = self.model.arch().output_grammar();
-            let token_validator: LlmTokenValidator = Box::new({
-                let model2 = self.model.clone();
-                move |token_text: &str| -> bool { model2.lookup_text_token(token_text).is_some() }
-            });
+            let boundaries = self
+                .model
+                .arch()
+                .tag_boundaries()
+                .into_iter()
+                .map(|(ct, open, close)| {
+                    let content_type = match ct {
+                        ContentType::Reasoning => OutputState::Reasoning,
+                        ContentType::ToolCall => OutputState::ToolCall,
+                        _ => OutputState::Text,
+                    };
+                    TagBoundary {
+                        content_type,
+                        open_tag: open,
+                        close_tag: close,
+                    }
+                })
+                .collect::<Vec<TagBoundary>>();
 
-            let mut p = OutputParser::builder()
-                .model(self.model.clone())
-                .grammar(&grammar)
-                .token_validator(token_validator)
-                .build()
-                .ok();
-
-            if !task.output_prepend.is_empty()
-                && let Some(p) = &mut p
-            {
-                // mimic model generates an open think tag, to make parser be prepared with proper state
-                for token in task.output_prepend {
-                    let _ = p.push_token(token);
+            // If the prompt already contains an unclosed open tag (e.g. `<think>`
+            // from chat template), start the parser in that state directly.
+            // The caller signals this by populating `output_prepend`.
+            let initial_state = if !task.output_prepend.is_empty() {
+                // Decode prepended tokens to text, then check which open tag they contain
+                let mut prepend_bytes = Vec::new();
+                for t in &task.output_prepend {
+                    prepend_bytes.extend_from_slice(&self.model.token_to_piece(*t));
                 }
-            }
+                let prepend_text = String::from_utf8_lossy(&prepend_bytes);
+                let mut state = OutputState::Text;
+                for b in &boundaries {
+                    if prepend_text.contains(b.open_tag) {
+                        state = b.content_type;
+                        break;
+                    }
+                }
+                state
+            } else {
+                OutputState::Text
+            };
 
-            p
+            Some(OutputParser::new(boundaries, initial_state))
         } else {
             None
         };
 
-        // Add initial current_content element
+        // Add initial current_content element.
+        // If the parser starts in a non-Text state (e.g. Reasoning because the
+        // prompt already contains an unclosed <think> tag), emit the corresponding
+        // Start event so downstream handlers see it.
         let initial_state = output_parser
             .as_ref()
             .map(|p| p.current_state())
@@ -531,14 +572,14 @@ impl Engine {
         // Debug token log: cleared at start of each inference
         #[cfg(debug_assertions)]
         let token_log = if task.config.enable_output_parser {
-            let log_path = format!("/tmp/aike-tokens-{}.log", task.config.task_id);
+            let log_path = format!("aike-output-tokens.log");
             // Create/truncate the log file
             std::fs::File::create(&log_path).ok()
         } else {
             None
         };
 
-        let task_state = TaskState {
+        let mut task_state = TaskState {
             config: task.config,
             n_completion_tokens: 0,
             output_parser,
@@ -548,6 +589,18 @@ impl Engine {
             #[cfg(debug_assertions)]
             token_log,
         };
+
+        // If the parser starts in a non-Text state (e.g. Reasoning because the
+        // prompt already contains an unclosed <think> tag), emit the corresponding
+        // Start event so downstream handlers see it.
+        if initial_state != OutputState::Text {
+            let event = match initial_state {
+                OutputState::Reasoning => OutputStateChange::ReasoningStart,
+                OutputState::ToolCall => OutputStateChange::ToolCallStart,
+                _ => unreachable!(),
+            };
+            task_state.handle_output_event(event);
+        }
 
         let slot = &mut slots[slot_idx];
         slot.n_past = n_common as i32;

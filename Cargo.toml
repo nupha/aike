@@ -28,7 +28,6 @@ zuqe = { path = "../../../devel/zhuque", features = [
     "crossbeam_channel",
     "serde_json_support",
 ] }
-swiftlet-incremental = { path = "../swiftlet-incremental" }
 crossbeam = "0.8"
 tokio = { version = "1", features = [
     "macros",
