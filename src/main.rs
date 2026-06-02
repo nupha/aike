@@ -142,12 +142,6 @@ fn parse_byte_size(ss: &str) -> Option<usize> {
 #[distributed_slice]
 pub(crate) static USER_CLASS_DEFS: [fn(&mut Runtime) -> Result<ClassID, i32>];
 
-pub(crate) fn get_llm_base_url() -> String {
-    std::env::var("AIKE_LLM_BASE_URL").unwrap_or_default()
-}
-pub(crate) fn get_llm_api_key() -> String {
-    std::env::var("AIKE_LLM_API_KEY").unwrap_or_default()
-}
 pub(crate) fn get_llm_model() -> String {
     std::env::var("AIKE_LLM_MODEL").unwrap_or_default()
 }

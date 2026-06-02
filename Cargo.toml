@@ -52,7 +52,6 @@ llama-cpp-ffi = { path = "../llama-cpp-ffi", features = ["cmake_static"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1"
 dotenvy = "0.15"
-dotenvy_macro = "0.15"
 glob = "0.3"
 libc = "0.2"
 clap = { version = "4.5", features = ["derive"] }
@@ -74,7 +73,10 @@ async-openai = { version = "0.37", default-features = false, features = [
     "rustls",
 ] }
 tokio-util = { version = "0.7", features = ["io"] }
-rustyline = { version = "18", features = ["with-file-history", "custom-bindings"] }
+rustyline = { version = "18", features = [
+    "with-file-history",
+    "custom-bindings",
+] }
 rustyline-derive = "0.12"
 parking_lot = "0.12"
 dirs = "6"

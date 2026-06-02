@@ -18,10 +18,7 @@ use zuqe::{
     def_native_object,
 };
 
-use crate::{
-    USER_CLASS_DEFS, get_llm_api_key, get_llm_base_url, get_llm_model,
-    helpers::json_keys_camel_to_snake,
-};
+use crate::{USER_CLASS_DEFS, helpers::json_keys_camel_to_snake};
 
 use super::{
     OUTMSG_FIELD_CHOICES, OUTMSG_FIELD_REASONING,
@@ -35,13 +32,16 @@ pub(crate) struct ClientPayload {
     pub(crate) api_key: String,
     pub(crate) org_id: String,
     pub(crate) project_id: String,
-    pub(crate) custom_headers: HeaderMap,
-    pub(crate) model_name: Option<String>,
     pub(crate) buffered_tool_call: bool,
-    /// default extra_body field for openai request
-    pub(crate) extra_body: serde_json::Value,
-    /// Request timeout. `None` = no timeout (reqwest default, infinite wait).
     pub(crate) timeout: Option<Duration>,
+    pub(crate) custom_headers: HeaderMap,
+
+    //
+    // default params
+    //
+    pub(crate) model_name: Option<String>,
+    pub(crate) max_tokens: usize,
+    pub(crate) extra_body: serde_json::Value,
 }
 
 pub(crate) fn get_client(ctx: &mut ScopedContext, val: JSValue) -> Result<Arc<ClientPayload>, i32> {
@@ -56,89 +56,127 @@ pub(crate) fn get_client(ctx: &mut ScopedContext, val: JSValue) -> Result<Arc<Cl
 
 /// Constructor: new Client({apiKey, baseUrl, model?, timeout?})
 fn js_client_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let new_target = cc.this();
-
-    let opts = cc.arg(0);
-    let opts_obj = opts.as_object().copied().ok_or_else(|| {
-        ctx.throw_type_error("requires options object");
-        -1
-    })?;
-
-    let base_url_val = opts_obj.get_property_str(ctx, "baseUrl")?;
-    let base_url = if let Some(s) = base_url_val.as_string() {
-        s.content().encode_utf8(false).to_string()
+    // params from envvar
+    let mut base_url = std::env::var("AIKE_LLM_BASE_URL").unwrap_or_default();
+    let mut api_key = std::env::var("AIKE_LLM_API_KEY").unwrap_or_default();
+    let mut model = std::env::var("AIKE_LLM_MODEL").unwrap_or_default();
+    let mut max_tokens = if let Ok(s) = std::env::var("AIKE_LLM_MAX_TOKENS")
+        && !s.is_empty()
+    {
+        if let Ok(n) = s.parse::<i32>()
+            && n >= 0
+        {
+            n
+        } else {
+            0
+        }
     } else {
-        get_llm_base_url()
+        0
     };
-
-    let api_key = opts_obj
-        .get_property_str(ctx, "apiKey")?
-        .as_string()
-        .map(|s| s.content().encode_utf8(false).to_string())
-        .unwrap_or_else(get_llm_api_key);
-
-    let default_model: Option<String> = opts_obj
-        .get_property_str(ctx, "model")?
-        .as_string()
-        .map(|s| s.content().encode_utf8(false).to_string());
-
-    // extra_body
-    let extra_body: serde_json::Value = match opts_obj.get_property_str(ctx, "extraBody")? {
-        JSValue::NULL => serde_json::Value::Null,
-        JSValue::UNDEFINED => {
-            let s = std::env::var("AIKE_LLM_EXTRA_BODY").unwrap_or_default();
-            if !s.is_empty() {
-                if let Ok(o) = serde_json::from_str(&s) {
-                    o
-                } else {
-                    eprintln!("[WARN] envvar AIKE_LLM_EXTRA_BODY is invalid JSON");
-                    serde_json::Value::Null
-                }
+    let mut buffered_tool_call = true;
+    let mut timeout_ms = 0;
+    let mut extra_body = {
+        let s = std::env::var("AIKE_LLM_EXTRA_BODY").unwrap_or_default();
+        if !s.is_empty() {
+            if let Ok(o) = serde_json::from_str(&s) {
+                o
             } else {
+                eprintln!("[WARN] envvar AIKE_LLM_EXTRA_BODY is invalid JSON");
                 serde_json::Value::Null
             }
-        }
-        JSValue::Object(o) => o.to_serde_json(ctx)?,
-        _ => {
-            ctx.throw_type_error("extraBody must be one of undefined, null or object");
-            return Err(-1);
+        } else {
+            serde_json::Value::Null
         }
     };
-    debug_assert!(extra_body.is_null() || extra_body.is_object());
 
-    let buffered_tool_call = true;
-    // let buffered_tool_call = opts_obj
-    //     .get_property_str(ctx, "bufferedToolCall")?
-    //     .as_bool()
-    //     .unwrap_or(false);
+    let new_target = cc.this();
 
-    let timeout_ms = opts_obj.get_property_str(ctx, "timeout")?;
-    let timeout = if !timeout_ms.is_undefined() {
-        Some(
-            timeout_ms
-                .to_number(ctx)
-                .map(|n| Duration::from_millis(n.to_u32() as u64))?,
-        )
-    } else {
-        None
-    };
+    let v = cc.arg(0);
+    if !v.is_undefined() {
+        let opts_obj = v.as_object().copied().ok_or_else(|| {
+            ctx.throw_type_error("requires options object");
+            -1
+        })?;
 
-    JSLlmClient::new_instance(
-        ctx,
-        new_target,
-        Arc::new(ClientPayload {
-            model_name: default_model,
-            base_url,
-            api_key,
-            org_id: String::new(),
-            project_id: String::new(),
-            custom_headers: HeaderMap::new(),
-            buffered_tool_call,
-            extra_body,
-            timeout,
-        }),
-    )
-    .and_then(|mut o| {
+        let base_url_val = opts_obj.get_property_str(ctx, "baseUrl")?;
+        if !base_url_val.is_undefined()
+            && let Some(s) = base_url_val.as_string()
+        {
+            base_url = s.content().encode_utf8(false).to_string()
+        }
+
+        let key_val = opts_obj.get_property_str(ctx, "apiKey")?;
+        if !key_val.is_undefined()
+            && let Some(s) = key_val
+                .as_string()
+                .map(|s| s.content().encode_utf8(false).to_string())
+        {
+            api_key = s
+        }
+
+        let model_val = opts_obj.get_property_str(ctx, "model")?;
+        if !model_val.is_undefined()
+            && let Some(s) = model_val
+                .as_string()
+                .map(|s| s.content().encode_utf8(false).to_string())
+        {
+            model = s;
+        }
+
+        let tokens_val = opts_obj.get_property_str(ctx, "maxTokens")?;
+        if !tokens_val.is_undefined() {
+            let n = v.to_number(ctx)?.to_i32();
+            if n >= 0 {
+                max_tokens = n;
+            } else {
+                ctx.throw_type_error("invalid maxTokens");
+                return Err(-1);
+            }
+        }
+
+        let timeout_val = opts_obj.get_property_str(ctx, "timeout")?;
+        if !timeout_val.is_undefined() {
+            let n = timeout_val.to_number(ctx).map(|n| n.to_i32())?;
+            if n >= 0 {
+                timeout_ms = n;
+            }
+        }
+
+        // extra_body
+        match opts_obj.get_property_str(ctx, "extraBody")? {
+            JSValue::UNDEFINED => {}
+            JSValue::NULL => {
+                extra_body = serde_json::Value::Null;
+            }
+            JSValue::Object(o) => {
+                extra_body = o.to_serde_json(ctx)?;
+            }
+            _ => {
+                ctx.throw_type_error("extraBody must be one of undefined, null or object");
+                return Err(-1);
+            }
+        };
+        debug_assert!(extra_body.is_null() || extra_body.is_object());
+    }
+
+    let payload = Arc::new(ClientPayload {
+        model_name: if model.is_empty() { None } else { Some(model) },
+        base_url,
+        api_key,
+        org_id: String::new(),
+        project_id: String::new(),
+        custom_headers: HeaderMap::new(),
+        buffered_tool_call,
+        timeout: if timeout_ms > 0 {
+            Some(Duration::from_millis(timeout_ms as u64))
+        } else {
+            None
+        },
+        max_tokens: max_tokens as usize,
+        extra_body,
+    });
+
+    JSLlmClient::new_instance(ctx, new_target, payload).and_then(|mut o| {
         // Initialize hidden internal property for responseNormalizer,
         // pre-created so the setter can use simple set_property_str.
         o.as_object_mut().define_property_value_str(
@@ -280,37 +318,39 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
     // fields like reasoning_content) that async-openai typed structs would drop.
     // Client is a remote API proxy — it should forward everything, not filter.
     let mut req_json = opts_obj.to_serde_json(ctx)?;
-
     // camelCase → snake_case for OpenAI API compatibility
     json_keys_camel_to_snake(&mut req_json);
 
-    // Fill default model if missing or empty
-    if let Some(obj) = req_json.as_object_mut() {
-        let model_val = obj
-            .get("model")
-            .and_then(|v| v.as_str())
-            .map(String::from)
-            .unwrap_or_else(get_llm_model);
-
-        obj.insert("model".to_string(), serde_json::Value::String(model_val));
-    }
-
-    // Merge default extra_body with per-request extra_body.
-    // Client default extra_body serves as base, per-request fields override.
-    if let Some(default_body) = client.extra_body.as_object() {
-        let mut merged = default_body.clone();
-        if let Some(req_body) = req_json
-            .as_object()
-            .and_then(|o| o.get("extra_body"))
-            .and_then(|v| v.as_object())
+    if let Some(req) = req_json.as_object_mut() {
+        // model
+        if req.get("model").is_none()
+            && let Some(m) = &client.model_name
         {
-            for (k, v) in req_body.iter() {
-                merged.insert(k.clone(), v.clone());
-            }
+            req.insert("model".into(), serde_json::Value::String(m.to_string()));
         }
 
-        if let Some(obj) = req_json.as_object_mut() {
-            obj.insert("extra_body".to_string(), serde_json::Value::Object(merged));
+        // max_tokens
+        if req.get("max_tokens").is_none() && client.max_tokens > 0 {
+            req.insert("max_tokens".into(), client.max_tokens.into());
+        }
+
+        // extra_body
+        if let Some(b) = req.get("extra_body") {
+            if let Some(req_body) = b.as_object() {
+                if let Some(mut merged) = client.extra_body.as_object().cloned() {
+                    // Merge default extra_body with per-request extra_body.
+                    // Client default extra_body serves as base, per-request fields override.
+                    for (k, v) in req_body.iter() {
+                        merged.insert(k.clone(), v.clone());
+                    }
+                    req.insert("extra_body".to_string(), serde_json::Value::Object(merged));
+                }
+            } else {
+                ctx.throw_type_error("expect object: extraBody");
+                return Err(-1);
+            }
+        } else if client.extra_body.is_object() {
+            req.insert("extra_body".to_string(), client.extra_body.clone());
         }
     }
 
@@ -572,6 +612,7 @@ const PROP_BASE_URL: i32 = 2;
 const PROP_BUFFERED_TOOL_CALL: i32 = 3;
 const PROP_EXTRA_BODY: i32 = 4;
 const PROP_TIMEOUT: i32 = 5;
+const PROP_MAX_TOKENS: i32 = 6;
 
 /// Internal property key for responseNormalizer, hidden from JS enumeration
 const INNER_PROP_RESPONSE_NORMALIZER: &str = "_responseNormalizer";
@@ -589,6 +630,7 @@ fn js_client_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             .create_string_from_str(&client.base_url)
             .map(JSValue::String),
         PROP_BUFFERED_TOOL_CALL => Ok(JSValue::Bool(client.buffered_tool_call)),
+        PROP_MAX_TOKENS => Ok(JSValue::Int(client.max_tokens as i32)),
         PROP_EXTRA_BODY => {
             if client.extra_body.is_null() {
                 Ok(JSValue::NULL)
@@ -669,6 +711,12 @@ const CLASS_CLIENT_PROTO: &[FieldDef] = &[
         Some(js_client_getter),
         None,
         PROP_BUFFERED_TOOL_CALL as _,
+    ),
+    FieldDef::GETSET(
+        "maxTokens",
+        Some(js_client_getter),
+        None,
+        PROP_MAX_TOKENS as _,
     ),
     FieldDef::GETSET(
         "extraBody",
