@@ -100,7 +100,12 @@ impl OutputParser {
         let mut text = String::new();
         let mut add_text = false;
 
-        let terminal = if let Some(t) = self.model.lookup_token_text(llm_token) {
+        // Save raw token text before terminal mapping — needed for fail-guard fallback.
+        // For TOK_* terminals, `text` stays empty because output_token_to_terminal
+        // returns Some(...), so the unwrap_or_else closure that sets `text` is skipped.
+        let raw_token_text = self.model.lookup_token_text(llm_token).map(|s| s.to_string());
+
+        let terminal = if let Some(t) = raw_token_text.as_deref() {
             self.model
                 .arch()
                 .output_token_to_terminal(t)
@@ -117,14 +122,17 @@ impl OutputParser {
         // Push token to parser for grammar validation
         if let Err(e) = self.parser.push_token_str(&text, terminal) {
             eprintln!(
-                "[O.o][OutputParser::push_token] token={llm_token}, terminal={terminal:?}, text={text}",
+                "[O.o][OutputParser::push_token] token={llm_token}, terminal={terminal:?}, text={text}, err={e}",
             );
 
             // FAIL GUARD: If the parser rejects a TOK_* terminal, try to push it as TEXT instead.
             // This handles cases where the model outputs a special token in an unexpected
-            // context (e.g., nested tool_call or stray boundary token).
+            // context (e.g., stray boundary token outside its expected section).
             if terminal != "TEXT" {
-                if self.parser.push_token_str(&text, "TEXT").is_ok() {
+                // Use raw_token_text for fallback: `text` is empty for TOK_* terminals
+                // because it's only set in the TEXT fallback path above.
+                let fallback = raw_token_text.as_deref().unwrap_or(&text);
+                if self.parser.push_token_str(fallback, "TEXT").is_ok() {
                     // Accepted as plain text — keep current state, add text
                     add_text = true;
                     return Ok((add_text, events));

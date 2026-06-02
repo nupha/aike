@@ -1,4 +1,5 @@
 use std::collections::{HashSet, VecDeque};
+use std::io::Write;
 
 use async_openai::types::chat::ChatCompletionTools;
 use crossbeam::channel::{Receiver, Sender};
@@ -208,12 +209,23 @@ pub struct TaskState {
     pub(crate) current_content: Vec<GeneratedContent>,
     /// Pending bytes for UTF-8 decoding
     pub(crate) pending_bytes: Vec<u8>,
+    /// Token output log (debugging). Each generated token text is appended here.
+    #[cfg(debug_assertions)]
+    pub(crate) token_log: Option<std::fs::File>,
 }
 
 impl TaskState {
     pub(crate) fn add_output_token(&mut self, token: Token, model: &LlamaModel) {
         let mut append_token_utf8 = true;
         self.n_completion_tokens += 1;
+
+        // Log every generated token for debugging (debug builds only)
+        #[cfg(debug_assertions)]
+        if let Some(ref mut log) = self.token_log {
+            let piece = model.token_to_piece(token);
+            let text = String::from_utf8_lossy(&piece);
+            let _ = writeln!(log, "[tok={token}] {text}");
+        }
 
         // Push token to parser and get events
         if let Some(ref mut parser) = self.output_parser {
@@ -516,6 +528,16 @@ impl Engine {
             OutputState::ToolCall => GeneratedContent::ToolCall(String::new()),
         }];
 
+        // Debug token log: cleared at start of each inference
+        #[cfg(debug_assertions)]
+        let token_log = if task.config.enable_output_parser {
+            let log_path = format!("/tmp/aike-tokens-{}.log", task.config.task_id);
+            // Create/truncate the log file
+            std::fs::File::create(&log_path).ok()
+        } else {
+            None
+        };
+
         let task_state = TaskState {
             config: task.config,
             n_completion_tokens: 0,
@@ -523,6 +545,8 @@ impl Engine {
             output_tx: task.output_tx,
             current_content,
             pending_bytes: Vec::new(),
+            #[cfg(debug_assertions)]
+            token_log,
         };
 
         let slot = &mut slots[slot_idx];
