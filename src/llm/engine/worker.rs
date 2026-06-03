@@ -10,8 +10,10 @@ use crossbeam::channel::Receiver;
 use super::{
     context::Engine,
     slot::{Slot, SlotState},
-    task::{EngineCtrlMsg, EngineReply, EngineTask, GeneratedContent, SchedResult, StopReason},
+    task::{EngineCtrlMsg, EngineReply, EngineTask, SchedResult, StopReason},
 };
+
+use super::output::GeneratedContent;
 
 /// Helper function to check if a GeneratedContent matches the parser state
 fn matches_content_state(content: &GeneratedContent, state: super::output::OutputState) -> bool {

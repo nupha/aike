@@ -166,11 +166,6 @@ impl OutputParser {
     pub fn current_state(&self) -> OutputState {
         self.current_state
     }
-
-    pub fn reset(&mut self) {
-        self.buf.clear();
-        self.current_state = OutputState::Text;
-    }
 }
 
 impl std::fmt::Debug for OutputParser {
