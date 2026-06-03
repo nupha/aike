@@ -706,7 +706,7 @@ fn js_engine_httpServe(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 fn js_engine_stopServe(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let engine = get_engine(ctx, &this)?;
-    engine.lock().unwrap().request_stop();
+    engine.lock().unwrap().notify_stop();
     Ok(JSValue::UNDEFINED)
 }
 

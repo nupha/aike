@@ -33,7 +33,7 @@ use crate::{
         PromptThinkPattern, apply_chat_template, detect_prompt_think_pattern, now_unix_s,
         to_lark_tool_choice,
     },
-    llm::engine::{Engine, EngineCtrlMsg, EngineReply, EngineTask, GrammarConfig, TaskConfig},
+    llm::engine::{Engine, EngineReply, EngineTask, GrammarConfig, TaskConfig},
     output::{
         ChunkSSE, ParserKind, collect_engine_reply_to_json, redirect_engine_reply_to_chat_sse,
     },
@@ -89,8 +89,6 @@ pub(crate) struct AppState {
     pub(crate) model_name: String,
     /// Channel to push tasks to the worker thread (no engine.lock() needed).
     pub(crate) input_tx: Sender<Box<EngineTask>>,
-    /// Channel to send control messages to the worker thread.
-    pub(crate) ctrl_tx: Sender<EngineCtrlMsg>,
 }
 
 /// Start http server with Engine (in current thread), blocks until shutdown signal.
@@ -100,7 +98,7 @@ pub async fn http_serve(
     port: u16,
     shutdown_rx: tokio::sync::oneshot::Receiver<()>,
 ) -> Result<(), String> {
-    let (model, parse_reasoning, default_max_tokens, model_name, input_tx, ctrl_tx) = {
+    let (model, parse_reasoning, default_max_tokens, model_name, input_tx) = {
         let e = engine.lock().unwrap();
         (
             e.model().clone(),
@@ -108,7 +106,6 @@ pub async fn http_serve(
             e.default_max_tokens(),
             e.model_name().to_string(),
             e.input_tx.clone(),
-            e.ctrl_tx.clone(),
         )
     };
     let state = AppState {
@@ -118,7 +115,6 @@ pub async fn http_serve(
         default_max_tokens,
         model_name,
         input_tx,
-        ctrl_tx,
     };
 
     let app = Router::new()
@@ -148,8 +144,18 @@ async fn handle_root() -> impl IntoResponse {
     Json(json!({"name":"llm server"}))
 }
 
-async fn handle_health() -> impl IntoResponse {
-    Json(json!({"status": "ok"}))
+async fn handle_health(State(state): State<AppState>) -> impl IntoResponse {
+    let alive = state.engine.lock().unwrap().is_alive();
+    if alive {
+        Json(json!({"status": "ok"})).into_response()
+    } else {
+        let status = StatusCode::SERVICE_UNAVAILABLE;
+        (
+            status,
+            Json(json!({"status": "error", "message": "engine worker has crashed"})),
+        )
+            .into_response()
+    }
 }
 
 async fn handle_models(State(state): State<AppState>) -> impl IntoResponse {
@@ -170,6 +176,15 @@ async fn handle_chat_completions(
     State(state): State<AppState>,
     Json(req): Json<CreateChatCompletionRequest>,
 ) -> Response {
+    // Quick check: if the engine worker has crashed, reject immediately.
+    if !state.engine.lock().unwrap().is_alive() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(oai_error("engine worker has crashed", "server_error")),
+        )
+            .into_response();
+    }
+
     #[cfg(feature = "enable_eval_log")]
     let start_time = std::time::Instant::now();
 

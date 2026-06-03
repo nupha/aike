@@ -44,6 +44,11 @@ pub struct Engine {
     /// via reasoning_content field instead of leaving them in content.
     /// meaningful for chat completion response only.
     pub(crate) parse_reasoning: bool,
+
+    /// Set to true when the worker thread has panicked.
+    /// Once dead, push_task() will return an error and the engine
+    /// should be considered unusable.
+    pub(crate) is_dead: bool,
 }
 
 impl Drop for Engine {
@@ -250,6 +255,7 @@ impl Engine {
             is_serving: false,
             shutdown_tx: None,
             parse_reasoning: true,
+            is_dead: false,
             llm_ctx,
             slot_cached_tokens: vec![Vec::new(); num_parallel],
             slot_samplers: (0..num_parallel).map(|_| None).collect(),
@@ -273,7 +279,9 @@ impl Engine {
                         ctrl_rx,
                     );
                 }));
+
                 if let Err(e) = result {
+                    // log panic error
                     let msg = if let Some(s) = e.downcast_ref::<&str>() {
                         s.to_string()
                     } else if let Some(s) = e.downcast_ref::<String>() {
@@ -286,8 +294,10 @@ impl Engine {
                     // Notify all pending tasks that the engine has crashed.
                     if let Ok(mut eng) = eng2.lock() {
                         eng.num_tasks = 0;
+                        eng.is_dead = true;
+
                         // Send shutdown signal to HTTP server if serving.
-                        eng.request_stop();
+                        eng.notify_stop();
                     }
                 }
             }
@@ -299,6 +309,13 @@ impl Engine {
 
     pub fn active_tasks(&self) -> usize {
         self.num_tasks
+    }
+
+    /// Returns true if the worker thread is still running.
+    /// Once the worker has panicked, this returns false and the engine
+    /// should be considered unusable.
+    pub fn is_alive(&self) -> bool {
+        !self.is_dead
     }
 
     pub fn default_max_tokens(&self) -> usize {
@@ -333,7 +350,7 @@ impl Engine {
         self.shutdown_tx.take();
     }
 
-    pub fn request_stop(&mut self) {
+    pub fn notify_stop(&mut self) {
         if let Some(tx) = self.shutdown_tx.take() {
             let _ = tx.send(());
         }
@@ -345,7 +362,11 @@ impl Engine {
         config: TaskConfig,
         output_prepend: Vec<Token>,
         seq_hint: Option<usize>,
-    ) -> Result<Receiver<EngineReply>, SendError<Box<EngineTask>>> {
+    ) -> Result<Receiver<EngineReply>, String> {
+        if self.is_dead {
+            return Err("engine worker has crashed".to_string());
+        }
+
         let (output_tx, output_rx) = crossbeam::channel::bounded::<EngineReply>(1);
 
         let task = Box::new(EngineTask {
@@ -356,7 +377,7 @@ impl Engine {
             seq_hint,
             timestamp: None,
         });
-        self.input_tx.send(task)?;
+        self.input_tx.send(task).map_err(|e| e.to_string())?;
 
         Ok(output_rx)
     }

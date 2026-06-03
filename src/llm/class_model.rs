@@ -88,7 +88,7 @@ fn normalize_model_params_for_runtime(params: &mut llama_cpp_ffi::llama_model_pa
     }
 
     if device_count == 0 && params.main_gpu >= 0 {
-        eprintln!(
+        log::warn!(
             "[warn] no GPU backend device is available; forcing mainGpu = -1 (was {})",
             params.main_gpu
         );
@@ -1081,15 +1081,27 @@ impl JSLlmModel {
                     return;
                 }
 
-                if matches!(
-                    level,
-                    llama_cpp_ffi::ggml_log_level_GGML_LOG_LEVEL_WARN
-                        | llama_cpp_ffi::ggml_log_level_GGML_LOG_LEVEL_ERROR
-                ) {
-                    let msg = unsafe { CStr::from_ptr(text).to_string_lossy() };
-                    eprint!("{msg}");
-                    append_llama_log(&msg);
+                let msg = unsafe { CStr::from_ptr(text).to_string_lossy() };
+
+                match level {
+                    llama_cpp_ffi::ggml_log_level_GGML_LOG_LEVEL_DEBUG => {
+                        log::debug!("{msg}");
+                    }
+                    llama_cpp_ffi::ggml_log_level_GGML_LOG_LEVEL_INFO => {
+                        log::info!("{msg}");
+                    }
+                    llama_cpp_ffi::ggml_log_level_GGML_LOG_LEVEL_WARN => {
+                        log::warn!("{msg}");
+                    }
+                    llama_cpp_ffi::ggml_log_level_GGML_LOG_LEVEL_ERROR => {
+                        log::error!("{msg}");
+                    }
+                    _ => {
+                        log::info!("{msg}");
+                    }
                 }
+
+                append_llama_log(&msg);
             }
 
             llama_cpp_ffi::llama_log_set(Some(log_callback), std::ptr::null_mut());

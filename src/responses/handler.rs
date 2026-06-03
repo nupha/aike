@@ -31,6 +31,15 @@ pub async fn handle_responses(
     State(state): State<AppState>,
     Json(req): Json<CreateResponse>,
 ) -> Response {
+    // Quick check: if the engine worker has crashed, reject immediately.
+    if !state.engine.lock().unwrap().is_alive() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(oai_error("engine worker has crashed", "server_error")),
+        )
+            .into_response();
+    }
+
     let input_items = match &req.input {
         InputParam::Text(t) => {
             vec![InputItem::EasyMessage(EasyInputMessage {
