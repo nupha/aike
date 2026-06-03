@@ -1,4 +1,7 @@
-use std::ffi::CString;
+use std::{
+    ffi::CString,
+    sync::{Arc, Mutex},
+};
 
 use async_openai::types::responses::{
     CreateResponse, EasyInputContent, EasyInputMessage, InputItem, InputParam, MessageType, Role,
@@ -14,7 +17,7 @@ use uuid::Uuid;
 
 use crate::{
     helpers::{PromptThinkPattern, apply_chat_template, detect_prompt_think_pattern},
-    llm::engine::{EngineReply, GrammarConfig, TaskConfig},
+    llm::engine::{Engine, EngineReply, GrammarConfig, TaskConfig},
     output::{
         ChunkSSE, ParserKind, collect_engine_reply_to_json, redirect_engine_reply_to_responses_sse,
     },
@@ -77,6 +80,7 @@ pub async fn handle_responses(
     let respond_id;
     let model_name;
     let rx;
+    let task_id;
     let max_tokens;
     let temperature;
     let top_p;
@@ -163,6 +167,9 @@ pub async fn handle_responses(
         respond_id = format!("res-{}", Uuid::new_v4().simple());
         model_name = engine.model_name().to_string();
 
+        // Save task_id before task_config is moved into push_task.
+        task_id = task_config.task_id;
+
         rx = match engine.push_task(prompt_tokens, task_config, output_prepend, None) {
             Ok(r) => r,
             Err(e) => {
@@ -173,10 +180,23 @@ pub async fn handle_responses(
                     .into_response();
             }
         };
-    }
+    } // engine (MutexGuard) is dropped here, before any .await
+
+    // CancelGuard ensures the task is cancelled if the client disconnects.
+    let mut guard = crate::serve::CancelGuard::new(state.engine.clone(), task_id);
 
     if is_stream {
-        handle_responses_stream(rx, respond_id, model_name, n_prompt_tokens)
+        // Don't disarm the guard — it ensures the task is cancelled immediately
+        // when the client disconnects (future dropped), even if spawn_blocking
+        // is blocked on rx.recv_timeout waiting for the next engine token.
+        handle_responses_stream(
+            rx,
+            respond_id,
+            model_name,
+            n_prompt_tokens,
+            state.engine.clone(),
+            task_id,
+        )
     } else {
         // non-stream
         let join = tokio::task::spawn_blocking(move || {
@@ -202,7 +222,12 @@ pub async fn handle_responses(
             })
         });
 
-        match join.await {
+        let result = join.await;
+        // Disarm the guard on any completed outcome.
+        // If the future was dropped (client disconnected), guard will fire instead.
+        guard.disarm();
+
+        match result {
             Ok(Ok(val)) => Json(val).into_response(),
             Ok(Err((code, err_info))) => (code, Json(err_info)).into_response(),
             Err(_) => (
@@ -219,9 +244,13 @@ pub(crate) fn handle_responses_stream(
     respond_id: String,
     model_name: String,
     n_prompt_tokens: usize,
+    engine: Arc<Mutex<Engine>>,
+    task_id: usize,
 ) -> Response {
     let (tx, rx_tokio) = tokio::sync::mpsc::unbounded_channel::<String>();
     tokio::task::spawn_blocking(move || {
+        let mut client_disconnected = false;
+
         redirect_engine_reply_to_responses_sse(
             rx,
             STREAM_TIMEOUT,
@@ -239,7 +268,10 @@ pub(crate) fn handle_responses_stream(
                         let data_str = serde_json::to_string(&data).unwrap_or_default();
                         drop(data);
                         let msg = format!("event: {event_type}\ndata: {data_str}\n\n");
-                        let _ = tx.send(msg);
+                        if tx.send(msg).is_err() {
+                            client_disconnected = true;
+                            return false;
+                        }
                     }
                     ChunkSSE::Done => {
                         let _ = tx.send("[DONE]".to_string());
@@ -258,6 +290,14 @@ pub(crate) fn handle_responses_stream(
                 true
             },
         );
+
+        if client_disconnected {
+            log::info!(
+                "[responses] streaming: client disconnected, cancelling task id={}",
+                task_id
+            );
+            let _ = engine.lock().unwrap().cancel_task(task_id);
+        }
     });
 
     let stream = tokio_stream::wrappers::UnboundedReceiverStream::new(rx_tokio)

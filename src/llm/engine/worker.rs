@@ -67,7 +67,7 @@ pub fn worker_loop(
 
         while let Some(task) = pop_next_task(&mut ready_tasks, &mut deferred_tasks) {
             if cancelled_ids.remove(&task.config.task_id) {
-                log::debug!(
+                log::info!(
                     "[worker] task id={} was cancelled, sending Cancelled reply",
                     task.config.task_id
                 );
@@ -432,6 +432,9 @@ impl Engine {
             let state0 = std::mem::replace(&mut slot.state, SlotState::Busy);
 
             if let SlotState::Done { task_state, reply } = state0 {
+                if matches!(reply, EngineReply::Cancelled) {
+                    log::info!("[worker] task id={} cancelled", task_state.config.task_id);
+                }
                 let aborted = matches!(
                     reply,
                     EngineReply::Cancelled | EngineReply::Shutdown | EngineReply::Error(_)

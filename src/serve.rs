@@ -4,6 +4,39 @@ use std::{
     time::Duration,
 };
 
+/// A guard that cancels an engine task on drop unless disarmed.
+/// Used to ensure tasks are cancelled when the HTTP client disconnects.
+pub(crate) struct CancelGuard {
+    engine: Option<Arc<Mutex<Engine>>>,
+    task_id: usize,
+}
+
+impl CancelGuard {
+    pub(crate) fn new(engine: Arc<Mutex<Engine>>, task_id: usize) -> Self {
+        Self {
+            engine: Some(engine),
+            task_id,
+        }
+    }
+
+    /// Disarm the guard — the task will NOT be cancelled on drop.
+    pub(crate) fn disarm(&mut self) {
+        self.engine.take();
+    }
+}
+
+impl Drop for CancelGuard {
+    fn drop(&mut self) {
+        if let Some(engine) = self.engine.take() {
+            log::info!(
+                "[cancel] client disconnected, cancelling task id={}",
+                self.task_id
+            );
+            let _ = engine.lock().unwrap().cancel_task(self.task_id);
+        }
+    }
+}
+
 use async_openai::types::chat::{CreateChatCompletionRequest, ReasoningEffort};
 use axum::{
     Json, Router,
@@ -297,6 +330,11 @@ async fn handle_chat_completions(
     let n_prompt_tokens = prompt_tokens.len();
     let respond_id = format!("chatcmpl-{}", Uuid::new_v4().simple());
 
+    // Save task_id before moving task_config into EngineTask.
+    let task_id = task_config.task_id;
+    // CancelGuard ensures the task is cancelled if the client disconnects.
+    let mut guard = CancelGuard::new(state.engine.clone(), task_id);
+
     // Push task directly via channel to avoid acquiring engine.lock()
     // (worker thread may hold the lock for extended periods during inference).
     let (output_tx, output_rx) = crossbeam::channel::bounded::<EngineReply>(1);
@@ -342,7 +380,10 @@ async fn handle_chat_completions(
         #[cfg(feature = "enable_eval_log")]
         let start_time_clone = start_time;
 
+        let engine_for_worker = state.engine.clone();
         tokio::task::spawn_blocking(move || {
+            let mut client_disconnected = false;
+
             redirect_engine_reply_to_chat_sse(
                 rx,
                 STREAM_TIMEOUT,
@@ -357,7 +398,10 @@ async fn handle_chat_completions(
                     match chunk {
                         ChunkSSE::Chunk(data) => {
                             let serialized = serde_json::to_string(&data).unwrap();
-                            let _ = tx.send(serialized);
+                            if tx.send(serialized).is_err() {
+                                client_disconnected = true;
+                                return false;
+                            }
                         }
                         ChunkSSE::Done => {
                             #[cfg(feature = "enable_eval_log")]
@@ -385,6 +429,15 @@ async fn handle_chat_completions(
                     true
                 },
             );
+
+            // If the client disconnected (tx.send failed), cancel the engine task.
+            if client_disconnected {
+                log::info!(
+                    "[http] streaming: client disconnected, cancelling task id={}",
+                    task_id
+                );
+                let _ = engine_for_worker.lock().unwrap().cancel_task(task_id);
+            }
         });
 
         let s = UnboundedReceiverStream::new(rx_tokio)
@@ -419,7 +472,12 @@ async fn handle_chat_completions(
             })
         });
 
-        match join.await {
+        let result = join.await;
+        // Disarm the guard on any completed outcome (success or known error).
+        // If the future was dropped (client disconnected), guard will fire instead.
+        guard.disarm();
+
+        match result {
             Ok(Ok(val)) => {
                 #[cfg(feature = "enable_eval_log")]
                 {
