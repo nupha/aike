@@ -16,6 +16,7 @@ use axum::{
     routing::{get, post},
 };
 use futures_util::StreamExt;
+use llama_cpp_ffi::LlamaModel;
 use serde::Serialize;
 use serde_json::json;
 use tokio_stream::wrappers::UnboundedReceiverStream;
@@ -25,12 +26,14 @@ use uuid::Uuid;
 #[cfg(feature = "enable_eval_log")]
 use crate::eval_logger::{EvalLogEntry, ToolCallLog, get_eval_logger};
 
+use crossbeam::channel::Sender;
+
 use crate::{
     helpers::{
         PromptThinkPattern, apply_chat_template, detect_prompt_think_pattern, now_unix_s,
         to_lark_tool_choice,
     },
-    llm::engine::{Engine, GrammarConfig, TaskConfig},
+    llm::engine::{Engine, EngineCtrlMsg, EngineReply, EngineTask, GrammarConfig, TaskConfig},
     output::{
         ChunkSSE, ParserKind, collect_engine_reply_to_json, redirect_engine_reply_to_chat_sse,
     },
@@ -78,9 +81,16 @@ struct ModelInfo {
 }
 
 #[derive(Clone)]
-#[repr(transparent)]
 pub(crate) struct AppState {
     pub(crate) engine: Arc<Mutex<Engine>>,
+    pub(crate) model: LlamaModel,
+    pub(crate) parse_reasoning: bool,
+    pub(crate) default_max_tokens: usize,
+    pub(crate) model_name: String,
+    /// Channel to push tasks to the worker thread (no engine.lock() needed).
+    pub(crate) input_tx: Sender<Box<EngineTask>>,
+    /// Channel to send control messages to the worker thread.
+    pub(crate) ctrl_tx: Sender<EngineCtrlMsg>,
 }
 
 /// Start http server with Engine (in current thread), blocks until shutdown signal.
@@ -90,7 +100,26 @@ pub async fn http_serve(
     port: u16,
     shutdown_rx: tokio::sync::oneshot::Receiver<()>,
 ) -> Result<(), String> {
-    let state = AppState { engine };
+    let (model, parse_reasoning, default_max_tokens, model_name, input_tx, ctrl_tx) = {
+        let e = engine.lock().unwrap();
+        (
+            e.model().clone(),
+            e.parse_reasoning(),
+            e.default_max_tokens(),
+            e.model_name().to_string(),
+            e.input_tx.clone(),
+            e.ctrl_tx.clone(),
+        )
+    };
+    let state = AppState {
+        engine,
+        model,
+        parse_reasoning,
+        default_max_tokens,
+        model_name,
+        input_tx,
+        ctrl_tx,
+    };
 
     let app = Router::new()
         .route("/", get(handle_root))
@@ -125,7 +154,7 @@ async fn handle_health() -> impl IntoResponse {
 
 async fn handle_models(State(state): State<AppState>) -> impl IntoResponse {
     let data = vec![ModelInfo {
-        id: state.engine.lock().unwrap().model_name().to_string(),
+        id: state.model_name.clone(),
         object: "model",
         created: now_unix_s(),
         owned_by: "local",
@@ -161,20 +190,17 @@ async fn handle_chat_completions(
     let is_stream = req.stream.unwrap_or(false);
     let enable_thinking = req.reasoning_effort.clone().unwrap_or_default() != ReasoningEffort::None;
 
-    let parse_reasoning: bool;
-    let default_max_tokens: usize;
-    let model_name: String;
     let output_prepend: Vec<i32>;
+
+    // Use cached model info from AppState to avoid acquiring engine.lock()
+    // (worker thread may hold the lock for extended periods during inference).
+    let model = &state.model;
+    let parse_reasoning = state.parse_reasoning;
+    let default_max_tokens = state.default_max_tokens;
+    let model_name = state.model_name.clone();
 
     // Build prompt tokens
     let prompt_tokens = {
-        let engine = state.engine.lock().unwrap();
-        let model = engine.model();
-
-        parse_reasoning = engine.parse_reasoning();
-        default_max_tokens = engine.default_max_tokens();
-        model_name = engine.model_name().to_string();
-
         match apply_chat_template(
             model,
             &req.messages,
@@ -249,24 +275,27 @@ async fn handle_chat_completions(
             .unwrap_or(llama_cpp_ffi::ToolChoice::Auto);
 
         if tc != llama_cpp_ffi::ToolChoice::None {
-            task_config = task_config.grammar(GrammarConfig::new(
-                state.engine.lock().unwrap().model(),
-                tools,
-                tc,
-            ));
+            task_config = task_config.grammar(GrammarConfig::new(&state.model, tools, tc));
         }
     }
 
     let n_prompt_tokens = prompt_tokens.len();
     let respond_id = format!("chatcmpl-{}", Uuid::new_v4().simple());
 
-    let rx = match state.engine.lock().unwrap().push_task(
+    // Push task directly via channel to avoid acquiring engine.lock()
+    // (worker thread may hold the lock for extended periods during inference).
+    let (output_tx, output_rx) = crossbeam::channel::bounded::<EngineReply>(1);
+    let task = Box::new(EngineTask {
+        config: task_config,
         prompt_tokens,
-        task_config,
         output_prepend,
-        None,
-    ) {
-        Ok(rx) => rx,
+        output_tx,
+        seq_hint: None,
+        timestamp: None,
+    });
+
+    let rx = match state.input_tx.send(task) {
+        Ok(()) => output_rx,
         Err(e) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -284,6 +313,7 @@ async fn handle_chat_completions(
 
     if is_stream {
         // streaming - sse
+        log::debug!("[http] streaming path: spawning blocking task for SSE");
         let (tx, rx_tokio) = tokio::sync::mpsc::unbounded_channel::<String>();
 
         #[cfg(feature = "enable_eval_log")]
@@ -392,12 +422,21 @@ async fn handle_chat_completions(
 
                 Json(val).into_response()
             }
-            Ok(Err((code, err_info))) => (code, Json(err_info)).into_response(),
-            Err(_) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(oai_error("request task failed", "server_error")),
-            )
-                .into_response(),
+            Ok(Err((code, err_info))) => {
+                log::debug!(
+                    "[http] non-streaming: join.await returned Err: {}",
+                    err_info.error.message
+                );
+                (code, Json(err_info)).into_response()
+            }
+            Err(_) => {
+                log::debug!("[http] non-streaming: join.await returned JoinError (task panicked)");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(oai_error("request task failed", "server_error")),
+                )
+                    .into_response()
+            }
         }
     }
 }

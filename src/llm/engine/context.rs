@@ -260,14 +260,36 @@ impl Engine {
         let worker_join = thread::spawn({
             let eng2 = engine.clone();
             move || {
-                worker_loop(
-                    eng2,
-                    num_parallel,
-                    idle_sleep,
-                    slot_match_threshold,
-                    input_rx,
-                    ctrl_rx,
-                );
+                // Wrap worker_loop in catch_unwind so that a panic (e.g. from
+                // llama_decode) is logged and the engine is marked as stopped
+                // instead of silently killing the worker thread.
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    worker_loop(
+                        eng2.clone(),
+                        num_parallel,
+                        idle_sleep,
+                        slot_match_threshold,
+                        input_rx,
+                        ctrl_rx,
+                    );
+                }));
+                if let Err(e) = result {
+                    let msg = if let Some(s) = e.downcast_ref::<&str>() {
+                        s.to_string()
+                    } else if let Some(s) = e.downcast_ref::<String>() {
+                        s.clone()
+                    } else {
+                        format!("{:?}", e)
+                    };
+                    log::error!("[worker] worker thread panicked: {}", msg);
+
+                    // Notify all pending tasks that the engine has crashed.
+                    if let Ok(mut eng) = eng2.lock() {
+                        eng.num_tasks = 0;
+                        // Send shutdown signal to HTTP server if serving.
+                        eng.request_stop();
+                    }
+                }
             }
         });
 

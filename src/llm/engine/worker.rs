@@ -40,8 +40,8 @@ pub fn worker_loop(
     let mut slots = (0..max_parallel).map(Slot::new).collect::<Vec<_>>();
     let mut slot_cursor = 0usize;
 
-    let mut ready_inputs = VecDeque::<Box<EngineTask>>::new();
-    let mut deferred_inputs = VecDeque::<Box<EngineTask>>::new();
+    let mut ready_tasks = VecDeque::<Box<EngineTask>>::new();
+    let mut deferred_tasks = VecDeque::<Box<EngineTask>>::new();
 
     let mut cancelled_ids = HashSet::<usize>::new();
 
@@ -49,30 +49,28 @@ pub fn worker_loop(
         if engine.lock().unwrap().handle_ctrl_messages(
             &ctrl_rx,
             &mut slots,
-            &mut ready_inputs,
-            &mut deferred_inputs,
+            &mut ready_tasks,
+            &mut deferred_tasks,
             &mut cancelled_ids,
         ) {
             engine.lock().unwrap().num_tasks = 0;
             return;
         }
 
-        while let Ok(input) = input_rx.try_recv() {
-            if engine.lock().unwrap().handle_ctrl_messages(
-                &ctrl_rx,
-                &mut slots,
-                &mut ready_inputs,
-                &mut deferred_inputs,
-                &mut cancelled_ids,
-            ) {
-                engine.lock().unwrap().num_tasks = 0;
-                return;
+        while let Ok(task) = input_rx.try_recv() {
+            if deferred_tasks.is_empty() {
+                ready_tasks.push_back(task);
+            } else {
+                deferred_tasks.push_back(task);
             }
-            enqueue_task(input, &mut ready_inputs, &mut deferred_inputs);
         }
 
-        while let Some(task) = pop_next_task(&mut ready_inputs, &mut deferred_inputs) {
+        while let Some(task) = pop_next_task(&mut ready_tasks, &mut deferred_tasks) {
             if cancelled_ids.remove(&task.config.task_id) {
+                log::debug!(
+                    "[worker] task id={} was cancelled, sending Cancelled reply",
+                    task.config.task_id
+                );
                 let _ = task.output_tx.send(EngineReply::Cancelled);
             } else {
                 match engine
@@ -80,26 +78,38 @@ pub fn worker_loop(
                     .unwrap()
                     .sched_task(task, &mut slots, slot_match_threshold)
                 {
-                    SchedResult::Scheduled | SchedResult::Rejected => {}
+                    SchedResult::Scheduled => {
+                        log::debug!("[worker] task scheduled");
+                    }
+                    SchedResult::Deferred(task) => {
+                        log::debug!(
+                            "[worker] sched_task deferred, task id={}",
+                            task.config.task_id
+                        );
+                        deferred_tasks.push_back(task);
+                        break;
+                    }
                     SchedResult::Busy(task) => {
+                        log::warn!("[worker] sched_task busy, task id={}", task.config.task_id);
                         let _ = task.output_tx.send(EngineReply::Error(
                             "all slots are busy, try again later".to_string(),
                         ));
                     }
-                    SchedResult::Deferred(input) => {
-                        enqueue_task(input, &mut ready_inputs, &mut deferred_inputs);
-                        break;
+                    SchedResult::Rejected => {
+                        log::warn!("[worker] sched_task rejected");
                     }
                 }
             }
         }
 
+        // tick engine pipeline
         let did_work = engine.lock().unwrap().tick(&mut slots, &mut slot_cursor);
 
-        engine.lock().unwrap().num_tasks = slots
+        let num_tasks = slots
             .iter()
             .filter(|s| !matches!(s.state, SlotState::Idle))
             .count();
+        engine.lock().unwrap().num_tasks = num_tasks;
 
         if !did_work {
             thread::sleep(idle_sleep);
@@ -107,19 +117,7 @@ pub fn worker_loop(
     }
 }
 
-pub fn enqueue_task(
-    task: Box<EngineTask>,
-    ready: &mut VecDeque<Box<EngineTask>>,
-    deferred: &mut VecDeque<Box<EngineTask>>,
-) {
-    if task.seq_hint.unwrap_or(0) == 0 {
-        ready.push_back(task);
-    } else {
-        deferred.push_back(task);
-    }
-}
-
-pub fn pop_next_task(
+fn pop_next_task(
     ready: &mut VecDeque<Box<EngineTask>>,
     deferred: &mut VecDeque<Box<EngineTask>>,
 ) -> Option<Box<EngineTask>> {
@@ -177,8 +175,8 @@ impl Engine {
                 break;
             }
 
-            let idx = (*slot_cursor + offset) % slots_len;
-            let slot = &mut slots[idx];
+            let slot_idx = (*slot_cursor + offset) % slots_len;
+            let slot = &mut slots[slot_idx];
             let state0 = std::mem::replace(&mut slot.state, SlotState::Busy);
 
             if let SlotState::Decoding {
@@ -192,6 +190,7 @@ impl Engine {
                 let n_take = n_tokens.min(self.ubatch_size.saturating_sub(cnt));
                 let mut feed_count = 0usize;
                 let mut decode_err: Option<String> = None;
+
                 for token in prompt_tokens.drain(..n_take) {
                     let need_logits = task_state.config.logits_for_all_tokens || n_take == n_tokens;
                     match self.push_decode_token(
@@ -220,6 +219,7 @@ impl Engine {
                     continue;
                 }
                 slot.state = if prompt_tokens.is_empty() {
+                    // prefill done, go to sampling phase
                     if logits_for_all_tokens {
                         SlotState::Done {
                             task_state,
@@ -233,6 +233,7 @@ impl Engine {
                         }
                     }
                 } else {
+                    // go on prefilling
                     SlotState::Decoding {
                         prompt_tokens,
                         logits_for_all_tokens,
@@ -241,7 +242,7 @@ impl Engine {
                     }
                 };
                 if feed_count > 0 {
-                    written_updates.push((idx, feed_count));
+                    written_updates.push((slot_idx, feed_count));
                 }
             } else {
                 slot.state = state0;
@@ -294,7 +295,7 @@ impl Engine {
             } = state0
             {
                 if task_state.output_tx.is_full() {
-                    // do sampling in next tick
+                    // channel is full, wait sampling in next tick
                     slot.state = SlotState::Sampling { logits, task_state };
                 } else if let Err(e) = self.init_sampler(
                     slot.seq_id,
@@ -398,6 +399,7 @@ impl Engine {
 
                                         task_state.current_content.push(content);
                                     }
+
                                     SlotState::Decoding {
                                         prompt_tokens: VecDeque::from([token]),
                                         logits_for_all_tokens: false,
@@ -428,6 +430,7 @@ impl Engine {
 
         for slot in slots {
             let state0 = std::mem::replace(&mut slot.state, SlotState::Busy);
+
             if let SlotState::Done { task_state, reply } = state0 {
                 let aborted = matches!(
                     reply,

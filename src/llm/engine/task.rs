@@ -237,7 +237,7 @@ pub struct TaskState {
 }
 
 impl TaskState {
-    pub(crate) fn add_output_token(&mut self, token: Token, model: &LlamaModel) {
+    pub(super) fn add_output_token(&mut self, token: Token, model: &LlamaModel) {
         let mut append_token_utf8 = true;
         self.n_completion_tokens += 1;
 
@@ -339,33 +339,20 @@ impl TaskState {
 
         self.pending_bytes.extend_from_slice(piece);
 
-        while !self.pending_bytes.is_empty() {
-            let text: String = match std::str::from_utf8(&self.pending_bytes) {
-                Ok(s) => {
-                    let text = s.to_string();
-                    self.pending_bytes.clear();
-                    text
-                }
-                Err(e) => {
-                    let valid = e.valid_up_to();
-                    if valid > 0 {
-                        let s = unsafe {
-                            std::str::from_utf8_unchecked(&self.pending_bytes[..valid]).to_string()
-                        };
-                        self.pending_bytes.drain(0..valid);
-                        s
-                    } else if self.pending_bytes.len() >= 4 {
-                        self.pending_bytes.drain(0..1);
-                        continue;
-                    } else {
-                        String::new()
-                    }
-                }
-            };
-
-            if !text.is_empty() {
-                self.current_content.last_mut().unwrap().push_str(&text);
+        // Try to decode pending_bytes as UTF-8. Valid prefix goes to content,
+        // trailing incomplete bytes stay in pending_bytes for next token.
+        if let Ok(s) = std::str::from_utf8(&self.pending_bytes) {
+            self.current_content.last_mut().unwrap().push_str(s);
+            self.pending_bytes.clear();
+        } else if let Err(e) = std::str::from_utf8(&self.pending_bytes) {
+            let valid = e.valid_up_to();
+            if valid > 0 {
+                let s = unsafe { std::str::from_utf8_unchecked(&self.pending_bytes[..valid]) };
+                self.current_content.last_mut().unwrap().push_str(s);
+                self.pending_bytes.drain(0..valid);
             }
+            // else: valid == 0, not yet a complete UTF-8 sequence,
+            // leave pending_bytes as-is for next token to complete.
         }
     }
 }
@@ -469,12 +456,8 @@ impl Engine {
         slots: &mut [Slot],
         prefix_match_threshold: f32,
     ) -> SchedResult {
-        if task.prompt_tokens.is_empty() {
-            let _ = task.output_tx.send(EngineReply::Error(
-                "prompt_tokens must not be empty".to_string(),
-            ));
-            return SchedResult::Rejected;
-        }
+        debug_assert!(!task.prompt_tokens.is_empty());
+
         let Some((slot_idx, allow_cache_reuse)) = self.pick_idle_slot(
             slots,
             task.seq_hint,
