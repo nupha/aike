@@ -46,7 +46,9 @@ fn append_llama_log(text: &str) {
         s.push_str(text);
         if s.len() > 16 * 1024 {
             let keep_from = s.len() - 16 * 1024;
-            s.drain(..keep_from);
+            // ensure the cut position is on a UTF-8 char boundary
+            let boundary = s.floor_char_boundary(keep_from);
+            s.drain(..boundary);
         }
     }
 }
