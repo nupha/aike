@@ -270,11 +270,16 @@ pub(crate) fn apply_chat_template(
 /// Compute the number of tokens for the leading system/developer messages
 /// in the prompt, using the model's chat template for accurate tokenization.
 ///
-/// Only leading system/developer messages (those at the start of the messages
-/// array, before any non-system message) are counted.  This ensures that
-/// `keep_tokens` preserves exactly the system prompt portion of the KV cache
-/// during context shift — later system messages interleaved with user/assistant
-/// turns are not meaningful to preserve.
+/// This function is designed for the **OpenAI-compatible format** where system
+/// messages are embedded in the messages array.  It only counts leading
+/// system/developer messages (those at the start of the array, before any
+/// non-system message).  Later system messages interleaved with user/assistant
+/// turns are ignored — they are not meaningful to preserve during context shift.
+///
+/// For the **Anthropic-compatible format**, system is a separate top-level
+/// field (not in messages), so this function is not needed.  In that case,
+/// the caller should render the system field through the chat template and
+/// pass the token count directly to `TaskConfig::keep_tokens()`.
 ///
 /// The messages are rendered through the chat template so that template
 /// prefixes/suffixes (e.g. `<|start_header_id|>system<|end_header_id|>\n\n`)
