@@ -267,6 +267,77 @@ pub(crate) fn apply_chat_template(
         .ok_or("model has no chat template".to_string())?
 }
 
+/// Compute the number of tokens for the leading system/developer messages
+/// in the prompt, using the model's chat template for accurate tokenization.
+///
+/// Only leading system/developer messages (those at the start of the messages
+/// array, before any non-system message) are counted.  This ensures that
+/// `keep_tokens` preserves exactly the system prompt portion of the KV cache
+/// during context shift — later system messages interleaved with user/assistant
+/// turns are not meaningful to preserve.
+///
+/// The messages are rendered through the chat template so that template
+/// prefixes/suffixes (e.g. `<|start_header_id|>system<|end_header_id|>\n\n`)
+/// are included in the token count.
+pub(crate) fn compute_keep_tokens(
+    model: &LlamaModel,
+    messages: &[ChatCompletionRequestMessage],
+) -> usize {
+    // Collect only leading system/developer messages (before any non-system message)
+    let leading_system_msgs: Vec<&ChatCompletionRequestMessage> = messages
+        .iter()
+        .take_while(|msg| {
+            matches!(
+                msg,
+                ChatCompletionRequestMessage::System(_)
+                    | ChatCompletionRequestMessage::Developer(_)
+            )
+        })
+        .collect();
+
+    if leading_system_msgs.is_empty() {
+        return 0;
+    }
+
+    // Render only the leading system/developer messages through the chat template
+    // to get the exact prompt text including template formatting.
+    let system_prompt = match model.with_chat_template(|tmpl| {
+        let backing = leading_system_msgs
+            .iter()
+            .map(|msg| message_to_role_content(msg))
+            .collect::<Vec<_>>();
+
+        let jinja_msgs: Vec<JinjaMessage> = backing
+            .into_iter()
+            .map(|(role, content)| JinjaMessage {
+                role: role.into(),
+                content,
+            })
+            .collect();
+
+        let eos_token = model.eos_token_text().unwrap_or_default();
+        let bos_token = model.bos_token_text().unwrap_or_default();
+        let tmpl_ctx = TemplateContext::new(&jinja_msgs, eos_token, bos_token);
+
+        render_chat_template(tmpl, &tmpl_ctx)
+    }) {
+        Some(Ok(p)) => p,
+        _ => return 0,
+    };
+
+    if system_prompt.is_empty() {
+        return 0;
+    }
+
+    // Tokenize the rendered system prompt
+    let c_str = match std::ffi::CString::new(system_prompt) {
+        Ok(s) => s,
+        Err(_) => return 0,
+    };
+    let tokens = model.tokenize(&c_str, false, false);
+    tokens.len()
+}
+
 /// Result of scanning from the end of a prompt for think tags.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PromptThinkPattern {

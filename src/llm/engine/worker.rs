@@ -262,6 +262,9 @@ impl Engine {
                     }
                 }
                 Err(e) => {
+                    // Context shift is now handled proactively in sampling_stage
+                    // before entering Decoding. If we still get a decode error here,
+                    // it's a real error (not context full), so report it.
                     for (idx, _) in &written_updates {
                         let slot = &mut slots[*idx];
                         self.truncate_slot_cache(slot.seq_id, slot.n_past as usize);
@@ -369,7 +372,7 @@ impl Engine {
                                         reply: EngineReply::Stop(StopReason::Word(w), n),
                                     }
                                 } else {
-                                    // In stream mode, send current content if not ToolCall
+                                    // For streaming mode, send current content if not ToolCall
                                     if task_state.config.output_stream {
                                         debug_assert_eq!(
                                             task_state.current_content.len(),
@@ -403,6 +406,44 @@ impl Engine {
                                         }
 
                                         task_state.current_content.push(content);
+                                    }
+
+                                    // Pre-check: if the next decode will exceed context,
+                                    // perform context shift now before entering Decoding.
+                                    let n_ctx = self.llm_ctx().n_ctx() as usize;
+                                    let n_past = slot.n_past as usize + 1; // +1 for this new token
+                                    let keep_tokens = task_state.config.keep_tokens;
+
+                                    if n_past + 1 >= n_ctx && keep_tokens > 0 {
+                                        // Context will be full on next decode, and we also defined keep_tokens -
+                                        // let's shift the slot cache now to free some space.
+                                        match self.context_shift(slot.seq_id, keep_tokens, 0) {
+                                            Ok(new_n_past) => {
+                                                log::debug!(
+                                                    "[context_shift] slot={} seq_id={} keep={} n_past={}->{}",
+                                                    slot.seq_id,
+                                                    slot.seq_id,
+                                                    keep_tokens,
+                                                    slot.n_past,
+                                                    new_n_past,
+                                                );
+                                                slot.n_past = new_n_past;
+                                            }
+                                            Err(e) => {
+                                                log::error!(
+                                                    "[context_shift] failed for slot={}: {}",
+                                                    slot.seq_id,
+                                                    e,
+                                                );
+                                                slot.state = SlotState::Done {
+                                                    task_state,
+                                                    reply: EngineReply::Error(
+                                                        "ContextFull".to_string(),
+                                                    ),
+                                                };
+                                                continue;
+                                            }
+                                        }
                                     }
 
                                     SlotState::Decoding {

@@ -19,7 +19,7 @@ use zuqe::{
 use crate::{
     USER_CLASS_DEFS,
     helpers::{
-        PromptThinkPattern, apply_chat_template, detect_prompt_think_pattern,
+        PromptThinkPattern, apply_chat_template, compute_keep_tokens, detect_prompt_think_pattern,
         parse_chat_completion_req, to_lark_tool_choice,
     },
     output::{
@@ -218,6 +218,12 @@ fn js_engine_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
         req.model = engine.lock().unwrap().model_name().into();
     }
 
+    let keep_tokens = {
+        let engine = engine.lock().unwrap();
+        let model = engine.model();
+        compute_keep_tokens(model, &req.messages)
+    };
+
     // Build task config
     let mut task_config = TaskConfig::new()
         .temperature(req.temperature.unwrap_or(0.75))
@@ -227,7 +233,8 @@ fn js_engine_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
                 .map_or(engine.lock().unwrap().default_max_tokens(), |n| n as usize),
         )
         .output_stream(is_stream)
-        .enable_output_parser(parse_reasoning);
+        .enable_output_parser(parse_reasoning)
+        .keep_tokens(keep_tokens);
 
     if let Some(stop_words) = req
         .stop
@@ -562,12 +569,19 @@ fn js_engine_responses(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         tokens
     };
 
+    let keep_tokens = {
+        let engine = engine.lock().unwrap();
+        let model = engine.model();
+        compute_keep_tokens(model, &messages)
+    };
+
     // Build task config
     let mut task_config = TaskConfig::new()
         .temperature(temperature.unwrap_or(0.75))
         .top_p(top_p.unwrap_or(1.0))
         .max_tokens(max_output_tokens.unwrap_or(engine.lock().unwrap().default_max_tokens()))
-        .output_stream(is_stream);
+        .output_stream(is_stream)
+        .keep_tokens(keep_tokens);
 
     if let Some(tools) = chat_tools.as_ref().filter(|t| !t.is_empty()) {
         task_config = task_config.grammar(GrammarConfig::new(

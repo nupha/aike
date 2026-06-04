@@ -70,6 +70,11 @@ pub struct TaskConfig {
     pub output_stream: bool,
     /// Enable output parsing to track semantic states (reasoning, tool calls, etc.)
     pub enable_output_parser: bool,
+    /// Number of initial prompt tokens to keep during context shift.
+    /// When KV cache is full, tokens [keep_tokens..keep_tokens+n_discard] are
+    /// removed and the rest are shifted forward. 0 = keep nothing (full clear).
+    /// Typically set to the system prompt token count.
+    pub keep_tokens: usize,
 }
 
 impl TaskConfig {
@@ -84,6 +89,7 @@ impl TaskConfig {
             grammar: None,
             output_stream: false,
             enable_output_parser: false,
+            keep_tokens: 0,
         }
     }
 
@@ -124,6 +130,11 @@ impl TaskConfig {
 
     pub fn enable_output_parser(mut self, enable: bool) -> Self {
         self.enable_output_parser = enable;
+        self
+    }
+
+    pub fn keep_tokens(mut self, v: usize) -> Self {
+        self.keep_tokens = v;
         self
     }
 }
@@ -436,7 +447,12 @@ impl Engine {
         let n_common = if n_common_raw > 0 {
             // Use KV shifting (cache_reuse) when enabled
             let result = if self.n_cache_reuse > 0 {
-                self.prepare_slot_with_shift(seq_id, &task.prompt_tokens, n_common_raw, self.n_cache_reuse)
+                self.prepare_slot_with_shift(
+                    seq_id,
+                    &task.prompt_tokens,
+                    n_common_raw,
+                    self.n_cache_reuse,
+                )
             } else {
                 self.prepare_slot(seq_id, &task.prompt_tokens, n_common_raw)
             };

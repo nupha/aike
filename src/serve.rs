@@ -63,8 +63,8 @@ use crossbeam::channel::Sender;
 
 use crate::{
     helpers::{
-        PromptThinkPattern, apply_chat_template, detect_prompt_think_pattern, now_unix_s,
-        to_lark_tool_choice,
+        PromptThinkPattern, apply_chat_template, compute_keep_tokens, detect_prompt_think_pattern,
+        now_unix_s, to_lark_tool_choice,
     },
     llm::engine::{Engine, EngineReply, EngineTask, GrammarConfig, TaskConfig},
     output::{
@@ -295,6 +295,8 @@ async fn handle_chat_completions(
             .into_response();
     }
 
+    let keep_tokens = compute_keep_tokens(model, &req.messages);
+
     let mut task_config = TaskConfig::new()
         .max_tokens(
             req.max_completion_tokens
@@ -303,7 +305,8 @@ async fn handle_chat_completions(
         .temperature(req.temperature.unwrap_or(DEFAULT_TEMPERATURE))
         .top_p(req.top_p.unwrap_or(DEFAULT_TOP_P))
         .enable_output_parser(parse_reasoning)
-        .output_stream(is_stream);
+        .output_stream(is_stream)
+        .keep_tokens(keep_tokens);
 
     if let Some(stop_words) = req.stop.as_ref() {
         let words: Vec<String> = match stop_words {

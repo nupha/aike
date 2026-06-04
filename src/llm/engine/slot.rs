@@ -304,6 +304,57 @@ impl Engine {
         Ok(n_past)
     }
 
+    /// Perform context shift when KV cache is full.
+    ///
+    /// Keeps the first `n_keep` tokens, discards `n_discard` tokens after them,
+    /// and shifts the remaining tokens forward.  This frees up space in the KV
+    /// cache so generation can continue without recomputing the kept prefix.
+    ///
+    /// `n_discard` defaults to `(total - n_keep) / 2` when 0.
+    /// Returns the new n_past value after the shift.
+    pub(crate) fn context_shift(
+        &mut self,
+        seq_id: usize,
+        n_keep: usize,
+        n_discard: usize,
+    ) -> Result<i32, String> {
+        let cached = self.cached_tokens()[seq_id].clone();
+        let total = cached.len();
+        if total <= n_keep {
+            return Ok(total as i32);
+        }
+
+        let n_discard = if n_discard > 0 {
+            n_discard
+        } else {
+            (total - n_keep) / 2
+        };
+        let n_discard = n_discard.min(total - n_keep);
+
+        let llm = self.llm_ctx_mut();
+
+        // Remove the discarded range [n_keep, n_keep + n_discard)
+        llm.memory_seq_rm(seq_id as i32, n_keep as i32, (n_keep + n_discard) as i32);
+        // Shift the remaining tokens [n_keep + n_discard .. total) backward by n_discard
+        llm.memory_seq_add(
+            seq_id as i32,
+            (n_keep + n_discard) as i32,
+            total as i32,
+            -(n_discard as i32),
+        );
+
+        // Update cached_tokens: compact the token list
+        let cached_tok = self.cached_tokens_mut();
+        let slot_tokens = &mut cached_tok[seq_id];
+        for i in n_keep..(total - n_discard) {
+            slot_tokens[i] = cached[i + n_discard];
+        }
+        slot_tokens.truncate(total - n_discard);
+
+        let new_n_past = (total - n_discard) as i32;
+        Ok(new_n_past)
+    }
+
     /// reset state for given slot id
     pub(crate) fn reset_slot(&mut self, seq_id: usize) {
         let ss = self.samplers_mut();
