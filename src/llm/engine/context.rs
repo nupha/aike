@@ -45,6 +45,13 @@ pub struct Engine {
     /// meaningful for chat completion response only.
     pub(crate) parse_reasoning: bool,
 
+    /// Minimum chunk size for KV cache shifting (cache_reuse).
+    /// When > 0, after the initial prefix match, the engine scans for
+    /// additional matching chunks in the cached prompt and uses
+    /// memory_seq_rm + memory_seq_add to shift them into the correct
+    /// position, avoiding recomputation. 0 = disabled.
+    pub(crate) n_cache_reuse: usize,
+
     /// Set to true when the worker thread has panicked.
     /// Once dead, push_task() will return an error and the engine
     /// should be considered unusable.
@@ -231,6 +238,7 @@ impl Engine {
         idle_sleep: Duration,
         slot_match_threshold: f32,
         default_max_tokens: usize,
+        n_cache_reuse: usize,
     ) -> Arc<Mutex<Self>> {
         let model = llm_ctx.model().clone();
         let model_name = model
@@ -255,6 +263,7 @@ impl Engine {
             is_serving: false,
             shutdown_tx: None,
             parse_reasoning: true,
+            n_cache_reuse,
             is_dead: false,
             llm_ctx,
             slot_cached_tokens: vec![Vec::new(); num_parallel],

@@ -42,6 +42,7 @@ pub(crate) const ERR_CANCELLED: &str = "cancelled";
 pub(crate) const ERR_ENGINE_SHUTDOWN: &str = "engine shutdown";
 
 pub(super) struct EngineParams {
+    pub n_cache_reuse: usize,
     pub idle_sleep_ms: u64,
     pub slot_match_threshold: f32,
     pub max_tokens: usize,
@@ -54,6 +55,7 @@ pub(super) fn parse_engine_params(
     let mut idle_sleep_ms = 1u64;
     let mut slot_match_threshold = 0.5f32;
     let mut max_tokens = 0usize;
+    let mut n_cache_reuse = 0usize;
 
     if let Some(opts) = opts {
         // idleSleepMs
@@ -90,12 +92,25 @@ pub(super) fn parse_engine_params(
             }
             max_tokens = n as usize;
         }
+
+        // cacheReuse (KV shifting minimum chunk size, 0 = disabled)
+        let v = opts.get_property_str(ctx, "cacheReuse")?;
+        if !v.is_undefined() {
+            let n = v.to_number(ctx)?.to_i32();
+            if n >= 0 {
+                n_cache_reuse = n as usize;
+            } else {
+                ctx.throw_type_error("cacheReuse must be >= 0");
+                return Err(-1);
+            }
+        }
     }
 
     Ok(EngineParams {
         idle_sleep_ms,
         slot_match_threshold,
         max_tokens,
+        n_cache_reuse,
     })
 }
 

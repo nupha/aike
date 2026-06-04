@@ -186,6 +186,124 @@ impl Engine {
         }
     }
 
+    /// Align KV/cache state for prefix reuse with KV shifting (cache_reuse).
+    ///
+    /// Like `prepare_slot`, but after the initial prefix match, scans the
+    /// remaining cached tokens for additional matching chunks and uses
+    /// `memory_seq_rm` + `memory_seq_add` to shift them into the correct
+    /// position.  This avoids recomputing tokens that appear later in the
+    /// new prompt but at different positions.
+    ///
+    /// `n_common` is the initial common prefix length (from `pick_idle_slot`).
+    /// `n_cache_reuse` is the minimum chunk size to attempt shifting (0 = disabled).
+    /// Returns the total number of reusable tokens (n_past).
+    pub(super) fn prepare_slot_with_shift(
+        &mut self,
+        seq_id: usize,
+        prompt_tokens: &[Token],
+        n_common: usize,
+        n_cache_reuse: usize,
+    ) -> Result<usize, String> {
+        if seq_id >= self.cached_tokens().len() {
+            return Err(format!("invalid seq id {}", seq_id));
+        }
+
+        // Step 1: basic prefix match (same as prepare_slot)
+        let n_common = if n_common == prompt_tokens.len() && n_common > 0 {
+            n_common - 1
+        } else {
+            n_common
+        };
+
+        if n_common == 0 {
+            self.clear_slot(seq_id);
+            return Ok(0);
+        }
+
+        // Check if KV shifting is supported
+        let can_shift = n_cache_reuse > 0 && self.llm_ctx().memory_can_shift();
+
+        if !can_shift {
+            // Fall back to basic prepare_slot
+            let removed = self
+                .llm_ctx_mut()
+                .memory_seq_rm(seq_id as i32, n_common as i32, -1);
+            if !removed {
+                self.clear_slot(seq_id);
+                return Ok(0);
+            }
+            self.cached_tokens_mut()[seq_id].truncate(n_common);
+            return Ok(n_common);
+        }
+
+        // Step 2: remove tokens after n_common from cache
+        let removed = self
+            .llm_ctx_mut()
+            .memory_seq_rm(seq_id as i32, n_common as i32, -1);
+        if !removed {
+            self.clear_slot(seq_id);
+            return Ok(0);
+        }
+        self.cached_tokens_mut()[seq_id].truncate(n_common);
+
+        // Step 3: KV shifting — scan for additional matching chunks
+        let cached = self.cached_tokens()[seq_id].clone();
+        let mut n_past = n_common;
+        let mut head_c = n_common; // position in cached tokens
+        let mut head_p = n_common; // position in new prompt tokens
+
+        while head_c < cached.len() && head_p < prompt_tokens.len() {
+            // Count matching tokens from current positions
+            let mut n_match = 0usize;
+            while head_c + n_match < cached.len()
+                && head_p + n_match < prompt_tokens.len()
+                && cached[head_c + n_match] == prompt_tokens[head_p + n_match]
+            {
+                n_match += 1;
+            }
+
+            if n_match >= n_cache_reuse {
+                // Shift the matching chunk from [head_c, head_c+n_match) to [head_p, head_p+n_match)
+                let head_p_i32 = head_p as i32;
+                let head_c_i32 = head_c as i32;
+                let kv_shift = head_p_i32 - head_c_i32;
+
+                // Remove any stale tokens at the target position, then shift
+                let llm = self.llm_ctx_mut();
+                llm.memory_seq_rm(seq_id as i32, head_p_i32, head_c_i32);
+                llm.memory_seq_add(
+                    seq_id as i32,
+                    head_c_i32,
+                    (head_c + n_match) as i32,
+                    kv_shift,
+                );
+                // llm dropped here
+
+                // Update cached_tokens: copy the matched tokens into position
+                let cached_tok = self.cached_tokens_mut();
+                let slot_tokens = &mut cached_tok[seq_id];
+                for i in 0..n_match {
+                    if head_p + i < slot_tokens.len() {
+                        slot_tokens[head_p + i] = cached[head_c + i];
+                    } else {
+                        slot_tokens.push(cached[head_c + i]);
+                    }
+                }
+
+                n_past += n_match;
+                head_c += n_match;
+                head_p += n_match;
+            } else {
+                head_c += 1;
+            }
+        }
+
+        // Truncate cached tokens to n_past (remove anything beyond what we kept)
+        self.cached_tokens_mut()[seq_id].truncate(n_past);
+
+        Ok(n_past)
+    }
+
     /// reset state for given slot id
     pub(crate) fn reset_slot(&mut self, seq_id: usize) {
         let ss = self.samplers_mut();

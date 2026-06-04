@@ -429,6 +429,7 @@ fn js_context_createEngine(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
             Duration::from_millis(eng_params.idle_sleep_ms),
             eng_params.slot_match_threshold,
             eng_params.max_tokens,
+            eng_params.n_cache_reuse,
         );
 
         let mut engine_obj = JSEngine::new_instance(ctx, JSValue::UNDEFINED, engine)?;

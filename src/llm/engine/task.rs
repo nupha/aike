@@ -434,7 +434,13 @@ impl Engine {
 
         let seq_id = slots[slot_idx].seq_id;
         let n_common = if n_common_raw > 0 {
-            match self.prepare_slot(seq_id, &task.prompt_tokens, n_common_raw) {
+            // Use KV shifting (cache_reuse) when enabled
+            let result = if self.n_cache_reuse > 0 {
+                self.prepare_slot_with_shift(seq_id, &task.prompt_tokens, n_common_raw, self.n_cache_reuse)
+            } else {
+                self.prepare_slot(seq_id, &task.prompt_tokens, n_common_raw)
+            };
+            match result {
                 Ok(n) => n,
                 Err(e) => {
                     let _ = task.output_tx.send(EngineReply::Error(e));
