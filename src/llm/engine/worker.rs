@@ -168,26 +168,29 @@ impl Engine {
         let mut has_sampling = false;
         let mut cnt = 0usize;
         let mut written_updates: Vec<(usize, usize)> = Vec::new();
+        let slots_len = slots.len();
 
         self.begin_decode_batch();
 
-        let slots_len = slots.len();
         for offset in 0..slots_len {
             if cnt == self.ubatch_size {
-                break;
+                break; // ubatch full
             }
 
             let slot_idx = (*slot_cursor + offset) % slots_len;
             let slot = &mut slots[slot_idx];
-            let state0 = std::mem::replace(&mut slot.state, SlotState::Busy);
 
-            if let SlotState::Decoding {
-                mut prompt_tokens,
-                logits_for_all_tokens,
-                mut num_written,
-                task_state,
-            } = state0
-            {
+            if matches!(slot.state, SlotState::Decoding { .. }) {
+                let SlotState::Decoding {
+                    mut prompt_tokens,
+                    logits_for_all_tokens,
+                    mut num_written,
+                    task_state,
+                } = std::mem::replace(&mut slot.state, SlotState::Busy)
+                else {
+                    unreachable!();
+                };
+
                 let n_tokens = prompt_tokens.len();
                 let n_take = n_tokens.min(self.ubatch_size.saturating_sub(cnt));
                 let mut feed_count = 0usize;
@@ -212,6 +215,7 @@ impl Engine {
                         }
                     }
                 }
+
                 if let Some(e) = decode_err {
                     self.truncate_slot_cache(slot.seq_id, slot.n_past as usize);
                     slot.state = SlotState::Done {
@@ -220,6 +224,7 @@ impl Engine {
                     };
                     continue;
                 }
+
                 slot.state = if prompt_tokens.is_empty() {
                     // prefill done, go to sampling phase
                     if logits_for_all_tokens {
@@ -235,7 +240,7 @@ impl Engine {
                         }
                     }
                 } else {
-                    // go on prefilling
+                    // go on prefilling next
                     SlotState::Decoding {
                         prompt_tokens,
                         logits_for_all_tokens,
@@ -246,8 +251,6 @@ impl Engine {
                 if feed_count > 0 {
                     written_updates.push((slot_idx, feed_count));
                 }
-            } else {
-                slot.state = state0;
             }
         }
 
