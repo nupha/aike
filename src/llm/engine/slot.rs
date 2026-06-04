@@ -30,6 +30,9 @@ pub struct Slot {
     pub n_past: i32,
     pub mtime: i64,
     pub state: SlotState,
+    /// Cached tokens for this slot, used for prefix matching and
+    /// for dumping/restoring KV cache state to/from CacheRam.
+    pub cached_tokens: Vec<Token>,
 }
 
 impl Slot {
@@ -39,91 +42,67 @@ impl Slot {
             n_past: 0,
             mtime: 0,
             state: SlotState::Idle,
+            cached_tokens: Vec::new(),
         }
     }
 }
 
 impl Engine {
-    fn common_prefix_len(&self, seq_id: usize, prompt_tokens: &[Token]) -> usize {
-        let cached: &Vec<Token> = match self.cached_tokens().get(seq_id) {
-            Some(c) => c,
-            None => return 0,
-        };
-        let max_common = cached.len().min(prompt_tokens.len());
-        let mut n = 0usize;
-        while n < max_common && cached[n] == prompt_tokens[n] {
-            n += 1;
-        }
-        n
-    }
-
     pub(super) fn pick_idle_slot(
-        &self,
-        slots: &[Slot],
-        seq_hint: Option<usize>,
+        &mut self,
+        slots: &mut [Slot],
         prompt_tokens: &[Token],
         match_threshold: f32,
     ) -> Option<(usize, usize)> {
-        // seq_hint takes priority: caller suggests which slot to reuse
-        if let Some(hint) = seq_hint
-            && let Some(slot) = slots.get(hint)
-            && matches!(slot.state, SlotState::Idle)
-        {
-            let n = self.common_prefix_len(slot.seq_id, prompt_tokens);
-            return Some((hint, n));
-        }
-
         // Scan idle slots: track best match (longest common prefix above threshold)
         // and LRU fallback simultaneously.
         let mut best_idx = None;
         let mut best_n = 0usize;
         let mut lru_idx = None;
-        let mut lru_n = 0usize;
         let mut lru_mtime = i64::MAX;
 
         for (idx, slot) in slots.iter().enumerate() {
-            if !matches!(slot.state, SlotState::Idle) {
-                continue;
-            }
+            if matches!(slot.state, SlotState::Idle) {
+                let n = common_prefix_len(&slot.cached_tokens, prompt_tokens);
 
-            let n = self.common_prefix_len(slot.seq_id, prompt_tokens);
+                // Track best match above threshold
+                if n > best_n
+                    && (match_threshold <= 0.0
+                        || n as f32 / prompt_tokens.len() as f32 >= match_threshold)
+                {
+                    best_n = n;
+                    best_idx = Some(idx);
+                }
 
-            // Track best match above threshold
-            if n > best_n
-                && (match_threshold <= 0.0
-                    || n as f32 / prompt_tokens.len() as f32 >= match_threshold)
-            {
-                best_n = n;
-                best_idx = Some(idx);
-            }
-
-            // Track LRU as fallback
-            if slot.mtime < lru_mtime {
-                lru_mtime = slot.mtime;
-                lru_n = n;
-                lru_idx = Some(idx);
+                // Track LRU as fallback
+                if slot.mtime < lru_mtime {
+                    lru_mtime = slot.mtime;
+                    lru_idx = Some(idx);
+                }
             }
         }
 
-        // Prefer best match; fallback to LRU
-        best_idx
-            .or(lru_idx)
-            .map(|idx| (idx, if Some(idx) == best_idx { best_n } else { lru_n }))
+        if let Some(best) = best_idx {
+            Some((best, best_n))
+        } else if let Some(lru) = lru_idx {
+            self.dump_slot_to_cache_ram(&mut slots[lru]);
+            Some((lru, 0))
+        } else {
+            None
+        }
     }
 
     /// Align KV/cache state for prefix reuse. Returns reusable prefix length.
     /// `n_common` is the raw common prefix length (from `pick_idle_slot`); this
     /// function adjusts it so that at least one token remains for the model to
     /// process.
-    pub(super) fn prepare_slot(
+    pub(super) fn prefill_slot(
         &mut self,
-        seq_id: usize,
+        slot: &mut Slot,
         prompt_tokens: &[Token],
         n_common: usize,
     ) -> Result<usize, String> {
-        if seq_id >= self.cached_tokens().len() {
-            return Err(format!("invalid seq id {}", seq_id));
-        }
+        let seq_id = slot.seq_id;
 
         // When the prompt fully matches the cached prefix, keep one token so
         // the model still has input to forward and can generate the next token.
@@ -136,7 +115,7 @@ impl Engine {
         };
 
         if n_common == 0 {
-            self.clear_slot(seq_id);
+            self.clear_slot(slot);
             Ok(0)
         } else {
             let llm = self.llm_ctx_mut();
@@ -160,7 +139,7 @@ impl Engine {
                         n_clip,
                     );
                     if llm.memory_seq_rm(seq_id as i32, n_clip as i32, -1) {
-                        self.cached_tokens_mut()[seq_id].truncate(n_clip);
+                        slot.cached_tokens.truncate(n_clip);
                         return Ok(n_clip);
                     }
                 }
@@ -170,20 +149,17 @@ impl Engine {
                      falling back to full clear for seq_id={seq_id}"
                 );
 
-                self.clear_slot(seq_id);
+                self.clear_slot(slot);
                 Ok(0)
             } else {
-                self.cached_tokens_mut()[seq_id].truncate(n_common);
+                slot.cached_tokens.truncate(n_common);
                 Ok(n_common)
             }
         }
     }
 
-    pub(crate) fn truncate_slot_cache(&mut self, seq_id: usize, n_keep: usize) {
-        let cached: &mut Vec<Vec<Token>> = self.cached_tokens_mut();
-        if let Some(c) = cached.get_mut(seq_id) {
-            c.truncate(n_keep);
-        }
+    pub(crate) fn truncate_slot_cache(&mut self, slot: &mut Slot, n_keep: usize) {
+        slot.cached_tokens.truncate(n_keep);
     }
 
     /// Align KV/cache state for prefix reuse with KV shifting (cache_reuse).
@@ -197,16 +173,14 @@ impl Engine {
     /// `n_common` is the initial common prefix length (from `pick_idle_slot`).
     /// `n_cache_reuse` is the minimum chunk size to attempt shifting (0 = disabled).
     /// Returns the total number of reusable tokens (n_past).
-    pub(super) fn prepare_slot_with_shift(
+    pub(super) fn prefill_slot_with_shift(
         &mut self,
-        seq_id: usize,
+        slot: &mut Slot,
         prompt_tokens: &[Token],
         n_common: usize,
         n_cache_reuse: usize,
     ) -> Result<usize, String> {
-        if seq_id >= self.cached_tokens().len() {
-            return Err(format!("invalid seq id {}", seq_id));
-        }
+        let seq_id = slot.seq_id;
 
         // Step 1: basic prefix match (same as prepare_slot)
         let n_common = if n_common == prompt_tokens.len() && n_common > 0 {
@@ -216,7 +190,7 @@ impl Engine {
         };
 
         if n_common == 0 {
-            self.clear_slot(seq_id);
+            self.clear_slot(slot);
             return Ok(0);
         }
 
@@ -229,10 +203,10 @@ impl Engine {
                 .llm_ctx_mut()
                 .memory_seq_rm(seq_id as i32, n_common as i32, -1);
             if !removed {
-                self.clear_slot(seq_id);
+                self.clear_slot(slot);
                 return Ok(0);
             }
-            self.cached_tokens_mut()[seq_id].truncate(n_common);
+            slot.cached_tokens.truncate(n_common);
             return Ok(n_common);
         }
 
@@ -241,13 +215,13 @@ impl Engine {
             .llm_ctx_mut()
             .memory_seq_rm(seq_id as i32, n_common as i32, -1);
         if !removed {
-            self.clear_slot(seq_id);
+            self.clear_slot(slot);
             return Ok(0);
         }
-        self.cached_tokens_mut()[seq_id].truncate(n_common);
+        slot.cached_tokens.truncate(n_common);
 
         // Step 3: KV shifting — scan for additional matching chunks
-        let cached = self.cached_tokens()[seq_id].clone();
+        let cached = slot.cached_tokens.clone();
         let mut n_past = n_common;
         let mut head_c = n_common; // position in cached tokens
         let mut head_p = n_common; // position in new prompt tokens
@@ -280,8 +254,7 @@ impl Engine {
                 // llm dropped here
 
                 // Update cached_tokens: copy the matched tokens into position
-                let cached_tok = self.cached_tokens_mut();
-                let slot_tokens = &mut cached_tok[seq_id];
+                let slot_tokens = &mut slot.cached_tokens;
                 for i in 0..n_match {
                     if head_p + i < slot_tokens.len() {
                         slot_tokens[head_p + i] = cached[head_c + i];
@@ -299,7 +272,7 @@ impl Engine {
         }
 
         // Truncate cached tokens to n_past (remove anything beyond what we kept)
-        self.cached_tokens_mut()[seq_id].truncate(n_past);
+        slot.cached_tokens.truncate(n_past);
 
         Ok(n_past)
     }
@@ -314,11 +287,12 @@ impl Engine {
     /// Returns the new n_past value after the shift.
     pub(crate) fn context_shift(
         &mut self,
-        seq_id: usize,
+        slot: &mut Slot,
         n_keep: usize,
         n_discard: usize,
     ) -> Result<i32, String> {
-        let cached = self.cached_tokens()[seq_id].clone();
+        let seq_id = slot.seq_id;
+        let cached = slot.cached_tokens.clone();
         let total = cached.len();
         if total <= n_keep {
             return Ok(total as i32);
@@ -344,8 +318,7 @@ impl Engine {
         );
 
         // Update cached_tokens: compact the token list
-        let cached_tok = self.cached_tokens_mut();
-        let slot_tokens = &mut cached_tok[seq_id];
+        let slot_tokens = &mut slot.cached_tokens;
         for i in n_keep..(total - n_discard) {
             slot_tokens[i] = cached[i + n_discard];
         }
@@ -363,11 +336,20 @@ impl Engine {
         }
     }
 
-    pub(crate) fn clear_slot(&mut self, seq_id: usize) {
-        if seq_id < self.cached_tokens().len() {
-            self.llm_ctx_mut().memory_seq_rm(seq_id as i32, 0, -1);
-            self.cached_tokens_mut()[seq_id].clear();
-            self.samplers_mut()[seq_id] = None;
+    pub(crate) fn clear_slot(&mut self, slot: &mut Slot) {
+        self.llm_ctx_mut().memory_seq_rm(slot.seq_id as i32, 0, -1);
+        slot.cached_tokens.clear();
+        if slot.seq_id < self.samplers().len() {
+            self.samplers_mut()[slot.seq_id] = None;
         }
     }
+}
+
+fn common_prefix_len(cached_tokens: &[Token], prompt_tokens: &[Token]) -> usize {
+    let max_cnt = cached_tokens.len().min(prompt_tokens.len());
+    let mut n = 0usize;
+    while n < max_cnt && cached_tokens[n] == prompt_tokens[n] {
+        n += 1;
+    }
+    n
 }

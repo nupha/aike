@@ -344,7 +344,6 @@ async fn handle_chat_completions(
         prompt_tokens,
         output_prepend,
         output_tx,
-        seq_hint: None,
         timestamp: None,
     });
 

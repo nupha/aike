@@ -268,7 +268,7 @@ fn js_engine_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
     let rx = engine
         .lock()
         .unwrap()
-        .push_task(prompt_tokens, task_config, output_prepend, None)
+        .push_task(prompt_tokens, task_config, output_prepend)
         .map_err(|e| {
             ctx.throw_internal_error(&e.to_string());
             -1
@@ -599,7 +599,7 @@ fn js_engine_responses(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let rx = engine
         .lock()
         .unwrap()
-        .push_task(prompt_tokens, task_config, output_prepend, None)
+        .push_task(prompt_tokens, task_config, output_prepend)
         .map_err(|e| {
             ctx.throw_internal_error(&e.to_string());
             -1

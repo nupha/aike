@@ -131,9 +131,7 @@ fn pop_next_task(
     }
     let mut i = 0usize;
     while i < deferred.len() {
-        if deferred[i].seq_hint.unwrap_or(0) == 0
-            && let Some(v) = deferred.remove(i)
-        {
+        if let Some(v) = deferred.remove(i) {
             ready.push_back(v);
             continue;
         }
@@ -199,7 +197,7 @@ impl Engine {
                 for token in prompt_tokens.drain(..n_take) {
                     let need_logits = task_state.config.logits_for_all_tokens || n_take == n_tokens;
                     match self.push_decode_token(
-                        slot.seq_id,
+                        slot,
                         token,
                         slot.n_past + feed_count as i32,
                         need_logits,
@@ -217,7 +215,7 @@ impl Engine {
                 }
 
                 if let Some(e) = decode_err {
-                    self.truncate_slot_cache(slot.seq_id, slot.n_past as usize);
+                    self.truncate_slot_cache(slot, slot.n_past as usize);
                     slot.state = SlotState::Done {
                         task_state,
                         reply: EngineReply::Error(e),
@@ -267,7 +265,7 @@ impl Engine {
                     // it's a real error (not context full), so report it.
                     for (idx, _) in &written_updates {
                         let slot = &mut slots[*idx];
-                        self.truncate_slot_cache(slot.seq_id, slot.n_past as usize);
+                        self.truncate_slot_cache(slot, slot.n_past as usize);
                         let old = std::mem::replace(&mut slot.state, SlotState::Busy);
                         slot.state = match old {
                             SlotState::Decoding { task_state, .. }
@@ -417,7 +415,7 @@ impl Engine {
                                     if n_past + 1 >= n_ctx && keep_tokens > 0 {
                                         // Context will be full on next decode, and we also defined keep_tokens -
                                         // let's shift the slot cache now to free some space.
-                                        match self.context_shift(slot.seq_id, keep_tokens, 0) {
+                                        match self.context_shift(slot, keep_tokens, 0) {
                                             Ok(new_n_past) => {
                                                 log::debug!(
                                                     "[context_shift] slot={} seq_id={} keep={} n_past={}->{}",
@@ -511,7 +509,7 @@ impl Engine {
                 let _ = task_state.output_tx.send(reply);
 
                 if aborted {
-                    self.clear_slot(slot.seq_id);
+                    self.clear_slot(slot);
                     slot.n_past = 0;
                 } else {
                     self.reset_slot(slot.seq_id);

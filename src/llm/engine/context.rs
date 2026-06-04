@@ -8,6 +8,8 @@ use crossbeam::channel::{Receiver, SendError, Sender};
 use llama_cpp_ffi::{LlamaContext, LlamaModel, SamplerChain, SamplerKind};
 
 use super::{
+    cache::CacheRam,
+    slot::Slot,
     task::{EngineCtrlMsg, EngineReply, EngineTask, GrammarConfig, TaskConfig, Token},
     worker::worker_loop,
 };
@@ -30,7 +32,6 @@ pub struct Engine {
     // Worker-exclusive (mutated only by the worker thread)
     //
     pub(crate) llm_ctx: LlamaContext,
-    pub(crate) slot_cached_tokens: Vec<Vec<Token>>,
     pub(crate) slot_samplers: Vec<Option<SamplerChain>>,
     pub(crate) pending_decode_tokens: usize,
     pub(crate) worker_join_handle: Option<JoinHandle<()>>,
@@ -51,6 +52,9 @@ pub struct Engine {
     /// memory_seq_rm + memory_seq_add to shift them into the correct
     /// position, avoiding recomputation. 0 = disabled.
     pub(crate) n_cache_reuse: usize,
+
+    /// RAM-based prompt cache pool for KV state persistence across slots.
+    pub(crate) cache_ram: CacheRam,
 
     /// Set to true when the worker thread has panicked.
     /// Once dead, push_task() will return an error and the engine
@@ -91,14 +95,6 @@ impl Engine {
         &mut self.llm_ctx
     }
 
-    pub(crate) fn cached_tokens(&self) -> &[Vec<Token>] {
-        &self.slot_cached_tokens
-    }
-
-    pub(crate) fn cached_tokens_mut(&mut self) -> &mut Vec<Vec<Token>> {
-        &mut self.slot_cached_tokens
-    }
-
     pub(crate) fn samplers(&self) -> &[Option<SamplerChain>] {
         &self.slot_samplers
     }
@@ -121,16 +117,14 @@ impl Engine {
 
     pub(crate) fn push_decode_token(
         &mut self,
-        seq_id: usize,
+        slot: &mut Slot,
         token: Token,
         pos: i32,
         need_logits: bool,
     ) -> Result<(), String> {
         let idx = self.pending();
 
-        if seq_id >= self.cached_tokens().len() {
-            return Err(format!("invalid seq id {}", seq_id));
-        } else if idx >= self.ubatch_size {
+        if idx >= self.ubatch_size {
             return Err("decode batch is full".to_string());
         }
 
@@ -139,13 +133,13 @@ impl Engine {
 
             *batch.token.add(idx) = token;
             *batch.pos.add(idx) = pos;
-            *(*batch.seq_id.add(idx)).add(0) = seq_id as i32;
+            *(*batch.seq_id.add(idx)).add(0) = slot.seq_id as i32;
             *batch.n_seq_id.add(idx) = 1;
             *batch.logits.add(idx) = if need_logits { 1 } else { 0 };
         }
 
         self.set_pending(idx + 1);
-        self.cached_tokens_mut()[seq_id].push(token);
+        slot.cached_tokens.push(token);
 
         Ok(())
     }
@@ -264,9 +258,9 @@ impl Engine {
             shutdown_tx: None,
             parse_reasoning: true,
             n_cache_reuse,
+            cache_ram: CacheRam::new(0), // 0 = disabled by default
             is_dead: false,
             llm_ctx,
-            slot_cached_tokens: vec![Vec::new(); num_parallel],
             slot_samplers: (0..num_parallel).map(|_| None).collect(),
             pending_decode_tokens: 0,
             worker_join_handle: None,
@@ -370,7 +364,6 @@ impl Engine {
         prompt_tokens: Vec<Token>,
         config: TaskConfig,
         output_prepend: Vec<Token>,
-        seq_hint: Option<usize>,
     ) -> Result<Receiver<EngineReply>, String> {
         if self.is_dead {
             return Err("engine worker has crashed".to_string());
@@ -383,7 +376,6 @@ impl Engine {
             prompt_tokens,
             output_prepend,
             output_tx,
-            seq_hint,
             timestamp: None,
         });
         self.input_tx.send(task).map_err(|e| e.to_string())?;

@@ -148,8 +148,6 @@ pub struct EngineTask {
     pub output_prepend: Vec<Token>,
     pub output_tx: Sender<EngineReply>,
 
-    pub seq_hint: Option<usize>,
-
     /// Set to Some(Instant) when the task is deferred due to all slots busy.
     /// If the wait exceeds TASK_WAIT_TIMEOUT, the task is rejected with Busy.
     pub timestamp: Option<std::time::Instant>,
@@ -355,7 +353,7 @@ impl Engine {
                         | SlotState::Done { task_state, .. } = state0
                         {
                             let _ = task_state.output_tx.send(EngineReply::Shutdown);
-                            self.clear_slot(slot.seq_id);
+                            self.clear_slot(slot);
                         }
                         slot.n_past = 0;
                         slot.state = SlotState::Idle;
@@ -429,12 +427,9 @@ impl Engine {
     ) -> SchedResult {
         debug_assert!(!task.prompt_tokens.is_empty());
 
-        let Some((slot_idx, n_common_raw)) = self.pick_idle_slot(
-            slots,
-            task.seq_hint,
-            &task.prompt_tokens,
-            prefix_match_threshold,
-        ) else {
+        let Some((slot_idx, mut n_common_raw)) =
+            self.pick_idle_slot(slots, &task.prompt_tokens, prefix_match_threshold)
+        else {
             let now = std::time::Instant::now();
             return if now.duration_since(*task.timestamp.get_or_insert(now)) > TASK_WAIT_TIMEOUT {
                 SchedResult::Busy(task)
@@ -443,18 +438,29 @@ impl Engine {
             };
         };
 
-        let seq_id = slots[slot_idx].seq_id;
+        if n_common_raw == 0 {
+            // no match found in slots, try match in cache ram
+            if let Some((cache_idx, len)) = self
+                .cache_ram
+                .find_best_match(&task.prompt_tokens, prefix_match_threshold)
+            {
+                let r = self.restore_cache_ram_to_slot(&mut slots[slot_idx], cache_idx, len);
+                debug_assert!(r > 0, "fail to restore cache_ram entry");
+                n_common_raw = len;
+            }
+        }
+
         let n_common = if n_common_raw > 0 {
             // Use KV shifting (cache_reuse) when enabled
             let result = if self.n_cache_reuse > 0 {
-                self.prepare_slot_with_shift(
-                    seq_id,
+                self.prefill_slot_with_shift(
+                    &mut slots[slot_idx],
                     &task.prompt_tokens,
                     n_common_raw,
                     self.n_cache_reuse,
                 )
             } else {
-                self.prepare_slot(seq_id, &task.prompt_tokens, n_common_raw)
+                self.prefill_slot(&mut slots[slot_idx], &task.prompt_tokens, n_common_raw)
             };
             match result {
                 Ok(n) => n,
@@ -464,10 +470,12 @@ impl Engine {
                 }
             }
         } else {
-            self.clear_slot(seq_id);
-            self.truncate_slot_cache(seq_id, 0);
+            self.clear_slot(&mut slots[slot_idx]);
+            self.truncate_slot_cache(&mut slots[slot_idx], 0);
             0
         };
+
+        let seq_id = slots[slot_idx].seq_id;
 
         log::debug!(
             "[sched] slot={} seq_id={} common_raw={} common={} prompt_len={}",

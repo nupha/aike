@@ -170,7 +170,7 @@ pub async fn handle_responses(
         // Save task_id before task_config is moved into push_task.
         task_id = task_config.task_id;
 
-        rx = match engine.push_task(prompt_tokens, task_config, output_prepend, None) {
+        rx = match engine.push_task(prompt_tokens, task_config, output_prepend) {
             Ok(r) => r,
             Err(e) => {
                 return (
