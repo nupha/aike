@@ -215,7 +215,7 @@ impl Engine {
                 }
 
                 if let Some(e) = decode_err {
-                    self.truncate_slot_cache(slot, slot.n_past as usize);
+                    slot.cached_tokens.truncate(slot.n_past as usize);
                     slot.state = SlotState::Done {
                         task_state,
                         reply: EngineReply::Error(e),
@@ -259,13 +259,17 @@ impl Engine {
                         slots[*idx].n_past += *wrote as i32;
                     }
                 }
+                Err(e) if e == "ContextFull" => {
+                    todo!("kv cache full, need to shift context");
+                }
                 Err(e) => {
-                    // Context shift is now handled proactively in sampling_stage
-                    // before entering Decoding. If we still get a decode error here,
-                    // it's a real error (not context full), so report it.
                     for (idx, _) in &written_updates {
                         let slot = &mut slots[*idx];
-                        self.truncate_slot_cache(slot, slot.n_past as usize);
+
+                        slot.cached_tokens.truncate(slot.n_past as usize);
+                        self.llm_ctx_mut()
+                            .memory_seq_rm(slot.seq_id as _, slot.n_past as _, -1);
+
                         let old = std::mem::replace(&mut slot.state, SlotState::Busy);
                         slot.state = match old {
                             SlotState::Decoding { task_state, .. }
@@ -413,8 +417,12 @@ impl Engine {
                                     let keep_tokens = task_state.config.keep_tokens;
 
                                     if n_past + 1 >= n_ctx && keep_tokens > 0 {
-                                        // Context will be full on next decode, and we also defined keep_tokens -
-                                        // let's shift the slot cache now to free some space.
+                                        // Context will be full on next decode
+                                        // try free a lru slot first
+                                        // TODO.
+
+                                        // No idle slot to swap: we have keep_tokens defined -
+                                        // let's shift the slot kv/cache to squeeze some space.
                                         match self.context_shift(slot, keep_tokens, 0) {
                                             Ok(new_n_past) => {
                                                 log::debug!(

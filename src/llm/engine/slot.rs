@@ -98,87 +98,18 @@ impl Engine {
     }
 
     /// Align KV/cache state for prefix reuse. Returns reusable prefix length.
+    ///
+    /// When `n_cache_reuse > 0` and KV shifting is supported, after the initial
+    /// prefix match, scans the remaining cached tokens for additional matching
+    /// chunks and uses `memory_seq_rm` + `memory_seq_add` to shift them into
+    /// the correct position, avoiding recomputation of the common prefix.
+    ///
     /// `n_common` is the raw common prefix length (from `pick_idle_slot`); this
     /// function adjusts it so that at least one token remains for the model to
     /// process.
-    pub(super) fn prefill_slot(
-        &mut self,
-        slot: &mut Slot,
-        prompt_tokens: &[Token],
-        n_common: usize,
-    ) -> Result<usize, String> {
-        let seq_id = slot.seq_id;
-
-        // When the prompt fully matches the cached prefix, keep one token so
-        // the model still has input to forward and can generate the next token.
-        // Without this, draining all tokens would leave prompt_tokens empty and
-        // the prefill stage would have nothing to process.
-        let n_common = if n_common == prompt_tokens.len() && n_common > 0 {
-            n_common - 1
-        } else {
-            n_common
-        };
-
-        if n_common == 0 {
-            self.clear_slot(slot);
-            Ok(0)
-        } else {
-            let llm = self.llm_ctx_mut();
-            // For hybrid models (e.g. Qwen3.5), the cache has both attention
-            // and recurrent layers.  The recurrent state does not support
-            // arbitrary partial truncation — it can only roll back within
-            // n_rs_seq steps (default 0).  When memory_seq_rm fails, we
-            // retry with a truncated range bounded by n_rs_seq.  If that
-            // also fails, fall back to clearing the entire slot.
-            let removed = llm.memory_seq_rm(seq_id as i32, n_common as i32, -1);
-            if !removed {
-                let n_rs = llm.n_rs_seq() as usize;
-                if n_rs > 0 {
-                    let n_clip = n_common.min(n_rs);
-                    log::debug!(
-                        "[prepare_slot] seq_rm failed for seq_id={}, \
-                         retrying with n_rs_seq={} clip (n_common={} -> n_clip={})",
-                        seq_id,
-                        n_rs,
-                        n_common,
-                        n_clip,
-                    );
-                    if llm.memory_seq_rm(seq_id as i32, n_clip as i32, -1) {
-                        slot.cached_tokens.truncate(n_clip);
-                        return Ok(n_clip);
-                    }
-                }
-
-                log::debug!(
-                    "[prepare_slot] seq_rm failed (hybrid model? n_rs_seq={n_rs} too small?), \
-                     falling back to full clear for seq_id={seq_id}"
-                );
-
-                self.clear_slot(slot);
-                Ok(0)
-            } else {
-                slot.cached_tokens.truncate(n_common);
-                Ok(n_common)
-            }
-        }
-    }
-
-    pub(crate) fn truncate_slot_cache(&mut self, slot: &mut Slot, n_keep: usize) {
-        slot.cached_tokens.truncate(n_keep);
-    }
-
-    /// Align KV/cache state for prefix reuse with KV shifting (cache_reuse).
-    ///
-    /// Like `prepare_slot`, but after the initial prefix match, scans the
-    /// remaining cached tokens for additional matching chunks and uses
-    /// `memory_seq_rm` + `memory_seq_add` to shift them into the correct
-    /// position.  This avoids recomputing tokens that appear later in the
-    /// new prompt but at different positions.
-    ///
-    /// `n_common` is the initial common prefix length (from `pick_idle_slot`).
     /// `n_cache_reuse` is the minimum chunk size to attempt shifting (0 = disabled).
     /// Returns the total number of reusable tokens (n_past).
-    pub(super) fn prefill_slot_with_shift(
+    pub(super) fn prefill_slot(
         &mut self,
         slot: &mut Slot,
         prompt_tokens: &[Token],
@@ -187,7 +118,8 @@ impl Engine {
     ) -> Result<usize, String> {
         let seq_id = slot.seq_id;
 
-        // Step 1: basic prefix match (same as prepare_slot)
+        // When the prompt fully matches the cached prefix, keep one token so
+        // the model still has input to forward and can generate the next token.
         let n_common = if n_common == prompt_tokens.len() && n_common > 0 {
             n_common - 1
         } else {
@@ -203,11 +135,40 @@ impl Engine {
         let can_shift = n_cache_reuse > 0 && self.llm_ctx().memory_can_shift();
 
         if !can_shift {
-            // Fall back to basic prepare_slot
+            // Fall back to basic truncation
             let removed = self
                 .llm_ctx_mut()
                 .memory_seq_rm(seq_id as i32, n_common as i32, -1);
             if !removed {
+                // For hybrid models (e.g. Qwen3.5), the cache has both attention
+                // and recurrent layers.  The recurrent state does not support
+                // arbitrary partial truncation — it can only roll back within
+                // n_rs_seq steps (default 0).  When memory_seq_rm fails, we
+                // retry with a truncated range bounded by n_rs_seq.
+                let n_rs = self.llm_ctx().n_rs_seq() as usize;
+                if n_rs > 0 {
+                    let n_clip = n_common.min(n_rs);
+                    log::debug!(
+                        "[prefill_slot] seq_rm failed for seq_id={}, \
+                         retrying with n_rs_seq={} clip (n_common={} -> n_clip={})",
+                        seq_id,
+                        n_rs,
+                        n_common,
+                        n_clip,
+                    );
+                    if self
+                        .llm_ctx_mut()
+                        .memory_seq_rm(seq_id as i32, n_clip as i32, -1)
+                    {
+                        slot.cached_tokens.truncate(n_clip);
+                        return Ok(n_clip);
+                    }
+                }
+
+                log::debug!(
+                    "[prefill_slot] seq_rm failed (hybrid model? n_rs_seq={n_rs} too small?), \
+                     falling back to full clear for seq_id={seq_id}"
+                );
                 self.clear_slot(slot);
                 return Ok(0);
             }
@@ -226,28 +187,24 @@ impl Engine {
         slot.cached_tokens.truncate(n_common);
 
         // Step 3: KV shifting — scan for additional matching chunks
-        let cached = slot.cached_tokens.clone();
         let mut n_past = n_common;
-        let mut head_c = n_common; // position in cached tokens
-        let mut head_p = n_common; // position in new prompt tokens
+        let mut head_c = n_common;
+        let mut head_p = n_common;
 
-        while head_c < cached.len() && head_p < prompt_tokens.len() {
-            // Count matching tokens from current positions
+        while head_c < slot.cached_tokens.len() && head_p < prompt_tokens.len() {
             let mut n_match = 0usize;
-            while head_c + n_match < cached.len()
+            while head_c + n_match < slot.cached_tokens.len()
                 && head_p + n_match < prompt_tokens.len()
-                && cached[head_c + n_match] == prompt_tokens[head_p + n_match]
+                && slot.cached_tokens[head_c + n_match] == prompt_tokens[head_p + n_match]
             {
                 n_match += 1;
             }
 
             if n_match >= n_cache_reuse {
-                // Shift the matching chunk from [head_c, head_c+n_match) to [head_p, head_p+n_match)
                 let head_p_i32 = head_p as i32;
                 let head_c_i32 = head_c as i32;
                 let kv_shift = head_p_i32 - head_c_i32;
 
-                // Remove any stale tokens at the target position, then shift
                 let llm = self.llm_ctx_mut();
                 llm.memory_seq_rm(seq_id as i32, head_p_i32, head_c_i32);
                 llm.memory_seq_add(
@@ -256,15 +213,12 @@ impl Engine {
                     (head_c + n_match) as i32,
                     kv_shift,
                 );
-                // llm dropped here
 
-                // Update cached_tokens: copy the matched tokens into position
-                let slot_tokens = &mut slot.cached_tokens;
                 for i in 0..n_match {
-                    if head_p + i < slot_tokens.len() {
-                        slot_tokens[head_p + i] = cached[head_c + i];
+                    if head_p + i < slot.cached_tokens.len() {
+                        slot.cached_tokens[head_p + i] = slot.cached_tokens[head_c + i];
                     } else {
-                        slot_tokens.push(cached[head_c + i]);
+                        slot.cached_tokens.push(slot.cached_tokens[head_c + i]);
                     }
                 }
 
@@ -276,9 +230,7 @@ impl Engine {
             }
         }
 
-        // Truncate cached tokens to n_past (remove anything beyond what we kept)
         slot.cached_tokens.truncate(n_past);
-
         Ok(n_past)
     }
 

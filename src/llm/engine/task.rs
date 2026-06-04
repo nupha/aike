@@ -451,17 +451,12 @@ impl Engine {
         }
 
         let n_common = if n_common_raw > 0 {
-            // Use KV shifting (cache_reuse) when enabled
-            let result = if self.n_cache_reuse > 0 {
-                self.prefill_slot_with_shift(
-                    &mut slots[slot_idx],
-                    &task.prompt_tokens,
-                    n_common_raw,
-                    self.n_cache_reuse,
-                )
-            } else {
-                self.prefill_slot(&mut slots[slot_idx], &task.prompt_tokens, n_common_raw)
-            };
+            let result = self.prefill_slot(
+                &mut slots[slot_idx],
+                &task.prompt_tokens,
+                n_common_raw,
+                self.n_cache_reuse,
+            );
             match result {
                 Ok(n) => n,
                 Err(e) => {
@@ -471,7 +466,6 @@ impl Engine {
             }
         } else {
             self.clear_slot(&mut slots[slot_idx]);
-            self.truncate_slot_cache(&mut slots[slot_idx], 0);
             0
         };
 
