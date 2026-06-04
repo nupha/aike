@@ -144,16 +144,32 @@ impl Engine {
             // and recurrent layers.  The recurrent state does not support
             // arbitrary partial truncation — it can only roll back within
             // n_rs_seq steps (default 0).  When memory_seq_rm fails, we
-            // fall back to clearing the entire slot and recomputing from
-            // scratch.  This loses the prefix reuse benefit but is always
-            // correct.
+            // retry with a truncated range bounded by n_rs_seq.  If that
+            // also fails, fall back to clearing the entire slot.
             let removed = llm.memory_seq_rm(seq_id as i32, n_common as i32, -1);
             if !removed {
+                let n_rs = llm.n_rs_seq() as usize;
+                if n_rs > 0 {
+                    let n_clip = n_common.min(n_rs);
+                    log::debug!(
+                        "[prepare_slot] seq_rm failed for seq_id={}, \
+                         retrying with n_rs_seq={} clip (n_common={} -> n_clip={})",
+                        seq_id,
+                        n_rs,
+                        n_common,
+                        n_clip,
+                    );
+                    if llm.memory_seq_rm(seq_id as i32, n_clip as i32, -1) {
+                        self.cached_tokens_mut()[seq_id].truncate(n_clip);
+                        return Ok(n_clip);
+                    }
+                }
+
                 log::debug!(
-                    "[prepare_slot] seq_rm failed (hybrid model? n_rs_seq too small?), \
-                     falling back to full clear for seq_id={}",
-                    seq_id,
+                    "[prepare_slot] seq_rm failed (hybrid model? n_rs_seq={n_rs} too small?), \
+                     falling back to full clear for seq_id={seq_id}"
                 );
+
                 self.clear_slot(seq_id);
                 Ok(0)
             } else {
