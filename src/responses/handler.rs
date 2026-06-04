@@ -182,13 +182,7 @@ pub async fn handle_responses(
         };
     } // engine (MutexGuard) is dropped here, before any .await
 
-    // CancelGuard ensures the task is cancelled if the client disconnects.
-    let mut guard = crate::serve::CancelGuard::new(state.engine.clone(), task_id);
-
     if is_stream {
-        // Don't disarm the guard — it ensures the task is cancelled immediately
-        // when the client disconnects (future dropped), even if spawn_blocking
-        // is blocked on rx.recv_timeout waiting for the next engine token.
         handle_responses_stream(
             rx,
             respond_id,
@@ -199,6 +193,10 @@ pub async fn handle_responses(
         )
     } else {
         // non-stream
+        // CancelGuard ensures the task is cancelled if the client disconnects
+        // while the blocking task is waiting for engine replies.
+        let mut guard = crate::serve::CancelGuard::new(state.engine.clone(), task_id);
+
         let join = tokio::task::spawn_blocking(move || {
             collect_engine_reply_to_json(
                 rx,

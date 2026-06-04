@@ -418,7 +418,7 @@ impl Engine {
     ) -> SchedResult {
         debug_assert!(!task.prompt_tokens.is_empty());
 
-        let Some((slot_idx, allow_cache_reuse)) = self.pick_idle_slot(
+        let Some((slot_idx, n_common_raw)) = self.pick_idle_slot(
             slots,
             task.seq_hint,
             &task.prompt_tokens,
@@ -433,8 +433,8 @@ impl Engine {
         };
 
         let seq_id = slots[slot_idx].seq_id;
-        let n_common = if allow_cache_reuse {
-            match self.prepare_slot(seq_id, &task.prompt_tokens) {
+        let n_common = if n_common_raw > 0 {
+            match self.prepare_slot(seq_id, &task.prompt_tokens, n_common_raw) {
                 Ok(n) => n,
                 Err(e) => {
                     let _ = task.output_tx.send(EngineReply::Error(e));
@@ -446,6 +446,15 @@ impl Engine {
             self.truncate_slot_cache(seq_id, 0);
             0
         };
+
+        log::debug!(
+            "[sched] slot={} seq_id={} common_raw={} common={} prompt_len={}",
+            slot_idx,
+            seq_id,
+            n_common_raw,
+            n_common,
+            task.prompt_tokens.len(),
+        );
 
         task.prompt_tokens.drain(..n_common);
         if task.prompt_tokens.is_empty() {

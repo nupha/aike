@@ -57,47 +57,110 @@ impl Engine {
         n
     }
 
+    pub(super) fn pick_idle_slot(
+        &self,
+        slots: &[Slot],
+        seq_hint: Option<usize>,
+        prompt_tokens: &[Token],
+        match_threshold: f32,
+    ) -> Option<(usize, usize)> {
+        // seq_hint takes priority: caller suggests which slot to reuse
+        if let Some(hint) = seq_hint
+            && let Some(slot) = slots.get(hint)
+            && matches!(slot.state, SlotState::Idle)
+        {
+            let n = self.common_prefix_len(slot.seq_id, prompt_tokens);
+            return Some((hint, n));
+        }
+
+        // Scan idle slots: track best match (longest common prefix above threshold)
+        // and LRU fallback simultaneously.
+        let mut best_idx = None;
+        let mut best_n = 0usize;
+        let mut lru_idx = None;
+        let mut lru_n = 0usize;
+        let mut lru_mtime = i64::MAX;
+
+        for (idx, slot) in slots.iter().enumerate() {
+            if !matches!(slot.state, SlotState::Idle) {
+                continue;
+            }
+
+            let n = self.common_prefix_len(slot.seq_id, prompt_tokens);
+
+            // Track best match above threshold
+            if n > best_n
+                && (match_threshold <= 0.0
+                    || n as f32 / prompt_tokens.len() as f32 >= match_threshold)
+            {
+                best_n = n;
+                best_idx = Some(idx);
+            }
+
+            // Track LRU as fallback
+            if slot.mtime < lru_mtime {
+                lru_mtime = slot.mtime;
+                lru_n = n;
+                lru_idx = Some(idx);
+            }
+        }
+
+        // Prefer best match; fallback to LRU
+        best_idx
+            .or(lru_idx)
+            .map(|idx| (idx, if Some(idx) == best_idx { best_n } else { lru_n }))
+    }
+
     /// Align KV/cache state for prefix reuse. Returns reusable prefix length.
+    /// `n_common` is the raw common prefix length (from `pick_idle_slot`); this
+    /// function adjusts it so that at least one token remains for the model to
+    /// process.
     pub(super) fn prepare_slot(
         &mut self,
         seq_id: usize,
         prompt_tokens: &[Token],
+        n_common: usize,
     ) -> Result<usize, String> {
         if seq_id >= self.cached_tokens().len() {
             return Err(format!("invalid seq id {}", seq_id));
         }
 
-        let n_common: usize = {
-            let cached = self.cached_tokens();
-            let slot_cache = &cached[seq_id];
-            let max_common = slot_cache.len().min(prompt_tokens.len());
-            let mut cnt = 0_usize;
-
-            while cnt < max_common && slot_cache[cnt] == prompt_tokens[cnt] {
-                cnt += 1;
-            }
-            if cnt == prompt_tokens.len() && cnt > 0 {
-                cnt -= 1;
-            }
-
-            cnt
+        // When the prompt fully matches the cached prefix, keep one token so
+        // the model still has input to forward and can generate the next token.
+        // Without this, draining all tokens would leave prompt_tokens empty and
+        // the prefill stage would have nothing to process.
+        let n_common = if n_common == prompt_tokens.len() && n_common > 0 {
+            n_common - 1
+        } else {
+            n_common
         };
 
         if n_common == 0 {
             self.clear_slot(seq_id);
-            return Ok(0);
+            Ok(0)
+        } else {
+            let llm = self.llm_ctx_mut();
+            // For hybrid models (e.g. Qwen3.5), the cache has both attention
+            // and recurrent layers.  The recurrent state does not support
+            // arbitrary partial truncation — it can only roll back within
+            // n_rs_seq steps (default 0).  When memory_seq_rm fails, we
+            // fall back to clearing the entire slot and recomputing from
+            // scratch.  This loses the prefix reuse benefit but is always
+            // correct.
+            let removed = llm.memory_seq_rm(seq_id as i32, n_common as i32, -1);
+            if !removed {
+                log::debug!(
+                    "[prepare_slot] seq_rm failed (hybrid model? n_rs_seq too small?), \
+                     falling back to full clear for seq_id={}",
+                    seq_id,
+                );
+                self.clear_slot(seq_id);
+                Ok(0)
+            } else {
+                self.cached_tokens_mut()[seq_id].truncate(n_common);
+                Ok(n_common)
+            }
         }
-
-        let llm = self.llm_ctx_mut();
-        let removed = llm.memory_seq_rm(seq_id as i32, n_common as i32, -1);
-        if !removed {
-            self.clear_slot(seq_id);
-            return Ok(0);
-        }
-
-        self.cached_tokens_mut()[seq_id].truncate(n_common);
-
-        Ok(n_common)
     }
 
     pub(crate) fn truncate_slot_cache(&mut self, seq_id: usize, n_keep: usize) {
@@ -105,41 +168,6 @@ impl Engine {
         if let Some(c) = cached.get_mut(seq_id) {
             c.truncate(n_keep);
         }
-    }
-
-    pub(super) fn pick_idle_slot(
-        &self,
-        slots: &[Slot],
-        seq_hint: Option<usize>,
-        prompt_tokens: &[Token],
-        _match_threshold: f32,
-    ) -> Option<(usize, bool)> {
-        if let Some(hint) = seq_hint
-            && let Some(slot) = slots.get(hint)
-            && matches!(slot.state, SlotState::Idle)
-        {
-            let can_reuse = self.common_prefix_len(slot.seq_id, prompt_tokens) > 0;
-            return Some((hint, can_reuse));
-        }
-        let idle_indices = slots
-            .iter()
-            .enumerate()
-            .filter_map(|(idx, s)| matches!(s.state, SlotState::Idle).then_some(idx))
-            .collect::<Vec<_>>();
-        if idle_indices.is_empty() {
-            return None;
-        }
-
-        let mut lru_idx = idle_indices[0];
-        let mut lru_mtime = slots[lru_idx].mtime;
-        for idx in idle_indices.iter().skip(1) {
-            if slots[*idx].mtime < lru_mtime {
-                lru_mtime = slots[*idx].mtime;
-                lru_idx = *idx;
-            }
-        }
-
-        Some((lru_idx, true))
     }
 
     /// reset state for given slot id

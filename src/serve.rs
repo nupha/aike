@@ -332,8 +332,6 @@ async fn handle_chat_completions(
 
     // Save task_id before moving task_config into EngineTask.
     let task_id = task_config.task_id;
-    // CancelGuard ensures the task is cancelled if the client disconnects.
-    let mut guard = CancelGuard::new(state.engine.clone(), task_id);
 
     // Push task directly via channel to avoid acquiring engine.lock()
     // (worker thread may hold the lock for extended periods during inference).
@@ -449,6 +447,10 @@ async fn handle_chat_completions(
             .into_response()
     } else {
         // non-streaming
+        // CancelGuard ensures the task is cancelled if the client disconnects
+        // while the blocking task is waiting for engine replies.
+        let mut guard = CancelGuard::new(state.engine.clone(), task_id);
+
         let join = tokio::task::spawn_blocking(move || {
             collect_engine_reply_to_json(
                 rx,
