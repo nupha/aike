@@ -157,7 +157,7 @@ impl Engine {
                     .save(kv, tokens, crate::helpers::now_unix_s());
                 debug_assert!(r != usize::MAX, "fail to save cache_ram entry");
 
-                self.llm_ctx_mut().memory_seq_rm(slot.seq_id as i32, 0, -1);
+                self.clear_slot(slot);
             }
         }
     }

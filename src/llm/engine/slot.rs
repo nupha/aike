@@ -1,5 +1,7 @@
 use std::collections::VecDeque;
 
+use llama_cpp_ffi::SamplerChain;
+
 use super::{
     Engine,
     task::{EngineReply, TaskState, Token},
@@ -33,6 +35,8 @@ pub struct Slot {
     /// Cached tokens for this slot, used for prefix matching and
     /// for dumping/restoring KV cache state to/from CacheRam.
     pub cached_tokens: Vec<Token>,
+    /// Sampler chain for this slot, lazily initialized.
+    pub sampler: Option<SamplerChain>,
 }
 
 impl Slot {
@@ -43,6 +47,7 @@ impl Slot {
             mtime: 0,
             state: SlotState::Idle,
             cached_tokens: Vec::new(),
+            sampler: None,
         }
     }
 }
@@ -329,19 +334,14 @@ impl Engine {
     }
 
     /// reset state for given slot id
-    pub(crate) fn reset_slot(&mut self, seq_id: usize) {
-        let ss = self.samplers_mut();
-        if seq_id < ss.len() {
-            ss[seq_id] = None;
-        }
+    pub(crate) fn reset_sampler(&mut self, slot: &mut Slot) {
+        slot.sampler = None;
     }
 
     pub(crate) fn clear_slot(&mut self, slot: &mut Slot) {
         self.llm_ctx_mut().memory_seq_rm(slot.seq_id as i32, 0, -1);
         slot.cached_tokens.clear();
-        if slot.seq_id < self.samplers().len() {
-            self.samplers_mut()[slot.seq_id] = None;
-        }
+        slot.sampler = None;
     }
 }
 

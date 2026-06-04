@@ -32,7 +32,6 @@ pub struct Engine {
     // Worker-exclusive (mutated only by the worker thread)
     //
     pub(crate) llm_ctx: LlamaContext,
-    pub(crate) slot_samplers: Vec<Option<SamplerChain>>,
     pub(crate) pending_decode_tokens: usize,
     pub(crate) worker_join_handle: Option<JoinHandle<()>>,
 
@@ -95,14 +94,6 @@ impl Engine {
         &mut self.llm_ctx
     }
 
-    pub(crate) fn samplers(&self) -> &[Option<SamplerChain>] {
-        &self.slot_samplers
-    }
-
-    pub(crate) fn samplers_mut(&mut self) -> &mut Vec<Option<SamplerChain>> {
-        &mut self.slot_samplers
-    }
-
     pub(crate) fn pending(&self) -> usize {
         self.pending_decode_tokens
     }
@@ -155,29 +146,22 @@ impl Engine {
         }
     }
 
-    pub(crate) fn sample(&mut self, seq_id: usize, logits_idx: i32) -> Result<Token, String> {
-        if seq_id >= self.samplers().len() {
-            return Err(format!("invalid seq id {}", seq_id));
-        }
-
+    pub(crate) fn sample(&mut self, slot: &mut Slot, logits_idx: i32) -> Result<Token, String> {
         let ctx_ptr = {
             let c = self.llm_ctx();
             c.as_ptr()
         };
 
-        if let Some(sampler) = self.samplers_mut()[seq_id].as_mut() {
+        if let Some(sampler) = slot.sampler.as_mut() {
             Ok(sampler.sample(ctx_ptr, logits_idx))
         } else {
-            Err(format!("slot sampler is not ready: {}", seq_id))
+            Err(format!("slot sampler is not ready: {}", slot.seq_id))
         }
     }
 
     /// accept sampled token
-    pub(crate) fn sample_accept(&mut self, seq_id: usize, token: Token) {
-        let samplers = self.samplers_mut();
-        if seq_id < samplers.len()
-            && let Some(sampler) = samplers[seq_id].as_mut()
-        {
+    pub(crate) fn sample_accept(&mut self, slot: &mut Slot, token: Token) {
+        if let Some(sampler) = slot.sampler.as_mut() {
             sampler.accept(token);
         }
     }
@@ -185,17 +169,12 @@ impl Engine {
     /// lazy initialize sampler for slot
     pub(super) fn init_sampler(
         &mut self,
-        seq_id: usize,
+        slot: &mut Slot,
         temperature: f32,
         top_p: f32,
         grammar: Option<&GrammarConfig>,
     ) -> Result<(), String> {
-        let samplers = self.samplers();
-        if seq_id >= samplers.len() {
-            return Err(format!("invalid seq id {}", seq_id));
-        }
-
-        if samplers[seq_id].is_none() {
+        if slot.sampler.is_none() {
             let mut sc = SamplerChain::new(self.llm_ctx().model().clone(), true);
 
             sc.add_sampler(&SamplerKind::Penalties {
@@ -221,7 +200,7 @@ impl Engine {
                 }
             }
 
-            self.samplers_mut()[seq_id] = Some(sc);
+            slot.sampler = Some(sc);
         }
 
         Ok(())
@@ -261,7 +240,6 @@ impl Engine {
             cache_ram: CacheRam::new(0), // 0 = disabled by default
             is_dead: false,
             llm_ctx,
-            slot_samplers: (0..num_parallel).map(|_| None).collect(),
             pending_decode_tokens: 0,
             worker_join_handle: None,
         }));

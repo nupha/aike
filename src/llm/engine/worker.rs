@@ -304,7 +304,7 @@ impl Engine {
                     // channel is full, wait sampling in next tick
                     slot.state = SlotState::Sampling { logits, task_state };
                 } else if let Err(e) = self.init_sampler(
-                    slot.seq_id,
+                    slot,
                     task_state.config.temperature,
                     task_state.config.top_p,
                     task_state.config.grammar.as_ref(),
@@ -316,9 +316,9 @@ impl Engine {
                 } else {
                     did_work = true;
 
-                    match self.sample(slot.seq_id, logits) {
+                    match self.sample(slot, logits) {
                         Ok(token) => {
-                            self.sample_accept(slot.seq_id, token);
+                            self.sample_accept(slot, token);
 
                             slot.state = if model.is_eog(token) {
                                 let n = task_state.n_completion_tokens;
@@ -512,7 +512,7 @@ impl Engine {
                     self.clear_slot(slot);
                     slot.n_past = 0;
                 } else {
-                    self.reset_slot(slot.seq_id);
+                    self.reset_sampler(slot);
                 }
                 completed += 1;
                 slot.state = SlotState::Idle;
