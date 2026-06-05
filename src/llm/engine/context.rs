@@ -212,6 +212,7 @@ impl Engine {
         slot_match_threshold: f32,
         default_max_tokens: usize,
         n_cache_reuse: usize,
+        checkpoints: usize,
     ) -> Arc<Mutex<Self>> {
         let model = llm_ctx.model().clone();
         let model_name = model
@@ -256,6 +257,7 @@ impl Engine {
                         num_parallel,
                         idle_sleep,
                         slot_match_threshold,
+                        checkpoints,
                         input_rx,
                         ctrl_rx,
                     );

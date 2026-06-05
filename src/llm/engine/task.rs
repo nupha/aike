@@ -374,6 +374,7 @@ impl Engine {
                                 logits_for_all_tokens,
                                 num_written,
                                 task_state,
+                                is_prefill,
                             } => {
                                 if task_state.config.task_id == task_id {
                                     SlotState::Done {
@@ -386,6 +387,7 @@ impl Engine {
                                         logits_for_all_tokens,
                                         num_written,
                                         task_state,
+                                        is_prefill,
                                     }
                                 }
                             }
@@ -584,6 +586,7 @@ impl Engine {
             logits_for_all_tokens: task_state.config.logits_for_all_tokens,
             num_written: 0,
             task_state,
+            is_prefill: true,
         };
 
         SchedResult::Scheduled

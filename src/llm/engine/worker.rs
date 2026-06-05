@@ -8,6 +8,7 @@ use std::{
 use crossbeam::channel::Receiver;
 
 use super::{
+    checkpoint::CheckpointPool,
     context::Engine,
     slot::{Slot, SlotState},
     task::{EngineCtrlMsg, EngineReply, EngineTask, SchedResult, StopReason},
@@ -36,10 +37,17 @@ pub fn worker_loop(
     max_parallel: usize,
     idle_sleep: Duration,
     slot_match_threshold: f32,
+    checkpoints: usize,
     input_rx: Receiver<Box<EngineTask>>,
     ctrl_rx: Receiver<EngineCtrlMsg>,
 ) {
-    let mut slots = (0..max_parallel).map(Slot::new).collect::<Vec<_>>();
+    let mut slots = (0..max_parallel)
+        .map(|i| {
+            let mut s = Slot::new(i);
+            s.checkpoints = CheckpointPool::new(checkpoints);
+            s
+        })
+        .collect::<Vec<_>>();
     let mut slot_cursor = 0usize;
 
     let mut ready_tasks = VecDeque::<Box<EngineTask>>::new();
@@ -166,6 +174,9 @@ impl Engine {
         let mut has_sampling = false;
         let mut cnt = 0usize;
         let mut written_updates: Vec<(usize, usize)> = Vec::new();
+        // Tracks slots whose prefill just completed (entering Sampling).
+        // We save a checkpoint for these after decode_batch() succeeds.
+        let mut prefill_done_slots: Vec<usize> = Vec::new();
         let slots_len = slots.len();
 
         self.begin_decode_batch();
@@ -184,6 +195,7 @@ impl Engine {
                     logits_for_all_tokens,
                     mut num_written,
                     task_state,
+                    is_prefill,
                 } = std::mem::replace(&mut slot.state, SlotState::Busy)
                 else {
                     unreachable!();
@@ -202,7 +214,7 @@ impl Engine {
                         slot.n_past + feed_count as i32,
                         need_logits,
                     ) {
-                        Ok(()) => {
+                        Ok(_) => {
                             num_written += 1;
                             feed_count += 1;
                             cnt += 1;
@@ -232,6 +244,9 @@ impl Engine {
                         }
                     } else {
                         has_sampling = true;
+                        if is_prefill {
+                            prefill_done_slots.push(slot_idx);
+                        }
                         SlotState::Sampling {
                             logits: cnt as i32 - 1,
                             task_state,
@@ -244,6 +259,7 @@ impl Engine {
                         logits_for_all_tokens,
                         num_written,
                         task_state,
+                        is_prefill: true,
                     }
                 };
                 if feed_count > 0 {
@@ -257,6 +273,38 @@ impl Engine {
                 Ok(_) => {
                     for (idx, wrote) in &written_updates {
                         slots[*idx].n_past += *wrote as i32;
+                    }
+
+                    // Save context checkpoints for FULL-removal memory
+                    // (recurrent/hybrid models) after prefill completes.
+                    // We only save once per slot, when it transitions from
+                    // Decoding to Sampling (i.e. all prompt tokens processed).
+                    // Must run after n_past update so that n_tokens matches
+                    // the actual number of processed tokens.
+                    if !prefill_done_slots.is_empty() && self.needs_checkpoint_cache() {
+                        for &idx in &prefill_done_slots {
+                            let slot = &mut slots[idx];
+                            if slot.checkpoints.is_enabled() {
+                                let seq_id = slot.seq_id as i32;
+                                let data = self.llm_ctx_mut().dump_seq_state(seq_id);
+                                if !data.is_empty() {
+                                    let n_tokens = slot.n_past as i64;
+                                    let size = data.len();
+                                    let pos_min = self.llm_ctx().memory_seq_pos_min(seq_id);
+                                    let pos_max = self.llm_ctx().memory_seq_pos_max(seq_id);
+                                    slot.checkpoints.save(data, n_tokens, pos_min, pos_max);
+                                    log::debug!(
+                                        "[checkpoint] saved slot#{} seq_id={} n_tokens={} pos=[{},{}] size={}",
+                                        idx,
+                                        seq_id,
+                                        n_tokens,
+                                        pos_min,
+                                        pos_max,
+                                        size,
+                                    );
+                                }
+                            }
+                        }
                     }
                 }
                 // Err(e) if e == "ContextFull" => {
@@ -478,6 +526,7 @@ impl Engine {
                             logits_for_all_tokens: false,
                             num_written: 0,
                             task_state,
+                            is_prefill: false,
                         };
                     }
                     Err(e) => {

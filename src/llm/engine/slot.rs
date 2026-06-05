@@ -4,6 +4,7 @@ use llama_cpp_ffi::SamplerChain;
 
 use super::{
     Engine,
+    checkpoint::CheckpointPool,
     task::{EngineReply, TaskState, Token},
 };
 
@@ -15,6 +16,9 @@ pub enum SlotState {
         logits_for_all_tokens: bool,
         num_written: usize,
         task_state: TaskState,
+        /// true = prefill phase (processing prompt tokens),
+        /// false = sample->decode phase (generating one token at a time).
+        is_prefill: bool,
     },
     Sampling {
         logits: i32,
@@ -37,6 +41,10 @@ pub struct Slot {
     pub cached_tokens: Vec<Token>,
     /// Sampler chain for this slot, lazily initialized.
     pub sampler: Option<SamplerChain>,
+    /// Context checkpoints for FULL-removal memory (recurrent/hybrid models).
+    /// Created during prefill, used to restore state when seq_rm is not
+    /// available.
+    pub checkpoints: CheckpointPool,
 }
 
 impl Slot {
@@ -48,6 +56,7 @@ impl Slot {
             state: SlotState::Idle,
             cached_tokens: Vec::new(),
             sampler: None,
+            checkpoints: CheckpointPool::new(0),
         }
     }
 }
@@ -148,7 +157,8 @@ impl Engine {
                     // arbitrary partial truncation — it can only roll back within
                     // n_rs_seq steps (default 0).  When memory_seq_rm fails, we
                     // retry with a truncated range bounded by n_rs_seq.  If that
-                    // also fails, fall back to clearing the entire slot.
+                    // also fails, try checkpoint restore before falling back to
+                    // full clear.
                     let n_rs = self.llm_ctx().n_rs_seq() as usize;
                     if n_rs > 0 {
                         let n_clip = n_common.min(n_rs);
@@ -169,8 +179,34 @@ impl Engine {
                 }
 
                 if !removed {
+                    // Try checkpoint restore for FULL-removal memory.
+                    // Use n_common + 1 because n_common may have been
+                    // decremented above (when n_common == tokens.len()),
+                    // but the checkpoint's n_tokens reflects the full
+                    // prefill-completed state.
+                    if slot.checkpoints.is_enabled() {
+                        let restore_n_past = if n_common + 1 == tokens.len() {
+                            n_common + 1
+                        } else {
+                            n_common
+                        };
+                        log::debug!(
+                            "[prefill_slot] seq_rm failed, trying checkpoint restore \
+                             for seq_id={seq_id}, n_common={n_common}, restore_n_past={restore_n_past}"
+                        );
+                        if let Some(restored_n_past) = self.restore_from_checkpoint(
+                            &mut slot.checkpoints,
+                            seq_id as i32,
+                            restore_n_past as i64,
+                        ) {
+                            let restored = restored_n_past as usize;
+                            slot.cached_tokens.truncate(restored);
+                            return Ok(restored);
+                        }
+                    }
+
                     log::debug!(
-                        "[prefill_slot] seq_rm failed (hybrid model? n_rs_seq too small?), \
+                        "[prefill_slot] both seq_rm, n_rs_seq, checkppoint are failed, \
                      falling back to full clear for seq_id={seq_id}"
                     );
                     self.clear_slot(slot);
@@ -303,6 +339,7 @@ impl Engine {
     pub(crate) fn clear_slot(&mut self, slot: &mut Slot) {
         self.llm_ctx_mut().memory_seq_rm(slot.seq_id as i32, 0, -1);
         slot.cached_tokens.clear();
+        slot.checkpoints.clear();
         slot.sampler = None;
     }
 }
