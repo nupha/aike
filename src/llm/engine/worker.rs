@@ -259,9 +259,9 @@ impl Engine {
                         slots[*idx].n_past += *wrote as i32;
                     }
                 }
-                Err(e) if e == "ContextFull" => {
-                    todo!("kv cache full, need to shift context");
-                }
+                // Err(e) if e == "ContextFull" => {
+                //     todo!("kv cache full, need to shift context");
+                // }
                 Err(e) => {
                     for (idx, _) in &written_updates {
                         let slot = &mut slots[*idx];
@@ -296,181 +296,196 @@ impl Engine {
         let mut did_work = false;
         let model = self.llm_ctx().model().clone();
 
-        for slot in slots.iter_mut() {
-            let state0 = std::mem::replace(&mut slot.state, SlotState::Busy);
+        for i in 0..slots.len() {
+            if matches!(slots[i].state, SlotState::Sampling { .. }) {
+                let SlotState::Sampling {
+                    logits,
+                    mut task_state,
+                } = std::mem::replace(&mut slots[i].state, SlotState::Busy)
+                else {
+                    unreachable!();
+                };
 
-            if let SlotState::Sampling {
-                logits,
-                mut task_state,
-            } = state0
-            {
                 if task_state.output_tx.is_full() {
-                    // channel is full, wait sampling in next tick
-                    slot.state = SlotState::Sampling { logits, task_state };
-                } else if let Err(e) = self.init_sampler(
-                    slot,
+                    // channel is full, try sampling in next tick
+                    slots[i].state = SlotState::Sampling { logits, task_state };
+                    continue;
+                }
+
+                if let Err(e) = self.init_sampler(
+                    &mut slots[i],
                     task_state.config.temperature,
                     task_state.config.top_p,
                     task_state.config.grammar.as_ref(),
                 ) {
-                    slot.state = SlotState::Done {
+                    // can't init sampler
+                    slots[i].state = SlotState::Done {
                         task_state,
                         reply: EngineReply::Error(e),
                     };
-                } else {
-                    did_work = true;
+                    continue;
+                }
 
-                    match self.sample(slot, logits) {
-                        Ok(token) => {
-                            self.sample_accept(slot, token);
+                did_work = true;
 
-                            slot.state = if model.is_eog(token) {
-                                let n = task_state.n_completion_tokens;
-                                SlotState::Done {
-                                    task_state,
-                                    reply: EngineReply::Stop(StopReason::Eog, n),
-                                }
-                            } else if task_state.config.max_tokens > 0
-                                && task_state.n_completion_tokens >= task_state.config.max_tokens
-                            {
-                                let n = task_state.n_completion_tokens;
-                                SlotState::Done {
-                                    task_state,
-                                    reply: EngineReply::Stop(StopReason::MaxTokens, n),
-                                }
-                            } else {
-                                task_state.add_output_token(token, self.model());
+                match self.sample(&mut slots[i], logits) {
+                    Ok(token) => {
+                        self.sample_accept(&mut slots[i], token);
 
-                                #[cfg(debug_assertions)]
-                                if let Some(parser) = &task_state.output_parser {
-                                    debug_assert!(
-                                        matches_content_state(
-                                            task_state.current_content.last().unwrap(),
-                                            parser.current_state()
-                                        ),
-                                        "current_content state mismatch: {:?} != {:?}",
+                        if model.is_eog(token) {
+                            let n = task_state.n_completion_tokens;
+                            slots[i].state = SlotState::Done {
+                                task_state,
+                                reply: EngineReply::Stop(StopReason::Eog, n),
+                            };
+                            continue;
+                        }
+
+                        if task_state.config.max_tokens > 0
+                            && task_state.n_completion_tokens >= task_state.config.max_tokens
+                        {
+                            let n = task_state.n_completion_tokens;
+                            slots[i].state = SlotState::Done {
+                                task_state,
+                                reply: EngineReply::Stop(StopReason::MaxTokens, n),
+                            };
+                            continue;
+                        }
+
+                        task_state.add_output_token(token, self.model());
+
+                        #[cfg(debug_assertions)]
+                        {
+                            if let Some(parser) = &task_state.output_parser {
+                                debug_assert!(
+                                    matches_content_state(
                                         task_state.current_content.last().unwrap(),
                                         parser.current_state()
-                                    );
-                                }
+                                    ),
+                                    "current_content state mismatch: {:?} != {:?}",
+                                    task_state.current_content.last().unwrap(),
+                                    parser.current_state()
+                                );
+                            }
 
-                                // Check stop words against the current content text
-                                if let Some(w) = hit_stop_words(
-                                    task_state.current_content.last().unwrap().as_str(),
-                                    &task_state.config.stop_words,
-                                ) {
-                                    // Truncate stop word from tail of last content's text
-                                    let last_content =
-                                        task_state.current_content.last_mut().unwrap();
-
-                                    let new_len =
-                                        last_content.as_str().len().saturating_sub(w.len());
-
-                                    last_content.truncate(new_len);
-
-                                    let n = task_state.n_completion_tokens;
-                                    SlotState::Done {
-                                        task_state,
-                                        reply: EngineReply::Stop(StopReason::Word(w), n),
-                                    }
-                                } else {
-                                    // For streaming mode, send current content if not ToolCall
-                                    if task_state.config.output_stream {
-                                        debug_assert_eq!(
-                                            task_state.current_content.len(),
-                                            1,
-                                            "continuous mode should have only 1 content element in sampling_stage"
-                                        );
-
-                                        let mut content = task_state.current_content.pop().unwrap();
-
-                                        // Only send if not ToolCall
-                                        if !matches!(content, GeneratedContent::ToolCall(_))
-                                            && !content.as_str().is_empty()
-                                        {
-                                            let empty = match content {
-                                                GeneratedContent::Text(_) => {
-                                                    GeneratedContent::Text(String::new())
-                                                }
-                                                GeneratedContent::Reasoning(_) => {
-                                                    GeneratedContent::Reasoning(String::new())
-                                                }
-                                                GeneratedContent::ToolCall(_) => {
-                                                    GeneratedContent::ToolCall(String::new())
-                                                }
-                                            };
-
-                                            let _ = task_state
-                                                .output_tx
-                                                .send(EngineReply::Content(content));
-
-                                            content = empty;
-                                        }
-
-                                        task_state.current_content.push(content);
-                                    }
-
-                                    // Pre-check: if the next decode will exceed context,
-                                    // perform context shift now before entering Decoding.
-                                    let n_ctx = self.llm_ctx().n_ctx() as usize;
-                                    let n_past = slot.n_past as usize + 1; // +1 for this new token
-                                    let keep_tokens = task_state.config.keep_tokens;
-
-                                    if n_past + 1 >= n_ctx && keep_tokens > 0 {
-                                        // Context will be full on next decode
-                                        // try free a lru slot first
-                                        // TODO.
-
-                                        // No idle slot to swap: we have keep_tokens defined -
-                                        // let's shift the slot kv/cache to squeeze some space.
-                                        match self.context_shift(slot, keep_tokens, 0) {
-                                            Ok(new_n_past) => {
-                                                log::debug!(
-                                                    "[context_shift] slot={} seq_id={} keep={} n_past={}->{}",
-                                                    slot.seq_id,
-                                                    slot.seq_id,
-                                                    keep_tokens,
-                                                    slot.n_past,
-                                                    new_n_past,
-                                                );
-                                                slot.n_past = new_n_past;
-                                            }
-                                            Err(e) => {
-                                                log::error!(
-                                                    "[context_shift] failed for slot={}: {}",
-                                                    slot.seq_id,
-                                                    e,
-                                                );
-                                                slot.state = SlotState::Done {
-                                                    task_state,
-                                                    reply: EngineReply::Error(
-                                                        "ContextFull".to_string(),
-                                                    ),
-                                                };
-                                                continue;
-                                            }
-                                        }
-                                    }
-
-                                    SlotState::Decoding {
-                                        prompt_tokens: VecDeque::from([token]),
-                                        logits_for_all_tokens: false,
-                                        num_written: 0,
-                                        task_state,
-                                    }
-                                }
-                            };
+                            if task_state.config.output_stream {
+                                debug_assert_eq!(
+                                    task_state.current_content.len(),
+                                    1,
+                                    "streaming mode should have only 1 content element in sampling_stage"
+                                );
+                            }
                         }
-                        Err(e) => {
-                            slot.state = SlotState::Done {
+
+                        if let Some(last) = task_state.current_content.last_mut()
+                            && let Some(w) =
+                                hit_stop_words(last.as_str(), &task_state.config.stop_words)
+                        {
+                            // Found stop words - truncate stop word from tail of last content's text
+                            let new_len = last.as_str().len().saturating_sub(w.len());
+                            last.truncate(new_len);
+
+                            let n = task_state.n_completion_tokens;
+                            slots[i].state = SlotState::Done {
                                 task_state,
-                                reply: EngineReply::Error(e),
+                                reply: EngineReply::Stop(StopReason::Word(w), n),
                             };
+                            continue;
                         }
+
+                        if task_state.config.output_stream
+                            && let Some(last) = task_state.current_content.last()
+                            && !matches!(last, GeneratedContent::ToolCall(_))
+                            && !last.as_str().is_empty()
+                        {
+                            let content = task_state.current_content.pop().unwrap();
+
+                            // Determine placeholder type before sending
+                            let empty = match content {
+                                GeneratedContent::Text(ref _s) => {
+                                    GeneratedContent::Text(String::new())
+                                }
+                                GeneratedContent::Reasoning(ref _s) => {
+                                    GeneratedContent::Reasoning(String::new())
+                                }
+                                GeneratedContent::ToolCall(_) => unreachable!(),
+                            };
+
+                            let _ = task_state.output_tx.send(EngineReply::Content(content));
+                            task_state.current_content.push(empty); // replace with an empty placeholder
+                        }
+
+                        // Pre-check: if the next decode will exceed context size
+                        let n_ctx = self.llm_ctx().n_ctx() as usize;
+                        let n_past = slots[i].n_past as usize + 1; // +1 for this new token
+                        if n_past + 1 >= n_ctx {
+                            // context will be full on next decode tick:
+                            // 1. try to find a lru slot and free it.
+                            // 2. if no lru slot found, shift the slot kv/cache to squeeze some space.
+                            let mut lru: Option<usize> = None;
+                            let mut lru_time = i64::MAX;
+                            for (j, s) in slots.iter().enumerate() {
+                                if i != j
+                                    && matches!(s.state, SlotState::Idle)
+                                    && s.mtime < lru_time
+                                {
+                                    lru = Some(j);
+                                    lru_time = s.mtime;
+                                }
+                            }
+                            if let Some(lru_idx) = lru {
+                                self.dump_slot_to_cache_ram(&mut slots[lru_idx]);
+                            } else {
+                                // No idle slot to swap: we have keep_tokens defined -
+                                // let's shift the slot kv/cache to squeeze some space.
+                                let keep_tokens = task_state.config.keep_tokens;
+                                if keep_tokens > 0 {
+                                    match self.context_shift(&mut slots[i], keep_tokens, 0) {
+                                        Ok(new_n_past) => {
+                                            log::debug!(
+                                                "[context_shift] slot={} seq_id={} keep={} n_past={}->{}",
+                                                slots[i].seq_id,
+                                                slots[i].seq_id,
+                                                keep_tokens,
+                                                slots[i].n_past,
+                                                new_n_past,
+                                            );
+                                            slots[i].n_past = new_n_past;
+                                        }
+                                        Err(e) => {
+                                            log::error!(
+                                                "[context_shift] failed for slot={}: {}",
+                                                slots[i].seq_id,
+                                                e,
+                                            );
+                                            slots[i].state = SlotState::Done {
+                                                task_state,
+                                                reply: EngineReply::Error(
+                                                    "ContextFull".to_string(),
+                                                ),
+                                            };
+                                            continue;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // decoding for sampled token
+                        slots[i].state = SlotState::Decoding {
+                            prompt_tokens: VecDeque::from([token]),
+                            logits_for_all_tokens: false,
+                            num_written: 0,
+                            task_state,
+                        };
+                    }
+                    Err(e) => {
+                        slots[i].state = SlotState::Done {
+                            task_state,
+                            reply: EngineReply::Error(e),
+                        };
                     }
                 }
-            } else {
-                slot.state = state0;
             }
         }
 

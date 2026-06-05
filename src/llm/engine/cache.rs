@@ -146,8 +146,15 @@ impl CacheRam {
 }
 
 impl Engine {
+    /// Dump slot kv and tokens to cache_ram, and clear the slot cache and tokens.
     pub(crate) fn dump_slot_to_cache_ram(&mut self, slot: &mut Slot) {
         let tokens = std::mem::take(&mut slot.cached_tokens);
+
+        log::debug!(
+            "Dump slot #{} ({} tokens) to cache",
+            slot.seq_id,
+            tokens.len()
+        );
 
         if !tokens.is_empty() {
             let kv = self.llm_ctx().dump_seq_state(slot.seq_id as i32);
@@ -175,6 +182,8 @@ impl Engine {
         cache_idx: usize,
         n_tokens: usize,
     ) -> usize {
+        log::debug!("Restore cached kv #{} to slot #{}", cache_idx, slot.seq_id);
+
         // Get the state bytes and tokens from cache_ram (borrows self immutably)
         let (state_ptr, state_len, cached_tokens) = {
             let (s, t) = match self.cache_ram.get(cache_idx) {
