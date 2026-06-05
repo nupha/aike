@@ -108,94 +108,100 @@ impl Engine {
     /// function adjusts it so that at least one token remains for the model to
     /// process.
     /// `n_cache_reuse` is the minimum chunk size to attempt shifting (0 = disabled).
+    ///
     /// Returns the total number of reusable tokens (n_past).
     pub(super) fn prefill_slot(
         &mut self,
         slot: &mut Slot,
-        prompt_tokens: &[Token],
-        n_common: usize,
+        tokens: &[Token],
+        mut n_common: usize,
         n_cache_reuse: usize,
     ) -> Result<usize, String> {
-        let seq_id = slot.seq_id;
+        debug_assert!(!tokens.is_empty());
+        debug_assert!(n_common <= tokens.len());
+        debug_assert!(n_common <= slot.cached_tokens.len());
 
-        // When the prompt fully matches the cached prefix, keep one token so
-        // the model still has input to forward and can generate the next token.
-        let n_common = if n_common == prompt_tokens.len() && n_common > 0 {
-            n_common - 1
-        } else {
-            n_common
-        };
+        if n_common == tokens.len() {
+            // When the tokens fully matches the cached prefix, keep one token so
+            // the model still has input to forward and can generate the next token.
+            n_common -= 1;
+        }
 
         if n_common == 0 {
             self.clear_slot(slot);
             return Ok(0);
         }
 
-        // Check if KV shifting is supported
-        let can_shift = n_cache_reuse > 0 && self.llm_ctx().memory_can_shift();
+        let seq_id = slot.seq_id;
+        let can_shift = self.llm_ctx().memory_can_shift();
 
-        if !can_shift {
-            // Fall back to basic truncation
-            let removed = self
-                .llm_ctx_mut()
-                .memory_seq_rm(seq_id as i32, n_common as i32, -1);
-            if !removed {
-                // For hybrid models (e.g. Qwen3.5), the cache has both attention
-                // and recurrent layers.  The recurrent state does not support
-                // arbitrary partial truncation — it can only roll back within
-                // n_rs_seq steps (default 0).  When memory_seq_rm fails, we
-                // retry with a truncated range bounded by n_rs_seq.
-                let n_rs = self.llm_ctx().n_rs_seq() as usize;
-                if n_rs > 0 {
-                    let n_clip = n_common.min(n_rs);
-                    log::debug!(
-                        "[prefill_slot] seq_rm failed for seq_id={}, \
+        if n_cache_reuse == 0 || !can_shift {
+            if n_common < slot.cached_tokens.len() {
+                // truncate kv and cached tokens to n_common length
+                let mut removed =
+                    self.llm_ctx_mut()
+                        .memory_seq_rm(seq_id as i32, n_common as i32, -1);
+
+                if !removed {
+                    // For hybrid models (e.g. Qwen3.5), the cache has both attention
+                    // and recurrent layers.  The recurrent state does not support
+                    // arbitrary partial truncation — it can only roll back within
+                    // n_rs_seq steps (default 0).  When memory_seq_rm fails, we
+                    // retry with a truncated range bounded by n_rs_seq.  If that
+                    // also fails, fall back to clearing the entire slot.
+                    let n_rs = self.llm_ctx().n_rs_seq() as usize;
+                    if n_rs > 0 {
+                        let n_clip = n_common.min(n_rs);
+                        log::debug!(
+                            "[prefill_slot] seq_rm failed for seq_id={}, \
                          retrying with n_rs_seq={} clip (n_common={} -> n_clip={})",
-                        seq_id,
-                        n_rs,
-                        n_common,
-                        n_clip,
-                    );
-                    if self
-                        .llm_ctx_mut()
-                        .memory_seq_rm(seq_id as i32, n_clip as i32, -1)
-                    {
-                        slot.cached_tokens.truncate(n_clip);
-                        return Ok(n_clip);
+                            seq_id,
+                            n_rs,
+                            n_common,
+                            n_clip,
+                        );
+
+                        n_common = n_clip;
+                        removed =
+                            self.llm_ctx_mut()
+                                .memory_seq_rm(seq_id as i32, n_clip as i32, -1);
                     }
                 }
 
-                log::debug!(
-                    "[prefill_slot] seq_rm failed (hybrid model? n_rs_seq={n_rs} too small?), \
+                if !removed {
+                    log::debug!(
+                        "[prefill_slot] seq_rm failed (hybrid model? n_rs_seq too small?), \
                      falling back to full clear for seq_id={seq_id}"
-                );
-                self.clear_slot(slot);
-                return Ok(0);
+                    );
+                    self.clear_slot(slot);
+                    return Ok(0);
+                }
+
+                slot.cached_tokens.truncate(n_common);
             }
-            slot.cached_tokens.truncate(n_common);
+
             return Ok(n_common);
         }
 
-        // Step 2: remove tokens after n_common from cache
-        let removed = self
-            .llm_ctx_mut()
-            .memory_seq_rm(seq_id as i32, n_common as i32, -1);
-        if !removed {
-            self.clear_slot(slot);
-            return Ok(0);
-        }
-        slot.cached_tokens.truncate(n_common);
+        //
+        // KV shifting — scan for additional matching chunks
+        //
 
-        // Step 3: KV shifting — scan for additional matching chunks
+        log::debug!(
+            "[prepare_slot] shift kv chunks for reuse: n_cache_reuse={}",
+            n_cache_reuse
+        );
+
+        let old_cache_len = slot.cached_tokens.len();
         let mut n_past = n_common;
-        let mut head_c = n_common;
-        let mut head_p = n_common;
+        let mut head_c = n_common; // index to cached tokens
+        let mut head_p = n_common; // index to prompt tokens
 
-        while head_c < slot.cached_tokens.len() && head_p < prompt_tokens.len() {
+        while head_c < old_cache_len && head_p < tokens.len() {
             let mut n_match = 0usize;
-            while head_c + n_match < slot.cached_tokens.len()
-                && head_p + n_match < prompt_tokens.len()
-                && slot.cached_tokens[head_c + n_match] == prompt_tokens[head_p + n_match]
+            while head_c + n_match < old_cache_len
+                && head_p + n_match < tokens.len()
+                && slot.cached_tokens[head_c + n_match] == tokens[head_p + n_match]
             {
                 n_match += 1;
             }
@@ -206,7 +212,9 @@ impl Engine {
                 let kv_shift = head_p_i32 - head_c_i32;
 
                 let llm = self.llm_ctx_mut();
-                llm.memory_seq_rm(seq_id as i32, head_p_i32, head_c_i32);
+                let r = llm.memory_seq_rm(seq_id as i32, head_p_i32, head_c_i32);
+                debug_assert!(r);
+
                 llm.memory_seq_add(
                     seq_id as i32,
                     head_c_i32,
@@ -214,12 +222,14 @@ impl Engine {
                     kv_shift,
                 );
 
+                // cached_tokens may need to grow when the matching chunk
+                // is shifted to a position beyond the current cache length
+                // (head_p + n_match > cache_len).
+                if head_p + n_match > slot.cached_tokens.len() {
+                    slot.cached_tokens.resize(head_p + n_match, 0);
+                }
                 for i in 0..n_match {
-                    if head_p + i < slot.cached_tokens.len() {
-                        slot.cached_tokens[head_p + i] = slot.cached_tokens[head_c + i];
-                    } else {
-                        slot.cached_tokens.push(slot.cached_tokens[head_c + i]);
-                    }
+                    slot.cached_tokens[head_p + i] = slot.cached_tokens[head_c + i];
                 }
 
                 n_past += n_match;

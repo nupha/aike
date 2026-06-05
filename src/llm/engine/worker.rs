@@ -420,21 +420,22 @@ impl Engine {
                         let n_past = slots[i].n_past as usize + 1; // +1 for this new token
                         if n_past + 1 >= n_ctx {
                             // context will be full on next decode tick:
-                            // 1. try to find a lru slot and free it.
+                            // 1. try to find an idle slot and free it.
                             // 2. if no lru slot found, shift the slot kv/cache to squeeze some space.
                             let mut lru: Option<usize> = None;
                             let mut lru_time = i64::MAX;
                             for (j, s) in slots.iter().enumerate() {
-                                if i != j
-                                    && matches!(s.state, SlotState::Idle)
+                                if matches!(s.state, SlotState::Idle)
+                                    && !s.cached_tokens.is_empty()
                                     && s.mtime < lru_time
                                 {
+                                    debug_assert_ne!(i, j);
                                     lru = Some(j);
                                     lru_time = s.mtime;
                                 }
                             }
-                            if let Some(lru_idx) = lru {
-                                self.dump_slot_to_cache_ram(&mut slots[lru_idx]);
+                            if let Some(nth) = lru {
+                                self.dump_slot_to_cache_ram(&mut slots[nth]);
                             } else {
                                 // No idle slot to swap: we have keep_tokens defined -
                                 // let's shift the slot kv/cache to squeeze some space.

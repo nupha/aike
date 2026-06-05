@@ -426,6 +426,12 @@ impl Engine {
         prefix_match_threshold: f32,
     ) -> SchedResult {
         debug_assert!(!task.prompt_tokens.is_empty());
+        // if task.prompt_tokens.is_empty() {
+        //     let _ = task.output_tx.send(EngineReply::Error(
+        //         "prompt_tokens became empty after prefix match".to_string(),
+        //     ));
+        //     return SchedResult::Rejected;
+        // }
 
         let Some((slot_idx, mut n_common_raw)) =
             self.pick_idle_slot(slots, &task.prompt_tokens, prefix_match_threshold)
@@ -450,42 +456,28 @@ impl Engine {
             }
         }
 
-        let n_common = if n_common_raw > 0 {
-            let result = self.prefill_slot(
-                &mut slots[slot_idx],
-                &task.prompt_tokens,
-                n_common_raw,
-                self.n_cache_reuse,
-            );
-            match result {
-                Ok(n) => n,
-                Err(e) => {
-                    let _ = task.output_tx.send(EngineReply::Error(e));
-                    return SchedResult::Rejected;
-                }
+        let n_common = match self.prefill_slot(
+            &mut slots[slot_idx],
+            &task.prompt_tokens,
+            n_common_raw, // n_common_raw == 0 will clear the slot
+            self.n_cache_reuse,
+        ) {
+            Ok(n) => n,
+            Err(e) => {
+                let _ = task.output_tx.send(EngineReply::Error(e));
+                return SchedResult::Rejected;
             }
-        } else {
-            self.clear_slot(&mut slots[slot_idx]);
-            0
         };
 
-        let seq_id = slots[slot_idx].seq_id;
-
         log::debug!(
-            "[sched] slot={} seq_id={} common_raw={} common={} prompt_len={}",
-            slot_idx,
-            seq_id,
-            n_common_raw,
-            n_common,
+            "[sched] slot#{slot_idx} seq_id:{} prompt:{} common:{n_common_raw} -> {n_common} ",
+            slots[slot_idx].seq_id,
             task.prompt_tokens.len(),
         );
 
-        task.prompt_tokens.drain(..n_common);
-        if task.prompt_tokens.is_empty() {
-            let _ = task.output_tx.send(EngineReply::Error(
-                "prompt_tokens became empty after prefix match".to_string(),
-            ));
-            return SchedResult::Rejected;
+        if n_common > 0 {
+            task.prompt_tokens.drain(..n_common);
+            debug_assert!(!task.prompt_tokens.is_empty());
         }
 
         // Create output parser if enabled
