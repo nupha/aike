@@ -470,9 +470,9 @@ impl Engine {
         };
 
         log::debug!(
-            "[sched] slot#{slot_idx} seq_id:{} prompt:{} common:{n_common_raw} -> {n_common} ",
+            "[sched] slot#{slot_idx} seq_id:{} prompt:{} common:{n_common_raw} -> {n_common}",
             slots[slot_idx].seq_id,
-            task.prompt_tokens.len(),
+            slots[slot_idx].cached_tokens.len(),
         );
 
         if n_common > 0 {
