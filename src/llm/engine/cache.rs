@@ -163,6 +163,8 @@ impl Engine {
                     .cache_ram
                     .save(kv, tokens, crate::helpers::now_unix_s());
                 debug_assert!(r != usize::MAX, "fail to save cache_ram entry");
+            }
+        }
     }
 
     /// Restore a cache_ram entry into a slot, keeping only the first `n_tokens`
