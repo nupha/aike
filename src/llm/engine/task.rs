@@ -13,6 +13,8 @@ use llama_cpp_ffi::{ContentType, LlamaModel, SamplerChain, ToolChoice};
 
 use crate::helpers::now_unix_s;
 
+use super::cache::CHECKPOINT_STEP;
+
 use super::{
     context::Engine,
     output::{GeneratedContent, OutputParser, OutputState, OutputStateChange, TagBoundary},
@@ -447,15 +449,34 @@ impl Engine {
             };
         };
 
+        log::debug!(
+            "[sched] task#{} prompt_tokens.len={} first10={:?}",
+            task.config.task_id,
+            task.prompt_tokens.len(),
+            &task.prompt_tokens[..task.prompt_tokens.len().min(10)],
+        );
+
         if n_common_raw == 0 {
             // try match in cache ram
+            log::debug!(
+                "[sched] no slot match, searching cache_ram ({} entries) for prompt.len={}",
+                self.cache_ram.entry_count(),
+                task.prompt_tokens.len(),
+            );
             if let Some((cache_idx, len)) = self
                 .cache_ram
                 .find_best_match(&task.prompt_tokens, self.context_mode())
             {
+                log::debug!(
+                    "[sched] cache_ram hit: entry#{} match_len={}",
+                    cache_idx,
+                    len,
+                );
                 let r = self.restore_cache_ram_to_slot(&mut slots[slot_idx], cache_idx, len);
                 debug_assert!(r > 0, "fail to restore cache_ram entry");
                 n_common_raw = len;
+            } else {
+                log::debug!("[sched] cache_ram miss: no matching entry found");
             }
         }
 
@@ -475,7 +496,7 @@ impl Engine {
         let n_common = match self.prefill_slot(
             &mut slots[slot_idx],
             &task.prompt_tokens,
-            n_common_raw, // n_common_raw == 0 will clear the slot
+            n_common_raw,
             self.n_cache_reuse,
         ) {
             Ok(n) => n,
@@ -595,6 +616,16 @@ impl Engine {
         let slot = &mut slots[slot_idx];
         slot.n_past = n_common as i32;
         slot.mtime = now_unix_s();
+
+        // Set aligned dump target for Checkpoint mode:
+        // dump_at = largest CHECKPOINT_STEP multiple <= total_prompt_len
+        // This dumps once during prefill, excluding the generation prompt suffix.
+        if self.context_mode() == super::cache::ContextMode::Checkpoint {
+            let total_prompt_len = n_common + task.prompt_tokens.len();
+            let dump_at = (total_prompt_len / CHECKPOINT_STEP) * CHECKPOINT_STEP;
+            slot.checkpoint_dump_at = if dump_at > n_common { dump_at } else { 0 };
+        }
+
         slot.state = SlotState::Decoding {
             prompt_tokens: VecDeque::from(task.prompt_tokens),
             logits_for_all_tokens: task_state.config.logits_for_all_tokens,

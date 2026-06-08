@@ -43,6 +43,11 @@ impl CacheRam {
         }
     }
 
+    /// Number of entries in the cache.
+    pub fn entry_count(&self) -> usize {
+        self.entries.len()
+    }
+
     /// Find the best matching entry for a given prompt.
     /// Returns (entry_index, common_len) for the best match,
     /// or None if no entry has any common prefix.
@@ -59,11 +64,28 @@ impl CacheRam {
                 // Only full entry match is valid — entry.tokens must be a prefix
                 // of prompt_tokens.  Prefer the longest matching entry.
                 for (i, entry) in self.entries.iter().enumerate() {
-                    if entry.tokens.len() <= prompt_tokens.len()
-                        && entry.tokens.len() > best_n
-                        && entry.tokens[..] == prompt_tokens[..entry.tokens.len()]
-                    {
-                        best_n = entry.tokens.len();
+                    let entry_len = entry.tokens.len();
+                    if entry_len > prompt_tokens.len() {
+                        log::debug!(
+                            "[cache_ram] entry#{} skip: entry_len={} > prompt_len={}",
+                            i, entry_len, prompt_tokens.len(),
+                        );
+                        continue;
+                    }
+                    // Find first mismatch position
+                    let mut common = 0;
+                    while common < entry_len && entry.tokens[common] == prompt_tokens[common] {
+                        common += 1;
+                    }
+                    if common < entry_len {
+                        log::debug!(
+                            "[cache_ram] entry#{} mismatch at pos {}: entry_token={} prompt_token={} (entry_len={}, prompt_len={})",
+                            i, common, entry.tokens[common], prompt_tokens[common],
+                            entry_len, prompt_tokens.len(),
+                        );
+                    }
+                    if common == entry_len && entry_len > best_n {
+                        best_n = entry_len;
                         best_idx = Some(i);
                     }
                 }
@@ -197,10 +219,12 @@ impl Engine {
         }
 
         log::debug!(
-            "Dump slot #{} ({} tokens) to cache (mode={:?})",
+            "Dump slot #{} ({} tokens, last_dump={}) to cache (mode={:?}) first10={:?}",
             slot.seq_id,
             slot.cached_tokens.len(),
+            slot.last_dump_tokens,
             mode,
+            &slot.cached_tokens[..slot.cached_tokens.len().min(10)],
         );
 
         let r = self.cache_ram.save(
@@ -212,6 +236,10 @@ impl Engine {
             },
             crate::helpers::now_unix_s(),
         );
+
+        if r != usize::MAX && mode == ContextMode::Checkpoint {
+            slot.last_dump_tokens = slot.cached_tokens.len();
+        }
 
         if r != usize::MAX {
             if reset_after_dump {
@@ -254,7 +282,11 @@ impl Engine {
 
         #[cfg(debug_assertions)]
         if mode == ContextMode::Checkpoint {
-            debug_assert_eq!(truncate, slot.cached_tokens.len());
+            // In Checkpoint mode, truncate must equal the entry's token count
+            // (we restore the full entry, no truncation).
+            debug_assert_eq!(truncate, cached_tokens.len(),
+                "Checkpoint restore: truncate={} != entry tokens={}",
+                truncate, cached_tokens.len());
         }
 
         let state = unsafe { std::slice::from_raw_parts(state_ptr, state_len) };

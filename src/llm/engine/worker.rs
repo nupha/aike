@@ -7,8 +7,6 @@ use std::{
 
 use crossbeam::channel::Receiver;
 
-use crate::llm::engine::cache::CHECKPOINT_STEP;
-
 use super::{
     cache::{CacheRam, ContextMode},
     context::Engine,
@@ -166,8 +164,8 @@ pub(super) fn hit_stop_words(generated_text: &str, stop_words: &[String]) -> Opt
 
 impl Engine {
     fn decoding_stage(&mut self, slots: &mut [Slot], slot_cursor: &mut usize) -> bool {
-        // Tracks slots whose prefill just completed (will enter Sampling in next tick).
-        let mut prefill_done_slots: Vec<usize> = Vec::new();
+        // Tracks slots that just reached their aligned checkpoint dump target.
+        let mut checkpoint_dump_slots: Vec<usize> = Vec::new();
 
         let mut has_sampling = false;
         let mut cnt = 0usize;
@@ -198,7 +196,19 @@ impl Engine {
                 };
 
                 let n_tokens = prompt_tokens.len();
-                let n_take = n_tokens.min(self.ubatch_size.saturating_sub(cnt));
+                let mut n_take = n_tokens.min(self.ubatch_size.saturating_sub(cnt));
+
+                // In Checkpoint mode, limit n_take to land exactly on the
+                // checkpoint_dump_at target so we can dump the KV state at
+                // an aligned position (excludes generation prompt suffix).
+                let dump_at = slot.checkpoint_dump_at;
+                if dump_at > 0
+                    && (slot.n_past as usize) < dump_at
+                    && (slot.n_past as usize) + n_take >= dump_at
+                {
+                    n_take = dump_at - slot.n_past as usize;
+                }
+
                 let mut write_count = 0usize;
                 let mut decode_err: Option<String> = None;
 
@@ -233,10 +243,6 @@ impl Engine {
 
                 slot.state = if prompt_tokens.is_empty() {
                     // prefill done, will enter sampling/done phase
-                    if is_prefill {
-                        prefill_done_slots.push(slot_idx);
-                    }
-
                     if logits_for_all_tokens {
                         SlotState::Done {
                             task_state,
@@ -262,6 +268,11 @@ impl Engine {
 
                 if write_count > 0 {
                     written_updates.push((slot_idx, write_count));
+
+                    // Check if this slot just reached its checkpoint dump target
+                    if dump_at > 0 && slot.n_past as usize + write_count == dump_at {
+                        checkpoint_dump_slots.push(slot_idx);
+                    }
                 }
             }
         }
@@ -273,19 +284,11 @@ impl Engine {
                         slots[*idx].n_past += *wrote as i32;
                     }
 
-                    // Dumnp prefill checkpoints to cache ram for recurrent/hybrid models
-                    // after prefill completes.
-                    // We only save once per slot, when it transitions from
-                    // Decoding to Sampling (i.e. all prompt tokens processed).
-                    // Must run after n_past update so that n_tokens matches
-                    // the actual number of processed tokens.
-                    if self.context_mode() == ContextMode::Checkpoint {
-                        for &idx in &prefill_done_slots {
-                            let slot = &mut slots[idx];
-                            if slot.cached_tokens.len() >= slot.last_dump_tokens + CHECKPOINT_STEP {
-                                self.dump_slot_to_cache_ram(slot, false);
-                            }
-                        }
+                    // Dump aligned checkpoint to cache_ram for recurrent/hybrid models.
+                    // Dump once at the pre-calculated target (excludes gen prompt suffix).
+                    for &idx in &checkpoint_dump_slots {
+                        self.dump_slot_to_cache_ram(&mut slots[idx], false);
+                        slots[idx].checkpoint_dump_at = 0; // done
                     }
                 }
                 // Err(e) if e == "ContextFull" => {
@@ -464,7 +467,13 @@ impl Engine {
                                 }
                             }
                             if let Some(nth) = lru {
-                                self.dump_slot_to_cache_ram(&mut slots[nth], true);
+                                if self.context_mode() == ContextMode::Checkpoint {
+                                    // Checkpoint dumped in decode phase. no need to dump again here
+                                    self.clear_slot(&mut slots[nth]);
+                                } else {
+                                    // Dump kv
+                                    self.dump_slot_to_cache_ram(&mut slots[nth], true);
+                                }
                             } else {
                                 // No idle slot to swap: we have keep_tokens defined -
                                 // let's shift the slot kv/cache to squeeze some space.

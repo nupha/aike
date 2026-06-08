@@ -41,6 +41,10 @@ pub struct Slot {
     pub cached_tokens: Vec<Token>,
     /// last tokens count when dumped to cache_ram (Checkpoint mode).
     pub last_dump_tokens: usize,
+    /// Aligned dump target for current task (Checkpoint mode).
+    /// Set once in sched_task based on total prompt length.
+    /// 0 = no dump scheduled.
+    pub checkpoint_dump_at: usize,
     /// Sampler chain for this slot, lazily initialized.
     pub sampler: Option<SamplerChain>,
 }
@@ -54,6 +58,7 @@ impl Slot {
             state: SlotState::Idle,
             cached_tokens: Vec::new(),
             last_dump_tokens: 0,
+            checkpoint_dump_at: 0,
             sampler: None,
         }
     }
@@ -325,6 +330,7 @@ impl Engine {
         slot.cached_tokens.clear();
         slot.sampler = None;
         slot.last_dump_tokens = 0;
+        slot.checkpoint_dump_at = 0;
     }
 }
 
