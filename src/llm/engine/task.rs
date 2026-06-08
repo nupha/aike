@@ -438,6 +438,7 @@ impl Engine {
         let Some((slot_idx, mut n_common_raw)) =
             self.pick_idle_slot(slots, &task.prompt_tokens, prefix_match_threshold)
         else {
+            // No idle slot found
             let now = std::time::Instant::now();
             return if now.duration_since(*task.timestamp.get_or_insert(now)) > TASK_WAIT_TIMEOUT {
                 SchedResult::Busy(task)
@@ -447,15 +448,28 @@ impl Engine {
         };
 
         if n_common_raw == 0 {
-            // no match found in slots, try match in cache ram
+            // try match in cache ram
             if let Some((cache_idx, len)) = self
                 .cache_ram
-                .find_best_match(&task.prompt_tokens, prefix_match_threshold)
+                .find_best_match(&task.prompt_tokens, self.context_mode())
             {
                 let r = self.restore_cache_ram_to_slot(&mut slots[slot_idx], cache_idx, len);
                 debug_assert!(r > 0, "fail to restore cache_ram entry");
                 n_common_raw = len;
             }
+        }
+
+        // All prompt tokens already match the cache — no new input, end the task.
+        if n_common_raw == task.prompt_tokens.len() {
+            self.clear_slot(&mut slots[slot_idx]);
+            log::debug!(
+                "[sched] slot#{slot_idx} prompt fully cached (n_common_raw={}), ending task",
+                n_common_raw,
+            );
+            let _ = task
+                .output_tx
+                .send(EngineReply::Stop(StopReason::PrefillOnly, 0));
+            return SchedResult::Rejected;
         }
 
         let n_common = match self.prefill_slot(

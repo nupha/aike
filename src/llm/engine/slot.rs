@@ -4,7 +4,7 @@ use llama_cpp_ffi::SamplerChain;
 
 use super::{
     Engine,
-    checkpoint::CheckpointPool,
+    cache::ContextMode,
     task::{EngineReply, TaskState, Token},
 };
 
@@ -39,12 +39,10 @@ pub struct Slot {
     /// Cached tokens for this slot, used for prefix matching and
     /// for dumping/restoring KV cache state to/from CacheRam.
     pub cached_tokens: Vec<Token>,
+    /// last tokens count when dumped to cache_ram (Checkpoint mode).
+    pub last_dump_tokens: usize,
     /// Sampler chain for this slot, lazily initialized.
     pub sampler: Option<SamplerChain>,
-    /// Context checkpoints for FULL-removal memory (recurrent/hybrid models).
-    /// Created during prefill, used to restore state when seq_rm is not
-    /// available.
-    pub checkpoints: CheckpointPool,
 }
 
 impl Slot {
@@ -55,8 +53,8 @@ impl Slot {
             mtime: 0,
             state: SlotState::Idle,
             cached_tokens: Vec::new(),
+            last_dump_tokens: 0,
             sampler: None,
-            checkpoints: CheckpointPool::new(0),
         }
     }
 }
@@ -70,36 +68,44 @@ impl Engine {
     ) -> Option<(usize, usize)> {
         // Scan idle slots: track best match (longest common prefix above threshold)
         // and LRU fallback simultaneously.
+        let is_checkpoint = self.context_mode() == ContextMode::Checkpoint;
         let mut best_idx = None;
         let mut best_n = 0usize;
         let mut lru_idx = None;
         let mut lru_mtime = i64::MAX;
 
-        for (idx, slot) in slots.iter().enumerate() {
-            if matches!(slot.state, SlotState::Idle) {
-                let n = common_prefix_len(&slot.cached_tokens, prompt_tokens);
+        for (idx, slot) in slots
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| matches!(s.state, SlotState::Idle))
+        {
+            let n = common_prefix_len(&slot.cached_tokens, prompt_tokens);
 
-                // Track best match above threshold
-                if n > best_n
-                    && (match_threshold <= 0.0
-                        || n as f32 / prompt_tokens.len() as f32 >= match_threshold)
-                {
-                    best_n = n;
-                    best_idx = Some(idx);
-                }
+            // In Checkpoint mode, only full match (n == cached_tokens) is valid.
+            // Partial matches can't truncate, so treat them as no match.
+            let valid = if is_checkpoint {
+                n == slot.cached_tokens.len()
+            } else {
+                match_threshold <= 0.0 || n as f32 / prompt_tokens.len() as f32 >= match_threshold
+            };
 
-                // Track LRU as fallback
-                if slot.mtime < lru_mtime {
-                    lru_mtime = slot.mtime;
-                    lru_idx = Some(idx);
-                }
+            if n > best_n && valid {
+                best_n = n;
+                best_idx = Some(idx);
+            }
+
+            // Track LRU as fallback
+            if slot.mtime < lru_mtime {
+                lru_mtime = slot.mtime;
+                lru_idx = Some(idx);
             }
         }
 
         if let Some(best) = best_idx {
+            log::debug!("reuse best slot #{best}, n_common={best_n}");
             Some((best, best_n))
         } else if let Some(lru) = lru_idx {
-            self.dump_slot_to_cache_ram(&mut slots[lru]);
+            log::debug!("pick lru slot #{lru}");
             Some((lru, 0))
         } else {
             None
@@ -122,18 +128,22 @@ impl Engine {
     pub(super) fn prefill_slot(
         &mut self,
         slot: &mut Slot,
-        tokens: &[Token],
-        mut n_common: usize,
+        prompt_tokens: &[Token],
+        n_common: usize,
         n_cache_reuse: usize,
     ) -> Result<usize, String> {
-        debug_assert!(!tokens.is_empty());
-        debug_assert!(n_common <= tokens.len());
-        debug_assert!(n_common <= slot.cached_tokens.len());
+        debug_assert!(!prompt_tokens.is_empty());
+        debug_assert!(n_common < prompt_tokens.len());
 
-        if n_common == tokens.len() {
-            // When the tokens fully matches the cached prefix, keep one token so
-            // the model still has input to forward and can generate the next token.
-            n_common -= 1;
+        #[cfg(debug_assertions)]
+        if self.context_mode() == ContextMode::Checkpoint {
+            debug_assert!(
+                n_common == 0 || n_common == slot.cached_tokens.len(),
+                "n_common={n_common}, cached_tokens={}",
+                slot.cached_tokens.len()
+            );
+        } else {
+            debug_assert!(n_common <= slot.cached_tokens.len());
         }
 
         if n_common == 0 {
@@ -146,69 +156,42 @@ impl Engine {
 
         if n_cache_reuse == 0 || !can_shift {
             if n_common < slot.cached_tokens.len() {
+                debug_assert_eq!(self.context_mode(), ContextMode::Kv);
+
                 // truncate kv and cached tokens to n_common length
-                let mut removed =
-                    self.llm_ctx_mut()
-                        .memory_seq_rm(seq_id as i32, n_common as i32, -1);
+                let removed = self
+                    .llm_ctx_mut()
+                    .memory_seq_rm(seq_id as i32, n_common as i32, -1);
+
+                // if !removed {
+                //     // For hybrid models (e.g. Qwen3.5), the cache has both attention
+                //     // and recurrent layers.  The recurrent state does not support
+                //     // arbitrary partial truncation — it can only roll back within
+                //     // n_rs_seq steps (default 0).  When memory_seq_rm fails, we
+                //     // retry with a truncated range bounded by n_rs_seq.  If that
+                //     // also fails, try checkpoint restore before falling back to
+                //     // full clear.
+                //     let n_rs = self.llm_ctx().n_rs_seq() as usize;
+                //     if n_rs > 0 {
+                //         let n_clip = n_common.min(n_rs);
+                //         log::debug!(
+                //             "[prefill_slot] seq_rm failed for seq_id={}, \
+                //          retrying with n_rs_seq={} clip (n_common={} -> n_clip={})",
+                //             seq_id,
+                //             n_rs,
+                //             n_common,
+                //             n_clip,
+                //         );
+
+                //         n_common = n_clip;
+                //         removed =
+                //             self.llm_ctx_mut()
+                //                 .memory_seq_rm(seq_id as i32, n_clip as i32, -1);
+                //     }
+                // }
 
                 if !removed {
-                    // For hybrid models (e.g. Qwen3.5), the cache has both attention
-                    // and recurrent layers.  The recurrent state does not support
-                    // arbitrary partial truncation — it can only roll back within
-                    // n_rs_seq steps (default 0).  When memory_seq_rm fails, we
-                    // retry with a truncated range bounded by n_rs_seq.  If that
-                    // also fails, try checkpoint restore before falling back to
-                    // full clear.
-                    let n_rs = self.llm_ctx().n_rs_seq() as usize;
-                    if n_rs > 0 {
-                        let n_clip = n_common.min(n_rs);
-                        log::debug!(
-                            "[prefill_slot] seq_rm failed for seq_id={}, \
-                         retrying with n_rs_seq={} clip (n_common={} -> n_clip={})",
-                            seq_id,
-                            n_rs,
-                            n_common,
-                            n_clip,
-                        );
-
-                        n_common = n_clip;
-                        removed =
-                            self.llm_ctx_mut()
-                                .memory_seq_rm(seq_id as i32, n_clip as i32, -1);
-                    }
-                }
-
-                if !removed {
-                    // Try checkpoint restore for FULL-removal memory.
-                    // Use n_common + 1 because n_common may have been
-                    // decremented above (when n_common == tokens.len()),
-                    // but the checkpoint's n_tokens reflects the full
-                    // prefill-completed state.
-                    if slot.checkpoints.is_enabled() {
-                        let restore_n_past = if n_common + 1 == tokens.len() {
-                            n_common + 1
-                        } else {
-                            n_common
-                        };
-                        log::debug!(
-                            "[prefill_slot] seq_rm failed, trying checkpoint restore \
-                             for seq_id={seq_id}, n_common={n_common}, restore_n_past={restore_n_past}"
-                        );
-                        if let Some(restored_n_past) = self.restore_from_checkpoint(
-                            &mut slot.checkpoints,
-                            seq_id as i32,
-                            restore_n_past as i64,
-                        ) {
-                            let restored = restored_n_past as usize;
-                            slot.cached_tokens.truncate(restored);
-                            return Ok(restored);
-                        }
-                    }
-
-                    log::debug!(
-                        "[prefill_slot] both seq_rm, n_rs_seq, checkppoint are failed, \
-                     falling back to full clear for seq_id={seq_id}"
-                    );
+                    log::debug!("[prefill_slot] seq_rm failed, reset slot.");
                     self.clear_slot(slot);
                     return Ok(0);
                 }
@@ -223,6 +206,7 @@ impl Engine {
         // KV shifting — scan for additional matching chunks
         //
 
+        debug_assert_eq!(self.context_mode(), ContextMode::Kv);
         log::debug!(
             "[prepare_slot] shift kv chunks for reuse: n_cache_reuse={}",
             n_cache_reuse
@@ -233,11 +217,11 @@ impl Engine {
         let mut head_c = n_common; // index to cached tokens
         let mut head_p = n_common; // index to prompt tokens
 
-        while head_c < old_cache_len && head_p < tokens.len() {
+        while head_c < old_cache_len && head_p < prompt_tokens.len() {
             let mut n_match = 0usize;
             while head_c + n_match < old_cache_len
-                && head_p + n_match < tokens.len()
-                && slot.cached_tokens[head_c + n_match] == tokens[head_p + n_match]
+                && head_p + n_match < prompt_tokens.len()
+                && slot.cached_tokens[head_c + n_match] == prompt_tokens[head_p + n_match]
             {
                 n_match += 1;
             }
@@ -339,8 +323,8 @@ impl Engine {
     pub(crate) fn clear_slot(&mut self, slot: &mut Slot) {
         self.llm_ctx_mut().memory_seq_rm(slot.seq_id as i32, 0, -1);
         slot.cached_tokens.clear();
-        slot.checkpoints.clear();
         slot.sampler = None;
+        slot.last_dump_tokens = 0;
     }
 }
 

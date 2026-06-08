@@ -1,5 +1,13 @@
 use super::{Engine, slot::Slot, task::Token};
 
+pub(crate) const CHECKPOINT_STEP: usize = 256;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ContextMode {
+    Kv,         // attention 模型：restore + seq_rm 截断
+    Checkpoint, // hybrid 模型：restore，不截断
+}
+
 #[derive(Debug)]
 struct CacheEntry {
     kv_state: Box<[u8]>,
@@ -41,28 +49,38 @@ impl CacheRam {
     pub fn find_best_match(
         &self,
         prompt_tokens: &[Token],
-        match_threshold: f32,
+        cache_mode: ContextMode,
     ) -> Option<(usize, usize)> {
-        if self.max_bytes == 0 {
-            return None;
-        }
-
         let mut best_idx = None;
         let mut best_n = 0usize;
 
-        for (i, entry) in self.entries.iter().enumerate() {
-            let max_len = entry.tokens.len().min(prompt_tokens.len());
-            let mut n = 0usize;
-            while n < max_len && entry.tokens[n] == prompt_tokens[n] {
-                n += 1;
+        match cache_mode {
+            ContextMode::Checkpoint => {
+                // Only full entry match is valid — entry.tokens must be a prefix
+                // of prompt_tokens.  Prefer the longest matching entry.
+                for (i, entry) in self.entries.iter().enumerate() {
+                    if entry.tokens.len() <= prompt_tokens.len()
+                        && entry.tokens.len() > best_n
+                        && entry.tokens[..] == prompt_tokens[..entry.tokens.len()]
+                    {
+                        best_n = entry.tokens.len();
+                        best_idx = Some(i);
+                    }
+                }
             }
-            // Apply threshold: either disabled (<=0) or ratio >= threshold
-            if n > best_n
-                && (match_threshold <= 0.0
-                    || n as f32 / prompt_tokens.len() as f32 >= match_threshold)
-            {
-                best_n = n;
-                best_idx = Some(i);
+            ContextMode::Kv => {
+                // Longest common prefix (partial match OK).
+                for (i, entry) in self.entries.iter().enumerate() {
+                    let max_len = entry.tokens.len().min(prompt_tokens.len());
+                    let mut n = 0usize;
+                    while n < max_len && entry.tokens[n] == prompt_tokens[n] {
+                        n += 1;
+                    }
+                    if n > best_n {
+                        best_n = n;
+                        best_idx = Some(i);
+                    }
+                }
             }
         }
 
@@ -73,29 +91,35 @@ impl CacheRam {
     /// Returns the index assigned to this entry.
     pub fn save(&mut self, kv_state: Box<[u8]>, tokens: Vec<Token>, mtime: i64) -> usize {
         let size = kv_state.len();
-        if size == 0 || self.max_bytes == 0 {
+        if size == 0 {
             return usize::MAX; // disabled
         }
 
         // Evict LRU entries if needed to make room
-        while self.total_bytes + size > self.max_bytes && !self.entries.is_empty() {
-            if let Some(idx) = self
-                .entries
-                .iter()
-                .enumerate()
-                .min_by_key(|(_, e)| e.mtime)
-                .map(|(i, _)| i)
-            {
-                self.evict(idx);
-            } else {
-                break;
+        if self.max_bytes > 0 {
+            while self.total_bytes + size > self.max_bytes {
+                if let Some(idx) = self
+                    .entries
+                    .iter()
+                    .enumerate()
+                    .min_by_key(|(_, e)| e.mtime)
+                    .map(|(i, _)| i)
+                {
+                    self.evict(idx);
+                } else {
+                    break;
+                }
             }
-        }
 
-        // If still too large after eviction, skip saving
-        if self.total_bytes + size > self.max_bytes {
-            log::debug!("[cache_ram] entry too large ({}), skipping", size);
-            return usize::MAX;
+            // If still too large after eviction, skip saving
+            if self.total_bytes + size > self.max_bytes {
+                log::debug!(
+                    "[cache_ram] entry too large ({}) max:{}, skipping",
+                    self.total_bytes + size,
+                    self.max_bytes
+                );
+                return usize::MAX;
+            }
         }
 
         self.entries.push(CacheEntry {
@@ -147,22 +171,51 @@ impl CacheRam {
 
 impl Engine {
     /// Dump slot kv and tokens to cache_ram, and clear the slot cache and tokens.
-    pub(crate) fn dump_slot_to_cache_ram(&mut self, slot: &mut Slot) {
-        let tokens = std::mem::take(&mut slot.cached_tokens);
+    pub(crate) fn dump_slot_to_cache_ram(&mut self, slot: &mut Slot, reset_after_dump: bool) {
+        if slot.cached_tokens.is_empty() {
+            return;
+        }
+
+        let mode = self.context_mode();
+
+        if mode == ContextMode::Checkpoint {
+            if slot.cached_tokens.len() < slot.last_dump_tokens + CHECKPOINT_STEP {
+                log::debug!(
+                    "Skip dump slot #{} ({} tokens) to cache: too close to last dump {} (step={})",
+                    slot.seq_id,
+                    slot.cached_tokens.len(),
+                    slot.last_dump_tokens,
+                    CHECKPOINT_STEP,
+                );
+                return;
+            }
+        }
+
+        let state = self.llm_ctx().dump_seq_state(slot.seq_id as i32);
+        if state.is_empty() {
+            return;
+        }
 
         log::debug!(
-            "Dump slot #{} ({} tokens) to cache",
+            "Dump slot #{} ({} tokens) to cache (mode={:?})",
             slot.seq_id,
-            tokens.len()
+            slot.cached_tokens.len(),
+            mode,
         );
 
-        if !tokens.is_empty() {
-            let kv = self.llm_ctx().dump_seq_state(slot.seq_id as i32);
-            if !kv.is_empty() {
-                let r = self
-                    .cache_ram
-                    .save(kv, tokens, crate::helpers::now_unix_s());
-                debug_assert!(r != usize::MAX, "fail to save cache_ram entry");
+        let r = self.cache_ram.save(
+            state,
+            if reset_after_dump {
+                std::mem::take(&mut slot.cached_tokens)
+            } else {
+                slot.cached_tokens.clone()
+            },
+            crate::helpers::now_unix_s(),
+        );
+
+        if r != usize::MAX {
+            if reset_after_dump {
+                self.clear_slot(slot);
             }
         }
     }
@@ -171,30 +224,38 @@ impl Engine {
     /// tokens of the cached KV state.  Returns the number of bytes restored,
     /// or 0 on failure.
     ///
-    /// `n_tokens` must be <= the number of tokens in the cached entry.
+    /// `truncate` must be <= the number of tokens in the cached entry.
     /// Since `dump_seq_state` serializes the entire sequence as an opaque blob,
     /// we restore the full state first, then truncate via `memory_seq_rm`.
     pub(crate) fn restore_cache_ram_to_slot(
         &mut self,
         slot: &mut Slot,
         cache_idx: usize,
-        n_tokens: usize,
+        truncate: usize,
     ) -> usize {
-        log::debug!("Restore cached kv #{} to slot #{}", cache_idx, slot.seq_id);
+        debug_assert!(cache_idx < self.cache_ram.entries.len());
+
+        let mode = self.context_mode();
+        log::debug!(
+            "Restore cached ram #{} to slot #{} (mode={:?})",
+            cache_idx,
+            slot.seq_id,
+            mode
+        );
+
+        // Clear the slot first
+        self.clear_slot(slot);
 
         // Get the state bytes and tokens from cache_ram (borrows self immutably)
         let (state_ptr, state_len, cached_tokens) = {
-            let (s, t) = match self.cache_ram.get(cache_idx) {
-                Some(v) => v,
-                None => return 0,
-            };
+            let (s, t) = &self.cache_ram.get(cache_idx).unwrap();
             (s.as_ptr(), s.len(), t.to_vec())
         };
 
-        let n_tokens = n_tokens.min(cached_tokens.len());
-
-        // Clear the slot and restore
-        self.clear_slot(slot);
+        #[cfg(debug_assertions)]
+        if mode == ContextMode::Checkpoint {
+            debug_assert_eq!(truncate, slot.cached_tokens.len());
+        }
 
         let state = unsafe { std::slice::from_raw_parts(state_ptr, state_len) };
 
@@ -207,11 +268,18 @@ impl Engine {
             self.cache_ram
                 .touch(cache_idx, crate::helpers::now_unix_s());
 
-            if n_tokens > 0 {
-                // Truncate to n_tokens — remove tokens [n_tokens ..)
-                self.llm_ctx_mut()
-                    .memory_seq_rm(slot.seq_id as i32, n_tokens as i32, -1);
-                slot.cached_tokens.truncate(n_tokens);
+            match mode {
+                ContextMode::Kv => {
+                    if truncate < slot.cached_tokens.len() {
+                        self.llm_ctx_mut()
+                            .memory_seq_rm(slot.seq_id as i32, truncate as i32, -1);
+                        slot.cached_tokens.truncate(truncate);
+                    }
+                }
+                ContextMode::Checkpoint => {
+                    // Checkpoint mode: no truncation, keep all tokens
+                    slot.last_dump_tokens = slot.cached_tokens.len();
+                }
             }
         }
 

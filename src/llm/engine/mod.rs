@@ -5,7 +5,6 @@
 //! prefix caching, grammar-constrained generation, and streaming output.
 
 mod cache;
-mod checkpoint;
 mod context;
 mod output;
 mod slot;

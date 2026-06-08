@@ -8,7 +8,7 @@ use crossbeam::channel::{Receiver, SendError, Sender};
 use llama_cpp_ffi::{LlamaContext, LlamaModel, SamplerChain, SamplerKind};
 
 use super::{
-    cache::CacheRam,
+    cache::{CacheRam, ContextMode},
     slot::Slot,
     task::{EngineCtrlMsg, EngineReply, EngineTask, GrammarConfig, TaskConfig, Token},
     worker::worker_loop,
@@ -100,6 +100,15 @@ impl Engine {
 
     pub(crate) fn set_pending(&mut self, v: usize) {
         self.pending_decode_tokens = v;
+    }
+
+    pub(crate) fn context_mode(&self) -> ContextMode {
+        let ctx = self.llm_ctx();
+        if !ctx.memory_can_shift() && ctx.n_rs_seq() == 0 {
+            ContextMode::Checkpoint
+        } else {
+            ContextMode::Kv
+        }
     }
 
     pub(crate) fn begin_decode_batch(&mut self) {
@@ -212,7 +221,7 @@ impl Engine {
         slot_match_threshold: f32,
         default_max_tokens: usize,
         n_cache_reuse: usize,
-        checkpoints: usize,
+        cache_ram_bytes: usize,
     ) -> Arc<Mutex<Self>> {
         let model = llm_ctx.model().clone();
         let model_name = model
@@ -238,7 +247,7 @@ impl Engine {
             shutdown_tx: None,
             parse_reasoning: true,
             n_cache_reuse,
-            cache_ram: CacheRam::new(0), // 0 = disabled by default
+            cache_ram: CacheRam::new(cache_ram_bytes),
             is_dead: false,
             llm_ctx,
             pending_decode_tokens: 0,
@@ -257,7 +266,6 @@ impl Engine {
                         num_parallel,
                         idle_sleep,
                         slot_match_threshold,
-                        checkpoints,
                         input_rx,
                         ctrl_rx,
                     );

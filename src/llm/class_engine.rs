@@ -43,7 +43,7 @@ pub(crate) const ERR_ENGINE_SHUTDOWN: &str = "engine shutdown";
 
 pub(super) struct EngineParams {
     pub n_cache_reuse: usize,
-    pub checkpoints: usize,
+    pub cache_ram_mb: usize,
     pub idle_sleep_ms: u64,
     pub slot_match_threshold: f32,
     pub max_tokens: usize,
@@ -57,7 +57,7 @@ pub(super) fn parse_engine_params(
     let mut slot_match_threshold = 0.5f32;
     let mut max_tokens = 0usize;
     let mut n_cache_reuse = 0usize;
-    let mut checkpoints = 0usize;
+    let mut cache_ram_mb = 1024_usize; // default 1G limit for cache ram
 
     if let Some(opts) = opts {
         // idleSleepMs
@@ -107,17 +107,14 @@ pub(super) fn parse_engine_params(
             }
         }
 
-        // checkpoints (number of context checkpoints for FULL-removal memory,
-        // 0 = disabled).  Only useful for recurrent/hybrid models that cannot
-        // do partial seq_rm.  Multiple checkpoints at different token positions
-        // allow matching requests with varying prefix lengths.
-        let v = opts.get_property_str(ctx, "checkpoints")?;
+        // cacheRam (MB)
+        let v = opts.get_property_str(ctx, "cacheRam")?;
         if !v.is_undefined() {
             let n = v.to_number(ctx)?.to_i32();
             if n >= 0 {
-                checkpoints = n as usize;
+                cache_ram_mb = n as usize;
             } else {
-                ctx.throw_type_error("checkpoints must be >= 0");
+                ctx.throw_type_error("cacheRam must be >= 0");
                 return Err(-1);
             }
         }
@@ -128,7 +125,7 @@ pub(super) fn parse_engine_params(
         slot_match_threshold,
         max_tokens,
         n_cache_reuse,
-        checkpoints,
+        cache_ram_mb,
     })
 }
 
