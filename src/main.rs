@@ -10,6 +10,7 @@ mod color;
 mod fs;
 mod global;
 mod helpers;
+mod http;
 mod llm;
 mod output;
 mod repl;
@@ -35,6 +36,7 @@ use crate::{
     class_text_decoder::JSTextDecoder,
     fs::init_mod_fs,
     global::setup_globals,
+    http::{JSHttpRequest, JSHttpResponse, JSHttpServer, init_mod_http},
     llm::{JSEngine, JSLlmClient, JSLlmContext, JSLlmModel, JSSamplerChain, init_mod_llm},
     request::JSResponse,
     timeout::gc_trace_timeout,
@@ -259,11 +261,15 @@ async fn main() -> ExitCode {
                 JSResponse::class_id(),
                 JSTextDecoder::class_id(),
                 JSCronJob::class_id(),
+                JSHttpServer::class_id(),
+                JSHttpRequest::class_id(),
+                JSHttpResponse::class_id(),
             ])?;
 
             // register native modules
             init_mod_llm(cx)?;
             init_mod_fs(cx)?;
+            init_mod_http(cx)?;
 
             setup_globals(cx, &argv, &exec_argv)
         })
