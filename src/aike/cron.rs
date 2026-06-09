@@ -1,15 +1,28 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-use std::{cell::RefCell, collections::HashMap, str::FromStr, time::Duration};
+use std::{
+    cell::{Cell, RefCell},
+    collections::HashMap,
+    str::FromStr,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 
 use chrono::Utc;
 use cron::Schedule;
 use crossbeam::channel::{Receiver, Sender};
+use linkme::distributed_slice;
 use zuqe::{
-    CallContext, Callback, JS_PROP_C_W_E, JSResult, JSValue, Object, ScopedContext,
+    CallContext, ClassCtorDef, ClassID, FieldDef, JS_PROP_C_W_E, JSResult, JSValue, Object,
+    Runtime, ScopedContext, def_native_object,
     gc_lite::{GcTrace, GcTraceCtx},
 };
+
+use crate::USER_CLASS_DEFS;
 
 // ---------------------------------------------------------------------------
 // Channel message
@@ -26,11 +39,9 @@ enum CronMsg {
 // ---------------------------------------------------------------------------
 
 struct CronEntry {
-    name: Option<String>,
-    pattern: String,
     schedule: Schedule,
     callback: Object,
-    job_obj: Object,
+    job_obj: Object, // native JSCronJob instance — for updating nextRun
     active: bool,
 }
 
@@ -77,22 +88,47 @@ pub(crate) fn gc_trace_cron(tr: &mut GcTraceCtx) {
 }
 
 // ---------------------------------------------------------------------------
-// Spawn a tokio task that sleeps until next fire time
+// Shared helpers
 // ---------------------------------------------------------------------------
 
+/// Compute delay in milliseconds to the next cron fire time.
+fn next_delay_ms(schedule: &Schedule) -> Option<u64> {
+    schedule
+        .upcoming(Utc)
+        .next()
+        .map(|next| (next.timestamp() - Utc::now().timestamp()).max(0) as u64)
+}
+
+/// Format the next fire time as ISO 8601 UTC string.
+fn format_next_run(schedule: &Schedule) -> Option<String> {
+    schedule
+        .upcoming(Utc)
+        .next()
+        .map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string())
+}
+
+/// Normalize a 5-field standard cron expression to the 7-field format
+/// expected by the `cron` crate: `sec min hour dom month dow year`.
+fn normalize_cron_expr(expr: &str) -> String {
+    let fields: Vec<&str> = expr.trim().split_whitespace().collect();
+    match fields.len() {
+        5 => format!("0 {} *", expr.trim()), // prepend seconds, append year
+        6 => format!("{} *", expr.trim()),   // has seconds, append year
+        _ => expr.trim().to_string(),        // assume already 7-field
+    }
+}
+
+/// Spawn a tokio task that sleeps until next fire time
 fn spawn_cron_timer(id: u32, schedule: &Schedule) {
     // Clone tx on the JS thread before moving into tokio worker
     let tx = CRON_STATE.with_borrow(|opt| opt.as_ref().map(|s| s.tx.clone()));
     let Some(tx) = tx else { return };
 
-    let next = schedule.upcoming(Utc).next();
-    let Some(next_time) = next else {
+    let Some(delay_ms) = next_delay_ms(schedule) else {
         // No more future occurrences — auto-expire
         let _ = tx.send(CronMsg::Cancelled(id));
         return;
     };
-
-    let delay_ms = (next_time.timestamp() - Utc::now().timestamp()).max(0) as u64;
 
     tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(delay_ms)).await;
@@ -100,10 +136,7 @@ fn spawn_cron_timer(id: u32, schedule: &Schedule) {
     });
 }
 
-// ---------------------------------------------------------------------------
-// The persistent polling microtask
-// ---------------------------------------------------------------------------
-
+/// The persistent polling microtask
 fn add_cron_notifier(ctx: &mut ScopedContext) {
     let rx = CRON_STATE.with_borrow(|opt| opt.as_ref().unwrap().rx.clone());
 
@@ -155,17 +188,21 @@ fn add_cron_notifier(ctx: &mut ScopedContext) {
                             });
 
                             // Update nextRun on job object
-                            if let Some(next_iso) = compute_next_run_iso(id) {
-                                let _ = cx.create_string_from_utf8(next_iso.into_bytes()).and_then(
-                                    |s| {
+                            let next_iso = CRON_STATE.with_borrow(|opt| {
+                                opt.as_ref()
+                                    .and_then(|s| s.entries.get(&id))
+                                    .and_then(|e| format_next_run(&e.schedule))
+                            });
+                            if let Some(iso) = next_iso {
+                                let _ =
+                                    cx.create_string_from_utf8(iso.into_bytes()).and_then(|s| {
                                         job_obj.define_property_value_str(
                                             cx,
                                             "nextRun",
                                             s.into(),
                                             JS_PROP_C_W_E,
                                         )
-                                    },
-                                );
+                                    });
                             }
                         } else {
                             // Mark inactive on job object
@@ -191,36 +228,92 @@ fn add_cron_notifier(ctx: &mut ScopedContext) {
 }
 
 // ---------------------------------------------------------------------------
-// Helpers
+// JSCronJob native class
 // ---------------------------------------------------------------------------
 
-/// Compute the next fire time ISO string for a cron entry.
-fn compute_next_run_iso(id: u32) -> Option<String> {
-    CRON_STATE.with_borrow(|opt| {
-        let s = opt.as_ref()?;
-        let e = s.entries.get(&id)?;
-        e.schedule
-            .upcoming(Utc)
-            .next()
-            .map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string())
-    })
+struct CronJobPayload {
+    id: u32,
+    name: Option<String>,
+    pattern: String,
+    active: bool,
 }
 
-/// Normalize a 5-field standard cron expression to the 7-field format
-/// expected by the `cron` crate: `sec min hour dom month dow year`.
-fn normalize_cron_expr(expr: &str) -> String {
-    let fields: Vec<&str> = expr.trim().split_whitespace().collect();
-    match fields.len() {
-        5 => format!("0 {} *", expr.trim()), // prepend seconds, append year
-        6 => format!("{} *", expr.trim()),   // has seconds, append year
-        _ => expr.trim().to_string(),        // assume already 7-field
+impl CronJobPayload {
+    #[inline(always)]
+    fn gc_trace(&self, _gcx: &mut GcTraceCtx) {
+        // No JS objects in payload — nothing to trace
     }
 }
 
-// ---------------------------------------------------------------------------
-// JS API: Aike.schedule(pattern, callback, options?)
-// ---------------------------------------------------------------------------
+fn get_cron_job<'a>(ctx: &mut ScopedContext, val: &'a JSValue) -> Result<&'a CronJobPayload, i32> {
+    val.as_native_object::<JSCronJob>()
+        .and_then(|o| o.payload())
+        .ok_or_else(|| {
+            ctx.throw_internal_error("not a CronJob instance");
+            -1
+        })
+}
 
+/// Prototype method: job.cancel()
+fn js_cron_job_cancel(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let this = cc.this();
+    let payload = get_cron_job(ctx, &this)?;
+    let id = payload.id;
+
+    if id == 0 {
+        return Ok(JSValue::UNDEFINED);
+    }
+
+    // Remove from state and cancel pending timer
+    CRON_STATE.with_borrow_mut(|opt| {
+        if let Some(s) = opt.as_mut() {
+            if let Some(entry) = s.entries.get_mut(&id) {
+                entry.active = false;
+            }
+            let _ = s.tx.send(CronMsg::Cancelled(id));
+            s.entries.remove(&id);
+        }
+    });
+
+    // Update active property on the JS object
+    if let Some(mut obj) = cc.this().as_object().cloned() {
+        let _ = obj.define_property_value_str(ctx, "active", JSValue::Bool(false), JS_PROP_C_W_E);
+    }
+
+    Ok(JSValue::UNDEFINED)
+}
+
+const CRON_JOB_PROTO: &[FieldDef] = &[FieldDef::FUNC("cancel", 0, js_cron_job_cancel, 0)];
+
+// fn js_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+//     JSCronJob::new_instance(
+//         ctx,
+//         cc.this(),
+//         Box::new(CronJobPayload {
+//             id: 0,
+//             name: None,
+//             pattern: String::new(),
+//             active: true,
+//         }),
+//     )
+//     .map(JSValue::from)
+// }
+
+def_native_object!(
+    "CronJob",
+    JSCronJob,
+    Box<CronJobPayload>,
+    CRON_JOB_PROTO,
+    // constructor: ClassCtorDef::new(js_constructor, 0, true), // can't create CronJob manually
+    on_payload_gc: CronJobPayload::gc_trace
+);
+
+#[distributed_slice(USER_CLASS_DEFS)]
+fn register_class_cron_job(rt: &mut Runtime) -> Result<ClassID, i32> {
+    JSCronJob::register(rt)
+}
+
+/// JS API: Aike.schedule(pattern, callback, options?)
 pub(super) fn js_schedule(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     // arg 0: cron expression string
     let pattern = cc.arg(0).to_string(ctx)?;
@@ -248,24 +341,21 @@ pub(super) fn js_schedule(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
     })?;
 
     // Initialize state if needed
-    let (id, tx, need_notifier) = CRON_STATE.with_borrow_mut(|opt| {
+    let (id, need_notifier) = CRON_STATE.with_borrow_mut(|opt| {
         let start_job = opt.is_none();
         let s = opt.get_or_insert_with(CronState::new);
         let id = s.next_id;
         s.next_id += 1;
-        let tx = s.tx.clone();
-        (id, tx, start_job)
+        (id, start_job)
     });
 
-    // Compute nextRun before creating the job object
-    let next_run_iso = schedule
-        .upcoming(Utc)
-        .next()
-        .map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string());
+    // Compute nextRun
+    let next_run_val: JSValue = match format_next_run(&schedule) {
+        Some(iso) => ctx.create_string_from_utf8(iso.into_bytes())?.into(),
+        None => JSValue::NULL,
+    };
 
-    // Build JS job object — pre-create all string values to avoid double-borrow of ctx
-    let mut job = ctx.create_base_object()?;
-
+    // Pre-create string values to avoid double-borrow of ctx
     let name_val: JSValue = match &name {
         Some(n) => ctx.create_string_from_utf8(n.clone().into_bytes())?.into(),
         None => JSValue::NULL,
@@ -273,34 +363,43 @@ pub(super) fn js_schedule(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
     let pattern_val = ctx
         .create_string_from_utf8(pattern_str.clone().into_bytes())?
         .into();
-    let next_run_val: JSValue = match next_run_iso {
-        Some(ref iso) => ctx
-            .create_string_from_utf8(iso.clone().into_bytes())?
-            .into(),
-        None => JSValue::NULL,
-    };
-    let cancel_fn = ctx
-        .create_native_function(Callback::Func(js_job_cancel), "cancel", 0, 0)?
-        .into();
 
-    job.define_property_value_str(ctx, "id", JSValue::from(id as i32), JS_PROP_C_W_E)?;
-    job.define_property_value_str(ctx, "name", name_val, JS_PROP_C_W_E)?;
-    job.define_property_value_str(ctx, "pattern", pattern_val, JS_PROP_C_W_E)?;
-    job.define_property_value_str(ctx, "nextRun", next_run_val, JS_PROP_C_W_E)?;
-    job.define_property_value_str(ctx, "active", JSValue::Bool(true), JS_PROP_C_W_E)?;
-    job.define_property_value_str(ctx, "cancel", cancel_fn, JS_PROP_C_W_E)?;
+    // Create native JSCronJob instance
+    let job_instance = JSCronJob::new_instance(
+        ctx,
+        JSValue::UNDEFINED,
+        Box::new(CronJobPayload {
+            id,
+            name,
+            pattern: pattern_str,
+            active: true,
+        }),
+    )?;
+    let job_val: JSValue = job_instance.into();
 
-    // Store entry (clone job_obj so cancel can update it)
+    // Set data properties on the instance
+    let mut job_obj = job_val
+        .as_object()
+        .ok_or_else(|| {
+            ctx.throw_internal_error("failed to create CronJob object");
+            -1
+        })?
+        .clone();
+    job_obj.define_property_value_str(ctx, "id", JSValue::from(id as i32), JS_PROP_C_W_E)?;
+    job_obj.define_property_value_str(ctx, "name", name_val, JS_PROP_C_W_E)?;
+    job_obj.define_property_value_str(ctx, "pattern", pattern_val, JS_PROP_C_W_E)?;
+    job_obj.define_property_value_str(ctx, "nextRun", next_run_val, JS_PROP_C_W_E)?;
+    job_obj.define_property_value_str(ctx, "active", JSValue::Bool(true), JS_PROP_C_W_E)?;
+
+    // Store entry
     CRON_STATE.with_borrow_mut(|opt| {
         if let Some(s) = opt.as_mut() {
             s.entries.insert(
                 id,
                 CronEntry {
-                    name,
-                    pattern: pattern_str,
                     schedule: schedule.clone(),
                     callback,
-                    job_obj: job.clone(),
+                    job_obj: job_obj.clone(),
                     active: true,
                 },
             );
@@ -315,50 +414,78 @@ pub(super) fn js_schedule(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
         add_cron_notifier(ctx);
     }
 
-    // Suppress unused warning — tx is cloned into spawn_cron_timer via CRON_STATE
-    let _ = tx;
-
-    Ok(job.into())
+    Ok(job_val)
 }
 
 // ---------------------------------------------------------------------------
-// JS API: job.cancel()
+// Rust-side helper: schedule an async job on a cron pattern
 // ---------------------------------------------------------------------------
 
-fn js_job_cancel(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let this = cc.this();
-    let id = this
-        .as_object()
-        .and_then(|obj| obj.get_property_str(ctx, "id").ok())
-        .and_then(|v| v.to_number(ctx).ok().map(|n| n.to_i32()))
-        .unwrap_or(-1);
+/// Handle to cancel a Rust-side cron job.
+#[allow(dead_code)]
+pub(crate) struct CronHandle {
+    active: Arc<AtomicBool>,
+}
 
-    if id <= 0 {
-        return Ok(JSValue::UNDEFINED);
+#[allow(dead_code)]
+impl CronHandle {
+    /// Stop the scheduled job. Subsequent fires are suppressed.
+    pub fn cancel(&self) {
+        self.active.store(false, Ordering::Release);
     }
-    let id = id as u32;
 
-    // Mark inactive and remove from state
-    let was_active = CRON_STATE.with_borrow_mut(|opt| {
-        if let Some(s) = opt.as_mut() {
-            if let Some(entry) = s.entries.get_mut(&id) {
-                entry.active = false;
+    pub fn is_active(&self) -> bool {
+        self.active.load(Ordering::Acquire)
+    }
+}
+
+/// Schedule an async closure on a cron pattern (5 or 7 field).
+///
+/// Returns a [`CronHandle`] that can be used to cancel the job.
+///
+/// ```ignore
+/// let handle = schedule_async("*/5 * * * *", || async {
+///     println!("every 5 minutes");
+/// }).unwrap();
+///
+/// // later...
+/// handle.cancel();
+/// ```
+#[allow(dead_code)]
+pub(crate) fn schedule_async<F, Fut>(pattern: &str, job: F) -> Result<CronHandle, String>
+where
+    F: Fn() -> Fut + Send + Sync + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    let normalized = normalize_cron_expr(pattern);
+    let schedule = Schedule::from_str(&normalized)
+        .map_err(|e| format!("invalid cron '{}': {}", pattern, e))?;
+
+    let active = Arc::new(AtomicBool::new(true));
+    let active_clone = active.clone();
+
+    tokio::spawn(async move {
+        loop {
+            // Check cancelled before sleeping
+            if !active_clone.load(Ordering::Acquire) {
+                break;
             }
-            // Send cancel to interrupt any pending sleep
-            let _ = s.tx.send(CronMsg::Cancelled(id));
-            s.entries.remove(&id).is_some()
-        } else {
-            false
+
+            // Compute delay to next fire
+            let Some(delay_ms) = next_delay_ms(&schedule) else {
+                break; // no more occurrences
+            };
+            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+
+            // Check cancelled after sleeping
+            if !active_clone.load(Ordering::Acquire) {
+                break;
+            }
+
+            // Run the job
+            job().await;
         }
     });
 
-    if was_active {
-        // Update active flag on the JS job object
-        if let Some(mut obj) = this.as_object().cloned() {
-            let _ =
-                obj.define_property_value_str(ctx, "active", JSValue::Bool(false), JS_PROP_C_W_E);
-        }
-    }
-
-    Ok(JSValue::UNDEFINED)
+    Ok(CronHandle { active })
 }

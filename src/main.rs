@@ -30,7 +30,7 @@ use zuqe::{
 };
 
 use crate::{
-    aike::{JSIoHandle, gc_trace_cron, gc_trace_io},
+    aike::{JSCronJob, JSIoHandle, gc_trace_cron, gc_trace_io},
     class_event_emitter::JSEventEmitter,
     class_text_decoder::JSTextDecoder,
     fs::init_mod_fs,
@@ -258,6 +258,7 @@ async fn main() -> ExitCode {
                 JSIoHandle::class_id(),
                 JSResponse::class_id(),
                 JSTextDecoder::class_id(),
+                JSCronJob::class_id(),
             ])?;
 
             // register native modules

@@ -7,8 +7,10 @@ pub(crate) mod signal;
 mod spawn;
 mod sys;
 
-pub(crate) use class_io_handle::{JSIoHandle, gc_trace_io, make_stats};
-pub(crate) use cron::gc_trace_cron;
+pub(crate) use {
+    class_io_handle::{JSIoHandle, gc_trace_io, make_stats},
+    cron::{JSCronJob, gc_trace_cron},
+};
 
 use zuqe::{Array, FieldDef, JS_PROP_C_W_E, JS_PROP_ENUMERABLE, JSValue, ScopedContext};
 
