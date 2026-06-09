@@ -30,7 +30,7 @@ use zuqe::{
 };
 
 use crate::{
-    aike::{JSIoHandle, gc_trace_io},
+    aike::{JSIoHandle, gc_trace_cron, gc_trace_io},
     class_event_emitter::JSEventEmitter,
     class_text_decoder::JSTextDecoder,
     fs::init_mod_fs,
@@ -233,6 +233,7 @@ async fn main() -> ExitCode {
     rt.gc_set_trace_handler(|gcx| {
         aike::signal::gc_trace_zuq_signals(gcx);
         gc_trace_timeout(gcx);
+        gc_trace_cron(gcx);
         gc_trace_io(gcx)
     });
 

@@ -81,6 +81,8 @@ parking_lot = "0.12"
 dirs = "6"
 crossterm = "0.28"
 nu-ansi-term = "0.50"
+cron = "0.16"
+chrono = { version = "0.4", default-features = false, features = ["std"] }
 
 [[bin]]
 name = "aike"

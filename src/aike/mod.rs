@@ -2,11 +2,13 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
 mod class_io_handle;
+pub(crate) mod cron;
 pub(crate) mod signal;
 mod spawn;
 mod sys;
 
 pub(crate) use class_io_handle::{JSIoHandle, gc_trace_io, make_stats};
+pub(crate) use cron::gc_trace_cron;
 
 use zuqe::{Array, FieldDef, JS_PROP_C_W_E, JS_PROP_ENUMERABLE, JSValue, ScopedContext};
 
@@ -58,6 +60,8 @@ pub fn init_aike(
         FieldDef::FUNC("now", 0, sys::js_now, 0),
         // --- signal ---
         FieldDef::FUNC("onSignal", 2, signal::js_on_signal, 0),
+        // --- cron ---
+        FieldDef::FUNC("schedule", 2, cron::js_schedule, 0),
         // --- stdio ---
         FieldDef::LAZY_VALUE(
             "stdin",
