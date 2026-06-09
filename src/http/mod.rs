@@ -19,7 +19,6 @@ use axum::{
     Router,
     body::Body,
     extract::Request,
-    http::Method,
     response::{IntoResponse, Response as AxumResponse},
     routing::any,
 };
@@ -42,8 +41,36 @@ use {
     response::{HttpResponseMessage, HttpResponsePayload, get_res_payload},
 };
 
+/// HTTP method enum usable as a HashMap key.
+#[allow(clippy::upper_case_acronyms)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u8)]
+pub(crate) enum Method {
+    GET = 0,
+    POST = 1,
+    PUT = 2,
+    PATCH = 3,
+    DELETE = 4,
+    HEAD = 5,
+    OPTIONS = 6,
+}
+
+impl Method {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::GET => "GET",
+            Self::POST => "POST",
+            Self::PUT => "PUT",
+            Self::PATCH => "PATCH",
+            Self::DELETE => "DELETE",
+            Self::HEAD => "HEAD",
+            Self::OPTIONS => "OPTIONS",
+        }
+    }
+}
+
 struct IncomingRequest {
-    method: String,
+    method: Method,
     path: String,
     query_string: String,
     headers: Vec<(String, String)>,
@@ -142,28 +169,28 @@ fn js_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     .map(|v| v.into())
 }
 
-macro_rules! route_method {
-    ($name:ident, $method:expr) => {
-        fn $name(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-            let this = cc.this();
-            // Extract args before borrowing payload to avoid ctx double-borrow
-            let path_str = cc.arg(0).to_string(ctx)?;
-            let path = path_str.content().encode_utf8(false).to_string();
-            let handler = cc.arg(1).into_callable(ctx)?;
-            let data = get_server_payload(ctx, &this)?;
-            data.add_route($method, path, handler);
-            Ok(this)
+fn js_route_add(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let this = cc.this();
+    let method = match cc.magic() as u8 {
+        0 => Method::GET,
+        1 => Method::POST,
+        2 => Method::PUT,
+        3 => Method::PATCH,
+        4 => Method::DELETE,
+        5 => Method::HEAD,
+        6 => Method::OPTIONS,
+        _ => {
+            ctx.throw_internal_error("unknown method magic");
+            return Err(-1);
         }
     };
+    let path_str = cc.arg(0).to_string(ctx)?;
+    let path = path_str.content().encode_utf8(false).to_string();
+    let handler = cc.arg(1).into_callable(ctx)?;
+    let data = get_server_payload(ctx, &this)?;
+    data.add_route(method, path, handler);
+    Ok(this)
 }
-
-route_method!(js_route_get, Method::GET);
-route_method!(js_route_post, Method::POST);
-route_method!(js_route_put, Method::PUT);
-route_method!(js_route_patch, Method::PATCH);
-route_method!(js_route_delete, Method::DELETE);
-route_method!(js_route_head, Method::HEAD);
-route_method!(js_route_options, Method::OPTIONS);
 
 fn js_handler_then(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let is_reject = cc.magic() == 1;
@@ -228,9 +255,9 @@ fn js_listen(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     };
 
     // Build per-method matchit routers (convert `:param` to `{param}`)
-    let mut method_routers: HashMap<String, MatchRouter<usize>> = HashMap::new();
+    let mut method_routers: HashMap<Method, MatchRouter<usize>> = HashMap::new();
     for (i, (method, path, _)) in routes.iter().enumerate() {
-        let entry = method_routers.entry(method.to_string()).or_default();
+        let entry = method_routers.entry(*method).or_default();
         let _ = entry.insert(normalize_route(path), i);
     }
 
@@ -266,7 +293,7 @@ fn js_listen(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                     cx,
                     JSValue::UNDEFINED,
                     Box::new(HttpRequestPayload {
-                        method: incoming.method.clone(),
+                        method: incoming.method,
                         path: incoming.path.clone(),
                         params: {
                             let mut map = HashMap::new();
@@ -414,7 +441,22 @@ fn js_listen(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 }
 
 async fn axum_catch_all(axum_state: AxumState, req: Request) -> AxumResponse {
-    let method = req.method().to_string();
+    let method = match req.method().as_str() {
+        "GET" => Method::GET,
+        "POST" => Method::POST,
+        "PUT" => Method::PUT,
+        "PATCH" => Method::PATCH,
+        "DELETE" => Method::DELETE,
+        "HEAD" => Method::HEAD,
+        "OPTIONS" => Method::OPTIONS,
+        m => {
+            return (
+                axum::http::StatusCode::METHOD_NOT_ALLOWED,
+                format!("method {m} not allowed"),
+            )
+                .into_response();
+        }
+    };
     let uri = req.uri().clone();
     let path = uri.path().to_string();
     let query_string = uri.query().unwrap_or("").to_string();
@@ -562,13 +604,13 @@ fn hex_val(b: u8) -> Option<u8> {
 }
 
 const SERVER_PROTO: &[FieldDef] = &[
-    FieldDef::FUNC("get", 2, js_route_get, 0),
-    FieldDef::FUNC("post", 2, js_route_post, 0),
-    FieldDef::FUNC("put", 2, js_route_put, 0),
-    FieldDef::FUNC("patch", 2, js_route_patch, 0),
-    FieldDef::FUNC("delete", 2, js_route_delete, 0),
-    FieldDef::FUNC("head", 2, js_route_head, 0),
-    FieldDef::FUNC("options", 2, js_route_options, 0),
+    FieldDef::FUNC("get", 2, js_route_add, 0),
+    FieldDef::FUNC("post", 2, js_route_add, 1),
+    FieldDef::FUNC("put", 2, js_route_add, 2),
+    FieldDef::FUNC("patch", 2, js_route_add, 3),
+    FieldDef::FUNC("delete", 2, js_route_add, 4),
+    FieldDef::FUNC("head", 2, js_route_add, 5),
+    FieldDef::FUNC("options", 2, js_route_add, 6),
     FieldDef::GETSET("isRunning", Some(js_is_running), None, 0),
     FieldDef::FUNC("listen", 1, js_listen, 0),
     FieldDef::FUNC("shutdown", 0, js_shutdown, 0),

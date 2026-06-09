@@ -12,9 +12,11 @@ use zuqe::{
 
 use crate::USER_CLASS_DEFS;
 
+use super::Method;
+
 /// Internal payload for HttpRequest classes.
 pub(super) struct HttpRequestPayload {
-    pub(super) method: String,
+    pub(super) method: Method,
     pub(super) path: String,
     pub(super) params: HashMap<String, String>,
     pub(super) query: HashMap<String, String>,
@@ -43,7 +45,7 @@ fn js_req_method(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let method = {
         let data = get_req_payload(ctx, &this)?;
-        data.method.clone()
+        data.method.as_str()
     };
     let s = ctx.create_string_from_utf8(method.as_bytes().to_vec())?;
     Ok(s.into())
