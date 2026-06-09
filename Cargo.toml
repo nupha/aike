@@ -60,7 +60,11 @@ smallvec = "1.13"
 linkme = "0.3"
 minijinja = { version = "2", features = ["serde"] }
 minijinja-contrib = { version = "2", features = ["pycompat"] }
-axum = { version = "0.7", features = ["json", "macros"] }
+axum = { version = "0.8", default-features = false, features = [
+    "tokio",
+    "http1",
+    "json",
+] }
 futures-util = "0.3"
 async-stream = "0.3"
 tokio-stream = "0.1"
