@@ -4,20 +4,22 @@
 mod request;
 mod response;
 
-pub(crate) use request::JSHttpRequest;
-pub(crate) use response::JSHttpResponse;
+pub(crate) use {request::JSHttpRequest, response::JSHttpResponse};
 
-use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
+use std::{
+    cell::{Cell, RefCell},
+    collections::HashMap,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use axum::{
     Router,
     body::Body,
     extract::Request,
+    http::Method,
     response::{IntoResponse, Response as AxumResponse},
     routing::any,
 };
@@ -27,13 +29,18 @@ use matchit::Router as MatchRouter;
 use tokio::sync::oneshot;
 use zuqe::{
     CallContext, Callback, ClassCtorDef, ClassID, FieldDef, IntOrFloat, JSResult, JSValue,
-    NativeObject, Object, PollSender, Runtime, ScopedContext, builtins::promise::Promise,
+    NativeObject, Object, PollSender, Runtime, ScopedContext,
+    builtins::promise::Promise,
     def_native_object,
+    gc_lite::{GcTrace, GcTraceCtx},
 };
 
 use crate::USER_CLASS_DEFS;
-use request::HttpRequestPayload;
-use response::{HttpResponseMessage, HttpResponsePayload, get_res_payload};
+
+use {
+    request::HttpRequestPayload,
+    response::{HttpResponseMessage, HttpResponsePayload, get_res_payload},
+};
 
 struct IncomingRequest {
     method: String,
@@ -50,17 +57,21 @@ struct AxumState {
 }
 
 pub(crate) struct HttpServerPayload {
-    routes: Vec<(String, String)>,
-    handlers: Vec<Object>,
+    routes: Vec<(Method, String, Object)>,
     request_tx: Option<channel::Sender<IncomingRequest>>,
     shutdown_tx: Option<oneshot::Sender<()>>,
     is_running: Arc<AtomicBool>,
 }
 
 impl HttpServerPayload {
-    fn add_route(&mut self, method: &str, path: &str, handler: Object) {
-        self.routes.push((method.to_string(), path.to_string()));
-        self.handlers.push(handler);
+    fn add_route(&mut self, method: Method, path: String, handler: Object) {
+        self.routes.push((method, path, handler));
+    }
+
+    fn gc_trace(&self, gcx: &mut GcTraceCtx) {
+        for (_, _, handler) in &self.routes {
+            handler.trace(gcx);
+        }
     }
 }
 
@@ -94,6 +105,10 @@ fn get_server_payload<'a>(
     ctx: &'a mut ScopedContext,
     val: &JSValue,
 ) -> Result<&'a mut HttpServerPayload, i32> {
+    // let payload = val
+    //     .as_native_object::<JSHttpServer>()
+    //     .ok_or_else(|| ctx.throw_internal_error("HttpServer expected"))?;
+
     let payload = val
         .retrive_object_payload(ctx, JSHttpServer::class_id())?
         .other()
@@ -119,7 +134,6 @@ fn js_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         cc.this(),
         Box::new(HttpServerPayload {
             routes: Vec::new(),
-            handlers: Vec::new(),
             request_tx: None,
             shutdown_tx: None,
             is_running: Arc::new(AtomicBool::new(false)),
@@ -137,19 +151,19 @@ macro_rules! route_method {
             let path = path_str.content().encode_utf8(false).to_string();
             let handler = cc.arg(1).into_callable(ctx)?;
             let data = get_server_payload(ctx, &this)?;
-            data.add_route($method, &path, handler);
+            data.add_route($method, path, handler);
             Ok(this)
         }
     };
 }
 
-route_method!(js_route_get, "GET");
-route_method!(js_route_post, "POST");
-route_method!(js_route_put, "PUT");
-route_method!(js_route_patch, "PATCH");
-route_method!(js_route_delete, "DELETE");
-route_method!(js_route_head, "HEAD");
-route_method!(js_route_options, "OPTIONS");
+route_method!(js_route_get, Method::GET);
+route_method!(js_route_post, Method::POST);
+route_method!(js_route_put, Method::PUT);
+route_method!(js_route_patch, Method::PATCH);
+route_method!(js_route_delete, Method::DELETE);
+route_method!(js_route_head, Method::HEAD);
+route_method!(js_route_options, Method::OPTIONS);
 
 fn js_handler_then(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let is_reject = cc.magic() == 1;
@@ -207,16 +221,16 @@ fn js_listen(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         }
     }
 
-    // Now extract routes/handlers from payload (separate borrow scope)
-    let (routes, handlers) = {
+    // Now extract routes from payload (separate borrow scope)
+    let routes = {
         let data = get_server_payload(ctx, &this)?;
-        (data.routes.clone(), data.handlers.clone())
+        data.routes.clone()
     };
 
     // Build per-method matchit routers (convert `:param` to `{param}`)
     let mut method_routers: HashMap<String, MatchRouter<usize>> = HashMap::new();
-    for (i, (method, path)) in routes.iter().enumerate() {
-        let entry = method_routers.entry(method.clone()).or_default();
+    for (i, (method, path, _)) in routes.iter().enumerate() {
+        let entry = method_routers.entry(method.to_string()).or_default();
         let _ = entry.insert(normalize_route(path), i);
     }
 
@@ -245,7 +259,7 @@ fn js_listen(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 .map(|m| *m.value);
 
             if let Some(idx) = handler_idx {
-                let handler = &handlers[idx];
+                let (_, _, handler) = &routes[idx];
                 let query = parse_query_string(&incoming.query_string);
 
                 let req_val: JSValue = match JSHttpRequest::new_instance(
@@ -565,7 +579,8 @@ def_native_object!(
     JSHttpServer,
     Box<HttpServerPayload>,
     SERVER_PROTO,
-    constructor: ClassCtorDef::new(js_constructor, 0, true).expose_to_global()
+    constructor: ClassCtorDef::new(js_constructor, 0, true),
+    on_payload_gc: HttpServerPayload::gc_trace
 );
 
 #[distributed_slice(USER_CLASS_DEFS)]
