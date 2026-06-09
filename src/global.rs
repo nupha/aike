@@ -107,7 +107,7 @@ fn js_console_trace(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 console_println(out);
             }
         }
-        scope.return_value(Ok::<(), i32>(()))
+        scope.return_with(Ok::<(), i32>(()))
     });
 
     Ok(JSValue::UNDEFINED)

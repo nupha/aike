@@ -88,7 +88,7 @@ pub(super) fn js_evalScript(ctx: &mut ScopedContext, cc: CallContext) -> JSResul
             EvalType::Global,
             flags,
         );
-        scope.return_value(r)
+        scope.return_with(r)
     })
 }
 

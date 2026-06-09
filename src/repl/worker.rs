@@ -85,7 +85,7 @@ fn process_input_line(
                     }
                 }
 
-                cx.return_value(())
+                cx.return_with(())
             });
 
             let _ = ack_tx.send(());
@@ -94,7 +94,7 @@ fn process_input_line(
 }
 
 /// Start the REPL event loop.
-pub(crate) async fn run<'c>(rt: &mut zuqe::Runtime, ctx: &mut zuqe::Context<'c>) {
+pub(crate) async fn run<'c>(mut rt: zuqe::Runtime, mut ctx0: zuqe::Context<'c>) {
     let completion_state = CompletionState::new();
 
     // Build rustyline editor
@@ -272,7 +272,7 @@ pub(crate) async fn run<'c>(rt: &mut zuqe::Runtime, ctx: &mut zuqe::Context<'c>)
                 match cmd {
                     InputCommand::Quit =>{ break; },
                     InputCommand::Eval(line) => {
-                        process_input_line(ctx, &line, &ack_tx);
+                        process_input_line(&mut ctx0, &line, &ack_tx);
                     }
                 }
             }
@@ -280,9 +280,9 @@ pub(crate) async fn run<'c>(rt: &mut zuqe::Runtime, ctx: &mut zuqe::Context<'c>)
             // completion request
             req = req_rx.recv() => {
                 let Some(req) = req else { continue };
-                ctx.with_new_scope(|mut scope| {
+                ctx0.with_new_scope(|mut scope| {
                     js_compute_completions(&mut scope, req);
-                    scope.return_value(())
+                    scope.return_with(())
                 });
             }
         }

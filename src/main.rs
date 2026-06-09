@@ -277,9 +277,11 @@ async fn main() -> ExitCode {
         })
         .unwrap();
 
-    // REPL mode: no filename provided
+    //
+    // REPL mode: run repl task and exit.
+    //
     let Some(ref_filename) = filename else {
-        repl::run(&mut rt, &mut ctx).await;
+        repl::run(rt, ctx).await;
         return ExitCode::SUCCESS;
     };
 
@@ -318,24 +320,28 @@ async fn main() -> ExitCode {
             Ok(Some(p)) => match p.into_future(&mut cx) {
                 Ok(fut) => {
                     promise_future = Some(fut);
-                    cx.return_value(Ok(()))
+                    cx.return_with(Ok(()))
                 }
-                Err(_) => cx.return_value(Err(-1)),
+                Err(_) => cx.return_with(Err(-1)),
             },
-            Ok(None) => cx.return_value(Ok(())),
-            Err(_) => cx.return_value(Err(-1)),
+            Ok(None) => cx.return_with(Ok(())),
+            Err(_) => cx.return_with(Err(-1)),
         }
     });
 
     if res.is_err() {
-        let exit_code = ctx.with_root_scope(|mut cx| {
-            let code: u8 = match cx.take_exception() {
-                Exception::Interrupted(ec) => {
-                    // ExitCode doesn't implement ScopeResult, convert to u8
-                    format!("{:?}", ec).parse::<u8>().unwrap_or(1)
-                }
+        let exit_code = ctx.with_root_scope(|mut cx0| {
+            let code: u8 = match cx0.take_exception() {
+                Exception::Interrupted(ec) => format!("{:?}", ec).parse::<u8>().unwrap_or(1),
                 Exception::Error(e) => {
-                    colorize_println(e.to_string(&mut cx).unwrap().encode_utf8(false), GreenFg);
+                    colorize_println(e.to_string(&mut cx0).unwrap().encode_utf8(false), GreenFg);
+
+                    // value 'e' is in cx0 (top-level scope), it won't be gc collected.
+                    // we should remove it from protection manually.
+                    if let Some(n) = e.gc_node_ptr() {
+                        cx0.remove_local(n);
+                    }
+
                     1
                 }
                 Exception::OutOfMemory => {
@@ -370,7 +376,7 @@ async fn main() -> ExitCode {
                 // Promise reject
                 let err_msg = ctx.with_new_scope(|mut cx| {
                     let s = reason.to_string(&mut cx).unwrap();
-                    cx.return_value(s.encode_utf8(false).to_string())
+                    cx.return_with(s.encode_utf8(false).to_string())
                 });
                 colorize_println(err_msg, RedFg);
             }
@@ -391,7 +397,7 @@ async fn main() -> ExitCode {
         Err(Exception::Error(err)) => {
             ctx.with_new_scope(|mut cx| {
                 colorize_println(err.to_string(&mut cx).unwrap().encode_utf8(false), RedFg);
-                cx.return_value(())
+                cx.return_with(())
             });
             ExitCode::FAILURE
         }
