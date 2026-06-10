@@ -135,119 +135,120 @@ fn js_res_setHeaders(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     Ok(this)
 }
 
-fn js_res_end(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+const FINISH_END: i32 = 0;
+const FINISH_JSON: i32 = 1;
+const FINISH_SEND_STATUS: i32 = 2;
+const FINISH_REDIRECT: i32 = 3;
+
+fn js_res_finish(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
-    let body_str = if cc.length() > 0 && !cc.arg(0).is_undefined() {
-        cc.arg(0)
-            .to_string(ctx)
-            .ok()
-            .map(|s| s.content().encode_utf8(false).to_string())
-    } else {
-        None
-    };
+    let magic = cc.magic();
+
+    let body_str;
+    let status_code;
+    let redirect_url;
+    match magic {
+        FINISH_END => {
+            body_str = if cc.length() > 0 && !cc.arg(0).is_undefined() {
+                cc.arg(0)
+                    .to_string(ctx)
+                    .ok()
+                    .map(|s| s.content().encode_utf8(false).to_string())
+            } else {
+                None
+            };
+            status_code = None;
+            redirect_url = None;
+        }
+        FINISH_JSON => {
+            // Serialize via JS JSON.stringify
+            body_str = if cc.length() > 0 {
+                let global = ctx.global_obj();
+                let json_val = global.get_property_str(ctx, "JSON")?;
+                let stringify = json_val.get_property_str(ctx, "stringify")?;
+                let result = match stringify.call(ctx, json_val, &[cc.arg(0)]) {
+                    Ok(r) => r,
+                    Err(_) => {
+                        ctx.throw_type_error("JSON.stringify failed on the provided value");
+                        return Err(-1);
+                    }
+                };
+                result
+                    .to_string(ctx)
+                    .ok()
+                    .map(|s| s.content().encode_utf8(false).to_string())
+            } else {
+                None
+            };
+            status_code = None;
+            redirect_url = None;
+        }
+        FINISH_SEND_STATUS => {
+            body_str = None;
+            status_code = if cc.length() > 0 {
+                cc.arg(0).to_number(ctx).ok().and_then(|n| match n {
+                    IntOrFloat::Int64(v) => Some(v as u16),
+                    _ => None,
+                })
+            } else {
+                None
+            };
+            redirect_url = None;
+        }
+        FINISH_REDIRECT => {
+            let c = if cc.length() > 0 {
+                cc.arg(0)
+                    .to_number(ctx)
+                    .ok()
+                    .and_then(|n| match n {
+                        IntOrFloat::Int64(v) => Some(v as u16),
+                        _ => None,
+                    })
+                    .unwrap_or(302)
+            } else {
+                302
+            };
+            let u = if cc.length() >= 2 {
+                cc.arg(1)
+                    .to_string(ctx)
+                    .ok()
+                    .map(|s| s.content().encode_utf8(false).to_string())
+                    .unwrap_or_default()
+            } else {
+                String::new()
+            };
+            body_str = None;
+            status_code = Some(c);
+            redirect_url = Some(u);
+        }
+        _ => unreachable!(),
+    }
+
     let data = get_res_payload(ctx, &this)?;
     if data.ended {
         return Ok(JSValue::UNDEFINED);
     }
+
+    if magic == FINISH_JSON {
+        let has_ct = data
+            .headers
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case("content-type"));
+        if !has_ct {
+            data.headers
+                .push(("content-type".into(), "application/json".into()));
+        }
+    }
+    if let Some(url) = redirect_url {
+        data.headers.push(("Location".into(), url));
+    }
+
     if let Some(b) = body_str {
         data.body = Some(b);
     }
-    data.ended = true;
-    data.send_response();
-    Ok(JSValue::UNDEFINED)
-}
-
-fn js_res_json(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let this = cc.this();
-    let json_str = if cc.length() > 0 {
-        // Serialize via JS JSON.stringify
-        let global = ctx.global_obj();
-        let json_val = global.get_property_str(ctx, "JSON")?;
-        let stringify = json_val.get_property_str(ctx, "stringify")?;
-        let result = match stringify.call(ctx, json_val, &[cc.arg(0)]) {
-            Ok(r) => r,
-            Err(_) => {
-                ctx.throw_type_error("JSON.stringify failed on the provided value");
-                return Err(-1);
-            }
-        };
-        result
-            .to_string(ctx)
-            .ok()
-            .map(|s| s.content().encode_utf8(false).to_string())
-    } else {
-        None
-    };
-    let data = get_res_payload(ctx, &this)?;
-    if data.ended {
-        return Ok(JSValue::UNDEFINED);
-    }
-    let has_ct = data
-        .headers
-        .iter()
-        .any(|(k, _)| k.eq_ignore_ascii_case("content-type"));
-    if !has_ct {
-        data.headers
-            .push(("content-type".into(), "application/json".into()));
-    }
-    if let Some(s) = json_str {
-        data.body = Some(s);
-    }
-    data.ended = true;
-    data.send_response();
-    Ok(JSValue::UNDEFINED)
-}
-
-fn js_res_sendStatus(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let this = cc.this();
-    let code = if cc.length() > 0 {
-        cc.arg(0).to_number(ctx).ok().and_then(|n| match n {
-            IntOrFloat::Int64(v) => Some(v as u16),
-            _ => None,
-        })
-    } else {
-        None
-    };
-    let data = get_res_payload(ctx, &this)?;
-    if data.ended {
-        return Ok(JSValue::UNDEFINED);
-    }
-    if let Some(c) = code {
+    if let Some(c) = status_code {
         data.status = c;
     }
-    data.ended = true;
-    data.send_response();
-    Ok(JSValue::UNDEFINED)
-}
-
-fn js_res_redirect(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let this = cc.this();
-    let (code, url_str) = if cc.length() >= 2 {
-        let c = cc
-            .arg(0)
-            .to_number(ctx)
-            .ok()
-            .and_then(|n| match n {
-                IntOrFloat::Int64(v) => Some(v as u16),
-                _ => None,
-            })
-            .unwrap_or(302);
-        let u = cc
-            .arg(1)
-            .to_string(ctx)
-            .ok()
-            .map(|s| s.content().encode_utf8(false).to_string())
-            .unwrap_or_default();
-        (c, u)
-    } else {
-        (302, String::new())
-    };
-    let data = get_res_payload(ctx, &this)?;
-    if data.ended {
-        return Ok(JSValue::UNDEFINED);
-    }
-    data.status = code;
-    data.headers.push(("Location".into(), url_str));
     data.ended = true;
     data.send_response();
     Ok(JSValue::UNDEFINED)
@@ -257,10 +258,10 @@ const RES_PROTO: &[FieldDef] = &[
     FieldDef::FUNC("status", 1, js_res_status, 0),
     FieldDef::FUNC("setHeader", 2, js_res_setHeader, 0),
     FieldDef::FUNC("setHeaders", 1, js_res_setHeaders, 0),
-    FieldDef::FUNC("end", 1, js_res_end, 0),
-    FieldDef::FUNC("json", 1, js_res_json, 0),
-    FieldDef::FUNC("sendStatus", 1, js_res_sendStatus, 0),
-    FieldDef::FUNC("redirect", 2, js_res_redirect, 0),
+    FieldDef::FUNC("end", 1, js_res_finish, FINISH_END as _),
+    FieldDef::FUNC("json", 1, js_res_finish, FINISH_JSON as _),
+    FieldDef::FUNC("sendStatus", 1, js_res_finish, FINISH_SEND_STATUS as _),
+    FieldDef::FUNC("redirect", 2, js_res_finish, FINISH_REDIRECT as _),
 ];
 
 def_native_object!(
