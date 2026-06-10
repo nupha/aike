@@ -14,9 +14,10 @@ use crate::USER_CLASS_DEFS;
 
 use super::class_model::get_llama_model;
 
-pub(crate) type SamplerPayload = Arc<Mutex<SamplerChain>>;
-
-pub(super) fn get_sampler(ctx: &mut ScopedContext, val: &JSValue) -> Result<SamplerPayload, i32> {
+pub(super) fn get_sampler(
+    ctx: &mut ScopedContext,
+    val: &JSValue,
+) -> Result<Arc<Mutex<SamplerChain>>, i32> {
     let ob = JSSamplerChain::try_from(*val).unwrap();
     if let Some(p) = ob.payload() {
         Ok(p.clone())
@@ -170,8 +171,11 @@ pub fn js_model_createSamplerChain(ctx: &mut ScopedContext, cc: CallContext) -> 
     chain.add_sampler(&SamplerKind::Dist(0));
     chain.finalize_samplers();
 
-    let mut obj =
-        JSSamplerChain::new_instance(ctx, JSValue::UNDEFINED, Arc::new(Mutex::new(chain)))?;
+    let mut obj = JSSamplerChain::new_instance(
+        ctx,
+        JSValue::UNDEFINED,
+        Box::new(Arc::new(Mutex::new(chain))),
+    )?;
     obj.define_property_value_str(ctx, "model", this, JS_PROP_ENUMERABLE)?;
 
     Ok(obj.into())
@@ -333,7 +337,7 @@ const CLASS_SAMPLER_CHAIN_PROTO: &[FieldDef] = &[
 def_native_object!(
     "SamplerChain",
     JSSamplerChain,
-    SamplerPayload,
+    Box<Arc<Mutex<SamplerChain>>>,
     CLASS_SAMPLER_CHAIN_PROTO
 );
 

@@ -36,8 +36,6 @@ use super::{
     engine::{Engine, GrammarConfig, TaskConfig},
 };
 
-pub(crate) type EnginePayload = Arc<Mutex<Engine>>;
-
 pub(crate) const ERR_CANCELLED: &str = "cancelled";
 pub(crate) const ERR_ENGINE_SHUTDOWN: &str = "engine shutdown";
 
@@ -129,7 +127,7 @@ pub(super) fn parse_engine_params(
     })
 }
 
-fn get_engine(ctx: &mut ScopedContext, val: &JSValue) -> Result<EnginePayload, i32> {
+fn get_engine(ctx: &mut ScopedContext, val: &JSValue) -> Result<Arc<Mutex<Engine>>, i32> {
     let engine = JSEngine::try_from(*val).unwrap();
     if let Some(p) = engine.payload() {
         Ok(p.clone())
@@ -819,7 +817,12 @@ const CLASS_ENGINE_PROTO: &[FieldDef] = &[
     FieldDef::FUNC("dispose", 0, js_engine_dispose, 0),
 ];
 
-def_native_object!("Engine", JSEngine, EnginePayload, CLASS_ENGINE_PROTO);
+def_native_object!(
+    "Engine",
+    JSEngine,
+    Box<Arc<Mutex<Engine>>>,
+    CLASS_ENGINE_PROTO
+);
 
 #[distributed_slice(USER_CLASS_DEFS)]
 fn register_class_engine(rt: &mut Runtime) -> Result<ClassID, i32> {

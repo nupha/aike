@@ -25,39 +25,45 @@ pub(super) struct HttpRequestPayload {
 }
 
 fn get_req_payload<'a>(
-    ctx: &'a mut ScopedContext,
-    val: &JSValue,
+    ctx: &mut ScopedContext,
+    val: &'a JSValue,
+) -> Result<&'a HttpRequestPayload, i32> {
+    val.as_native_object::<JSHttpRequest>()
+        .and_then(|o| o.payload())
+        .ok_or_else(|| {
+            ctx.throw_type_error("not an HttpRequest instance");
+            -1
+        })
+}
+
+fn get_req_payload_mut<'a>(
+    ctx: &mut ScopedContext,
+    val: &'a mut JSValue,
 ) -> Result<&'a mut HttpRequestPayload, i32> {
-    let payload = val
-        .retrive_object_payload(ctx, JSHttpRequest::class_id())?
-        .other()
-        .unwrap();
-    let opaque = payload.opaque();
-    if opaque.is_null() {
-        ctx.throw_type_error("HttpRequest was disposed");
-        Err(-1)
-    } else {
-        Ok(unsafe { &mut *opaque.cast::<HttpRequestPayload>() })
-    }
+    val.as_native_object_mut::<JSHttpRequest>()
+        .and_then(|o| o.payload_mut())
+        .ok_or_else(|| {
+            ctx.throw_type_error("not an HttpRequest instance");
+            -1
+        })
 }
 
 fn js_req_method(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let this = cc.this();
     let method = {
-        let data = get_req_payload(ctx, &this)?;
-        data.method.as_str()
+        let this = cc.this();
+        get_req_payload(ctx, &this)?.method
     };
-    let s = ctx.create_string_from_utf8(method.as_bytes().to_vec())?;
+    let s = ctx.create_string_from_str(method.as_str())?;
     Ok(s.into())
 }
 
 fn js_req_path(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let this = cc.this();
     let path = {
-        let data = get_req_payload(ctx, &this)?;
-        data.path.clone()
+        let this = cc.this();
+        let p = get_req_payload(ctx, &this)?;
+        p.path.as_bytes().to_vec()
     };
-    let s = ctx.create_string_from_utf8(path.as_bytes().to_vec())?;
+    let s = ctx.create_string_from_utf8(path)?;
     Ok(s.into())
 }
 
@@ -104,11 +110,10 @@ fn js_req_headers(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 }
 
 fn js_req_json(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let this = cc.this();
-    let body = {
-        let data = get_req_payload(ctx, &this)?;
-        data.body.take().unwrap_or_default()
-    };
+    let body = get_req_payload_mut(ctx, &mut cc.this())?
+        .body
+        .take()
+        .unwrap_or_default();
     if body.is_empty() {
         return Ok(JSValue::UNDEFINED);
     }
@@ -120,21 +125,19 @@ fn js_req_json(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 }
 
 fn js_req_text(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let this = cc.this();
-    let body = {
-        let data = get_req_payload(ctx, &this)?;
-        data.body.take().unwrap_or_default()
-    };
+    let body = get_req_payload_mut(ctx, &mut cc.this())?
+        .body
+        .take()
+        .unwrap_or_default();
     let s = ctx.create_string_from_utf8(body)?;
     Ok(s.into())
 }
 
 fn js_req_bytes(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let this = cc.this();
-    let body = {
-        let data = get_req_payload(ctx, &this)?;
-        data.body.take().unwrap_or_default()
-    };
+    let body = get_req_payload_mut(ctx, &mut cc.this())?
+        .body
+        .take()
+        .unwrap_or_default();
     zuqe::builtins::typed_array::TypedArray::create_from_vec_u8(ctx, body).map(JSValue::from)
 }
 
