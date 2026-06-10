@@ -70,7 +70,7 @@ fn get_llm_ctx(
                 p.clone()
             })
             .ok_or_else(|| {
-                ctx.throw_type_error("LLM Context was disposed");
+                ctx.throw_type_error("LLM Context was detached");
                 -1
             })
     }
@@ -82,7 +82,7 @@ fn get_llm_ctx(
             .payload()
             .cloned()
             .ok_or_else(|| {
-                ctx.throw_type_error("LLM Context was disposed");
+                ctx.throw_type_error("LLM Context was detached");
                 -1
             })
     }
@@ -438,7 +438,7 @@ fn js_context_createEngine(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
 
         Ok(engine_obj.into())
     } else {
-        ctx.throw_type_error("Context was disposed");
+        ctx.throw_type_error("Context was detached");
         Err(-1)
     }
 }

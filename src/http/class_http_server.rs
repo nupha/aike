@@ -31,14 +31,17 @@ use zuqe::{
     gc_lite::{GcTrace, GcTraceCtx},
 };
 
-use crate::USER_CLASS_DEFS;
-use crate::llm::engine::Engine;
-use crate::llm::engine::serve::engine_routes;
+use crate::{
+    USER_CLASS_DEFS,
+    llm::engine::{Engine, serve::engine_routes},
+};
 
-use super::Method;
-use super::request::{HttpRequestPayload, JSHttpRequest};
-use super::response::{HttpResponseMessage, HttpResponsePayload, JSHttpResponse, get_res_payload};
-use super::server::{RouteEntry, spawn_http_service};
+use super::{
+    Method, RouteEntry,
+    request::{HttpRequestPayload, JSHttpRequest},
+    response::{HttpResponseMessage, HttpResponsePayload, JSHttpResponse, get_res_payload},
+    spawn_http_service,
+};
 
 /// Request message sent from axum delegate fn to the JS HTTP Server Job.
 struct IncomingRequest {
@@ -92,20 +95,27 @@ impl HttpServerPayload {
 }
 
 fn get_server_payload<'a>(
-    ctx: &'a mut ScopedContext,
-    val: &JSValue,
+    ctx: &mut ScopedContext,
+    val: &'a JSValue,
+) -> Result<&'a HttpServerPayload, i32> {
+    val.as_native_object::<JSHttpServer>()
+        .and_then(|o| o.payload())
+        .ok_or_else(|| {
+            ctx.throw_type_error("expect HttpServer instance");
+            -1
+        })
+}
+
+fn get_server_payload_mut<'a>(
+    ctx: &mut ScopedContext,
+    val: &'a mut JSValue,
 ) -> Result<&'a mut HttpServerPayload, i32> {
-    let payload = val
-        .retrive_object_payload(ctx, JSHttpServer::class_id())?
-        .other()
-        .unwrap();
-    let opaque = payload.opaque();
-    if opaque.is_null() {
-        ctx.throw_internal_error("HttpServer was disposed");
-        Err(-1)
-    } else {
-        Ok(unsafe { &mut *opaque.cast::<HttpServerPayload>() })
-    }
+    val.as_native_object_mut::<JSHttpServer>()
+        .and_then(|o| o.payload_mut())
+        .ok_or_else(|| {
+            ctx.throw_type_error("expect HttpServer instance");
+            -1
+        })
 }
 
 thread_local! {
@@ -120,12 +130,20 @@ fn js_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     // Parse optional { engine } from first argument
     if cc.length() > 0 {
         if let Some(opts) = cc.arg(0).as_object() {
-            if let Ok(v) = opts.get_property_str(ctx, "engine") {
-                if !v.is_undefined() && !v.is_null() {
-                    // Extract engine Arc<Mutex<Engine>> from JSEngine native object
-                    if let Some(e) = v.as_native_object::<crate::llm::JSEngine>() {
-                        if let Some(payload) = e.payload() {
-                            engine = Some(payload.clone());
+            if let Ok(mut v) = opts.get_property_str(ctx, "engine") {
+                if !v.is_undefined_or_null() {
+                    // Take engine Arc<Mutex<Engine>> from JSEngine — detaches it
+                    match v.as_native_object_mut::<crate::llm::JSEngine>() {
+                        Some(e) => match e.take_payload() {
+                            Some(payload) => engine = Some(*payload),
+                            None => {
+                                ctx.throw_type_error("Engine object has already been detached");
+                                return Err(-1);
+                            }
+                        },
+                        None => {
+                            ctx.throw_type_error("expect Engine instance");
+                            return Err(-1);
                         }
                     }
                 }
@@ -154,7 +172,7 @@ fn js_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 }
 
 fn js_route_add(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let this = cc.this();
+    let mut this = cc.this();
     let method = match cc.magic() as u8 {
         0 => Method::GET,
         1 => Method::POST,
@@ -171,8 +189,9 @@ fn js_route_add(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let path_str = cc.arg(0).to_string(ctx)?;
     let path = path_str.content().encode_utf8(false).to_string();
     let handler = cc.arg(1).into_callable(ctx)?;
-    let data = get_server_payload(ctx, &this)?;
-    if let Err(e) = data.add_route(method, path, handler) {
+
+    let p = get_server_payload_mut(ctx, &mut this)?;
+    if let Err(e) = p.add_route(method, path, handler) {
         ctx.throw_type_error(e);
         return Err(-1);
     }
@@ -180,7 +199,7 @@ fn js_route_add(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 }
 
 fn js_remove_route(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let this = cc.this();
+    let mut this = cc.this();
     let method = match &*cc.arg(0).to_string(ctx)?.content().encode_utf8(false) {
         "GET" => Method::GET,
         "POST" => Method::POST,
@@ -196,14 +215,14 @@ fn js_remove_route(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     };
     let path_str = cc.arg(1).to_string(ctx)?;
     let path = path_str.content().encode_utf8(false).to_string();
-    let data = get_server_payload(ctx, &this)?;
-    match data.remove_route(method, &path) {
-        Ok(removed) => Ok(JSValue::Bool(removed)),
-        Err(e) => {
+
+    get_server_payload_mut(ctx, &mut this)?
+        .remove_route(method, &path)
+        .map_err(|e| {
             ctx.throw_type_error(e);
-            Err(-1)
-        }
-    }
+            -1
+        })
+        .map(JSValue::Bool)
 }
 
 /// Convert Express-style `:param` path segments to axum-style `{param}`.
@@ -372,7 +391,7 @@ fn js_handler_then(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 }
 
 fn js_listen(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let this = cc.this();
+    let mut this = cc.this();
 
     // Check if already running
     if get_server_payload(ctx, &this)?.shutdown_tx.is_some() {
@@ -406,7 +425,7 @@ fn js_listen(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     // Extract data from payload (separate borrow scope)
     let (rust_routes, js_routes, _engine) = {
-        let data = get_server_payload(ctx, &this)?;
+        let data = get_server_payload_mut(ctx, &mut this)?;
         data.frozen = true;
         (
             std::mem::take(&mut data.rust_routes),
@@ -447,9 +466,9 @@ fn js_listen(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     // Store handle — after spawn, is_running is true
     {
-        let data = get_server_payload(ctx, &this)?;
-        data.shutdown_tx = Some(handle.shutdown_tx);
-        data.is_running = handle.is_running.clone();
+        let p = get_server_payload_mut(ctx, &mut this)?;
+        p.shutdown_tx = Some(handle.shutdown_tx);
+        p.is_running = handle.is_running.clone();
     }
 
     // Start HTTP Server Job on JS thread with the CORRECT is_running flag
@@ -573,16 +592,17 @@ fn js_start_http_server_job(
 }
 
 fn js_shutdown(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let this = cc.this();
+    let mut this = cc.this();
 
     let (shutdown_tx, is_running) = {
-        let data = get_server_payload(ctx, &this)?;
-        if data.shutdown_tx.is_none() {
+        let p = get_server_payload_mut(ctx, &mut this)?;
+        if p.shutdown_tx.is_none() {
             return Ok(JSValue::UNDEFINED);
         }
-        let tx = data.shutdown_tx.take();
-        let r = data.is_running.clone();
-        data.frozen = false;
+
+        let tx = p.shutdown_tx.take();
+        let r = p.is_running.clone();
+        p.frozen = false;
         (tx, r)
     };
 

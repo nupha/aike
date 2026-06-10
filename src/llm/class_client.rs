@@ -49,7 +49,7 @@ pub(crate) fn get_client(ctx: &mut ScopedContext, val: JSValue) -> Result<Arc<Cl
     if let Some(c) = ob.payload() {
         Ok(c.clone())
     } else {
-        ctx.throw_type_error("Client was disposed");
+        ctx.throw_type_error("Client was detached");
         Err(-1)
     }
 }

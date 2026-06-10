@@ -53,7 +53,7 @@ pub(crate) fn get_res_payload<'a>(
         .unwrap();
     let opaque = payload.opaque();
     if opaque.is_null() {
-        ctx.throw_internal_error("HttpResponse was disposed");
+        ctx.throw_internal_error("HttpResponse was detached");
         Err(-1)
     } else {
         Ok(unsafe { &mut *opaque.cast::<HttpResponsePayload>() })

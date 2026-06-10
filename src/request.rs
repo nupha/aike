@@ -38,7 +38,7 @@ fn get_response_data<'a>(
         .unwrap();
     let opaque = payload.opaque();
     if opaque.is_null() {
-        ctx.throw_type_error("Response was disposed");
+        ctx.throw_type_error("Response was detached");
         Err(-1)
     } else {
         Ok(unsafe { &mut *opaque.cast::<ResponseData>() })

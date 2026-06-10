@@ -132,7 +132,7 @@ fn get_engine(ctx: &mut ScopedContext, val: &JSValue) -> Result<Arc<Mutex<Engine
     if let Some(p) = engine.payload() {
         Ok(p.clone())
     } else {
-        ctx.throw_type_error("Engine was disposed");
+        ctx.throw_type_error("Engine was detached");
         Err(-1)
     }
 }

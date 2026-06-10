@@ -22,7 +22,7 @@ pub(super) fn get_sampler(
     if let Some(p) = ob.payload() {
         Ok(p.clone())
     } else {
-        ctx.throw_type_error("SamplerChain was disposed");
+        ctx.throw_type_error("SamplerChain was detached");
         Err(-1)
     }
 }
