@@ -37,10 +37,10 @@ use crate::{
 };
 
 use super::{
-    Method, RouteEntry,
+    Method,
     request::{HttpRequestPayload, JSHttpRequest},
     response::{HttpResponseMessage, HttpResponsePayload, JSHttpResponse, get_res_payload},
-    spawn_http_service,
+    server::{RouteEntry, spawn_http_service},
 };
 
 /// Request message sent from axum delegate fn to the JS HTTP Server Job.

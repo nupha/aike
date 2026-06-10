@@ -8,13 +8,12 @@ use std::{
 use crossbeam::channel::Receiver;
 
 use super::{
-    cache::{CacheRam, ContextMode},
+    cache::ContextMode,
     context::Engine,
+    output::GeneratedContent,
     slot::{Slot, SlotState},
     task::{EngineCtrlMsg, EngineReply, EngineTask, SchedResult, StopReason},
 };
-
-use super::output::GeneratedContent;
 
 /// Helper function to check if a GeneratedContent matches the parser state
 fn matches_content_state(content: &GeneratedContent, state: super::output::OutputState) -> bool {

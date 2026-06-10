@@ -1,20 +1,13 @@
-// HTTP module root.
-//
-// Submodules:
-// - server:           Pure Rust axum service core (spawn_http_service)
-// - class_http_server: JS binding (HttpServer class, delegate, Job)
-// - request:          JSHttpRequest native class
-// - response:         JSHttpResponse native class
-
-pub(crate) mod server;
-
 mod class_http_server;
 mod request;
 mod response;
+pub(crate) mod server;
 
-pub(crate) use class_http_server::{JSHttpServer, init_mod_http};
-pub(crate) use request::JSHttpRequest;
-pub(crate) use response::JSHttpResponse;
+pub(crate) use {
+    class_http_server::JSHttpServer, request::JSHttpRequest, response::JSHttpResponse,
+};
+
+use zuqe::{FieldDef, NativeObject, ScopedContext};
 
 /// HTTP method enum — shared across submodules.
 #[allow(clippy::upper_case_acronyms)]
