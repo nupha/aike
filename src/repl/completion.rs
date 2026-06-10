@@ -1,23 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-use std::borrow::Cow;
-use std::sync::Arc;
-use std::time::Duration;
+use std::{borrow::Cow, sync::Arc, time::Duration};
 
-use rustyline::Context;
-use rustyline::completion::{Completer, Pair};
-use rustyline::highlight::Highlighter;
-use rustyline::hint::Hinter;
-use rustyline::validate::Validator;
+use rustyline::{
+    Context,
+    completion::{Completer, Pair},
+    highlight::Highlighter,
+    hint::Hinter,
+    validate::Validator,
+};
 use rustyline_derive::Helper;
 use zuqe::JSValue;
 
 use crate::repl::prompt::AikePrompt;
-
-// ---------------------------------------------------------------------------
-// Completion types
-// ---------------------------------------------------------------------------
 
 type CandidatePrinter = Arc<dyn Fn(&[CompletionCandidate]) + Send + Sync>;
 
