@@ -18,7 +18,7 @@ use axum::{
     body::Body,
     extract::Request,
     response::{IntoResponse, Response as AxumResponse},
-    routing::any,
+    routing::{delete, get, head, options, patch, post, put},
 };
 use crossbeam::channel;
 use linkme::distributed_slice;
@@ -206,6 +206,36 @@ fn js_remove_route(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     }
 }
 
+/// Convert Express-style `:param` path segments to axum-style `{param}`.
+fn express_to_axum_path(path: &str) -> String {
+    let mut result = String::with_capacity(path.len());
+    let mut chars = path.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == ':' {
+            let mut param = String::new();
+            for ch in chars.by_ref() {
+                if ch.is_alphanumeric() || ch == '_' {
+                    param.push(ch);
+                } else {
+                    result.push('{');
+                    result.push_str(&param);
+                    result.push('}');
+                    result.push(ch);
+                    break;
+                }
+            }
+            if !param.is_empty() {
+                result.push('{');
+                result.push_str(&param);
+                result.push('}');
+            }
+        } else {
+            result.push(c);
+        }
+    }
+    result
+}
+
 /// Create a RouteEntry that delegates to a JS handler via channel.
 ///
 /// The closure captures only `handler_index: usize` and `Sender` — both Send + Sync.
@@ -216,8 +246,11 @@ fn delegate_js_route(
     handler_index: usize,
     request_tx: channel::Sender<IncomingRequest>,
 ) -> RouteEntry {
+    let path = express_to_axum_path(&path);
     let tx = request_tx;
-    let handler = any(move |req: Request| {
+
+    // Create the handler closure once, then wrap with method-specific router
+    let handler_fn = move |req: Request| {
         let tx = tx.clone();
         async move {
             let (res_tx, res_rx) = oneshot::channel();
@@ -295,7 +328,19 @@ fn delegate_js_route(
                     .into_response(),
             }
         }
-    });
+    };
+
+    // Wrap with method-specific router so multiple routes at the same path
+    // (e.g. GET and PUT /api/users/:id) can coexist without fallback conflicts.
+    let handler = match method {
+        Method::GET => get(handler_fn),
+        Method::POST => post(handler_fn),
+        Method::PUT => put(handler_fn),
+        Method::PATCH => patch(handler_fn),
+        Method::DELETE => delete(handler_fn),
+        Method::HEAD => head(handler_fn),
+        Method::OPTIONS => options(handler_fn),
+    };
     RouteEntry {
         method,
         path,
@@ -373,6 +418,9 @@ fn js_listen(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     // Merge routes: Rust (Engine) + JS delegate
     let mut all_routes = rust_routes;
 
+    let mut js_rx_opt: Option<channel::Receiver<IncomingRequest>> = None;
+    let mut handler_table_opt: Option<Vec<Object>> = None;
+
     if !js_routes.is_empty() {
         let (js_tx, js_rx) = channel::unbounded::<IncomingRequest>();
 
@@ -384,15 +432,11 @@ fn js_listen(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             all_routes.push(delegate_js_route(*method, path.clone(), i, js_tx.clone()));
         }
 
-        // Start HTTP Server Job on JS thread
-        let is_running_check = {
-            let data = get_server_payload(ctx, &this)?;
-            data.is_running.clone()
-        };
-        js_start_http_server_job(ctx, js_rx, handler_table, is_running_check);
+        js_rx_opt = Some(js_rx);
+        handler_table_opt = Some(handler_table);
     }
 
-    // Spawn the unified axum service
+    // Spawn the unified axum service first
     let handle = match spawn_http_service(all_routes, host, port) {
         Ok(h) => h,
         Err(e) => {
@@ -401,10 +445,17 @@ fn js_listen(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         }
     };
 
-    // Store handle
-    let data = get_server_payload(ctx, &this)?;
-    data.shutdown_tx = Some(handle.shutdown_tx);
-    data.is_running = handle.is_running;
+    // Store handle — after spawn, is_running is true
+    {
+        let data = get_server_payload(ctx, &this)?;
+        data.shutdown_tx = Some(handle.shutdown_tx);
+        data.is_running = handle.is_running.clone();
+    }
+
+    // Start HTTP Server Job on JS thread with the CORRECT is_running flag
+    if let (Some(js_rx), Some(handler_table)) = (js_rx_opt, handler_table_opt) {
+        js_start_http_server_job(ctx, js_rx, handler_table, handle.is_running);
+    }
 
     Ok(JSValue::UNDEFINED)
 }
