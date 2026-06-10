@@ -118,11 +118,6 @@ fn get_server_payload_mut<'a>(
         })
 }
 
-thread_local! {
-    /// Temporary storage for the response object when the handler returned a Promise.
-    static ASYNC_RES: RefCell<Option<JSValue>> = const { RefCell::new(None) };
-}
-
 fn js_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut engine: Option<Arc<Mutex<Engine>>> = None;
     let mut rust_routes = Vec::new();

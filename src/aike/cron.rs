@@ -24,19 +24,11 @@ use zuqe::{
 
 use crate::USER_CLASS_DEFS;
 
-// ---------------------------------------------------------------------------
-// Channel message
-// ---------------------------------------------------------------------------
-
 #[derive(Debug, Clone, Copy)]
 enum CronMsg {
     Fired(u32),
     Cancelled(u32),
 }
-
-// ---------------------------------------------------------------------------
-// Per-job entry stored in the registry
-// ---------------------------------------------------------------------------
 
 struct CronEntry {
     schedule: Schedule,
@@ -44,10 +36,6 @@ struct CronEntry {
     job_obj: Object, // native JSCronJob instance — for updating nextRun
     active: bool,
 }
-
-// ---------------------------------------------------------------------------
-// Thread-local global state
-// ---------------------------------------------------------------------------
 
 struct CronState {
     next_id: u32,
@@ -72,10 +60,7 @@ thread_local! {
     static CRON_STATE: RefCell<Option<CronState>> = const { RefCell::new(None) };
 }
 
-// ---------------------------------------------------------------------------
-// GC trace — keep all live callbacks and job objects alive
-// ---------------------------------------------------------------------------
-
+/// GC trace — keep all live callbacks and job objects alive
 pub(crate) fn gc_trace_cron(tr: &mut GcTraceCtx) {
     CRON_STATE.with_borrow(|opt| {
         if let Some(s) = opt.as_ref() {
@@ -86,10 +71,6 @@ pub(crate) fn gc_trace_cron(tr: &mut GcTraceCtx) {
         }
     });
 }
-
-// ---------------------------------------------------------------------------
-// Shared helpers
-// ---------------------------------------------------------------------------
 
 /// Compute delay in milliseconds to the next cron fire time.
 fn next_delay_ms(schedule: &Schedule) -> Option<u64> {
@@ -285,26 +266,11 @@ fn js_cron_job_cancel(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
 const CRON_JOB_PROTO: &[FieldDef] = &[FieldDef::FUNC("cancel", 0, js_cron_job_cancel, 0)];
 
-// fn js_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-//     JSCronJob::new_instance(
-//         ctx,
-//         cc.this(),
-//         Box::new(CronJobPayload {
-//             id: 0,
-//             name: None,
-//             pattern: String::new(),
-//             active: true,
-//         }),
-//     )
-//     .map(JSValue::from)
-// }
-
 def_native_object!(
     "CronJob",
     JSCronJob,
     Box<CronJobPayload>,
     CRON_JOB_PROTO,
-    // constructor: ClassCtorDef::new(js_constructor, 0, true), // can't create CronJob manually
     on_payload_gc: CronJobPayload::gc_trace
 );
 
