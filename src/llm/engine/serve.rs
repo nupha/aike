@@ -1,8 +1,52 @@
+// Engine OpenAI-compatible HTTP handlers.
+//
+// Provides handler functions and `engine_routes()` which returns RouteEntry
+// items for all Engine-related routes (/v1/chat/completions, /v1/models, etc).
+
 use std::{
     ffi::CString,
     sync::{Arc, Mutex},
     time::Duration,
 };
+
+use async_openai::types::chat::{CreateChatCompletionRequest, ReasoningEffort};
+use axum::{
+    Json,
+    extract::State,
+    http::StatusCode,
+    response::{
+        IntoResponse, Response,
+        sse::{Event, Sse},
+    },
+    routing::{get, post},
+};
+use futures_util::StreamExt;
+use llama_cpp_ffi::LlamaModel;
+use serde::Serialize;
+use serde_json::json;
+use tokio_stream::wrappers::UnboundedReceiverStream;
+use uuid::Uuid;
+
+use crate::{
+    helpers::{
+        PromptThinkPattern, apply_chat_template, compute_keep_tokens, detect_prompt_think_pattern,
+        now_unix_s, to_lark_tool_choice,
+    },
+    http::{Method, server::RouteEntry},
+    llm::engine::{Engine, EngineReply, EngineTask, GrammarConfig, TaskConfig},
+    output::{
+        ChunkSSE, ParserKind, collect_engine_reply_to_json, redirect_engine_reply_to_chat_sse,
+    },
+};
+
+#[cfg(feature = "enable_eval_log")]
+use crate::eval_logger::{EvalLogEntry, ToolCallLog, get_eval_logger};
+
+pub(crate) const ERR_CANCELLED: &str = "cancelled";
+pub(crate) const ERR_ENGINE_SHUTDOWN: &str = "engine shutdown";
+pub(crate) const DEFAULT_TEMPERATURE: f32 = 0.75;
+pub(crate) const DEFAULT_TOP_P: f32 = 1.0;
+pub(crate) const STREAM_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// A guard that cancels an engine task on drop unless disarmed.
 /// Used to ensure tasks are cancelled when the HTTP client disconnects.
@@ -36,47 +80,6 @@ impl Drop for CancelGuard {
         }
     }
 }
-
-use async_openai::types::chat::{CreateChatCompletionRequest, ReasoningEffort};
-use axum::{
-    Json, Router,
-    extract::State,
-    http::StatusCode,
-    response::{
-        IntoResponse, Response,
-        sse::{Event, Sse},
-    },
-    routing::{get, post},
-};
-use futures_util::StreamExt;
-use llama_cpp_ffi::LlamaModel;
-use serde::Serialize;
-use serde_json::json;
-use tokio_stream::wrappers::UnboundedReceiverStream;
-use tower_http::cors::CorsLayer;
-use uuid::Uuid;
-
-#[cfg(feature = "enable_eval_log")]
-use crate::eval_logger::{EvalLogEntry, ToolCallLog, get_eval_logger};
-
-use crossbeam::channel::Sender;
-
-use crate::{
-    helpers::{
-        PromptThinkPattern, apply_chat_template, compute_keep_tokens, detect_prompt_think_pattern,
-        now_unix_s, to_lark_tool_choice,
-    },
-    llm::engine::{Engine, EngineReply, EngineTask, GrammarConfig, TaskConfig},
-    output::{
-        ChunkSSE, ParserKind, collect_engine_reply_to_json, redirect_engine_reply_to_chat_sse,
-    },
-};
-
-pub(crate) const ERR_CANCELLED: &str = "cancelled";
-pub(crate) const ERR_ENGINE_SHUTDOWN: &str = "engine shutdown";
-pub(crate) const DEFAULT_TEMPERATURE: f32 = 0.75;
-pub(crate) const DEFAULT_TOP_P: f32 = 1.0;
-pub(crate) const STREAM_TIMEOUT: Duration = Duration::from_secs(300);
 
 #[derive(Debug, Serialize)]
 pub(crate) struct ErrorResponse {
@@ -113,72 +116,54 @@ struct ModelInfo {
     owned_by: &'static str,
 }
 
-#[derive(Clone)]
-pub(crate) struct AppState {
-    pub(crate) engine: Arc<Mutex<Engine>>,
-    pub(crate) model: LlamaModel,
-    pub(crate) parse_reasoning: bool,
-    pub(crate) default_max_tokens: usize,
-    pub(crate) model_name: String,
-    /// Channel to push tasks to the worker thread (no engine.lock() needed).
-    pub(crate) input_tx: Sender<Box<EngineTask>>,
-}
-
-/// Start http server with Engine (in current thread), blocks until shutdown signal.
-pub async fn http_serve(
-    engine: Arc<Mutex<Engine>>,
-    host: &str,
-    port: u16,
-    shutdown_rx: tokio::sync::oneshot::Receiver<()>,
-) -> Result<(), String> {
-    let (model, parse_reasoning, default_max_tokens, model_name, input_tx) = {
-        let e = engine.lock().unwrap();
-        (
-            e.model().clone(),
-            e.parse_reasoning(),
-            e.default_max_tokens(),
-            e.model_name().to_string(),
-            e.input_tx.clone(),
-        )
-    };
-    let state = AppState {
-        engine,
-        model,
-        parse_reasoning,
-        default_max_tokens,
-        model_name,
-        input_tx,
-    };
-
-    let app = Router::new()
-        .route("/", get(handle_root))
-        .route("/health", get(handle_health))
-        .route("/models", get(handle_models))
-        .route("/v1/health", get(handle_health))
-        .route("/v1/models", get(handle_models))
-        .route("/v1/chat/completions", post(handle_chat_completions))
-        .route("/v1/responses", post(crate::responses::handle_responses))
-        .with_state(state)
-        .layer(CorsLayer::permissive());
-
-    let listener = tokio::net::TcpListener::bind((host, port))
-        .await
-        .map_err(|e| format!("failed to bind {host}:{port}: {e}"))?;
-
-    log::info!("Engine http server listening on {host}:{port}");
-
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async { drop(shutdown_rx.await) })
-        .await
-        .map_err(|e| format!("server error: {e}"))
+/// Build all Engine-related RouteEntry items.
+/// Handlers are resolved with state (.with_state) so RouteEntry contains MethodRouter<()>.
+pub(crate) fn engine_routes(engine: Arc<Mutex<Engine>>) -> Vec<RouteEntry> {
+    vec![
+        RouteEntry {
+            method: Method::GET,
+            path: "/".into(),
+            handler: get(handle_root).into(),
+        },
+        RouteEntry {
+            method: Method::GET,
+            path: "/health".into(),
+            handler: get(handle_health).with_state(engine.clone()),
+        },
+        RouteEntry {
+            method: Method::GET,
+            path: "/models".into(),
+            handler: get(handle_models).with_state(engine.clone()),
+        },
+        RouteEntry {
+            method: Method::GET,
+            path: "/v1/health".into(),
+            handler: get(handle_health).with_state(engine.clone()),
+        },
+        RouteEntry {
+            method: Method::GET,
+            path: "/v1/models".into(),
+            handler: get(handle_models).with_state(engine.clone()),
+        },
+        RouteEntry {
+            method: Method::POST,
+            path: "/v1/chat/completions".into(),
+            handler: post(handle_chat_completions).with_state(engine.clone()),
+        },
+        RouteEntry {
+            method: Method::POST,
+            path: "/v1/responses".into(),
+            handler: post(crate::responses::handle_responses).with_state(engine.clone()),
+        },
+    ]
 }
 
 async fn handle_root() -> impl IntoResponse {
     Json(json!({"name":"llm server"}))
 }
 
-async fn handle_health(State(state): State<AppState>) -> impl IntoResponse {
-    let alive = state.engine.lock().unwrap().is_alive();
+async fn handle_health(State(engine): State<Arc<Mutex<Engine>>>) -> impl IntoResponse {
+    let alive = engine.lock().unwrap().is_alive();
     if alive {
         Json(json!({"status": "ok"})).into_response()
     } else {
@@ -191,9 +176,10 @@ async fn handle_health(State(state): State<AppState>) -> impl IntoResponse {
     }
 }
 
-async fn handle_models(State(state): State<AppState>) -> impl IntoResponse {
+async fn handle_models(State(engine): State<Arc<Mutex<Engine>>>) -> impl IntoResponse {
+    let model_name = engine.lock().unwrap().model_name().to_string();
     let data = vec![ModelInfo {
-        id: state.model_name.clone(),
+        id: model_name,
         object: "model",
         created: now_unix_s(),
         owned_by: "local",
@@ -206,11 +192,11 @@ async fn handle_models(State(state): State<AppState>) -> impl IntoResponse {
 }
 
 async fn handle_chat_completions(
-    State(state): State<AppState>,
+    State(engine): State<Arc<Mutex<Engine>>>,
     Json(req): Json<CreateChatCompletionRequest>,
 ) -> Response {
     // Quick check: if the engine worker has crashed, reject immediately.
-    if !state.engine.lock().unwrap().is_alive() {
+    if !engine.lock().unwrap().is_alive() {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(oai_error("engine worker has crashed", "server_error")),
@@ -238,19 +224,24 @@ async fn handle_chat_completions(
     let is_stream = req.stream.unwrap_or(false);
     let enable_thinking = req.reasoning_effort.clone().unwrap_or_default() != ReasoningEffort::None;
 
-    let output_prepend: Vec<i32>;
+    // Extract model info from engine under lock, then release lock
+    let (model, parse_reasoning, default_max_tokens, model_name, input_tx) = {
+        let e = engine.lock().unwrap();
+        (
+            e.model().clone(),
+            e.parse_reasoning(),
+            e.default_max_tokens(),
+            e.model_name().to_string(),
+            e.input_tx.clone(),
+        )
+    };
 
-    // Use cached model info from AppState to avoid acquiring engine.lock()
-    // (worker thread may hold the lock for extended periods during inference).
-    let model = &state.model;
-    let parse_reasoning = state.parse_reasoning;
-    let default_max_tokens = state.default_max_tokens;
-    let model_name = state.model_name.clone();
+    let output_prepend: Vec<i32>;
 
     // Build prompt tokens
     let prompt_tokens = {
         match apply_chat_template(
-            model,
+            &model,
             &req.messages,
             req.tools.as_deref(),
             req.tool_choice.as_ref(),
@@ -295,7 +286,7 @@ async fn handle_chat_completions(
             .into_response();
     }
 
-    let keep_tokens = compute_keep_tokens(model, &req.messages);
+    let keep_tokens = compute_keep_tokens(&model, &req.messages);
 
     let mut task_config = TaskConfig::new()
         .max_tokens(
@@ -326,7 +317,7 @@ async fn handle_chat_completions(
             .unwrap_or(llama_cpp_ffi::ToolChoice::Auto);
 
         if tc != llama_cpp_ffi::ToolChoice::None {
-            task_config = task_config.grammar(GrammarConfig::new(&state.model, tools, tc));
+            task_config = task_config.grammar(GrammarConfig::new(&model, tools, tc));
         }
     }
 
@@ -336,7 +327,7 @@ async fn handle_chat_completions(
     // Save task_id before moving task_config into EngineTask.
     let task_id = task_config.task_id;
 
-    // Push task directly via channel to avoid acquiring engine.lock()
+    // Push task via channel to avoid acquiring engine.lock()
     // (worker thread may hold the lock for extended periods during inference).
     let (output_tx, output_rx) = crossbeam::channel::bounded::<EngineReply>(1);
     let task = Box::new(EngineTask {
@@ -347,7 +338,7 @@ async fn handle_chat_completions(
         timestamp: None,
     });
 
-    let rx = match state.input_tx.send(task) {
+    let rx = match input_tx.send(task) {
         Ok(()) => output_rx,
         Err(e) => {
             return (
@@ -380,7 +371,7 @@ async fn handle_chat_completions(
         #[cfg(feature = "enable_eval_log")]
         let start_time_clone = start_time;
 
-        let engine_for_worker = state.engine.clone();
+        let engine_for_worker = engine.clone();
         tokio::task::spawn_blocking(move || {
             let mut client_disconnected = false;
 
@@ -406,7 +397,6 @@ async fn handle_chat_completions(
                         ChunkSSE::Done => {
                             #[cfg(feature = "enable_eval_log")]
                             {
-                                // 流式结束，记录评估日志
                                 let latency = start_time_clone.elapsed().as_millis();
                                 log_eval_response_streaming(
                                     &request_id_clone,
@@ -430,7 +420,7 @@ async fn handle_chat_completions(
                 },
             );
 
-            // If the client disconnected (tx.send failed), cancel the engine task.
+            // If the client disconnected, cancel the engine task.
             if client_disconnected {
                 log::info!(
                     "[http] streaming: client disconnected, cancelling task id={}",
@@ -451,7 +441,7 @@ async fn handle_chat_completions(
         // non-streaming
         // CancelGuard ensures the task is cancelled if the client disconnects
         // while the blocking task is waiting for engine replies.
-        let mut guard = CancelGuard::new(state.engine.clone(), task_id);
+        let mut guard = CancelGuard::new(engine.clone(), task_id);
 
         let join = tokio::task::spawn_blocking(move || {
             collect_engine_reply_to_json(
@@ -477,15 +467,12 @@ async fn handle_chat_completions(
         });
 
         let result = join.await;
-        // Disarm the guard on any completed outcome (success or known error).
-        // If the future was dropped (client disconnected), guard will fire instead.
         guard.disarm();
 
         match result {
             Ok(Ok(val)) => {
                 #[cfg(feature = "enable_eval_log")]
                 {
-                    // 记录评估日志
                     let latency = start_time.elapsed().as_millis();
                     log_eval_response(
                         &request_id,
@@ -529,7 +516,6 @@ fn log_eval_response(
 ) {
     use async_openai::types::chat::Role;
 
-    // 从响应中提取内容
     let mut output = String::new();
     let mut reasoning = None;
     let mut tool_calls = Vec::new();
@@ -638,7 +624,6 @@ fn log_eval_response_streaming(
 ) {
     use async_openai::types::chat::Role;
 
-    // 流式响应的日志记录（简化版，因为没有完整响应体）
     let input = req
         .messages
         .iter()
@@ -655,7 +640,7 @@ fn log_eval_response_streaming(
         domain: "chat.stream".to_string(),
         source: "serve".to_string(),
         input,
-        output: String::new(), // 流式响应在这里无法获取完整输出
+        output: String::new(),
         reasoning: None,
         tool_calls: None,
         latency_ms,

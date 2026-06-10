@@ -17,25 +17,27 @@ use uuid::Uuid;
 
 use crate::{
     helpers::{PromptThinkPattern, apply_chat_template, detect_prompt_think_pattern},
-    llm::engine::{Engine, EngineReply, GrammarConfig, TaskConfig},
+    llm::engine::{
+        Engine, EngineReply, GrammarConfig, TaskConfig,
+        serve::{
+            CancelGuard, DEFAULT_TEMPERATURE, DEFAULT_TOP_P, ERR_CANCELLED, ERR_ENGINE_SHUTDOWN,
+            STREAM_TIMEOUT, oai_error,
+        },
+    },
     output::{
         ChunkSSE, ParserKind, collect_engine_reply_to_json, redirect_engine_reply_to_responses_sse,
     },
     responses::stream::sse_event,
-    serve::{
-        AppState, DEFAULT_TEMPERATURE, DEFAULT_TOP_P, ERR_CANCELLED, ERR_ENGINE_SHUTDOWN,
-        STREAM_TIMEOUT, oai_error,
-    },
 };
 
 use super::convert::{input_item_to_chat_message, responses_tools_to_chat_tools};
 
 pub async fn handle_responses(
-    State(state): State<AppState>,
+    State(engine): State<Arc<Mutex<Engine>>>,
     Json(req): Json<CreateResponse>,
 ) -> Response {
     // Quick check: if the engine worker has crashed, reject immediately.
-    if !state.engine.lock().unwrap().is_alive() {
+    if !engine.lock().unwrap().is_alive() {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(oai_error("engine worker has crashed", "server_error")),
@@ -87,16 +89,16 @@ pub async fn handle_responses(
 
     // Lock engine in a block so MutexGuard is dropped before any await
     {
-        let engine = state.engine.lock().unwrap();
+        let eng = engine.lock().unwrap();
 
         max_tokens = req
             .max_output_tokens
-            .unwrap_or(engine.default_max_tokens() as u32) as usize;
+            .unwrap_or(eng.default_max_tokens() as u32) as usize;
         temperature = req.temperature.unwrap_or(DEFAULT_TEMPERATURE);
         top_p = req.top_p.unwrap_or(DEFAULT_TOP_P);
 
         let prompt_tokens = match apply_chat_template(
-            engine.model(),
+            eng.model(),
             &messages,
             tools.as_deref(),
             tool_choice.as_ref(),
@@ -108,16 +110,13 @@ pub async fn handle_responses(
             None,
         ) {
             Ok(prompt) => {
-                output_prepend = if enable_thinking && engine.parse_reasoning() {
-                    let tags = engine.model().arch().think_boundaries();
+                output_prepend = if enable_thinking && eng.parse_reasoning() {
+                    let tags = eng.model().arch().think_boundaries();
                     if detect_prompt_think_pattern(&prompt, tags.0, tags.1)
                         == PromptThinkPattern::Open
                     {
-                        engine.model().tokenize(
-                            CString::new(tags.0).unwrap().as_c_str(),
-                            false,
-                            false,
-                        )
+                        eng.model()
+                            .tokenize(CString::new(tags.0).unwrap().as_c_str(), false, false)
                     } else {
                         vec![]
                     }
@@ -125,8 +124,7 @@ pub async fn handle_responses(
                     vec![]
                 };
 
-                engine
-                    .model()
+                eng.model()
                     .tokenize(CString::new(prompt).unwrap().as_c_str(), false, true)
             }
             Err(e) => {
@@ -157,7 +155,7 @@ pub async fn handle_responses(
 
         if let Some(tools) = tools.as_ref().filter(|t| !t.is_empty()) {
             task_config = task_config.grammar(GrammarConfig::new(
-                state.engine.lock().unwrap().model(),
+                eng.model(),
                 tools,
                 llama_cpp_ffi::ToolChoice::Auto,
             ));
@@ -165,12 +163,12 @@ pub async fn handle_responses(
 
         n_prompt_tokens = prompt_tokens.len();
         respond_id = format!("res-{}", Uuid::new_v4().simple());
-        model_name = engine.model_name().to_string();
+        model_name = eng.model_name().to_string();
 
         // Save task_id before task_config is moved into push_task.
         task_id = task_config.task_id;
 
-        rx = match engine.push_task(prompt_tokens, task_config, output_prepend) {
+        rx = match eng.push_task(prompt_tokens, task_config, output_prepend) {
             Ok(r) => r,
             Err(e) => {
                 return (
@@ -188,14 +186,14 @@ pub async fn handle_responses(
             respond_id,
             model_name,
             n_prompt_tokens,
-            state.engine.clone(),
+            engine.clone(),
             task_id,
         )
     } else {
         // non-stream
         // CancelGuard ensures the task is cancelled if the client disconnects
         // while the blocking task is waiting for engine replies.
-        let mut guard = crate::serve::CancelGuard::new(state.engine.clone(), task_id);
+        let mut guard = CancelGuard::new(engine.clone(), task_id);
 
         let join = tokio::task::spawn_blocking(move || {
             collect_engine_reply_to_json(

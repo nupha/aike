@@ -16,7 +16,6 @@ mod output;
 mod repl;
 mod request;
 mod responses;
-mod serve;
 mod timeout;
 mod worker;
 

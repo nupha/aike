@@ -7,6 +7,7 @@
 mod cache;
 mod context;
 mod output;
+pub(crate) mod serve;
 mod slot;
 mod task;
 mod worker;
