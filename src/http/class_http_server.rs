@@ -54,7 +54,7 @@ struct IncomingRequest {
     response_tx: oneshot::Sender<HttpResponseMessage>,
 }
 
-pub(crate) struct HttpServerPayload {
+pub(super) struct HttpServerPayload {
     engine: Option<Arc<Mutex<Engine>>>,
     rust_routes: Vec<RouteEntry>,
     js_routes: Vec<(Method, String, Object)>,
@@ -701,15 +701,4 @@ def_native_object!(
 #[distributed_slice(USER_CLASS_DEFS)]
 fn register_http_server(rt: &mut Runtime) -> Result<ClassID, i32> {
     JSHttpServer::register(rt)
-}
-
-const MOD_HTTP_ENTRIES: &[FieldDef] = &[FieldDef::CLASS(
-    "HttpServer",
-    JSHttpServer::class_id,
-    zuqe::JS_PROP_ENUMERABLE,
-)];
-
-pub fn init_mod_http(ctx: &mut ScopedContext) -> Result<(), i32> {
-    ctx.create_module("http", MOD_HTTP_ENTRIES)?;
-    Ok(())
 }

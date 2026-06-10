@@ -265,7 +265,7 @@ async fn main() -> ExitCode {
                 JSHttpResponse::class_id(),
             ])?;
 
-            // register native modules
+            // initialize native modules
             init_mod_llm(cx)?;
             init_mod_fs(cx)?;
             init_mod_http(cx)?;
