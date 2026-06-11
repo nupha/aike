@@ -6,7 +6,7 @@
 // JS routes are delegated to axum via crossbeam channel + handler_index lookup.
 
 use std::{
-    cell::{Cell, RefCell},
+    cell::Cell,
     collections::HashMap,
     sync::{
         Arc, Mutex,
@@ -24,8 +24,8 @@ use crossbeam::channel;
 use linkme::distributed_slice;
 use tokio::sync::oneshot;
 use zuqe::{
-    CallContext, Callback, ClassCtorDef, ClassID, FieldDef, IntOrFloat, JSResult, JSValue,
-    NativeObject, Object, PollSender, Runtime, ScopedContext,
+    CallContext, Callback, ClassCtorDef, ClassID, FieldDef, IntOrFloat, JSResult, JSValue, Object,
+    PollSender, Runtime, ScopedContext,
     builtins::promise::Promise,
     def_native_object,
     gc_lite::{GcTrace, GcTraceCtx},
