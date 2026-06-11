@@ -418,35 +418,8 @@ fn js_module_loader(
     _: *mut std::ffi::c_void,
 ) -> Result<ModuleDef, i32> {
     if file_name.ends_with(".dylib") || file_name.ends_with(".so") || file_name.ends_with(".dll") {
-        // let lib = unsafe { Library::new(file_name) }.map_err(|_| {
-        //     ctx.throw_reference_error(&format!(
-        //         "could not load module filename '{file_name}' as shared library"
-        //     ));
-        //     -1
-        // })?;
-
-        // unsafe {
-        //     let init_fn = match lib.get::<ZqInitModuleFn>(c"js_init_module") {
-        //         Ok(sym) => sym,
-        //         Err(_) => {
-        //             ctx.throw_reference_error(&format!(
-        //                 "could not load module filename '{file_name}': js_init_module not found"
-        //             ));
-        //             return Err(-1);
-        //         }
-        //     };
-
-        //     let ctx_ref: ZqContextRef = ctx as *mut ScopedContext as ZqContextRef;
-        //     let m: ZqModuleRef = init_fn(ctx_ref, CString::new(file_name).unwrap().as_ptr());
-        //     if m.is_null() {
-        //         log::error!("could not load library '{file_name}': initialization error");
-        //         Err(-1)
-        //     } else {
-        //         ctx.add_shared_library(lib);
-        //         Ok(unsafe { *Box::from_raw(m as *mut ModuleDef) })
-        //     }
-        // }
-        todo!()
+        ctx.throw_internal_error("dynamic library loading not implemented");
+        Err(-1)
     } else {
         // js file
         match std::fs::read(file_name) {
