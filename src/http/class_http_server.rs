@@ -15,10 +15,11 @@ use std::{
 };
 
 use axum::{
+    Router,
     body::Body,
     extract::Request,
     response::{IntoResponse, Response as AxumResponse},
-    routing::{delete, get, head, options, patch, post, put},
+    routing::{MethodRouter, delete, get, head, options, patch, post, put},
 };
 use crossbeam::channel;
 use linkme::distributed_slice;
@@ -35,7 +36,7 @@ use crate::{
     USER_CLASS_DEFS,
     llm::{
         JSEngine,
-        engine::{Engine, serve::openai_engine_routes},
+        engine::{Engine, serve::engine_openai_router},
     },
 };
 
@@ -43,7 +44,7 @@ use super::{
     Method,
     request::{HttpRequestPayload, JSHttpRequest},
     response::{HttpResponseMessage, HttpResponsePayload, JSHttpResponse, get_res_payload},
-    server::{RouteEntry, spawn_http_server},
+    server::spawn_http_server,
 };
 
 /// Request message sent from axum delegate fn to the JS HTTP Server Job.
@@ -58,7 +59,7 @@ struct IncomingRequest {
 }
 
 pub(super) struct HttpServerPayload {
-    engine: Option<Arc<Mutex<Engine>>>,
+    openai: Option<(Arc<Mutex<Engine>>, String)>,
     js_routes: Vec<(Method, String, Object)>,
     shutdown_tx: Option<oneshot::Sender<()>>,
     is_running: Arc<AtomicBool>,
@@ -130,32 +131,65 @@ fn get_server_payload_mut<'a>(
 }
 
 fn js_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let mut engine: Option<Arc<Mutex<Engine>>> = None;
+    let mut openai: Option<(Arc<Mutex<Engine>>, String)> = None;
 
-    // Parse optional { engine } from first argument
     if cc.length() > 0 {
-        if let Some(opts) = cc.arg(0).as_object() {
-            if let Ok(mut v) = opts.get_property_str(ctx, "engine") {
-                if !v.is_undefined_or_null() {
-                    // Take engine Arc<Mutex<Engine>> from JSEngine — detaches it
-                    match v.as_native_object_mut::<JSEngine>() {
-                        Some(e) => match e.take_payload() {
-                            Some(payload) => engine = Some(*payload),
+        let arg0 = cc.arg(0);
+        let opts = arg0.as_object().ok_or_else(|| {
+            ctx.throw_type_error("options must be an object");
+            -1
+        })?;
+
+        // Parse optional { openai: { engine, mountPath } }
+        if let Ok(openai_val) = opts.get_property_str(ctx, "openai") {
+            if openai_val.is_undefined_or_null() {
+                // null/undefined → no engine service, that's fine
+            } else if let Some(openai_obj) = openai_val.as_object() {
+                // engine is required inside openai
+                let engine = {
+                    if let Ok(mut v) = openai_obj.get_property_str(ctx, "engine") {
+                        match v.as_native_object_mut::<JSEngine>() {
+                            Some(e) => match e.take_payload() {
+                                Some(payload) => *payload,
+                                None => {
+                                    ctx.throw_type_error("Engine object has already been detached");
+                                    return Err(-1);
+                                }
+                            },
                             None => {
-                                ctx.throw_type_error("Engine object has already been detached");
+                                ctx.throw_type_error("openai.engine must be an Engine instance");
                                 return Err(-1);
                             }
-                        },
-                        None => {
-                            ctx.throw_type_error("expect Engine instance");
+                        }
+                    } else {
+                        ctx.throw_type_error("openai.engine is required");
+                        return Err(-1);
+                    }
+                };
+
+                // mountPath is required inside openai
+                let mp = openai_obj.get_property_str(ctx, "mountPath")?;
+                let mount_path = match mp.to_string(ctx) {
+                    Ok(s) => {
+                        let text = s.content().encode_utf8(false).to_string();
+                        if !text.starts_with('/') {
+                            ctx.throw_type_error("openai.mountPath must start with '/'");
                             return Err(-1);
                         }
+                        text
                     }
-                }
+                    Err(_) => {
+                        ctx.throw_type_error("openai.mountPath is required");
+                        return Err(-1);
+                    }
+                };
+
+                openai = Some((engine, mount_path));
+            } else {
+                // openai present but not an object → error
+                ctx.throw_type_error("openai must be an object");
+                return Err(-1);
             }
-        } else {
-            ctx.throw_type_error("options must be an object");
-            return Err(-1);
         }
     }
 
@@ -163,7 +197,7 @@ fn js_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         ctx,
         cc.this(),
         Box::new(HttpServerPayload {
-            engine,
+            openai,
             js_routes: Vec::new(),
             shutdown_tx: None,
             is_running: Arc::new(AtomicBool::new(false)),
@@ -257,7 +291,7 @@ fn express_to_axum_path(path: &str) -> String {
     result
 }
 
-/// Create a RouteEntry that delegates to a JS handler via channel.
+/// Create a (path, MethodRouter) pair that delegates to a JS handler via channel.
 ///
 /// The closure captures only `handler_index: usize` and `Sender` — both Send + Sync.
 /// JS Object stays in the JS thread handler lookup table.
@@ -266,7 +300,7 @@ fn delegate_js_route(
     path: String,
     handler_index: usize,
     request_tx: channel::Sender<IncomingRequest>,
-) -> RouteEntry {
+) -> (String, MethodRouter<()>) {
     let path = express_to_axum_path(&path);
     let tx = request_tx;
 
@@ -362,7 +396,7 @@ fn delegate_js_route(
         Method::HEAD => head(handler_fn),
         Method::OPTIONS => options(handler_fn),
     };
-    RouteEntry { path, handler }
+    (path, handler)
 }
 
 fn js_handler_then(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -422,20 +456,19 @@ fn js_listen(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     }
 
     // Extract data from payload (separate borrow scope)
-    let (js_routes, engine) = {
+    let (js_routes, openai) = {
         let data = get_server_payload_mut(ctx, &mut this)?;
         data.frozen = true;
-        (data.js_routes.clone(), data.engine.clone())
+        (data.js_routes.clone(), data.openai.clone())
     };
 
-    // Rebuild engine routes on every listen (supports shutdown → re-listen cycle)
-    let openai_routes = match engine {
-        Some(ref eng) => openai_engine_routes(eng.clone()),
-        None => Vec::new(),
-    };
-
-    // Merge routes: Rust (Engine) + JS delegate
-    let mut all_routes = openai_routes;
+    // Build the base router. If openai engine + mountPath provided, nest
+    // engine routes under the mount path. JS routes are added at the top level.
+    let mut router: Router = Router::new();
+    if let Some((ref eng, ref mount_path)) = openai {
+        let engine_router = engine_openai_router(eng.clone());
+        router = router.nest(mount_path, engine_router);
+    }
 
     let mut js_rx_opt: Option<channel::Receiver<IncomingRequest>> = None;
     let mut handler_table_opt: Option<Vec<Object>> = None;
@@ -444,19 +477,20 @@ fn js_listen(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         let (js_tx, js_rx) = channel::unbounded::<IncomingRequest>();
 
         // Build handler lookup table (Object stays on JS thread)
-        let handler_table: Vec<Object> = js_routes.iter().map(|(_, _, h)| h.clone()).collect();
+        let handler_table: Vec<Object> = js_routes.iter().map(|(_, _, h)| *h).collect();
 
-        // Delegate each JS route to a RouteEntry
+        // Delegate each JS route and add to router
         for (i, (method, path, _)) in js_routes.iter().enumerate() {
-            all_routes.push(delegate_js_route(*method, path.clone(), i, js_tx.clone()));
+            let (path, handler) = delegate_js_route(*method, path.clone(), i, js_tx.clone());
+            router = router.route(&path, handler);
         }
 
         js_rx_opt = Some(js_rx);
         handler_table_opt = Some(handler_table);
     }
 
-    // Spawn the unified axum service first
-    let handle = match spawn_http_server(all_routes, host, port) {
+    // Spawn the unified axum service
+    let handle = match spawn_http_server(router, host, port) {
         Ok(h) => h,
         Err(e) => {
             ctx.throw_internal_error(&e);

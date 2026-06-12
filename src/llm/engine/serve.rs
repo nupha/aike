@@ -11,7 +11,7 @@ use std::{
 
 use async_openai::types::chat::{CreateChatCompletionRequest, ReasoningEffort};
 use axum::{
-    Json,
+    Json, Router,
     extract::State,
     http::StatusCode,
     response::{
@@ -31,7 +31,6 @@ use crate::{
         PromptThinkPattern, apply_chat_template, compute_keep_tokens, detect_prompt_think_pattern,
         now_unix_s, to_lark_tool_choice,
     },
-    http::server::RouteEntry,
     llm::engine::{Engine, EngineReply, EngineTask, GrammarConfig, TaskConfig},
     output::{
         ChunkSSE, ParserKind, collect_engine_reply_to_json, redirect_engine_reply_to_chat_sse,
@@ -115,39 +114,23 @@ struct ModelInfo {
     owned_by: &'static str,
 }
 
-/// Build all Engine-related RouteEntry items.
-/// Handlers are resolved with state (.with_state) so RouteEntry contains MethodRouter<()>.
-pub(crate) fn openai_engine_routes(engine: Arc<Mutex<Engine>>) -> Vec<RouteEntry> {
-    vec![
-        RouteEntry {
-            path: "/".into(),
-            handler: get(handle_root),
-        },
-        RouteEntry {
-            path: "/health".into(),
-            handler: get(handle_health).with_state(engine.clone()),
-        },
-        RouteEntry {
-            path: "/models".into(),
-            handler: get(handle_models).with_state(engine.clone()),
-        },
-        RouteEntry {
-            path: "/v1/health".into(),
-            handler: get(handle_health).with_state(engine.clone()),
-        },
-        RouteEntry {
-            path: "/v1/models".into(),
-            handler: get(handle_models).with_state(engine.clone()),
-        },
-        RouteEntry {
-            path: "/v1/chat/completions".into(),
-            handler: post(handle_chat_completions).with_state(engine.clone()),
-        },
-        RouteEntry {
-            path: "/v1/responses".into(),
-            handler: post(crate::responses::handle_responses).with_state(engine.clone()),
-        },
-    ]
+/// Build all Engine-related routes as an axum Router.
+/// Handlers already have state resolved via .with_state().
+pub(crate) fn engine_openai_router(engine: Arc<Mutex<Engine>>) -> Router {
+    Router::new()
+        .route("/", get(handle_root))
+        .route("/health", get(handle_health).with_state(engine.clone()))
+        .route("/models", get(handle_models).with_state(engine.clone()))
+        .route("/v1/health", get(handle_health).with_state(engine.clone()))
+        .route("/v1/models", get(handle_models).with_state(engine.clone()))
+        .route(
+            "/v1/chat/completions",
+            post(handle_chat_completions).with_state(engine.clone()),
+        )
+        .route(
+            "/v1/responses",
+            post(crate::responses::handle_responses).with_state(engine.clone()),
+        )
 }
 
 async fn handle_root() -> impl IntoResponse {
