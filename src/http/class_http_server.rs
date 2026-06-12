@@ -131,73 +131,11 @@ fn get_server_payload_mut<'a>(
 }
 
 fn js_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let mut openai: Option<(Arc<Mutex<Engine>>, String)> = None;
-
-    if cc.length() > 0 {
-        let arg0 = cc.arg(0);
-        let opts = arg0.as_object().ok_or_else(|| {
-            ctx.throw_type_error("options must be an object");
-            -1
-        })?;
-
-        // Parse optional { openai: { engine, mountPath } }
-        if let Ok(openai_val) = opts.get_property_str(ctx, "openai") {
-            if openai_val.is_undefined_or_null() {
-                // null/undefined → no engine service, that's fine
-            } else if let Some(openai_obj) = openai_val.as_object() {
-                // engine is required inside openai
-                let engine = {
-                    if let Ok(mut v) = openai_obj.get_property_str(ctx, "engine") {
-                        match v.as_native_object_mut::<JSEngine>() {
-                            Some(e) => match e.take_payload() {
-                                Some(payload) => *payload,
-                                None => {
-                                    ctx.throw_type_error("Engine object has already been detached");
-                                    return Err(-1);
-                                }
-                            },
-                            None => {
-                                ctx.throw_type_error("openai.engine must be an Engine instance");
-                                return Err(-1);
-                            }
-                        }
-                    } else {
-                        ctx.throw_type_error("openai.engine is required");
-                        return Err(-1);
-                    }
-                };
-
-                // mountPath is required inside openai
-                let mp = openai_obj.get_property_str(ctx, "mountPath")?;
-                let mount_path = match mp.to_string(ctx) {
-                    Ok(s) => {
-                        let text = s.content().encode_utf8(false).to_string();
-                        if !text.starts_with('/') {
-                            ctx.throw_type_error("openai.mountPath must start with '/'");
-                            return Err(-1);
-                        }
-                        text
-                    }
-                    Err(_) => {
-                        ctx.throw_type_error("openai.mountPath is required");
-                        return Err(-1);
-                    }
-                };
-
-                openai = Some((engine, mount_path));
-            } else {
-                // openai present but not an object → error
-                ctx.throw_type_error("openai must be an object");
-                return Err(-1);
-            }
-        }
-    }
-
     JSHttpServer::new_instance(
         ctx,
         cc.this(),
         Box::new(HttpServerPayload {
-            openai,
+            openai: None,
             js_routes: Vec::new(),
             shutdown_tx: None,
             is_running: Arc::new(AtomicBool::new(false)),
@@ -205,6 +143,54 @@ fn js_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         }),
     )
     .map(|v| v.into())
+}
+
+/// HttpServer.openai(engine, mountPath) — mount OpenAI-compatible routes.
+///
+/// `engine` must be an Engine instance (ownership is transferred).
+/// `mountPath` must start with '/', e.g. "/v1".
+/// Calling after listen() raises an error.
+fn js_openai(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let mut this = cc.this();
+
+    // Validate engine argument
+    let mut v = cc.arg(0);
+    let engine = match v.as_native_object_mut::<JSEngine>() {
+        Some(e) => match e.take_payload() {
+            Some(payload) => *payload,
+            None => {
+                ctx.throw_type_error("Engine object has already been detached");
+                return Err(-1);
+            }
+        },
+        None => {
+            ctx.throw_type_error("engine must be an Engine instance");
+            return Err(-1);
+        }
+    };
+
+    // Validate mountPath argument
+    let mount_path = {
+        let s = cc.arg(1).to_string(ctx).map_err(|_| {
+            ctx.throw_type_error("mountPath must be a string");
+            -1
+        })?;
+        let text = s.content().encode_utf8(false).to_string();
+        if !text.starts_with('/') {
+            ctx.throw_type_error("mountPath must start with '/'");
+            return Err(-1);
+        }
+        text
+    };
+
+    let p = get_server_payload_mut(ctx, &mut this)?;
+    if p.frozen {
+        ctx.throw_type_error("cannot call openai() after listen()");
+        return Err(-1);
+    }
+    p.openai = Some((engine, mount_path));
+
+    Ok(this)
 }
 
 fn js_route_add(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -710,6 +696,7 @@ fn hex_val(b: u8) -> Option<u8> {
 }
 
 const SERVER_PROTO: &[FieldDef] = &[
+    FieldDef::FUNC("openai", 2, js_openai, 0),
     FieldDef::FUNC("get", 2, js_route_add, 0),
     FieldDef::FUNC("post", 2, js_route_add, 1),
     FieldDef::FUNC("put", 2, js_route_add, 2),
@@ -728,7 +715,7 @@ def_native_object!(
     JSHttpServer,
     Box<HttpServerPayload>,
     SERVER_PROTO,
-    constructor: ClassCtorDef::new(js_constructor, 0, true),
+    constructor: ClassCtorDef::new(js_constructor, 0, false),
     on_payload_gc: HttpServerPayload::gc_trace
 );
 
