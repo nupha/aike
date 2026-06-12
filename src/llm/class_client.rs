@@ -176,7 +176,7 @@ fn js_client_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         extra_body,
     });
 
-    JSLlmClient::new_instance(ctx, new_target, Box::new(payload)).and_then(|mut o| {
+    JSLlmClient::new_instance(ctx, new_target, payload).and_then(|mut o| {
         // Initialize hidden internal property for responseNormalizer,
         // pre-created so the setter can use simple set_property_str.
         o.as_object_mut().define_property_value_str(
@@ -736,7 +736,7 @@ const CLASS_CLIENT_PROTO: &[FieldDef] = &[
 def_native_object!(
     "Client",
     JSLlmClient,
-    Box<Arc<ClientPayload>>,
+    Arc<ClientPayload>,
     CLASS_CLIENT_PROTO,
     constructor: ClassCtorDef::new(js_client_constructor, 1, false)
 );

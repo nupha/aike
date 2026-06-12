@@ -1061,24 +1061,19 @@ const CLASS_IO_HANDLE_PROTO: &[FieldDef] = &[
     FieldDef::FUNC("[Symbol.asyncIterator]", 0, js_fh_asyncIterator, 0),
 ];
 
-def_native_object!(
-    "IoHandle",
-    JSIoHandle,
-    Box<IoPayload>,
-    CLASS_IO_HANDLE_PROTO
-);
+def_native_object!("IoHandle", JSIoHandle, IoPayload, CLASS_IO_HANDLE_PROTO);
 
 impl JSIoHandle {
     pub fn new_instance_stdin(ctx: &mut ScopedContext) -> Result<Self, i32> {
-        Self::new_instance(ctx, JSValue::UNDEFINED, Box::new(IoPayload::Stdin))
+        Self::new_instance(ctx, JSValue::UNDEFINED, IoPayload::Stdin)
     }
 
     pub fn new_instance_stdout(ctx: &mut ScopedContext) -> Result<Self, i32> {
-        Self::new_instance(ctx, JSValue::UNDEFINED, Box::new(IoPayload::Stdout))
+        Self::new_instance(ctx, JSValue::UNDEFINED, IoPayload::Stdout)
     }
 
     pub fn new_instance_stderr(ctx: &mut ScopedContext) -> Result<Self, i32> {
-        Self::new_instance(ctx, JSValue::UNDEFINED, Box::new(IoPayload::Stderr))
+        Self::new_instance(ctx, JSValue::UNDEFINED, IoPayload::Stderr)
     }
 
     /// Create a IoHandle from an already-opened tokio::fs::File
@@ -1090,10 +1085,7 @@ impl JSIoHandle {
         Self::new_instance(
             ctx,
             new_target,
-            Box::new(IoPayload::File(
-                Arc::new(tokio::sync::Mutex::new(file)),
-                alloc_fd(),
-            )),
+            IoPayload::File(Arc::new(tokio::sync::Mutex::new(file)), alloc_fd()),
         )
     }
 
@@ -1107,10 +1099,7 @@ impl JSIoHandle {
         Self::new_instance(
             ctx,
             JSValue::UNDEFINED,
-            Box::new(IoPayload::PipeRead(
-                Arc::new(tokio::sync::Mutex::new(Box::new(reader))),
-                fd,
-            )),
+            IoPayload::PipeRead(Arc::new(tokio::sync::Mutex::new(Box::new(reader))), fd),
         )
     }
 
@@ -1124,10 +1113,7 @@ impl JSIoHandle {
         Self::new_instance(
             ctx,
             JSValue::UNDEFINED,
-            Box::new(IoPayload::PipeWrite(
-                Arc::new(tokio::sync::Mutex::new(Box::new(writer))),
-                fd,
-            )),
+            IoPayload::PipeWrite(Arc::new(tokio::sync::Mutex::new(Box::new(writer))), fd),
         )
     }
 }

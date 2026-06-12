@@ -65,8 +65,7 @@ fn get_decoder<'a>(
         })
 }
 
-/// Constructor
-fn js_text_decoder_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+fn js_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let new_target = cc.this();
 
     // Parse encoding
@@ -107,13 +106,13 @@ fn js_text_decoder_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSRe
     JSTextDecoder::new_instance(
         ctx,
         new_target,
-        Box::new(TextDecoderPayload {
+        TextDecoderPayload {
             encoding,
             fatal,
             ignore_bom,
             bom_handled: Cell::new(false),
             pending: RefCell::new(Vec::new()),
-        }),
+        },
     )
     .map(JSValue::from)
 }
@@ -448,9 +447,9 @@ const CLASS_TEXT_DECODER_PROTO: &[FieldDef] = &[
 def_native_object!(
     "TextDecoder",
     JSTextDecoder,
-    Box<TextDecoderPayload>,
+    TextDecoderPayload,
     CLASS_TEXT_DECODER_PROTO,
-    constructor: ClassCtorDef::new(js_text_decoder_constructor, 2, true).expose_to_global()
+    constructor: ClassCtorDef::new(js_constructor, 2, true).expose_to_global()
 );
 
 #[distributed_slice(USER_CLASS_DEFS)]

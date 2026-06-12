@@ -171,11 +171,8 @@ pub fn js_model_createSamplerChain(ctx: &mut ScopedContext, cc: CallContext) -> 
     chain.add_sampler(&SamplerKind::Dist(0));
     chain.finalize_samplers();
 
-    let mut obj = JSSamplerChain::new_instance(
-        ctx,
-        JSValue::UNDEFINED,
-        Box::new(Arc::new(Mutex::new(chain))),
-    )?;
+    let mut obj =
+        JSSamplerChain::new_instance(ctx, JSValue::UNDEFINED, Arc::new(Mutex::new(chain)))?;
     obj.define_property_value_str(ctx, "model", this, JS_PROP_ENUMERABLE)?;
 
     Ok(obj.into())
@@ -337,7 +334,7 @@ const CLASS_SAMPLER_CHAIN_PROTO: &[FieldDef] = &[
 def_native_object!(
     "SamplerChain",
     JSSamplerChain,
-    Box<Arc<Mutex<SamplerChain>>>,
+    Arc<Mutex<SamplerChain>>,
     CLASS_SAMPLER_CHAIN_PROTO
 );
 

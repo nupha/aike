@@ -149,9 +149,9 @@ pub(crate) fn js_request(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             let mut resp_obj = JSResponse::new_instance(
                 cx,
                 JSValue::UNDEFINED,
-                Box::new(ResponseData {
+                ResponseData {
                     body_rx: Some(body_rx),
-                }),
+                },
             )?;
 
             resp_obj.define_property_value_str(
@@ -382,12 +382,7 @@ const RESPONSE_PROTO: &[FieldDef] = &[
     FieldDef::FUNC("json", 0, js_response_body_as, BODY_AS_JSON as i16),
 ];
 
-def_native_object!(
-    "HttpResponse",
-    JSResponse,
-    Box<ResponseData>,
-    RESPONSE_PROTO
-);
+def_native_object!("HttpResponse", JSResponse, ResponseData, RESPONSE_PROTO);
 
 #[distributed_slice(USER_CLASS_DEFS)]
 fn register_class_response(rt: &mut Runtime) -> Result<ClassID, i32> {

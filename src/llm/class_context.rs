@@ -433,7 +433,7 @@ fn js_context_createEngine(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
             eng_params.cache_ram_mb * 1024 * 1024,
         );
 
-        let mut engine_obj = JSEngine::new_instance(ctx, JSValue::UNDEFINED, Box::new(engine))?;
+        let mut engine_obj = JSEngine::new_instance(ctx, JSValue::UNDEFINED, engine)?;
         let _ = engine_obj.define_property_value_str(ctx, "model", model_val, JS_PROP_ENUMERABLE);
 
         Ok(engine_obj.into())
@@ -479,7 +479,7 @@ const CLASS_CONTEXT_PROTO: &[FieldDef] = &[
 def_native_object!(
     "Context",
     JSLlmContext,
-    Box<Arc<Mutex<Option<LlamaContext>>>>,
+    Arc<Mutex<Option<LlamaContext>>>,
     CLASS_CONTEXT_PROTO
 );
 

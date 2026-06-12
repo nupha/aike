@@ -269,7 +269,7 @@ const CRON_JOB_PROTO: &[FieldDef] = &[FieldDef::FUNC("cancel", 0, js_cron_job_ca
 def_native_object!(
     "CronJob",
     JSCronJob,
-    Box<CronJobPayload>,
+    CronJobPayload,
     CRON_JOB_PROTO,
     on_payload_gc: CronJobPayload::gc_trace
 );
@@ -334,12 +334,12 @@ pub(super) fn js_schedule(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
     let job_instance = JSCronJob::new_instance(
         ctx,
         JSValue::UNDEFINED,
-        Box::new(CronJobPayload {
+        CronJobPayload {
             id,
             name,
             pattern: pattern_str,
             active: true,
-        }),
+        },
     )?;
     let job_val: JSValue = job_instance.into();
 

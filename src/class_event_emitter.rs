@@ -52,9 +52,9 @@ fn js_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     JSEventEmitter::new_instance(
         ctx,
         cc.this(),
-        Box::new(EmitterPayload {
+        EmitterPayload {
             listeners: RefCell::new(HashMap::new()),
-        }),
+        },
     )
     .map(JSValue::from)
 }
@@ -224,7 +224,7 @@ const CLASS_EVENT_EMITTER_PROTO: &[FieldDef] = &[
 def_native_object!(
     "EventEmitter",
     JSEventEmitter,
-    Box<EmitterPayload>,
+    EmitterPayload,
     CLASS_EVENT_EMITTER_PROTO,
     constructor: ClassCtorDef::new(js_constructor, 0, true).expose_to_global(),
     on_payload_gc: EmitterPayload::gc_trace

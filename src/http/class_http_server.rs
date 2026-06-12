@@ -134,13 +134,13 @@ fn js_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     JSHttpServer::new_instance(
         ctx,
         cc.this(),
-        Box::new(HttpServerPayload {
+        HttpServerPayload {
             openai: None,
             js_routes: Vec::new(),
             shutdown_tx: None,
             is_running: Arc::new(AtomicBool::new(false)),
             frozen: false,
-        }),
+        },
     )
     .map(|v| v.into())
 }
@@ -518,14 +518,14 @@ fn js_start_http_server_job(
             let req_val: JSValue = match JSHttpRequest::new_instance(
                 cx,
                 JSValue::UNDEFINED,
-                Box::new(HttpRequestPayload {
+                HttpRequestPayload {
                     method: incoming.method,
                     path: incoming.path.clone(),
                     params: HashMap::new(),
                     query,
                     headers: incoming.headers.iter().cloned().collect(),
                     body: Some(incoming.body),
-                }),
+                },
             ) {
                 Ok(v) => v.into(),
                 Err(_) => return true,
@@ -534,13 +534,13 @@ fn js_start_http_server_job(
             let res_val: JSValue = match JSHttpResponse::new_instance(
                 cx,
                 JSValue::UNDEFINED,
-                Box::new(HttpResponsePayload {
+                HttpResponsePayload {
                     status: 200,
                     headers: Vec::new(),
                     body: None,
                     ended: false,
                     response_tx: Some(incoming.response_tx),
-                }),
+                },
             ) {
                 Ok(v) => v.into(),
                 Err(_) => return true,
@@ -713,7 +713,7 @@ const SERVER_PROTO: &[FieldDef] = &[
 def_native_object!(
     "HttpServer",
     JSHttpServer,
-    Box<HttpServerPayload>,
+    HttpServerPayload,
     SERVER_PROTO,
     constructor: ClassCtorDef::new(js_constructor, 0, false),
     on_payload_gc: HttpServerPayload::gc_trace

@@ -267,7 +267,7 @@ const RES_PROTO: &[FieldDef] = &[
 def_native_object!(
     "HttpServerResponse",
     JSHttpResponse,
-    Box<HttpResponsePayload>,
+    HttpResponsePayload,
     RES_PROTO
 );
 

@@ -26,8 +26,6 @@ use super::{
     class_sampler::js_model_createSamplerChain,
 };
 
-pub(crate) type ModelPayload = Box<LlamaModel>;
-
 const MODEL_PATH_HIDDEN_KEY: &str = "__modelPath";
 static LLAMA_LOG_BUFFER: OnceLock<Mutex<String>> = OnceLock::new();
 
@@ -268,7 +266,7 @@ fn js_model_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 -1
             })?;
 
-    let mut obj = JSLlmModel::new_instance(ctx, new_target, Box::new(model))?;
+    let mut obj = JSLlmModel::new_instance(ctx, new_target, model)?;
 
     let path = ctx
         .create_string_from_utf8(file_name.into_bytes())
@@ -705,11 +703,8 @@ fn js_model_createContext(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
     })?;
     llm_ctx.init_batch(ctx_params.n_batch as i32, 0, ctx_params.n_seq_max as i32);
 
-    let mut ctx_obj = JSLlmContext::new_instance(
-        ctx,
-        JSValue::UNDEFINED,
-        Box::new(Arc::new(Mutex::new(Some(llm_ctx)))),
-    )?;
+    let mut ctx_obj =
+        JSLlmContext::new_instance(ctx, JSValue::UNDEFINED, Arc::new(Mutex::new(Some(llm_ctx))))?;
 
     // to keep model object referenced alive, model property is read-only
     ctx_obj.define_property_value_str(ctx, "model", this, JS_PROP_ENUMERABLE)?;
@@ -1039,7 +1034,7 @@ fn js_model_load(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 cx.throw_internal_error(&e);
                 -1
             })?;
-            let mut obj = JSLlmModel::new_instance(cx, JSValue::UNDEFINED, Box::new(model))?;
+            let mut obj = JSLlmModel::new_instance(cx, JSValue::UNDEFINED, model)?;
             let path = cx
                 .create_string_from_utf8(file_name.into_bytes())
                 .map(JSValue::String)?;
@@ -1067,7 +1062,7 @@ const CLASS_MODEL_ENTRIES: &[FieldDef] = &[FieldDef::FUNC("load", 1, js_model_lo
 def_native_object!(
     "Model",
     JSLlmModel,
-    ModelPayload,
+    LlamaModel,
     CLASS_MODEL_PROTO_ENTRIES,
     constructor: ClassCtorDef::new(js_model_constructor, 2, false).entries(CLASS_MODEL_ENTRIES),
     on_class_register: JSLlmModel::on_register,

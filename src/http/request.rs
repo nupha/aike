@@ -5,8 +5,7 @@ use std::{cell::Cell, collections::HashMap};
 
 use linkme::distributed_slice;
 use zuqe::{
-    CallContext, ClassID, FieldDef, JSResult, JSValue, NativeObject, Runtime, ScopedContext,
-    def_native_object,
+    CallContext, ClassID, FieldDef, JSResult, JSValue, Runtime, ScopedContext, def_native_object,
 };
 
 use crate::USER_CLASS_DEFS;
@@ -154,7 +153,7 @@ const REQ_PROTO: &[FieldDef] = &[
 def_native_object!(
     "HttpServerRequest",
     JSHttpRequest,
-    Box<HttpRequestPayload>,
+    HttpRequestPayload,
     REQ_PROTO
 );
 
