@@ -33,7 +33,10 @@ use zuqe::{
 
 use crate::{
     USER_CLASS_DEFS,
-    llm::engine::{Engine, serve::engine_routes},
+    llm::{
+        JSEngine,
+        engine::{Engine, serve::llm_engine_routes},
+    },
 };
 
 use super::{
@@ -128,7 +131,7 @@ fn js_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             if let Ok(mut v) = opts.get_property_str(ctx, "engine") {
                 if !v.is_undefined_or_null() {
                     // Take engine Arc<Mutex<Engine>> from JSEngine — detaches it
-                    match v.as_native_object_mut::<crate::llm::JSEngine>() {
+                    match v.as_native_object_mut::<JSEngine>() {
                         Some(e) => match e.take_payload() {
                             Some(payload) => engine = Some(*payload),
                             None => {
@@ -143,12 +146,15 @@ fn js_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                     }
                 }
             }
+        } else {
+            ctx.throw_type_error("options must be an object");
+            return Err(-1);
         }
     }
 
     // If engine is provided, pre-load Engine routes
     if let Some(ref eng) = engine {
-        rust_routes = engine_routes(eng.clone());
+        rust_routes = llm_engine_routes(eng.clone());
     }
 
     JSHttpServer::new_instance(
@@ -157,7 +163,7 @@ fn js_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         Box::new(HttpServerPayload {
             engine,
             rust_routes,
-            js_routes: Vec::new(),
+            js_routes: Vec::with_capacity(4),
             shutdown_tx: None,
             is_running: Arc::new(AtomicBool::new(false)),
             frozen: false,

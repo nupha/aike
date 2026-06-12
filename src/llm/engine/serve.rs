@@ -118,12 +118,12 @@ struct ModelInfo {
 
 /// Build all Engine-related RouteEntry items.
 /// Handlers are resolved with state (.with_state) so RouteEntry contains MethodRouter<()>.
-pub(crate) fn engine_routes(engine: Arc<Mutex<Engine>>) -> Vec<RouteEntry> {
+pub(crate) fn llm_engine_routes(engine: Arc<Mutex<Engine>>) -> Vec<RouteEntry> {
     vec![
         RouteEntry {
             method: Method::GET,
             path: "/".into(),
-            handler: get(handle_root).into(),
+            handler: get(handle_root),
         },
         RouteEntry {
             method: Method::GET,
