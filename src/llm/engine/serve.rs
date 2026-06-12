@@ -21,7 +21,6 @@ use axum::{
     routing::{get, post},
 };
 use futures_util::StreamExt;
-use llama_cpp_ffi::LlamaModel;
 use serde::Serialize;
 use serde_json::json;
 use tokio_stream::wrappers::UnboundedReceiverStream;
@@ -32,7 +31,7 @@ use crate::{
         PromptThinkPattern, apply_chat_template, compute_keep_tokens, detect_prompt_think_pattern,
         now_unix_s, to_lark_tool_choice,
     },
-    http::{Method, server::RouteEntry},
+    http::server::RouteEntry,
     llm::engine::{Engine, EngineReply, EngineTask, GrammarConfig, TaskConfig},
     output::{
         ChunkSSE, ParserKind, collect_engine_reply_to_json, redirect_engine_reply_to_chat_sse,
@@ -118,40 +117,33 @@ struct ModelInfo {
 
 /// Build all Engine-related RouteEntry items.
 /// Handlers are resolved with state (.with_state) so RouteEntry contains MethodRouter<()>.
-pub(crate) fn llm_engine_routes(engine: Arc<Mutex<Engine>>) -> Vec<RouteEntry> {
+pub(crate) fn openai_engine_routes(engine: Arc<Mutex<Engine>>) -> Vec<RouteEntry> {
     vec![
         RouteEntry {
-            method: Method::GET,
             path: "/".into(),
             handler: get(handle_root),
         },
         RouteEntry {
-            method: Method::GET,
             path: "/health".into(),
             handler: get(handle_health).with_state(engine.clone()),
         },
         RouteEntry {
-            method: Method::GET,
             path: "/models".into(),
             handler: get(handle_models).with_state(engine.clone()),
         },
         RouteEntry {
-            method: Method::GET,
             path: "/v1/health".into(),
             handler: get(handle_health).with_state(engine.clone()),
         },
         RouteEntry {
-            method: Method::GET,
             path: "/v1/models".into(),
             handler: get(handle_models).with_state(engine.clone()),
         },
         RouteEntry {
-            method: Method::POST,
             path: "/v1/chat/completions".into(),
             handler: post(handle_chat_completions).with_state(engine.clone()),
         },
         RouteEntry {
-            method: Method::POST,
             path: "/v1/responses".into(),
             handler: post(crate::responses::handle_responses).with_state(engine.clone()),
         },

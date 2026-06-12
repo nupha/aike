@@ -15,18 +15,16 @@ use axum::{Router, routing::MethodRouter};
 use tokio::sync::oneshot;
 use tower_http::cors::CorsLayer;
 
-use super::Method;
-
-/// A single route entry registered into axum.
-/// Handler is fully resolved (MethodRouter<()>) — state already provided.
+/// A single route entry keyed by path.
+/// Handler is a fully resolved MethodRouter<()> — state already provided via .with_state().
+/// Multiple entries for the same path are merged automatically by axum's path_router.
 pub(crate) struct RouteEntry {
-    pub method: Method,
     pub path: String,
     pub handler: MethodRouter<()>,
 }
 
 /// Handle returned by `spawn_http_service` for controlling the server lifecycle.
-pub(crate) struct ServiceHandle {
+pub(crate) struct ServerHandle {
     pub shutdown_tx: oneshot::Sender<()>,
     pub is_running: Arc<AtomicBool>,
 }
@@ -35,11 +33,11 @@ pub(crate) struct ServiceHandle {
 ///
 /// All routes are registered directly into axum — one match, no fallback.
 /// Each RouteEntry.handler must already have its state resolved via .with_state().
-pub(crate) fn spawn_http_service(
+pub(super) fn spawn_http_server(
     routes: Vec<RouteEntry>,
     host: String,
     port: u16,
-) -> Result<ServiceHandle, String> {
+) -> Result<ServerHandle, String> {
     let mut router: Router = Router::new();
 
     // Register all routes — axum matches in one pass.
@@ -73,7 +71,7 @@ pub(crate) fn spawn_http_service(
         is_running_clone.store(false, Ordering::Release);
     });
 
-    Ok(ServiceHandle {
+    Ok(ServerHandle {
         shutdown_tx,
         is_running,
     })

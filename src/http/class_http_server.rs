@@ -35,7 +35,7 @@ use crate::{
     USER_CLASS_DEFS,
     llm::{
         JSEngine,
-        engine::{Engine, serve::llm_engine_routes},
+        engine::{Engine, serve::openai_engine_routes},
     },
 };
 
@@ -43,7 +43,7 @@ use super::{
     Method,
     request::{HttpRequestPayload, JSHttpRequest},
     response::{HttpResponseMessage, HttpResponsePayload, JSHttpResponse, get_res_payload},
-    server::{RouteEntry, spawn_http_service},
+    server::{RouteEntry, spawn_http_server},
 };
 
 /// Request message sent from axum delegate fn to the JS HTTP Server Job.
@@ -59,7 +59,6 @@ struct IncomingRequest {
 
 pub(super) struct HttpServerPayload {
     engine: Option<Arc<Mutex<Engine>>>,
-    rust_routes: Vec<RouteEntry>,
     js_routes: Vec<(Method, String, Object)>,
     shutdown_tx: Option<oneshot::Sender<()>>,
     is_running: Arc<AtomicBool>,
@@ -67,7 +66,7 @@ pub(super) struct HttpServerPayload {
 }
 
 impl HttpServerPayload {
-    fn add_route(
+    fn add_js_route(
         &mut self,
         method: Method,
         path: String,
@@ -76,7 +75,16 @@ impl HttpServerPayload {
         if self.frozen {
             return Err("cannot add route while server is running");
         }
-        self.js_routes.push((method, path, handler));
+        // Replace existing entry for the same (method, path) to avoid duplicates
+        if let Some(entry) = self
+            .js_routes
+            .iter_mut()
+            .find(|(m, p, _)| m == &method && p == &path)
+        {
+            entry.2 = handler;
+        } else {
+            self.js_routes.push((method, path, handler));
+        }
         Ok(())
     }
 
@@ -123,7 +131,6 @@ fn get_server_payload_mut<'a>(
 
 fn js_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut engine: Option<Arc<Mutex<Engine>>> = None;
-    let mut rust_routes = Vec::new();
 
     // Parse optional { engine } from first argument
     if cc.length() > 0 {
@@ -152,18 +159,12 @@ fn js_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         }
     }
 
-    // If engine is provided, pre-load Engine routes
-    if let Some(ref eng) = engine {
-        rust_routes = llm_engine_routes(eng.clone());
-    }
-
     JSHttpServer::new_instance(
         ctx,
         cc.this(),
         Box::new(HttpServerPayload {
             engine,
-            rust_routes,
-            js_routes: Vec::with_capacity(4),
+            js_routes: Vec::new(),
             shutdown_tx: None,
             is_running: Arc::new(AtomicBool::new(false)),
             frozen: false,
@@ -192,7 +193,7 @@ fn js_route_add(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let handler = cc.arg(1).into_callable(ctx)?;
 
     let p = get_server_payload_mut(ctx, &mut this)?;
-    if let Err(e) = p.add_route(method, path, handler) {
+    if let Err(e) = p.add_js_route(method, path, handler) {
         ctx.throw_type_error(e);
         return Err(-1);
     }
@@ -361,11 +362,7 @@ fn delegate_js_route(
         Method::HEAD => head(handler_fn),
         Method::OPTIONS => options(handler_fn),
     };
-    RouteEntry {
-        method,
-        path,
-        handler,
-    }
+    RouteEntry { path, handler }
 }
 
 fn js_handler_then(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -425,18 +422,20 @@ fn js_listen(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     }
 
     // Extract data from payload (separate borrow scope)
-    let (rust_routes, js_routes, _engine) = {
+    let (js_routes, engine) = {
         let data = get_server_payload_mut(ctx, &mut this)?;
         data.frozen = true;
-        (
-            std::mem::take(&mut data.rust_routes),
-            data.js_routes.clone(),
-            data.engine.clone(),
-        )
+        (data.js_routes.clone(), data.engine.clone())
+    };
+
+    // Rebuild engine routes on every listen (supports shutdown → re-listen cycle)
+    let openai_routes = match engine {
+        Some(ref eng) => openai_engine_routes(eng.clone()),
+        None => Vec::new(),
     };
 
     // Merge routes: Rust (Engine) + JS delegate
-    let mut all_routes = rust_routes;
+    let mut all_routes = openai_routes;
 
     let mut js_rx_opt: Option<channel::Receiver<IncomingRequest>> = None;
     let mut handler_table_opt: Option<Vec<Object>> = None;
@@ -457,7 +456,7 @@ fn js_listen(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     }
 
     // Spawn the unified axum service first
-    let handle = match spawn_http_service(all_routes, host, port) {
+    let handle = match spawn_http_server(all_routes, host, port) {
         Ok(h) => h,
         Err(e) => {
             ctx.throw_internal_error(&e);
