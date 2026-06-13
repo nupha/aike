@@ -13,7 +13,7 @@ use llama_cpp_ffi::{ContentType, LlamaModel, SamplerChain, ToolChoice};
 
 use crate::helpers::now_unix_s;
 
-use super::cache::CHECKPOINT_STEP;
+// use super::cache::CHECKPOINT_STEP;  // used by checkpoint dump (disabled by default)
 
 use super::{
     context::Engine,
@@ -635,14 +635,15 @@ impl Engine {
         slot.n_past = n_common as i32;
         slot.mtime = now_unix_s();
 
-        // Set aligned dump target for Checkpoint mode:
-        // dump_at = largest CHECKPOINT_STEP multiple <= total_prompt_len
-        // This dumps once during prefill, excluding the generation prompt suffix.
-        if self.context_mode() == super::cache::ContextMode::Checkpoint {
-            let total_prompt_len = n_common + task.prompt_tokens.len();
-            let dump_at = (total_prompt_len / CHECKPOINT_STEP) * CHECKPOINT_STEP;
-            slot.checkpoint_dump_at = if dump_at > n_common { dump_at } else { 0 };
-        }
+        // Set aligned dump target for Checkpoint mode (disabled by default).
+        // Calculates the aligned position to dump KV state during prefill,
+        // excluding the generation prompt suffix. Enable via future switch.
+
+        // if self.context_mode() == super::cache::ContextMode::Checkpoint {
+        //     let total_prompt_len = n_common + task.prompt_tokens.len();
+        //     let dump_at = (total_prompt_len / CHECKPOINT_STEP) * CHECKPOINT_STEP;
+        //     slot.checkpoint_dump_at = if dump_at > n_common { dump_at } else { 0 };
+        // }
 
         slot.state = SlotState::Decoding {
             prompt_tokens: VecDeque::from(task.prompt_tokens),

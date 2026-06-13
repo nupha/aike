@@ -170,7 +170,11 @@ pub(super) fn hit_stop_words(generated_text: &str, stop_words: &[String]) -> Opt
 impl Engine {
     fn decoding_stage(&mut self, slots: &mut [Slot], slot_cursor: &mut usize) -> bool {
         // Tracks slots that just reached their aligned checkpoint dump target.
-        let mut checkpoint_dump_slots: Vec<usize> = Vec::new();
+        // let mut checkpoint_dump_slots: Vec<usize> = Vec::new();
+        // Checkpoint dump disabled by default. The code below dumps KV state
+        // to cache_ram at aligned positions during prefill, enabling cache
+        // recovery after slot eviction. Can be toggled via a future switch
+        // (e.g. --enable-cache-dump) for workloads with frequent slot churn.
 
         let mut has_sampling = false;
         let mut cnt = 0usize;
@@ -274,10 +278,10 @@ impl Engine {
                 if write_count > 0 {
                     written_updates.push((slot_idx, write_count));
 
-                    // Check if this slot just reached its checkpoint dump target
-                    if dump_at > 0 && slot.n_past as usize + write_count == dump_at {
-                        checkpoint_dump_slots.push(slot_idx);
-                    }
+                    // Track slots reaching checkpoint dump target (disabled).
+                    // if dump_at > 0 && slot.n_past as usize + write_count == dump_at {
+                    //     checkpoint_dump_slots.push(slot_idx);
+                    // }
                 }
             }
         }
@@ -289,12 +293,13 @@ impl Engine {
                         slots[*idx].n_past += *wrote as i32;
                     }
 
-                    // Dump aligned checkpoint to cache_ram for recurrent/hybrid models.
-                    // Dump once at the pre-calculated target (excludes gen prompt suffix).
-                    for &idx in &checkpoint_dump_slots {
-                        self.dump_slot_to_cache_ram(&mut slots[idx], false);
-                        slots[idx].checkpoint_dump_at = 0; // done
-                    }
+                    // Dump aligned checkpoint to cache_ram (disabled by default).
+                    // Dumps KV state for recurrent/hybrid models at aligned
+                    // positions to enable recovery after slot eviction.
+                    // for &idx in &checkpoint_dump_slots {
+                    //     self.dump_slot_to_cache_ram(&mut slots[idx], false);
+                    //     slots[idx].checkpoint_dump_at = 0; // done
+                    // }
                 }
                 // Err(e) if e == "ContextFull" => {
                 //     todo!("kv cache full, need to shift context");
