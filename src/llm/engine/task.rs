@@ -17,7 +17,9 @@ use super::cache::CHECKPOINT_STEP;
 
 use super::{
     context::Engine,
-    output::{GeneratedContent, OutputParser, OutputState, OutputStateChange, TagBoundary},
+    output::{
+        GeneratedContent, OutputAction, OutputParser, OutputState, OutputStateChange, TagBoundary,
+    },
     slot::{Slot, SlotState},
     worker::remove_cancelled_inputs,
 };
@@ -235,22 +237,18 @@ impl TaskState {
 
         if let Some(ref mut parser) = self.output_parser {
             match parser.add_text(text) {
-                Ok((add_text, event_list)) => {
-                    // Snapshot parser state before dropping the borrow so we
-                    // can call self methods below.
-                    #[cfg(debug_assertions)]
-                    let parser_state = parser.current_state();
+                Ok((action, event_list)) => {
+                    // Append content BEFORE processing events: events may swap
+                    // the content block (e.g. TagStart creates a new ToolCall block),
+                    // so any preceding text must land in the current block first.
+                    if let OutputAction::Content(ref s) = action {
+                        if !s.is_empty() {
+                            self.current_content.last_mut().unwrap().push_str(s);
+                        }
+                    }
 
                     for event in event_list {
                         self.handle_output_event(event);
-                    }
-                    if add_text {
-                        #[cfg(debug_assertions)]
-                        debug_assert!(
-                            matches_content(self.current_content.last().unwrap(), &parser_state),
-                            "Parser state mismatch with current_content"
-                        );
-                        self.current_content.last_mut().unwrap().push_str(text);
                     }
                 }
                 Err(_) => {

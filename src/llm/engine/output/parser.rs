@@ -1,6 +1,6 @@
 use smallvec::{SmallVec, smallvec};
 
-use super::{OutputState, OutputStateChange};
+use super::{OutputAction, OutputState, OutputStateChange};
 
 /// Type alias for small event vector (optimized for 0-2 events per token)
 pub type OutputEvents = SmallVec<[OutputStateChange; 2]>;
@@ -16,10 +16,8 @@ pub struct TagBoundary {
 
 /// A lightweight stream parser that detects tag boundaries in LLM token output.
 ///
-/// Instead of using a full Lark grammar + Earley parser (swiftlet-incremental),
-/// this parser uses a simple state machine with string matching on accumulated text.
-/// It detects open/close tags (e.g. `<tool_call>`/`</tool_call>`, `<think>`/`</think>`)
-/// and emits state change events accordingly.
+/// Uses a simple state machine with string matching on accumulated text.
+/// Detects open/close tags and emits state change events accordingly.
 ///
 /// This approach avoids the multi-path tokenization problem: since detection is
 /// done at the text level (after UTF-8 decoding), it doesn't matter whether a tag
@@ -39,7 +37,7 @@ impl OutputParser {
     /// open tags could match at the same position, the first one wins.
     ///
     /// `initial_state` sets the starting state. Use this when the prompt already
-    /// contains an open tag (e.g. `<think>` from chat template) so the parser
+    /// contains an open tag (e.g. from chat template) so the parser
     /// starts in the correct state without needing to replay prepended tokens.
     pub fn new(boundaries: Vec<TagBoundary>, initial_state: OutputState) -> Self {
         Self {
@@ -51,22 +49,29 @@ impl OutputParser {
 
     /// Push a token's decoded text into the parser.
     ///
-    /// Returns `(add_text, events)`:
-    /// - `add_text`: whether the caller should append this token's text to content
+    /// Returns `(action, events)`:
+    /// - `action`: what the caller should do (add content, hold, or react to state change)
     /// - `events`: state change events detected (0-2 per token)
-    pub fn add_text(&mut self, text: &str) -> Result<(bool, OutputEvents), String> {
+    pub fn add_text(&mut self, text: &str) -> Result<(OutputAction, OutputEvents), String> {
         let mut events: OutputEvents = smallvec![];
 
-        // Try to detect tag boundaries
         match self.current_state {
             OutputState::Text => {
-                // Append token text to buffer first, then look for open tags
+                // Append token text to buffer, then apply three-state tag detection:
+                // 1. buf == open_tag        → complete tag  → TagStart
+                // 2. buf is prefix of open_tag → partial tag → Hold
+                // 3. buf is not any prefix   → normal text  → Content(buf)
                 self.buf.push_str(text);
 
+                // Check against all open tags
                 for boundary in &self.boundaries {
-                    if let Some(pos) = self.buf.find(boundary.open_tag) {
-                        // Text after the open tag (starts new content)
-                        self.buf = self.buf[pos + boundary.open_tag.len()..].to_string();
+                    let ot = boundary.open_tag;
+
+                    // Complete match: buf contains the full open tag
+                    if let Some(pos) = self.buf.find(ot) {
+                        // Content before the tag is safe to emit
+                        let before = self.buf[..pos].to_string();
+                        self.buf.clear();
 
                         events.push(match boundary.content_type {
                             OutputState::Reasoning => OutputStateChange::ReasoningStart,
@@ -75,21 +80,36 @@ impl OutputParser {
                         });
                         self.current_state = boundary.content_type;
 
-                        // Don't add the tag text to content
-                        return Ok((false, events));
+                        return if before.is_empty() {
+                            Ok((OutputAction::TagStart, events))
+                        } else {
+                            // Emit preceding content; caller will see TagStart via events
+                            // We can't return two actions, so carry content and signal via events
+                            Ok((OutputAction::Content(before), events))
+                        };
+                    }
+
+                    // Prefix check: is buf a proper prefix of this open tag?
+                    if ot.starts_with(&self.buf) && self.buf.len() < ot.len() {
+                        // buf is a partial tag prefix — hold
+                        return Ok((OutputAction::Hold, events));
                     }
                 }
+
+                // No complete tag, not a valid prefix — emit buf as normal content
+                let content = std::mem::take(&mut self.buf);
+                Ok((OutputAction::Content(content), events))
             }
             OutputState::Reasoning | OutputState::ToolCall => {
                 // Multi-token close tag detection:
                 // Check if text is part of the close tag before appending to buf.
                 // This handles cases where the close tag spans multiple tokens
-                // (e.g. Qwen3.5 generates </tool_call> as 4 BPE tokens: </ + tool + _call + >).
+                // (e.g. Qwen3.5 generates close tag as 4 BPE tokens).
                 //
                 // Three cases:
-                // 1. text is a prefix of ct (e.g. text="</", ct="</tool_call>")
+                // 1. text is a prefix of ct (e.g. text="</", ct="")
                 // 2. buf ends with a prefix of ct, and text continues ct
-                //    (e.g. buf="...</", text="tool", ct="</tool_call>")
+                //    (e.g. buf="...</", text="tool", ct="")
                 // 3. buf + text ends with ct (full match, single or multi-token)
                 for boundary in &self.boundaries {
                     if boundary.content_type != self.current_state {
@@ -98,9 +118,9 @@ impl OutputParser {
                     let ct = boundary.close_tag;
 
                     if ct.starts_with(text) {
-                        // text is part of the close tag — append to buf but don't add to content
+                        // text is part of the close tag — append to buf, don't add to content
                         self.buf.push_str(text);
-                        // If text is the complete close tag (single token), trigger end event now
+                        // If text is the complete close tag (single token), trigger end event
                         if text == ct {
                             self.buf.clear();
                             events.push(match self.current_state {
@@ -109,8 +129,9 @@ impl OutputParser {
                                 _ => unreachable!(),
                             });
                             self.current_state = OutputState::Text;
+                            return Ok((OutputAction::TagEnd, events));
                         }
-                        return Ok((false, events));
+                        return Ok((OutputAction::Hold, events));
                     }
 
                     // Check if buf ends with a prefix of ct, and text continues ct
@@ -119,7 +140,7 @@ impl OutputParser {
                         if self.buf.ends_with(prefix) {
                             let rest = &ct[prefix_len..];
                             if rest.starts_with(text) {
-                                // text continues the close tag — append to buf but don't add to content
+                                // text continues the close tag — append to buf
                                 self.buf.push_str(text);
                                 // If buf now contains the complete close tag, trigger end event
                                 if self.buf.ends_with(ct) {
@@ -130,8 +151,9 @@ impl OutputParser {
                                         _ => unreachable!(),
                                     });
                                     self.current_state = OutputState::Text;
+                                    return Ok((OutputAction::TagEnd, events));
                                 }
-                                return Ok((false, events));
+                                return Ok((OutputAction::Hold, events));
                             }
                             break;
                         }
@@ -140,27 +162,34 @@ impl OutputParser {
                     // Append text to buf, then check for full close tag match
                     self.buf.push_str(text);
                     if self.buf.ends_with(ct) {
-                        let content_len = self.buf.len() - ct.len();
-                        self.buf = self.buf[..content_len].to_string();
-
+                        // Content before the close tag is safe to emit
+                        let before_len = self.buf.len() - ct.len();
+                        let before = self.buf[..before_len].to_string();
+                        self.buf.clear();
                         events.push(match self.current_state {
                             OutputState::Reasoning => OutputStateChange::ReasoningEnd,
                             OutputState::ToolCall => OutputStateChange::ToolCallEnd,
                             _ => unreachable!(),
                         });
                         self.current_state = OutputState::Text;
-
-                        return Ok((false, events));
+                        return if before.is_empty() {
+                            Ok((OutputAction::TagEnd, events))
+                        } else {
+                            Ok((OutputAction::Content(before), events))
+                        };
                     }
 
                     // Close tag not matched — text is content
-                    return Ok((true, events));
+                    let content = std::mem::take(&mut self.buf);
+                    return Ok((OutputAction::Content(content), events));
                 }
+                // No matching boundary for current state — emit text directly
+                let content = std::mem::take(&mut self.buf);
+                let mut result = content;
+                result.push_str(text);
+                Ok((OutputAction::Content(result), events))
             }
         }
-
-        // No boundary detected — add text to content
-        Ok((true, events))
     }
 
     pub fn current_state(&self) -> OutputState {

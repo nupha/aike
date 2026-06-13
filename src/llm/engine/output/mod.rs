@@ -19,6 +19,21 @@ pub enum OutputStateChange {
     ToolCallEnd,
 }
 
+/// Action returned by OutputParser.add_text(), tells the caller what to do.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OutputAction {
+    /// Append the carried text to current content block.
+    /// Usually just the token text; may include buffered prefix when
+    /// a held-back partial tag turns out not to be a real tag.
+    Content(String),
+    /// Text is buffered as a potential tag prefix, no action needed.
+    Hold,
+    /// Open tag detected, state transitioned (e.g. Text → ToolCall).
+    TagStart,
+    /// Close tag detected, state transitioned (e.g. ToolCall → Text).
+    TagEnd,
+}
+
 /// Represents different types of generated content based on semantic state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GeneratedContent {
