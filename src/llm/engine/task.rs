@@ -200,7 +200,10 @@ pub struct TaskState {
     /// In Continuous mode: sent immediately on state transition.
     /// The last element represents the current content being accumulated.
     pub(crate) current_content: Vec<GeneratedContent>,
-    /// Pending bytes for UTF-8 decoding
+    /// Pending bytes for UTF-8 decoding across token boundaries.
+    /// Both parser and content accumulation share this single buffer:
+    /// bytes are extended per-token, valid UTF-8 prefixes are consumed,
+    /// incomplete trailing sequences carry over to the next token.
     pub(crate) pending_bytes: Vec<u8>,
     /// Token output log (debugging). Each generated token text is appended here.
     #[cfg(debug_assertions)]
@@ -209,7 +212,6 @@ pub struct TaskState {
 
 impl TaskState {
     pub(super) fn add_output_token(&mut self, token: Token, model: &LlamaModel) {
-        let mut append_token_utf8 = true;
         self.n_completion_tokens += 1;
 
         // Log every generated token for debugging (debug builds only)
@@ -220,25 +222,47 @@ impl TaskState {
             let _ = writeln!(log, "[tok={token}] {text}");
         }
 
-        // Decode token text for parser
+        // Buffer raw bytes and extract valid UTF-8 prefix.
+        // Incomplete bytes stay in pending_bytes for the next token to complete.
         let piece = model.token_to_piece(token);
-        let token_text = String::from_utf8_lossy(&piece);
+        self.pending_bytes.extend_from_slice(&piece);
+        let decoded = Self::decode_utf8_buf(&mut self.pending_bytes);
 
-        // Push token text to parser and get events
+        let Some(ref text) = decoded else {
+            // No valid UTF-8 yet — bytes stay in pending_bytes,
+            // will be decoded when the next token completes the sequence.
+            return;
+        };
+
         if let Some(ref mut parser) = self.output_parser {
-            match parser.push_token(&token_text) {
+            match parser.push_text(text) {
                 Ok((add_text, event_list)) => {
+                    // Snapshot parser state before dropping the borrow so we
+                    // can call self methods below.
+                    #[cfg(debug_assertions)]
+                    let parser_state = parser.current_state();
+                    let _ = parser;
+
                     for event in event_list {
                         self.handle_output_event(event);
                     }
-                    append_token_utf8 = add_text;
+                    if add_text {
+                        #[cfg(debug_assertions)]
+                        debug_assert!(
+                            matches_content(self.current_content.last().unwrap(), &parser_state),
+                            "Parser state mismatch with current_content"
+                        );
+                        self.current_content.last_mut().unwrap().push_str(text);
+                    }
                 }
                 Err(_) => {
-                    append_token_utf8 = false;
-
-                    // Sync current_content state with parser after error
-                    // (parser may have been reset internally)
+                    // Parser reset internally: clear pending bytes (they belong to
+                    // pre-error state and are no longer valid), then sync content
                     let parser_state = parser.current_state();
+                    let _ = parser;
+
+                    self.pending_bytes.clear();
+
                     let needs_sync = {
                         let last = self.current_content.last().unwrap();
                         !matches!(
@@ -262,10 +286,10 @@ impl TaskState {
                     }
                 }
             }
-        }
-
-        if append_token_utf8 {
-            self.append_utf8_bytes(&piece);
+        } else {
+            // No parser: append decoded text directly to content
+            debug_assert!(!self.current_content.is_empty());
+            self.current_content.last_mut().unwrap().push_str(text);
         }
     }
 
@@ -288,42 +312,29 @@ impl TaskState {
         });
     }
 
-    fn append_utf8_bytes(&mut self, piece: &[u8]) {
-        debug_assert!(!piece.is_empty());
-        debug_assert!(!self.current_content.is_empty());
-
-        #[cfg(debug_assertions)]
-        {
-            // Get current state from parser
-            let state = self
-                .output_parser
-                .as_ref()
-                .map(|p| p.current_state())
-                .unwrap_or(OutputState::Text);
-
-            // Debug assert: parser state should match last content element's type
-            debug_assert!(
-                matches_content(self.current_content.last().unwrap(), &state),
-                "Parser state mismatch with current_content"
-            );
+    /// Extract a valid UTF-8 prefix from a byte buffer, draining consumed bytes.
+    /// Returns `Some(text)` if at least one complete character is available,
+    /// or `None` if the buffer contains only an incomplete UTF-8 sequence.
+    fn decode_utf8_buf(buf: &mut Vec<u8>) -> Option<String> {
+        if buf.is_empty() {
+            return None;
         }
-
-        self.pending_bytes.extend_from_slice(piece);
-
-        // Try to decode pending_bytes as UTF-8. Valid prefix goes to content,
-        // trailing incomplete bytes stay in pending_bytes for next token.
-        if let Ok(s) = std::str::from_utf8(&self.pending_bytes) {
-            self.current_content.last_mut().unwrap().push_str(s);
-            self.pending_bytes.clear();
-        } else if let Err(e) = std::str::from_utf8(&self.pending_bytes) {
+        if let Ok(s) = std::str::from_utf8(buf) {
+            let text = s.to_string();
+            buf.clear();
+            Some(text)
+        } else if let Err(e) = std::str::from_utf8(buf) {
             let valid = e.valid_up_to();
             if valid > 0 {
-                let s = unsafe { std::str::from_utf8_unchecked(&self.pending_bytes[..valid]) };
-                self.current_content.last_mut().unwrap().push_str(s);
-                self.pending_bytes.drain(0..valid);
+                let s = unsafe { std::str::from_utf8_unchecked(&buf[..valid]) };
+                let text = s.to_string();
+                buf.drain(0..valid);
+                Some(text)
+            } else {
+                None
             }
-            // else: valid == 0, not yet a complete UTF-8 sequence,
-            // leave pending_bytes as-is for next token to complete.
+        } else {
+            None
         }
     }
 }
