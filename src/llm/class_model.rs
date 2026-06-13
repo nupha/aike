@@ -1064,7 +1064,7 @@ def_native_object!(
     JSLlmModel,
     LlamaModel,
     CLASS_MODEL_PROTO_ENTRIES,
-    constructor: ClassCtorDef::new(js_model_constructor, 2, false).entries(CLASS_MODEL_ENTRIES),
+    Some(ClassCtorDef::new(js_model_constructor, 2, false).entries(CLASS_MODEL_ENTRIES)),
     on_class_register: JSLlmModel::on_register,
     on_class_unregister: JSLlmModel::on_unregister
 );

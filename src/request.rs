@@ -382,7 +382,13 @@ const RESPONSE_PROTO: &[FieldDef] = &[
     FieldDef::FUNC("json", 0, js_response_body_as, BODY_AS_JSON as i16),
 ];
 
-def_native_object!("HttpResponse", JSResponse, ResponseData, RESPONSE_PROTO);
+def_native_object!(
+    "HttpResponse",
+    JSResponse,
+    ResponseData,
+    RESPONSE_PROTO,
+    None
+);
 
 #[distributed_slice(USER_CLASS_DEFS)]
 fn register_class_response(rt: &mut Runtime) -> Result<ClassID, i32> {

@@ -738,7 +738,7 @@ def_native_object!(
     JSLlmClient,
     Arc<ClientPayload>,
     CLASS_CLIENT_PROTO,
-    constructor: ClassCtorDef::new(js_client_constructor, 1, false)
+    Some(ClassCtorDef::new(js_client_constructor, 1, false))
 );
 
 #[distributed_slice(USER_CLASS_DEFS)]

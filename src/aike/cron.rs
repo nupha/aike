@@ -271,6 +271,7 @@ def_native_object!(
     JSCronJob,
     CronJobPayload,
     CRON_JOB_PROTO,
+    None,
     on_payload_gc: CronJobPayload::gc_trace
 );
 

@@ -154,7 +154,8 @@ def_native_object!(
     "HttpServerRequest",
     JSHttpRequest,
     HttpRequestPayload,
-    REQ_PROTO
+    REQ_PROTO,
+    None
 );
 
 #[distributed_slice(USER_CLASS_DEFS)]

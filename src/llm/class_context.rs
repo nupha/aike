@@ -480,7 +480,8 @@ def_native_object!(
     "Context",
     JSLlmContext,
     Arc<Mutex<Option<LlamaContext>>>,
-    CLASS_CONTEXT_PROTO
+    CLASS_CONTEXT_PROTO,
+    None
 );
 
 #[distributed_slice(USER_CLASS_DEFS)]

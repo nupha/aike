@@ -449,7 +449,7 @@ def_native_object!(
     JSTextDecoder,
     TextDecoderPayload,
     CLASS_TEXT_DECODER_PROTO,
-    constructor: ClassCtorDef::new(js_constructor, 2, true).expose_to_global()
+    Some(ClassCtorDef::new(js_constructor, 2, true).expose_to_global())
 );
 
 #[distributed_slice(USER_CLASS_DEFS)]

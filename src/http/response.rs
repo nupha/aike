@@ -268,7 +268,8 @@ def_native_object!(
     "HttpServerResponse",
     JSHttpResponse,
     HttpResponsePayload,
-    RES_PROTO
+    RES_PROTO,
+    None
 );
 
 #[distributed_slice(USER_CLASS_DEFS)]

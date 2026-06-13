@@ -715,7 +715,7 @@ def_native_object!(
     JSHttpServer,
     HttpServerPayload,
     SERVER_PROTO,
-    constructor: ClassCtorDef::new(js_constructor, 0, false),
+    Some(ClassCtorDef::new(js_constructor, 0, false)),
     on_payload_gc: HttpServerPayload::gc_trace
 );
 

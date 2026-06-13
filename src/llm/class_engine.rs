@@ -734,7 +734,13 @@ const CLASS_ENGINE_PROTO: &[FieldDef] = &[
     FieldDef::FUNC("dispose", 0, js_engine_dispose, 0),
 ];
 
-def_native_object!("Engine", JSEngine, Arc<Mutex<Engine>>, CLASS_ENGINE_PROTO);
+def_native_object!(
+    "Engine",
+    JSEngine,
+    Arc<Mutex<Engine>>,
+    CLASS_ENGINE_PROTO,
+    None
+);
 
 #[distributed_slice(USER_CLASS_DEFS)]
 fn register_class_engine(rt: &mut Runtime) -> Result<ClassID, i32> {

@@ -335,7 +335,8 @@ def_native_object!(
     "SamplerChain",
     JSSamplerChain,
     Arc<Mutex<SamplerChain>>,
-    CLASS_SAMPLER_CHAIN_PROTO
+    CLASS_SAMPLER_CHAIN_PROTO,
+    None
 );
 
 #[distributed_slice(USER_CLASS_DEFS)]

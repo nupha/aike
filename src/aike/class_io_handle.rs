@@ -1061,7 +1061,13 @@ const CLASS_IO_HANDLE_PROTO: &[FieldDef] = &[
     FieldDef::FUNC("[Symbol.asyncIterator]", 0, js_fh_asyncIterator, 0),
 ];
 
-def_native_object!("IoHandle", JSIoHandle, IoPayload, CLASS_IO_HANDLE_PROTO);
+def_native_object!(
+    "IoHandle",
+    JSIoHandle,
+    IoPayload,
+    CLASS_IO_HANDLE_PROTO,
+    None
+);
 
 impl JSIoHandle {
     pub fn new_instance_stdin(ctx: &mut ScopedContext) -> Result<Self, i32> {
