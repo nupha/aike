@@ -1,4 +1,3 @@
-use crate::llm::OUTMSG_FIELD_REASONING;
 use async_openai::types::{
     chat::{
         ChatChoice, ChatChoiceStream, ChatCompletionMessageToolCall,
@@ -17,12 +16,13 @@ use async_openai::types::{
         ResponseUsage, Status, SummaryPart, SummaryTextContent,
     },
 };
+use llama_cpp_ffi::ModelArch;
 use uuid::Uuid;
 
 use crate::{
     helpers::now_unix_s,
     llm::{
-        ERR_CANCELLED, ERR_ENGINE_SHUTDOWN, OUTMSG_FIELD_CHOICES,
+        ERR_CANCELLED, ERR_ENGINE_SHUTDOWN, OUTMSG_FIELD_CHOICES, OUTMSG_FIELD_REASONING,
         engine::{EngineReply, GeneratedContent, StopReason},
     },
 };
@@ -40,6 +40,7 @@ impl GeneratedContent {
         id: String,
         model: String,
         has_tool_call: &mut bool,
+        arch: &dyn ModelArch,
     ) -> serde_json::Value {
         match self {
             GeneratedContent::Text(text) => {
@@ -106,19 +107,14 @@ impl GeneratedContent {
             GeneratedContent::ToolCall(repr) => {
                 *has_tool_call = true;
 
-                // Parse JSON manually to handle arguments as nested object
-                let (name, arguments) = serde_json::from_str::<serde_json::Value>(&repr)
-                    .ok()
-                    .map(|v| {
-                        let name = v
-                            .get("name")
-                            .and_then(|n| n.as_str())
-                            .map(|s| s.to_string());
-
-                        let arguments = v.get("arguments").map(|args| match args {
-                            serde_json::Value::String(s) => s.clone(),
-                            other => serde_json::to_string(other).unwrap_or_default(),
-                        });
+                let (name, arguments) = arch
+                    .parse_tool_call(&repr)
+                    .map(|(n, args)| {
+                        let name = Some(n);
+                        let arguments = match args {
+                            serde_json::Value::String(s) => Some(s),
+                            other => Some(serde_json::to_string(&other).unwrap_or_default()),
+                        };
                         (name, arguments)
                     })
                     .unwrap_or((None, None));
@@ -174,6 +170,7 @@ pub(crate) fn redirect_engine_reply_to_chat_sse(
     n_prompt_tokens: usize,
     include_usage: bool,
     mut on_chunk: impl FnMut(ChunkSSE) -> bool,
+    arch: &dyn ModelArch,
 ) {
     let mut has_tool_call = false;
     let mut first_chunk = true;
@@ -185,6 +182,7 @@ pub(crate) fn redirect_engine_reply_to_chat_sse(
                     respond_id.to_string(),
                     model_name.to_string(),
                     &mut has_tool_call,
+                    arch,
                 );
 
                 // Set role on first chunk
@@ -284,6 +282,7 @@ pub(crate) fn collect_engine_reply_to_json(
     model_name: &str,
     n_prompt_tokens: usize,
     include_usage: bool,
+    arch: &dyn ModelArch,
 ) -> Result<serde_json::Value, String> {
     let tm = now_unix_s();
     let mut text = String::new();
@@ -296,23 +295,17 @@ pub(crate) fn collect_engine_reply_to_json(
                 GeneratedContent::Text(t) => text.push_str(&t),
                 GeneratedContent::Reasoning(t) => reasoning.push_str(&t),
                 GeneratedContent::ToolCall(t) => {
-                    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&t) {
-                        if let Some(name) = value.get("name").and_then(|v| v.as_str()) {
-                            let arguments = match value.get("arguments") {
-                                Some(serde_json::Value::String(s)) => s.clone(),
-                                Some(other) => serde_json::to_string(other).unwrap_or_default(),
-                                None => String::new(),
-                            };
-                            calls.push(ChatCompletionMessageToolCalls::Function(
-                                ChatCompletionMessageToolCall {
-                                    id: format!("call_{}", uuid::Uuid::new_v4().simple()),
-                                    function: FunctionCall {
-                                        name: name.to_string(),
-                                        arguments,
-                                    },
-                                },
-                            ));
-                        }
+                    if let Some((name, arguments)) = arch.parse_tool_call(&t) {
+                        let arguments = match arguments {
+                            serde_json::Value::String(s) => s,
+                            other => serde_json::to_string(&other).unwrap_or_default(),
+                        };
+                        calls.push(ChatCompletionMessageToolCalls::Function(
+                            ChatCompletionMessageToolCall {
+                                id: format!("call_{}", uuid::Uuid::new_v4().simple()),
+                                function: FunctionCall { name, arguments },
+                            },
+                        ));
                     }
                 }
             },

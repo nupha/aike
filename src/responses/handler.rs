@@ -81,6 +81,7 @@ pub async fn handle_responses(
     let n_prompt_tokens;
     let respond_id;
     let model_name;
+    let arch;
     let rx;
     let task_id;
     let max_tokens;
@@ -164,6 +165,7 @@ pub async fn handle_responses(
         n_prompt_tokens = prompt_tokens.len();
         respond_id = format!("res-{}", Uuid::new_v4().simple());
         model_name = eng.model_name().to_string();
+        arch = eng.model().arch();
 
         // Save task_id before task_config is moved into push_task.
         task_id = task_config.task_id;
@@ -204,6 +206,7 @@ pub async fn handle_responses(
                 &model_name,
                 n_prompt_tokens,
                 true,
+                arch,
             )
             .map_err(|e| match e.as_str() {
                 ERR_CANCELLED => (StatusCode::CONFLICT, oai_error(e, "cancelled")),

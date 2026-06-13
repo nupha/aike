@@ -304,6 +304,8 @@ fn js_engine_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
             .join("\n")
     };
 
+    let arch = engine.lock().unwrap().model().arch();
+
     if is_stream {
         // Streaming: AsyncIterableIterator
         let (chunk_tx, chunk_rx) = crossbeam::channel::bounded::<crate::output::ChunkSSE>(8);
@@ -316,6 +318,7 @@ fn js_engine_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
                 n_prompt_tokens,
                 include_usage,
                 |chunk| chunk_tx.send(chunk).is_ok(),
+                arch,
             );
         });
 
@@ -366,6 +369,7 @@ fn js_engine_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
                 &model_name,
                 n_prompt_tokens,
                 include_usage,
+                arch,
             );
 
             #[cfg(feature = "enable_eval_log")]
@@ -607,6 +611,7 @@ fn js_engine_responses(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let n_prompt_tokens = prompt_tokens.len();
     let respond_id = format!("res-{}", uuid::Uuid::new_v4().simple());
     let model_name = engine.lock().unwrap().model_name().to_string();
+    let arch = engine.lock().unwrap().model().arch();
 
     // Push task to engine
     let rx = engine
@@ -669,6 +674,7 @@ fn js_engine_responses(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 &model_name,
                 n_prompt_tokens,
                 usage,
+                arch,
             );
             let _ = result_slot.commit(result);
         });

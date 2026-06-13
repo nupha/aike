@@ -330,6 +330,8 @@ async fn handle_chat_completions(
         .and_then(|o| o.include_usage)
         .unwrap_or(false);
 
+    let arch = model.arch();
+
     if is_stream {
         // streaming - sse
         log::debug!("[http] streaming path: spawning blocking task for SSE");
@@ -393,6 +395,7 @@ async fn handle_chat_completions(
                     }
                     true
                 },
+                arch,
             );
 
             // If the client disconnected, cancel the engine task.
@@ -427,6 +430,7 @@ async fn handle_chat_completions(
                 &model_name,
                 n_prompt_tokens,
                 include_usage,
+                arch,
             )
             .map_err(|e| match e.as_str() {
                 ERR_CANCELLED => (StatusCode::CONFLICT, oai_error(e, "cancelled")),
