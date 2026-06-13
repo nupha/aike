@@ -123,20 +123,28 @@ impl Engine {
         }
     }
 
-    /// Align KV/cache state for prefix reuse. Returns reusable prefix length.
+    /// Align slot KV/cache state for a common prefix, so the first `n_common`
+    /// prompt tokens can skip re-computation.  Returns the number of reusable
+    /// tokens (`n_past`, equal to `n_common` unless KV shifting changed it).
     ///
-    /// When `n_cache_reuse > 0` and KV shifting is supported, after the initial
-    /// prefix match, scans the remaining cached tokens for additional matching
-    /// chunks and uses `memory_seq_rm` + `memory_seq_add` to shift them into
-    /// the correct position, avoiding recomputation of the common prefix.
+    /// Two paths:
+    /// - **Simple** (lines 168–214): truncate the slot's KV cache and
+    ///   `cached_tokens` to `n_common` length.  Used when `n_cache_reuse == 0`
+    ///   or the backend does not support KV shifting.
+    /// - **KV shifting** (lines 220–275): after the initial prefix, scan the
+    ///   remaining cached tokens for additional chunks that match the prompt,
+    ///   and use `memory_seq_rm` + `memory_seq_add` to shift them into the
+    ///   correct position, further reducing re-computation.
+    ///   Requires `n_cache_reuse > 0` and `memory_can_shift() == true`.
     ///
-    /// `n_common` is the raw common prefix length (from `pick_idle_slot`); this
-    /// function adjusts it so that at least one token remains for the model to
-    /// process.
+    /// `n_common` is the common-prefix length from `pick_idle_slot`.
+    /// Must satisfy `0 < n_common < prompt_tokens.len()` (the caller is
+    /// responsible for ensuring at least one prompt token remains to process).
     /// `n_cache_reuse` is the minimum chunk size to attempt shifting (0 = disabled).
     ///
-    /// Returns the total number of reusable tokens (n_past).
-    pub(super) fn prefill_slot(
+    /// Does **not** modify `prompt_tokens` or perform model inference.
+    /// Actual token decoding happens in `decoding_stage` (worker.rs).
+    pub(super) fn align_slot_common_prefix(
         &mut self,
         slot: &mut Slot,
         prompt_tokens: &[Token],

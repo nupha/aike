@@ -511,7 +511,7 @@ impl Engine {
             }
         }
 
-        let n_common = match self.prefill_slot(
+        let n_common = match self.align_slot_common_prefix(
             &mut slots[slot_idx],
             &task.prompt_tokens,
             n_common_raw,
