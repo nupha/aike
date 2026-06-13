@@ -81,7 +81,10 @@ impl OutputParser {
                         self.current_state = boundary.content_type;
 
                         return if before.is_empty() {
-                            Ok((OutputAction::TagStart, events))
+                            Ok((
+                                OutputAction::TagStart(boundary.open_tag.to_string()),
+                                events,
+                            ))
                         } else {
                             // Emit preceding content; caller will see TagStart via events
                             // We can't return two actions, so carry content and signal via events
@@ -92,6 +95,22 @@ impl OutputParser {
                     // Prefix check: is buf a proper prefix of this open tag?
                     if ot.starts_with(&self.buf) && self.buf.len() < ot.len() {
                         // buf is a partial tag prefix — hold
+                        return Ok((OutputAction::Hold, events));
+                    }
+                }
+
+                // Check against known close tags: LLMs sometimes generate stray close
+                // tags as format artifacts (e.g. `</tool_call>`) in Text state.
+                // These should be silently discarded rather than emitted as content.
+                for boundary in &self.boundaries {
+                    let ct = boundary.close_tag;
+                    if ct == self.buf {
+                        // Exact close tag match — discard silently
+                        self.buf.clear();
+                        return Ok((OutputAction::Hold, events));
+                    }
+                    if ct.starts_with(&self.buf) && self.buf.len() < ct.len() {
+                        // Partial close tag prefix — hold for continuation
                         return Ok((OutputAction::Hold, events));
                     }
                 }
@@ -122,14 +141,15 @@ impl OutputParser {
                         self.buf.push_str(text);
                         // If text is the complete close tag (single token), trigger end event
                         if text == ct {
-                            self.buf.clear();
+                            debug_assert_eq!(self.buf, ct, "single-token close tag mismatch");
+                            let tag = std::mem::take(&mut self.buf);
                             events.push(match self.current_state {
                                 OutputState::Reasoning => OutputStateChange::ReasoningEnd,
                                 OutputState::ToolCall => OutputStateChange::ToolCallEnd,
                                 _ => unreachable!(),
                             });
                             self.current_state = OutputState::Text;
-                            return Ok((OutputAction::TagEnd, events));
+                            return Ok((OutputAction::TagEnd(tag), events));
                         }
                         return Ok((OutputAction::Hold, events));
                     }
@@ -144,14 +164,18 @@ impl OutputParser {
                                 self.buf.push_str(text);
                                 // If buf now contains the complete close tag, trigger end event
                                 if self.buf.ends_with(ct) {
-                                    self.buf.clear();
+                                    debug_assert_eq!(
+                                        self.buf, ct,
+                                        "multi-token close tag mismatch"
+                                    );
+                                    let tag = std::mem::take(&mut self.buf);
                                     events.push(match self.current_state {
                                         OutputState::Reasoning => OutputStateChange::ReasoningEnd,
                                         OutputState::ToolCall => OutputStateChange::ToolCallEnd,
                                         _ => unreachable!(),
                                     });
                                     self.current_state = OutputState::Text;
-                                    return Ok((OutputAction::TagEnd, events));
+                                    return Ok((OutputAction::TagEnd(tag), events));
                                 }
                                 return Ok((OutputAction::Hold, events));
                             }
@@ -163,6 +187,7 @@ impl OutputParser {
                     self.buf.push_str(text);
                     if self.buf.ends_with(ct) {
                         // Content before the close tag is safe to emit
+                        debug_assert!(self.buf.ends_with(ct), "buf close tag suffix mismatch");
                         let before_len = self.buf.len() - ct.len();
                         let before = self.buf[..before_len].to_string();
                         self.buf.clear();
@@ -173,7 +198,7 @@ impl OutputParser {
                         });
                         self.current_state = OutputState::Text;
                         return if before.is_empty() {
-                            Ok((OutputAction::TagEnd, events))
+                            Ok((OutputAction::TagEnd(ct.to_string()), events))
                         } else {
                             Ok((OutputAction::Content(before), events))
                         };

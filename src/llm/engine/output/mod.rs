@@ -29,9 +29,11 @@ pub enum OutputAction {
     /// Text is buffered as a potential tag prefix, no action needed.
     Hold,
     /// Open tag detected, state transitioned (e.g. Text → ToolCall).
-    TagStart,
+    /// Carries the actual open tag string (e.g. `"<tool_call>"`).
+    TagStart(String),
     /// Close tag detected, state transitioned (e.g. ToolCall → Text).
-    TagEnd,
+    /// Carries the actual close tag string (e.g. `"</tool_call>"`).
+    TagEnd(String),
 }
 
 /// Represents different types of generated content based on semantic state.
