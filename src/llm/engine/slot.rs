@@ -335,7 +335,7 @@ impl Engine {
     }
 
     /// reset state for given slot id
-    pub(crate) fn reset_sampler(&mut self, slot: &mut Slot) {
+    pub(crate) fn reset_slot_sampler(&mut self, slot: &mut Slot) {
         slot.sampler = None;
         #[cfg(debug_assertions)]
         {

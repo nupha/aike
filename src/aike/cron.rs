@@ -17,8 +17,8 @@ use cron::Schedule;
 use crossbeam::channel::{Receiver, Sender};
 use linkme::distributed_slice;
 use zuqe::{
-    CallContext, ClassCtorDef, ClassID, FieldDef, JS_PROP_C_W_E, JSResult, JSValue, Object,
-    Runtime, ScopedContext, def_native_object,
+    CallContext, ClassID, FieldDef, JS_PROP_C_W_E, JSResult, JSValue, Object, Runtime,
+    ScopedContext, def_native_object,
     gc_lite::{GcTrace, GcTraceCtx},
 };
 

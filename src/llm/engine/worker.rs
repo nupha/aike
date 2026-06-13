@@ -545,12 +545,17 @@ impl Engine {
         let mut completed = 0usize;
 
         for slot in slots {
-            let state0 = std::mem::replace(&mut slot.state, SlotState::Busy);
+            if matches!(slot.state, SlotState::Done { .. }) {
+                let SlotState::Done { task_state, reply } =
+                    std::mem::replace(&mut slot.state, SlotState::Idle)
+                else {
+                    unreachable!()
+                };
 
-            if let SlotState::Done { task_state, reply } = state0 {
                 if matches!(reply, EngineReply::Cancelled) {
                     log::info!("[worker] task id={} cancelled", task_state.config.task_id);
                 }
+
                 let aborted = matches!(
                     reply,
                     EngineReply::Cancelled | EngineReply::Shutdown | EngineReply::Error(_)
@@ -583,13 +588,19 @@ impl Engine {
                 if aborted {
                     self.clear_slot(slot);
                     slot.n_past = 0;
+                } else if self.context_mode() == ContextMode::Checkpoint {
+                    // Recurrent/hybrid: checkpoint already saved to cache_ram during decode phase.
+                    // shall we clear slot to free memory?
+                    // self.clear_slot(slot);
+                    // slot.n_past = 0;
+
+                    // or just reset the sampler state?
+                    self.reset_slot_sampler(slot);
                 } else {
-                    self.reset_sampler(slot);
+                    self.reset_slot_sampler(slot);
                 }
+
                 completed += 1;
-                slot.state = SlotState::Idle;
-            } else {
-                slot.state = state0;
             }
         }
 
