@@ -47,6 +47,7 @@ pub struct Slot {
     pub checkpoint_dump_at: usize,
     /// Sampler chain for this slot, lazily initialized.
     pub sampler: Option<SamplerChain>,
+
     /// Timestamp when generation (sampling) started, for TPS calculation.
     #[cfg(debug_assertions)]
     pub debug_generation_start: Option<std::time::Instant>,
@@ -328,6 +329,10 @@ impl Engine {
     /// reset state for given slot id
     pub(crate) fn reset_sampler(&mut self, slot: &mut Slot) {
         slot.sampler = None;
+        #[cfg(debug_assertions)]
+        {
+            slot.debug_generation_start = None;
+        }
     }
 
     pub(crate) fn clear_slot(&mut self, slot: &mut Slot) {

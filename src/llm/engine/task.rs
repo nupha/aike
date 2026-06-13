@@ -171,16 +171,6 @@ pub enum StopReason {
     Word(String),
 }
 
-/// Helper function to check if a GeneratedContent matches the given state
-fn matches_content(content: &GeneratedContent, state: &OutputState) -> bool {
-    matches!(
-        (content, state),
-        (GeneratedContent::Text(_), OutputState::Text)
-            | (GeneratedContent::Reasoning(_), OutputState::Reasoning)
-            | (GeneratedContent::ToolCall(_), OutputState::ToolCall)
-    )
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EngineReply {
     Content(GeneratedContent),
@@ -462,6 +452,14 @@ impl Engine {
             &task.prompt_tokens[..task.prompt_tokens.len().min(10)],
         );
 
+        // Full match from slot prefix: recurrent/hybrid models can't safely
+        // truncate KV cache, so treat as no-match and fall through to cache_ram.
+        if n_common_raw == task.prompt_tokens.len()
+            && self.context_mode() == super::cache::ContextMode::Checkpoint
+        {
+            n_common_raw = 0;
+        }
+
         if n_common_raw == 0 {
             // try match in cache ram
             log::debug!(
@@ -469,6 +467,7 @@ impl Engine {
                 self.cache_ram.entry_count(),
                 task.prompt_tokens.len(),
             );
+
             if let Some((cache_idx, len)) = self
                 .cache_ram
                 .find_best_match(&task.prompt_tokens, self.context_mode())
@@ -486,17 +485,30 @@ impl Engine {
             }
         }
 
-        // All prompt tokens already match the cache — no new input, end the task.
+        // Full-match handling after all prefix (slot + cache_ram) resolution.
+        // When the entire prompt matches cached state with no new input tokens,
+        // the model won't generate any output.  cached_tokens is a flat
+        // [prompt|generated] sequence without a prompt/generation boundary,
+        // so we cannot reliably extract just the generated portion.
         if n_common_raw == task.prompt_tokens.len() {
-            self.clear_slot(&mut slots[slot_idx]);
-            log::debug!(
-                "[sched] slot#{slot_idx} prompt fully cached (n_common_raw={}), ending task",
-                n_common_raw,
-            );
-            let _ = task
-                .output_tx
-                .send(EngineReply::Stop(StopReason::PrefillOnly, 0));
-            return SchedResult::Rejected;
+            if self.context_mode() == super::cache::ContextMode::Checkpoint {
+                // Recurrent: can't safely trim KV to force re-generation.
+                // Signal empty generation. Slot stays Idle with cache intact.
+                log::debug!(
+                    "[sched] slot#{slot_idx} prompt fully cached (n_common_raw={}), \
+                     recurrent model, no new tokens to process",
+                    n_common_raw,
+                );
+                let _ = task
+                    .output_tx
+                    .send(EngineReply::Stop(StopReason::PrefillOnly, 0));
+                return SchedResult::Scheduled;
+            } else {
+                // Non-recurrent: trim one token from the common prefix so at
+                // least one prompt token is re-decoded, forcing the model to
+                // generate new output beyond the cached prefix.
+                n_common_raw = n_common_raw.saturating_sub(1);
+            }
         }
 
         let n_common = match self.prefill_slot(
@@ -519,8 +531,8 @@ impl Engine {
         );
 
         if n_common > 0 {
+            // trim common tokens from prompt
             task.prompt_tokens.drain(..n_common);
-            debug_assert!(!task.prompt_tokens.is_empty());
         }
 
         // Create output parser if enabled
