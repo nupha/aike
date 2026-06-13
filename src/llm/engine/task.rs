@@ -363,6 +363,16 @@ impl Engine {
                     remove_cancelled_inputs(deferred, task_id);
                     cancelled_ids.insert(task_id);
 
+                    // Clean up pending swaps for this task
+                    let mut i = 0;
+                    while i < self.pending_swap_outs.len() {
+                        if self.pending_swap_outs[i].task_id == task_id {
+                            self.pending_swap_outs.remove(i);
+                        } else {
+                            i += 1;
+                        }
+                    }
+
                     for slot in slots.iter_mut() {
                         let state0 = std::mem::replace(&mut slot.state, SlotState::Busy);
 
@@ -409,6 +419,8 @@ impl Engine {
                                     SlotState::Done { task_state, reply }
                                 }
                             }
+                            // Swapped has no active task — slot is free.
+                            SlotState::Swapped => SlotState::Idle,
                             other => other,
                         };
                     }
@@ -455,7 +467,7 @@ impl Engine {
         // Full match from slot prefix: recurrent/hybrid models can't safely
         // truncate KV cache, so treat as no-match and fall through to cache_ram.
         if n_common_raw == task.prompt_tokens.len()
-            && self.context_mode() == super::cache::ContextMode::Checkpoint
+            && self.context_mode() == super::caching::ContextMode::Checkpoint
         {
             n_common_raw = 0;
         }
@@ -491,7 +503,7 @@ impl Engine {
         // [prompt|generated] sequence without a prompt/generation boundary,
         // so we cannot reliably extract just the generated portion.
         if n_common_raw == task.prompt_tokens.len() {
-            if self.context_mode() == super::cache::ContextMode::Checkpoint {
+            if self.context_mode() == super::caching::ContextMode::Checkpoint {
                 // Recurrent: can't safely trim KV to force re-generation.
                 // Signal empty generation. Slot stays Idle with cache intact.
                 log::debug!(

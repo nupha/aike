@@ -1,4 +1,10 @@
-use super::{Engine, slot::Slot, task::Token};
+use std::collections::VecDeque;
+
+use super::{
+    Engine,
+    slot::{Slot, SlotState},
+    task::{EngineReply, TaskState, Token},
+};
 
 pub(crate) const CHECKPOINT_STEP: usize = 256;
 
@@ -68,7 +74,9 @@ impl CacheRam {
                     if entry_len > prompt_tokens.len() {
                         log::debug!(
                             "[cache_ram] entry#{} skip: entry_len={} > prompt_len={}",
-                            i, entry_len, prompt_tokens.len(),
+                            i,
+                            entry_len,
+                            prompt_tokens.len(),
                         );
                         continue;
                     }
@@ -80,8 +88,12 @@ impl CacheRam {
                     if common < entry_len {
                         log::debug!(
                             "[cache_ram] entry#{} mismatch at pos {}: entry_token={} prompt_token={} (entry_len={}, prompt_len={})",
-                            i, common, entry.tokens[common], prompt_tokens[common],
-                            entry_len, prompt_tokens.len(),
+                            i,
+                            common,
+                            entry.tokens[common],
+                            prompt_tokens[common],
+                            entry_len,
+                            prompt_tokens.len(),
                         );
                     }
                     if common == entry_len && entry_len > best_n {
@@ -284,9 +296,13 @@ impl Engine {
         if mode == ContextMode::Checkpoint {
             // In Checkpoint mode, truncate must equal the entry's token count
             // (we restore the full entry, no truncation).
-            debug_assert_eq!(truncate, cached_tokens.len(),
+            debug_assert_eq!(
+                truncate,
+                cached_tokens.len(),
                 "Checkpoint restore: truncate={} != entry tokens={}",
-                truncate, cached_tokens.len());
+                truncate,
+                cached_tokens.len()
+            );
         }
 
         let state = unsafe { std::slice::from_raw_parts(state_ptr, state_len) };
@@ -317,4 +333,216 @@ impl Engine {
 
         restored
     }
+
+    /// Swap a slot's state out to free memory.
+    ///
+    /// Saves KV state + task state so the task can be resumed later.
+    /// Simple version for experimentation — does not save sampler
+    /// (recreated on restore via init_sampler).
+    pub(crate) fn swap_slot(&mut self, slot: &mut Slot) -> Option<SwapEntry> {
+        let (task_state, prompt_tokens, logits_for_all_tokens, num_written, _is_prefill) =
+            match std::mem::replace(&mut slot.state, SlotState::Swapped) {
+                SlotState::Decoding {
+                    task_state,
+                    prompt_tokens,
+                    logits_for_all_tokens,
+                    num_written,
+                    is_prefill,
+                } => (
+                    task_state,
+                    prompt_tokens,
+                    logits_for_all_tokens,
+                    num_written,
+                    is_prefill,
+                ),
+                SlotState::Sampling { task_state, .. } => {
+                    // Sampling: no remaining prompt to save, resume as single-token decode.
+                    (task_state, VecDeque::new(), false, 0, false)
+                }
+                _ => return None,
+            };
+
+        let kv_state = self.llm_ctx().dump_seq_state(slot.seq_id as i32);
+        if kv_state.is_empty() {
+            log::warn!("[swap] slot#{} empty kv_state, skipping", slot.seq_id);
+            slot.state = SlotState::Done {
+                task_state,
+                reply: EngineReply::Error("swap failed: empty kv state".to_string()),
+            };
+            return None;
+        }
+
+        let task_id = task_state.config.task_id;
+        let cached_tokens = slot.cached_tokens.clone();
+        let n_past = slot.n_past;
+
+        self.clear_slot(slot);
+        slot.n_past = 0;
+
+        log::info!(
+            "[swap] slot#{} task_id={} {} cached_tokens={} n_past={}",
+            slot.seq_id,
+            task_id,
+            if prompt_tokens.is_empty() {
+                "sampling"
+            } else {
+                "prefill"
+            },
+            cached_tokens.len(),
+            n_past,
+        );
+
+        Some(SwapEntry {
+            task_id,
+            kv_state,
+            cached_tokens,
+            n_past,
+            task_state,
+            prompt_tokens,
+            logits_for_all_tokens,
+            num_written,
+        })
+    }
+
+    /// Restore a swapped task into an idle slot.
+    pub(crate) fn restore_swap(&mut self, slot: &mut Slot, entry: SwapEntry) {
+        let task_id = entry.task_id;
+
+        debug_assert!(matches!(slot.state, SlotState::Idle));
+        self.clear_slot(slot);
+
+        let restored = self
+            .llm_ctx_mut()
+            .restore_seq_state(slot.seq_id as i32, &entry.kv_state);
+
+        if restored == 0 {
+            log::error!(
+                "[restore_swap] failed to restore kv_state for task_id={}",
+                task_id,
+            );
+            let _ = entry
+                .task_state
+                .output_tx
+                .send(EngineReply::Error("restore swap failed".to_string()));
+            return;
+        }
+
+        slot.cached_tokens = entry.cached_tokens;
+        slot.n_past = entry.n_past;
+        slot.mtime = crate::helpers::now_unix_s();
+
+        if !entry.prompt_tokens.is_empty() {
+            // Was in prefill — continue with remaining prompt tokens
+            slot.state = SlotState::Decoding {
+                prompt_tokens: entry.prompt_tokens,
+                logits_for_all_tokens: entry.logits_for_all_tokens,
+                num_written: entry.num_written,
+                task_state: entry.task_state,
+                is_prefill: true,
+            };
+        } else {
+            // Was in sampling — resume with the kv state at `n_past` already
+            // pointing to the last decoded position. We need to re-decode
+            // the last token to get logits for sampling.
+            // For simplicity, put a single decode step: re-decode the last
+            // token from cached_tokens.
+            let last_token = slot.cached_tokens.last().copied().unwrap_or_default();
+            slot.state = SlotState::Decoding {
+                prompt_tokens: VecDeque::from([last_token]),
+                logits_for_all_tokens: false,
+                num_written: 0,
+                task_state: entry.task_state,
+                is_prefill: false,
+            };
+        }
+
+        log::info!(
+            "[restore_swap] task_id={} slot#{} restored, n_past={}, {}",
+            task_id,
+            slot.seq_id,
+            slot.n_past,
+            if matches!(
+                slot.state,
+                SlotState::Decoding {
+                    is_prefill: true,
+                    ..
+                }
+            ) {
+                "resume prefill"
+            } else {
+                "resume sampling"
+            },
+        );
+    }
+}
+
+/// A swapped-out task saved to free slot memory.
+///
+/// Contains everything needed to resume the task from where it left off.
+/// Sampler is not saved — recreated on restore.
+#[derive(Debug)]
+pub(crate) struct SwapEntry {
+    pub task_id: usize,
+    pub kv_state: Box<[u8]>,
+    pub cached_tokens: Vec<Token>,
+    pub n_past: i32,
+    pub task_state: TaskState,
+    /// Remaining prompt tokens (non-empty = was in Decoding/prefill).
+    pub prompt_tokens: VecDeque<Token>,
+    pub logits_for_all_tokens: bool,
+    pub num_written: usize,
+}
+
+/// Find the slot that's closest to finishing — best swap candidate.
+/// Prefers Decoding(prefill) slots with fewest remaining prompt tokens,
+/// then Sampling slots (closest to EOG by n_completion_tokens).
+pub(crate) fn find_swap_candidate(slots: &[Slot]) -> Option<usize> {
+    let mut best: Option<usize> = None;
+    let mut best_score: Option<usize> = None;
+
+    for (i, slot) in slots.iter().enumerate() {
+        let score = match &slot.state {
+            // Prefill: fewer remaining tokens = finish sooner
+            SlotState::Decoding {
+                prompt_tokens,
+                is_prefill: true,
+                ..
+            } => Some(prompt_tokens.len()),
+            // Sampling: more output tokens = closer to done
+            SlotState::Sampling { task_state, .. }
+            | SlotState::Decoding {
+                task_state,
+                is_prefill: false,
+                ..
+            } => {
+                let max_tokens = task_state.config.max_tokens;
+                let done = task_state.n_completion_tokens;
+                if max_tokens > 0 {
+                    // Closer to max_tokens = closer to done
+                    Some(max_tokens.saturating_sub(done))
+                } else {
+                    // No max: prefer higher completion (more likely EOG soon)
+                    Some(usize::MAX.saturating_sub(done))
+                }
+            }
+            _ => continue, // Idle/Done/Swapped/Busy — not swap candidates
+        };
+
+        if let Some(s) = score {
+            match best_score {
+                None => {
+                    best = Some(i);
+                    best_score = Some(s);
+                }
+                Some(bs) => {
+                    if s < bs {
+                        best = Some(i);
+                        best_score = Some(s);
+                    }
+                }
+            }
+        }
+    }
+
+    best
 }

@@ -4,7 +4,7 @@ use llama_cpp_ffi::SamplerChain;
 
 use super::{
     Engine,
-    cache::ContextMode,
+    caching::ContextMode,
     task::{EngineReply, TaskState, Token},
 };
 
@@ -28,6 +28,8 @@ pub enum SlotState {
         task_state: TaskState,
         reply: EngineReply,
     },
+    /// Task data extracted and saved as SwapEntry, slot free to reclaim.
+    Swapped,
     Busy,
 }
 

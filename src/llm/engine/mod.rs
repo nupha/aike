@@ -4,7 +4,7 @@
 //! multiple tasks concurrently on a single LlamaContext, with support for
 //! prefix caching, grammar-constrained generation, and streaming output.
 
-mod cache;
+mod caching;
 mod context;
 mod output;
 pub(crate) mod serve;

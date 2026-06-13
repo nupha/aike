@@ -11,7 +11,7 @@ use std::io::Write;
 use crossbeam::channel::Receiver;
 
 use super::{
-    cache::ContextMode,
+    caching::{ContextMode, find_swap_candidate},
     context::Engine,
     output::GeneratedContent,
     slot::{Slot, SlotState},
@@ -34,6 +34,9 @@ fn matches_content_state(content: &GeneratedContent, state: super::output::Outpu
     )
 }
 
+/// Find the slot that's closest to finishing — best swap candidate.
+/// Prefers Decoding(prefill) slots with fewest remaining prompt tokens,
+/// then Sampling slots (closest to EOG by n_completion_tokens).
 pub fn worker_loop(
     engine: Arc<Mutex<Engine>>,
     max_parallel: usize,
@@ -63,7 +66,10 @@ pub fn worker_loop(
         }
 
         while let Ok(task) = input_rx.try_recv() {
-            if deferred_tasks.is_empty() {
+            // When swaps are pending, defer new tasks to keep slots
+            // available for restore_swap on Done→Idle transitions.
+            let has_swaps = !engine.lock().unwrap().pending_swap_outs.is_empty();
+            if deferred_tasks.is_empty() && !has_swaps {
                 ready_tasks.push_back(task);
             } else {
                 deferred_tasks.push_back(task);
@@ -301,13 +307,74 @@ impl Engine {
                     //     slots[idx].checkpoint_dump_at = 0; // done
                     // }
                 }
-                // Err(e) if e == "ContextFull" => {
-                //     todo!("kv cache full, need to shift context");
-                // }
+                Err(e) if e == "OOM" => {
+                    // Out of memory during decode: free memory, then retry.
+                    // The failing slot's state is still valid — decode_batch is
+                    // atomic. push_decode_token added tokens to cached_tokens
+                    // but n_past wasn't committed. Unwind, free memory, then
+                    // put the slot back in Decoding state for next tick retry.
+                    for (idx, _) in &written_updates {
+                        // Task is still valid,
+                        // it just needs memory freed before retrying decode.
+                        // unwind partial decode works.
+                        let slot = &mut slots[*idx];
+                        slot.cached_tokens.truncate(slot.n_past as usize);
+                        self.llm_ctx_mut()
+                            .memory_seq_rm(slot.seq_id as _, slot.n_past as _, -1);
+                    }
+
+                    // Free memory try 1: dump LRU idle slot to cache_ram first.
+                    let mut freed = false;
+                    {
+                        let mut lru: Option<usize> = None;
+                        let mut lru_time = i64::MAX;
+                        for (j, s) in slots.iter().enumerate() {
+                            if matches!(s.state, SlotState::Idle)
+                                && !s.cached_tokens.is_empty()
+                                && s.mtime < lru_time
+                            {
+                                lru = Some(j);
+                                lru_time = s.mtime;
+                            }
+                        }
+                        if let Some(nth) = lru {
+                            if self.context_mode() == ContextMode::Checkpoint {
+                                self.dump_slot_to_cache_ram(&mut slots[nth], false);
+                                self.clear_slot(&mut slots[nth]);
+                            } else {
+                                self.dump_slot_to_cache_ram(&mut slots[nth], true);
+                            }
+                            freed = true;
+                        }
+                    }
+
+                    // Try 2: No idle slot to free: if there's no Done slot that will
+                    // transition to Idle next tick, swap out a candidate.
+                    if !freed {
+                        let has_done = slots
+                            .iter()
+                            .any(|s| matches!(s.state, SlotState::Done { .. }));
+                        if !has_done {
+                            if let Some(swap_idx) = find_swap_candidate(slots) {
+                                log::info!(
+                                    "[decode] out of memory, swapping out slot#{}",
+                                    swap_idx,
+                                );
+                                if let Some(swap) = self.swap_slot(&mut slots[swap_idx]) {
+                                    self.pending_swap_outs.push_back(swap);
+                                }
+                            }
+                        }
+                    }
+
+                    // The failing slots are back in Decoding and will retry
+                    // on the next tick. Don't trigger sampling from a messed
+                    // up batch.
+                    has_sampling = false;
+                }
                 Err(e) => {
                     for (idx, _) in &written_updates {
                         let slot = &mut slots[*idx];
-
                         slot.cached_tokens.truncate(slot.n_past as usize);
                         self.llm_ctx_mut()
                             .memory_seq_rm(slot.seq_id as _, slot.n_past as _, -1);
@@ -460,71 +527,44 @@ impl Engine {
                         // Pre-check: if the next decode will exceed context size
                         let n_ctx = self.llm_ctx().n_ctx() as usize;
                         let n_past = slots[i].n_past as usize + 1; // +1 for this new token
-                        if n_past + 1 >= n_ctx {
-                            // context will be full on next decode tick:
-                            // 1. try to find an idle slot and free it.
-                            // 2. if no lru slot found, shift the slot kv/cache to squeeze some space.
-                            let mut lru: Option<usize> = None;
-                            let mut lru_time = i64::MAX;
-                            for (j, s) in slots.iter().enumerate() {
-                                if matches!(s.state, SlotState::Idle)
-                                    && !s.cached_tokens.is_empty()
-                                    && s.mtime < lru_time
-                                {
-                                    debug_assert_ne!(i, j);
-                                    lru = Some(j);
-                                    lru_time = s.mtime;
-                                }
-                            }
-                            if let Some(nth) = lru {
-                                if self.context_mode() == ContextMode::Checkpoint {
-                                    // Checkpoint dumped in decode phase. no need to dump again here
-                                    self.clear_slot(&mut slots[nth]);
-                                } else {
-                                    // Dump kv
-                                    self.dump_slot_to_cache_ram(&mut slots[nth], true);
-                                }
-                            } else {
-                                // No idle slot to swap: we have keep_tokens defined -
-                                // let's shift the slot kv/cache to squeeze some space.
-                                let keep_tokens = task_state.config.keep_tokens;
-                                if keep_tokens > 0 {
-                                    match self.context_shift(&mut slots[i], keep_tokens, 0) {
-                                        Ok(new_n_past) => {
-                                            log::debug!(
-                                                "[context_shift] slot={} seq_id={} keep={} n_past={}->{}",
-                                                slots[i].seq_id,
-                                                slots[i].seq_id,
-                                                keep_tokens,
-                                                slots[i].n_past,
-                                                new_n_past,
-                                            );
-                                            slots[i].n_past = new_n_past;
-                                        }
-                                        Err(e) => {
-                                            log::error!(
-                                                "[context_shift] failed for slot={}: {}",
-                                                slots[i].seq_id,
-                                                e,
-                                            );
-                                            slots[i].state = SlotState::Done {
-                                                task_state,
-                                                reply: EngineReply::Error(
-                                                    "ContextFull".to_string(),
-                                                ),
-                                            };
-                                            continue;
-                                        }
+                        if n_past + 8 >= n_ctx {
+                            // Context will be full: shift current slot's window to free space.
+                            let keep_tokens = task_state.config.keep_tokens;
+                            if keep_tokens > 0 {
+                                match self.context_shift(&mut slots[i], keep_tokens, 0) {
+                                    Ok(new_n_past) => {
+                                        log::debug!(
+                                            "[context_shift] slot={} seq_id={} keep={} n_past={}->{}",
+                                            slots[i].seq_id,
+                                            slots[i].seq_id,
+                                            keep_tokens,
+                                            slots[i].n_past,
+                                            new_n_past,
+                                        );
+                                        slots[i].n_past = new_n_past;
+                                    }
+                                    Err(e) => {
+                                        log::error!(
+                                            "[context_shift] failed for slot={}: {}",
+                                            slots[i].seq_id,
+                                            e,
+                                        );
+                                        slots[i].state = SlotState::Done {
+                                            task_state,
+                                            reply: EngineReply::Error("ContextFull".to_string()),
+                                        };
+                                        continue;
                                     }
                                 }
                             }
                         }
 
-                        // decoding for sampled token
                         #[cfg(debug_assertions)]
                         if slots[i].debug_generation_start.is_none() {
                             slots[i].debug_generation_start = Some(std::time::Instant::now());
                         }
+
+                        // decode for this sampled token
                         slots[i].state = SlotState::Decoding {
                             prompt_tokens: VecDeque::from([token]),
                             logits_for_all_tokens: false,
@@ -605,6 +645,14 @@ impl Engine {
                     self.reset_slot_sampler(slot);
                 }
 
+                // If there are pending swap-outs, restore one into this freed slot.
+                // The slot is already Idle after the Done→Idle transition above.
+                if !aborted && !self.pending_swap_outs.is_empty() {
+                    if let Some(entry) = self.pending_swap_outs.pop_front() {
+                        self.restore_swap(slot, entry);
+                    }
+                }
+
                 completed += 1;
             }
         }
@@ -626,10 +674,12 @@ impl Engine {
             self.done_stage(slots) > 0
         }
     }
+}
 
+#[cfg(debug_assertions)]
+impl Engine {
     /// Print slot statuses to stderr for live debugging.
     /// Uses ANSI escape to overwrite previous output each tick.
-    #[cfg(debug_assertions)]
     fn debug_print_slots(slots: &[Slot]) {
         let has_active = slots.iter().any(|s| !matches!(s.state, SlotState::Idle));
         if !has_active {
@@ -667,6 +717,7 @@ impl Engine {
                     }
                 }
                 SlotState::Done { reply, .. } => format!("Done({:?})", reply),
+                SlotState::Swapped => "Swapped".to_string(),
                 SlotState::Busy => "Busy".to_string(),
             };
 

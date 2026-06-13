@@ -1,4 +1,5 @@
 use std::{
+    collections::VecDeque,
     sync::{Arc, Mutex},
     thread::{self, JoinHandle},
     time::Duration,
@@ -8,7 +9,7 @@ use crossbeam::channel::{Receiver, SendError, Sender};
 use llama_cpp_ffi::{LlamaContext, LlamaModel, SamplerChain, SamplerKind};
 
 use super::{
-    cache::{CacheRam, ContextMode},
+    caching::{CacheRam, ContextMode, SwapEntry},
     slot::Slot,
     task::{EngineCtrlMsg, EngineReply, EngineTask, GrammarConfig, TaskConfig, Token},
     worker::worker_loop,
@@ -54,6 +55,10 @@ pub struct Engine {
 
     /// RAM-based prompt cache pool for KV state persistence across slots.
     pub(crate) cache_ram: CacheRam,
+
+    /// Tasks swapped out to free slot memory, waiting for an idle slot.
+    /// When non-empty, new incoming tasks are deferred.
+    pub(crate) pending_swap_outs: VecDeque<SwapEntry>,
 
     /// Set to true when the worker thread has panicked.
     /// Once dead, push_task() will return an error and the engine
@@ -248,6 +253,7 @@ impl Engine {
             parse_reasoning: true,
             n_cache_reuse,
             cache_ram: CacheRam::new(cache_ram_bytes),
+            pending_swap_outs: VecDeque::new(),
             is_dead: false,
             llm_ctx,
             pending_decode_tokens: 0,
