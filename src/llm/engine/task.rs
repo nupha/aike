@@ -226,8 +226,7 @@ impl TaskState {
         // Incomplete bytes stay in pending_bytes for the next token to complete.
         let piece = model.token_to_piece(token);
         self.pending_bytes.extend_from_slice(&piece);
-        let decoded = Self::decode_utf8_buf(&mut self.pending_bytes);
-
+        let decoded = decode_utf8_buf(&mut self.pending_bytes);
         let Some(ref text) = decoded else {
             // No valid UTF-8 yet — bytes stay in pending_bytes,
             // will be decoded when the next token completes the sequence.
@@ -235,13 +234,12 @@ impl TaskState {
         };
 
         if let Some(ref mut parser) = self.output_parser {
-            match parser.push_text(text) {
+            match parser.add_text(text) {
                 Ok((add_text, event_list)) => {
                     // Snapshot parser state before dropping the borrow so we
                     // can call self methods below.
                     #[cfg(debug_assertions)]
                     let parser_state = parser.current_state();
-                    let _ = parser;
 
                     for event in event_list {
                         self.handle_output_event(event);
@@ -259,7 +257,6 @@ impl TaskState {
                     // Parser reset internally: clear pending bytes (they belong to
                     // pre-error state and are no longer valid), then sync content
                     let parser_state = parser.current_state();
-                    let _ = parser;
 
                     self.pending_bytes.clear();
 
@@ -311,31 +308,31 @@ impl TaskState {
             _ => GeneratedContent::Text(String::new()),
         });
     }
+}
 
-    /// Extract a valid UTF-8 prefix from a byte buffer, draining consumed bytes.
-    /// Returns `Some(text)` if at least one complete character is available,
-    /// or `None` if the buffer contains only an incomplete UTF-8 sequence.
-    fn decode_utf8_buf(buf: &mut Vec<u8>) -> Option<String> {
-        if buf.is_empty() {
-            return None;
-        }
-        if let Ok(s) = std::str::from_utf8(buf) {
+/// Extract a valid UTF-8 prefix from a byte buffer, draining consumed bytes.
+/// Returns `Some(text)` if at least one complete character is available,
+/// or `None` if the buffer contains only an incomplete UTF-8 sequence.
+fn decode_utf8_buf(buf: &mut Vec<u8>) -> Option<String> {
+    if buf.is_empty() {
+        return None;
+    }
+    if let Ok(s) = std::str::from_utf8(buf) {
+        let text = s.to_string();
+        buf.clear();
+        Some(text)
+    } else if let Err(e) = std::str::from_utf8(buf) {
+        let valid = e.valid_up_to();
+        if valid > 0 {
+            let s = unsafe { std::str::from_utf8_unchecked(&buf[..valid]) };
             let text = s.to_string();
-            buf.clear();
+            buf.drain(0..valid);
             Some(text)
-        } else if let Err(e) = std::str::from_utf8(buf) {
-            let valid = e.valid_up_to();
-            if valid > 0 {
-                let s = unsafe { std::str::from_utf8_unchecked(&buf[..valid]) };
-                let text = s.to_string();
-                buf.drain(0..valid);
-                Some(text)
-            } else {
-                None
-            }
         } else {
             None
         }
+    } else {
+        None
     }
 }
 

@@ -54,7 +54,7 @@ impl OutputParser {
     /// Returns `(add_text, events)`:
     /// - `add_text`: whether the caller should append this token's text to content
     /// - `events`: state change events detected (0-2 per token)
-    pub fn push_text(&mut self, text: &str) -> Result<(bool, OutputEvents), String> {
+    pub fn add_text(&mut self, text: &str) -> Result<(bool, OutputEvents), String> {
         let mut events: OutputEvents = smallvec![];
 
         // Try to detect tag boundaries
