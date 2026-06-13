@@ -47,6 +47,9 @@ pub struct Slot {
     pub checkpoint_dump_at: usize,
     /// Sampler chain for this slot, lazily initialized.
     pub sampler: Option<SamplerChain>,
+    /// Timestamp when generation (sampling) started, for TPS calculation.
+    #[cfg(debug_assertions)]
+    pub debug_generation_start: Option<std::time::Instant>,
 }
 
 impl Slot {
@@ -60,6 +63,8 @@ impl Slot {
             last_dump_tokens: 0,
             checkpoint_dump_at: 0,
             sampler: None,
+            #[cfg(debug_assertions)]
+            debug_generation_start: None,
         }
     }
 }
@@ -331,6 +336,10 @@ impl Engine {
         slot.sampler = None;
         slot.last_dump_tokens = 0;
         slot.checkpoint_dump_at = 0;
+        #[cfg(debug_assertions)]
+        {
+            slot.debug_generation_start = None;
+        }
     }
 }
 

@@ -5,6 +5,9 @@ use std::{
     time::Duration,
 };
 
+#[cfg(debug_assertions)]
+use std::io::Write;
+
 use crossbeam::channel::Receiver;
 
 use super::{
@@ -112,6 +115,9 @@ pub fn worker_loop(
             .filter(|s| !matches!(s.state, SlotState::Idle))
             .count();
         engine.lock().unwrap().num_tasks = num_tasks;
+
+        #[cfg(debug_assertions)]
+        Engine::debug_print_slots(&slots);
 
         if !did_work {
             thread::sleep(idle_sleep);
@@ -510,6 +516,10 @@ impl Engine {
                         }
 
                         // decoding for sampled token
+                        #[cfg(debug_assertions)]
+                        if slots[i].debug_generation_start.is_none() {
+                            slots[i].debug_generation_start = Some(std::time::Instant::now());
+                        }
                         slots[i].state = SlotState::Decoding {
                             prompt_tokens: VecDeque::from([token]),
                             logits_for_all_tokens: false,
@@ -599,5 +609,62 @@ impl Engine {
         } else {
             self.done_stage(slots) > 0
         }
+    }
+
+    /// Print slot statuses to stderr for live debugging.
+    /// Uses ANSI escape to overwrite previous output each tick.
+    #[cfg(debug_assertions)]
+    fn debug_print_slots(slots: &[Slot]) {
+        let has_active = slots.iter().any(|s| !matches!(s.state, SlotState::Idle));
+        if !has_active {
+            return;
+        }
+
+        let mut stderr = std::io::stderr().lock();
+        let mut lines_printed = 0usize;
+        for (i, slot) in slots.iter().enumerate() {
+            let status = match &slot.state {
+                SlotState::Idle => "Idle".to_string(),
+                SlotState::Decoding {
+                    prompt_tokens,
+                    is_prefill: true,
+                    ..
+                } => {
+                    format!("Prefilling remaining={})", prompt_tokens.len())
+                }
+                // After sampling_stage completes, slot sits in Decoding(sample)
+                // until next tick's decoding_stage processes the single token.
+                // Show the same generation stats as Sampling.
+                SlotState::Decoding {
+                    task_state,
+                    is_prefill: false,
+                    ..
+                }
+                | SlotState::Sampling { task_state, .. } => {
+                    let out = task_state.n_completion_tokens;
+                    if let Some(start) = slot.debug_generation_start {
+                        let secs = start.elapsed().as_secs_f64();
+                        let tps = if secs > 0.0 { out as f64 / secs } else { 0.0 };
+                        format!("Generating output={out}, {:.1} tok/s", tps)
+                    } else {
+                        format!("Generating output={out}")
+                    }
+                }
+                SlotState::Done { reply, .. } => format!("Done({:?})", reply),
+                SlotState::Busy => "Busy".to_string(),
+            };
+
+            // \r returns to column 0, \x1b[K clears to end of line,
+            // preventing leftover characters from longer previous lines.
+            let _ = write!(stderr, "\r\x1b[K");
+            let _ = writeln!(stderr, "SLOT#{}: {}", i, status);
+            lines_printed += 1;
+        }
+
+        // Move cursor up by actual lines printed so next tick overwrites them
+        if lines_printed > 0 {
+            let _ = write!(stderr, "\x1b[{}A", lines_printed);
+        }
+        let _ = stderr.flush();
     }
 }
