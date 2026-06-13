@@ -9,7 +9,7 @@ const TASK_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 
 use async_openai::types::chat::ChatCompletionTools;
 use crossbeam::channel::{Receiver, Sender};
-use llama_cpp_ffi::{ContentType, LlamaModel, SamplerChain, ToolChoice};
+use llama_cpp_ffi::{ContentType, LlamaModel, ToolChoice};
 
 use crate::helpers::now_unix_s;
 
@@ -36,25 +36,24 @@ impl GrammarConfig {
     pub fn new(model: &LlamaModel, tools: &[ChatCompletionTools], tool_choice: ToolChoice) -> Self {
         debug_assert!(!tools.is_empty());
 
-        let tool_iter = tools.iter().filter_map(|t| match t {
-            ChatCompletionTools::Function(f) => {
-                let name = f.function.name.clone();
-                let params = f
-                    .function
-                    .parameters
-                    .clone()
-                    .unwrap_or(serde_json::json!({"type": "object", "properties": {}}));
-                Some((name, params))
-            }
-            _ => None,
-        });
+        let tools_vec: Vec<(String, serde_json::Value)> = tools
+            .iter()
+            .filter_map(|t| match t {
+                ChatCompletionTools::Function(f) => {
+                    let name = f.function.name.clone();
+                    let params = f
+                        .function
+                        .parameters
+                        .clone()
+                        .unwrap_or(serde_json::json!({"type": "object", "properties": {}}));
+                    Some((name, params))
+                }
+                _ => None,
+            })
+            .collect();
 
         Self {
-            lark_grammar: SamplerChain::build_tools_grammar(
-                tool_iter,
-                tool_choice,
-                model.arch().tool_call_boundaries(),
-            ),
+            lark_grammar: model.arch().build_tools_grammar(&tools_vec, tool_choice),
             tool_choice,
         }
     }
