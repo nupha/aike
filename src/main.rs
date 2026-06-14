@@ -145,10 +145,6 @@ fn parse_byte_size(ss: &str) -> Option<usize> {
 #[distributed_slice]
 pub(crate) static USER_CLASS_DEFS: [fn(&mut Runtime) -> Result<ClassID, i32>];
 
-pub(crate) fn get_sandbox_path() -> String {
-    std::env::var("AIKE_SANDBOX_PATH").unwrap_or_default()
-}
-
 #[tokio::main]
 async fn main() -> ExitCode {
     if let Err(e) = dotenvy::dotenv() {

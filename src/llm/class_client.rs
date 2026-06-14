@@ -574,7 +574,9 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
 
                     if status.is_success() {
                         if body.is_empty() {
-                            Err(format!("HTTP {} but empty response body", status))
+                            // HTTP success, but empty response body -> empty string
+                            Ok("".into())
+                            // Err(format!("HTTP {} but empty response body", status))
                         } else {
                             match serde_json::from_str::<serde_json::Value>(&body) {
                                 Ok(mut json) => {

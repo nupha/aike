@@ -14,13 +14,10 @@ use zuqe::{
 use crate::aike::{JSIoHandle, make_stats};
 
 thread_local! {
-    /// Chroot support
-    static CHROOT_PATH: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
-
     /// Sandbox restriction: limits all fs access to this directory.
     /// None means no sandbox restriction.
     static SANDBOX_PATH: RefCell<Option<PathBuf>> = RefCell::new({
-        let p = crate::get_sandbox_path();
+        let p = std::env::var("AIKE_SANDBOX_PATH").unwrap_or_default();
         if p.is_empty() {
             None
         } else {
@@ -29,6 +26,10 @@ thread_local! {
                 .and_then(|p| if p.is_dir() { Some(p) } else { None })
         }
     });
+
+    /// Chroot support
+    #[cfg(feature = "fs_chroot")]
+    static CHROOT_PATH: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
 }
 
 /// Normalize a path by resolving . and .. components without following symlinks.
@@ -63,6 +64,7 @@ fn normalize_path(path: &Path) -> PathBuf {
     result
 }
 
+#[cfg(feature = "fs_chroot")]
 fn set_chroot(path: Option<&str>) -> Result<(), String> {
     if path.is_none() {
         CHROOT_PATH.with(|c| {
@@ -127,6 +129,7 @@ fn is_inside_sandbox(resolved_path: &Path) -> bool {
 /// comparison but returned in its original form.
 /// Returns an error if any boundary check fails.
 fn resolve_safe_path(user_path: &str) -> Result<PathBuf, String> {
+    #[cfg(feature = "fs_chroot")]
     let Some(chroot) = CHROOT_PATH.with(|c| c.borrow().clone()) else {
         let p = PathBuf::from(user_path);
         let has_sandbox = SANDBOX_PATH.with(|c| c.borrow().is_some());
@@ -161,7 +164,11 @@ fn resolve_safe_path(user_path: &str) -> Result<PathBuf, String> {
     // Works cross-platform:
     //   Unix:   "/foo"  → "foo"
     //   Win:    "C:\foo" → "foo"  (strip Prefix + RootDir)
+    #[cfg(feature = "fs_chroot")]
     let mut raw = chroot;
+    #[cfg(not(feature = "fs_chroot"))]
+    let mut raw = std::env::current_dir().map_err(|e| e.to_string())?;
+
     let user_path = Path::new(user_path);
     if user_path.has_root() {
         // Strip leading prefix/root to get the relative portion.
@@ -184,20 +191,24 @@ fn resolve_safe_path(user_path: &str) -> Result<PathBuf, String> {
     let normalized = normalize_path(&raw);
 
     // Lexical check: must stay within chroot (fast path, no I/O)
-    let allowed = CHROOT_PATH.with(|c| {
-        c.borrow()
-            .as_ref()
-            .map_or(false, |s| normalized.starts_with(s))
-    });
-    if !allowed {
-        return Err("forbidden: path outside chroot".to_string());
+    #[cfg(feature = "fs_chroot")]
+    {
+        let allowed = CHROOT_PATH.with(|c| {
+            c.borrow()
+                .as_ref()
+                .map_or(false, |s| normalized.starts_with(s))
+        });
+        if !allowed {
+            return Err("forbidden: path outside chroot".to_string());
+        }
     }
 
     // Sandbox check: after chroot resolution, verify sandbox boundary
     if !is_inside_sandbox(&normalized) {
         return Err(format!(
-            "forbidden: path outside sandbox: {}",
-            user_path.display()
+            "forbidden: path outside sandbox: {} ({})",
+            user_path.display(),
+            normalized.display()
         ));
     }
 
@@ -208,25 +219,39 @@ fn resolve_safe_path(user_path: &str) -> Result<PathBuf, String> {
     // which is safe because no symlink can be embedded in a non-existent path.
     match std::fs::canonicalize(&normalized) {
         Ok(real) => {
-            let fs_allowed =
-                CHROOT_PATH.with(|c| c.borrow().as_ref().map_or(false, |s| real.starts_with(s)));
-            if fs_allowed {
-                // Sandbox check on canonicalized path
-                if !is_inside_sandbox(&real) {
-                    return Err(format!(
-                        "forbidden: path outside sandbox: {}",
-                        user_path.display()
-                    ));
+            #[cfg(feature = "fs_chroot")]
+            {
+                let fs_allowed = CHROOT_PATH
+                    .with(|c| c.borrow().as_ref().map_or(false, |s| real.starts_with(s)));
+                if fs_allowed {
+                    // Sandbox check on canonicalized path
+                    if !is_inside_sandbox(&real) {
+                        return Err(format!(
+                            "forbidden: path outside sandbox: {}",
+                            user_path.display()
+                        ));
+                    }
+                    // Use real path so the kernel sees the resolved target
+                    Ok(real)
+                } else {
+                    Err(format!(
+                        "forbidden: symlink escape: {} -> {} {:?}",
+                        user_path.display(),
+                        real.display(),
+                        CHROOT_PATH.with(|c| c.borrow().as_ref().map(|s| s.to_owned()))
+                    ))
                 }
-                // Use real path so the kernel sees the resolved target
-                Ok(real)
-            } else {
+            }
+
+            // Sandbox check on canonicalized path
+            #[cfg(not(feature = "fs_chroot"))]
+            if !is_inside_sandbox(&real) {
                 Err(format!(
-                    "forbidden: symlink escape: {} -> {} {:?}",
-                    user_path.display(),
-                    real.display(),
-                    CHROOT_PATH.with(|c| c.borrow().as_ref().map(|s| s.to_owned()))
+                    "forbidden: path outside sandbox: {}",
+                    user_path.display()
                 ))
+            } else {
+                Ok(real)
             }
         }
         Err(_) => {
@@ -239,6 +264,7 @@ fn resolve_safe_path(user_path: &str) -> Result<PathBuf, String> {
 
 /// Strip chroot prefix from a resolved path for external display.
 /// Returns the path as-is if no chroot is set.
+#[cfg(feature = "fs_chroot")]
 pub(crate) fn strip_chroot(full_path: &str) -> String {
     let Some(chroot) = CHROOT_PATH.with(|c| c.borrow().clone()) else {
         return full_path.to_string();
@@ -309,11 +335,14 @@ fn get_bytes_from_arg(ctx: &mut ScopedContext, arg: &mut JSValue) -> Result<Vec<
 }
 
 const BOUNDARY_SANDBOX: i32 = 0;
+
+#[cfg(feature = "fs_chroot")]
 const BOUNDARY_CHROOT: i32 = 1;
 
-fn js_fs_get_boundary(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+fn js_fs_get_restrict(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let path = match cc.magic() {
         BOUNDARY_SANDBOX => SANDBOX_PATH.with(|c| c.borrow().clone()),
+        #[cfg(feature = "fs_chroot")]
         BOUNDARY_CHROOT => CHROOT_PATH.with(|c| c.borrow().clone()),
         _ => unreachable!(),
     };
@@ -327,7 +356,7 @@ fn js_fs_get_boundary(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     }
 }
 
-fn js_fs_set_boundary(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+fn js_fs_set_restrict(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let arg = cc.arg(0);
     let path = if arg.is_undefined_or_null() {
         None
@@ -338,6 +367,7 @@ fn js_fs_set_boundary(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     match cc.magic() {
         BOUNDARY_SANDBOX => set_sandbox(path.as_deref()),
+        #[cfg(feature = "fs_chroot")]
         BOUNDARY_CHROOT => set_chroot(path.as_deref()),
         _ => unreachable!(),
     }
@@ -998,10 +1028,13 @@ fn js_fs_stat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 }
 
 const MOD_FS_ENTRIES: &[FieldDef] = &[
-    FieldDef::FUNC("getSandbox", 0, js_fs_get_boundary, BOUNDARY_SANDBOX as _),
-    FieldDef::FUNC("getChroot", 0, js_fs_get_boundary, BOUNDARY_CHROOT as _),
-    FieldDef::FUNC("setSandbox", 1, js_fs_set_boundary, BOUNDARY_SANDBOX as _),
-    FieldDef::FUNC("setChroot", 1, js_fs_set_boundary, BOUNDARY_CHROOT as _),
+    FieldDef::FUNC("getSandbox", 0, js_fs_get_restrict, BOUNDARY_SANDBOX as _),
+    FieldDef::FUNC("setSandbox", 1, js_fs_set_restrict, BOUNDARY_SANDBOX as _),
+    #[cfg(feature = "fs_chroot")]
+    FieldDef::FUNC("getChroot", 0, js_fs_get_restrict, BOUNDARY_CHROOT as _),
+    #[cfg(feature = "fs_chroot")]
+    FieldDef::FUNC("setChroot", 1, js_fs_set_restrict, BOUNDARY_CHROOT as _),
+    //
     FieldDef::FUNC("open", 2, js_fs_open, 0),
     FieldDef::FUNC("readText", 1, js_fs_readText, 0),
     FieldDef::FUNC("readJSON", 1, js_fs_readJSON, 0),
