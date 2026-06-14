@@ -13,6 +13,7 @@ mod helpers;
 mod http;
 mod llm;
 mod output;
+mod path;
 mod repl;
 mod request;
 mod responses;
@@ -37,6 +38,7 @@ use crate::{
     global::setup_globals,
     http::{JSHttpRequest, JSHttpResponse, JSHttpServer, init_mod_http},
     llm::{JSEngine, JSLlmClient, JSLlmContext, JSLlmModel, JSSamplerChain, init_mod_llm},
+    path::init_mod_path,
     request::JSResponse,
     timeout::gc_trace_timeout,
 };
@@ -269,6 +271,7 @@ async fn main() -> ExitCode {
             init_mod_llm(cx)?;
             init_mod_fs(cx)?;
             init_mod_http(cx)?;
+            init_mod_path(cx)?;
 
             setup_globals(cx, &argv, &exec_argv)
         })
