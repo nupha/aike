@@ -318,6 +318,17 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
     // fields like reasoning_content) that async-openai typed structs would drop.
     // Client is a remote API proxy — it should forward everything, not filter.
     let mut req_json = opts_obj.to_serde_json(ctx)?;
+
+    // Extract per-request timeout (seconds), defaults to client-level timeout
+    // This field is NOT sent to the API — it controls HTTP timeout only
+    let req_timeout_secs = req_json
+        .as_object()
+        .and_then(|obj| obj.get("timeout")?.as_f64())
+        .map(|n| n as u64);
+    if let Some(obj) = req_json.as_object_mut() {
+        obj.remove("timeout");
+    }
+
     // camelCase → snake_case for OpenAI API compatibility
     json_keys_camel_to_snake(&mut req_json);
 
@@ -364,7 +375,10 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
     if !client.api_key.is_empty() {
         req_builder = req_builder.header("Authorization", format!("Bearer {}", client.api_key));
     }
-    if let Some(dur) = client.timeout {
+    // Use per-request timeout if provided, otherwise client-level timeout
+    if let Some(secs) = req_timeout_secs {
+        req_builder = req_builder.timeout(Duration::from_secs(secs));
+    } else if let Some(dur) = client.timeout {
         req_builder = req_builder.timeout(dur);
     }
 
