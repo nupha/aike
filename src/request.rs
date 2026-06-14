@@ -45,10 +45,6 @@ fn get_response_data<'a>(
     }
 }
 
-// ---------------------------------------------------------------------------
-// Transient metadata sent through the Promise slot (not opaque-stored)
-// ---------------------------------------------------------------------------
-
 struct ResponseMeta {
     status: u16,
     status_text: String,
@@ -70,7 +66,7 @@ pub(crate) fn js_request(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut method = String::from("GET");
     let mut req_headers: Vec<(String, String)> = Vec::new();
     let mut req_body: Option<String> = None;
-    let mut timeout: Option<Duration> = None;
+    let mut timeout = Duration::from_secs(30);
 
     if cc.length() > 1 {
         let arg1 = cc.arg(1);
@@ -112,14 +108,13 @@ pub(crate) fn js_request(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 req_body = Some(s.content().encode_utf8(false).to_string());
             }
 
-            // timeout (milliseconds) — None = no timeout per reqwest default
-            let timeout_ms = opts.get_property_str(ctx, "timeout")?;
-            if !timeout_ms.is_undefined() {
-                timeout.replace(
-                    timeout_ms
-                        .to_number(ctx)
-                        .map(|n| Duration::from_millis(n.to_u32() as u64))?,
-                );
+            // timeout (secs) — None = no timeout per reqwest default
+            let timeout_s = opts.get_property_str(ctx, "timeout")?;
+            if !timeout_s.is_undefined() {
+                let n = timeout_s.to_number(ctx)?.to_i32();
+                if n > 0 {
+                    timeout = Duration::from_secs(n as u64);
+                }
             }
         }
     }
@@ -219,18 +214,18 @@ pub(crate) fn js_request(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     //
     tokio::spawn(async move {
         let client = reqwest::Client::new();
-        let mut req = client.request(
-            reqwest::Method::from_bytes(method.as_bytes()).unwrap_or(reqwest::Method::GET),
-            &url_str,
-        );
+        let mut req = client
+            .request(
+                reqwest::Method::from_bytes(method.as_bytes()).unwrap_or(reqwest::Method::GET),
+                &url_str,
+            )
+            .timeout(timeout);
+
         for (k, v) in &req_headers {
             req = req.header(k, v);
         }
         if let Some(b) = &req_body {
             req = req.body(b.clone());
-        }
-        if let Some(dur) = timeout {
-            req = req.timeout(dur);
         }
 
         match req.send().await {
