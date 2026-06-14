@@ -254,6 +254,7 @@ fn express_to_axum_path(path: &str) -> String {
     while let Some(c) = chars.next() {
         if c == ':' {
             let mut param = String::new();
+            let mut pushed = false;
             for ch in chars.by_ref() {
                 if ch.is_alphanumeric() || ch == '_' {
                     param.push(ch);
@@ -262,10 +263,11 @@ fn express_to_axum_path(path: &str) -> String {
                     result.push_str(&param);
                     result.push('}');
                     result.push(ch);
+                    pushed = true;
                     break;
                 }
             }
-            if !param.is_empty() {
+            if !param.is_empty() && !pushed {
                 result.push('{');
                 result.push_str(&param);
                 result.push('}');
@@ -275,6 +277,36 @@ fn express_to_axum_path(path: &str) -> String {
         }
     }
     result
+}
+
+/// Validate axum path — reject segments that mix `{param}` with literal text.
+/// This mirrors matchit's internal validation to avoid panics from router.route().
+fn validate_axum_path(path: &str) -> Result<(), String> {
+    if path.is_empty() || !path.starts_with('/') {
+        return Err(format!(
+            "Invalid route \"{path}\": path must start with '/'"
+        ));
+    }
+    for segment in path.split('/') {
+        // Check for mixed param + literal: segment like "{taskId}restore"
+        if let Some(open) = segment.find('{') {
+            // param-like segment — ensure no literal text before '{'
+            if open > 0 {
+                return Err(format!(
+                    "Invalid route \"{path}\": Only one parameter is allowed per path segment"
+                ));
+            }
+            if let Some(close) = segment.rfind('}') {
+                // literal text after '}'
+                if close + 1 < segment.len() {
+                    return Err(format!(
+                        "Invalid route \"{path}\": Only one parameter is allowed per path segment"
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Create a (path, MethodRouter) pair that delegates to a JS handler via channel.
@@ -468,6 +500,10 @@ fn js_listen(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         // Delegate each JS route and add to router
         for (i, (method, path, _)) in js_routes.iter().enumerate() {
             let (path, handler) = delegate_js_route(*method, path.clone(), i, js_tx.clone());
+            if let Err(e) = validate_axum_path(&path) {
+                ctx.throw_type_error(&e);
+                return Err(-1);
+            }
             router = router.route(&path, handler);
         }
 
