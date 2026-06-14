@@ -33,7 +33,7 @@ pub(crate) struct ClientPayload {
     pub(crate) org_id: String,
     pub(crate) project_id: String,
     pub(crate) buffered_tool_call: bool,
-    pub(crate) timeout: Option<Duration>,
+    pub(crate) timeout: Duration,
     pub(crate) custom_headers: HeaderMap,
 
     //
@@ -73,7 +73,7 @@ fn js_client_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     } else {
         0
     };
-    let mut timeout = 0; // sec
+    let mut timeout = 600; // sec
     let mut extra_body = {
         let s = std::env::var("AIKE_LLM_EXTRA_BODY").unwrap_or_default();
         if !s.is_empty() {
@@ -167,11 +167,7 @@ fn js_client_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         project_id: String::new(),
         custom_headers: HeaderMap::new(),
         buffered_tool_call,
-        timeout: if timeout > 0 {
-            Some(Duration::from_secs(timeout as u64))
-        } else {
-            None
-        },
+        timeout: Duration::from_secs(timeout as u64),
         max_tokens: max_tokens as usize,
         extra_body,
     });
@@ -370,16 +366,16 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
     let mut req_builder = reqwest::Client::new()
         .post(format!("{}/chat/completions", client.base_url))
         .body(serde_json::to_string(&req_json).unwrap_or_default())
-        .header("Content-Type", "application/json");
+        .header("Content-Type", "application/json")
+        .timeout(client.timeout); // client default timeout
 
     if !client.api_key.is_empty() {
         req_builder = req_builder.header("Authorization", format!("Bearer {}", client.api_key));
     }
-    // Use per-request timeout if provided, otherwise client-level timeout
+
+    // Per-request timeout
     if let Some(secs) = req_timeout_secs {
         req_builder = req_builder.timeout(Duration::from_secs(secs));
-    } else if let Some(dur) = client.timeout {
-        req_builder = req_builder.timeout(dur);
     }
 
     // Read custom response normalizer from instance property
@@ -664,10 +660,7 @@ fn js_client_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 JSValue::from_serde_json(ctx, &client.extra_body)
             }
         }
-        PROP_TIMEOUT => match client.timeout {
-            Some(dur) => Ok(JSValue::from(dur.as_millis() as f64)),
-            None => Ok(JSValue::NULL),
-        },
+        PROP_TIMEOUT => Ok(JSValue::Int(client.timeout.as_secs() as i32)),
         _ => Ok(JSValue::UNDEFINED),
     }
 }

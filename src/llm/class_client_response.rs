@@ -225,6 +225,19 @@ pub(super) fn js_client_responses(ctx: &mut ScopedContext, cc: CallContext) -> J
     let api_key = client_arc.api_key.clone();
     let timeout = client_arc.timeout;
 
+    let url = format!("{}/responses", base_url);
+    let http_client = reqwest::Client::new();
+    let request_body = serde_json::to_string(&req).unwrap_or_default();
+    let mut req_builder = http_client
+        .post(&url)
+        .header("Content-Type", "application/json")
+        .timeout(timeout)
+        .body(request_body);
+
+    if !api_key.is_empty() {
+        req_builder = req_builder.header("Authorization", format!("Bearer {}", api_key));
+    }
+
     if is_stream {
         let result_slot = PromiseResultSlot::<ResponsesReply>::new();
         let slot = result_slot.clone();
@@ -245,19 +258,7 @@ pub(super) fn js_client_responses(ctx: &mut ScopedContext, cc: CallContext) -> J
                 }
             }
 
-            let url = format!("{}/responses", base_url);
-            let http_client = reqwest::Client::new();
-            let request_body = serde_json::to_string(&req).unwrap_or_default();
-
-            let mut builder = http_client
-                .post(&url)
-                .header("Content-Type", "application/json")
-                .header("Authorization", format!("Bearer {}", api_key))
-                .body(request_body);
-            if let Some(dur) = timeout {
-                builder = builder.timeout(dur);
-            }
-            match builder.send().await {
+            match req_builder.send().await {
                 Ok(response) => {
                     use futures_util::StreamExt;
                     use tokio::io::AsyncBufReadExt;
@@ -318,19 +319,7 @@ pub(super) fn js_client_responses(ctx: &mut ScopedContext, cc: CallContext) -> J
             })?;
 
         tokio::spawn(async move {
-            let url = format!("{}/responses", base_url);
-            let http_client = reqwest::Client::new();
-            let request_body = serde_json::to_string(&req).unwrap_or_default();
-
-            let mut builder = http_client
-                .post(&url)
-                .header("Content-Type", "application/json")
-                .header("Authorization", format!("Bearer {}", api_key))
-                .body(request_body);
-            if let Some(dur) = timeout {
-                builder = builder.timeout(dur);
-            }
-            let result = match builder.send().await {
+            let result = match req_builder.send().await {
                 Ok(response) => {
                     let status = response.status();
                     let body = response.text().await.unwrap_or_default();
