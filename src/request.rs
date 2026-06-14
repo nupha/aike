@@ -6,7 +6,8 @@ use std::{cell::Cell, time::Duration};
 use crossbeam::channel;
 use linkme::distributed_slice;
 use zuqe::{
-    CallContext, ClassID, FieldDef, JSResult, JSValue, NativeObject, Runtime, ScopedContext,
+    CallContext, ClassID, FieldDef, JSResult, JSValue, JobState, NativeObject, Runtime,
+    ScopedContext,
     builtins::{
         iterator::AsyncIterableIterator,
         promise::{Promise, PromiseResultSlot},
@@ -15,15 +16,52 @@ use zuqe::{
     def_native_object,
 };
 
+use crossbeam::channel::TryRecvError;
+
 use crate::USER_CLASS_DEFS;
 
-pub(crate) struct ResponseData {
+struct ResponsePayload {
+    resp: Option<reqwest::Response>,
     body_rx: Option<crossbeam::channel::Receiver<Vec<u8>>>,
 }
 
-impl ResponseData {
+impl ResponsePayload {
     fn take_body_rx(&mut self) -> Option<crossbeam::channel::Receiver<Vec<u8>>> {
         self.body_rx.take()
+    }
+
+    /// Ensure body streaming has started. Called lazily on first body access.
+    fn ensure_body_stream(&mut self) -> Result<(), i32> {
+        if self.body_rx.is_some() {
+            return Ok(()); // already streaming
+        }
+
+        if let Some(resp) = self.resp.take() {
+            let (body_tx, body_rx) = channel::unbounded::<Vec<u8>>();
+            self.body_rx = Some(body_rx);
+
+            tokio::spawn(async move {
+                use futures_util::StreamExt;
+
+                let mut stream = resp.bytes_stream();
+                while let Some(chunk) = stream.next().await {
+                    match chunk {
+                        Ok(bytes) => {
+                            if body_tx.send(bytes.to_vec()).is_err() {
+                                break;
+                            }
+                        }
+                        Err(e) => {
+                            body_tx.send(format!("{e}").into_bytes()).ok();
+                            break;
+                        }
+                    }
+                }
+            });
+            Ok(())
+        } else {
+            Err(-1) // body already consumed or request never succeeded
+        }
     }
 }
 
@@ -31,7 +69,7 @@ impl ResponseData {
 fn get_response_data<'a>(
     ctx: &'a mut ScopedContext,
     val: &JSValue,
-) -> Result<&'a mut ResponseData, i32> {
+) -> Result<&'a mut ResponsePayload, i32> {
     let payload = val
         .retrive_object_payload(ctx, JSResponse::class_id())?
         .other()
@@ -41,7 +79,7 @@ fn get_response_data<'a>(
         ctx.throw_type_error("Response was detached");
         Err(-1)
     } else {
-        Ok(unsafe { &mut *opaque.cast::<ResponseData>() })
+        Ok(unsafe { &mut *opaque.cast::<ResponsePayload>() })
     }
 }
 
@@ -119,33 +157,34 @@ pub(crate) fn js_request(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         }
     }
 
-    let (body_tx, body_rx) = channel::bounded::<Vec<u8>>(8);
+    let resp_holder = std::sync::Arc::new(std::sync::Mutex::new(None::<reqwest::Response>));
+    let resp_holder2 = resp_holder.clone();
 
     //
     // Promise that resolves when reqwest headers arrive.
-    // The async task builds ResponseMeta (status, headers, etc.) and calls
-    // result_slot.commit().  This closure receives the meta, builds the
-    // Response class instance (without streaming body), and resolves.
-    // The body AsyncIterableIterator is created lazily via a GETSET on proto.
+    // The async task builds ResponseMeta and stores the reqwest::Response;
+    // the callback builds the Response class instance without body streaming.
+    // Body streaming is triggered lazily on .text()/.json()/.body access.
     //
     let result_slot = PromiseResultSlot::<Result<ResponseMeta, String>>::new();
     let promise = Promise::create_with_result_slot(
         ctx,
         result_slot.clone(),
         move |cx, payload| -> JSResult {
-            //
-            // build Response instance with ResponseMeta committed by reqwest async task
-            //
             let meta = payload.map_err(|e| {
                 cx.throw_internal_error(&e);
                 -1
             })?;
 
+            // Take the stored response (may be None if close() was called early)
+            let resp = resp_holder.lock().unwrap().take();
+
             let mut resp_obj = JSResponse::new_instance(
                 cx,
                 JSValue::UNDEFINED,
-                ResponseData {
-                    body_rx: Some(body_rx),
+                ResponsePayload {
+                    body_rx: None,
+                    resp,
                 },
             )?;
 
@@ -257,23 +296,9 @@ pub(crate) fn js_request(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                     return;
                 }
 
-                use futures_util::StreamExt;
-                let mut stream = resp.bytes_stream();
-                while let Some(chunk) = stream.next().await {
-                    match chunk {
-                        Ok(bytes) => {
-                            if body_tx.send(bytes.to_vec()).is_err() {
-                                break;
-                            }
-                        }
-                        Err(e) => {
-                            body_tx
-                                .send(format!("reqwest error: {e}").into_bytes())
-                                .ok();
-                            break;
-                        }
-                    }
-                }
+                // Store the response for lazy body streaming.
+                // Body will be streamed on first .text()/.json()/.body access.
+                *resp_holder2.lock().unwrap() = Some(resp);
             }
             Err(e) => {
                 result_slot.commit(Err(format!("{e}"))).ok();
@@ -284,17 +309,23 @@ pub(crate) fn js_request(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     Ok(promise.into())
 }
 
-// ---------------------------------------------------------------------------
-// Lazily create body AsyncIterableIterator from the stored receiver.
-// On first access the receiver is taken; subsequent calls throw.
-// ---------------------------------------------------------------------------
-
+/// Lazily create body AsyncIterableIterator from the stored receiver.
+/// On first access the receiver is taken; subsequent calls throw.
 fn js_response_body(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let data = get_response_data(ctx, &cc.this())?;
-    let rx = data.take_body_rx().ok_or_else(|| {
+    // Step 1: ensure body streaming started (releases ctx borrow before step 2)
+    let has_body = {
+        let data = get_response_data(ctx, &cc.this())?;
+        data.ensure_body_stream().is_ok()
+    };
+    if !has_body {
         ctx.throw_type_error("body already consumed");
-        -1
-    })?;
+        return Err(-1);
+    }
+
+    let rx = {
+        let data = get_response_data(ctx, &cc.this())?;
+        data.take_body_rx().unwrap()
+    };
 
     let iter = AsyncIterableIterator::create_with_receiver::<Vec<u8>>(
         ctx,
@@ -317,17 +348,23 @@ const BODY_AS_BYTES: i32 = 0;
 const BODY_AS_TEXT: i32 = 1;
 const BODY_AS_JSON: i32 = 2;
 
-// ---------------------------------------------------------------------------
-// Response.bytes(), .text(), .json()  –  drain body, return Promise<T>
-// Differ only in the conversion applied to the drained buffer.
-// ---------------------------------------------------------------------------
-
+/// Response.bytes(), .text(), .json()  –  drain body, return Promise<T>
+/// Differ only in the conversion applied to the drained buffer.
 fn js_response_body_as(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let data = get_response_data(ctx, &cc.this())?;
-    let rx = data.take_body_rx().ok_or_else(|| {
+    // Step 1: ensure body streaming started (releases ctx borrow before step 2)
+    let has_body = {
+        let data = get_response_data(ctx, &cc.this())?;
+        data.ensure_body_stream().is_ok()
+    };
+    if !has_body {
         ctx.throw_type_error("body already consumed");
-        -1
-    })?;
+        return Err(-1);
+    }
+
+    let rx = {
+        let data = get_response_data(ctx, &cc.this())?;
+        data.take_body_rx().unwrap()
+    };
 
     let magic = cc.magic();
     let result_slot = PromiseResultSlot::<Result<Vec<u8>, String>>::new();
@@ -359,15 +396,48 @@ fn js_response_body_as(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         },
     )?;
 
-    tokio::task::spawn_blocking(move || {
-        let mut buf = Vec::new();
-        while let Ok(chunk) = rx.recv() {
-            buf.extend_from_slice(&chunk);
-        }
-        let _ = result_slot.commit(Ok(buf));
-    });
+    // Poll body chunks via queue_job (async, non-blocking)
+    let buf = std::sync::Arc::new(std::sync::Mutex::new(Some(Vec::new())));
+    let start = std::time::Instant::now();
+    let body_timeout = Duration::from_secs(30);
+
+    ctx.queue_job(
+        move |_cx| {
+            let mut guard = buf.lock().unwrap();
+            let inner = guard.as_mut().unwrap();
+            match rx.try_recv() {
+                Ok(chunk) => {
+                    inner.extend_from_slice(&chunk);
+                    Ok(JobState::Again)
+                }
+                Err(TryRecvError::Disconnected) => {
+                    let full = guard.take().unwrap();
+                    let _ = result_slot.commit(Ok(full));
+                    Ok(JobState::Done)
+                }
+                Err(TryRecvError::Empty) => {
+                    if start.elapsed() > body_timeout {
+                        guard.take();
+                        let _ = result_slot.commit(Err("body read timeout".into()));
+                        Ok(JobState::Done)
+                    } else {
+                        Ok(JobState::Again)
+                    }
+                }
+            }
+        },
+        (),
+    );
 
     Ok(promise.into())
+}
+
+/// response.close()  —  drop body rx and stored response, stop streaming task
+fn js_response_close(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let data = get_response_data(ctx, &cc.this())?;
+    drop(data.body_rx.take());
+    drop(data.resp.take());
+    Ok(JSValue::UNDEFINED)
 }
 
 const RESPONSE_PROTO: &[FieldDef] = &[
@@ -375,12 +445,13 @@ const RESPONSE_PROTO: &[FieldDef] = &[
     FieldDef::FUNC("bytes", 0, js_response_body_as, BODY_AS_BYTES as i16),
     FieldDef::FUNC("text", 0, js_response_body_as, BODY_AS_TEXT as i16),
     FieldDef::FUNC("json", 0, js_response_body_as, BODY_AS_JSON as i16),
+    FieldDef::FUNC("close", 0, js_response_close, 0),
 ];
 
 def_native_object!(
     "HttpResponse",
     JSResponse,
-    ResponseData,
+    ResponsePayload,
     RESPONSE_PROTO,
     None
 );
