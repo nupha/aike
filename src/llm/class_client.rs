@@ -73,7 +73,7 @@ fn js_client_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     } else {
         0
     };
-    let mut timeout_ms = 0;
+    let mut timeout = 0; // sec
     let mut extra_body = {
         let s = std::env::var("AIKE_LLM_EXTRA_BODY").unwrap_or_default();
         if !s.is_empty() {
@@ -138,7 +138,7 @@ fn js_client_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         if !timeout_val.is_undefined() {
             let n = timeout_val.to_number(ctx).map(|n| n.to_i32())?;
             if n >= 0 {
-                timeout_ms = n;
+                timeout = n;
             }
         }
 
@@ -167,8 +167,8 @@ fn js_client_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         project_id: String::new(),
         custom_headers: HeaderMap::new(),
         buffered_tool_call,
-        timeout: if timeout_ms > 0 {
-            Some(Duration::from_millis(timeout_ms as u64))
+        timeout: if timeout > 0 {
+            Some(Duration::from_secs(timeout as u64))
         } else {
             None
         },
@@ -574,9 +574,8 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
 
                     if status.is_success() {
                         if body.is_empty() {
-                            // HTTP success, but empty response body -> empty content
+                            // HTTP success, but empty response body -> empty message
                             Ok(serde_json::json!({}))
-                            // Err(format!("HTTP {} but empty response body", status))
                         } else {
                             match serde_json::from_str::<serde_json::Value>(&body) {
                                 Ok(mut json) => {
