@@ -7,6 +7,7 @@ use super::{
 };
 
 pub(crate) const CHECKPOINT_STEP: usize = 256;
+pub(crate) const CHECKPOINT_AUTO_DUMP: bool = false;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ContextMode {

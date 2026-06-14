@@ -4,18 +4,14 @@ use std::{
     time::Duration,
 };
 
-/// Maximum time a task can wait in the deferred queue before being rejected as Busy.
-const TASK_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
-
 use async_openai::types::chat::ChatCompletionTools;
 use crossbeam::channel::{Receiver, Sender};
 use llama_cpp_ffi::{ContentType, LlamaModel, ToolChoice};
 
 use crate::helpers::now_unix_s;
 
-// use super::cache::CHECKPOINT_STEP;  // used by checkpoint dump (disabled by default)
-
 use super::{
+    caching::{CHECKPOINT_AUTO_DUMP, CHECKPOINT_STEP},
     context::Engine,
     output::{
         GeneratedContent, OutputAction, OutputParser, OutputState, OutputStateChange, TagBoundary,
@@ -23,6 +19,9 @@ use super::{
     slot::{Slot, SlotState},
     worker::remove_cancelled_inputs,
 };
+
+/// Maximum time a task can wait in the deferred queue before being rejected as Busy.
+const TASK_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub type Token = i32;
 
@@ -649,12 +648,11 @@ impl Engine {
         // Set aligned dump target for Checkpoint mode (disabled by default).
         // Calculates the aligned position to dump KV state during prefill,
         // excluding the generation prompt suffix. Enable via future switch.
-
-        // if self.context_mode() == super::cache::ContextMode::Checkpoint {
-        //     let total_prompt_len = n_common + task.prompt_tokens.len();
-        //     let dump_at = (total_prompt_len / CHECKPOINT_STEP) * CHECKPOINT_STEP;
-        //     slot.checkpoint_dump_at = if dump_at > n_common { dump_at } else { 0 };
-        // }
+        if CHECKPOINT_AUTO_DUMP && self.context_mode() == super::caching::ContextMode::Checkpoint {
+            let total_prompt_len = n_common + task.prompt_tokens.len();
+            let dump_at = (total_prompt_len / CHECKPOINT_STEP) * CHECKPOINT_STEP;
+            slot.checkpoint_dump_at = if dump_at > n_common { dump_at } else { 0 };
+        }
 
         slot.state = SlotState::Decoding {
             prompt_tokens: VecDeque::from(task.prompt_tokens),

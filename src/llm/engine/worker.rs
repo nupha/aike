@@ -10,6 +10,8 @@ use std::io::Write;
 
 use crossbeam::channel::Receiver;
 
+use crate::llm::engine::caching::CHECKPOINT_AUTO_DUMP;
+
 use super::{
     caching::{ContextMode, find_swap_candidate},
     context::Engine,
@@ -176,11 +178,7 @@ pub(super) fn hit_stop_words(generated_text: &str, stop_words: &[String]) -> Opt
 impl Engine {
     fn decoding_stage(&mut self, slots: &mut [Slot], slot_cursor: &mut usize) -> bool {
         // Tracks slots that just reached their aligned checkpoint dump target.
-        // let mut checkpoint_dump_slots: Vec<usize> = Vec::new();
-        // Checkpoint dump disabled by default. The code below dumps KV state
-        // to cache_ram at aligned positions during prefill, enabling cache
-        // recovery after slot eviction. Can be toggled via a future switch
-        // (e.g. --enable-cache-dump) for workloads with frequent slot churn.
+        let mut checkpoint_dump_slots: Vec<usize> = Vec::new();
 
         let mut has_sampling = false;
         let mut cnt = 0usize;
@@ -285,9 +283,12 @@ impl Engine {
                     written_updates.push((slot_idx, write_count));
 
                     // Track slots reaching checkpoint dump target (disabled).
-                    // if dump_at > 0 && slot.n_past as usize + write_count == dump_at {
-                    //     checkpoint_dump_slots.push(slot_idx);
-                    // }
+                    if CHECKPOINT_AUTO_DUMP
+                        && dump_at > 0
+                        && slot.n_past as usize + write_count == dump_at
+                    {
+                        checkpoint_dump_slots.push(slot_idx);
+                    }
                 }
             }
         }
@@ -302,10 +303,12 @@ impl Engine {
                     // Dump aligned checkpoint to cache_ram (disabled by default).
                     // Dumps KV state for recurrent/hybrid models at aligned
                     // positions to enable recovery after slot eviction.
-                    // for &idx in &checkpoint_dump_slots {
-                    //     self.dump_slot_to_cache_ram(&mut slots[idx], false);
-                    //     slots[idx].checkpoint_dump_at = 0; // done
-                    // }
+                    if CHECKPOINT_AUTO_DUMP {
+                        for &idx in &checkpoint_dump_slots {
+                            self.dump_slot_to_cache_ram(&mut slots[idx], false);
+                            slots[idx].checkpoint_dump_at = 0; // done
+                        }
+                    }
                 }
                 Err(e) if e == "OOM" => {
                     // Out of memory during decode: free memory, then retry.
@@ -338,12 +341,7 @@ impl Engine {
                             }
                         }
                         if let Some(nth) = lru {
-                            if self.context_mode() == ContextMode::Checkpoint {
-                                self.dump_slot_to_cache_ram(&mut slots[nth], false);
-                                self.clear_slot(&mut slots[nth]);
-                            } else {
-                                self.dump_slot_to_cache_ram(&mut slots[nth], true);
-                            }
+                            self.dump_slot_to_cache_ram(&mut slots[nth], true);
                             freed = true;
                         }
                     }
@@ -690,7 +688,7 @@ impl Engine {
         let mut lines_printed = 0usize;
         for (i, slot) in slots.iter().enumerate() {
             let status = match &slot.state {
-                SlotState::Idle => "Idle".to_string(),
+                SlotState::Idle => format!("Idle cache={}", slot.cached_tokens.len()),
                 SlotState::Decoding {
                     prompt_tokens,
                     is_prefill: true,
