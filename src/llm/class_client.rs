@@ -573,24 +573,35 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
                     let body = response.text().await.unwrap_or_default();
 
                     if status.is_success() {
-                        match serde_json::from_str::<serde_json::Value>(&body) {
-                            Ok(mut json) => {
-                                // Check for error in response
-                                if json.get("error").is_some() {
-                                    let err_msg = json["error"]["message"]
-                                        .as_str()
-                                        .unwrap_or(&body)
-                                        .to_string();
-                                    Err(err_msg)
-                                } else {
-                                    // Normalize message format in choices[] message
-                                    if !has_normalizer {
-                                        normalize_message_shape(&mut json);
+                        if body.is_empty() {
+                            Err(format!("HTTP {} but empty response body", status))
+                        } else {
+                            match serde_json::from_str::<serde_json::Value>(&body) {
+                                Ok(mut json) => {
+                                    // Check for error in response
+                                    if json.get("error").is_some() {
+                                        let err_msg = json["error"]["message"]
+                                            .as_str()
+                                            .unwrap_or(&body)
+                                            .to_string();
+                                        Err(err_msg)
+                                    } else {
+                                        // Normalize message format in choices[] message
+                                        if !has_normalizer {
+                                            normalize_message_shape(&mut json);
+                                        }
+                                        Ok(json)
                                     }
-                                    Ok(json)
+                                }
+                                Err(e) => {
+                                    let snippet = if body.len() > 200 {
+                                        &body[..200]
+                                    } else {
+                                        &body
+                                    };
+                                    Err(format!("Failed to parse JSON: {} | body: {}", e, snippet))
                                 }
                             }
-                            Err(e) => Err(format!("Failed to parse JSON: {}", e)),
                         }
                     } else {
                         Err(format!("HTTP {} : {}", status, body))

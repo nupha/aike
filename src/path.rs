@@ -3,7 +3,7 @@
 
 use std::path::{Component, Path, PathBuf};
 
-use zuqe::{CallContext, FieldDef, JSResult, JSValue, ScopedContext};
+use zuqe::{CallContext, FieldDef, JS_PROP_ENUMERABLE, JSResult, JSValue, ScopedContext};
 
 /// Normalize a path by resolving `.` and `..` components without following symlinks.
 fn normalize_path(path: &Path) -> PathBuf {
@@ -250,6 +250,61 @@ fn js_path_format(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     js_str(ctx, &result)
 }
 
+// magic constants for js_path_inspect
+const INSPECT_NORMALIZE: i32 = 0;
+const INSPECT_IS_ABSOLUTE: i32 = 1;
+
+// ---------------------------------------------------------------------------
+// Shared handler for normalize / isAbsolute.
+// Selected by `magic`: 0=normalize, 1=isAbsolute.
+// ---------------------------------------------------------------------------
+fn js_path_inspect(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let p = arg_to_string(ctx, &cc, 0)?;
+    let path = Path::new(&p);
+    match cc.magic() {
+        INSPECT_NORMALIZE => {
+            let result = normalize_path(path);
+            let s = result.to_string_lossy();
+            js_str(ctx, if s.is_empty() { "." } else { &s })
+        }
+        INSPECT_IS_ABSOLUTE => Ok(JSValue::Bool(path.is_absolute())),
+        _ => unreachable!(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// path.relative(from, to)  →  string
+// Returns the relative path from `from` to `to`.
+// ---------------------------------------------------------------------------
+fn js_path_relative(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let from_str = arg_to_string(ctx, &cc, 0)?;
+    let to_str = arg_to_string(ctx, &cc, 1)?;
+
+    let from_norm = normalize_path(Path::new(&from_str));
+    let to_norm = normalize_path(Path::new(&to_str));
+
+    // Find common prefix length (in component count)
+    let from_comps: Vec<Component> = from_norm.components().collect();
+    let to_comps: Vec<Component> = to_norm.components().collect();
+    let common = from_comps
+        .iter()
+        .zip(to_comps.iter())
+        .take_while(|(a, b)| a == b)
+        .count();
+
+    // Build relative path: go up from `from` then down to `to`
+    let mut result = PathBuf::new();
+    for _ in common..from_comps.len() {
+        result.push("..");
+    }
+    for comp in &to_comps[common..] {
+        result.push(comp.as_os_str());
+    }
+
+    let s = result.to_string_lossy();
+    js_str(ctx, if s.is_empty() { "" } else { &s })
+}
+
 // ---------------------------------------------------------------------------
 // Module registration
 // ---------------------------------------------------------------------------
@@ -261,6 +316,28 @@ const MOD_PATH_ENTRIES: &[FieldDef] = &[
     FieldDef::FUNC("resolve", 1, js_path_combine, COMBINE_RESOLVE as _),
     FieldDef::FUNC("parse", 1, js_path_parse, 0),
     FieldDef::FUNC("format", 1, js_path_format, 0),
+    FieldDef::FUNC("normalize", 1, js_path_inspect, INSPECT_NORMALIZE as _),
+    FieldDef::FUNC("relative", 2, js_path_relative, 0),
+    FieldDef::FUNC("isAbsolute", 1, js_path_inspect, INSPECT_IS_ABSOLUTE as _),
+    // Platform path separator: POSIX "/" , Windows "\"
+    FieldDef::LAZY_VALUE(
+        "sep",
+        |cx| {
+            cx.create_string_from_utf8(std::path::MAIN_SEPARATOR_STR.as_bytes().to_vec())
+                .map(JSValue::from)
+        },
+        JS_PROP_ENUMERABLE,
+    ),
+    // Environment variable delimiter: POSIX ":" , Windows ";"
+    FieldDef::LAZY_VALUE(
+        "delimiter",
+        |cx| {
+            let d = if cfg!(windows) { ";" } else { ":" };
+            cx.create_string_from_utf8(d.as_bytes().to_vec())
+                .map(JSValue::from)
+        },
+        JS_PROP_ENUMERABLE,
+    ),
 ];
 
 pub fn init_mod_path(ctx: &mut ScopedContext) -> Result<(), i32> {
