@@ -49,7 +49,18 @@ pub fn init_aike(
         // --- proc ---
         FieldDef::FUNC("cwd", 0, sys::js_cwd, 0),
         FieldDef::FUNC("exit", 1, sys::js_exit, 0),
-        FieldDef::FUNC("env", 0, sys::js_env, 0),
+        FieldDef::LAZY_VALUE(
+            "env",
+            |cx| {
+                let mut env_obj = cx.create_base_object()?;
+                for (key, value) in std::env::vars() {
+                    let v = cx.create_string_from_utf8(value.as_bytes().to_vec())?;
+                    env_obj.set_property_str(cx, &key, v.into())?;
+                }
+                Ok(env_obj.into())
+            },
+            JS_PROP_ENUMERABLE,
+        ),
         // --- spawn ---
         FieldDef::FUNC("spawnSync", 0, spawn::js_spawn, 0),
         FieldDef::FUNC("spawn", 0, spawn::js_spawn, 1),

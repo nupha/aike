@@ -30,15 +30,6 @@ pub(super) fn js_exit(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     Err(-1)
 }
 
-pub(super) fn js_env(cx: &mut ScopedContext, _cc: CallContext) -> JSResult {
-    let mut env_obj = cx.create_base_object()?;
-    for (key, value) in std::env::vars() {
-        let v = cx.create_string_from_utf8(value.as_bytes().to_vec())?;
-        env_obj.set_property_str(cx, &key, v.into())?;
-    }
-    Ok(env_obj.into())
-}
-
 // Declare windows crt functions
 #[cfg(windows)]
 unsafe extern "system" {
