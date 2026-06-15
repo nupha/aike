@@ -389,7 +389,12 @@ fn strip_html_tags(input: &str) -> String {
             // Detect </script> or </style> closing
             if in_skip && pos >= 8 {
                 let from = pos.saturating_sub(10);
-                let slice = &lower[from..=pos];
+                // from may not be a char boundary (multi-byte UTF-8),
+                // walk forward to the nearest safe boundary
+                let start = (from..=pos)
+                    .find(|&i| lower.is_char_boundary(i))
+                    .unwrap_or(pos);
+                let slice = &lower[start..=pos];
                 if slice.contains("</script>") || slice.contains("</style>") {
                     in_skip = false;
                 }

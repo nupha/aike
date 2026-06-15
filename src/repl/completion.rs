@@ -274,7 +274,14 @@ fn find_prefix_suffix(candidates: &[String], prefix: &str) -> Option<String> {
                 .zip(b.as_bytes())
                 .take_while(|(x, y)| x == y)
                 .count();
-            &a[..common_len]
+            // common_len may land mid-character if the differing byte is a
+            // continuation byte of a multi-byte UTF-8 sequence. Walk back to
+            // the nearest char boundary to avoid panicking on &str slice.
+            let safe_len = (0..=common_len.min(a.len()))
+                .rev()
+                .find(|&i| a.is_char_boundary(i))
+                .unwrap_or(0);
+            &a[..safe_len]
         })
         .unwrap();
 
