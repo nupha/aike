@@ -6,7 +6,6 @@ edition = "2024"
 [features]
 cuda = ["llama-cpp-ffi/cuda"]
 metal = ["llama-cpp-ffi/metal"]
-fs_chroot = []
 enable_eval_log = []            # 启用 DeepEval 评估日志采集
 
 [profile.release]
