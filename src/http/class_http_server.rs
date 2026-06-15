@@ -17,7 +17,7 @@ use std::{
 use axum::{
     Router,
     body::Body,
-    extract::Request,
+    extract::{FromRequestParts as _, RawPathParams, Request},
     response::{IntoResponse, Response as AxumResponse},
     routing::{MethodRouter, delete, get, head, options, patch, post, put},
 };
@@ -53,6 +53,7 @@ struct IncomingRequest {
     method: Method,
     path: String,
     query_string: String,
+    params: HashMap<String, String>,
     headers: Vec<(String, String)>,
     body: Vec<u8>,
     response_tx: oneshot::Sender<HttpResponseMessage>,
@@ -319,16 +320,18 @@ fn delegate_js_route(
     handler_index: usize,
     request_tx: channel::Sender<IncomingRequest>,
 ) -> (String, MethodRouter<()>) {
-    let path = express_to_axum_path(&path);
+    let axum_path = express_to_axum_path(&path);
     let tx = request_tx;
 
-    // Create the handler closure once, then wrap with method-specific router
     let handler_fn = move |req: Request| {
         let tx = tx.clone();
+
         async move {
+            // Split request to access extensions (axum stores parsed path params there)
+            let (mut parts, body) = req.into_parts();
             let (res_tx, res_rx) = oneshot::channel();
-            let uri = req.uri().clone();
-            let method = match req.method().as_str() {
+            let uri = parts.uri.clone();
+            let method = match parts.method.as_str() {
                 "GET" => Method::GET,
                 "POST" => Method::POST,
                 "PUT" => Method::PUT,
@@ -346,11 +349,23 @@ fn delegate_js_route(
             };
             let path = uri.path().to_string();
             let query_string = uri.query().unwrap_or("").to_string();
-            let headers: Vec<(String, String)> = req
-                .headers()
+            let headers: Vec<(String, String)> = parts
+                .headers
                 .iter()
                 .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
                 .collect();
+
+            // Extract path params from axum's already-parsed route match
+            let params = match RawPathParams::from_request_parts(&mut parts, &()).await {
+                Ok(raw) => raw
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect::<HashMap<_, _>>(),
+                _ => HashMap::new(),
+            };
+
+            // Reconstruct request for body consumption
+            let req = Request::from_parts(parts, body);
             let body = match axum::body::to_bytes(req.into_body(), 10 * 1024 * 1024).await {
                 Ok(b) => b.to_vec(),
                 Err(_) => {
@@ -365,6 +380,7 @@ fn delegate_js_route(
                     method,
                     path,
                     query_string,
+                    params,
                     headers,
                     body,
                     response_tx: res_tx,
@@ -414,7 +430,7 @@ fn delegate_js_route(
         Method::HEAD => head(handler_fn),
         Method::OPTIONS => options(handler_fn),
     };
-    (path, handler)
+    (axum_path, handler)
 }
 
 fn js_handler_then(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -557,7 +573,7 @@ fn js_start_http_server_job(
                 HttpRequestPayload {
                     method: incoming.method,
                     path: incoming.path.clone(),
-                    params: HashMap::new(),
+                    params: incoming.params.clone(),
                     query,
                     headers: incoming.headers.iter().cloned().collect(),
                     body: Some(incoming.body),
