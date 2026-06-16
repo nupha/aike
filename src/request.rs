@@ -3,11 +3,9 @@
 
 use std::{cell::Cell, time::Duration};
 
-use crossbeam::channel;
 use linkme::distributed_slice;
 use zuqe::{
-    CallContext, ClassID, FieldDef, JSResult, JSValue, JobState, NativeObject, Runtime,
-    ScopedContext,
+    CallContext, ClassID, FieldDef, JSResult, JSValue, JobState, Runtime, ScopedContext,
     builtins::{
         iterator::AsyncIterableIterator,
         promise::{Promise, PromiseResultSlot},
@@ -16,13 +14,13 @@ use zuqe::{
     def_native_object,
 };
 
-use crossbeam::channel::TryRecvError;
-
 use crate::USER_CLASS_DEFS;
+use mdka::html_to_markdown;
 
 struct ResponsePayload {
     resp: Option<reqwest::Response>,
     body_rx: Option<crossbeam::channel::Receiver<Vec<u8>>>,
+    content_type: String,
 }
 
 impl ResponsePayload {
@@ -37,7 +35,7 @@ impl ResponsePayload {
         }
 
         if let Some(resp) = self.resp.take() {
-            let (body_tx, body_rx) = channel::unbounded::<Vec<u8>>();
+            let (body_tx, body_rx) = crossbeam::channel::unbounded::<Vec<u8>>();
             self.body_rx = Some(body_rx);
 
             tokio::spawn(async move {
@@ -65,22 +63,21 @@ impl ResponsePayload {
     }
 }
 
-/// Get a `&mut ResponseData` from a Response instance's opaque pointer.
-fn get_response_data<'a>(
-    ctx: &'a mut ScopedContext,
-    val: &JSValue,
+fn get_response_payload_mut<'a>(
+    ctx: &mut ScopedContext,
+    val: &'a mut JSValue,
 ) -> Result<&'a mut ResponsePayload, i32> {
-    let payload = val
-        .retrive_object_payload(ctx, JSResponse::class_id())?
-        .other()
-        .unwrap();
-    let opaque = payload.opaque();
-    if opaque.is_null() {
-        ctx.throw_type_error("Response was detached");
-        Err(-1)
-    } else {
-        Ok(unsafe { &mut *opaque.cast::<ResponsePayload>() })
-    }
+    val.as_native_object_mut::<JSResponse>()
+        .ok_or_else(|| {
+            ctx.throw_type_error("not an http response object");
+            -1
+        })
+        .and_then(|o| {
+            o.payload_mut().ok_or_else(|| {
+                ctx.throw_type_error("Response was detached");
+                -1
+            })
+        })
 }
 
 struct ResponseMeta {
@@ -185,6 +182,7 @@ pub(crate) fn js_request(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 ResponsePayload {
                     body_rx: None,
                     resp,
+                    content_type: meta.content_type.clone(),
                 },
             )?;
 
@@ -312,9 +310,11 @@ pub(crate) fn js_request(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 /// Lazily create body AsyncIterableIterator from the stored receiver.
 /// On first access the receiver is taken; subsequent calls throw.
 fn js_response_body(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let mut this = cc.this();
+
     // Step 1: ensure body streaming started (releases ctx borrow before step 2)
     let has_body = {
-        let data = get_response_data(ctx, &cc.this())?;
+        let data = get_response_payload_mut(ctx, &mut this)?;
         data.ensure_body_stream().is_ok()
     };
     if !has_body {
@@ -323,7 +323,7 @@ fn js_response_body(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     }
 
     let rx = {
-        let data = get_response_data(ctx, &cc.this())?;
+        let data = get_response_payload_mut(ctx, &mut this)?;
         data.take_body_rx().unwrap()
     };
 
@@ -462,35 +462,42 @@ fn strip_html_tags(input: &str) -> String {
 fn js_response_body_as(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let magic = cc.magic();
 
-    // For text mode, check optional convert argument
-    let arg0 = cc.arg(0);
-    let strip_tags = magic == BODY_AS_TEXT
-        && !arg0.is_undefined()
-        && arg0.to_string(ctx).ok().map_or(false, |s| {
-            s.content().encode_utf8(false).as_ref() == "strip"
-        });
+    // ensure body streaming started (releases ctx borrow before step 2)
+    let (is_html, has_body, body_rx) = {
+        let mut this = cc.this();
+        let p = get_response_payload_mut(ctx, &mut this)?;
 
-    // Step 1: ensure body streaming started (releases ctx borrow before step 2)
-    let has_body = {
-        let data = get_response_data(ctx, &cc.this())?;
-        data.ensure_body_stream().is_ok()
+        let is_html = p.content_type.starts_with("text/html");
+        let has_body = p.ensure_body_stream().is_ok();
+        (is_html, has_body, p.take_body_rx())
     };
+
     if !has_body {
         ctx.throw_type_error("body already consumed");
         return Err(-1);
     }
 
-    let rx = {
-        let data = get_response_data(ctx, &cc.this())?;
-        data.take_body_rx().unwrap()
+    let rx = body_rx.unwrap();
+
+    // For text mode, check optional convert argument: "strip" | "markdown"
+    // Conversion only applies when content type is text/html
+    let arg0 = cc.arg(0);
+    let convert = if magic == BODY_AS_TEXT && !arg0.is_undefined() && is_html {
+        arg0.to_string(ctx)
+            .ok()
+            .and_then(|s| match s.content().encode_utf8(false).as_ref() {
+                "strip" => Some("strip"),
+                "markdown" => Some("markdown"),
+                _ => None,
+            })
+    } else {
+        None
     };
 
     let result_slot = PromiseResultSlot::<Result<Vec<u8>, String>>::new();
-    let promise = Promise::create_with_result_slot(
-        ctx,
-        result_slot.clone(),
-        move |cx, payload| -> JSResult {
-            let buf = payload.map_err(|e| {
+    let promise =
+        Promise::create_with_result_slot(ctx, result_slot.clone(), move |cx, data| -> JSResult {
+            let buf = data.map_err(|e| {
                 cx.throw_internal_error(&e);
                 -1
             })?;
@@ -498,26 +505,25 @@ fn js_response_body_as(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 BODY_AS_BYTES => TypedArray::create_from_vec_u8(cx, buf).map(JSValue::from),
                 BODY_AS_TEXT => {
                     let s = String::from_utf8_lossy(&buf);
-                    let out = if strip_tags {
-                        strip_html_tags(&s)
-                    } else {
-                        s.into_owned()
+                    let out = match convert {
+                        Some("strip") => strip_html_tags(&s),
+                        Some("markdown") => html_to_markdown(&s),
+                        _ => s.into_owned(),
                     };
                     cx.create_string_from_utf8(out.into_bytes())
                         .map(JSValue::from)
                 }
                 BODY_AS_JSON => {
-                    let s = String::from_utf8_lossy(&buf);
-                    let val: serde_json::Value = serde_json::from_str(&s).map_err(|e| {
-                        cx.throw_internal_error(&e.to_string());
-                        -1
-                    })?;
+                    let val: serde_json::Value =
+                        serde_json::from_str(&String::from_utf8_lossy(&buf)).map_err(|e| {
+                            cx.throw_internal_error(&e.to_string());
+                            -1
+                        })?;
                     JSValue::from_serde_json(cx, &val)
                 }
                 _ => unreachable!(),
             }
-        },
-    )?;
+        })?;
 
     // Poll body chunks via queue_job (async, non-blocking)
     let buf = std::sync::Arc::new(std::sync::Mutex::new(Some(Vec::new())));
@@ -533,12 +539,12 @@ fn js_response_body_as(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                     inner.extend_from_slice(&chunk);
                     Ok(JobState::Again)
                 }
-                Err(TryRecvError::Disconnected) => {
+                Err(crossbeam::channel::TryRecvError::Disconnected) => {
                     let full = guard.take().unwrap();
                     let _ = result_slot.commit(Ok(full));
                     Ok(JobState::Done)
                 }
-                Err(TryRecvError::Empty) => {
+                Err(crossbeam::channel::TryRecvError::Empty) => {
                     if start.elapsed() > body_timeout {
                         guard.take();
                         let _ = result_slot.commit(Err("body read timeout".into()));
@@ -557,7 +563,8 @@ fn js_response_body_as(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
 /// response.close()  —  drop body rx and stored response, stop streaming task
 fn js_response_close(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let data = get_response_data(ctx, &cc.this())?;
+    let mut this = cc.this();
+    let data = get_response_payload_mut(ctx, &mut this)?;
     drop(data.body_rx.take());
     drop(data.resp.take());
     Ok(JSValue::UNDEFINED)
