@@ -34,6 +34,7 @@ use zuqe::{
 
 use crate::{
     USER_CLASS_DEFS,
+    http::rpc::build_js_rpc_router,
     llm::{
         JSEngine,
         engine::{Engine, serve::engine_openai_router},
@@ -44,11 +45,18 @@ use super::{
     Method,
     request::{HttpRequestPayload, JSHttpRequest},
     response::{HttpResponseMessage, HttpResponsePayload, JSHttpResponse, get_res_payload},
+    rpc::{JsRpcEndpoint, RpcRequest, handle_rpc_request},
     server::spawn_http_server,
 };
 
-/// Request message sent from axum delegate fn to the JS HTTP Server Job.
-struct IncomingRequest {
+/// Unified request message sent from axum delegate to the JS server job.
+pub(super) enum IncomingRequest {
+    Http(HttpRequest),
+    Rpc(RpcRequest),
+}
+
+/// HTTP route request (existing logic, fields unchanged).
+pub(super) struct HttpRequest {
     handler_index: usize,
     method: Method,
     path: String,
@@ -62,6 +70,7 @@ struct IncomingRequest {
 pub(super) struct HttpServerPayload {
     openai: Option<(Arc<Mutex<Engine>>, String)>,
     js_routes: Vec<(Method, String, Object)>,
+    js_rpc_endpoints: Vec<JsRpcEndpoint>,
     shutdown_tx: Option<oneshot::Sender<()>>,
     is_running: Arc<AtomicBool>,
     frozen: bool,
@@ -104,6 +113,9 @@ impl HttpServerPayload {
         for (_, _, handler) in &self.js_routes {
             handler.trace(gcx);
         }
+        for ep in &self.js_rpc_endpoints {
+            ep.gc_trace(gcx);
+        }
     }
 }
 
@@ -138,6 +150,7 @@ fn js_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         HttpServerPayload {
             openai: None,
             js_routes: Vec::new(),
+            js_rpc_endpoints: Vec::new(),
             shutdown_tx: None,
             is_running: Arc::new(AtomicBool::new(false)),
             frozen: false,
@@ -218,6 +231,75 @@ fn js_route_add(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         ctx.throw_type_error(e);
         return Err(-1);
     }
+    Ok(this)
+}
+
+/// HttpServer.rpc(mountPath, handlers) — register JSON-RPC method handlers.
+///
+/// `mountPath` must start with '/', e.g. "/rpc", "/mcp".
+/// `handlers` is an object whose keys are method names and values are async functions.
+/// Returns `this` for chain-style calls.
+fn js_rpc(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let mut this = cc.this();
+
+    // arg(0): mountPath
+    let mount_path = {
+        let s = cc.arg(0).to_string(ctx).map_err(|_| {
+            ctx.throw_type_error("mountPath must be a string");
+            -1
+        })?;
+        let text = s.content().encode_utf8(false).to_string();
+        if !text.starts_with('/') {
+            ctx.throw_type_error("mountPath must start with '/'");
+            return Err(-1);
+        }
+        text
+    };
+
+    // arg(1): handlers object
+    let mut handlers_obj = cc
+        .arg(1)
+        .as_object()
+        .ok_or_else(|| {
+            ctx.throw_type_error("handlers must be an object");
+            -1
+        })?
+        .clone();
+
+    // Iterate own enumerable properties to collect (method_name, handler) pairs
+    let pks = handlers_obj
+        .get_own_property_names(ctx, zuqe::JS_GPN_ENUM_ONLY | zuqe::JS_GPN_INDEX_MASK)?;
+    let mut methods = Vec::new();
+    for pk in pks.iter() {
+        let key_v = pk.atom.to_value(ctx)?;
+        let key_r = key_v.to_string(ctx)?;
+        let method_name = key_r.content().encode_utf8(false).to_string();
+
+        let handler_val = handlers_obj.get_property(ctx, pk.atom)?;
+        let handler = handler_val.into_callable(ctx)?;
+        methods.push((method_name, handler));
+    }
+
+    let p = get_server_payload_mut(ctx, &mut this)?;
+    if p.frozen {
+        ctx.throw_type_error("cannot add rpc after listen()");
+        return Err(-1);
+    }
+
+    // Merge or append to js_rpc_endpoints
+    if let Some(ep) = p
+        .js_rpc_endpoints
+        .iter_mut()
+        .find(|e| e.mount_path == mount_path)
+    {
+        ep.methods.extend(methods);
+    } else {
+        p.js_rpc_endpoints.push(JsRpcEndpoint {
+            mount_path,
+            methods,
+        });
+    }
+
     Ok(this)
 }
 
@@ -375,7 +457,7 @@ fn delegate_js_route(
             };
 
             if tx
-                .send(IncomingRequest {
+                .send(IncomingRequest::Http(HttpRequest {
                     handler_index,
                     method,
                     path,
@@ -384,7 +466,7 @@ fn delegate_js_route(
                     headers,
                     body,
                     response_tx: res_tx,
-                })
+                }))
                 .is_err()
             {
                 return (
@@ -489,43 +571,47 @@ fn js_listen(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         }
     }
 
-    // Extract data from payload (separate borrow scope)
-    let (js_routes, openai) = {
+    // Build router, channel, and handler tables in one scope
+    let (router, js_rx_opt, http_handler_table, rpc_handler_tables) = {
         let data = get_server_payload_mut(ctx, &mut this)?;
         data.frozen = true;
-        (data.js_routes.clone(), data.openai.clone())
-    };
 
-    // Build the base router. If openai engine + mountPath provided, nest
-    // engine routes under the mount path. JS routes are added at the top level.
-    let mut router: Router = Router::new();
-    if let Some((ref eng, ref mount_path)) = openai {
-        let engine_router = engine_openai_router(eng.clone());
-        router = router.nest(mount_path, engine_router);
-    }
-
-    let mut js_rx_opt: Option<channel::Receiver<IncomingRequest>> = None;
-    let mut handler_table_opt: Option<Vec<Object>> = None;
-
-    if !js_routes.is_empty() {
-        let (js_tx, js_rx) = channel::unbounded::<IncomingRequest>();
-
-        // Build handler lookup table (Object stays on JS thread)
-        let handler_table: Vec<Object> = js_routes.iter().map(|(_, _, h)| *h).collect();
-
-        // Delegate each JS route and add to router
-        for (i, (method, path, _)) in js_routes.iter().enumerate() {
-            let (path, handler) = delegate_js_route(*method, path.clone(), i, js_tx.clone());
-            if let Err(e) = validate_axum_path(&path) {
-                ctx.throw_type_error(&e);
-                return Err(-1);
-            }
-            router = router.route(&path, handler);
+        // Base router with optional OpenAI engine routes
+        let mut router: Router = Router::new();
+        if let Some((ref eng, ref mount_path)) = data.openai {
+            let engine_router = engine_openai_router(eng.clone());
+            router = router.nest(mount_path, engine_router);
         }
 
-        js_rx_opt = Some(js_rx);
-        handler_table_opt = Some(handler_table);
-    }
+        let has_js = !data.js_routes.is_empty() || !data.js_rpc_endpoints.is_empty();
+        if !has_js {
+            (router, None, Vec::new(), Vec::new())
+        } else {
+            let (js_tx, js_rx) = channel::unbounded::<IncomingRequest>();
+
+            // --- HTTP routes ---
+            let http_table: Vec<Object> = data.js_routes.iter().map(|(_, _, h)| *h).collect();
+            for (i, (method, path, _)) in data.js_routes.iter().enumerate() {
+                let (axum_path, handler) =
+                    delegate_js_route(*method, path.clone(), i, js_tx.clone());
+                if let Err(e) = validate_axum_path(&axum_path) {
+                    ctx.throw_type_error(&e);
+                    return Err(-1);
+                }
+                router = router.route(&axum_path, handler);
+            }
+
+            // --- JSON-RPC routes: build tables directly from payload ---
+            let mut rpc_tables: Vec<Vec<Object>> = Vec::new();
+            for (i, ep) in data.js_rpc_endpoints.iter().enumerate() {
+                let (rpc_router, rpc_table) = build_js_rpc_router(&ep.methods, js_tx.clone(), i);
+                router = router.merge(rpc_router.into_axum(&ep.mount_path));
+                rpc_tables.push(rpc_table);
+            }
+
+            (router, Some(js_rx), http_table, rpc_tables)
+        }
+    };
 
     // Spawn the unified axum service
     let handle = match spawn_http_server(router, host, port) {
@@ -543,19 +629,27 @@ fn js_listen(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         p.is_running = handle.is_running.clone();
     }
 
-    // Start HTTP Server Job on JS thread with the CORRECT is_running flag
-    if let (Some(js_rx), Some(handler_table)) = (js_rx_opt, handler_table_opt) {
-        js_start_http_server_job(ctx, js_rx, handler_table, handle.is_running);
+    // Start unified server job on JS thread (handles both HTTP and RPC)
+    if let Some(js_rx) = js_rx_opt {
+        js_start_server_job(
+            ctx,
+            js_rx,
+            http_handler_table,
+            rpc_handler_tables,
+            handle.is_running,
+        );
     }
 
     Ok(JSValue::UNDEFINED)
 }
 
-/// Start the HTTP Server Job via queue_job — polls crossbeam channel on JS thread.
-fn js_start_http_server_job(
+/// Start the unified server job via queue_job — polls crossbeam channel on JS thread.
+/// Handles both HTTP and RPC requests through the same channel.
+fn js_start_server_job(
     ctx: &mut ScopedContext,
     rx: channel::Receiver<IncomingRequest>,
-    handler_table: Vec<Object>,
+    http_handler_table: Vec<Object>,
+    rpc_handler_tables: Vec<Vec<Object>>,
     is_running: Arc<AtomicBool>,
 ) {
     let is_running2 = is_running.clone();
@@ -563,104 +657,114 @@ fn js_start_http_server_job(
         ctx,
         rx,
         move |incoming: IncomingRequest, cx| {
-            // Lookup handler by index — no route matching needed
-            let handler = &handler_table[incoming.handler_index];
-            let query = parse_query_string(&incoming.query_string);
-
-            let req_val: JSValue = match JSHttpRequest::new_instance(
-                cx,
-                JSValue::UNDEFINED,
-                HttpRequestPayload {
-                    method: incoming.method,
-                    path: incoming.path.clone(),
-                    params: incoming.params.clone(),
-                    query,
-                    headers: incoming.headers.iter().cloned().collect(),
-                    body: Some(incoming.body),
-                },
-            ) {
-                Ok(v) => v.into(),
-                Err(_) => return true,
-            };
-
-            let res_val: JSValue = match JSHttpResponse::new_instance(
-                cx,
-                JSValue::UNDEFINED,
-                HttpResponsePayload {
-                    status: 200,
-                    headers: Vec::new(),
-                    body: None,
-                    ended: false,
-                    response_tx: Some(incoming.response_tx),
-                },
-            ) {
-                Ok(v) => v.into(),
-                Err(_) => return true,
-            };
-
-            // Call JS handler
-            match handler.call(cx, JSValue::UNDEFINED, &[req_val, res_val]) {
-                Ok(val) => {
-                    if let Ok(mut promise) = Promise::try_from(val) {
-                        // Async handler — attach then/catch
-                        let ok_fn = match cx.create_native_function_with_data(
-                            Callback::Func(js_handler_then),
-                            "",
-                            0,
-                            0,
-                            [res_val].into(),
-                        ) {
-                            Ok(f) => JSValue::from(f),
-                            Err(_) => return true,
-                        };
-                        let fail_fn = match cx.create_native_function_with_data(
-                            Callback::Func(js_handler_then),
-                            "",
-                            1,
-                            1,
-                            [res_val].into(),
-                        ) {
-                            Ok(f) => JSValue::from(f),
-                            Err(_) => return true,
-                        };
-
-                        if promise.then(cx, ok_fn, fail_fn).is_err() {
-                            let p = get_res_payload(cx, &val).unwrap();
-                            p.status = 500;
-                            p.body = Some(String::from("Internal Server Error"));
-                            p.send_response();
-                        }
-                    } else {
-                        // Sync handler
-                        if let Ok(p) = get_res_payload(cx, &res_val)
-                            && !p.ended
-                        {
-                            p.status = 204;
-                            p.send_response();
-                        }
-                    }
+            match incoming {
+                IncomingRequest::Http(req) => {
+                    dispatch_http_request(cx, req, &http_handler_table);
                 }
-                Err(_) => {
-                    let exc = cx.take_exception();
-                    let msg = exc.to_text(cx);
-                    if !msg.message.is_empty() {
-                        eprintln!("{}", msg.message);
-                    }
-                    if let Ok(p) = get_res_payload(cx, &res_val)
-                        && !p.ended
-                    {
-                        p.status = 500;
-                        p.body = Some(String::from("Internal Server Error"));
-                        p.send_response();
-                    }
+                IncomingRequest::Rpc(req) => {
+                    handle_rpc_request(cx, req, &rpc_handler_tables);
                 }
             }
-
             true // keep polling
         },
         move || is_running2.load(Ordering::Acquire),
         || {},
     );
+}
+
+/// Dispatch an HTTP request to the appropriate JS handler.
+fn dispatch_http_request(cx: &mut ScopedContext, incoming: HttpRequest, handler_table: &[Object]) {
+    let handler = &handler_table[incoming.handler_index];
+    let query = parse_query_string(&incoming.query_string);
+
+    let req_val: JSValue = match JSHttpRequest::new_instance(
+        cx,
+        JSValue::UNDEFINED,
+        HttpRequestPayload {
+            method: incoming.method,
+            path: incoming.path.clone(),
+            params: incoming.params.clone(),
+            query,
+            headers: incoming.headers.iter().cloned().collect(),
+            body: Some(incoming.body),
+        },
+    ) {
+        Ok(v) => v.into(),
+        Err(_) => return,
+    };
+
+    let res_val: JSValue = match JSHttpResponse::new_instance(
+        cx,
+        JSValue::UNDEFINED,
+        HttpResponsePayload {
+            status: 200,
+            headers: Vec::new(),
+            body: None,
+            ended: false,
+            response_tx: Some(incoming.response_tx),
+        },
+    ) {
+        Ok(v) => v.into(),
+        Err(_) => return,
+    };
+
+    // Call JS handler
+    match handler.call(cx, JSValue::UNDEFINED, &[req_val, res_val]) {
+        Ok(val) => {
+            if let Ok(mut promise) = Promise::try_from(val) {
+                // Async handler — attach then/catch
+                let ok_fn = match cx.create_native_function_with_data(
+                    Callback::Func(js_handler_then),
+                    "",
+                    0,
+                    0,
+                    [res_val].into(),
+                ) {
+                    Ok(f) => JSValue::from(f),
+                    Err(_) => return,
+                };
+                let fail_fn = match cx.create_native_function_with_data(
+                    Callback::Func(js_handler_then),
+                    "",
+                    1,
+                    1,
+                    [res_val].into(),
+                ) {
+                    Ok(f) => JSValue::from(f),
+                    Err(_) => return,
+                };
+
+                if promise.then(cx, ok_fn, fail_fn).is_err() {
+                    let p = get_res_payload(cx, &val).unwrap();
+                    p.status = 500;
+                    p.body = Some(String::from("Internal Server Error"));
+                    p.send_response();
+                }
+            } else {
+                // Sync handler
+                if let Ok(p) = get_res_payload(cx, &res_val)
+                    && !p.ended
+                {
+                    p.status = 204;
+                    p.send_response();
+                }
+            }
+        }
+        Err(_) => {
+            let exc = cx.take_exception();
+            let msg = exc.to_text(cx);
+            if !msg.message.is_empty() {
+                eprintln!("{}", msg.message);
+            }
+            if let Ok(p) = get_res_payload(cx, &res_val)
+                && !p.ended
+            {
+                p.status = 500;
+                p.body = Some(String::from("Internal Server Error"));
+                p.send_response();
+            }
+        }
+    }
 }
 
 fn js_shutdown(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -756,6 +860,7 @@ const SERVER_PROTO: &[FieldDef] = &[
     FieldDef::FUNC("delete", 2, js_route_add, 4),
     FieldDef::FUNC("head", 2, js_route_add, 5),
     FieldDef::FUNC("options", 2, js_route_add, 6),
+    FieldDef::FUNC("rpc", 2, js_rpc, 0),
     FieldDef::FUNC("removeRoute", 2, js_remove_route, 0),
     FieldDef::GETSET("isRunning", Some(js_is_running), None, 0),
     FieldDef::FUNC("listen", 1, js_listen, 0),

@@ -65,6 +65,7 @@ axum = { version = "0.8", default-features = false, features = [
     "http1",
     "json",
 ] }
+ajj = { version = "0.7", features = ["axum"] }
 futures-util = "0.3"
 async-stream = "0.3"
 tokio-stream = "0.1"
