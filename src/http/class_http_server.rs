@@ -6,7 +6,7 @@
 // JS routes are delegated to axum via crossbeam channel + handler_index lookup.
 
 use std::{
-    cell::Cell,
+    cell::{Cell, RefCell},
     collections::HashMap,
     sync::{
         Arc, Mutex,
@@ -34,7 +34,7 @@ use zuqe::{
 
 use crate::{
     USER_CLASS_DEFS,
-    http::rpc::build_js_rpc_router,
+    http::rpc::{build_js_rpc_router, build_mcp_router},
     llm::{
         JSEngine,
         engine::{Engine, serve::engine_openai_router},
@@ -45,7 +45,10 @@ use super::{
     Method,
     request::{HttpRequestPayload, JSHttpRequest},
     response::{HttpResponseMessage, HttpResponsePayload, JSHttpResponse, get_res_payload},
-    rpc::{JsRpcEndpoint, RpcRequest, handle_rpc_request},
+    rpc::{
+        JsRpcEndpoint, McpEndpoint, McpSchemas, McpToolCallRequest, NativeMcpToolFn, RpcRequest,
+        handle_mcp_tool_call, handle_rpc_request,
+    },
     server::spawn_http_server,
 };
 
@@ -53,6 +56,7 @@ use super::{
 pub(super) enum IncomingRequest {
     Http(HttpRequest),
     Rpc(RpcRequest),
+    McpToolCall(McpToolCallRequest),
 }
 
 /// HTTP route request (existing logic, fields unchanged).
@@ -71,6 +75,7 @@ pub(super) struct HttpServerPayload {
     openai: Option<(Arc<Mutex<Engine>>, String)>,
     js_routes: Vec<(Method, String, Object)>,
     js_rpc_endpoints: Vec<JsRpcEndpoint>,
+    mcp_endpoints: Vec<McpEndpoint>,
     shutdown_tx: Option<oneshot::Sender<()>>,
     is_running: Arc<AtomicBool>,
     frozen: bool,
@@ -109,11 +114,47 @@ impl HttpServerPayload {
         Ok(self.js_routes.len() < before)
     }
 
+    /// Register a rust MCP tool on an existing MCP endpoint.
+    ///
+    /// Must be called BEFORE `listen()` because native handler closures are
+    /// captured at router-build time. The schema is added to the shared table
+    /// so `tools/list` and `tools/call` can find it.
+    pub(crate) fn register_mcp_tool(
+        &mut self,
+        mount_path: &str,
+        name: &str,
+        schema: serde_json::Value,
+        handler: NativeMcpToolFn,
+    ) -> Result<(), &'static str> {
+        let ep = self
+            .mcp_endpoints
+            .iter_mut()
+            .find(|e| e.mount_path == mount_path)
+            .ok_or("no MCP endpoint at given mount path")?;
+
+        // Add native handler
+        let native_idx = ep.handlers.len();
+        ep.handlers
+            .push((name.to_string(), schema.clone(), handler));
+
+        // Update shared schemas
+        let mut guard = ep.shared.write().map_err(|_| "schema lock poisoned")?;
+        let schema_idx = guard.schemas.len();
+        guard.schemas.push(schema);
+        guard.name_to_index.insert(name.to_string(), schema_idx);
+        guard.native_map.insert(name.to_string(), native_idx);
+
+        Ok(())
+    }
+
     fn gc_trace(&self, gcx: &mut GcTraceCtx) {
         for (_, _, handler) in &self.js_routes {
             handler.trace(gcx);
         }
         for ep in &self.js_rpc_endpoints {
+            ep.gc_trace(gcx);
+        }
+        for ep in &self.mcp_endpoints {
             ep.gc_trace(gcx);
         }
     }
@@ -151,6 +192,7 @@ fn js_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             openai: None,
             js_routes: Vec::new(),
             js_rpc_endpoints: Vec::new(),
+            mcp_endpoints: Vec::new(),
             shutdown_tx: None,
             is_running: Arc::new(AtomicBool::new(false)),
             frozen: false,
@@ -306,6 +348,292 @@ fn js_rpc(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             mount_path,
             methods,
         });
+    }
+
+    Ok(this)
+}
+
+/// HttpServer.mcp(mountPath, options) — register MCP server with tools.
+///
+/// `mountPath` must start with '/', e.g. "/mcp".
+/// `options` is `{ serverName, version, tools: [{ name, description, inputSchema, handler }] }`.
+/// Protocol methods (initialize, notifications/initialized, tools/list, tools/call)
+/// are auto-generated in Rust. Returns `this` for chain-style calls.
+fn js_mcp(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let mut this = cc.this();
+
+    // arg(0): mountPath
+    let mount_path = {
+        let s = cc.arg(0).to_string(ctx).map_err(|_| {
+            ctx.throw_type_error("mountPath must be a string");
+            -1
+        })?;
+        let text = s.content().encode_utf8(false).to_string();
+        if !text.starts_with('/') {
+            ctx.throw_type_error("mountPath must start with '/'");
+            return Err(-1);
+        }
+        text
+    };
+
+    // arg(1): options object
+    let mut opts = cc
+        .arg(1)
+        .as_object()
+        .ok_or_else(|| {
+            ctx.throw_type_error("options must be an object");
+            -1
+        })?
+        .clone();
+
+    let server_name = opts
+        .get_property_str(ctx, "serverName")
+        .and_then(|v| v.to_string(ctx))
+        .map(|s| s.content().encode_utf8(false).to_string())
+        .unwrap_or_else(|_| "mcp-server".into());
+
+    let server_version = opts
+        .get_property_str(ctx, "version")
+        .and_then(|v| v.to_string(ctx))
+        .map(|s| s.content().encode_utf8(false).to_string())
+        .unwrap_or_else(|_| "1.0.0".into());
+
+    // tools array
+    let tools_val = opts.get_property_str(ctx, "tools").map_err(|_| {
+        ctx.throw_type_error("options.tools is required");
+        -1
+    })?;
+    let mut tools_arr = tools_val
+        .as_object()
+        .ok_or_else(|| {
+            ctx.throw_type_error("tools must be an array");
+            -1
+        })?
+        .clone();
+
+    let mut schemas: Vec<serde_json::Value> = Vec::new();
+    let mut name_to_index: HashMap<String, usize> = HashMap::new();
+    let mut js_handlers: Vec<Object> = Vec::new();
+
+    let pks = tools_arr
+        .get_own_property_names(ctx, zuqe::JS_GPN_ENUM_ONLY | zuqe::JS_GPN_STR_OR_INT_MASK)?;
+
+    for pk in pks.iter() {
+        let key_v = pk.atom.to_value(ctx)?;
+        // Skip non-numeric keys (e.g. 'length')
+        if key_v.to_number(ctx).is_err() {
+            continue;
+        }
+        let mut tool_obj = tools_arr
+            .get_property(ctx, pk.atom)?
+            .as_object()
+            .ok_or_else(|| {
+                ctx.throw_type_error("each tool must be an object");
+                -1
+            })?
+            .clone();
+
+        // Extract name (required)
+        let name = tool_obj
+            .get_property_str(ctx, "name")
+            .and_then(|v| v.to_string(ctx))
+            .map(|s| s.content().encode_utf8(false).to_string())
+            .map_err(|_| {
+                ctx.throw_type_error("tool.name is required");
+                -1
+            })?;
+
+        // Extract handler (required)
+        let handler = tool_obj
+            .get_property_str(ctx, "handler")
+            .and_then(|v| v.into_callable(ctx))
+            .map_err(|_| {
+                ctx.throw_type_error(&format!("tool '{}' handler must be a function", name));
+                -1
+            })?;
+
+        // Build schema: { name, description, inputSchema } (no handler)
+        let description = tool_obj
+            .get_property_str(ctx, "description")
+            .and_then(|v| v.to_string(ctx))
+            .map(|s| s.content().encode_utf8(false).to_string())
+            .ok();
+
+        let input_schema = tool_obj
+            .get_property_str(ctx, "inputSchema")
+            .ok()
+            .and_then(|v| v.to_serde_json(ctx).ok());
+
+        let mut schema = serde_json::json!({ "name": &name });
+        if let Some(desc) = description {
+            schema["description"] = serde_json::Value::String(desc);
+        }
+        if let Some(is) = input_schema {
+            schema["inputSchema"] = is;
+        }
+
+        let idx = schemas.len();
+        schemas.push(schema);
+        name_to_index.insert(name, idx);
+        js_handlers.push(handler);
+    }
+
+    let p = get_server_payload_mut(ctx, &mut this)?;
+    if p.frozen {
+        ctx.throw_type_error("cannot add mcp after listen()");
+        return Err(-1);
+    }
+
+    p.mcp_endpoints.push(McpEndpoint {
+        mount_path,
+        server_name,
+        server_version,
+        shared: Arc::new(std::sync::RwLock::new(McpSchemas {
+            schemas,
+            name_to_index,
+            native_map: HashMap::new(),
+        })),
+        js_handlers,
+        handlers: Vec::new(),
+        update_tx: None,
+    });
+
+    Ok(this)
+}
+
+/// HttpServer.updateMcpTools(mountPath, tools) — hot-reload MCP tools at runtime.
+///
+/// Replaces all JS tools (native tools are preserved). Next request uses new handlers.
+fn js_update_tools(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let mut this = cc.this();
+
+    // arg(0): mountPath
+    let mount_path = cc
+        .arg(0)
+        .to_string(ctx)
+        .map(|s| s.content().encode_utf8(false).to_string())
+        .map_err(|_| {
+            ctx.throw_type_error("mountPath must be a string");
+            -1
+        })?;
+
+    // arg(1): tools array
+    let tools_val = cc.arg(1);
+    let mut tools_arr = tools_val
+        .as_object()
+        .ok_or_else(|| {
+            ctx.throw_type_error("tools must be an array");
+            -1
+        })?
+        .clone();
+
+    // Parse tools
+    let mut schemas: Vec<serde_json::Value> = Vec::new();
+    let mut name_to_index: HashMap<String, usize> = HashMap::new();
+    let mut js_handlers: Vec<Object> = Vec::new();
+
+    let pks = tools_arr
+        .get_own_property_names(ctx, zuqe::JS_GPN_ENUM_ONLY | zuqe::JS_GPN_STR_OR_INT_MASK)?;
+
+    for pk in pks.iter() {
+        let key_v = pk.atom.to_value(ctx)?;
+        if key_v.to_number(ctx).is_err() {
+            continue;
+        }
+        let mut tool_obj = tools_arr
+            .get_property(ctx, pk.atom)?
+            .as_object()
+            .ok_or_else(|| {
+                ctx.throw_type_error("each tool must be an object");
+                -1
+            })?
+            .clone();
+
+        let name = tool_obj
+            .get_property_str(ctx, "name")
+            .and_then(|v| v.to_string(ctx))
+            .map(|s| s.content().encode_utf8(false).to_string())
+            .map_err(|_| {
+                ctx.throw_type_error("tool.name is required");
+                -1
+            })?;
+
+        let handler = tool_obj
+            .get_property_str(ctx, "handler")
+            .and_then(|v| v.into_callable(ctx))
+            .map_err(|_| {
+                ctx.throw_type_error(&format!("tool '{}' handler must be a function", name));
+                -1
+            })?;
+
+        let description = tool_obj
+            .get_property_str(ctx, "description")
+            .and_then(|v| v.to_string(ctx))
+            .map(|s| s.content().encode_utf8(false).to_string())
+            .ok();
+
+        let input_schema = tool_obj
+            .get_property_str(ctx, "inputSchema")
+            .ok()
+            .and_then(|v| v.to_serde_json(ctx).ok());
+
+        let mut schema = serde_json::json!({ "name": &name });
+        if let Some(desc) = description {
+            schema["description"] = serde_json::Value::String(desc);
+        }
+        if let Some(is) = input_schema {
+            schema["inputSchema"] = is;
+        }
+
+        let idx = schemas.len();
+        schemas.push(schema);
+        name_to_index.insert(name, idx);
+        js_handlers.push(handler);
+    }
+
+    // Find endpoint and update
+    let p = get_server_payload_mut(ctx, &mut this)?;
+    let ep = p
+        .mcp_endpoints
+        .iter_mut()
+        .find(|e| e.mount_path == mount_path)
+        .ok_or_else(|| {
+            ctx.throw_type_error(&format!("no MCP endpoint at '{}'", mount_path));
+            -1
+        })?;
+
+    // Update shared schemas (write lock)
+    {
+        let mut guard = ep.shared.write().unwrap();
+        // Preserve native tool entries (names that are in native_map)
+        let native_names: Vec<String> = guard.native_map.keys().cloned().collect();
+        let mut new_schemas = schemas;
+        let mut new_name_to_index = name_to_index;
+        let mut new_native_map = HashMap::new();
+
+        // Re-add native tool schemas at the end
+        for name in &native_names {
+            if let Some(&old_idx) = guard.name_to_index.get(name) {
+                let new_idx = new_schemas.len();
+                new_schemas.push(guard.schemas[old_idx].clone());
+                new_name_to_index.insert(name.clone(), new_idx);
+                if let Some(&ni) = guard.native_map.get(name) {
+                    new_native_map.insert(name.clone(), ni);
+                }
+            }
+        }
+
+        guard.schemas = new_schemas;
+        guard.name_to_index = new_name_to_index;
+        guard.native_map = new_native_map;
+    }
+
+    // Update JS handlers on endpoint (for GC tracing)
+    ep.js_handlers = js_handlers.clone();
+
+    // Send new handler table to the poller via update channel
+    if let Some(ref utx) = ep.update_tx {
+        let _ = utx.send(js_handlers);
     }
 
     Ok(this)
@@ -580,7 +908,14 @@ fn js_listen(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     }
 
     // Build router, channel, and handler tables in one scope
-    let (router, js_rx_opt, http_handler_table, rpc_handler_tables) = {
+    let (
+        router,
+        js_rx_opt,
+        http_handler_table,
+        rpc_handler_tables,
+        mcp_handler_tables,
+        mcp_update_rxs,
+    ) = {
         let data = get_server_payload_mut(ctx, &mut this)?;
         data.frozen = true;
 
@@ -591,9 +926,11 @@ fn js_listen(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             router = router.nest(mount_path, engine_router);
         }
 
-        let has_js = !data.js_routes.is_empty() || !data.js_rpc_endpoints.is_empty();
+        let has_js = !data.js_routes.is_empty()
+            || !data.js_rpc_endpoints.is_empty()
+            || !data.mcp_endpoints.is_empty();
         if !has_js {
-            (router, None, Vec::new(), Vec::new())
+            (router, None, Vec::new(), Vec::new(), Vec::new(), Vec::new())
         } else {
             let (js_tx, js_rx) = channel::unbounded::<IncomingRequest>();
 
@@ -617,7 +954,27 @@ fn js_listen(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 rpc_tables.push(rpc_table);
             }
 
-            (router, Some(js_rx), http_table, rpc_tables)
+            // --- MCP routes: protocol methods handled in Rust ---
+            let mut mcp_tables: Vec<Vec<Object>> = Vec::new();
+            let mut mcp_update_rxs: Vec<channel::Receiver<Vec<Object>>> = Vec::new();
+            for (i, ep) in data.mcp_endpoints.iter_mut().enumerate() {
+                let (mcp_router, mcp_table) = build_mcp_router(ep, js_tx.clone(), i);
+                router = router.merge(mcp_router.into_axum(&ep.mount_path));
+                mcp_tables.push(mcp_table);
+                // Create update channel for hot-reload of tools
+                let (utx, urx) = channel::unbounded::<Vec<Object>>();
+                ep.update_tx = Some(utx);
+                mcp_update_rxs.push(urx);
+            }
+
+            (
+                router,
+                Some(js_rx),
+                http_table,
+                rpc_tables,
+                mcp_tables,
+                mcp_update_rxs,
+            )
         }
     };
 
@@ -644,6 +1001,8 @@ fn js_listen(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             js_rx,
             http_handler_table,
             rpc_handler_tables,
+            mcp_handler_tables,
+            mcp_update_rxs,
             handle.is_running,
         );
     }
@@ -658,19 +1017,32 @@ fn js_start_server_job(
     rx: channel::Receiver<IncomingRequest>,
     http_handler_table: Vec<Object>,
     rpc_handler_tables: Vec<Vec<Object>>,
+    mcp_handler_tables: Vec<Vec<Object>>,
+    mcp_update_rxs: Vec<channel::Receiver<Vec<Object>>>,
     is_running: Arc<AtomicBool>,
 ) {
     let is_running2 = is_running.clone();
+    // Wrap MCP tables in RefCell for hot-reload support
+    let mcp_tables = RefCell::new(mcp_handler_tables);
     crate::helpers::start_channel_poller(
         ctx,
         rx,
         move |incoming: IncomingRequest, cx| {
+            // Check for tool table updates before processing
+            for (i, urx) in mcp_update_rxs.iter().enumerate() {
+                if let Ok(new_table) = urx.try_recv() {
+                    mcp_tables.borrow_mut()[i] = new_table;
+                }
+            }
             match incoming {
                 IncomingRequest::Http(req) => {
                     dispatch_http_request(cx, req, &http_handler_table);
                 }
                 IncomingRequest::Rpc(req) => {
                     handle_rpc_request(cx, req, &rpc_handler_tables);
+                }
+                IncomingRequest::McpToolCall(req) => {
+                    handle_mcp_tool_call(cx, req, &mcp_tables.borrow());
                 }
             }
             true // keep polling
@@ -869,6 +1241,8 @@ const SERVER_PROTO: &[FieldDef] = &[
     FieldDef::FUNC("head", 2, js_route_add, 5),
     FieldDef::FUNC("options", 2, js_route_add, 6),
     FieldDef::FUNC("rpc", 2, js_rpc, 0),
+    FieldDef::FUNC("mcp", 2, js_mcp, 0),
+    FieldDef::FUNC("updateMcpTools", 2, js_update_tools, 0),
     FieldDef::FUNC("removeRoute", 2, js_remove_route, 0),
     FieldDef::GETSET("isRunning", Some(js_is_running), None, 0),
     FieldDef::FUNC("listen", 1, js_listen, 0),

@@ -6,7 +6,77 @@ declare module "http" {
   type RpcParams = Record<string, any> | any[] | undefined;
 
   /** JSON-RPC request handler: has id, must return result. */
-  type RpcRequestHandler = (params: RpcParams) => Promise<any>;
+  type RpcHandler = (params: RpcParams) => Promise<unknown>;
+
+  /**
+   * MCP tool call arguments — the `arguments` field from the JSON-RPC
+   * `tools/call` params, forwarded verbatim to the handler.
+   * Per MCP spec, this is typically an object matching the tool's `inputSchema`.
+   */
+  type McpToolArguments = Record<string, any>;
+
+  /**
+   * A single content part inside an MCP tool result.
+   * The most common variant is `{ type: "text", text: "..." }`.
+   */
+  type McpContentPart =
+    | { type: "text"; text: string }
+    | { type: "image"; data: string; mimeType: string }
+    | { type: "resource"; resource: any };
+
+  /**
+   * MCP tool result returned by a handler.
+   * A handler may return this object directly, OR return a plain value
+   * (string / object / Error) which will be automatically wrapped into
+   * `{ content: [{ type: "text", text: String(value) }] }`.
+   */
+  interface McpToolResult {
+    content: McpContentPart[];
+    isError?: boolean;
+  }
+
+  /**
+   * MCP tool handler function. Receives the `arguments` object from the
+   * client's `tools/call` request. May be sync or async.
+   *
+   * Must return a value conforming to `McpToolResult` (the MCP protocol
+   * requires `{ content: McpContentPart[], isError?: boolean }`).
+   * Throwing an Error is caught by the framework and translated into a
+   * JSON-RPC error response.
+   */
+  type McpToolHandler = (
+    args: McpToolArguments,
+  ) => McpToolResult | Promise<McpToolResult>;
+
+  /** JSON Schema describing a tool's input parameters. */
+  interface McpToolInputSchema {
+    type: "object";
+    properties?: Record<string, any>;
+    required?: string[];
+    [key: string]: any;
+  }
+
+  /** Definition of a single MCP tool, passed to `server.mcp()` or `server.updateTools()`. */
+  interface McpToolDefinition {
+    /** Unique tool name (required by MCP spec). */
+    name: string;
+    /** Human-readable description of what the tool does. */
+    description?: string;
+    /** JSON Schema for the tool's arguments. */
+    inputSchema?: McpToolInputSchema;
+    /** Handler invoked on `tools/call`. */
+    handler: McpToolHandler;
+  }
+
+  /** Options for `server.mcp()`. */
+  interface McpServerOptions {
+    /** Server name advertised in `initialize` response. */
+    serverName: string;
+    /** Server version advertised in `initialize` response. */
+    version: string;
+    /** Tool definitions to register at this mount path. */
+    tools: McpToolDefinition[];
+  }
 
   /** Incoming HTTP request passed to route handlers. Cannot be constructed directly. */
   export class HttpServerRequest {
@@ -82,10 +152,21 @@ declare module "http" {
     removeRoute(method: string, path: string): boolean;
 
     /** Register JSON-RPC method handlers at a mount path. */
-    rpc(
-      mountPath: string,
-      handlers: { [name: string]: RpcRequestHandler },
-    ): this;
+    rpc(mountPath: string, handlers: { [name: string]: RpcHandler }): this;
+
+    /**
+     * Register an MCP (Model Context Protocol) server at `mountPath`.
+     * Rust auto-generates the four protocol methods: `initialize`,
+     * `notifications/initialized`, `tools/list`, `tools/call`.
+     * Must be called BEFORE `listen()`.
+     */
+    mcp(mountPath: string, options: McpServerOptions): this;
+
+    /**
+     * Hot-reload JS tools on an existing MCP endpoint (native tools preserved).
+     * The new handler table takes effect on the very next request.
+     */
+    updateMcpTools(mountPath: string, tools: McpToolDefinition[]): this;
 
     /** Mount OpenAI-compatible LLM inference routes. */
     openai(engine: any, mountPath: string): this;
