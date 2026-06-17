@@ -122,7 +122,7 @@ pub(crate) fn js_request(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             if let Some(hdr_obj) = v.as_object_mut() {
                 let pks = hdr_obj.get_own_property_names(
                     ctx,
-                    zuqe::JS_GPN_ENUM_ONLY | zuqe::JS_GPN_INDEX_MASK,
+                    zuqe::JS_GPN_ENUM_ONLY | zuqe::JS_GPN_STR_OR_INT_MASK,
                 )?;
                 for pk in pks.iter() {
                     let key_v = pk.atom.to_value(ctx)?;
@@ -282,6 +282,9 @@ pub(crate) fn js_request(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                     .filter_map(|(k, v)| v.to_str().ok().map(|vs| (k.to_string(), vs.to_string())))
                     .collect();
 
+                // Store the response BEFORE committing — resolve callback will take() it
+                *resp_holder2.lock().unwrap() = Some(resp);
+
                 let meta = ResponseMeta {
                     status: status.as_u16(),
                     status_text: status.canonical_reason().unwrap_or("").to_string(),
@@ -289,14 +292,9 @@ pub(crate) fn js_request(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                     content_type,
                     content_length,
                 };
-
-                if result_slot.clone().commit(Ok(meta)).is_err() {
+                if result_slot.commit(Ok(meta)).is_err() {
                     return;
                 }
-
-                // Store the response for lazy body streaming.
-                // Body will be streamed on first .text()/.json()/.body access.
-                *resp_holder2.lock().unwrap() = Some(resp);
             }
             Err(e) => {
                 result_slot.commit(Err(format!("{e}"))).ok();

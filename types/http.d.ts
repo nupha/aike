@@ -2,6 +2,12 @@
 // import { HttpServer } from "http";
 
 declare module "http" {
+  /** JSON-RPC 2.0 params: object | array | omitted (undefined). */
+  type RpcParams = Record<string, any> | any[] | undefined;
+
+  /** JSON-RPC request handler: has id, must return result. */
+  type RpcRequestHandler = (params: RpcParams) => Promise<any>;
+
   /** Incoming HTTP request passed to route handlers. Cannot be constructed directly. */
   export class HttpServerRequest {
     /** HTTP method (GET, POST, PUT, etc.). */
@@ -78,7 +84,7 @@ declare module "http" {
     /** Register JSON-RPC method handlers at a mount path. */
     rpc(
       mountPath: string,
-      handlers: Record<string, (params: any) => Promise<any>>,
+      handlers: { [name: string]: RpcRequestHandler },
     ): this;
 
     /** Mount OpenAI-compatible LLM inference routes. */

@@ -11,7 +11,7 @@ use std::{
 use std::os::fd::AsRawFd;
 
 use zuqe::{
-    CallContext, Callback, JS_GPN_ENUM_ONLY, JS_GPN_INDEX_MASK, JS_PROP_C_W_E, JS_PROP_ENUMERABLE,
+    CallContext, Callback, JS_GPN_ENUM_ONLY, JS_GPN_STR_OR_INT_MASK, JS_PROP_C_W_E, JS_PROP_ENUMERABLE,
     JSResult, JSValue, Object, ScopedContext,
     builtins::{promise::Promise, typed_array::TypedArray},
 };
@@ -405,7 +405,7 @@ fn parse_env_obj(
     };
 
     let mut map = HashMap::new();
-    let pks = env_obj.get_own_property_names(ctx, JS_GPN_ENUM_ONLY | JS_GPN_INDEX_MASK)?;
+    let pks = env_obj.get_own_property_names(ctx, JS_GPN_ENUM_ONLY | JS_GPN_STR_OR_INT_MASK)?;
     for pk in pks.iter() {
         let key_v = pk.atom.to_value(ctx)?;
         let key_r = key_v.to_string(ctx)?;

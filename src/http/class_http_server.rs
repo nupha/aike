@@ -268,15 +268,23 @@ fn js_rpc(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     // Iterate own enumerable properties to collect (method_name, handler) pairs
     let pks = handlers_obj
-        .get_own_property_names(ctx, zuqe::JS_GPN_ENUM_ONLY | zuqe::JS_GPN_INDEX_MASK)?;
+        .get_own_property_names(ctx, zuqe::JS_GPN_ENUM_ONLY | zuqe::JS_GPN_STR_OR_INT_MASK)?;
     let mut methods = Vec::new();
     for pk in pks.iter() {
         let key_v = pk.atom.to_value(ctx)?;
         let key_r = key_v.to_string(ctx)?;
         let method_name = key_r.content().encode_utf8(false).to_string();
 
-        let handler_val = handlers_obj.get_property(ctx, pk.atom)?;
-        let handler = handler_val.into_callable(ctx)?;
+        let handler = handlers_obj
+            .get_property(ctx, pk.atom)?
+            .into_callable(ctx)
+            .map_err(|_| {
+                ctx.throw_type_error(&format!(
+                    "handler for method '{}' must be a function",
+                    method_name
+                ));
+                -1
+            })?;
         methods.push((method_name, handler));
     }
 

@@ -101,7 +101,7 @@ fn js_res_setHeaders(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let headers = if cc.length() > 0 {
         if let Some(mut obj) = cc.arg(0).as_object().cloned() {
             let pks = obj
-                .get_own_property_names(ctx, zuqe::JS_GPN_ENUM_ONLY | zuqe::JS_GPN_INDEX_MASK)
+                .get_own_property_names(ctx, zuqe::JS_GPN_ENUM_ONLY | zuqe::JS_GPN_STR_OR_INT_MASK)
                 .ok();
             let mut entries = Vec::new();
             if let Some(keys) = pks {
