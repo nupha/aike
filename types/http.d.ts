@@ -36,13 +36,35 @@ declare module "http" {
   }
 
   /**
-   * MCP tool handler function. Receives the `arguments` object from the
-   * client's `tools/call` request. May be sync or async.
+   * Handler for an MCP tool. Receives validated arguments and returns the
+   * result object as plain business data — the Rust framework automatically
+   * wraps it into the proper MCP `{ content: [{ type: "text", text: ... }] }`
+   * response format.
    *
-   * Must return a value conforming to `McpToolResult` (the MCP protocol
-   * requires `{ content: McpContentPart[], isError?: boolean }`).
-   * Throwing an Error is caught by the framework and translated into a
-   * JSON-RPC error response.
+   * To report a tool execution error, simply throw an Error. The framework
+   * catches it and converts it to the standard MCP error response
+   * `{ content: [{ type: "text", text: "Error: ..." }], isError: true }`.
+   *
+   * @example
+   * // Normal return — plain data, no manual MCP wrapping needed
+   * async function handleRead(args) {
+   *   const content = await fs.readFile(args.path, "utf-8");
+   *   return { content, size: content.length };
+   * }
+   *
+   * // Error reporting — throw an Error
+   * async function handleStat(args) {
+   *   if (!args.path) throw new Error("path is required");
+   *   const st = await fs.stat(args.path);
+   *   if (!st.isFile) throw new Error("not a file: " + args.path);
+   *   return { type: "file", size: st.size };
+   * }
+   *
+   * // Sync throw also works
+   * function handleDelete(args) {
+   *   if (!args.path) throw new Error("path is required");
+   *   return { deleted: [args.path] };
+   * }
    */
   type McpToolHandler = (
     args: McpToolArguments,
@@ -56,17 +78,104 @@ declare module "http" {
     [key: string]: any;
   }
 
-  /** Definition of a single MCP tool, passed to `server.mcp()` or `server.updateTools()`. */
+  /** Definition of a single MCP tool in array format (backward compat). */
   interface McpToolDefinition {
     /** Unique tool name (required by MCP spec). */
     name: string;
     /** Human-readable description of what the tool does. */
     description?: string;
     /** JSON Schema for the tool's arguments. */
-    inputSchema?: McpToolInputSchema;
+    inputSchema: McpToolInputSchema;
     /** Handler invoked on `tools/call`. */
     handler: McpToolHandler;
   }
+
+  /**
+   * Simplified argument definition for the DSL format.
+   * Rust auto-converts this to standard JSON Schema `properties` entries.
+   *
+   * @example
+   * // Basic string field
+   * { desc: "File path.", required: true }
+   * // Integer field
+   * { desc: "Start line", type: "integer", default: 0 }
+   * // Boolean field
+   * { desc: "Show hidden files", type: "boolean", default: false }
+   * // Array of strings
+   * { desc: "File patterns", type: "array" }
+   * // Enum
+   * { desc: "Write mode", type: "string", enum: ["overwrite", "append"], default: "overwrite" }
+   */
+  interface McpToolArgShort {
+    /** Human-readable description of this argument. */
+    desc: string;
+    /**
+     * Value type. Defaults to `"string"` when omitted.
+     * - `"string"` — default
+     * - `"integer"` — integer number
+     * - `"boolean"` — true/false
+     * - `"array"` — array; use `items` to specify element type
+     */
+    type: "string" | "integer" | "boolean" | "array";
+    /** Mark as required. */
+    required?: boolean;
+    /** Enum string values. */
+    enum?: string[];
+    /** Default value when not provided. */
+    default?: any;
+    /**
+     * Schema for array items. Only meaningful when `type="array"`.
+     * Defaults to `{ type: "string" }` when omitted.
+     *
+     * @example
+     * // Array of integers
+     * { desc: "Port numbers", type: "array", items: { type: "integer" } }
+     * // Array with element description
+     * { desc: "Tags", type: "array", items: { type: "string", desc: "Tag name" } }
+     */
+    items?: {
+      /** Element type */
+      type: "string" | "integer" | "boolean";
+      /** Description of each element. */
+      desc?: string;
+      /** Enum values for elements. */
+      enum?: string[];
+    };
+  }
+
+  /**
+   * Tool definition using object-keyed format.
+   *
+   * Tool name is the key — no `name` field needed.
+   * Use `args` for the simplified DSL (auto-converted to JSON Schema), or
+   * `inputSchema` for direct injection of raw JSON Schema (takes priority).
+   *
+   * @example
+   * const tools = {
+   *   read_file: {
+   *     desc: "Read file content.",
+   *     handler: handleRead,
+   *     args: {
+   *       path:   { desc: "File path.", required: true },
+   *       offset: { desc: "Start line", type: "integer", default: 0 },
+   *     },
+   *   },
+   * };
+   */
+  interface McpToolShortDef {
+    /** Human-readable description of what the tool does. */
+    desc: string;
+    /** Handler invoked on `tools/call`. */
+    handler: McpToolHandler;
+    /**
+     * Simplified argument DSL — Rust auto-converts this to standard
+     * JSON Schema inputSchema.
+     */
+    args: Record<string, McpToolArgShort>;
+  }
+
+  /** A map of tool names to tool definitions (object-keyed format). */
+  type McpToolShortMap = Record<string, McpToolShortDef>;
 
   /** Options for `server.mcp()`. */
   interface McpServerOptions {
@@ -74,8 +183,12 @@ declare module "http" {
     serverName: string;
     /** Server version advertised in `initialize` response. */
     version: string;
-    /** Tool definitions to register at this mount path. */
-    tools: McpToolDefinition[];
+    /**
+     * Tool definitions. Accepts either:
+     * - `McpToolDefinition[]` — array format (backward compatible)
+     * - `ToolsMap` — object-keyed format with simplified DSL
+     */
+    tools: McpToolDefinition[] | McpToolShortMap;
   }
 
   /** Incoming HTTP request passed to route handlers. Cannot be constructed directly. */
@@ -166,7 +279,10 @@ declare module "http" {
      * Hot-reload JS tools on an existing MCP endpoint (native tools preserved).
      * The new handler table takes effect on the very next request.
      */
-    updateMcpTools(mountPath: string, tools: McpToolDefinition[]): this;
+    updateMcpTools(
+      mountPath: string,
+      tools: McpToolDefinition[] | McpToolShortMap,
+    ): this;
 
     /** Mount OpenAI-compatible LLM inference routes. */
     openai(engine: any, mountPath: string): this;

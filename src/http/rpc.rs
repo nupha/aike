@@ -491,12 +491,14 @@ pub(super) fn handle_mcp_tool_call(
         Err(_) => return,
     };
 
-    // Call JS handler
+    // Call JS handler — wrap return values into MCP response format
+    // (content, isError) so JS handlers can return plain business data.
     match handler.call(cx, JSValue::UNDEFINED, &[params_val]) {
         Ok(val) => {
             if let Ok(mut promise) = Promise::try_from(val) {
+                // Promise path: attach MCP-specific then/catch
                 let ok_fn = match cx.create_native_function_with_data(
-                    Callback::Func(rpc_resolve_then),
+                    Callback::Func(mcp_resolve_then),
                     "",
                     0,
                     0,
@@ -506,7 +508,7 @@ pub(super) fn handle_mcp_tool_call(
                     Err(_) => return,
                 };
                 let fail_fn = match cx.create_native_function_with_data(
-                    Callback::Func(rpc_reject_catch),
+                    Callback::Func(mcp_reject_catch),
                     "",
                     1,
                     1,
@@ -517,10 +519,19 @@ pub(super) fn handle_mcp_tool_call(
                 };
                 let _ = promise.then(cx, ok_fn, fail_fn);
             } else {
-                let result_json = val
+                // Sync path: wrap raw result into MCP content format
+                let text = val
                     .to_serde_json(cx)
                     .ok()
-                    .map(|v| serde_json::to_string(&v).unwrap_or_else(|_| "null".into()));
+                    .map(|v| match v {
+                        serde_json::Value::String(s) => s,
+                        other => serde_json::to_string_pretty(&other).unwrap_or_default(),
+                    })
+                    .unwrap_or_default();
+                let mcp_response = serde_json::json!({
+                    "content": [{"type": "text", "text": text}]
+                });
+                let result_json = serde_json::to_string(&mcp_response).ok();
                 let mut bv = bridge_val;
                 let bridge = get_bridge_payload(cx, &mut bv).unwrap();
                 bridge.send_response(RpcResponseMessage {
@@ -530,16 +541,19 @@ pub(super) fn handle_mcp_tool_call(
             }
         }
         Err(_) => {
+            // Sync error: wrap error into MCP isError: true format
             let exc = cx.take_exception();
             let msg = exc.to_text(cx);
+            let mcp_response = serde_json::json!({
+                "content": [{"type": "text", "text": format!("Error: {}", msg.message)}],
+                "isError": true
+            });
+            let result_json = serde_json::to_string(&mcp_response).ok();
             let mut bv = bridge_val;
             if let Ok(bridge) = get_bridge_payload(cx, &mut bv) {
                 bridge.send_response(RpcResponseMessage {
-                    result_json: None,
-                    error: Some(RpcError {
-                        code: -32000,
-                        message: msg.message,
-                    }),
+                    result_json,
+                    error: None,
                 });
             }
         }
@@ -557,6 +571,70 @@ fn rpc_resolve_then(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         .map(|v| serde_json::to_string(&v).unwrap_or_else(|_| "null".into()));
 
     // Extract bridge and send response
+    let mut bridge_val = cc.data(0);
+    if let Ok(bridge) = get_bridge_payload(ctx, &mut bridge_val) {
+        bridge.send_response(RpcResponseMessage {
+            result_json,
+            error: None,
+        });
+    }
+
+    Ok(JSValue::UNDEFINED)
+}
+
+/// Promise resolve callback for MCP — wraps raw result into MCP
+/// `{content: [{type: "text", text: ...}]}` format so JS handlers
+/// can return plain business data without manual wrapping.
+fn mcp_resolve_then(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let result = cc.arg(0);
+
+    let text = result
+        .to_serde_json(ctx)
+        .ok()
+        .map(|v| match v {
+            serde_json::Value::String(s) => s,
+            other => serde_json::to_string_pretty(&other).unwrap_or_default(),
+        })
+        .unwrap_or_default();
+
+    let mcp_response = serde_json::json!({
+        "content": [{"type": "text", "text": text}]
+    });
+    let result_json = serde_json::to_string(&mcp_response).ok();
+
+    let mut bridge_val = cc.data(0);
+    if let Ok(bridge) = get_bridge_payload(ctx, &mut bridge_val) {
+        bridge.send_response(RpcResponseMessage {
+            result_json,
+            error: None,
+        });
+    }
+
+    Ok(JSValue::UNDEFINED)
+}
+
+/// Promise reject callback for MCP — wraps error into MCP
+/// `{content: [{type: "text", text: "Error: ..."}], isError: true}`
+/// format. Tool execution errors are returned as successful JSON-RPC
+/// responses per MCP spec, not as JSON-RPC protocol errors.
+fn mcp_reject_catch(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let reason = cc.arg(0);
+    let message = if !reason.is_undefined() {
+        reason
+            .to_string(ctx)
+            .ok()
+            .map(|s| s.content().encode_utf8(false).to_string())
+            .unwrap_or_else(|| "unknown error".into())
+    } else {
+        "unknown error".into()
+    };
+
+    let mcp_response = serde_json::json!({
+        "content": [{"type": "text", "text": format!("Error: {}", message)}],
+        "isError": true
+    });
+    let result_json = serde_json::to_string(&mcp_response).ok();
+
     let mut bridge_val = cc.data(0);
     if let Ok(bridge) = get_bridge_payload(ctx, &mut bridge_val) {
         bridge.send_response(RpcResponseMessage {

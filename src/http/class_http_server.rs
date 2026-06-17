@@ -353,6 +353,356 @@ fn js_rpc(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     Ok(this)
 }
 
+/// Convert DSL `args` object to standard JSON Schema `inputSchema`.
+///
+/// Input: `{ fieldName: { desc, type?, required?, enum?, default? } }`
+/// Output: `{ type: "object", properties: { ... }, required: [...] }`
+fn build_input_schema_from_args(
+    ctx: &mut ScopedContext,
+    mut args_obj: Object,
+) -> Result<Option<serde_json::Value>, i32> {
+    let pks = args_obj
+        .get_own_property_names(ctx, zuqe::JS_GPN_ENUM_ONLY | zuqe::JS_GPN_STR_OR_INT_MASK)?;
+
+    if pks.is_empty() {
+        return Ok(None);
+    }
+
+    let mut properties = serde_json::Map::new();
+    let mut required: Vec<serde_json::Value> = Vec::new();
+
+    for pk in pks.iter() {
+        let field_name = match pk.atom.to_value(ctx).and_then(|v| v.to_string(ctx)) {
+            Ok(s) => s.content().encode_utf8(false).to_string(),
+            Err(_) => continue,
+        };
+
+        if field_name.is_empty() {
+            continue;
+        }
+
+        let field_val = args_obj.get_property(ctx, pk.atom)?;
+        let field_obj = match field_val.as_object() {
+            Some(o) => o.clone(),
+            None => continue,
+        };
+
+        let mut prop = serde_json::Map::new();
+
+        // description
+        if let Some(desc_val) = field_obj.get_property_str(ctx, "desc").ok() {
+            if let Ok(s) = desc_val.to_string(ctx) {
+                prop.insert(
+                    "description".into(),
+                    serde_json::Value::String(s.content().encode_utf8(false).to_string()),
+                );
+            }
+        }
+
+        // type (default: "string")
+        let type_str = field_obj
+            .get_property_str(ctx, "type")
+            .ok()
+            .and_then(|v| v.to_string(ctx).ok())
+            .map(|s| s.content().encode_utf8(false).to_string())
+            .unwrap_or_else(|| "string".into());
+
+        // enum
+        let has_enum = field_obj
+            .get_property_str(ctx, "enum")
+            .ok()
+            .filter(|v| !v.is_undefined())
+            .is_some();
+        if has_enum {
+            if let Ok(enum_val) = field_obj.get_property_str(ctx, "enum") {
+                if !enum_val.is_undefined() {
+                    if let Ok(enum_json) = enum_val.to_serde_json(ctx) {
+                        if !enum_json.is_null() {
+                            prop.insert("enum".into(), enum_json);
+                        }
+                    }
+                }
+            }
+        } else if type_str == "array" {
+            prop.insert("type".into(), serde_json::Value::String("array".into()));
+
+            // Parse items schema (defaults to { type: "string" })
+            let mut items = serde_json::Map::new();
+            if let Some(items_obj) = field_obj
+                .get_property_str(ctx, "items")
+                .ok()
+                .filter(|v| !v.is_undefined())
+                .and_then(|v| v.as_object().cloned())
+            {
+                let item_type = items_obj
+                    .get_property_str(ctx, "type")
+                    .ok()
+                    .filter(|v| !v.is_undefined())
+                    .and_then(|v| v.to_string(ctx).ok())
+                    .map(|s| s.content().encode_utf8(false).to_string())
+                    .unwrap_or_else(|| "string".into());
+                items.insert("type".into(), serde_json::Value::String(item_type));
+
+                if let Some(desc) = items_obj
+                    .get_property_str(ctx, "desc")
+                    .ok()
+                    .filter(|v| !v.is_undefined())
+                    .and_then(|v| v.to_string(ctx).ok())
+                    .map(|s| s.content().encode_utf8(false).to_string())
+                {
+                    items.insert("description".into(), serde_json::Value::String(desc));
+                }
+
+                if let Some(enum_val) = items_obj
+                    .get_property_str(ctx, "enum")
+                    .ok()
+                    .filter(|v| !v.is_undefined())
+                    .and_then(|v| v.to_serde_json(ctx).ok())
+                    .filter(|v| !v.is_null())
+                {
+                    items.insert("enum".into(), enum_val);
+                }
+            } else {
+                items.insert("type".into(), serde_json::Value::String("string".into()));
+            }
+            prop.insert("items".into(), serde_json::Value::Object(items));
+        } else {
+            prop.insert("type".into(), serde_json::Value::String(type_str));
+        }
+
+        // default
+        if let Some(default_val) = field_obj.get_property_str(ctx, "default").ok() {
+            if let Ok(default_json) = default_val.to_serde_json(ctx) {
+                if !default_json.is_null() {
+                    prop.insert("default".into(), default_json);
+                }
+            }
+        }
+
+        // required
+        if let Ok(req_val) = field_obj.get_property_str(ctx, "required") {
+            if let Ok(req_json) = req_val.to_serde_json(ctx) {
+                if req_json.as_bool() == Some(true) {
+                    required.push(serde_json::Value::String(field_name.clone()));
+                }
+            }
+        }
+
+        properties.insert(field_name, serde_json::Value::Object(prop));
+    }
+
+    if properties.is_empty() {
+        return Ok(None);
+    }
+
+    let mut schema = serde_json::Map::new();
+    schema.insert("type".into(), serde_json::Value::String("object".into()));
+    schema.insert("properties".into(), serde_json::Value::Object(properties));
+    if !required.is_empty() {
+        schema.insert("required".into(), serde_json::Value::Array(required));
+    }
+
+    Ok(Some(serde_json::Value::Object(schema)))
+}
+
+/// Parse tools from either array format (McpToolDefinition[]) or
+/// object-keyed DSL format (ToolsMap).
+///
+/// Parse tool definitions, dispatching to array or object format handler.
+fn parse_mcp_tools(
+    ctx: &mut ScopedContext,
+    tools_val: &JSValue,
+) -> Result<(Vec<serde_json::Value>, HashMap<String, usize>, Vec<Object>), i32> {
+    if let Some(o) = tools_val.as_object().copied() {
+        if o.is_array(ctx).map_err(|_| {
+            ctx.throw_type_error("tools is_array check failed");
+            -1
+        })? {
+            parse_mcp_tools_array(ctx, o)
+        } else {
+            parse_mcp_tools_object(ctx, o)
+        }
+    } else {
+        ctx.throw_type_error("tools must be an array or object");
+        Err(-1)
+    }
+}
+
+/// Parse tools in array format (McpToolDefinition[]).
+///
+/// Each element is standard MCP schema: `{ name, description?, inputSchema?, handler }`.
+/// Extracts handler for JS call table, passes remaining fields through as-is.
+fn parse_mcp_tools_array(
+    ctx: &mut ScopedContext,
+    tools_arr: Object,
+) -> Result<(Vec<serde_json::Value>, HashMap<String, usize>, Vec<Object>), i32> {
+    // Get array length via the standard JS `length` property
+    let len = tools_arr
+        .get_property_str(ctx, "length")
+        .and_then(|v| v.to_number(ctx))
+        .map(|n| n.to_i32())
+        .map_err(|_| {
+            ctx.throw_type_error("tools array must have a valid length");
+            -1
+        })? as usize;
+
+    let mut schemas: Vec<serde_json::Value> = Vec::with_capacity(len);
+    let mut name_to_index: HashMap<String, usize> = HashMap::new();
+    let mut js_handlers: Vec<Object> = Vec::with_capacity(len);
+
+    for i in 0..len {
+        let elem = tools_arr.get_property_u32(ctx, i as u32)?;
+        let tool_obj = elem
+            .as_object()
+            .ok_or_else(|| {
+                ctx.throw_type_error("each tool must be an object");
+                -1
+            })?
+            .clone();
+
+        // name (required by MCP spec)
+        let name = tool_obj
+            .get_property_str(ctx, "name")
+            .and_then(|v| v.to_string(ctx))
+            .map(|s| s.content().encode_utf8(false).to_string())
+            .map_err(|_| {
+                ctx.throw_type_error("tool.name is required");
+                -1
+            })?;
+
+        // inputSchema (required for array format — standard MCP Schema)
+        let input_schema = tool_obj
+            .get_property_str(ctx, "inputSchema")
+            .and_then(|v| {
+                v.as_object().copied().ok_or_else(|| {
+                    ctx.throw_type_error(&format!("tool '{}' inputSchema must be an object", name));
+                    -1
+                })
+            })
+            .and_then(|o| o.to_serde_json(ctx))?;
+
+        // handler (required) — stored in JS call table
+        let handler = tool_obj
+            .get_property_str(ctx, "handler")
+            .and_then(|v| v.into_callable(ctx))
+            .map_err(|_| {
+                ctx.throw_type_error(&format!("tool '{}' handler must be a function", name));
+                -1
+            })?;
+
+        let mut schema = serde_json::json!({"name": &name, "inputSchema":input_schema});
+
+        // description
+        if let Some(desc) = tool_obj
+            .get_property_str(ctx, "description")
+            .ok()
+            .filter(|v| !v.is_undefined())
+            .and_then(|v| v.to_string(ctx).ok())
+            .map(|s| s.content().encode_utf8(false).to_string())
+        {
+            schema["description"] = serde_json::Value::String(desc);
+        }
+
+        let idx = schemas.len();
+        schemas.push(schema);
+        name_to_index.insert(name, idx);
+        js_handlers.push(handler);
+    }
+
+    Ok((schemas, name_to_index, js_handlers))
+}
+
+/// Parse tools in object-keyed DSL format.
+///
+/// Keys are tool names, values are `{ desc, handler, args?, inputSchema? }`.
+fn parse_mcp_tools_object(
+    ctx: &mut ScopedContext,
+    mut tools_obj: Object,
+) -> Result<(Vec<serde_json::Value>, HashMap<String, usize>, Vec<Object>), i32> {
+    let pks = tools_obj
+        .get_own_property_names(ctx, zuqe::JS_GPN_ENUM_ONLY | zuqe::JS_GPN_STR_OR_INT_MASK)?;
+
+    let mut schemas: Vec<serde_json::Value> = Vec::new();
+    let mut name_to_index: HashMap<String, usize> = HashMap::new();
+    let mut js_handlers: Vec<Object> = Vec::new();
+
+    for pk in pks.iter() {
+        let name = pk
+            .atom
+            .to_value(ctx)
+            .and_then(|v| v.to_string(ctx))
+            .map(|s| s.content().encode_utf8(false).to_string())
+            .map_err(|_| {
+                ctx.throw_type_error("tool name must be a string");
+                -1
+            })?;
+
+        if name.is_empty() {
+            continue;
+        }
+
+        let tool_obj = tools_obj
+            .get_property(ctx, pk.atom)?
+            .as_object()
+            .ok_or_else(|| {
+                ctx.throw_type_error(&format!("tool '{}' must be an object", name));
+                -1
+            })?
+            .clone();
+
+        // desc → description
+        let description = tool_obj
+            .get_property_str(ctx, "desc")
+            .ok()
+            .filter(|v| !v.is_undefined())
+            .and_then(|v| v.to_string(ctx).ok())
+            .map(|s| s.content().encode_utf8(false).to_string());
+
+        // handler (required)
+        let handler = tool_obj
+            .get_property_str(ctx, "handler")
+            .and_then(|v| v.into_callable(ctx))
+            .map_err(|_| {
+                ctx.throw_type_error(&format!("tool '{}' handler must be a function", name));
+                -1
+            })?;
+
+        // inputSchema takes priority over args DSL
+        let input_schema = tool_obj
+            .get_property_str(ctx, "inputSchema")
+            .ok()
+            .filter(|v| !v.is_undefined())
+            .and_then(|v| v.to_serde_json(ctx).ok());
+
+        let mut schema = serde_json::json!({"name": &name});
+        if let Some(desc) = &description {
+            schema["description"] = serde_json::Value::String(desc.clone());
+        }
+
+        if let Some(is) = input_schema {
+            if !is.is_null() {
+                schema["inputSchema"] = is;
+            }
+        } else if let Some(args_val) = tool_obj.get_property_str(ctx, "args").ok() {
+            if !args_val.is_undefined() {
+                if let Some(args_obj) = args_val.as_object() {
+                    let args_cloned = args_obj.clone();
+                    if let Some(args_schema) = build_input_schema_from_args(ctx, args_cloned)? {
+                        schema["inputSchema"] = args_schema;
+                    }
+                }
+            }
+        }
+
+        let idx = schemas.len();
+        schemas.push(schema);
+        name_to_index.insert(name, idx);
+        js_handlers.push(handler);
+    }
+
+    Ok((schemas, name_to_index, js_handlers))
+}
+
 /// HttpServer.mcp(mountPath, options) — register MCP server with tools.
 ///
 /// `mountPath` must start with '/', e.g. "/mcp".
@@ -398,85 +748,13 @@ fn js_mcp(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         .map(|s| s.content().encode_utf8(false).to_string())
         .unwrap_or_else(|_| "1.0.0".into());
 
-    // tools array
+    // tools (array or object-keyed format)
     let tools_val = opts.get_property_str(ctx, "tools").map_err(|_| {
         ctx.throw_type_error("options.tools is required");
         -1
     })?;
-    let mut tools_arr = tools_val
-        .as_object()
-        .ok_or_else(|| {
-            ctx.throw_type_error("tools must be an array");
-            -1
-        })?
-        .clone();
 
-    let mut schemas: Vec<serde_json::Value> = Vec::new();
-    let mut name_to_index: HashMap<String, usize> = HashMap::new();
-    let mut js_handlers: Vec<Object> = Vec::new();
-
-    let pks = tools_arr
-        .get_own_property_names(ctx, zuqe::JS_GPN_ENUM_ONLY | zuqe::JS_GPN_STR_OR_INT_MASK)?;
-
-    for pk in pks.iter() {
-        let key_v = pk.atom.to_value(ctx)?;
-        // Skip non-numeric keys (e.g. 'length')
-        if key_v.to_number(ctx).is_err() {
-            continue;
-        }
-        let mut tool_obj = tools_arr
-            .get_property(ctx, pk.atom)?
-            .as_object()
-            .ok_or_else(|| {
-                ctx.throw_type_error("each tool must be an object");
-                -1
-            })?
-            .clone();
-
-        // Extract name (required)
-        let name = tool_obj
-            .get_property_str(ctx, "name")
-            .and_then(|v| v.to_string(ctx))
-            .map(|s| s.content().encode_utf8(false).to_string())
-            .map_err(|_| {
-                ctx.throw_type_error("tool.name is required");
-                -1
-            })?;
-
-        // Extract handler (required)
-        let handler = tool_obj
-            .get_property_str(ctx, "handler")
-            .and_then(|v| v.into_callable(ctx))
-            .map_err(|_| {
-                ctx.throw_type_error(&format!("tool '{}' handler must be a function", name));
-                -1
-            })?;
-
-        // Build schema: { name, description, inputSchema } (no handler)
-        let description = tool_obj
-            .get_property_str(ctx, "description")
-            .and_then(|v| v.to_string(ctx))
-            .map(|s| s.content().encode_utf8(false).to_string())
-            .ok();
-
-        let input_schema = tool_obj
-            .get_property_str(ctx, "inputSchema")
-            .ok()
-            .and_then(|v| v.to_serde_json(ctx).ok());
-
-        let mut schema = serde_json::json!({ "name": &name });
-        if let Some(desc) = description {
-            schema["description"] = serde_json::Value::String(desc);
-        }
-        if let Some(is) = input_schema {
-            schema["inputSchema"] = is;
-        }
-
-        let idx = schemas.len();
-        schemas.push(schema);
-        name_to_index.insert(name, idx);
-        js_handlers.push(handler);
-    }
+    let (schemas, name_to_index, js_handlers) = parse_mcp_tools(ctx, &tools_val)?;
 
     let p = get_server_payload_mut(ctx, &mut this)?;
     if p.frozen {
@@ -517,79 +795,10 @@ fn js_update_tools(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             -1
         })?;
 
-    // arg(1): tools array
+    // arg(1): tools (array or object-keyed format)
     let tools_val = cc.arg(1);
-    let mut tools_arr = tools_val
-        .as_object()
-        .ok_or_else(|| {
-            ctx.throw_type_error("tools must be an array");
-            -1
-        })?
-        .clone();
 
-    // Parse tools
-    let mut schemas: Vec<serde_json::Value> = Vec::new();
-    let mut name_to_index: HashMap<String, usize> = HashMap::new();
-    let mut js_handlers: Vec<Object> = Vec::new();
-
-    let pks = tools_arr
-        .get_own_property_names(ctx, zuqe::JS_GPN_ENUM_ONLY | zuqe::JS_GPN_STR_OR_INT_MASK)?;
-
-    for pk in pks.iter() {
-        let key_v = pk.atom.to_value(ctx)?;
-        if key_v.to_number(ctx).is_err() {
-            continue;
-        }
-        let mut tool_obj = tools_arr
-            .get_property(ctx, pk.atom)?
-            .as_object()
-            .ok_or_else(|| {
-                ctx.throw_type_error("each tool must be an object");
-                -1
-            })?
-            .clone();
-
-        let name = tool_obj
-            .get_property_str(ctx, "name")
-            .and_then(|v| v.to_string(ctx))
-            .map(|s| s.content().encode_utf8(false).to_string())
-            .map_err(|_| {
-                ctx.throw_type_error("tool.name is required");
-                -1
-            })?;
-
-        let handler = tool_obj
-            .get_property_str(ctx, "handler")
-            .and_then(|v| v.into_callable(ctx))
-            .map_err(|_| {
-                ctx.throw_type_error(&format!("tool '{}' handler must be a function", name));
-                -1
-            })?;
-
-        let description = tool_obj
-            .get_property_str(ctx, "description")
-            .and_then(|v| v.to_string(ctx))
-            .map(|s| s.content().encode_utf8(false).to_string())
-            .ok();
-
-        let input_schema = tool_obj
-            .get_property_str(ctx, "inputSchema")
-            .ok()
-            .and_then(|v| v.to_serde_json(ctx).ok());
-
-        let mut schema = serde_json::json!({ "name": &name });
-        if let Some(desc) = description {
-            schema["description"] = serde_json::Value::String(desc);
-        }
-        if let Some(is) = input_schema {
-            schema["inputSchema"] = is;
-        }
-
-        let idx = schemas.len();
-        schemas.push(schema);
-        name_to_index.insert(name, idx);
-        js_handlers.push(handler);
-    }
+    let (schemas, name_to_index, js_handlers) = parse_mcp_tools(ctx, &tools_val)?;
 
     // Find endpoint and update
     let p = get_server_payload_mut(ctx, &mut this)?;
