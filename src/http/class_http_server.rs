@@ -727,7 +727,7 @@ fn js_mcp(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     };
 
     // arg(1): options object
-    let mut opts = cc
+    let opts = cc
         .arg(1)
         .as_object()
         .ok_or_else(|| {

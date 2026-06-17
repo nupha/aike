@@ -175,7 +175,7 @@ declare module "http" {
   }
 
   /** A map of tool names to tool definitions (object-keyed format). */
-  type McpToolShortMap = Record<string, McpToolShortDef>;
+  type McpToolMap = Record<string, McpToolShortDef>;
 
   /** Options for `server.mcp()`. */
   interface McpServerOptions {
@@ -185,10 +185,10 @@ declare module "http" {
     version: string;
     /**
      * Tool definitions. Accepts either:
-     * - `McpToolDefinition[]` — array format (backward compatible)
-     * - `ToolsMap` — object-keyed format with simplified DSL
+     * - `McpToolDefinition[]` — array of standard mcp tool definitions
+     * - `McpToolMap` — object-keyed format with simplified DSL
      */
-    tools: McpToolDefinition[] | McpToolShortMap;
+    tools: McpToolDefinition[] | McpToolMap;
   }
 
   /** Incoming HTTP request passed to route handlers. Cannot be constructed directly. */
@@ -281,7 +281,7 @@ declare module "http" {
      */
     updateMcpTools(
       mountPath: string,
-      tools: McpToolDefinition[] | McpToolShortMap,
+      tools: McpToolDefinition[] | McpToolMap,
     ): this;
 
     /** Mount OpenAI-compatible LLM inference routes. */
