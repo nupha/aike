@@ -4,6 +4,7 @@
 #![allow(non_snake_case)]
 
 mod aike;
+mod browser;
 mod class_event_emitter;
 mod class_text_decoder;
 mod color;
@@ -33,6 +34,7 @@ use zuqe::{
 
 use crate::{
     aike::{JSCronJob, JSIoHandle, gc_trace_cron, gc_trace_io},
+    browser::{JSBrowser, JSTab, init_mod_browser},
     class_event_emitter::JSEventEmitter,
     class_text_decoder::JSTextDecoder,
     fs::init_mod_fs,
@@ -265,6 +267,8 @@ async fn main() -> ExitCode {
                 JSHttpResponse::class_id(),
                 HtmlDocument::class_id(),
                 HtmlElement::class_id(),
+                JSBrowser::class_id(),
+                JSTab::class_id(),
             ])?;
 
             // initialize native modules
@@ -273,6 +277,7 @@ async fn main() -> ExitCode {
             init_mod_http(cx)?;
             init_mod_path(cx)?;
             init_mod_html(cx)?;
+            init_mod_browser(cx)?;
 
             setup_globals(cx, &argv, &exec_argv)
         })
