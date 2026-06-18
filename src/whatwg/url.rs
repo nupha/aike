@@ -272,8 +272,8 @@ fn js_url_search_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let url = get_url(ctx, &this)?;
     let u = url.shared.borrow();
     let s = match u.query() {
-        Some(q) => format!("?{}", q),
-        None => String::new(),
+        Some(q) if !q.is_empty() => format!("?{}", q),
+        _ => String::new(),
     };
     let js = ctx.create_string_from_utf8(s.into_bytes())?;
     Ok(js.into())
@@ -299,8 +299,8 @@ fn js_url_hash_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let url = get_url(ctx, &this)?;
     let u = url.shared.borrow();
     let s = match u.fragment() {
-        Some(f) => format!("#{}", f),
-        None => String::new(),
+        Some(f) if !f.is_empty() => format!("#{}", f),
+        _ => String::new(),
     };
     let js = ctx.create_string_from_utf8(s.into_bytes())?;
     Ok(js.into())

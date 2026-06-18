@@ -150,6 +150,151 @@ declare class TextDecoder {
 }
 
 // ---------------------------------------------------------------------------
+// TextEncoder
+// ---------------------------------------------------------------------------
+
+/**
+ * Encode text as UTF-8 Uint8Array.
+ * Encoding is always "utf-8" per spec.
+ */
+declare class TextEncoder {
+  constructor();
+  /** Always "utf-8". */
+  readonly encoding: string;
+  /** Encode a string into a Uint8Array. */
+  encode(input?: string): Uint8Array;
+  /**
+   * Encode a string into a pre-allocated Uint8Array destination.
+   * Returns the number of code units read and bytes written.
+   */
+  encodeInto(
+    source: string,
+    destination: Uint8Array,
+  ): { read: number; written: number };
+}
+
+// ---------------------------------------------------------------------------
+// URL
+// ---------------------------------------------------------------------------
+
+/**
+ * Parse, construct, and manipulate URLs per the WHATWG URL Standard.
+ */
+declare class URL {
+  constructor(url: string, base?: string | URL);
+  /** Complete URL string. */
+  href: string;
+  /** Read-only origin string (e.g. "https://example.com:8080"). */
+  readonly origin: string;
+  /** Protocol with trailing colon (e.g. "https:"). */
+  protocol: string;
+  /** Username portion of the URL. */
+  username: string;
+  /** Password portion of the URL. */
+  password: string;
+  /** Host including port (e.g. "example.com:8080"). */
+  host: string;
+  /** Hostname without port. */
+  hostname: string;
+  /** Port number as string, or empty string if default. */
+  port: string;
+  /** Path segment (e.g. "/foo/bar"). */
+  pathname: string;
+  /** Query string including leading "?", or empty string. */
+  search: string;
+  /** Fragment including leading "#", or empty string. */
+  hash: string;
+  /** URLSearchParams object tied to this URL's query. */
+  readonly searchParams: URLSearchParams;
+  /** Returns the href. */
+  toString(): string;
+  /** Returns the href (for JSON serialization). */
+  toJSON(): string;
+}
+
+// ---------------------------------------------------------------------------
+// URLSearchParams
+// ---------------------------------------------------------------------------
+
+/**
+ * Parse and manipulate URL query strings per the WHATWG URL Standard.
+ */
+declare class URLSearchParams {
+  constructor(init?: string | Record<string, string> | URLSearchParams);
+  /** Append a key-value pair. */
+  append(name: string, value: string): void;
+  /** Delete all entries with the given key. */
+  delete(name: string): void;
+  /** Get the first value for a key, or null if missing. */
+  get(name: string): string | null;
+  /** Get all values for a key. */
+  getAll(name: string): string[];
+  /** Check if a key exists. */
+  has(name: string): boolean;
+  /** Set a key to a single value (removes duplicates). */
+  set(name: string, value: string): void;
+  /** Sort all entries by key name. */
+  sort(): void;
+  /** Serialize to query string (without leading "?"). */
+  toString(): string;
+  /**
+   * Iterate over entries.
+   * @param callback - Called as (value, key, searchParams) per spec.
+   */
+  forEach(
+    callback: (value: string, key: string, parent: URLSearchParams) => void,
+  ): void;
+}
+
+// ---------------------------------------------------------------------------
+// AbortSignal
+// ---------------------------------------------------------------------------
+
+/**
+ * Represents a signal that can be used to abort asynchronous tasks.
+ * Cannot be constructed directly — obtain via AbortController.signal
+ * or AbortSignal.abort()/timeout() statics.
+ */
+declare class AbortSignal {
+  /** Prevent direct construction. */
+  private constructor();
+  /** Whether the operation has been aborted. */
+  readonly aborted: boolean;
+  /** The abort reason, or undefined if not aborted. */
+  readonly reason: any;
+  /** Throws the abort reason if this signal has been aborted. */
+  throwIfAborted(): void;
+  /**
+   * Returns an AbortSignal that is already aborted with the given reason.
+   * @param reason - Optional abort reason.
+   */
+  static abort(reason?: any): AbortSignal;
+  /**
+   * Returns an AbortSignal that aborts after the given duration in ms.
+   * @param delay - Timeout in milliseconds.
+   */
+  static timeout(delay: number): AbortSignal;
+}
+
+// ---------------------------------------------------------------------------
+// AbortController
+// ---------------------------------------------------------------------------
+
+/**
+ * Controller that creates an AbortSignal and can abort it on demand.
+ */
+declare class AbortController {
+  constructor();
+  /** The associated AbortSignal. */
+  readonly signal: AbortSignal;
+  /**
+   * Abort the operation.
+   * @param reason - Optional abort reason.
+   */
+  abort(reason?: any): void;
+}
+
+// ---------------------------------------------------------------------------
 // IoHandle  —  used by Aike.stdin/stdout/stderr and fs.open()
 // ---------------------------------------------------------------------------
 
