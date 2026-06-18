@@ -10,6 +10,7 @@ mod color;
 mod fs;
 mod global;
 mod helpers;
+mod html;
 mod http;
 mod llm;
 mod output;
@@ -36,6 +37,7 @@ use crate::{
     class_text_decoder::JSTextDecoder,
     fs::init_mod_fs,
     global::setup_globals,
+    html::{HtmlDocument, HtmlElement, init_mod_html},
     http::{JSHttpRequest, JSHttpResponse, JSHttpServer, init_mod_http},
     llm::{JSEngine, JSLlmClient, JSLlmContext, JSLlmModel, JSSamplerChain, init_mod_llm},
     path::init_mod_path,
@@ -261,6 +263,8 @@ async fn main() -> ExitCode {
                 JSHttpServer::class_id(),
                 JSHttpRequest::class_id(),
                 JSHttpResponse::class_id(),
+                HtmlDocument::class_id(),
+                HtmlElement::class_id(),
             ])?;
 
             // initialize native modules
@@ -268,6 +272,7 @@ async fn main() -> ExitCode {
             init_mod_fs(cx)?;
             init_mod_http(cx)?;
             init_mod_path(cx)?;
+            init_mod_html(cx)?;
 
             setup_globals(cx, &argv, &exec_argv)
         })

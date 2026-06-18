@@ -89,6 +89,8 @@ nu-ansi-term = "0.50"
 cron = "0.16"
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 mdka = "2.1"
+scraper = "0.22"
+ego-tree = "0.10"
 
 [[bin]]
 name = "aike"

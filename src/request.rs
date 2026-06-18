@@ -14,8 +14,10 @@ use zuqe::{
     def_native_object,
 };
 
-use crate::USER_CLASS_DEFS;
-use mdka::html_to_markdown;
+use crate::{
+    USER_CLASS_DEFS,
+    html::{HtmlConvertMode, convert_html},
+};
 
 struct ResponsePayload {
     resp: Option<reqwest::Response>,
@@ -346,115 +348,6 @@ const BODY_AS_BYTES: i32 = 0;
 const BODY_AS_TEXT: i32 = 1;
 const BODY_AS_JSON: i32 = 2;
 
-/// Strip HTML tags, decode common entities, and remove script/style content.
-/// Handles multi-byte UTF-8 correctly — iterates by char, matches by byte offset.
-fn strip_html_tags(input: &str) -> String {
-    let lower = input.to_ascii_lowercase();
-    let lower_bytes = lower.as_bytes();
-    let mut result = String::with_capacity(input.len() / 2);
-    let mut in_tag = false;
-    let mut in_skip = false; // inside <script> or <style>
-
-    // Collect (byte_offset, char) for UTF-8-safe iteration
-    let char_pos: Vec<(usize, char)> = input.char_indices().collect();
-    let mut ci = 0;
-
-    while ci < char_pos.len() {
-        let (pos, ch) = char_pos[ci];
-
-        if !in_tag && ch == '<' {
-            // Detect <script or <style opening (all ASCII, safe to slice lower)
-            if !in_skip {
-                let rest = &lower[pos..];
-                if rest.starts_with("<script")
-                    && rest.len() > 7
-                    && (lower_bytes[pos + 7] == b'>' || lower_bytes[pos + 7].is_ascii_whitespace())
-                {
-                    in_skip = true;
-                } else if rest.starts_with("<style")
-                    && rest.len() > 6
-                    && (lower_bytes[pos + 6] == b'>' || lower_bytes[pos + 6].is_ascii_whitespace())
-                {
-                    in_skip = true;
-                }
-            }
-            in_tag = true;
-            ci += 1;
-            continue;
-        }
-        if in_tag && ch == '>' {
-            in_tag = false;
-            // Detect </script> or </style> closing
-            if in_skip && pos >= 8 {
-                let from = pos.saturating_sub(10);
-                // from may not be a char boundary (multi-byte UTF-8),
-                // walk forward to the nearest safe boundary
-                let start = (from..=pos)
-                    .find(|&i| lower.is_char_boundary(i))
-                    .unwrap_or(pos);
-                let slice = &lower[start..=pos];
-                if slice.contains("</script>") || slice.contains("</style>") {
-                    in_skip = false;
-                }
-            }
-            result.push(' ');
-            ci += 1;
-            continue;
-        }
-        if !in_tag && !in_skip {
-            if ch == '&' {
-                // Decode common HTML entities (all ASCII)
-                let rest = &lower[pos..];
-                let (decoded, skip) = if rest.starts_with("&amp;") {
-                    ('&', 5)
-                } else if rest.starts_with("&lt;") {
-                    ('<', 4)
-                } else if rest.starts_with("&gt;") {
-                    ('>', 4)
-                } else if rest.starts_with("&quot;") {
-                    ('"', 6)
-                } else if rest.starts_with("&#39;") {
-                    ('\'', 5)
-                } else if rest.starts_with("&apos;") {
-                    ('\'', 6)
-                } else if rest.starts_with("&nbsp;") {
-                    (' ', 6)
-                } else {
-                    ('&', 1)
-                };
-                result.push(decoded);
-                // Advance past multi-byte entity by byte offset
-                let target = pos + skip;
-                while ci < char_pos.len() && char_pos[ci].0 < target {
-                    ci += 1;
-                }
-            } else {
-                // Push the full UTF-8 char (safe for CJK, emoji, etc.)
-                result.push(ch);
-                ci += 1;
-            }
-        } else {
-            ci += 1;
-        }
-    }
-
-    // Collapse whitespace
-    let mut collapsed = String::with_capacity(result.len());
-    let mut last_was_space = false;
-    for ch in result.chars() {
-        if ch.is_whitespace() {
-            if !last_was_space {
-                collapsed.push(' ');
-                last_was_space = true;
-            }
-        } else {
-            collapsed.push(ch);
-            last_was_space = false;
-        }
-    }
-    collapsed.trim().to_string()
-}
-
 /// Response.bytes(), .text(convert?), .json()  –  drain body, return Promise<T>
 /// `text("strip")` strips HTML tags for clean plain text.
 fn js_response_body_as(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -484,8 +377,8 @@ fn js_response_body_as(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         arg0.to_string(ctx)
             .ok()
             .and_then(|s| match s.content().encode_utf8(false).as_ref() {
-                "strip" => Some("strip"),
-                "markdown" => Some("markdown"),
+                "strip" => Some(HtmlConvertMode::Strip),
+                "markdown" => Some(HtmlConvertMode::Markdown),
                 _ => None,
             })
     } else {
@@ -504,8 +397,7 @@ fn js_response_body_as(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 BODY_AS_TEXT => {
                     let s = String::from_utf8_lossy(&buf);
                     let out = match convert {
-                        Some("strip") => strip_html_tags(&s),
-                        Some("markdown") => html_to_markdown(&s),
+                        Some(mode) => convert_html(&s, mode),
                         _ => s.into_owned(),
                     };
                     cx.create_string_from_utf8(out.into_bytes())
@@ -596,44 +488,61 @@ mod tests {
     #[test]
     fn strip_basic_html() {
         let html = "<p>Hello <b>world</b></p>";
-        assert_eq!(strip_html_tags(html), "Hello world");
+        assert_eq!(
+            crate::html::convert_html(html, HtmlConvertMode::Strip),
+            "Hello world"
+        );
     }
 
     #[test]
     fn strip_script_style() {
         let html = "<div>text</div><script>alert(1)</script><style>.a{color:red}</style><p>ok</p>";
-        assert_eq!(strip_html_tags(html), "text ok");
+        assert_eq!(
+            crate::html::convert_html(html, HtmlConvertMode::Strip),
+            "text ok"
+        );
     }
 
     #[test]
     fn strip_entities() {
         let html = "<p>A &amp; B &lt; C &gt; D &quot;E&quot; F&#39;s G&nbsp;H</p>";
-        assert_eq!(strip_html_tags(html), "A & B < C > D \"E\" F's G H");
+        assert_eq!(
+            crate::html::convert_html(html, HtmlConvertMode::Strip),
+            "A & B < C > D \"E\" F's G H"
+        );
     }
 
     #[test]
     fn strip_chinese_utf8() {
         let html = "<h1>你好世界</h1><p>这是一个<strong>测试</strong>页面。</p>";
-        assert_eq!(strip_html_tags(html), "你好世界 这是一个 测试 页面。");
+        assert_eq!(
+            crate::html::convert_html(html, HtmlConvertMode::Strip),
+            "你好世界 这是一个 测试 页面。"
+        );
     }
 
     #[test]
     fn strip_japanese_korean() {
         let html = "<p>日本語テスト</p><p>한국어 테스트</p>";
-        assert_eq!(strip_html_tags(html), "日本語テスト 한국어 테스트");
+        assert_eq!(
+            crate::html::convert_html(html, HtmlConvertMode::Strip),
+            "日本語テスト 한국어 테스트"
+        );
     }
-
     #[test]
     fn strip_emoji() {
         let html = "<p>Hello 🌍🌎🌏</p><span>✅ Done</span>";
-        assert_eq!(strip_html_tags(html), "Hello 🌍🌎🌏 ✅ Done");
+        assert_eq!(
+            crate::html::convert_html(html, HtmlConvertMode::Strip),
+            "Hello 🌍🌎🌏 ✅ Done"
+        );
     }
 
     #[test]
     fn strip_mixed_cjk_ascii() {
         let html = "<div>Price: ¥100 / €50 / $30</div><p>商品名：テスト用商品</p>";
         assert_eq!(
-            strip_html_tags(html),
+            crate::html::convert_html(html, HtmlConvertMode::Strip),
             "Price: ¥100 / €50 / $30 商品名：テスト用商品"
         );
     }
@@ -641,23 +550,32 @@ mod tests {
     #[test]
     fn strip_script_with_attrs() {
         let html = "<p>before</p><script type=\"text/javascript\">var x=1;</script><p>after</p>";
-        assert_eq!(strip_html_tags(html), "before after");
+        assert_eq!(
+            crate::html::convert_html(html, HtmlConvertMode::Strip),
+            "before after"
+        );
     }
 
     #[test]
     fn strip_whitespace_collapse() {
         let html = "<p>  hello   \n  world  </p>";
-        assert_eq!(strip_html_tags(html), "hello world");
+        assert_eq!(
+            crate::html::convert_html(html, HtmlConvertMode::Strip),
+            "hello world"
+        );
     }
 
     #[test]
     fn strip_empty_input() {
-        assert_eq!(strip_html_tags(""), "");
+        assert_eq!(crate::html::convert_html("", HtmlConvertMode::Strip), "");
     }
 
     #[test]
     fn strip_no_tags() {
-        assert_eq!(strip_html_tags("plain text"), "plain text");
+        assert_eq!(
+            crate::html::convert_html("plain text", HtmlConvertMode::Strip),
+            "plain text"
+        );
     }
 
     #[test]
@@ -665,7 +583,7 @@ mod tests {
         let html = "<nav><a href='/'>Home</a><a href='/about'>About</a></nav>\
                      <main><h1>标题：Rust 性能优化</h1>\
                      <p>本文介绍了 <code>char_indices()</code> 的用法。</p></main>";
-        let result = strip_html_tags(html);
+        let result = crate::html::convert_html(html, HtmlConvertMode::Strip);
         assert!(result.contains("标题：Rust 性能优化"));
         assert!(result.contains("char_indices()"));
         assert!(result.contains("Home"));
