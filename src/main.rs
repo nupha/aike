@@ -6,7 +6,6 @@
 mod aike;
 mod browser;
 mod class_event_emitter;
-mod class_text_decoder;
 mod color;
 mod fs;
 mod global;
@@ -19,7 +18,7 @@ mod path;
 mod repl;
 mod request;
 mod responses;
-mod timeout;
+mod whatwg;
 mod worker;
 
 use std::{io::Write, process::ExitCode};
@@ -36,7 +35,6 @@ use crate::{
     aike::{JSCronJob, JSIoHandle, gc_trace_cron, gc_trace_io},
     browser::{JSBrowser, JSTab, init_mod_browser},
     class_event_emitter::JSEventEmitter,
-    class_text_decoder::JSTextDecoder,
     fs::init_mod_fs,
     global::setup_globals,
     html::{HtmlDocument, HtmlElement, init_mod_html},
@@ -44,7 +42,13 @@ use crate::{
     llm::{JSEngine, JSLlmClient, JSLlmContext, JSLlmModel, JSSamplerChain, init_mod_llm},
     path::init_mod_path,
     request::JSResponse,
-    timeout::gc_trace_timeout,
+    whatwg::{
+        abort::{JSAbortController, JSAbortSignal},
+        text_decoder::JSTextDecoder,
+        text_encoder::JSTextEncoder,
+        timeout::gc_trace_timeout,
+        url::{JSURL, JSURLSearchParams},
+    },
 };
 
 /// write data both to stderr and file
@@ -261,6 +265,11 @@ async fn main() -> ExitCode {
                 JSIoHandle::class_id(),
                 JSResponse::class_id(),
                 JSTextDecoder::class_id(),
+                JSTextEncoder::class_id(),
+                JSURL::class_id(),
+                JSURLSearchParams::class_id(),
+                JSAbortController::class_id(),
+                JSAbortSignal::class_id(),
                 JSCronJob::class_id(),
                 JSHttpServer::class_id(),
                 JSHttpRequest::class_id(),

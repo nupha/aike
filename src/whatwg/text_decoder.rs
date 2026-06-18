@@ -1,6 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
+//! WHATWG Encoding Standard — TextDecoder implementation.
+//!
+//! Supports UTF-8, UTF-16LE, UTF-16BE, and ISO-8859-1 with streaming decode
+//! and BOM handling per spec.
+
 use std::cell::{Cell, RefCell};
 
 use linkme::distributed_slice;

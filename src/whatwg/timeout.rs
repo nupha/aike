@@ -1,6 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
+//! WHATWG Timers Standard: setTimeout, setInterval, clearTimeout, clearInterval.
+//!
+//! Uses a crossbeam channel + tokio async sleep for background timer dispatch,
+//! and a single persistent JS job (via start_channel_poller) to invoke callbacks.
+
 use std::{
     cell::{Cell, RefCell},
     collections::HashMap,
@@ -165,10 +170,7 @@ fn add_timeout_nofitier(ctx: &mut ScopedContext) {
             }
             true // always continue polling
         },
-        || {
-            TIMER_STATE.with_borrow(|s| s.as_ref().is_some_and(|s| !s.entries.is_empty()))
-            // true
-        },
+        || TIMER_STATE.with_borrow(|s| s.as_ref().is_some_and(|s| !s.entries.is_empty())),
         || {
             TIMER_STATE.with_borrow_mut(|s| {
                 s.take();
