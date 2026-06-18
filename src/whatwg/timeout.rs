@@ -67,9 +67,14 @@ impl TimerState {
         }
     }
 
-    #[inline(always)]
     fn timer_id(&mut self) -> u32 {
-        self.next_id
+        let id = TIMER_SERIAL.with(|t| {
+            let id = t.get();
+            t.set(id + 1);
+            id
+        });
+        self.next_id = id;
+        id
     }
 }
 
