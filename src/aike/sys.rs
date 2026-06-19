@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-use std::cell::Cell;
+use std::{cell::Cell, process::ExitCode};
 
 use zuqe::{
     Array, CallContext, EvalFlags, EvalType, JS_PROP_C_W_E, JSResult, JSValue, ScopedContext,
@@ -20,14 +20,13 @@ pub(super) fn js_cwd(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
 }
 
 pub(super) fn js_exit(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    use std::process::ExitCode;
-    let code = if cc.length() > 0 && !cc.arg(0).is_undefined() {
+    let code = if !cc.arg(0).is_undefined() {
         cc.arg(0).to_number(ctx).map(|n| n.to_i32()).unwrap_or(0)
     } else {
         0
     };
     ctx.rt_mut().interrupt(ExitCode::from(code as u8));
-    Err(-1)
+    Err(-1) // propagates immediately; cur_exception is already set to Interrupted.
 }
 
 // Declare windows crt functions
