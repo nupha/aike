@@ -27,8 +27,8 @@ use clap::Parser;
 use color::{Color::*, colorize_println};
 use linkme::distributed_slice;
 use zuqe::{
-    ClassID, EvalFlags, EvalType, Exception, ModuleDef, NativeObject, Runtime, ScopedContext,
-    builtins::promise::PromiseFuture,
+    ClassID, EvalFlags, EvalType, Exception, ExitStatus, JSValue, ModuleDef, NativeObject, Runtime,
+    ScopedContext, builtins::promise::PromiseFuture,
 };
 
 use crate::{
@@ -355,7 +355,6 @@ async fn main() -> ExitCode {
     if res.is_err() {
         let exit_code = ctx.with_root_scope(|mut cx0| {
             let code: u8 = match cx0.take_exception() {
-                Exception::Interrupted(ec) => format!("{:?}", ec).parse::<u8>().unwrap_or(1),
                 Exception::Error(e) => {
                     colorize_println(e.to_string(&mut cx0).unwrap().encode_utf8(false), GreenFg);
 
@@ -411,20 +410,24 @@ async fn main() -> ExitCode {
     };
 
     match result {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(Exception::OutOfMemory) => {
+        ExitStatus::Value(_) => ExitCode::SUCCESS,
+        ExitStatus::Interrupted(code) => {
+            #[cfg(debug_assertions)]
+            log::debug!("Process interrupted with code {:?}", code);
+            ExitCode::from(code)
+        }
+        ExitStatus::Exception(Exception::OutOfMemory) => {
             colorize_println("out of memory", RedFg);
             ExitCode::FAILURE
         }
-        Err(Exception::Interrupted(code)) => code,
-        Err(Exception::Error(err)) => {
+        ExitStatus::Exception(Exception::Error(err)) => {
             ctx.with_new_scope(|mut cx| {
                 colorize_println(err.to_string(&mut cx).unwrap().encode_utf8(false), RedFg);
                 cx.return_with(())
             });
             ExitCode::FAILURE
         }
-        Err(Exception::No | Exception::TooManyClasses) => {
+        ExitStatus::Exception(Exception::No | Exception::TooManyClasses) => {
             unreachable!();
         }
     }

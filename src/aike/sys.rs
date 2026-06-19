@@ -26,7 +26,10 @@ pub(super) fn js_exit(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         0
     };
     ctx.rt_mut().interrupt(ExitCode::from(code as u8));
-    Err(-1) // propagates immediately; cur_exception is already set to Interrupted.
+    // Return Ok instead of Err: interrupt flag is set on runtime, tick() detects
+    // it on the next synchronization point.  Returning Err would cause async
+    // callers to reject a Promise, triggering user-level .catch() handlers.
+    Ok(JSValue::UNDEFINED)
 }
 
 // Declare windows crt functions
