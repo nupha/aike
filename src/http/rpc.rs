@@ -2,11 +2,6 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
 // JSON-RPC 2.0 and MCP (Model Context Protocol) support for HttpServer.
-//
-// JSON-RPC: routed through ajj::Router to JS callbacks via the unified crossbeam channel.
-// MCP: built on the rmcp crate. Supports both stdio transport and axum route integration.
-// JS-defined MCP tools are dispatched through the crossbeam channel to the JS thread;
-// native Rust tools are called directly on the tokio runtime.
 
 use std::{
     borrow::Cow,
@@ -18,6 +13,15 @@ use std::{
 
 use crossbeam::channel;
 use linkme::distributed_slice;
+use rmcp::{
+    ErrorData as McpError,
+    handler::server::ServerHandler,
+    model::{
+        CallToolResult, Content, CustomNotification, Implementation, ListToolsResult,
+        ProtocolVersion, ServerCapabilities, ServerInfo, ServerNotification,
+    },
+    service::{RequestContext, RoleServer},
+};
 use tokio::sync::oneshot;
 use zuqe::{
     CallContext, Callback, ClassID, FieldDef, JSResult, JSValue, Object, Runtime, ScopedContext,
@@ -29,10 +33,6 @@ use zuqe::{
 use crate::USER_CLASS_DEFS;
 
 use super::class_http_server::IncomingRequest;
-
-// ---------------------------------------------------------------------------
-// JSON-RPC 2.0 (ajj-based)
-// ---------------------------------------------------------------------------
 
 /// A JSON-RPC mount point with method handlers.
 pub(super) struct JsRpcEndpoint {
@@ -325,19 +325,6 @@ pub(super) fn build_js_rpc_router(
 // MCP service (rmcp-based) — dynamic tool dispatch
 // ---------------------------------------------------------------------------
 
-use rmcp::{
-    ErrorData as McpError,
-    handler::server::ServerHandler,
-    model::{
-        CallToolResult, Content, CustomNotification, Implementation, ListToolsResult,
-        ProtocolVersion, ServerCapabilities, ServerInfo,
-    },
-    service::{RequestContext, RoleServer},
-};
-
-/// Short alias for server-side notification type.
-use rmcp::model::ServerNotification;
-
 /// The MCP service that bridges rmcp protocol to our native + JS tool handlers.
 ///
 /// Implements `ServerHandler` manually (not via `#[tool_router]`) because tools
@@ -418,10 +405,7 @@ impl ServerHandler for McpService {
     ) -> impl Future<Output = Result<ListToolsResult, McpError>> + Send + '_ {
         async move {
             let guard = self.shared.read().map_err(|e| {
-                McpError::internal_error(
-                    format!("schema lock poisoned: {}", e),
-                    None,
-                )
+                McpError::internal_error(format!("schema lock poisoned: {}", e), None)
             })?;
             Ok(ListToolsResult::with_all_items(guard.tools.clone()))
         }
@@ -439,19 +423,12 @@ impl ServerHandler for McpService {
             .unwrap_or(serde_json::Value::Null);
 
         async move {
-            eprintln!(
-                "[MCP SVC DEBUG] call_tool: tool=\"{}\" arguments={:?}",
-                tool_name,
-                arguments
-            );
             // Check native handlers first
             if let Some(handler) = self.native_handlers.get(&tool_name) {
-                eprintln!("[MCP SVC DEBUG] tool \"{}\" is native", tool_name);
                 return match handler(arguments).await {
                     Ok(result) => {
-                        let content = Content::json(result).unwrap_or_else(|_| {
-                            Content::text("Failed to serialize result")
-                        });
+                        let content = Content::json(result)
+                            .unwrap_or_else(|_| Content::text("Failed to serialize result"));
                         Ok(CallToolResult::success(vec![content]))
                     }
                     Err(msg) => Ok(CallToolResult::error(vec![Content::text(format!(
@@ -464,13 +441,9 @@ impl ServerHandler for McpService {
             // JS tool — dispatch through mpsc channel for streaming SSE support.
             let method_index = {
                 let guard = self.shared.read().map_err(|e| {
-                    McpError::internal_error(
-                        format!("schema lock poisoned: {}", e),
-                        None,
-                    )
+                    McpError::internal_error(format!("schema lock poisoned: {}", e), None)
                 })?;
                 let Some(&idx) = guard.name_to_index.get(&tool_name) else {
-                    eprintln!("[MCP SVC DEBUG] unknown tool: \"{}\"", tool_name);
                     return Err(McpError::invalid_params(
                         format!("Unknown tool: {}", tool_name),
                         None,
@@ -479,25 +452,18 @@ impl ServerHandler for McpService {
                 idx
             };
 
-            eprintln!(
-                "[MCP SVC DEBUG] JS tool \"{}\" method_index={}, sending to JS thread",
-                tool_name, method_index
-            );
-
             // Use mpsc (buffer 32) so the JS handler can send multiple chunks
             // before the final result. Intermediate chunks are forwarded as
             // SSE notification events to the MCP client.
             let (resp_tx, mut resp_rx) = tokio::sync::mpsc::channel::<McpChunkMessage>(32);
-            let send_result = self.js_tx.send(IncomingRequest::McpToolCall(McpToolCallRequest {
-                endpoint_index: self.endpoint_index,
-                method_index,
-                params: arguments,
-                response_tx: resp_tx,
-            }));
-            eprintln!(
-                "[MCP SVC DEBUG] js_tx.send result: {:?}",
-                send_result
-            );
+            let send_result = self
+                .js_tx
+                .send(IncomingRequest::McpToolCall(McpToolCallRequest {
+                    endpoint_index: self.endpoint_index,
+                    method_index,
+                    params: arguments,
+                    response_tx: resp_tx,
+                }));
 
             // Test: send a "start" notification before JS handler runs.
             // This verifies that SSE streaming notifications work end-to-end.
@@ -522,18 +488,27 @@ impl ServerHandler for McpService {
                         if chunk.final_chunk {
                             eprintln!("[MCP] received final chunk for tool: {}", tool_name);
                             if let Some(err) = chunk.error {
-                                eprintln!("[MCP] final chunk has error: code={} msg={}", err.code, err.message);
-                                return Ok(CallToolResult::error(vec![Content::text(
-                                    format!("Error: {}", err.message),
-                                )]));
+                                eprintln!(
+                                    "[MCP] final chunk has error: code={} msg={}",
+                                    err.code, err.message
+                                );
+                                return Ok(CallToolResult::error(vec![Content::text(format!(
+                                    "Error: {}",
+                                    err.message
+                                ))]));
                             }
-                            let result_json =
-                                chunk.result_json.as_deref().unwrap_or("null");
-                            eprintln!("[MCP] final chunk result (first 300 chars): {}", &result_json[..result_json.len().min(300)]);
+                            let result_json = chunk.result_json.as_deref().unwrap_or("null");
+                            eprintln!(
+                                "[MCP] final chunk result (first 300 chars): {}",
+                                &result_json[..result_json.len().min(300)]
+                            );
                             return match serde_json::from_str::<CallToolResult>(result_json) {
                                 Ok(ctr) => Ok(ctr),
                                 Err(e) => {
-                                    eprintln!("[MCP] failed to parse final chunk as CallToolResult: {:?}", e);
+                                    eprintln!(
+                                        "[MCP] failed to parse final chunk as CallToolResult: {:?}",
+                                        e
+                                    );
                                     Ok(CallToolResult::success(vec![Content::text(
                                         result_json.to_string(),
                                     )]))
@@ -542,11 +517,16 @@ impl ServerHandler for McpService {
                         } else {
                             // Intermediate chunk: send as custom notification (SSE event)
                             if let Some(ref json) = chunk.result_json {
-                                eprintln!("[MCP] sending intermediate chunk ({} bytes)", json.len());
+                                eprintln!(
+                                    "[MCP] sending intermediate chunk ({} bytes)",
+                                    json.len()
+                                );
                                 let notif = CustomNotification::new(
                                     "notifications/tool-chunk",
-                                    Some(serde_json::from_str::<serde_json::Value>(json)
-                                        .unwrap_or(serde_json::Value::String(json.clone()))),
+                                    Some(
+                                        serde_json::from_str::<serde_json::Value>(json)
+                                            .unwrap_or(serde_json::Value::String(json.clone())),
+                                    ),
                                 );
                                 let send_result = context
                                     .peer
@@ -559,7 +539,10 @@ impl ServerHandler for McpService {
                         }
                     }
                     None => {
-                        eprintln!("[MCP] handler channel closed unexpectedly for tool: {}", tool_name);
+                        eprintln!(
+                            "[MCP] handler channel closed unexpectedly for tool: {}",
+                            tool_name
+                        );
                         return Err(McpError::internal_error(
                             "handler channel closed unexpectedly",
                             None,
@@ -587,7 +570,9 @@ pub(super) fn build_stdio_mcp(
     let service = McpService::from_endpoint(ep, js_tx, endpoint_index);
     tokio::spawn(async move {
         let transport = (tokio::io::stdin(), tokio::io::stdout());
-        rmcp::serve_server(service, transport).await.map(|_running| ())
+        rmcp::serve_server(service, transport)
+            .await
+            .map(|_running| ())
     })
 }
 
@@ -734,49 +719,22 @@ pub(super) fn handle_mcp_tool_call(
     let handler = mcp_tables[req.endpoint_index][req.method_index];
 
     // Convert json params to JSValue
-    let params_val = match JSValue::from_serde_json(cx, &req.params) {
-        Ok(val) => {
-            let val_type = if val.is_object() {
-                let o = val.as_object().unwrap();
-                format!(
-                    "object class_id={} is_callable={}",
-                    o.class_id(),
-                    o.is_callable()
-                )
-            } else if val.is_undefined() {
-                "undefined".into()
-            } else if val.is_null() {
-                "null".into()
-            } else if val.is_string() {
-                "string".into()
-            } else {
-                "other".into()
-            };
-            eprintln!(
-                "[MCP JS DEBUG] params_val created: type={}",
-                val_type
-            );
-            val
-        }
-        Err(_) => {
-            eprintln!("[MCP JS DEBUG] FAILED to convert params to JSValue");
-            let _ = req.response_tx.try_send(McpChunkMessage {
-                final_chunk: true,
-                result_json: None,
-                error: Some(RpcError {
-                    code: -32603,
-                    message: "failed to convert params to JS".into(),
-                }),
-            });
-            return;
-        }
+    let Ok(params_val) = JSValue::from_serde_json(cx, &req.params) else {
+        let _ = req.response_tx.try_send(McpChunkMessage {
+            final_chunk: true,
+            result_json: None,
+            error: Some(RpcError {
+                code: -32603,
+                message: "failed to convert params to JS".into(),
+            }),
+        });
+        return;
     };
 
     // Create MCP bridge carrying the mpsc sender (supports multiple chunks)
     let bridge_val = match create_mcp_bridge(cx, req.response_tx) {
         Ok(v) => v,
         Err(_) => {
-            eprintln!("[MCP JS DEBUG] FAILED to create MCP bridge");
             return;
         }
     };
@@ -791,38 +749,16 @@ pub(super) fn handle_mcp_tool_call(
         1,
         [bridge_val].into(),
     ) {
-        Ok(f) => {
-            let v = JSValue::from(f);
-            eprintln!(
-                "[MCP JS DEBUG] chunk_fn created: is_object={} is_callable={}",
-                v.is_object(),
-                v.as_object().map(|o| o.is_callable()).unwrap_or(false)
-            );
-            v
-        }
+        Ok(f) => JSValue::from(f),
         Err(_) => {
-            eprintln!("[MCP JS DEBUG] FAILED to create chunk_fn");
             return;
         }
     };
 
-    // Log what we're about to call
-    eprintln!(
-        "[MCP JS DEBUG] about to call handler: handler class_id={} handler.is_callable={}",
-        handler.class_id(),
-        handler.is_callable()
-    );
-
     // Call JS handler with (params, chunkSender)
     match handler.call(cx, JSValue::UNDEFINED, &[params_val, chunk_fn]) {
         Ok(val) => {
-            eprintln!(
-                "[MCP JS DEBUG] handler.call() returned Ok: val.is_object={} val.is_promise={}",
-                val.is_object(),
-                Promise::try_from(val).is_ok()
-            );
             if let Ok(mut promise) = Promise::try_from(val) {
-                eprintln!("[MCP JS DEBUG] attaching then/catch to promise");
                 let ok_fn = match cx.create_native_function_with_data(
                     Callback::Func(mcp_resolve_then),
                     "",
@@ -832,7 +768,6 @@ pub(super) fn handle_mcp_tool_call(
                 ) {
                     Ok(f) => JSValue::from(f),
                     Err(_) => {
-                        eprintln!("[MCP JS DEBUG] FAILED to create ok_fn");
                         return;
                     }
                 };
@@ -845,20 +780,13 @@ pub(super) fn handle_mcp_tool_call(
                 ) {
                     Ok(f) => JSValue::from(f),
                     Err(_) => {
-                        eprintln!("[MCP JS DEBUG] FAILED to create fail_fn");
                         return;
                     }
                 };
                 let _ = promise.then(cx, ok_fn, fail_fn);
-                eprintln!("[MCP JS DEBUG] promise.then() done, returning from handle_mcp_tool_call");
             } else {
                 // Sync path: wrap raw result into MCP content format
-                eprintln!("[MCP JS DEBUG] sync path: handler returned non-promise value");
                 let to_json_result = val.to_serde_json(cx);
-                eprintln!(
-                    "[MCP JS DEBUG] to_serde_json result: {:?}",
-                    to_json_result.as_ref().map(|_| "Ok(_)").map_err(|e| format!("Err({})", e))
-                );
                 let text = to_json_result
                     .ok()
                     .map(|v| match v {
@@ -882,11 +810,6 @@ pub(super) fn handle_mcp_tool_call(
         Err(_) => {
             let exc = cx.take_exception();
             let msg = exc.to_text(cx);
-            eprintln!(
-                "[MCP JS DEBUG] handler.call() returned Err: message=\"{}\" traceback=\"{}\"",
-                msg.message,
-                msg.traceback.as_deref().unwrap_or("")
-            );
             let mcp_response = serde_json::json!({
                 "content": [{"type": "text", "text": format!("Error: {}", msg.message)}],
                 "isError": true
@@ -899,8 +822,6 @@ pub(super) fn handle_mcp_tool_call(
                     result_json,
                     error: None,
                 });
-            } else {
-                eprintln!("[MCP JS DEBUG] FAILED to get bridge payload in Err path");
             }
         }
     }
@@ -915,19 +836,7 @@ pub(super) fn handle_mcp_tool_call(
 /// Returns `undefined` (fire-and-forget; if the channel is full the chunk is dropped).
 fn mcp_send_chunk(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let data = cc.arg(0);
-    eprintln!(
-        "[MCP JS DEBUG] mcp_send_chunk called: data.is_object={} data.is_undefined={} data.is_null={}",
-        data.is_object(),
-        data.is_undefined(),
-        data.is_null()
-    );
-
     let to_json_result = data.to_serde_json(ctx);
-    eprintln!(
-        "[MCP JS DEBUG] mcp_send_chunk: to_serde_json = {:?}",
-        to_json_result.as_ref().map(|_| "Ok(_)").map_err(|e| format!("Err({})", e))
-    );
-
     let json = to_json_result
         .ok()
         .and_then(|v| serde_json::to_string(&v).ok())
@@ -937,9 +846,6 @@ fn mcp_send_chunk(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut bridge_val = cc.data(0);
     if let Ok(bridge) = get_mcp_bridge_payload(ctx, &mut bridge_val) {
         bridge.send_chunk(json);
-        eprintln!("[MCP JS DEBUG] mcp_send_chunk: chunk sent OK ({} bytes)", json_len);
-    } else {
-        eprintln!("[MCP JS DEBUG] mcp_send_chunk: FAILED to get bridge payload");
     }
 
     Ok(JSValue::UNDEFINED)
@@ -970,19 +876,7 @@ fn rpc_resolve_then(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
 fn mcp_resolve_then(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let result = cc.arg(0);
-    eprintln!(
-        "[MCP JS DEBUG] mcp_resolve_then called: result.is_object={} result.is_undefined={} result.is_null={}",
-        result.is_object(),
-        result.is_undefined(),
-        result.is_null()
-    );
-
     let to_json_result = result.to_serde_json(ctx);
-    eprintln!(
-        "[MCP JS DEBUG] mcp_resolve_then: to_serde_json result = {:?}",
-        to_json_result.as_ref().map(|_| "Ok(_)").map_err(|e| format!("Err({})", e))
-    );
-
     let text = to_json_result
         .ok()
         .map(|v| match v {
@@ -1003,9 +897,6 @@ fn mcp_resolve_then(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             result_json,
             error: None,
         });
-        eprintln!("[MCP JS DEBUG] mcp_resolve_then: final sent OK");
-    } else {
-        eprintln!("[MCP JS DEBUG] mcp_resolve_then: FAILED to get bridge payload");
     }
 
     Ok(JSValue::UNDEFINED)
@@ -1013,19 +904,8 @@ fn mcp_resolve_then(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
 fn mcp_reject_catch(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let reason = cc.arg(0);
-    eprintln!(
-        "[MCP JS DEBUG] mcp_reject_catch called: reason.is_object={} reason.is_undefined={} reason.is_error={}",
-        reason.is_object(),
-        reason.is_undefined(),
-        reason.is_error()
-    );
-
     let message = if !reason.is_undefined() {
         let to_string_result = reason.to_string(ctx);
-        eprintln!(
-            "[MCP JS DEBUG] mcp_reject_catch: reason.to_string() = {:?}",
-            to_string_result.as_ref().map(|s| s.content().encode_utf8(false).to_string()).map_err(|e| format!("Err({})", e))
-        );
         to_string_result
             .ok()
             .map(|s| s.content().encode_utf8(false).to_string())
@@ -1033,7 +913,6 @@ fn mcp_reject_catch(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     } else {
         "unknown error".into()
     };
-    eprintln!("[MCP JS DEBUG] mcp_reject_catch: message=\"{}\"", message);
 
     let mcp_response = serde_json::json!({
         "content": [{"type": "text", "text": format!("Error: {}", message)}],
@@ -1048,9 +927,6 @@ fn mcp_reject_catch(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             result_json,
             error: None,
         });
-        eprintln!("[MCP JS DEBUG] mcp_reject_catch: final sent OK");
-    } else {
-        eprintln!("[MCP JS DEBUG] mcp_reject_catch: FAILED to get bridge payload");
     }
 
     Ok(JSValue::UNDEFINED)

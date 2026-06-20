@@ -1307,10 +1307,6 @@ fn js_start_server_job(
                     handle_rpc_request(cx, req, &rpc_handler_tables);
                 }
                 IncomingRequest::McpToolCall(req) => {
-                    eprintln!(
-                        "[MCP JS DEBUG] poller received McpToolCall: endpoint={} method={}",
-                        req.endpoint_index, req.method_index
-                    );
                     handle_mcp_tool_call(cx, req, &mcp_tables.borrow());
                 }
             }
