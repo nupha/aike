@@ -596,24 +596,17 @@ fn mcp_resolve_then(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     let mut bridge_val = cc.data(0);
     if let Ok(bridge) = get_mcp_bridge_payload(ctx, &mut bridge_val) {
-        eprintln!(
-            "[MCP-JS] mcp_resolve_then: sending final chunk, json_len={}",
-            result_json.as_deref().map_or(0, |s| s.len())
-        );
         bridge.send_final(McpChunkMessage {
             final_chunk: true,
             result_json,
             error: None,
         });
-    } else {
-        eprintln!("[MCP-JS] mcp_resolve_then: get_mcp_bridge_payload FAILED");
     }
 
     Ok(JSValue::UNDEFINED)
 }
 
 fn mcp_reject_catch(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    eprintln!("[MCP-JS] mcp_reject_catch called");
     let reason = cc.arg(0);
     let message = if !reason.is_undefined() {
         let to_string_result = reason.to_string(ctx);

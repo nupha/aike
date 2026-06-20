@@ -34,7 +34,7 @@ use zuqe::{
 
 use crate::{
     USER_CLASS_DEFS,
-    http::rpc::build_axum_mcp_route,
+    http::mcp::build_axum_mcp_route,
     llm::{
         JSEngine,
         engine::{Engine, serve::engine_openai_router},
@@ -43,9 +43,9 @@ use crate::{
 
 use super::{
     Method,
+    mcp::{McpEndpoint, McpSchemas, McpToolCallRequest, NativeMcpToolFn, handle_mcp_tool_call},
     request::{HttpRequestPayload, JSHttpRequest},
     response::{HttpResponseMessage, HttpResponsePayload, JSHttpResponse, get_res_payload},
-    rpc::{McpEndpoint, McpSchemas, McpToolCallRequest, NativeMcpToolFn, handle_mcp_tool_call},
     server::spawn_http_server,
 };
 
@@ -561,7 +561,8 @@ fn parse_mcp_tools_array(
 
 /// Parse tools in object-keyed DSL format.
 ///
-/// Keys are tool names, values are `{ desc, handler, args?, inputSchema? }`.
+/// Keys are tool names, values are `{ desc, handler, args }`.
+/// This mode does NOT accept `inputSchema` — use array format for that.
 fn parse_mcp_tools_object(
     ctx: &mut ScopedContext,
     mut tools_obj: Object,
@@ -615,20 +616,9 @@ fn parse_mcp_tools_object(
                 -1
             })?;
 
-        // inputSchema takes priority over args DSL
-        let input_schema = tool_obj
-            .get_property_str(ctx, "inputSchema")
-            .ok()
-            .filter(|v| !v.is_undefined())
-            .and_then(|v| v.to_serde_json(ctx).ok());
-
-        let input_schema_json = if let Some(is) = input_schema {
-            if !is.is_null() {
-                is
-            } else {
-                serde_json::json!({"type": "object"})
-            }
-        } else if let Some(args_val) = tool_obj.get_property_str(ctx, "args").ok() {
+        // Build inputSchema from args DSL (only mode for object-keyed format)
+        let input_schema_json = if let Some(args_val) = tool_obj.get_property_str(ctx, "args").ok()
+        {
             if !args_val.is_undefined() {
                 if let Some(args_obj) = args_val.as_object() {
                     let args_cloned = args_obj.clone();
@@ -708,8 +698,6 @@ fn js_mcp(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         .and_then(|v| v.to_string(ctx))
         .map(|s| s.content().encode_utf8(false).to_string())
         .unwrap_or_else(|_| "1.0.0".into());
-
-
 
     // tools (array or object-keyed format)
     let tools_val = opts.get_property_str(ctx, "tools").map_err(|_| {
@@ -1080,13 +1068,7 @@ fn js_listen(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     }
 
     // Build router, channel, and handler tables in one scope
-    let (
-        router,
-        js_rx_opt,
-        http_handler_table,
-        mcp_handler_tables,
-        mcp_update_rxs,
-    ) = {
+    let (router, js_rx_opt, http_handler_table, mcp_handler_tables, mcp_update_rxs) = {
         let data = get_server_payload_mut(ctx, &mut this)?;
         data.frozen = true;
 
@@ -1097,8 +1079,7 @@ fn js_listen(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             router = router.nest(mount_path, engine_router);
         }
 
-        let has_js = !data.js_routes.is_empty()
-            || !data.mcp_endpoints.is_empty();
+        let has_js = !data.js_routes.is_empty() || !data.mcp_endpoints.is_empty();
         if !has_js {
             (router, None, Vec::new(), Vec::new(), Vec::new())
         } else {
@@ -1131,13 +1112,7 @@ fn js_listen(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 mcp_update_rxs.push(urx);
             }
 
-            (
-                router,
-                Some(js_rx),
-                http_table,
-                mcp_tables,
-                mcp_update_rxs,
-            )
+            (router, Some(js_rx), http_table, mcp_tables, mcp_update_rxs)
         }
     };
 
@@ -1200,7 +1175,6 @@ fn js_start_server_job(
                     dispatch_http_request(cx, req, &http_handler_table);
                 }
                 IncomingRequest::McpToolCall(req) => {
-                    eprintln!("[MCP-JS] poller: got McpToolCall ep={} method={}", req.endpoint_index, req.method_index);
                     handle_mcp_tool_call(cx, req, &mcp_tables.borrow());
                 }
             }

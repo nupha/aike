@@ -2,12 +2,6 @@
 // import { HttpServer } from "http";
 
 declare module "http" {
-  /** JSON-RPC 2.0 params: object | array | omitted (undefined). */
-  type RpcParams = Record<string, any> | any[] | undefined;
-
-  /** JSON-RPC request handler: has id, must return result. */
-  type RpcHandler = (params: RpcParams) => Promise<unknown>;
-
   /**
    * MCP tool call arguments — the `arguments` field from the JSON-RPC
    * `tools/call` params, forwarded verbatim to the handler.
@@ -116,7 +110,7 @@ declare module "http" {
      * - `"boolean"` — true/false
      * - `"array"` — array; use `items` to specify element type
      */
-    type: "string" | "integer" | "boolean" | "array";
+    type?: "string" | "integer" | "boolean" | "array";
     /** Mark as required. */
     required?: boolean;
     /** Enum string values. */
@@ -144,11 +138,11 @@ declare module "http" {
   }
 
   /**
-   * Tool definition using object-keyed format.
+   * Tool definition using object-keyed DSL format.
    *
    * Tool name is the key — no `name` field needed.
-   * Use `args` for the simplified DSL (auto-converted to JSON Schema), or
-   * `inputSchema` for direct injection of raw JSON Schema (takes priority).
+   * Arguments are defined via `args` DSL, auto-converted to JSON Schema.
+   * For raw JSON Schema, use the array format (`McpToolDefinition[]`).
    *
    * @example
    * const tools = {
@@ -168,8 +162,7 @@ declare module "http" {
     /** Handler invoked on `tools/call`. */
     handler: McpToolHandler;
     /**
-     * Simplified argument DSL — Rust auto-converts this to standard
-     * JSON Schema inputSchema.
+     * Argument DSL — Rust auto-converts this to standard JSON Schema inputSchema.
      */
     args: Record<string, McpToolArgShort>;
   }
@@ -225,7 +218,11 @@ declare module "http" {
     json(data: any): void;
     /** Send a response with only a status code and no body. */
     sendStatus(code: number): void;
-    /** Send a redirect response. Default status: 302. */
+    /**
+     * Send a redirect response. Sets `Location` header and ends the response.
+     * @param code HTTP status code (default: 302). Must be an integer.
+     * @param url Redirect target URL. If omitted, only the status is set.
+     */
     redirect(code?: number, url?: string): void;
   }
 
@@ -261,11 +258,8 @@ declare module "http" {
     /** Register an OPTIONS route. */
     options(path: string, handler: RouteHandler): this;
 
-    /** Remove a previously registered route. */
+    /** Remove a previously registered route. Returns true if a route was removed. */
     removeRoute(method: string, path: string): boolean;
-
-    /** Register JSON-RPC method handlers at a mount path. */
-    rpc(mountPath: string, handlers: { [name: string]: RpcHandler }): this;
 
     /**
      * Register an MCP (Model Context Protocol) server at `mountPath`.

@@ -39,13 +39,13 @@ tokio = { version = "1", features = [
     "io-std",
     "process",
 ] }
-reqwest = { version = "0.12", default-features = false, features = [
+reqwest = { version = "0.13", default-features = false, features = [
     "json",
     "stream",
     "gzip",
     "brotli",
     "deflate",
-    "rustls-tls",
+    "rustls",
 ] }
 llama-cpp-ffi = { path = "../llama-cpp-ffi", features = ["cmake_static"] }
 serde = { version = "1.0", features = ["derive"] }
@@ -65,7 +65,6 @@ axum = { version = "0.8", default-features = false, features = [
     "http1",
     "json",
 ] }
-ajj = { version = "0.7", features = ["axum"] }
 rmcp = { version = "1.7", default-features = false, features = [
     "server",
     "macros",
