@@ -1,10 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-// JSON-RPC 2.0 and MCP (Model Context Protocol) support for HttpServer.
-
 use std::{
-    borrow::Cow,
     cell::Cell,
     collections::HashMap,
     pin::Pin,
@@ -22,7 +19,6 @@ use rmcp::{
     },
     service::{RequestContext, RoleServer},
 };
-use tokio::sync::oneshot;
 use zuqe::{
     CallContext, Callback, ClassID, FieldDef, JSResult, JSValue, Object, Runtime, ScopedContext,
     builtins::promise::Promise,
@@ -33,44 +29,6 @@ use zuqe::{
 use crate::USER_CLASS_DEFS;
 
 use super::class_http_server::IncomingRequest;
-
-/// A JSON-RPC mount point with method handlers.
-pub(super) struct JsRpcEndpoint {
-    pub(super) mount_path: String,
-    /// (method_name, js_handler)
-    pub(super) methods: Vec<(String, Object)>,
-}
-
-impl JsRpcEndpoint {
-    pub(super) fn gc_trace(&self, gcx: &mut GcTraceCtx) {
-        for (_, handler) in &self.methods {
-            handler.trace(gcx);
-        }
-    }
-}
-
-/// JSON-RPC method request sent via crossbeam channel.
-pub(super) struct RpcRequest {
-    pub(super) endpoint_index: usize,
-    pub(super) method_index: usize,
-    pub(super) params_json: String,
-    pub(super) response_tx: oneshot::Sender<RpcResponseMessage>,
-}
-
-/// JSON-RPC response sent back via oneshot channel.
-pub(super) struct RpcResponseMessage {
-    pub(super) result_json: Option<String>,
-    pub(super) error: Option<RpcError>,
-}
-
-pub(super) struct RpcError {
-    pub(super) code: i64,
-    pub(super) message: String,
-}
-
-// ---------------------------------------------------------------------------
-// MCP (rmcp-based)
-// ---------------------------------------------------------------------------
 
 /// Native tool handler function type.
 pub(super) type NativeMcpToolFn = Arc<
@@ -97,9 +55,6 @@ pub(super) struct McpEndpoint {
     pub(super) mount_path: String,
     pub(super) server_name: String,
     pub(super) server_version: String,
-    /// If true, use stateful SSE mode (session-based, text/event-stream).
-    /// If false, use stateless JSON mode (no session, application/json).
-    pub(super) stateful: bool,
     /// Shared schemas accessible from tokio (Send + Sync)
     pub(super) shared: Arc<RwLock<McpSchemas>>,
     /// Native handlers: (name, schema, handler_fn)
@@ -128,6 +83,12 @@ pub(super) struct McpToolCallRequest {
     pub(super) response_tx: tokio::sync::mpsc::Sender<McpChunkMessage>,
 }
 
+/// A simple error for MCP tool call dispatch.
+pub(super) struct McpChunkError {
+    pub(super) code: i64,
+    pub(super) message: String,
+}
+
 /// A single chunk sent from JS tool handler to Rust MCP service.
 /// Either an intermediate SSE notification event or the final CallToolResult.
 pub(super) struct McpChunkMessage {
@@ -137,71 +98,10 @@ pub(super) struct McpChunkMessage {
     /// For the final chunk: the full CallToolResult JSON (as before).
     pub(super) result_json: Option<String>,
     /// Error (only meaningful for the final chunk).
-    pub(super) error: Option<RpcError>,
+    pub(super) error: Option<McpChunkError>,
 }
 
-// ---------------------------------------------------------------------------
-// Bridge: wraps oneshot::Sender<RpcResponseMessage> as a JS object (JSON-RPC)
-// ---------------------------------------------------------------------------
-
-pub(super) struct RpcBridgePayload {
-    tx: Option<oneshot::Sender<RpcResponseMessage>>,
-}
-
-impl RpcBridgePayload {
-    fn send_response(&mut self, msg: RpcResponseMessage) {
-        if let Some(tx) = self.tx.take() {
-            let _ = tx.send(msg);
-        }
-    }
-}
-
-fn get_bridge_payload<'a>(
-    ctx: &mut ScopedContext,
-    val: &'a mut JSValue,
-) -> Result<&'a mut RpcBridgePayload, i32> {
-    val.as_native_object_mut::<JSRpcBridge>()
-        .and_then(|o| o.payload_mut())
-        .ok_or_else(|| {
-            ctx.throw_internal_error("RpcBridge was detached");
-            -1
-        })
-}
-
-#[allow(dead_code)]
-fn js_bridge_ctor(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
-    ctx.throw_type_error("RpcBridge cannot be constructed from JS");
-    Err(-1)
-}
-
-const BRIDGE_PROTO: &[FieldDef] = &[];
-
-def_native_object!(
-    "RpcBridge",
-    JSRpcBridge,
-    RpcBridgePayload,
-    BRIDGE_PROTO,
-    None
-);
-
-#[distributed_slice(USER_CLASS_DEFS)]
-fn register_rpc_bridge(rt: &mut Runtime) -> Result<ClassID, i32> {
-    JSRpcBridge::register(rt)
-}
-
-/// Create a JSRpcBridge instance wrapping the given oneshot sender.
-fn create_bridge(
-    ctx: &mut ScopedContext,
-    tx: oneshot::Sender<RpcResponseMessage>,
-) -> Result<JSValue, i32> {
-    JSRpcBridge::new_instance(ctx, JSValue::UNDEFINED, RpcBridgePayload { tx: Some(tx) })
-        .map(|v| v.into())
-}
-
-// ---------------------------------------------------------------------------
-// MCP Bridge: wraps mpsc::Sender<McpChunkMessage> for streaming tool results
-// ---------------------------------------------------------------------------
-
+/// MCP Bridge: wraps mpsc::Sender<McpChunkMessage> for streaming tool results
 pub(super) struct McpBridgePayload {
     tx: Option<tokio::sync::mpsc::Sender<McpChunkMessage>>,
 }
@@ -260,65 +160,6 @@ fn create_mcp_bridge(
 ) -> Result<JSValue, i32> {
     JSMcpBridge::new_instance(ctx, JSValue::UNDEFINED, McpBridgePayload { tx: Some(tx) })
         .map(|v| v.into())
-}
-
-// ---------------------------------------------------------------------------
-// JSON-RPC router builder (ajj)
-// ---------------------------------------------------------------------------
-
-/// Build an ajj::Router from RPC method definitions, routing calls through
-/// the shared channel to the JS thread.
-///
-/// Returns (router, handler_table) where handler_table maps method_index
-/// to JS handler objects for use in the poller.
-pub(super) fn build_js_rpc_router(
-    methods: &[(String, Object)],
-    tx: channel::Sender<IncomingRequest>,
-    endpoint_index: usize,
-) -> (ajj::Router<()>, Vec<Object>) {
-    let mut router = ajj::Router::<()>::new();
-    let mut handler_table = Vec::new();
-
-    for (i, (method_name, callback)) in methods.iter().enumerate() {
-        handler_table.push(*callback);
-        let tx = tx.clone();
-
-        router = router.route(method_name.to_owned(), move |params: serde_json::Value| {
-            let tx = tx.clone();
-            let params_str = params.to_string();
-            async move {
-                let (resp_tx, resp_rx) = oneshot::channel();
-                let _ = tx.send(IncomingRequest::Rpc(RpcRequest {
-                    endpoint_index,
-                    method_index: i,
-                    params_json: params_str,
-                    response_tx: resp_tx,
-                }));
-                match resp_rx.await {
-                    Ok(resp) => {
-                        if let Some(err) = resp.error {
-                            Err(ajj::ErrorPayload {
-                                code: err.code,
-                                message: Cow::Owned(err.message),
-                                data: None::<()>,
-                            })
-                        } else {
-                            let val: serde_json::Value = serde_json::from_str(
-                                &resp.result_json.unwrap_or_else(|| "null".into()),
-                            )
-                            .unwrap_or(serde_json::Value::Null);
-                            Ok(val)
-                        }
-                    }
-                    _ => Err(ajj::ErrorPayload::internal_error_message(
-                        "handler channel closed".into(),
-                    )),
-                }
-            }
-        });
-    }
-
-    (router, handler_table)
 }
 
 // ---------------------------------------------------------------------------
@@ -456,7 +297,7 @@ impl ServerHandler for McpService {
             // before the final result. Intermediate chunks are forwarded as
             // SSE notification events to the MCP client.
             let (resp_tx, mut resp_rx) = tokio::sync::mpsc::channel::<McpChunkMessage>(32);
-            let send_result = self
+            let _send_result = self
                 .js_tx
                 .send(IncomingRequest::McpToolCall(McpToolCallRequest {
                     endpoint_index: self.endpoint_index,
@@ -465,8 +306,7 @@ impl ServerHandler for McpService {
                     response_tx: resp_tx,
                 }));
 
-            // Test: send a "start" notification before JS handler runs.
-            // This verifies that SSE streaming notifications work end-to-end.
+            // Send a "started" notification before JS handler runs.
             {
                 let start_notif = CustomNotification::new(
                     "notifications/tool-chunk",
@@ -476,7 +316,6 @@ impl ServerHandler for McpService {
                     .peer
                     .send_notification(ServerNotification::CustomNotification(start_notif))
                     .await;
-                eprintln!("[MCP] Sent 'started' notification for tool: {}", tool_name);
             }
 
             // Read chunks from the JS handler.
@@ -486,41 +325,22 @@ impl ServerHandler for McpService {
                 match resp_rx.recv().await {
                     Some(chunk) => {
                         if chunk.final_chunk {
-                            eprintln!("[MCP] received final chunk for tool: {}", tool_name);
                             if let Some(err) = chunk.error {
-                                eprintln!(
-                                    "[MCP] final chunk has error: code={} msg={}",
-                                    err.code, err.message
-                                );
                                 return Ok(CallToolResult::error(vec![Content::text(format!(
                                     "Error: {}",
                                     err.message
                                 ))]));
                             }
                             let result_json = chunk.result_json.as_deref().unwrap_or("null");
-                            eprintln!(
-                                "[MCP] final chunk result (first 300 chars): {}",
-                                &result_json[..result_json.len().min(300)]
-                            );
                             return match serde_json::from_str::<CallToolResult>(result_json) {
                                 Ok(ctr) => Ok(ctr),
-                                Err(e) => {
-                                    eprintln!(
-                                        "[MCP] failed to parse final chunk as CallToolResult: {:?}",
-                                        e
-                                    );
-                                    Ok(CallToolResult::success(vec![Content::text(
-                                        result_json.to_string(),
-                                    )]))
-                                }
+                                Err(_e) => Ok(CallToolResult::success(vec![Content::text(
+                                    result_json.to_string(),
+                                )])),
                             };
                         } else {
-                            // Intermediate chunk: send as custom notification (SSE event)
+                            // Intermediate chunk: send as custom notification (SSE event).
                             if let Some(ref json) = chunk.result_json {
-                                eprintln!(
-                                    "[MCP] sending intermediate chunk ({} bytes)",
-                                    json.len()
-                                );
                                 let notif = CustomNotification::new(
                                     "notifications/tool-chunk",
                                     Some(
@@ -528,13 +348,12 @@ impl ServerHandler for McpService {
                                             .unwrap_or(serde_json::Value::String(json.clone())),
                                     ),
                                 );
-                                let send_result = context
+                                let _ = context
                                     .peer
                                     .send_notification(ServerNotification::CustomNotification(
                                         notif,
                                     ))
                                     .await;
-                                eprintln!("[MCP] send_notification result: {:?}", send_result);
                             }
                         }
                     }
@@ -591,19 +410,11 @@ pub(super) fn build_axum_mcp_route(
     };
 
     let service = McpService::from_endpoint(ep, js_tx, endpoint_index);
-    // Choose mode based on endpoint configuration.
-    // - stateful SSE mode: session-based, text/event-stream responses, supports streaming chunks.
-    // - stateless JSON mode: no session, plain application/json, lower overhead.
-    let config = if ep.stateful {
-        StreamableHttpServerConfig::default()
-            .with_stateful_mode(true)
-            .disable_allowed_hosts()
-    } else {
-        StreamableHttpServerConfig::default()
-            .with_stateful_mode(false)
-            .with_json_response(true)
-            .disable_allowed_hosts()
-    };
+    // Always use stateful SSE mode (session-based, text/event-stream).
+    // Stateless JSON mode breaks SSE notifications and streaming chunks.
+    let config = StreamableHttpServerConfig::default()
+        .with_stateful_mode(true)
+        .disable_allowed_hosts();
     let session_manager = Arc::new(LocalSessionManager::default());
 
     let mcp_svc = StreamableHttpService::new(
@@ -618,94 +429,6 @@ pub(super) fn build_axum_mcp_route(
 // ---------------------------------------------------------------------------
 // Poller-side handlers (run on JS thread)
 // ---------------------------------------------------------------------------
-
-/// Handle a JSON-RPC request on the JS thread by calling the JS handler.
-pub(super) fn handle_rpc_request(cx: &mut ScopedContext, req: RpcRequest, tables: &[Vec<Object>]) {
-    let handler = &tables[req.endpoint_index][req.method_index];
-
-    // Parse params JSON and convert to JS value
-    let params_val = match serde_json::from_str::<serde_json::Value>(&req.params_json) {
-        Ok(v) => match JSValue::from_serde_json(cx, &v) {
-            Ok(val) => val,
-            Err(_) => {
-                let _ = req.response_tx.send(RpcResponseMessage {
-                    result_json: None,
-                    error: Some(RpcError {
-                        code: -32603,
-                        message: "failed to convert params to JS".into(),
-                    }),
-                });
-                return;
-            }
-        },
-        Err(_) => {
-            // Params is null/undefined for omitted params
-            JSValue::UNDEFINED
-        }
-    };
-
-    // Create bridge object carrying the oneshot sender
-    let bridge_val = match create_bridge(cx, req.response_tx) {
-        Ok(v) => v,
-        Err(_) => return,
-    };
-
-    // Call JS handler (must be async function returning Promise)
-    match handler.call(cx, JSValue::UNDEFINED, &[params_val]) {
-        Ok(val) => {
-            if let Ok(mut promise) = Promise::try_from(val) {
-                // Attach then/catch with bridge as data
-                let ok_fn = match cx.create_native_function_with_data(
-                    Callback::Func(rpc_resolve_then),
-                    "",
-                    0,
-                    0,
-                    [bridge_val].into(),
-                ) {
-                    Ok(f) => JSValue::from(f),
-                    Err(_) => return,
-                };
-                let fail_fn = match cx.create_native_function_with_data(
-                    Callback::Func(rpc_reject_catch),
-                    "",
-                    1,
-                    1,
-                    [bridge_val].into(),
-                ) {
-                    Ok(f) => JSValue::from(f),
-                    Err(_) => return,
-                };
-                let _ = promise.then(cx, ok_fn, fail_fn);
-            } else {
-                // Non-Promise result (defensive: handler should be async)
-                let result_json = val
-                    .to_serde_json(cx)
-                    .ok()
-                    .map(|v| serde_json::to_string(&v).unwrap_or_else(|_| "null".into()));
-                let mut bv = bridge_val;
-                let bridge = get_bridge_payload(cx, &mut bv).unwrap();
-                bridge.send_response(RpcResponseMessage {
-                    result_json,
-                    error: None,
-                });
-            }
-        }
-        Err(_) => {
-            let exc = cx.take_exception();
-            let msg = exc.to_text(cx);
-            let mut bv = bridge_val;
-            if let Ok(bridge) = get_bridge_payload(cx, &mut bv) {
-                bridge.send_response(RpcResponseMessage {
-                    result_json: None,
-                    error: Some(RpcError {
-                        code: -32000,
-                        message: msg.message,
-                    }),
-                });
-            }
-        }
-    }
-}
 
 /// Handle an MCP tool call request on the JS thread.
 /// Looks up the handler from the JS-thread handler table by method_index.
@@ -723,7 +446,7 @@ pub(super) fn handle_mcp_tool_call(
         let _ = req.response_tx.try_send(McpChunkMessage {
             final_chunk: true,
             result_json: None,
-            error: Some(RpcError {
+            error: Some(McpChunkError {
                 code: -32603,
                 message: "failed to convert params to JS".into(),
             }),
@@ -842,7 +565,7 @@ fn mcp_send_chunk(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         .and_then(|v| serde_json::to_string(&v).ok())
         .unwrap_or_default();
 
-    let json_len = json.len();
+    let _json_len = json.len();
     let mut bridge_val = cc.data(0);
     if let Ok(bridge) = get_mcp_bridge_payload(ctx, &mut bridge_val) {
         bridge.send_chunk(json);
@@ -854,25 +577,6 @@ fn mcp_send_chunk(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 // ---------------------------------------------------------------------------
 // Promise resolve/reject callbacks
 // ---------------------------------------------------------------------------
-
-fn rpc_resolve_then(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let result = cc.arg(0);
-
-    let result_json = result
-        .to_serde_json(ctx)
-        .ok()
-        .map(|v| serde_json::to_string(&v).unwrap_or_else(|_| "null".into()));
-
-    let mut bridge_val = cc.data(0);
-    if let Ok(bridge) = get_bridge_payload(ctx, &mut bridge_val) {
-        bridge.send_response(RpcResponseMessage {
-            result_json,
-            error: None,
-        });
-    }
-
-    Ok(JSValue::UNDEFINED)
-}
 
 fn mcp_resolve_then(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let result = cc.arg(0);
@@ -892,17 +596,24 @@ fn mcp_resolve_then(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     let mut bridge_val = cc.data(0);
     if let Ok(bridge) = get_mcp_bridge_payload(ctx, &mut bridge_val) {
+        eprintln!(
+            "[MCP-JS] mcp_resolve_then: sending final chunk, json_len={}",
+            result_json.as_deref().map_or(0, |s| s.len())
+        );
         bridge.send_final(McpChunkMessage {
             final_chunk: true,
             result_json,
             error: None,
         });
+    } else {
+        eprintln!("[MCP-JS] mcp_resolve_then: get_mcp_bridge_payload FAILED");
     }
 
     Ok(JSValue::UNDEFINED)
 }
 
 fn mcp_reject_catch(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    eprintln!("[MCP-JS] mcp_reject_catch called");
     let reason = cc.arg(0);
     let message = if !reason.is_undefined() {
         let to_string_result = reason.to_string(ctx);
@@ -926,32 +637,6 @@ fn mcp_reject_catch(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             final_chunk: true,
             result_json,
             error: None,
-        });
-    }
-
-    Ok(JSValue::UNDEFINED)
-}
-
-fn rpc_reject_catch(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let reason = cc.arg(0);
-    let message = if !reason.is_undefined() {
-        reason
-            .to_string(ctx)
-            .ok()
-            .map(|s| s.content().encode_utf8(false).to_string())
-            .unwrap_or_else(|| "unknown error".into())
-    } else {
-        "unknown error".into()
-    };
-
-    let mut bridge_val = cc.data(0);
-    if let Ok(bridge) = get_bridge_payload(ctx, &mut bridge_val) {
-        bridge.send_response(RpcResponseMessage {
-            result_json: None,
-            error: Some(RpcError {
-                code: -32000,
-                message,
-            }),
         });
     }
 

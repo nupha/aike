@@ -34,7 +34,7 @@ use zuqe::{
 
 use crate::{
     USER_CLASS_DEFS,
-    http::rpc::{build_axum_mcp_route, build_js_rpc_router},
+    http::rpc::build_axum_mcp_route,
     llm::{
         JSEngine,
         engine::{Engine, serve::engine_openai_router},
@@ -45,17 +45,13 @@ use super::{
     Method,
     request::{HttpRequestPayload, JSHttpRequest},
     response::{HttpResponseMessage, HttpResponsePayload, JSHttpResponse, get_res_payload},
-    rpc::{
-        JsRpcEndpoint, McpEndpoint, McpSchemas, McpToolCallRequest, NativeMcpToolFn, RpcRequest,
-        handle_mcp_tool_call, handle_rpc_request,
-    },
+    rpc::{McpEndpoint, McpSchemas, McpToolCallRequest, NativeMcpToolFn, handle_mcp_tool_call},
     server::spawn_http_server,
 };
 
 /// Unified request message sent from axum delegate to the JS server job.
 pub(super) enum IncomingRequest {
     Http(HttpRequest),
-    Rpc(RpcRequest),
     McpToolCall(McpToolCallRequest),
 }
 
@@ -74,7 +70,6 @@ pub(super) struct HttpRequest {
 pub(super) struct HttpServerPayload {
     openai: Option<(Arc<Mutex<Engine>>, String)>,
     js_routes: Vec<(Method, String, Object)>,
-    js_rpc_endpoints: Vec<JsRpcEndpoint>,
     mcp_endpoints: Vec<McpEndpoint>,
     shutdown_tx: Option<oneshot::Sender<()>>,
     is_running: Arc<AtomicBool>,
@@ -177,9 +172,6 @@ impl HttpServerPayload {
         for (_, _, handler) in &self.js_routes {
             handler.trace(gcx);
         }
-        for ep in &self.js_rpc_endpoints {
-            ep.gc_trace(gcx);
-        }
         for ep in &self.mcp_endpoints {
             ep.gc_trace(gcx);
         }
@@ -217,7 +209,6 @@ fn js_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         HttpServerPayload {
             openai: None,
             js_routes: Vec::new(),
-            js_rpc_endpoints: Vec::new(),
             mcp_endpoints: Vec::new(),
             shutdown_tx: None,
             is_running: Arc::new(AtomicBool::new(false)),
@@ -299,83 +290,6 @@ fn js_route_add(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         ctx.throw_type_error(e);
         return Err(-1);
     }
-    Ok(this)
-}
-
-/// HttpServer.rpc(mountPath, handlers) — register JSON-RPC method handlers.
-///
-/// `mountPath` must start with '/', e.g. "/rpc", "/mcp".
-/// `handlers` is an object whose keys are method names and values are async functions.
-/// Returns `this` for chain-style calls.
-fn js_rpc(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let mut this = cc.this();
-
-    // arg(0): mountPath
-    let mount_path = {
-        let s = cc.arg(0).to_string(ctx).map_err(|_| {
-            ctx.throw_type_error("mountPath must be a string");
-            -1
-        })?;
-        let text = s.content().encode_utf8(false).to_string();
-        if !text.starts_with('/') {
-            ctx.throw_type_error("mountPath must start with '/'");
-            return Err(-1);
-        }
-        text
-    };
-
-    // arg(1): handlers object
-    let mut handlers_obj = cc
-        .arg(1)
-        .as_object()
-        .ok_or_else(|| {
-            ctx.throw_type_error("handlers must be an object");
-            -1
-        })?
-        .clone();
-
-    // Iterate own enumerable properties to collect (method_name, handler) pairs
-    let pks = handlers_obj
-        .get_own_property_names(ctx, zuqe::JS_GPN_ENUM_ONLY | zuqe::JS_GPN_STR_OR_INT_MASK)?;
-    let mut methods = Vec::new();
-    for pk in pks.iter() {
-        let key_v = pk.atom.to_value(ctx)?;
-        let key_r = key_v.to_string(ctx)?;
-        let method_name = key_r.content().encode_utf8(false).to_string();
-
-        let handler = handlers_obj
-            .get_property(ctx, pk.atom)?
-            .into_callable(ctx)
-            .map_err(|_| {
-                ctx.throw_type_error(&format!(
-                    "handler for method '{}' must be a function",
-                    method_name
-                ));
-                -1
-            })?;
-        methods.push((method_name, handler));
-    }
-
-    let p = get_server_payload_mut(ctx, &mut this)?;
-    if p.frozen {
-        ctx.throw_type_error("cannot add rpc after listen()");
-        return Err(-1);
-    }
-
-    // Merge or append to js_rpc_endpoints
-    if let Some(ep) = p
-        .js_rpc_endpoints
-        .iter_mut()
-        .find(|e| e.mount_path == mount_path)
-    {
-        ep.methods.extend(methods);
-    } else {
-        p.js_rpc_endpoints.push(JsRpcEndpoint {
-            mount_path,
-            methods,
-        });
-    }
-
     Ok(this)
 }
 
@@ -795,11 +709,7 @@ fn js_mcp(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         .map(|s| s.content().encode_utf8(false).to_string())
         .unwrap_or_else(|_| "1.0.0".into());
 
-    // stateful mode: true = SSE (session-based, supports streaming), false = plain JSON
-    let stateful = opts
-        .get_property_str(ctx, "stateful")
-        .and_then(|v| v.to_bool())
-        .unwrap_or(false);
+
 
     // tools (array or object-keyed format)
     let tools_val = opts.get_property_str(ctx, "tools").map_err(|_| {
@@ -819,7 +729,6 @@ fn js_mcp(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         mount_path,
         server_name,
         server_version,
-        stateful,
         shared: Arc::new(std::sync::RwLock::new(McpSchemas {
             tools,
             name_to_index,
@@ -1175,7 +1084,6 @@ fn js_listen(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         router,
         js_rx_opt,
         http_handler_table,
-        rpc_handler_tables,
         mcp_handler_tables,
         mcp_update_rxs,
     ) = {
@@ -1190,10 +1098,9 @@ fn js_listen(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         }
 
         let has_js = !data.js_routes.is_empty()
-            || !data.js_rpc_endpoints.is_empty()
             || !data.mcp_endpoints.is_empty();
         if !has_js {
-            (router, None, Vec::new(), Vec::new(), Vec::new(), Vec::new())
+            (router, None, Vec::new(), Vec::new(), Vec::new())
         } else {
             let (js_tx, js_rx) = channel::unbounded::<IncomingRequest>();
 
@@ -1207,14 +1114,6 @@ fn js_listen(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                     return Err(-1);
                 }
                 router = router.route(&axum_path, handler);
-            }
-
-            // --- JSON-RPC routes: build tables directly from payload ---
-            let mut rpc_tables: Vec<Vec<Object>> = Vec::new();
-            for (i, ep) in data.js_rpc_endpoints.iter().enumerate() {
-                let (rpc_router, rpc_table) = build_js_rpc_router(&ep.methods, js_tx.clone(), i);
-                router = router.merge(rpc_router.into_axum(&ep.mount_path));
-                rpc_tables.push(rpc_table);
             }
 
             // --- MCP routes: rmcp-based, protocol handled by rmcp crate ---
@@ -1236,7 +1135,6 @@ fn js_listen(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 router,
                 Some(js_rx),
                 http_table,
-                rpc_tables,
                 mcp_tables,
                 mcp_update_rxs,
             )
@@ -1259,13 +1157,12 @@ fn js_listen(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         p.is_running = handle.is_running.clone();
     }
 
-    // Start unified server job on JS thread (handles both HTTP and RPC)
+    // Start unified server job on JS thread (handles HTTP and MCP tool calls)
     if let Some(js_rx) = js_rx_opt {
         js_start_server_job(
             ctx,
             js_rx,
             http_handler_table,
-            rpc_handler_tables,
             mcp_handler_tables,
             mcp_update_rxs,
             handle.is_running,
@@ -1276,12 +1173,11 @@ fn js_listen(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 }
 
 /// Start the unified server job via queue_job — polls crossbeam channel on JS thread.
-/// Handles both HTTP and RPC requests through the same channel.
+/// Handles HTTP and MCP tool call requests through the same channel.
 fn js_start_server_job(
     ctx: &mut ScopedContext,
     rx: channel::Receiver<IncomingRequest>,
     http_handler_table: Vec<Object>,
-    rpc_handler_tables: Vec<Vec<Object>>,
     mcp_handler_tables: Vec<Vec<Object>>,
     mcp_update_rxs: Vec<channel::Receiver<Vec<Object>>>,
     is_running: Arc<AtomicBool>,
@@ -1303,10 +1199,8 @@ fn js_start_server_job(
                 IncomingRequest::Http(req) => {
                     dispatch_http_request(cx, req, &http_handler_table);
                 }
-                IncomingRequest::Rpc(req) => {
-                    handle_rpc_request(cx, req, &rpc_handler_tables);
-                }
                 IncomingRequest::McpToolCall(req) => {
+                    eprintln!("[MCP-JS] poller: got McpToolCall ep={} method={}", req.endpoint_index, req.method_index);
                     handle_mcp_tool_call(cx, req, &mcp_tables.borrow());
                 }
             }
@@ -1505,7 +1399,6 @@ const SERVER_PROTO: &[FieldDef] = &[
     FieldDef::FUNC("delete", 2, js_route_add, 4),
     FieldDef::FUNC("head", 2, js_route_add, 5),
     FieldDef::FUNC("options", 2, js_route_add, 6),
-    FieldDef::FUNC("rpc", 2, js_rpc, 0),
     FieldDef::FUNC("mcp", 2, js_mcp, 0),
     FieldDef::FUNC("updateMcpTools", 2, js_update_tools, 0),
     FieldDef::FUNC("removeRoute", 2, js_remove_route, 0),

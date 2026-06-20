@@ -1,7 +1,7 @@
 mod class_http_server;
+mod mcp;
 mod request;
 mod response;
-mod rpc;
 pub(crate) mod server;
 
 pub(crate) use {
