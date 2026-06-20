@@ -34,7 +34,7 @@ use zuqe::{
 
 use crate::{
     USER_CLASS_DEFS,
-    http::rpc::{build_js_rpc_router, build_mcp_router},
+    http::rpc::{build_axum_mcp_route, build_js_rpc_router},
     llm::{
         JSEngine,
         engine::{Engine, serve::engine_openai_router},
@@ -119,6 +119,7 @@ impl HttpServerPayload {
     /// Must be called BEFORE `listen()` because native handler closures are
     /// captured at router-build time. The schema is added to the shared table
     /// so `tools/list` and `tools/call` can find it.
+    #[allow(dead_code)]
     pub(crate) fn register_mcp_tool(
         &mut self,
         mount_path: &str,
@@ -137,12 +138,37 @@ impl HttpServerPayload {
         ep.handlers
             .push((name.to_string(), schema.clone(), handler));
 
+        // Build rmcp::model::Tool from the schema
+        let description = schema
+            .get("description")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let input_schema = schema
+            .get("inputSchema")
+            .cloned()
+            .unwrap_or(serde_json::json!({"type": "object"}));
+        let input_schema_obj: serde_json::Map<String, serde_json::Value> = match input_schema {
+            serde_json::Value::Object(m) => m,
+            _ => serde_json::json!({"type": "object"})
+                .as_object()
+                .unwrap()
+                .clone(),
+        };
+
+        let tool = rmcp::model::Tool::new(
+            name.to_string(),
+            description.to_string(),
+            Arc::new(input_schema_obj.into()),
+        );
+
         // Update shared schemas
-        let mut guard = ep.shared.write().map_err(|_| "schema lock poisoned")?;
-        let schema_idx = guard.schemas.len();
-        guard.schemas.push(schema);
-        guard.name_to_index.insert(name.to_string(), schema_idx);
-        guard.native_map.insert(name.to_string(), native_idx);
+        {
+            let mut guard = ep.shared.write().map_err(|_| "schema lock poisoned")?;
+            let schema_idx = guard.tools.len();
+            guard.tools.push(tool);
+            guard.name_to_index.insert(name.to_string(), schema_idx);
+            guard.native_map.insert(name.to_string(), native_idx);
+        }
 
         Ok(())
     }
@@ -508,11 +534,11 @@ fn build_input_schema_from_args(
 /// Parse tools from either array format (McpToolDefinition[]) or
 /// object-keyed DSL format (ToolsMap).
 ///
-/// Parse tool definitions, dispatching to array or object format handler.
+/// Returns (rmcp Tool vec, name→index map, JS handler vec).
 fn parse_mcp_tools(
     ctx: &mut ScopedContext,
     tools_val: &JSValue,
-) -> Result<(Vec<serde_json::Value>, HashMap<String, usize>, Vec<Object>), i32> {
+) -> Result<(Vec<rmcp::model::Tool>, HashMap<String, usize>, Vec<Object>), i32> {
     if let Some(o) = tools_val.as_object().copied() {
         if o.is_array(ctx).map_err(|_| {
             ctx.throw_type_error("tools is_array check failed");
@@ -531,11 +557,11 @@ fn parse_mcp_tools(
 /// Parse tools in array format (McpToolDefinition[]).
 ///
 /// Each element is standard MCP schema: `{ name, description?, inputSchema?, handler }`.
-/// Extracts handler for JS call table, passes remaining fields through as-is.
+/// Extracts handler for JS call table, builds rmcp::model::Tool for protocol.
 fn parse_mcp_tools_array(
     ctx: &mut ScopedContext,
     tools_arr: Object,
-) -> Result<(Vec<serde_json::Value>, HashMap<String, usize>, Vec<Object>), i32> {
+) -> Result<(Vec<rmcp::model::Tool>, HashMap<String, usize>, Vec<Object>), i32> {
     // Get array length via the standard JS `length` property
     let len = tools_arr
         .get_property_str(ctx, "length")
@@ -546,7 +572,7 @@ fn parse_mcp_tools_array(
             -1
         })? as usize;
 
-    let mut schemas: Vec<serde_json::Value> = Vec::with_capacity(len);
+    let mut tools: Vec<rmcp::model::Tool> = Vec::with_capacity(len);
     let mut name_to_index: HashMap<String, usize> = HashMap::new();
     let mut js_handlers: Vec<Object> = Vec::with_capacity(len);
 
@@ -570,8 +596,17 @@ fn parse_mcp_tools_array(
                 -1
             })?;
 
+        // description
+        let description = tool_obj
+            .get_property_str(ctx, "description")
+            .ok()
+            .filter(|v| !v.is_undefined())
+            .and_then(|v| v.to_string(ctx).ok())
+            .map(|s| s.content().encode_utf8(false).to_string())
+            .unwrap_or_default();
+
         // inputSchema (required for array format — standard MCP Schema)
-        let input_schema = tool_obj
+        let input_schema_json = tool_obj
             .get_property_str(ctx, "inputSchema")
             .and_then(|v| {
                 v.as_object().copied().ok_or_else(|| {
@@ -590,26 +625,24 @@ fn parse_mcp_tools_array(
                 -1
             })?;
 
-        let mut schema = serde_json::json!({"name": &name, "inputSchema":input_schema});
+        let input_schema_obj: serde_json::Map<String, serde_json::Value> = match input_schema_json {
+            serde_json::Value::Object(m) => m,
+            _ => serde_json::json!({"type": "object"})
+                .as_object()
+                .unwrap()
+                .clone(),
+        };
 
-        // description
-        if let Some(desc) = tool_obj
-            .get_property_str(ctx, "description")
-            .ok()
-            .filter(|v| !v.is_undefined())
-            .and_then(|v| v.to_string(ctx).ok())
-            .map(|s| s.content().encode_utf8(false).to_string())
-        {
-            schema["description"] = serde_json::Value::String(desc);
-        }
+        let tool =
+            rmcp::model::Tool::new(name.clone(), description, Arc::new(input_schema_obj.into()));
 
-        let idx = schemas.len();
-        schemas.push(schema);
+        let idx = tools.len();
+        tools.push(tool);
         name_to_index.insert(name, idx);
         js_handlers.push(handler);
     }
 
-    Ok((schemas, name_to_index, js_handlers))
+    Ok((tools, name_to_index, js_handlers))
 }
 
 /// Parse tools in object-keyed DSL format.
@@ -618,11 +651,11 @@ fn parse_mcp_tools_array(
 fn parse_mcp_tools_object(
     ctx: &mut ScopedContext,
     mut tools_obj: Object,
-) -> Result<(Vec<serde_json::Value>, HashMap<String, usize>, Vec<Object>), i32> {
+) -> Result<(Vec<rmcp::model::Tool>, HashMap<String, usize>, Vec<Object>), i32> {
     let pks = tools_obj
         .get_own_property_names(ctx, zuqe::JS_GPN_ENUM_ONLY | zuqe::JS_GPN_STR_OR_INT_MASK)?;
 
-    let mut schemas: Vec<serde_json::Value> = Vec::new();
+    let mut tools: Vec<rmcp::model::Tool> = Vec::new();
     let mut name_to_index: HashMap<String, usize> = HashMap::new();
     let mut js_handlers: Vec<Object> = Vec::new();
 
@@ -656,7 +689,8 @@ fn parse_mcp_tools_object(
             .ok()
             .filter(|v| !v.is_undefined())
             .and_then(|v| v.to_string(ctx).ok())
-            .map(|s| s.content().encode_utf8(false).to_string());
+            .map(|s| s.content().encode_utf8(false).to_string())
+            .unwrap_or_default();
 
         // handler (required)
         let handler = tool_obj
@@ -674,33 +708,46 @@ fn parse_mcp_tools_object(
             .filter(|v| !v.is_undefined())
             .and_then(|v| v.to_serde_json(ctx).ok());
 
-        let mut schema = serde_json::json!({"name": &name});
-        if let Some(desc) = &description {
-            schema["description"] = serde_json::Value::String(desc.clone());
-        }
-
-        if let Some(is) = input_schema {
+        let input_schema_json = if let Some(is) = input_schema {
             if !is.is_null() {
-                schema["inputSchema"] = is;
+                is
+            } else {
+                serde_json::json!({"type": "object"})
             }
         } else if let Some(args_val) = tool_obj.get_property_str(ctx, "args").ok() {
             if !args_val.is_undefined() {
                 if let Some(args_obj) = args_val.as_object() {
                     let args_cloned = args_obj.clone();
-                    if let Some(args_schema) = build_input_schema_from_args(ctx, args_cloned)? {
-                        schema["inputSchema"] = args_schema;
-                    }
+                    build_input_schema_from_args(ctx, args_cloned)?
+                        .unwrap_or(serde_json::json!({"type": "object"}))
+                } else {
+                    serde_json::json!({"type": "object"})
                 }
+            } else {
+                serde_json::json!({"type": "object"})
             }
-        }
+        } else {
+            serde_json::json!({"type": "object"})
+        };
 
-        let idx = schemas.len();
-        schemas.push(schema);
+        let input_schema_obj: serde_json::Map<String, serde_json::Value> = match input_schema_json {
+            serde_json::Value::Object(m) => m,
+            _ => serde_json::json!({"type": "object"})
+                .as_object()
+                .unwrap()
+                .clone(),
+        };
+
+        let tool =
+            rmcp::model::Tool::new(name.clone(), description, Arc::new(input_schema_obj.into()));
+
+        let idx = tools.len();
+        tools.push(tool);
         name_to_index.insert(name, idx);
         js_handlers.push(handler);
     }
 
-    Ok((schemas, name_to_index, js_handlers))
+    Ok((tools, name_to_index, js_handlers))
 }
 
 /// HttpServer.mcp(mountPath, options) — register MCP server with tools.
@@ -748,13 +795,19 @@ fn js_mcp(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         .map(|s| s.content().encode_utf8(false).to_string())
         .unwrap_or_else(|_| "1.0.0".into());
 
+    // stateful mode: true = SSE (session-based, supports streaming), false = plain JSON
+    let stateful = opts
+        .get_property_str(ctx, "stateful")
+        .and_then(|v| v.to_bool())
+        .unwrap_or(false);
+
     // tools (array or object-keyed format)
     let tools_val = opts.get_property_str(ctx, "tools").map_err(|_| {
         ctx.throw_type_error("options.tools is required");
         -1
     })?;
 
-    let (schemas, name_to_index, js_handlers) = parse_mcp_tools(ctx, &tools_val)?;
+    let (tools, name_to_index, js_handlers) = parse_mcp_tools(ctx, &tools_val)?;
 
     let p = get_server_payload_mut(ctx, &mut this)?;
     if p.frozen {
@@ -766,8 +819,9 @@ fn js_mcp(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         mount_path,
         server_name,
         server_version,
+        stateful,
         shared: Arc::new(std::sync::RwLock::new(McpSchemas {
-            schemas,
+            tools,
             name_to_index,
             native_map: HashMap::new(),
         })),
@@ -798,7 +852,7 @@ fn js_update_tools(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     // arg(1): tools (array or object-keyed format)
     let tools_val = cc.arg(1);
 
-    let (schemas, name_to_index, js_handlers) = parse_mcp_tools(ctx, &tools_val)?;
+    let (tools, name_to_index, js_handlers) = parse_mcp_tools(ctx, &tools_val)?;
 
     // Find endpoint and update
     let p = get_server_payload_mut(ctx, &mut this)?;
@@ -816,15 +870,15 @@ fn js_update_tools(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         let mut guard = ep.shared.write().unwrap();
         // Preserve native tool entries (names that are in native_map)
         let native_names: Vec<String> = guard.native_map.keys().cloned().collect();
-        let mut new_schemas = schemas;
+        let mut new_tools = tools;
         let mut new_name_to_index = name_to_index;
         let mut new_native_map = HashMap::new();
 
         // Re-add native tool schemas at the end
         for name in &native_names {
             if let Some(&old_idx) = guard.name_to_index.get(name) {
-                let new_idx = new_schemas.len();
-                new_schemas.push(guard.schemas[old_idx].clone());
+                let new_idx = new_tools.len();
+                new_tools.push(guard.tools[old_idx].clone());
                 new_name_to_index.insert(name.clone(), new_idx);
                 if let Some(&ni) = guard.native_map.get(name) {
                     new_native_map.insert(name.clone(), ni);
@@ -832,7 +886,7 @@ fn js_update_tools(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             }
         }
 
-        guard.schemas = new_schemas;
+        guard.tools = new_tools;
         guard.name_to_index = new_name_to_index;
         guard.native_map = new_native_map;
     }
@@ -1163,13 +1217,15 @@ fn js_listen(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 rpc_tables.push(rpc_table);
             }
 
-            // --- MCP routes: protocol methods handled in Rust ---
+            // --- MCP routes: rmcp-based, protocol handled by rmcp crate ---
             let mut mcp_tables: Vec<Vec<Object>> = Vec::new();
             let mut mcp_update_rxs: Vec<channel::Receiver<Vec<Object>>> = Vec::new();
             for (i, ep) in data.mcp_endpoints.iter_mut().enumerate() {
-                let (mcp_router, mcp_table) = build_mcp_router(ep, js_tx.clone(), i);
-                router = router.merge(mcp_router.into_axum(&ep.mount_path));
-                mcp_tables.push(mcp_table);
+                // Build axum route via rmcp's StreamableHttpService
+                let mcp_axum_router = build_axum_mcp_route(ep, js_tx.clone(), i);
+                router = router.merge(mcp_axum_router);
+                // JS handler table for poller-side dispatch
+                mcp_tables.push(ep.js_handlers.clone());
                 // Create update channel for hot-reload of tools
                 let (utx, urx) = channel::unbounded::<Vec<Object>>();
                 ep.update_tx = Some(utx);
@@ -1251,6 +1307,10 @@ fn js_start_server_job(
                     handle_rpc_request(cx, req, &rpc_handler_tables);
                 }
                 IncomingRequest::McpToolCall(req) => {
+                    eprintln!(
+                        "[MCP JS DEBUG] poller received McpToolCall: endpoint={} method={}",
+                        req.endpoint_index, req.method_index
+                    );
                     handle_mcp_tool_call(cx, req, &mcp_tables.borrow());
                 }
             }
