@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
+
 // JS binding for HttpServer.
 //
 // HttpServer is a JS-side server instance with full lifecycle:
@@ -50,7 +53,7 @@ use super::{
 };
 
 /// Unified request message sent from axum delegate to the JS server job.
-pub(super) enum IncomingRequest {
+pub(crate) enum IncomingRequest {
     Http(HttpRequest),
     McpToolCall(McpToolCallRequest),
 }
@@ -297,7 +300,7 @@ fn js_route_add(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 ///
 /// Input: `{ fieldName: { desc, type?, required?, enum?, default? } }`
 /// Output: `{ type: "object", properties: { ... }, required: [...] }`
-fn build_input_schema_from_args(
+pub(crate) fn build_input_schema_from_args(
     ctx: &mut ScopedContext,
     mut args_obj: Object,
 ) -> Result<Option<serde_json::Value>, i32> {
@@ -449,7 +452,7 @@ fn build_input_schema_from_args(
 /// object-keyed DSL format (ToolsMap).
 ///
 /// Returns (rmcp Tool vec, name→index map, JS handler vec).
-fn parse_mcp_tools(
+pub(crate) fn parse_mcp_tools(
     ctx: &mut ScopedContext,
     tools_val: &JSValue,
 ) -> Result<(Vec<rmcp::model::Tool>, HashMap<String, usize>, Vec<Object>), i32> {
@@ -472,7 +475,7 @@ fn parse_mcp_tools(
 ///
 /// Each element is standard MCP schema: `{ name, description?, inputSchema?, handler }`.
 /// Extracts handler for JS call table, builds rmcp::model::Tool for protocol.
-fn parse_mcp_tools_array(
+pub(crate) fn parse_mcp_tools_array(
     ctx: &mut ScopedContext,
     tools_arr: Object,
 ) -> Result<(Vec<rmcp::model::Tool>, HashMap<String, usize>, Vec<Object>), i32> {
@@ -563,7 +566,7 @@ fn parse_mcp_tools_array(
 ///
 /// Keys are tool names, values are `{ desc, handler, args }`.
 /// This mode does NOT accept `inputSchema` — use array format for that.
-fn parse_mcp_tools_object(
+pub(crate) fn parse_mcp_tools_object(
     ctx: &mut ScopedContext,
     mut tools_obj: Object,
 ) -> Result<(Vec<rmcp::model::Tool>, HashMap<String, usize>, Vec<Object>), i32> {
@@ -1162,6 +1165,7 @@ fn js_start_server_job(
     let mcp_tables = RefCell::new(mcp_handler_tables);
     crate::helpers::start_channel_poller(
         ctx,
+        "http_mcp",
         rx,
         move |incoming: IncomingRequest, cx| {
             // Check for tool table updates before processing

@@ -1,11 +1,18 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
+
 mod class_http_server;
+mod class_mcp_stdio;
 mod mcp;
 mod request;
 mod response;
 pub(crate) mod server;
 
 pub(crate) use {
-    class_http_server::JSHttpServer, request::JSHttpRequest, response::JSHttpResponse,
+    class_http_server::JSHttpServer,
+    class_mcp_stdio::{JSMcpStdio, gc_trace_stdio_state},
+    request::JSHttpRequest,
+    response::JSHttpResponse,
 };
 
 use zuqe::{FieldDef, NativeObject, ScopedContext};
@@ -38,11 +45,14 @@ impl Method {
     }
 }
 
-const MOD_HTTP_ENTRIES: &[FieldDef] = &[FieldDef::CLASS(
-    "HttpServer",
-    JSHttpServer::class_id,
-    zuqe::JS_PROP_ENUMERABLE,
-)];
+const MOD_HTTP_ENTRIES: &[FieldDef] = &[
+    FieldDef::CLASS(
+        "HttpServer",
+        JSHttpServer::class_id,
+        zuqe::JS_PROP_ENUMERABLE,
+    ),
+    FieldDef::CLASS("McpStdio", JSMcpStdio::class_id, zuqe::JS_PROP_ENUMERABLE),
+];
 
 pub fn init_mod_http(ctx: &mut ScopedContext) -> Result<(), i32> {
     ctx.create_module("http", MOD_HTTP_ENTRIES)?;

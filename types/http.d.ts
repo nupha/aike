@@ -290,4 +290,79 @@ declare module "http" {
     /** Gracefully shut down the server. */
     shutdown(): Promise<void>;
   }
+
+  /**
+   * Options for McpStdio.start().
+   * Same tool definition format as HttpServer.mcp().
+   */
+  interface McpStdioOptions {
+    /** Server name reported in initialize response. */
+    serverName: string;
+    /** Server version reported in initialize response. */
+    version: string;
+    /**
+     * Tool definitions. Supports two formats:
+     * 1. Array of McpToolDefinition (JSON Schema inputSchema)
+     * 2. Object-keyed DSL format: { [name]: { desc, args, handler } }
+     */
+    tools: McpToolDefinition[] | McpToolMap;
+  }
+
+  /**
+   * Singleton MCP server over stdio transport (stdin/stdout).
+   *
+   * stdin/stdout is a process-wide exclusive resource, so McpStdio
+   * is a singleton — all methods are static. Only one instance can
+   * be running at a time.
+   *
+   * Usage:
+   *   const p = McpStdio.start({
+   *     serverName: "my-tools",
+   *     version: "1.0.0",
+   *     tools: {
+   *       echo: {
+   *         desc: "Echo back the message",
+   *         handler(args) { return { message: args.text }; },
+   *         args: { text: { desc: "Text to echo", required: true } }
+   *       }
+   *     }
+   *   });
+   *   // server is running in background...
+   *   McpStdio.stop(); // or wait for stdin EOF
+   *   await p;
+   */
+  export class McpStdio {
+    /** Cannot instantiate — use static methods. */
+    private constructor();
+
+    /**
+     * Start the MCP stdio server.
+     *
+     * Returns a Promise that resolves when the server stops,
+     * either because:
+     * - stop() was called
+     * - The MCP client disconnected (stdin EOF)
+     * - An error occurred
+     *
+     * This is NON-BLOCKING — the server runs in the background.
+     *
+     * @throws TypeError if the server is already running.
+     */
+    static start(options: McpStdioOptions): Promise<void>;
+
+    /**
+     * Gracefully stop the MCP stdio server.
+     *
+     * Cancels the underlying rmcp RunningService, closes the stdio
+     * transport, and resolves the Promise returned by start().
+     *
+     * Safe to call multiple times; no-op if already stopped.
+     */
+    static stop(): void;
+
+    /**
+     * Returns true if the server is currently running.
+     */
+    static isRunning(): boolean;
+  }
 }

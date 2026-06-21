@@ -126,6 +126,7 @@ fn add_timeout_nofitier(ctx: &mut ScopedContext) {
 
     crate::helpers::start_channel_poller(
         ctx,
+        "timeout",
         rx,
         |msg, cx| {
             match msg {

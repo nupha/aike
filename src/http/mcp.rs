@@ -31,7 +31,7 @@ use crate::USER_CLASS_DEFS;
 use super::class_http_server::IncomingRequest;
 
 /// Native tool handler function type.
-pub(super) type NativeMcpToolFn = Arc<
+pub(crate) type NativeMcpToolFn = Arc<
     dyn Fn(
             serde_json::Value,
         ) -> Pin<Box<dyn Future<Output = Result<serde_json::Value, String>> + Send>>
@@ -41,32 +41,32 @@ pub(super) type NativeMcpToolFn = Arc<
 
 /// MCP schemas shared between tokio closures (Send + Sync).
 /// Does NOT contain Object (which is !Send).
-pub(super) struct McpSchemas {
+pub(crate) struct McpSchemas {
     /// All tool schemas (native + JS), as rmcp::model::Tool values
-    pub(super) tools: Vec<rmcp::model::Tool>,
+    pub(crate) tools: Vec<rmcp::model::Tool>,
     /// Tool name -> index in tools
-    pub(super) name_to_index: HashMap<String, usize>,
+    pub(crate) name_to_index: HashMap<String, usize>,
     /// Tool name -> index in native_handlers (only for native tools)
-    pub(super) native_map: HashMap<String, usize>,
+    pub(crate) native_map: HashMap<String, usize>,
 }
 
 /// MCP endpoint state — holds everything needed to construct an rmcp service.
-pub(super) struct McpEndpoint {
-    pub(super) mount_path: String,
-    pub(super) server_name: String,
-    pub(super) server_version: String,
+pub(crate) struct McpEndpoint {
+    pub(crate) mount_path: String,
+    pub(crate) server_name: String,
+    pub(crate) server_version: String,
     /// Shared schemas accessible from tokio (Send + Sync)
-    pub(super) shared: Arc<RwLock<McpSchemas>>,
+    pub(crate) shared: Arc<RwLock<McpSchemas>>,
     /// Native handlers: (name, schema, handler_fn)
-    pub(super) handlers: Vec<(String, serde_json::Value, NativeMcpToolFn)>,
+    pub(crate) handlers: Vec<(String, serde_json::Value, NativeMcpToolFn)>,
     /// JS handlers (JS thread only, not Send)
-    pub(super) js_handlers: Vec<Object>,
+    pub(crate) js_handlers: Vec<Object>,
     /// Channel to send handler table updates to the poller
-    pub(super) update_tx: Option<channel::Sender<Vec<Object>>>,
+    pub(crate) update_tx: Option<channel::Sender<Vec<Object>>>,
 }
 
 impl McpEndpoint {
-    pub(super) fn gc_trace(&self, gcx: &mut GcTraceCtx) {
+    pub(crate) fn gc_trace(&self, gcx: &mut GcTraceCtx) {
         for handler in &self.js_handlers {
             handler.trace(gcx);
         }
@@ -76,33 +76,33 @@ impl McpEndpoint {
 /// MCP tool call request sent via crossbeam channel to the JS thread.
 /// Uses mpsc so the JS handler can send multiple chunks (SSE events) before
 /// the final result. The final message has `final_chunk: true`.
-pub(super) struct McpToolCallRequest {
-    pub(super) endpoint_index: usize,
-    pub(super) method_index: usize,
-    pub(super) params: serde_json::Value,
-    pub(super) response_tx: tokio::sync::mpsc::Sender<McpChunkMessage>,
+pub(crate) struct McpToolCallRequest {
+    pub(crate) endpoint_index: usize,
+    pub(crate) method_index: usize,
+    pub(crate) params: serde_json::Value,
+    pub(crate) response_tx: tokio::sync::mpsc::Sender<McpChunkMessage>,
 }
 
 /// A simple error for MCP tool call dispatch.
-pub(super) struct McpChunkError {
-    pub(super) code: i64,
-    pub(super) message: String,
+pub(crate) struct McpChunkError {
+    pub(crate) code: i64,
+    pub(crate) message: String,
 }
 
 /// A single chunk sent from JS tool handler to Rust MCP service.
 /// Either an intermediate SSE notification event or the final CallToolResult.
-pub(super) struct McpChunkMessage {
+pub(crate) struct McpChunkMessage {
     /// If true, this is the final message — the stream ends after this.
-    pub(super) final_chunk: bool,
+    pub(crate) final_chunk: bool,
     /// For intermediate chunks: the JSON-RPC notification payload (as JSON string).
     /// For the final chunk: the full CallToolResult JSON (as before).
-    pub(super) result_json: Option<String>,
+    pub(crate) result_json: Option<String>,
     /// Error (only meaningful for the final chunk).
-    pub(super) error: Option<McpChunkError>,
+    pub(crate) error: Option<McpChunkError>,
 }
 
 /// MCP Bridge: wraps mpsc::Sender<McpChunkMessage> for streaming tool results
-pub(super) struct McpBridgePayload {
+pub(crate) struct McpBridgePayload {
     tx: Option<tokio::sync::mpsc::Sender<McpChunkMessage>>,
 }
 
@@ -171,7 +171,7 @@ fn create_mcp_bridge(
 /// Implements `ServerHandler` manually (not via `#[tool_router]`) because tools
 /// are dynamic — JS tools are defined at runtime via the JS API.
 #[derive(Clone)]
-pub(super) struct McpService {
+pub(crate) struct McpService {
     /// Shared schemas for tools/list
     shared: Arc<RwLock<McpSchemas>>,
     /// Native handlers indexed by name
@@ -186,7 +186,7 @@ pub(super) struct McpService {
 }
 
 impl McpService {
-    pub(super) fn new(
+    pub(crate) fn new(
         shared: Arc<RwLock<McpSchemas>>,
         handlers: Vec<(String, serde_json::Value, NativeMcpToolFn)>,
         js_tx: channel::Sender<IncomingRequest>,
@@ -209,7 +209,7 @@ impl McpService {
     }
 
     /// Convert an McpEndpoint into an McpService.
-    pub(super) fn from_endpoint(
+    pub(crate) fn from_endpoint(
         ep: &McpEndpoint,
         js_tx: channel::Sender<IncomingRequest>,
         endpoint_index: usize,
@@ -381,7 +381,7 @@ impl ServerHandler for McpService {
 ///
 /// This spawns a tokio task that serves the MCP protocol over stdin/stdout.
 #[allow(dead_code)]
-pub(super) fn build_stdio_mcp(
+pub(crate) fn build_stdio_mcp(
     ep: &McpEndpoint,
     js_tx: channel::Sender<IncomingRequest>,
     endpoint_index: usize,
@@ -399,7 +399,7 @@ pub(super) fn build_stdio_mcp(
 ///
 /// The returned Router can be merged into an existing axum app via
 /// `router.merge(mcp_router)`.
-pub(super) fn build_axum_mcp_route(
+pub(crate) fn build_axum_mcp_route(
     ep: &McpEndpoint,
     js_tx: channel::Sender<IncomingRequest>,
     endpoint_index: usize,
@@ -434,7 +434,7 @@ pub(super) fn build_axum_mcp_route(
 /// Looks up the handler from the JS-thread handler table by method_index.
 /// Supports streaming: the JS handler can send intermediate chunks via the
 /// bridge before sending the final result.
-pub(super) fn handle_mcp_tool_call(
+pub(crate) fn handle_mcp_tool_call(
     cx: &mut ScopedContext,
     req: McpToolCallRequest,
     mcp_tables: &[Vec<Object>],

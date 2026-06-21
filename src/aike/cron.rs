@@ -123,6 +123,7 @@ fn add_cron_notifier(ctx: &mut ScopedContext) {
 
     crate::helpers::start_channel_poller(
         ctx,
+        "cron",
         rx,
         |msg, cx| {
             match msg {

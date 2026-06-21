@@ -27,7 +27,7 @@ use clap::Parser;
 use color::{Color::*, colorize_println};
 use linkme::distributed_slice;
 use zuqe::{
-    ClassID, EvalFlags, EvalType, Exception, ExitStatus, JSValue, ModuleDef, NativeObject, Runtime,
+    ClassID, EvalFlags, EvalType, Exception, ExitStatus, ModuleDef, NativeObject, Runtime,
     ScopedContext, builtins::promise::PromiseFuture,
 };
 
@@ -38,7 +38,10 @@ use crate::{
     fs::init_mod_fs,
     global::setup_globals,
     html::{HtmlDocument, HtmlElement, init_mod_html},
-    http::{JSHttpRequest, JSHttpResponse, JSHttpServer, init_mod_http},
+    http::{
+        JSHttpRequest, JSHttpResponse, JSHttpServer, JSMcpStdio, gc_trace_stdio_state,
+        init_mod_http,
+    },
     llm::{JSEngine, JSLlmClient, JSLlmContext, JSLlmModel, JSSamplerChain, init_mod_llm},
     path::init_mod_path,
     request::JSResponse,
@@ -241,7 +244,8 @@ async fn main() -> ExitCode {
         aike::signal::gc_trace_zuq_signals(gcx);
         gc_trace_timeout(gcx);
         gc_trace_cron(gcx);
-        gc_trace_io(gcx)
+        gc_trace_io(gcx);
+        gc_trace_stdio_state(gcx);
     });
 
     // register native classes
@@ -272,6 +276,7 @@ async fn main() -> ExitCode {
                 JSAbortSignal::class_id(),
                 JSCronJob::class_id(),
                 JSHttpServer::class_id(),
+                JSMcpStdio::class_id(),
                 JSHttpRequest::class_id(),
                 JSHttpResponse::class_id(),
                 HtmlDocument::class_id(),

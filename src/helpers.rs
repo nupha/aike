@@ -11,7 +11,7 @@ use minijinja::Environment;
 use minijinja_contrib::pycompat;
 use serde::Serialize;
 use serde_json::Value as JsonValue;
-use zuqe::{JobState, ScopedContext};
+use zuqe::{Exception, JobState, ScopedContext};
 
 #[derive(Debug, Serialize)]
 pub(crate) struct JinjaMessage {
@@ -512,6 +512,7 @@ fn secs_to_datetime(total_secs: u64) -> ((i64, u32, u32), (u32, u32, u32)) {
 /// and terminates.  A disconnected channel always triggers termination.
 pub(crate) fn start_channel_poller<T, F>(
     ctx: &mut ScopedContext,
+    label: &'static str,
     rx: crossbeam::channel::Receiver<T>,
     handler: F,
     has_entries: impl Fn() -> bool + 'static,
@@ -523,7 +524,15 @@ pub(crate) fn start_channel_poller<T, F>(
     ctx.queue_job(
         move |cx| match rx.try_recv() {
             Ok(msg) => {
-                if handler(msg, cx) {
+                let cont = handler(msg, cx);
+
+                // ES §9.5: handler returns bool, not Result — clear any
+                // exception it may have set via cx.throw_*().
+                if let exc @ Exception::Error(_) = cx.take_exception() {
+                    log::warn!("[channel poller:{label}] handler left exception: {exc:?}");
+                }
+
+                if cont {
                     Ok(JobState::Again)
                 } else {
                     on_finish();

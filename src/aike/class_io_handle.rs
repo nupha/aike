@@ -128,6 +128,7 @@ fn start_on_read_microtask(ctx: &mut ScopedContext) {
 
     crate::helpers::start_channel_poller(
         ctx,
+        "io_handle",
         rx,
         |msg, cx| {
             match msg {
@@ -139,7 +140,10 @@ fn start_on_read_microtask(ctx: &mut ScopedContext) {
                     if let Some(cb) = cb
                         && let Ok(arg) = TypedArray::create_from_vec_u8(cx, data).map(JSValue::from)
                     {
-                        let _ = cb.call(cx, JSValue::UNDEFINED, &[arg]);
+                        // Clear any exception the callback may have thrown (ES §9.5)
+                        if cb.call(cx, JSValue::UNDEFINED, &[arg]).is_err() {
+                            cx.take_exception();
+                        }
                     }
                 }
                 OnReadMsg::Eof(fd) => {
@@ -148,7 +152,10 @@ fn start_on_read_microtask(ctx: &mut ScopedContext) {
                             .and_then(|s| s.entries.remove(&fd).map(|e| e.callback))
                     });
                     if let Some(cb) = cb {
-                        let _ = cb.call(cx, JSValue::UNDEFINED, &[JSValue::NULL]);
+                        // Clear any exception the callback may have thrown (ES §9.5)
+                        if cb.call(cx, JSValue::UNDEFINED, &[JSValue::NULL]).is_err() {
+                            cx.take_exception();
+                        }
                     }
                 }
                 OnReadMsg::Error(fd, err_msg) => {
@@ -160,7 +167,10 @@ fn start_on_read_microtask(ctx: &mut ScopedContext) {
                         && let Some(err_obj) =
                             cx.create_error_object(zuqe::ErrorKind::Internal, &err_msg, false)
                     {
-                        let _ = cb.call(cx, JSValue::UNDEFINED, &[err_obj.into()]);
+                        // Clear any exception the callback may have thrown (ES §9.5)
+                        if cb.call(cx, JSValue::UNDEFINED, &[err_obj.into()]).is_err() {
+                            cx.take_exception();
+                        }
                     }
                 }
             }

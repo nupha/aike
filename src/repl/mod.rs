@@ -21,6 +21,16 @@ use rustyline::ExternalPrinter;
 /// ExternalPrinter instead of direct stdout.
 pub(super) static IN_READLINE: AtomicBool = AtomicBool::new(false);
 
+/// When true, print_output() routes all console.log/warn/error to stderr,
+/// keeping stdout clean for the MCP stdio transport.
+static STDIO_MODE: AtomicBool = AtomicBool::new(false);
+
+/// Enable stdio mode: all subsequent print_output() calls use stderr.
+/// Called by McpStdio::start() before the server begins.
+pub(crate) fn set_stdio_mode() {
+    STDIO_MODE.store(true, Ordering::Release);
+}
+
 /// Global printer used by print_output(). Initialized once at REPL startup.
 static PRINTER: OnceLock<Mutex<Box<dyn ExternalPrinter + Send>>> = OnceLock::new();
 
@@ -30,9 +40,11 @@ pub(super) fn init_printer(printer: Box<dyn ExternalPrinter + Send>) {
 }
 
 /// Print a message to the terminal. Uses ExternalPrinter during readline()
-/// (raw mode) and direct stdout otherwise.
+/// (raw mode), stderr in stdio mode, and direct stdout otherwise.
 pub(crate) fn print_output<'a>(msg: Cow<'a, str>) {
-    if IN_READLINE.load(Ordering::Acquire)
+    if STDIO_MODE.load(Ordering::Acquire) {
+        eprintln!("{}", msg);
+    } else if IN_READLINE.load(Ordering::Acquire)
         && let Some(mut p) = PRINTER.get().and_then(|x| x.lock().ok())
     {
         let _ = p.print(msg.to_string());

@@ -161,6 +161,7 @@ pub fn gc_trace_zuq_signals(gcx: &mut GcTraceCtx) {
 fn start_signal_microtask(ctx: &mut ScopedContext, rx: channel::Receiver<u32>) {
     crate::helpers::start_channel_poller(
         ctx,
+        "signal",
         rx,
         |sig_num, cx| {
             let cb = HANDLER_MAP.with(|map| map.borrow().get(&sig_num).copied());
