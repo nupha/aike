@@ -190,7 +190,7 @@ async fn main() -> ExitCode {
 
     let argv: Vec<String> = {
         let mut v = Vec::with_capacity(2 + args.script_args.len());
-        v.push(exe_path);
+        v.push(exe_path.clone());
         match &filename {
             Some(f) => v.push(f.clone()),
             None => v.push("<repl>".to_string()),
@@ -255,7 +255,7 @@ async fn main() -> ExitCode {
 
     // create context and setup
     let mut ctx = rt
-        .create_context(|cx| {
+        .create_context(move |cx| {
             ScopedContext::ECMA_CONTEXT_SETUP(cx)?;
 
             // use classes
@@ -294,7 +294,7 @@ async fn main() -> ExitCode {
             init_mod_html(cx)?;
             init_mod_browser(cx)?;
 
-            setup_globals(cx, &argv, &exec_argv)
+            setup_globals(cx, &argv, &exec_argv, &exe_path)
         })
         .inspect_err(|_| {
             let _ = rt.create_context(|cx| {

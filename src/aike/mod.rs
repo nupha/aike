@@ -12,18 +12,25 @@ pub(crate) use {
     cron::{JSCronJob, gc_trace_cron},
 };
 
-use zuqe::{Array, FieldDef, JS_PROP_C_W_E, JS_PROP_ENUMERABLE, JSValue, ScopedContext};
+use zuqe::{Array, FieldDef, JS_PROP_ENUMERABLE, JSValue, ScopedContext};
 
 /// Build and register the `Aike` global object.
 pub fn init_aike(
     ctx: &mut ScopedContext,
     argv: &[String],
     exec_argv: &[String],
+    exec_path: &str,
 ) -> Result<(), i32> {
     // Aike object inherits EventEmitter so process signals can be emitted on it
     // let mut ns =  class_event_emitter::create_event_emitter_instance(ctx)?;
 
     let mut ns = ctx.create_base_object()?;
+
+    // execPath — the aike runtime executable path
+    {
+        let s = ctx.create_string_from_utf8(exec_path.as_bytes().to_vec())?;
+        ns.define_property_value_str(ctx, "execPath", s.into(), JS_PROP_ENUMERABLE)?;
+    }
 
     // argv / execArgv require runtime data — build JS arrays dynamically
     {
@@ -33,7 +40,7 @@ pub fn init_aike(
             elems.push(s.into());
         }
         let arr = Array::from_values(ctx, elems)?;
-        ns.define_property_value_str(ctx, "argv", arr.into(), JS_PROP_C_W_E)?;
+        ns.define_property_value_str(ctx, "argv", arr.into(), JS_PROP_ENUMERABLE)?;
     }
     {
         let mut elems: Vec<JSValue> = Vec::with_capacity(exec_argv.len());
@@ -42,7 +49,7 @@ pub fn init_aike(
             elems.push(s.into());
         }
         let arr = Array::from_values(ctx, elems)?;
-        ns.define_property_value_str(ctx, "execArgv", arr.into(), JS_PROP_C_W_E)?;
+        ns.define_property_value_str(ctx, "execArgv", arr.into(), JS_PROP_ENUMERABLE)?;
     }
 
     let entries: &[FieldDef] = &[

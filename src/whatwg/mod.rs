@@ -32,10 +32,7 @@ use zuqe::{Object, ScopedContext};
 /// AbortController, AbortSignal) are automatically exposed to globalThis
 /// via `expose_to_global()` in the `def_native_object!` macro.
 /// Only non-class globals (console, timers, static methods) are installed here.
-pub(crate) fn install_whatwg_globals(
-    ctx: &mut ScopedContext,
-    mut global: Object,
-) -> Result<(), i32> {
+pub(crate) fn install_whatwg(ctx: &mut ScopedContext, mut global: Object) -> Result<(), i32> {
     console::install_console(ctx, &mut global)?;
     timeout::install_timeout(ctx, global)?;
     abort::install_abort_statics(ctx, &mut global)?;
