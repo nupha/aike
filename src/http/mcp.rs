@@ -18,6 +18,10 @@ use rmcp::{
         ProtocolVersion, ServerCapabilities, ServerInfo, ServerNotification,
     },
     service::{RequestContext, RoleServer},
+    transport::streamable_http_server::{
+        session::local::LocalSessionManager,
+        tower::{StreamableHttpServerConfig, StreamableHttpService},
+    },
 };
 use zuqe::{
     CallContext, Callback, ClassID, FieldDef, JSResult, JSValue, Object, Runtime, ScopedContext,
@@ -374,28 +378,10 @@ impl ServerHandler for McpService {
 }
 
 // ---------------------------------------------------------------------------
-// MCP transport builders
+// MCP transport — Streamable HTTP (stateful, session-based, SSE)
 // ---------------------------------------------------------------------------
 
-/// Build an rmcp stdio server future for the given endpoint.
-///
-/// This spawns a tokio task that serves the MCP protocol over stdin/stdout.
-#[allow(dead_code)]
-pub(crate) fn build_stdio_mcp(
-    ep: &McpEndpoint,
-    js_tx: channel::Sender<IncomingRequest>,
-    endpoint_index: usize,
-) -> tokio::task::JoinHandle<Result<(), rmcp::service::ServerInitializeError>> {
-    let service = McpService::from_endpoint(ep, js_tx, endpoint_index);
-    tokio::spawn(async move {
-        let transport = (tokio::io::stdin(), tokio::io::stdout());
-        rmcp::serve_server(service, transport)
-            .await
-            .map(|_running| ())
-    })
-}
-
-/// Build an axum Router for the MCP service using Streamable HTTP.
+/// Build an axum Router for the MCP service via Streamable HTTP.
 ///
 /// The returned Router can be merged into an existing axum app via
 /// `router.merge(mcp_router)`.
@@ -404,14 +390,7 @@ pub(crate) fn build_axum_mcp_route(
     js_tx: channel::Sender<IncomingRequest>,
     endpoint_index: usize,
 ) -> axum::Router {
-    use rmcp::transport::streamable_http_server::{
-        session::local::LocalSessionManager,
-        tower::{StreamableHttpServerConfig, StreamableHttpService},
-    };
-
     let service = McpService::from_endpoint(ep, js_tx, endpoint_index);
-    // Always use stateful SSE mode (session-based, text/event-stream).
-    // Stateless JSON mode breaks SSE notifications and streaming chunks.
     let config = StreamableHttpServerConfig::default()
         .with_stateful_mode(true)
         .disable_allowed_hosts();
