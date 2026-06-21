@@ -11,8 +11,8 @@ use std::{
 use std::os::fd::AsRawFd;
 
 use zuqe::{
-    CallContext, Callback, JS_GPN_ENUM_ONLY, JS_GPN_STR_OR_INT_MASK, JS_PROP_C_W_E, JS_PROP_ENUMERABLE,
-    JSResult, JSValue, Object, ScopedContext,
+    CallContext, Callback, JS_GPN_ENUM_ONLY, JS_GPN_STR_OR_INT_MASK, JS_PROP_C_W_E,
+    JS_PROP_ENUMERABLE, JSResult, JSValue, Object, ScopedContext,
     builtins::{promise::Promise, typed_array::TypedArray},
 };
 
@@ -230,6 +230,7 @@ fn spawn_async(ctx: &mut ScopedContext, mut child: tokio::process::Child, pid: i
             let fd = child_stdin.as_raw_fd();
             #[cfg(not(unix))]
             let fd = -1;
+
             match JSIoHandle::new_instance_pipe_write(ctx, child_stdin, fd) {
                 Ok(nob) => JSValue::from(nob),
                 Err(_) => JSValue::NULL,

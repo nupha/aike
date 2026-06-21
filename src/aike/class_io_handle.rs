@@ -28,6 +28,36 @@ use zuqe::{
 
 use crate::USER_CLASS_DEFS;
 
+/// RAII guard for a pipe fd — closes the fd on drop.
+#[cfg(unix)]
+pub(crate) struct PipeFd(i32);
+#[cfg(unix)]
+impl Drop for PipeFd {
+    fn drop(&mut self) {
+        if self.0 >= 0 {
+            unsafe {
+                libc::close(self.0);
+            }
+        }
+    }
+}
+#[cfg(unix)]
+impl PipeFd {
+    fn as_raw_fd(&self) -> i32 {
+        self.0
+    }
+}
+
+/// No-op fallback for non-Unix platforms.
+#[cfg(not(unix))]
+struct PipeFd(i32);
+#[cfg(not(unix))]
+impl PipeFd {
+    fn as_raw_fd(&self) -> i32 {
+        self.0
+    }
+}
+
 const PROP_FD: i32 = 5;
 const BUF_SIZE_STDIN: usize = 16384;
 const BUF_SIZE_FILE: usize = 65536;
@@ -51,20 +81,16 @@ pub(crate) enum IoPayload {
         Arc<tokio::sync::Mutex<Box<dyn tokio::io::AsyncRead + Unpin + Send>>>,
         i32,
     ),
-    PipeWrite(
-        Arc<tokio::sync::Mutex<Box<dyn tokio::io::AsyncWrite + Unpin + Send>>>,
-        i32,
-    ),
+    PipeWrite(PipeFd),
 }
 
 impl IoPayload {
     fn read_buf_size(&self) -> usize {
         match self {
             Self::File(..) => BUF_SIZE_FILE,
-            Self::Stdin => BUF_SIZE_STDIN,
-            Self::Stdout | Self::Stderr => 0,
             Self::PipeRead(..) => BUF_SIZE_PIPE,
-            Self::PipeWrite(..) => 0,
+            Self::Stdin => BUF_SIZE_STDIN,
+            Self::Stdout | Self::Stderr | Self::PipeWrite(..) => 0,
         }
     }
 
@@ -75,7 +101,8 @@ impl IoPayload {
             Self::Stdout => std::io::stdout().as_raw_fd(),
             Self::Stderr => std::io::stderr().as_raw_fd(),
             Self::File(fd, virt_fd) => fd.try_lock().map(|f| f.as_raw_fd()).unwrap_or(*virt_fd),
-            Self::PipeRead(_, f) | Self::PipeWrite(_, f) => *f,
+            Self::PipeRead(_, f) => *f,
+            Self::PipeWrite(fd) => fd.as_raw_fd(),
         }
 
         #[cfg(windows)]
@@ -716,6 +743,34 @@ fn js_fh_writeAll(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             let _ = out.flush();
             Ok(JSValue::Bool(ok))
         }
+        IoPayload::PipeWrite(fd) => {
+            // Pipe write(2) is a synchronous memcpy to kernel buffer
+            let ok = (|| -> std::io::Result<()> {
+                let mut offset = 0;
+                while offset < data.len() {
+                    // SAFETY: fd is a valid pipe fd owned by this IoHandle.
+                    let n = unsafe {
+                        libc::write(
+                            fd.as_raw_fd() as _,
+                            data[offset..].as_ptr() as *const _,
+                            data[offset..].len(),
+                        )
+                    };
+                    if n < 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    offset += n as usize;
+                }
+                Ok(())
+            })()
+            .is_ok();
+            Ok(JSValue::Bool(ok))
+        }
+        IoPayload::PipeRead(..) => {
+            ctx.throw_type_error("cannot write to pipe reader");
+            Err(-1)
+        }
+        // async
         IoPayload::File(fd, _) => {
             let (promise, tx) = Promise::create_with_channel::<Result<(), String>>(
                 ctx,
@@ -734,31 +789,6 @@ fn js_fh_writeAll(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 let _ = PollSender::from(tx).send_async(result).await;
             });
             Ok(promise.into())
-        }
-        IoPayload::PipeWrite(writer, _) => {
-            use tokio::io::AsyncWriteExt;
-            let (promise, tx) = Promise::create_with_channel::<Result<(), String>>(
-                ctx,
-                |cx, payload| -> JSResult {
-                    payload.map_err(|e| {
-                        cx.throw_internal_error(&e);
-                        -1
-                    })?;
-                    Ok(JSValue::UNDEFINED)
-                },
-            )?;
-            let writer = writer.clone();
-            tokio::spawn(async move {
-                let mut w = writer.lock().await;
-                let result = w.write_all(&data).await.map_err(|e| e.to_string());
-                let _ = w.flush().await;
-                let _ = PollSender::from(tx).send_async(result).await;
-            });
-            Ok(promise.into())
-        }
-        IoPayload::PipeRead(..) => {
-            ctx.throw_type_error("cannot write to pipe reader");
-            Err(-1)
         }
     }
 }
@@ -780,6 +810,12 @@ fn js_fh_flush(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             let _ = std::io::stderr().flush();
             Ok(JSValue::UNDEFINED)
         }
+        IoPayload::PipeWrite(..) | IoPayload::PipeRead(..) => {
+            // Pipe writes go directly to kernel pipe buffer —
+            // no userspace buffering to flush.
+            Ok(JSValue::UNDEFINED)
+        }
+        // async
         IoPayload::File(fd, _) => {
             use tokio::io::AsyncWriteExt;
             let (promise, tx) = Promise::create_with_channel::<Result<(), String>>(
@@ -800,27 +836,6 @@ fn js_fh_flush(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             });
             Ok(promise.into())
         }
-        IoPayload::PipeWrite(writer, _) => {
-            use tokio::io::AsyncWriteExt;
-            let (promise, tx) = Promise::create_with_channel::<Result<(), String>>(
-                ctx,
-                |cx, payload| -> JSResult {
-                    payload.map_err(|e| {
-                        cx.throw_internal_error(&e);
-                        -1
-                    })?;
-                    Ok(JSValue::UNDEFINED)
-                },
-            )?;
-            let writer = writer.clone();
-            tokio::spawn(async move {
-                let mut w = writer.lock().await;
-                let result = w.flush().await.map_err(|e| e.to_string());
-                let _ = PollSender::from(tx).send_async(result).await;
-            });
-            Ok(promise.into())
-        }
-        IoPayload::PipeRead(..) => Ok(JSValue::UNDEFINED),
     }
 }
 
@@ -830,10 +845,7 @@ fn js_fh_close(_: &mut ScopedContext, cc: CallContext) -> JSResult {
     Ok(JSValue::UNDEFINED)
 }
 
-// ---------------------------------------------------------------------------
-// stat helper — shared between IoHandle.stat and fs.stat
-// ---------------------------------------------------------------------------
-
+/// stat helper — shared between IoHandle.stat and fs.stat
 pub(crate) fn make_stats(
     ctx: &mut ScopedContext,
     meta: &std::fs::Metadata,
@@ -1123,14 +1135,21 @@ impl JSIoHandle {
     /// `fd` is the platform-specific file descriptor (used for the `.fd` property).
     pub fn new_instance_pipe_write(
         ctx: &mut ScopedContext,
-        writer: impl tokio::io::AsyncWrite + Unpin + Send + 'static,
-        fd: i32,
+        #[cfg(unix)] writer: impl tokio::io::AsyncWrite + Unpin + Send + 'static + AsRawFd,
+        #[cfg(not(unix))] _writer: impl tokio::io::AsyncWrite + Unpin + Send + 'static,
+        #[allow(unused)] fd: i32,
     ) -> Result<Self, i32> {
-        Self::new_instance(
-            ctx,
-            JSValue::UNDEFINED,
-            IoPayload::PipeWrite(Arc::new(tokio::sync::Mutex::new(Box::new(writer))), fd),
-        )
+        #[cfg(unix)]
+        let pipe_fd = {
+            // Take ownership of the fd from the caller — PipeFd will close it on drop.
+            let raw_fd = writer.as_raw_fd();
+            std::mem::forget(writer); // don't double-close
+            PipeFd(raw_fd)
+        };
+        #[cfg(not(unix))]
+        let pipe_fd = PipeFd(fd);
+
+        Self::new_instance(ctx, JSValue::UNDEFINED, IoPayload::PipeWrite(pipe_fd))
     }
 }
 
