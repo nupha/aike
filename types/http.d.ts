@@ -167,11 +167,7 @@ declare module "http" {
     args: Record<string, McpToolArgShort>;
   }
 
-  /** A map of tool names to tool definitions (object-keyed format). */
-  type McpToolMap = Record<string, McpToolShortDef>;
-
-  /** Options for `server.mcp()`. */
-  interface McpServerOptions {
+  interface McpOptions {
     /** Server name advertised in `initialize` response. */
     serverName: string;
     /** Server version advertised in `initialize` response. */
@@ -181,7 +177,7 @@ declare module "http" {
      * - `McpToolDefinition[]` — array of standard mcp tool definitions
      * - `McpToolMap` — object-keyed format with simplified DSL
      */
-    tools: McpToolDefinition[] | McpToolMap;
+    tools: McpToolDefinition[] | Record<string, McpToolShortDef>;
   }
 
   /** Incoming HTTP request passed to route handlers. Cannot be constructed directly. */
@@ -267,7 +263,7 @@ declare module "http" {
      * `notifications/initialized`, `tools/list`, `tools/call`.
      * Must be called BEFORE `listen()`.
      */
-    mcp(mountPath: string, options: McpServerOptions): this;
+    mcp(mountPath: string, options: McpOptions): this;
 
     /**
      * Hot-reload JS tools on an existing MCP endpoint (native tools preserved).
@@ -275,7 +271,7 @@ declare module "http" {
      */
     updateMcpTools(
       mountPath: string,
-      tools: McpToolDefinition[] | McpToolMap,
+      tools: McpToolDefinition[] | Record<string, McpToolShortDef>,
     ): this;
 
     /** Mount OpenAI-compatible LLM inference routes. */
@@ -292,24 +288,7 @@ declare module "http" {
   }
 
   /**
-   * Options for McpStdio.start().
-   * Same tool definition format as HttpServer.mcp().
-   */
-  interface McpStdioOptions {
-    /** Server name reported in initialize response. */
-    serverName: string;
-    /** Server version reported in initialize response. */
-    version: string;
-    /**
-     * Tool definitions. Supports two formats:
-     * 1. Array of McpToolDefinition (JSON Schema inputSchema)
-     * 2. Object-keyed DSL format: { [name]: { desc, args, handler } }
-     */
-    tools: McpToolDefinition[] | McpToolMap;
-  }
-
-  /**
-   * Singleton MCP server over stdio transport (stdin/stdout).
+   * MCP server over stdio transport (stdin/stdout).
    *
    * stdin/stdout is a process-wide exclusive resource, so McpStdio
    * is a singleton — all methods are static. Only one instance can
@@ -348,7 +327,7 @@ declare module "http" {
      *
      * @throws TypeError if the server is already running.
      */
-    static start(options: McpStdioOptions): Promise<void>;
+    static start(options: McpOptions): Promise<void>;
 
     /**
      * Gracefully stop the MCP stdio server.
