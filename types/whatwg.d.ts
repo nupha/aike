@@ -295,7 +295,7 @@ declare class AbortController {
 }
 
 // ---------------------------------------------------------------------------
-// IoHandle  —  used by Aike.stdin/stdout/stderr and fs.open()
+// StdioHandle / FileHandle  —  used by Aike.stdin/stdout/stderr and fs.open()
 // ---------------------------------------------------------------------------
 
 interface FileStat {
@@ -315,10 +315,10 @@ interface FileStat {
 }
 
 /**
- * I/O handle for files, stdin, stdout, stderr.
- * Cannot be constructed directly — obtained via Aike.stdin/stdout/stderr or fs.open().
+ * I/O handle for standard streams (stdin, stdout, stderr) and pipe write ends.
+ * Obtained via Aike.stdin/stdout/stderr or spawn().
  */
-declare class IoHandle {
+declare class StdioHandle {
   /** File descriptor number. */
   readonly fd: number;
   /** Read all content as a UTF-8 string. */
@@ -332,17 +332,50 @@ declare class IoHandle {
   /** Get file statistics. */
   stat(): Promise<FileStat>;
   /**
-   * Write data.
-   * - For stdout/stderr: returns boolean synchronously.
-   * - For file/pipe: returns Promise<void>.
+   * Write data synchronously.
+   * Returns boolean, no yield.
    */
-  write(data: string | Uint8Array | ArrayBuffer): Promise<void> | boolean;
+  writeSync(data: string | Uint8Array | ArrayBuffer): boolean;
   /**
-   * Flush buffered data.
-   * - For stdout/stderr: synchronous (returns void).
-   * - For file/pipe: returns Promise<void>.
+   * Flush write end — no-op for pipes and standard streams.
    */
-  flush(): Promise<void> | void;
+  flush(): void;
+  /** Close this I/O handle. */
+  close(): void;
+  /**
+   * Register a callback for incoming data (streaming mode).
+   * Pass null to unregister.
+   */
+  onData(callback: ((data: Uint8Array) => void) | null): void;
+  /** Async iterator over data chunks. */
+  [Symbol.asyncIterator](): AsyncIterableIterator<Uint8Array>;
+}
+
+/**
+ * I/O handle for files and pipe read ends (child stdout/stderr).
+ * Obtained via fs.open() or spawn().
+ */
+declare class FileHandle {
+  /** File descriptor number. */
+  readonly fd: number;
+  /** Read all content as a UTF-8 string. */
+  text(): Promise<string>;
+  /** Read and parse all content as JSON. */
+  json(): Promise<any>;
+  /** Read all content as a Uint8Array. */
+  bytes(): Promise<Uint8Array>;
+  /** Read up to `maxCount` bytes. */
+  read(maxCount?: number): Promise<Uint8Array>;
+  /** Get file statistics. */
+  stat(): Promise<FileStat>;
+  /**
+   * Write data asynchronously.
+   */
+  write(data: string | Uint8Array | ArrayBuffer): Promise<void>;
+  /**
+   * Flush buffered data asynchronously.
+   */
+  flush(): Promise<void>;
   /** Close this I/O handle. */
   close(): void;
   /**
@@ -415,11 +448,11 @@ interface AsyncSpawnResult {
   /** Process ID. */
   pid: number;
   /** Writable stdin handle, or null if not piped. */
-  stdin: IoHandle | null;
+  stdin: StdioHandle | null;
   /** Readable stdout handle, or null if not piped. */
-  stdout: IoHandle | null;
+  stdout: StdioHandle | null;
   /** Readable stderr handle, or null if not piped. */
-  stderr: IoHandle | null;
+  stderr: StdioHandle | null;
   /** Promise that resolves with the exit code. */
   exitCode: Promise<number>;
   /** Promise that resolves with the signal code, or null. */
@@ -472,11 +505,11 @@ declare namespace Aike {
   /** Command-line arguments passed to the runtime executable. */
   const execArgv: string[];
   /** Standard input handle. */
-  const stdin: IoHandle;
+  const stdin: StdioHandle;
   /** Standard output handle. */
-  const stdout: IoHandle;
+  const stdout: StdioHandle;
   /** Standard error handle. */
-  const stderr: IoHandle;
+  const stderr: StdioHandle;
   /** Environment variables (populated at startup). */
   const env: Record<string, string>;
 

@@ -16,7 +16,7 @@ use zuqe::{
     builtins::{promise::Promise, typed_array::TypedArray},
 };
 
-use super::{JSIoHandle, signal::signal_name};
+use super::{JSStdioHandle, signal::signal_name};
 
 pub(super) fn js_spawn(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let is_async = cc.magic() == 1;
@@ -231,7 +231,7 @@ fn spawn_async(ctx: &mut ScopedContext, mut child: tokio::process::Child, pid: i
             #[cfg(not(unix))]
             let fd = -1;
 
-            match JSIoHandle::new_instance_pipe_write(ctx, child_stdin, fd) {
+            match JSStdioHandle::new_instance_pipe_write(ctx, child_stdin, fd) {
                 Ok(nob) => JSValue::from(nob),
                 Err(_) => JSValue::NULL,
             }
@@ -240,7 +240,7 @@ fn spawn_async(ctx: &mut ScopedContext, mut child: tokio::process::Child, pid: i
     };
 
     // Take stdout pipe before moving child into async task,
-    // so we can create a PipeRead FileHandle while ScopedContext is available.
+    // so we can create a PipeRead StdioHandle while ScopedContext is available.
     // When stdout is not piped, this will be None → null.
     let stdout_val = match child.stdout.take() {
         Some(child_stdout) => {
@@ -248,7 +248,7 @@ fn spawn_async(ctx: &mut ScopedContext, mut child: tokio::process::Child, pid: i
             let fd = child_stdout.as_raw_fd();
             #[cfg(not(unix))]
             let fd = -1;
-            match JSIoHandle::new_instance_pipe_read(ctx, child_stdout, fd) {
+            match JSStdioHandle::new_instance_pipe_read(ctx, child_stdout, fd) {
                 Ok(nob) => JSValue::from(nob),
                 Err(_) => JSValue::NULL,
             }
@@ -263,7 +263,7 @@ fn spawn_async(ctx: &mut ScopedContext, mut child: tokio::process::Child, pid: i
             let fd = child_stderr.as_raw_fd();
             #[cfg(not(unix))]
             let fd = -1;
-            match JSIoHandle::new_instance_pipe_read(ctx, child_stderr, fd) {
+            match JSStdioHandle::new_instance_pipe_read(ctx, child_stderr, fd) {
                 Ok(nob) => JSValue::from(nob),
                 Err(_) => JSValue::NULL,
             }

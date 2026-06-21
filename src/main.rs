@@ -32,7 +32,7 @@ use zuqe::{
 };
 
 use crate::{
-    aike::{JSCronJob, JSIoHandle, gc_trace_cron, gc_trace_io},
+    aike::{JSCronJob, JSFileHandle, JSStdioHandle, gc_trace_cron, gc_trace_io},
     browser::{JSBrowser, JSTab, init_mod_browser},
     class_event_emitter::JSEventEmitter,
     fs::init_mod_fs,
@@ -266,7 +266,8 @@ async fn main() -> ExitCode {
                 JSEngine::class_id(),
                 JSLlmClient::class_id(),
                 JSSamplerChain::class_id(),
-                JSIoHandle::class_id(),
+                JSStdioHandle::class_id(),
+                JSFileHandle::class_id(),
                 JSResponse::class_id(),
                 JSTextDecoder::class_id(),
                 JSTextEncoder::class_id(),

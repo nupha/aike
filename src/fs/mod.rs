@@ -11,7 +11,7 @@ use zuqe::{
     builtins::{promise::Promise, typed_array::TypedArray},
 };
 
-use crate::aike::{JSIoHandle, make_stats};
+use crate::aike::{JSFileHandle, make_stats};
 
 thread_local! {
     /// Sandbox restriction: limits all fs access to this directory.
@@ -464,7 +464,7 @@ fn js_fs_open(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 cx.throw_internal_error(&e);
                 -1
             })?;
-            JSIoHandle::new_instance_file(cx, JSValue::UNDEFINED, file).map(JSValue::from)
+            JSFileHandle::new_instance_file(cx, JSValue::UNDEFINED, file).map(JSValue::from)
         },
     )?;
 

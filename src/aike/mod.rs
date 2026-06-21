@@ -8,7 +8,7 @@ mod spawn;
 mod sys;
 
 pub(crate) use {
-    class_io_handle::{JSIoHandle, gc_trace_io, make_stats},
+    class_io_handle::{JSFileHandle, JSStdioHandle, gc_trace_io, make_stats},
     cron::{JSCronJob, gc_trace_cron},
 };
 
@@ -78,17 +78,17 @@ pub fn init_aike(
         // --- stdio ---
         FieldDef::LAZY_VALUE(
             "stdin",
-            |cx| JSIoHandle::new_instance_stdin(cx).map(JSValue::from),
+            |cx| JSStdioHandle::new_instance_stdin(cx).map(JSValue::from),
             JS_PROP_ENUMERABLE,
         ),
         FieldDef::LAZY_VALUE(
             "stdout",
-            |cx| JSIoHandle::new_instance_stdout(cx).map(JSValue::from),
+            |cx| JSStdioHandle::new_instance_stdout(cx).map(JSValue::from),
             JS_PROP_ENUMERABLE,
         ),
         FieldDef::LAZY_VALUE(
             "stderr",
-            |cx| JSIoHandle::new_instance_stderr(cx).map(JSValue::from),
+            |cx| JSStdioHandle::new_instance_stderr(cx).map(JSValue::from),
             JS_PROP_ENUMERABLE,
         ),
     ];

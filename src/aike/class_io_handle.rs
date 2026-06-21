@@ -116,28 +116,24 @@ impl IoPayload {
     }
 }
 
-// ---------------------------------------------------------------------------
-// onRead — async read loop with callback, modeled after timeout.rs
-// ---------------------------------------------------------------------------
-
-enum OnReadMsg {
+enum OnDataMsg {
     Data(i32, Vec<u8>),
     Eof(i32),
     Error(i32, String),
 }
 
-struct OnReadEntry {
+struct OnDataEntry {
     callback: Object,
 }
 
-struct OnReadState {
-    entries: HashMap<i32, OnReadEntry>,
-    rx: Receiver<OnReadMsg>,
-    tx: Sender<OnReadMsg>,
+struct OnDataState {
+    entries: HashMap<i32, OnDataEntry>,
+    rx: Receiver<OnDataMsg>,
+    tx: Sender<OnDataMsg>,
 }
 
 thread_local! {
-    static ON_DATA_STATE: RefCell<Option<OnReadState>> = const { RefCell::new(None) };
+    static ON_DATA_STATE: RefCell<Option<OnDataState>> = const { RefCell::new(None) };
 }
 
 pub(crate) fn gc_trace_io(tr: &mut GcTraceCtx) {
@@ -159,7 +155,7 @@ fn start_on_read_microtask(ctx: &mut ScopedContext) {
         rx,
         |msg, cx| {
             match msg {
-                OnReadMsg::Data(fd, data) => {
+                OnDataMsg::Data(fd, data) => {
                     let cb = ON_DATA_STATE.with_borrow(|opt| {
                         opt.as_ref()
                             .and_then(|s| s.entries.get(&fd).map(|e| e.callback))
@@ -173,7 +169,7 @@ fn start_on_read_microtask(ctx: &mut ScopedContext) {
                         }
                     }
                 }
-                OnReadMsg::Eof(fd) => {
+                OnDataMsg::Eof(fd) => {
                     let cb = ON_DATA_STATE.with_borrow_mut(|opt| {
                         opt.as_mut()
                             .and_then(|s| s.entries.remove(&fd).map(|e| e.callback))
@@ -185,7 +181,7 @@ fn start_on_read_microtask(ctx: &mut ScopedContext) {
                         }
                     }
                 }
-                OnReadMsg::Error(fd, err_msg) => {
+                OnDataMsg::Error(fd, err_msg) => {
                     let cb = ON_DATA_STATE.with_borrow_mut(|opt| {
                         opt.as_mut()
                             .and_then(|s| s.entries.remove(&fd).map(|e| e.callback))
@@ -210,7 +206,7 @@ fn start_on_read_microtask(ctx: &mut ScopedContext) {
 
 /// Spawn an async read loop for an owned reader (Stdin — no locking).
 fn spawn_direct_read(
-    tx: Sender<OnReadMsg>,
+    tx: Sender<OnDataMsg>,
     fd: i32,
     buf_size: usize,
     mut reader: impl tokio::io::AsyncRead + Unpin + Send + 'static,
@@ -220,14 +216,14 @@ fn spawn_direct_read(
         loop {
             match reader.read(&mut buf).await {
                 Ok(0) => {
-                    let _ = tx.send(OnReadMsg::Eof(fd));
+                    let _ = tx.send(OnDataMsg::Eof(fd));
                     break;
                 }
                 Ok(n) => {
-                    let _ = tx.send(OnReadMsg::Data(fd, buf[..n].to_vec()));
+                    let _ = tx.send(OnDataMsg::Data(fd, buf[..n].to_vec()));
                 }
                 Err(e) => {
-                    let _ = tx.send(OnReadMsg::Error(fd, e.to_string()));
+                    let _ = tx.send(OnDataMsg::Error(fd, e.to_string()));
                     break;
                 }
             }
@@ -238,7 +234,7 @@ fn spawn_direct_read(
 /// Spawn an async read loop for a lock-based reader (File, PipeRead).
 /// The Mutex is acquired once per iteration so other tasks can interleave.
 fn spawn_locked_read<M: tokio::io::AsyncRead + Unpin + Send + 'static>(
-    tx: Sender<OnReadMsg>,
+    tx: Sender<OnDataMsg>,
     fd: i32,
     buf_size: usize,
     mutex: Arc<tokio::sync::Mutex<M>>,
@@ -249,14 +245,14 @@ fn spawn_locked_read<M: tokio::io::AsyncRead + Unpin + Send + 'static>(
             let mut guard = mutex.lock().await;
             match guard.read(&mut buf).await {
                 Ok(0) => {
-                    let _ = tx.send(OnReadMsg::Eof(fd));
+                    let _ = tx.send(OnDataMsg::Eof(fd));
                     break;
                 }
                 Ok(n) => {
-                    let _ = tx.send(OnReadMsg::Data(fd, buf[..n].to_vec()));
+                    let _ = tx.send(OnDataMsg::Data(fd, buf[..n].to_vec()));
                 }
                 Err(e) => {
-                    let _ = tx.send(OnReadMsg::Error(fd, e.to_string()));
+                    let _ = tx.send(OnDataMsg::Error(fd, e.to_string()));
                     break;
                 }
             }
@@ -265,8 +261,9 @@ fn spawn_locked_read<M: tokio::io::AsyncRead + Unpin + Send + 'static>(
 }
 
 fn get_io<'a>(ctx: &mut ScopedContext, val: &'a JSValue) -> Result<&'a IoPayload, i32> {
-    val.as_native_object::<JSIoHandle>()
+    val.as_native_object::<JSStdioHandle>()
         .and_then(|o| o.payload())
+        .or_else(|| JSFileHandle::payload_from(val))
         .ok_or_else(|| {
             ctx.throw_internal_error("invalid IoHandle instance");
             -1
@@ -298,9 +295,9 @@ fn js_fh_onData(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     // Initialize state if needed
     let need_microtask = ON_DATA_STATE.with_borrow(|opt| opt.is_none());
     if need_microtask {
-        let (tx, rx) = crossbeam::channel::bounded::<OnReadMsg>(256);
+        let (tx, rx) = crossbeam::channel::bounded::<OnDataMsg>(256);
         ON_DATA_STATE.with_borrow_mut(|opt| {
-            *opt = Some(OnReadState {
+            *opt = Some(OnDataState {
                 entries: HashMap::new(),
                 rx,
                 tx,
@@ -316,7 +313,7 @@ fn js_fh_onData(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     ON_DATA_STATE.with_borrow_mut(|opt| {
         if let Some(s) = opt.as_mut() {
-            s.entries.insert(raw_fd, OnReadEntry { callback });
+            s.entries.insert(raw_fd, OnDataEntry { callback });
         }
     });
 
@@ -335,7 +332,7 @@ fn js_fh_onData(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 spawn_locked_read(tx, raw_fd, BUF_SIZE_PIPE, reader.clone());
             }
             IoPayload::PipeWrite(..) => {
-                let _ = tx.send(OnReadMsg::Error(
+                let _ = tx.send(OnDataMsg::Error(
                     raw_fd,
                     "cannot read from pipe writer".to_string(),
                 ));
@@ -841,7 +838,12 @@ fn js_fh_flush(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
 /// close() — drop the io
 fn js_fh_close(_: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let _ = JSIoHandle::try_from(cc.this()).unwrap().take_payload();
+    let val = cc.this();
+    if let Ok(mut o) = JSStdioHandle::try_from(val) {
+        o.take_payload();
+    } else if let Ok(mut o) = JSFileHandle::try_from(val) {
+        o.take_payload();
+    }
     Ok(JSValue::UNDEFINED)
 }
 
@@ -1069,29 +1071,119 @@ fn js_fh_asyncIterator(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     Ok(iter.into())
 }
 
-const CLASS_IO_HANDLE_PROTO: &[FieldDef] = &[
+// ---------------------------------------------------------------------------
+// StdioHandle -- sync write/flush for stdin/stdout/stderr/pipeWrite
+// ---------------------------------------------------------------------------
+
+fn js_fh_writeSync(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let this = cc.this();
+    let desc = get_io(ctx, &this)?;
+
+    let arg = cc.arg(0);
+    let data: Vec<u8> = if let Some(s) = arg.as_string() {
+        s.content().encode_utf8(false).into_owned().into_bytes()
+    } else if let Some(p) = arg.as_object().map(|o| o.payload()) {
+        if let Some(ta) = p.typed_array() {
+            ta.bytes().to_vec()
+        } else if let Some(ab) = p.array_buffer() {
+            ab.bytes().to_vec()
+        } else {
+            ctx.throw_type_error("expect string, TypedArray or ArrayBuffer argument");
+            return Err(-1);
+        }
+    } else {
+        ctx.throw_type_error("expect string, TypedArray or ArrayBuffer argument");
+        return Err(-1);
+    };
+
+    match desc {
+        IoPayload::Stdin => {
+            ctx.throw_type_error("cannot write to stdin");
+            Err(-1)
+        }
+        IoPayload::Stdout => {
+            let mut out = std::io::stdout().lock();
+            let ok = out.write_all(&data).is_ok();
+            let _ = out.flush();
+            Ok(JSValue::Bool(ok))
+        }
+        IoPayload::Stderr => {
+            let mut out = std::io::stderr().lock();
+            let ok = out.write_all(&data).is_ok();
+            let _ = out.flush();
+            Ok(JSValue::Bool(ok))
+        }
+        IoPayload::PipeWrite(fd) => {
+            let ok = (|| -> std::io::Result<()> {
+                let mut offset = 0;
+                while offset < data.len() {
+                    let n = unsafe {
+                        libc::write(
+                            fd.as_raw_fd() as _,
+                            data[offset..].as_ptr() as *const _,
+                            data[offset..].len(),
+                        )
+                    };
+                    if n < 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    offset += n as usize;
+                }
+                Ok(())
+            })()
+            .is_ok();
+            Ok(JSValue::Bool(ok))
+        }
+        _ => {
+            ctx.throw_type_error("cannot write to this handle");
+            Err(-1)
+        }
+    }
+}
+
+fn js_fh_flushSync(_ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let val = cc.this();
+    let desc = get_io(_ctx, &val)?;
+    match desc {
+        IoPayload::PipeWrite(..) => {}
+        IoPayload::Stdout => {
+            let _ = std::io::stdout().flush();
+        }
+        IoPayload::Stderr => {
+            let _ = std::io::stderr().flush();
+        }
+        IoPayload::Stdin => {}
+        _ => {
+            _ctx.throw_type_error("cannot flush this handle");
+            return Err(-1);
+        }
+    }
+    Ok(JSValue::UNDEFINED)
+}
+
+const STDIO_HANDLE_PROTO: &[FieldDef] = &[
     FieldDef::GETSET("fd", Some(js_fh_fd), None, PROP_FD as _),
+    FieldDef::FUNC("writeSync", 1, js_fh_writeSync, 0),
+    FieldDef::FUNC("flush", 0, js_fh_flushSync, 0),
+    FieldDef::FUNC("close", 0, js_fh_close, 0),
     FieldDef::FUNC("text", 0, js_fh_text, 0),
     FieldDef::FUNC("json", 0, js_fh_json, 0),
     FieldDef::FUNC("bytes", 0, js_fh_bytes, 0),
     FieldDef::FUNC("read", 1, js_fh_read, 0),
     FieldDef::FUNC("stat", 0, js_fh_stat, 0),
-    FieldDef::FUNC("write", 1, js_fh_writeAll, 0),
-    FieldDef::FUNC("flush", 0, js_fh_flush, 0),
-    FieldDef::FUNC("close", 0, js_fh_close, 0),
     FieldDef::FUNC("onData", 1, js_fh_onData, 0),
     FieldDef::FUNC("[Symbol.asyncIterator]", 0, js_fh_asyncIterator, 0),
 ];
 
 def_native_object!(
-    "IoHandle",
-    JSIoHandle,
+    "StdioHandle",
+    JSStdioHandle,
     IoPayload,
-    CLASS_IO_HANDLE_PROTO,
+    STDIO_HANDLE_PROTO,
     None
 );
 
-impl JSIoHandle {
+impl JSStdioHandle {
     pub fn new_instance_stdin(ctx: &mut ScopedContext) -> Result<Self, i32> {
         Self::new_instance(ctx, JSValue::UNDEFINED, IoPayload::Stdin)
     }
@@ -1104,7 +1196,63 @@ impl JSIoHandle {
         Self::new_instance(ctx, JSValue::UNDEFINED, IoPayload::Stderr)
     }
 
-    /// Create a IoHandle from an already-opened tokio::fs::File
+    pub fn new_instance_pipe_write(
+        ctx: &mut ScopedContext,
+        #[cfg(unix)] writer: impl tokio::io::AsyncWrite + Unpin + Send + 'static + AsRawFd,
+        #[cfg(not(unix))] _writer: impl tokio::io::AsyncWrite + Unpin + Send + 'static,
+        #[allow(unused)] fd: i32,
+    ) -> Result<Self, i32> {
+        #[cfg(unix)]
+        let pipe_fd = {
+            let raw_fd = writer.as_raw_fd();
+            std::mem::forget(writer);
+            PipeFd(raw_fd)
+        };
+        #[cfg(not(unix))]
+        let pipe_fd = PipeFd(fd);
+        Self::new_instance(ctx, JSValue::UNDEFINED, IoPayload::PipeWrite(pipe_fd))
+    }
+
+    pub fn new_instance_pipe_read(
+        ctx: &mut ScopedContext,
+        reader: impl tokio::io::AsyncRead + Unpin + Send + 'static,
+        fd: i32,
+    ) -> Result<Self, i32> {
+        Self::new_instance(
+            ctx,
+            JSValue::UNDEFINED,
+            IoPayload::PipeRead(Arc::new(tokio::sync::Mutex::new(Box::new(reader))), fd),
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
+// FileHandle -- async write/flush for file/pipeRead
+// ---------------------------------------------------------------------------
+
+const FILE_HANDLE_PROTO: &[FieldDef] = &[
+    FieldDef::GETSET("fd", Some(js_fh_fd), None, PROP_FD as _),
+    FieldDef::FUNC("write", 1, js_fh_writeAll, 0),
+    FieldDef::FUNC("flush", 0, js_fh_flush, 0),
+    FieldDef::FUNC("close", 0, js_fh_close, 0),
+    FieldDef::FUNC("text", 0, js_fh_text, 0),
+    FieldDef::FUNC("json", 0, js_fh_json, 0),
+    FieldDef::FUNC("bytes", 0, js_fh_bytes, 0),
+    FieldDef::FUNC("read", 1, js_fh_read, 0),
+    FieldDef::FUNC("stat", 0, js_fh_stat, 0),
+    FieldDef::FUNC("onData", 1, js_fh_onData, 0),
+    FieldDef::FUNC("[Symbol.asyncIterator]", 0, js_fh_asyncIterator, 0),
+];
+
+def_native_object!(
+    "FileHandle",
+    JSFileHandle,
+    IoPayload,
+    FILE_HANDLE_PROTO,
+    None
+);
+
+impl JSFileHandle {
     pub fn new_instance_file(
         ctx: &mut ScopedContext,
         new_target: JSValue,
@@ -1117,8 +1265,6 @@ impl JSIoHandle {
         )
     }
 
-    /// Create a IoHandle from an async pipe reader (ChildStdout/ChildStderr).
-    /// `fd` is the platform-specific file descriptor (used for the `.fd` property).
     pub fn new_instance_pipe_read(
         ctx: &mut ScopedContext,
         reader: impl tokio::io::AsyncRead + Unpin + Send + 'static,
@@ -1131,29 +1277,18 @@ impl JSIoHandle {
         )
     }
 
-    /// Create a IoHandle from an async pipe writer (ChildStdin).
-    /// `fd` is the platform-specific file descriptor (used for the `.fd` property).
-    pub fn new_instance_pipe_write(
-        ctx: &mut ScopedContext,
-        #[cfg(unix)] writer: impl tokio::io::AsyncWrite + Unpin + Send + 'static + AsRawFd,
-        #[cfg(not(unix))] _writer: impl tokio::io::AsyncWrite + Unpin + Send + 'static,
-        #[allow(unused)] fd: i32,
-    ) -> Result<Self, i32> {
-        #[cfg(unix)]
-        let pipe_fd = {
-            // Take ownership of the fd from the caller — PipeFd will close it on drop.
-            let raw_fd = writer.as_raw_fd();
-            std::mem::forget(writer); // don't double-close
-            PipeFd(raw_fd)
-        };
-        #[cfg(not(unix))]
-        let pipe_fd = PipeFd(fd);
-
-        Self::new_instance(ctx, JSValue::UNDEFINED, IoPayload::PipeWrite(pipe_fd))
+    fn payload_from(val: &JSValue) -> Option<&IoPayload> {
+        val.as_native_object::<JSFileHandle>()
+            .and_then(|o| o.payload())
     }
 }
 
 #[distributed_slice(USER_CLASS_DEFS)]
-fn register_class_io_handle(rt: &mut Runtime) -> Result<ClassID, i32> {
-    JSIoHandle::register(rt)
+fn register_class_stdio_handle(rt: &mut Runtime) -> Result<ClassID, i32> {
+    JSStdioHandle::register(rt)
+}
+
+#[distributed_slice(USER_CLASS_DEFS)]
+fn register_class_file_handle(rt: &mut Runtime) -> Result<ClassID, i32> {
+    JSFileHandle::register(rt)
 }

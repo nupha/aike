@@ -95,10 +95,10 @@ declare module "fs" {
   // Open
 
   /**
-   * Open a file and return an IoHandle.
+   * Open a file and return a FileHandle.
    * @param flags - "r"|"rb" read, "r+"|"r+b" read+write, "w"|"wb" write(truncate),
    *   "w+"|"w+b" read+write(truncate), "a"|"ab" append, "a+"|"a+b" read+append, "rw" read+write(create).
    *   Default: "r"
    */
-  function open(path: string, flags?: string): Promise<IoHandle>;
+  function open(path: string, flags?: string): Promise<FileHandle>;
 }
