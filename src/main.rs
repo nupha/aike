@@ -181,12 +181,13 @@ async fn main() -> ExitCode {
 
     let args = Args::parse();
 
+    let filename: Option<String> = args.filename;
+
     // Build process.argv and process.execArgv
     let exe_path = std::env::current_exe()
+        .and_then(|p| p.canonicalize())
         .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|_| "zjs".to_string());
-
-    let filename: Option<String> = args.filename;
+        .expect("failed to resolve current executable path");
 
     let argv: Vec<String> = {
         let mut v = Vec::with_capacity(2 + args.script_args.len());
@@ -320,7 +321,7 @@ async fn main() -> ExitCode {
     let script = match std::fs::read_to_string(&ref_filename) {
         Ok(s) => s,
         Err(e) => {
-            colorize_println(format!("can't load file: {e}"), RedFg);
+            colorize_println(format!("cannot load '{ref_filename}': {e}"), RedFg);
             std::process::exit(-1);
         }
     };
@@ -451,8 +452,8 @@ fn js_module_loader(
         // js file
         match std::fs::read(file_name) {
             Ok(buf) => ctx.compile_module(&buf, file_name, false),
-            Err(_) => {
-                ctx.throw_reference_error(&format!("could not load module '{file_name}'"));
+            Err(e) => {
+                ctx.throw_reference_error(&format!("could not load module '{file_name}'. {e}"));
                 Err(-1)
             }
         }
