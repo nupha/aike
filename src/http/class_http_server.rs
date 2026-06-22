@@ -1151,7 +1151,7 @@ fn js_listen(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     }
 
     // Create exit promise — resolves when the server fully stops
-    let (exit_promise, exit_tx) =
+    let (mut exit_promise, exit_tx) =
         Promise::create_with_channel::<Result<(), ()>>(ctx, |_cx, _| Ok(JSValue::UNDEFINED))?;
 
     // Spawn tokio task that polls is_running and resolves the exit promise
@@ -1168,6 +1168,16 @@ fn js_listen(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         -1
     })?;
 
+    // Define a hidden reference to the HttpServer on the exit promise.
+    // This keeps the server alive as long as the promise is referenced
+    // (e.g. after startServer returns handle.exit and handle goes out of scope).
+    exit_promise.define_property_value_str(
+        ctx,
+        "_server",
+        this.into(),
+        0, // hidden: not configurable, not writable, not enumerable
+    )?;
+
     // prop: exit — readonly (no WRITABLE flag)
     handle_obj.define_property_value_str(
         ctx,
@@ -1175,6 +1185,7 @@ fn js_listen(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         exit_promise.into(),
         zuqe::JS_PROP_ENUMERABLE,
     )?;
+
     // method: shutdown — function that sends stop signal
     let shutdown_fn = ctx.create_native_function_with_data(
         Callback::Func(js_handle_shutdown),
