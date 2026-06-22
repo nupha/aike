@@ -5,8 +5,7 @@
 
 use std::time::Duration;
 
-use tokio::process::Child;
-use tokio::time::sleep;
+use tokio::{process::Child, time::sleep};
 
 /// Launch Chrome with remote debugging enabled.
 /// Returns (child_handle, webSocketDebuggerUrl).
@@ -29,6 +28,16 @@ pub(crate) async fn launch(
         "--no-default-browser-check".to_string(),
         "--disable-sync".to_string(),
         "--disable-background-networking".to_string(),
+        "--window-size=1280,800".to_string(),
+        // Use a temp user-data-dir so remote debugging port reliably opens.
+        // Without this, modern Chrome on macOS may silently skip the debug.
+        // Set window-size so the actual Chrome frame is large enough.
+        format!(
+            "--user-data-dir={}",
+            std::env::temp_dir()
+                .join(format!("aike-chrome-{}", port))
+                .display()
+        ),
     ];
 
     if headless {
