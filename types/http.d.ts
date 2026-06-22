@@ -280,11 +280,29 @@ declare module "http" {
     /** Whether the server is currently running. */
     readonly isRunning: boolean;
 
-    /** Start listening for HTTP requests. */
-    listen(options?: ListenOptions): void;
+    /** Start listening for HTTP requests. Returns a handle with server lifecycle control. */
+    listen(options?: ListenOptions): HttpServerHandle;
 
     /** Gracefully shut down the server. */
     shutdown(): Promise<void>;
+  }
+
+  /**
+   * Handle returned by {@link HttpServer.listen} for controlling
+   * the server lifecycle outside the HttpServer instance itself.
+   */
+  interface HttpServerHandle {
+    /**
+     * A Promise that resolves when the server fully stops.
+     * Use this to wait for graceful shutdown after calling `shutdown()`.
+     */
+    readonly exit: Promise<void>;
+
+    /**
+     * Send a stop request to the server.
+     * This returns immediately — use {@link exit} to wait for actual stop.
+     */
+    shutdown(): void;
   }
 
   /**

@@ -1135,6 +1135,9 @@ fn js_listen(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         p.is_running = handle.is_running.clone();
     }
 
+    // Clone is_running for the exit promise before handle.is_running gets moved
+    let running_flag = handle.is_running.clone();
+
     // Start unified server job on JS thread (handles HTTP and MCP tool calls)
     if let Some(js_rx) = js_rx_opt {
         js_start_server_job(
@@ -1147,7 +1150,47 @@ fn js_listen(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         );
     }
 
-    Ok(JSValue::UNDEFINED)
+    // Create exit promise — resolves when the server fully stops
+    let (exit_promise, exit_tx) =
+        Promise::create_with_channel::<Result<(), ()>>(ctx, |_cx, _| Ok(JSValue::UNDEFINED))?;
+
+    // Spawn tokio task that polls is_running and resolves the exit promise
+    tokio::spawn(async move {
+        while running_flag.load(Ordering::Acquire) {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let _ = PollSender::from(exit_tx).send_async(Ok(())).await;
+    });
+
+    // Create handle object with exit (readonly Promise) and shutdown()
+    let mut handle_obj = ctx.create_base_object().map_err(|_| {
+        ctx.throw_internal_error("failed to create handle object");
+        -1
+    })?;
+
+    // prop: exit — readonly (no WRITABLE flag)
+    handle_obj.define_property_value_str(
+        ctx,
+        "exit",
+        exit_promise.into(),
+        zuqe::JS_PROP_ENUMERABLE,
+    )?;
+    // method: shutdown — function that sends stop signal
+    let shutdown_fn = ctx.create_native_function_with_data(
+        Callback::Func(js_handle_shutdown),
+        "shutdown",
+        0,
+        0,
+        [this].into(),
+    )?;
+    handle_obj.define_property_value_str(
+        ctx,
+        "shutdown",
+        shutdown_fn.into(),
+        zuqe::JS_PROP_ENUMERABLE,
+    )?;
+
+    Ok(handle_obj.into())
 }
 
 /// Start the unified server job via queue_job — polls crossbeam channel on JS thread.
@@ -1315,6 +1358,25 @@ fn js_shutdown(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     });
 
     Ok(promise.into())
+}
+
+/// Handle's shutdown — sends stop signal only, returns immediately.
+/// The caller should await handle.exit to wait for the server to fully stop.
+fn js_handle_shutdown(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let mut server_val = cc.data(0);
+    let shutdown_tx = {
+        let p = get_server_payload_mut(ctx, &mut server_val)?;
+        if p.shutdown_tx.is_none() {
+            return Ok(JSValue::UNDEFINED);
+        }
+        let tx = p.shutdown_tx.take();
+        p.frozen = false;
+        tx
+    };
+    if let Some(tx) = shutdown_tx {
+        let _ = tx.send(());
+    }
+    Ok(JSValue::UNDEFINED)
 }
 
 fn js_is_running(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
