@@ -23,7 +23,7 @@ mod worker;
 
 use std::{io::Write, process::ExitCode};
 
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 use color::{Color::*, colorize_println};
 use linkme::distributed_slice;
 use zuqe::{
@@ -94,9 +94,12 @@ impl<A: Write, B: Write> Write for TeeWriter<A, B> {
 }
 
 #[derive(Debug, Parser)]
-#[command(version)]
+#[command(version, disable_help_flag = true)]
 struct Args {
-    #[arg(short, long, default_value_t = false, help = "load as ES6 module")]
+    #[arg(short = 'h', long = "help", help = "Print help")]
+    help: bool,
+
+    #[arg(short, long, default_value_t = false, help = "load as esm module")]
     module: bool,
 
     #[arg(
@@ -179,7 +182,17 @@ async fn main() -> ExitCode {
             .init();
     }
 
-    let args = Args::parse();
+    let mut args = Args::parse();
+
+    // --help without filename: show aike help and exit
+    // --help with filename: pass through to script
+    if args.help && args.filename.is_none() {
+        let _ = Args::command().print_help();
+        return ExitCode::SUCCESS;
+    }
+    if args.help {
+        args.script_args.insert(0, "--help".to_string());
+    }
 
     let filename: Option<String> = args.filename;
 
