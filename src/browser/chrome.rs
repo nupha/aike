@@ -38,10 +38,34 @@ pub(crate) async fn launch(
                 .join(format!("aike-chrome-{}", port))
                 .display()
         ),
+        
+        // === Anti-detection parameters (Phase 1) ===
+        // Hide navigator.webdriver attribute (most important one)
+        "--disable-blink-features=AutomationControlled".to_string(),
+        // Disable automation infobar
+        "--disable-automation".to_string(),
+        // Disable various background features to reduce fingerprint
+        "--disable-component-update".to_string(),
+        "--disable-default-apps".to_string(),
+        "--disable-notifications".to_string(),
+        "--disable-popup-blocking".to_string(),
+        "--disable-extensions".to_string(),
+        "--disable-domain-reliability".to_string(),
+        "--disable-background-timer-throttling".to_string(),
+        "--disable-backgrounding-occluded-windows".to_string(),
+        "--disable-features=ChromeWhatsNewUI,InterestFeedLoading,MediaRouter,NavigationThreading,OptimizationHints".to_string(),
+        "--disable-features=SafeBrowsingEnhancedProtection".to_string(),
+        "--disable-webrtc".to_string(),
+        "--lang=en-US".to_string(),
+        "--disable-dev-shm-usage".to_string(),
     ];
 
     if headless {
         args.push("--headless=new".to_string());
+        // Only disable sandbox in headless mode (security risk otherwise)
+        args.push("--no-sandbox".to_string());
+        // Reduce crashes in some headless environments
+        args.push("--disable-gpu".to_string());
     }
     if let Some(proxy) = proxy_url {
         args.push(format!("--proxy-server={}", proxy));
