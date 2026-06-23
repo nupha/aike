@@ -175,7 +175,7 @@ declare module "http" {
     /**
      * Tool definitions. Accepts either:
      * - `McpToolDefinition[]` — array of standard mcp tool definitions
-     * - `McpToolMap` — object-keyed format with simplified DSL
+     * - `Record<string, McpToolShortDef>` — object-keyed format with simplified DSL
      */
     tools: McpToolDefinition[] | Record<string, McpToolShortDef>;
   }
