@@ -9,7 +9,7 @@ pub(crate) enum Color {
     GreenFg,
     YellowFg,
     RedFg,
-    Default,
+    Reset,
 }
 
 fn ansi_code(c: Color) -> &'static str {
@@ -18,7 +18,7 @@ fn ansi_code(c: Color) -> &'static str {
         Color::GreenFg => "32",
         Color::YellowFg => "33",
         Color::RedFg => "31",
-        Color::Default => "39",
+        Color::Reset => "39",
     }
 }
 

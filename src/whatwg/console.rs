@@ -28,7 +28,7 @@ fn js_console_print(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         2 => Color::GreenFg,
         3 => Color::YellowFg,
         4 => Color::RedFg,
-        _ => Color::Default,
+        _ => Color::Reset,
     };
 
     let mut out = String::new();
@@ -71,15 +71,15 @@ fn js_console_trace(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let indent = GROUP_INDENT.with(|n| *n.borrow());
     let mut out = String::new();
     for _ in 0..indent {
-        out.push_str(&colorize("  ", Color::Default));
+        out.push_str(&colorize("  ", Color::Reset));
     }
 
-    out.push_str(&colorize("Trace", Color::Default));
+    out.push_str(&colorize("Trace", Color::Reset));
     if cc.length() > 0 {
-        out.push_str(&colorize(":", Color::Default));
+        out.push_str(&colorize(":", Color::Reset));
         for i in 0..cc.length() {
-            out.push_str(&colorize(" ", Color::Default));
-            out.push_str(&colorize(cc.arg(i).inspect(ctx)?, Color::Default));
+            out.push_str(&colorize(" ", Color::Reset));
+            out.push_str(&colorize(cc.arg(i).inspect(ctx)?, Color::Reset));
         }
     }
     console_println(out);
@@ -97,9 +97,9 @@ fn js_console_trace(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             for line in stack_str.lines().skip(1) {
                 let mut out = String::new();
                 for _ in 0..indent {
-                    out.push_str(&colorize("  ", Color::Default));
+                    out.push_str(&colorize("  ", Color::Reset));
                 }
-                out.push_str(&colorize(line, Color::Default));
+                out.push_str(&colorize(line, Color::Reset));
                 console_println(out);
             }
         }
@@ -112,7 +112,7 @@ fn js_console_dir(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let indent = GROUP_INDENT.with(|n| *n.borrow());
     let mut out = String::new();
     for _ in 0..indent {
-        out.push_str(&colorize("  ", Color::Default));
+        out.push_str(&colorize("  ", Color::Reset));
     }
     if cc.length() > 0 {
         out.push_str(&cc.arg(0).inspect(ctx)?);
@@ -138,9 +138,9 @@ fn js_console_count(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut out = String::new();
     let indent = GROUP_INDENT.with(|n| *n.borrow());
     for _ in 0..indent {
-        out.push_str(&colorize("  ", Color::Default));
+        out.push_str(&colorize("  ", Color::Reset));
     }
-    out.push_str(&colorize(format!("{label}: {count}"), Color::Default));
+    out.push_str(&colorize(format!("{label}: {count}"), Color::Reset));
     console_println(out);
 
     Ok(JSValue::UNDEFINED)
@@ -204,15 +204,15 @@ fn js_console_time_log(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut out = String::new();
     let indent = GROUP_INDENT.with(|n| *n.borrow());
     for _ in 0..indent {
-        out.push_str(&colorize("  ", Color::Default));
+        out.push_str(&colorize("  ", Color::Reset));
     }
 
     match elapsed_ms {
         Some(ms) => {
-            out.push_str(&colorize(format!("{label}: {ms:.1} ms"), Color::Default));
+            out.push_str(&colorize(format!("{label}: {ms:.1} ms"), Color::Reset));
             for i in 1..cc.length() {
-                out.push_str(&colorize(" ", Color::Default));
-                out.push_str(&colorize(&cc.arg(i).inspect(ctx)?, Color::Default));
+                out.push_str(&colorize(" ", Color::Reset));
+                out.push_str(&colorize(&cc.arg(i).inspect(ctx)?, Color::Reset));
             }
             console_println(out);
         }
@@ -244,12 +244,12 @@ fn js_console_time_end(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut out = String::new();
     let indent = GROUP_INDENT.with(|n| *n.borrow());
     for _ in 0..indent {
-        out.push_str(&colorize("  ", Color::Default));
+        out.push_str(&colorize("  ", Color::Reset));
     }
 
     match elapsed {
         Some(ms) => {
-            out.push_str(&colorize(format!("{label}: {ms:.1} ms"), Color::Default));
+            out.push_str(&colorize(format!("{label}: {ms:.1} ms"), Color::Reset));
             console_println(out);
         }
         None => {
@@ -283,7 +283,7 @@ fn js_console_group_end(_ctx: &mut ScopedContext, _cc: CallContext) -> JSResult 
 
 fn js_console_clear(_ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
     // ANSI clear screen + home cursor
-    console_println(colorize("\x1b[2J\x1b[H", Color::Default));
+    console_println(colorize("\x1b[2J\x1b[H", Color::Reset));
     Ok(JSValue::UNDEFINED)
 }
 
