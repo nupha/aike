@@ -345,7 +345,7 @@ async fn main() -> ExitCode {
 
     let mut promise_future: Option<PromiseFuture> = None;
 
-    let res = ctx.with_new_scope(|mut cx| {
+    let res = ctx.with_new_scope(|cx| {
         let r = cx
             .eval(
                 script.as_bytes(),
@@ -360,15 +360,15 @@ async fn main() -> ExitCode {
             .map(|v| v.as_object_Promise().copied());
 
         match r {
-            Ok(Some(p)) => match p.into_future(&mut cx) {
+            Ok(Some(p)) => match p.into_future(cx) {
                 Ok(fut) => {
                     promise_future = Some(fut);
-                    cx.return_with(Ok(()))
+                    Ok(())
                 }
-                Err(_) => cx.return_with(Err(-1)),
+                Err(_) => Err(-1),
             },
-            Ok(None) => cx.return_with(Ok(())),
-            Err(_) => cx.return_with(Err(-1)),
+            Ok(None) => Ok(()),
+            Err(_) => Err(-1),
         }
     });
 
@@ -416,9 +416,9 @@ async fn main() -> ExitCode {
             }
             Err(reason) => {
                 // Promise reject
-                let err_msg = ctx.with_new_scope(|mut cx| {
-                    let s = reason.to_string(&mut cx).unwrap();
-                    cx.return_with(s.encode_utf8(false).to_string())
+                let err_msg = ctx.with_new_scope(|cx| {
+                    let s = reason.to_string(cx).unwrap();
+                    s.encode_utf8(false).to_string()
                 });
                 colorize_println(err_msg, RedFg);
             }
@@ -441,9 +441,8 @@ async fn main() -> ExitCode {
             ExitCode::FAILURE
         }
         ExitStatus::Exception(Exception::Error(err)) => {
-            ctx.with_new_scope(|mut cx| {
-                colorize_println(err.to_string(&mut cx).unwrap().encode_utf8(false), RedFg);
-                cx.return_with(())
+            ctx.with_new_scope(|cx| {
+                colorize_println(err.to_string(cx).unwrap().encode_utf8(false), RedFg);
             });
             ExitCode::FAILURE
         }

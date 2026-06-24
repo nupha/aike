@@ -61,7 +61,7 @@ fn process_input_line(
             print_output(HELP.into());
         }
         _ => {
-            ctx.with_new_scope(|mut cx| {
+            ctx.with_new_scope(|cx| {
                 match cx.eval(
                     line.as_bytes(),
                     "<repl>",
@@ -70,12 +70,12 @@ fn process_input_line(
                 ) {
                     Ok(val) => {
                         let result = val
-                            .inspect(&mut cx)
+                            .inspect(cx)
                             .unwrap_or_else(|_| "<fail to display>".to_string());
                         print_output(result.into());
                     }
                     Err(_) => {
-                        let t = cx.take_exception().to_text(&mut cx);
+                        let t = cx.take_exception().to_text(cx);
                         let mut msg = t.message;
                         if let Some(tb) = t.traceback {
                             msg.push('\n');
@@ -84,8 +84,6 @@ fn process_input_line(
                         print_output(format!("\x1b[31m{}\x1b[0m", msg).into());
                     }
                 }
-
-                cx.return_with(())
             });
 
             let _ = ack_tx.send(());
@@ -280,9 +278,8 @@ pub(crate) async fn run<'c>(mut rt: zuqe::Runtime, mut ctx0: zuqe::Context<'c>) 
             // completion request
             req = req_rx.recv() => {
                 let Some(req) = req else { continue };
-                ctx0.with_new_scope(|mut scope| {
-                    js_compute_completions(&mut scope, req);
-                    scope.return_with(())
+                ctx0.with_new_scope(|scope| {
+                    js_compute_completions(scope, req);
                 });
             }
         }

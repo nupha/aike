@@ -74,14 +74,13 @@ pub(super) fn js_evalScript(ctx: &mut ScopedContext, cc: CallContext) -> JSResul
         flags |= EvalFlags::COMPILE_TO_ASYNC;
     }
 
-    ctx.with_new_scope(|mut scope| {
-        let r = scope.eval(
+    ctx.with_new_scope(|scope| {
+        scope.eval(
             str.content().encode_utf8_bytes(true).as_ref(),
             "<evalScript>",
             EvalType::Global,
             flags,
-        );
-        scope.return_with(r)
+        )
     })
 }
 

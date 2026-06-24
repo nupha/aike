@@ -85,13 +85,13 @@ fn js_console_trace(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     console_println(out);
 
     // Append stack trace via JS eval
-    let _ = ctx.with_new_scope(|mut scope| {
+    let _ = ctx.with_new_scope(|scope| {
         if let Ok(stack_val) = scope.eval(
             b"new Error().stack",
             "<console.trace>",
             EvalType::Global,
             EvalFlags::empty(),
-        ) && let Ok(s) = stack_val.to_string(&mut scope)
+        ) && let Ok(s) = stack_val.to_string(scope)
         {
             let stack_str = format!("{}", s.deref());
             for line in stack_str.lines().skip(1) {
@@ -103,7 +103,6 @@ fn js_console_trace(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 console_println(out);
             }
         }
-        scope.return_with(Ok::<(), i32>(()))
     });
 
     Ok(JSValue::UNDEFINED)
