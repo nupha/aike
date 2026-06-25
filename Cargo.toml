@@ -50,6 +50,7 @@ reqwest = { version = "0.13", default-features = false, features = [
 llama-cpp-ffi = { path = "../llama-cpp-ffi", features = ["cmake_static"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1"
+serde_yaml = "0.9"
 dotenvy = "0.15"
 glob = "0.3"
 libc = "0.2"

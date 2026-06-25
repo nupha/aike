@@ -20,6 +20,7 @@ mod request;
 mod responses;
 mod whatwg;
 mod worker;
+mod yaml;
 
 use std::{io::Write, process::ExitCode};
 
@@ -45,6 +46,7 @@ use crate::{
     llm::{JSEngine, JSLlmClient, JSLlmContext, JSLlmModel, JSSamplerChain, init_mod_llm},
     path::init_mod_path,
     request::JSResponse,
+    yaml::init_mod_yaml,
     whatwg::{
         abort::{JSAbortController, JSAbortSignal},
         text_decoder::JSTextDecoder,
@@ -307,6 +309,7 @@ async fn main() -> ExitCode {
             init_mod_path(cx)?;
             init_mod_html(cx)?;
             init_mod_browser(cx)?;
+            init_mod_yaml(cx)?;
 
             setup_globals(cx, &argv, &exec_argv, &exe_path)
         })
