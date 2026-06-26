@@ -12,7 +12,7 @@ use std::{
     cell::{Cell, RefCell},
     collections::HashMap,
     sync::{
-        Arc, Mutex,
+        Arc,
         atomic::{AtomicBool, Ordering},
     },
 };
@@ -70,10 +70,12 @@ pub(super) struct HttpRequest {
 }
 
 pub(super) struct HttpServerPayload {
-    #[cfg(feature = "llama_cpp")]
-    openai: Option<(Arc<Mutex<Engine>>, String)>,
     js_routes: Vec<(Method, String, Object)>,
     mcp_endpoints: Vec<McpEndpoint>,
+
+    #[cfg(feature = "llama_cpp")]
+    openai: Option<(Arc<std::sync::Mutex<Engine>>, String)>,
+
     shutdown_tx: Option<oneshot::Sender<()>>,
     is_running: Arc<AtomicBool>,
     frozen: bool,
