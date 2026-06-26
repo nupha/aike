@@ -13,8 +13,7 @@ use std::{
 
 #[cfg(unix)]
 use std::os::fd::AsRawFd;
-#[cfg(windows)]
-use std::os::windows::io::AsRawHandle;
+
 
 use crossbeam::channel::{Receiver, Sender};
 use linkme::distributed_slice;
@@ -43,7 +42,7 @@ impl Drop for PipeFd {
 }
 #[cfg(unix)]
 impl PipeFd {
-    fn as_raw_fd(&self) -> i32 {
+    fn as_virt_fd(&self) -> i32 {
         self.0
     }
 }
@@ -53,7 +52,7 @@ impl PipeFd {
 struct PipeFd(i32);
 #[cfg(not(unix))]
 impl PipeFd {
-    fn as_raw_fd(&self) -> i32 {
+    fn as_virt_fd(&self) -> i32 {
         self.0
     }
 }
@@ -94,7 +93,7 @@ impl IoPayload {
         }
     }
 
-    fn as_raw_fd(&self) -> i32 {
+    fn as_virt_fd(&self) -> i32 {
         #[cfg(unix)]
         match self {
             Self::Stdin => std::io::stdin().as_raw_fd(),
@@ -102,7 +101,7 @@ impl IoPayload {
             Self::Stderr => std::io::stderr().as_raw_fd(),
             Self::File(fd, virt_fd) => fd.try_lock().map(|f| f.as_raw_fd()).unwrap_or(*virt_fd),
             Self::PipeRead(_, f) => *f,
-            Self::PipeWrite(fd) => fd.as_raw_fd(),
+            Self::PipeWrite(fd) => fd.as_virt_fd(),
         }
 
         #[cfg(windows)]
@@ -110,8 +109,9 @@ impl IoPayload {
             Self::Stdin => 0,
             Self::Stdout => 1,
             Self::Stderr => 2,
-            Self::OpenFile { .. } => -1,
-            Self::PipeRead(..) | Self::PipeWrite(..) => -1,
+            Self::File(_, virt_fd) => *virt_fd,
+            Self::PipeRead(_, f) => *f,
+            Self::PipeWrite(fd) => fd.as_virt_fd(),
         }
     }
 }
@@ -273,7 +273,7 @@ fn get_io<'a>(ctx: &mut ScopedContext, val: &'a JSValue) -> Result<&'a IoPayload
 fn js_fh_onData(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let desc = get_io(ctx, &this)?;
-    let raw_fd = desc.as_raw_fd();
+    let raw_fd = desc.as_virt_fd();
 
     // Cannot read from stdout/stderr
     if matches!(desc, IoPayload::Stdout | IoPayload::Stderr) {
@@ -748,9 +748,9 @@ fn js_fh_writeAll(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                     // SAFETY: fd is a valid pipe fd owned by this IoHandle.
                     let n = unsafe {
                         libc::write(
-                            fd.as_raw_fd() as _,
+                            fd.as_virt_fd() as _,
                             data[offset..].as_ptr() as *const _,
-                            data[offset..].len(),
+                            data[offset..].len() as _,
                         )
                     };
                     if n < 0 {
@@ -944,7 +944,7 @@ pub(crate) fn make_stats(
 fn js_fh_fd(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let desc = get_io(ctx, &this)?;
-    Ok(JSValue::Int(desc.as_raw_fd()))
+    Ok(JSValue::Int(desc.as_virt_fd()))
 }
 
 // ---------------------------------------------------------------------------
@@ -1119,9 +1119,9 @@ fn js_fh_writeSync(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 while offset < data.len() {
                     let n = unsafe {
                         libc::write(
-                            fd.as_raw_fd() as _,
+                            fd.as_virt_fd() as _,
                             data[offset..].as_ptr() as *const _,
-                            data[offset..].len(),
+                            data[offset..].len() as _,
                         )
                     };
                     if n < 0 {

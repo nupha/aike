@@ -12,7 +12,11 @@ pub fn extract_reasoning_from_text(text: &str) -> (Option<String>, String) {
         let after_start = &text[start + think_start.len()..];
         if let Some(end) = after_start.find(think_end) {
             let reasoning = after_start[..end].to_string();
-            let clean = format!("{}{}", &text[..start], &after_start[end + think_end.len()..]);
+            let clean = format!(
+                "{}{}",
+                &text[..start],
+                &after_start[end + think_end.len()..]
+            );
             return (Some(reasoning), clean.trim().to_string());
         }
     }
@@ -84,10 +88,7 @@ pub fn build_responses_response(
 }
 
 /// Build a "response.created" event for SSE stream.
-pub fn build_response_created_event(
-    respond_id: &str,
-    model_name: &str,
-) -> serde_json::Value {
+pub fn build_response_created_event(respond_id: &str, model_name: &str) -> serde_json::Value {
     json!({
         "id": respond_id,
         "object": "response",
@@ -98,10 +99,7 @@ pub fn build_response_created_event(
 }
 
 /// Build a "response.output_item.added" event for a message item.
-pub fn build_output_item_added_event(
-    seq: u64,
-    output_index: u32,
-) -> serde_json::Value {
+pub fn build_output_item_added_event(seq: u64, output_index: u32) -> serde_json::Value {
     json!({
         "type": "response.output_item.added",
         "sequence_number": seq,
@@ -152,11 +150,7 @@ pub fn build_text_delta_event(
 }
 
 /// Build a "response.reasoning_summary.delta" event.
-pub fn build_reasoning_delta_event(
-    seq: u64,
-    output_index: u32,
-    delta: &str,
-) -> serde_json::Value {
+pub fn build_reasoning_delta_event(seq: u64, output_index: u32, delta: &str) -> serde_json::Value {
     json!({
         "type": "response.reasoning_summary.delta",
         "sequence_number": seq,

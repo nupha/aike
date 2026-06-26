@@ -1,5 +1,9 @@
+#![cfg(feature = "llama_cpp")]
+
+#[cfg(feature = "llama_cpp")]
 use std::collections::VecDeque;
 
+#[cfg(feature = "llama_cpp")]
 use super::{
     Engine,
     slot::{Slot, SlotState},

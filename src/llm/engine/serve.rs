@@ -1,8 +1,11 @@
+#![cfg(feature = "llama_cpp")]
+
 // Engine OpenAI-compatible HTTP handlers.
 //
 // Provides handler functions and `engine_routes()` which returns RouteEntry
 // items for all Engine-related routes (/v1/chat/completions, /v1/models, etc).
 
+#[cfg(feature = "llama_cpp")]
 use std::{
     ffi::CString,
     sync::{Arc, Mutex},

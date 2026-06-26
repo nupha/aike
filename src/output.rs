@@ -16,16 +16,17 @@ use async_openai::types::{
         ResponseUsage, Status, SummaryPart, SummaryTextContent,
     },
 };
+#[cfg(feature = "llama_cpp")]
 use llama_cpp_ffi::ModelArch;
 use uuid::Uuid;
 
 use crate::{
     helpers::now_unix_s,
-    llm::{
-        ERR_CANCELLED, ERR_ENGINE_SHUTDOWN, OUTMSG_FIELD_CHOICES, OUTMSG_FIELD_REASONING,
-        engine::{EngineReply, GeneratedContent, StopReason},
-    },
+    llm::{OUTMSG_FIELD_CHOICES, OUTMSG_FIELD_REASONING},
 };
+
+#[cfg(feature = "llama_cpp")]
+use crate::llm::{ERR_CANCELLED, ERR_ENGINE_SHUTDOWN, engine::{EngineReply, GeneratedContent, StopReason}};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum ParserKind {
@@ -33,6 +34,7 @@ pub(crate) enum ParserKind {
     Responses,
 }
 
+#[cfg(feature = "llama_cpp")]
 impl GeneratedContent {
     /// Convert GeneratedContent to chat completion chunk
     pub fn into_chat_chunk(
@@ -162,6 +164,7 @@ pub(crate) enum ChunkSSE {
     Done,
 }
 
+#[cfg(feature = "llama_cpp")]
 pub(crate) fn redirect_engine_reply_to_chat_sse(
     rx: crossbeam::channel::Receiver<EngineReply>,
     timeout: std::time::Duration,
@@ -274,6 +277,7 @@ pub(crate) fn redirect_engine_reply_to_chat_sse(
 /// EngineReply::Content already carries parsed `GeneratedContent` (Text/Reasoning/ToolCall),
 /// so the engine-side OutputParser handles tag/state machine logic — no need for LlmOutputParser.
 /// Only non-empty output content is included.
+#[cfg(feature = "llama_cpp")]
 pub(crate) fn collect_engine_reply_to_json(
     rx: crossbeam::channel::Receiver<EngineReply>,
     timeout: std::time::Duration,
@@ -545,6 +549,7 @@ fn emit_item_added(
 
 /// Direct EngineReply -> Response API event stream (streaming variant).
 /// Uses async_openai ResponseStreamEvent standard types for serialization.
+#[cfg(feature = "llama_cpp")]
 pub(crate) fn redirect_engine_reply_to_responses_sse(
     rx: crossbeam::channel::Receiver<EngineReply>,
     timeout: std::time::Duration,

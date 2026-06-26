@@ -6,6 +6,7 @@ use async_openai::types::chat::{
     ReasoningEffort, ResponseFormat, ToolChoiceOptions,
 };
 use crossbeam::channel::TryRecvError;
+#[cfg(feature = "llama_cpp")]
 use llama_cpp_ffi::{LlamaModel, ToolChoice as LarkToolChoice};
 use minijinja::Environment;
 use minijinja_contrib::pycompat;
@@ -147,6 +148,7 @@ pub(crate) fn tool_choice_to_string(tc: &ChatCompletionToolChoiceOption) -> Stri
 }
 
 /// Map async-openai ToolChoiceOption to LarkToolChoice for grammar controller.
+#[cfg(feature = "llama_cpp")]
 pub(crate) fn to_lark_tool_choice(tc: &ChatCompletionToolChoiceOption) -> LarkToolChoice {
     match tc {
         ChatCompletionToolChoiceOption::Mode(m) => match m {
@@ -203,6 +205,7 @@ pub(crate) fn message_to_role_content(msg: &ChatCompletionRequestMessage) -> (&s
     }
 }
 
+#[cfg(feature = "llama_cpp")]
 pub(crate) fn apply_chat_template(
     model: &LlamaModel,
     messages: &[ChatCompletionRequestMessage],
@@ -284,6 +287,7 @@ pub(crate) fn apply_chat_template(
 /// The messages are rendered through the chat template so that template
 /// prefixes/suffixes (e.g. `<|start_header_id|>system<|end_header_id|>\n\n`)
 /// are included in the token count.
+#[cfg(feature = "llama_cpp")]
 pub(crate) fn compute_keep_tokens(
     model: &LlamaModel,
     messages: &[ChatCompletionRequestMessage],

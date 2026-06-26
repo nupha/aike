@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
+llama_cpp = ["llama-cpp-ffi"]
 cuda = ["llama-cpp-ffi/cuda"]
 metal = ["llama-cpp-ffi/metal"]
 enable_eval_log = []            # 启用 DeepEval 评估日志采集
@@ -47,7 +48,7 @@ reqwest = { version = "0.13", default-features = false, features = [
     "deflate",
     "rustls",
 ] }
-llama-cpp-ffi = { path = "../llama-cpp-ffi", features = ["cmake_static"] }
+llama-cpp-ffi = { path = "../llama-cpp-ffi", features = ["cmake_static"], optional=true }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
@@ -104,6 +105,13 @@ tokio-tungstenite = { version = "0.24", default-features = false, features = [
 ] }
 url = "2"
 base64 = "0.22"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.0", features = [
+    "Win32_Foundation",
+    "Win32_System_Console",
+    "Win32_System_Threading",
+] }
 
 [[bin]]
 name = "aike"

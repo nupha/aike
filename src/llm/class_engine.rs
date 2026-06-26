@@ -1,3 +1,5 @@
+#![cfg(feature = "llama_cpp")]
+
 use std::{
     cell::Cell,
     ffi::CString,
@@ -136,11 +138,6 @@ fn get_engine(ctx: &mut ScopedContext, val: &JSValue) -> Result<Arc<Mutex<Engine
         Err(-1)
     }
 }
-
-pub(super) const MAGIC_CHAT_ONCE: i32 = 2;
-pub(super) const MAGIC_CHAT_STREAM: i32 = 3;
-pub(super) const MAGIC_RESPONSES_ONCE: i32 = 5;
-pub(super) const MAGIC_RESPONSES_STREAM: i32 = 4;
 
 fn stop_to_vec(stop: &StopConfiguration) -> Option<Vec<String>> {
     match stop {

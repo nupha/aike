@@ -6,7 +6,6 @@ use std::{
     io::{Read, Write},
     process::{ExitStatus, Stdio},
 };
-
 #[cfg(unix)]
 use std::os::fd::AsRawFd;
 
@@ -342,6 +341,7 @@ fn spawn_async(ctx: &mut ScopedContext, mut child: tokio::process::Child, pid: i
 
 /// kill(signal?) — send signal to child process.
 /// Reads `pid` from `this`, sends signal via libc::kill().
+#[cfg(unix)]
 fn js_child_kill(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let pid = pid_from_this(ctx, &cc);
     if pid <= 0 {
@@ -366,7 +366,32 @@ fn js_child_kill(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     Ok(JSValue::Bool(ret == 0))
 }
 
+/// Windows equivalent: kill process by pid (ignores signal arg).
+#[cfg(windows)]
+fn js_child_kill(_ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let pid = pid_from_this(_ctx, &cc);
+    if pid <= 0 {
+        return Ok(JSValue::Bool(false));
+    }
+    Ok(JSValue::Bool(unsafe { terminate_process(pid) }))
+}
+#[cfg(windows)]
+unsafe fn terminate_process(pid: i32) -> bool {
+    use windows_sys::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
+    use windows_sys::Win32::Foundation::CloseHandle;
+
+    // SAFETY: pid is a valid process id from a spawned child process.
+    let handle = unsafe { OpenProcess(PROCESS_TERMINATE, 0, pid as u32) };
+    if handle.is_null() {
+        return false;
+    }
+    let ok = unsafe { TerminateProcess(handle, 1) != 0 };
+    unsafe { CloseHandle(handle) };
+    ok
+}
+
 /// isRunning() — check if child process is still alive using kill(pid, 0).
+#[cfg(unix)]
 fn js_child_isRunning(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let pid = pid_from_this(ctx, &cc);
     if pid <= 0 {
@@ -374,6 +399,28 @@ fn js_child_isRunning(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     }
     let running = unsafe { libc::kill(pid, 0) == 0 };
     Ok(JSValue::Bool(running))
+}
+
+/// isRunning() — Windows: check if process is alive via WaitForSingleObject.
+#[cfg(windows)]
+fn js_child_isRunning(_ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let pid = pid_from_this(_ctx, &cc);
+    if pid <= 0 {
+        return Ok(JSValue::Bool(false));
+    }
+    unsafe {
+        use windows_sys::Win32::System::Threading::{OpenProcess, WaitForSingleObject, PROCESS_QUERY_INFORMATION};
+        use windows_sys::Win32::Foundation::{CloseHandle, WAIT_TIMEOUT};
+
+        let handle = OpenProcess(PROCESS_QUERY_INFORMATION, 0, pid as u32);
+        if handle.is_null() {
+            return Ok(JSValue::Bool(false));
+        }
+        let status = WaitForSingleObject(handle, 0);
+        CloseHandle(handle);
+        // WAIT_TIMEOUT = process still running
+        Ok(JSValue::Bool(status == WAIT_TIMEOUT))
+    }
 }
 
 /// Read `pid` from the `this` object's "pid" property.

@@ -1,3 +1,6 @@
+#![cfg(feature = "llama_cpp")]
+
+#[cfg(feature = "llama_cpp")]
 use std::{
     cell::Cell,
     sync::{Arc, Mutex},

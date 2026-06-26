@@ -1,3 +1,5 @@
+#![cfg(feature = "llama_cpp")]
+
 use std::{
     collections::VecDeque,
     sync::{Arc, Mutex},

@@ -21,9 +21,8 @@ use zuqe::{
 use crate::{USER_CLASS_DEFS, helpers::json_keys_camel_to_snake};
 
 use super::{
-    OUTMSG_FIELD_CHOICES, OUTMSG_FIELD_REASONING,
-    class_client_response::{MAGIC_RESPONSES_ONCE, MAGIC_RESPONSES_STREAM, js_client_responses},
-    class_engine::{MAGIC_CHAT_ONCE, MAGIC_CHAT_STREAM},
+    MAGIC_CHAT_ONCE, MAGIC_CHAT_STREAM, MAGIC_RESPONSES_ONCE, MAGIC_RESPONSES_STREAM,
+    OUTMSG_FIELD_CHOICES, OUTMSG_FIELD_REASONING, class_client_response::js_client_responses,
 };
 
 #[derive(Debug)]

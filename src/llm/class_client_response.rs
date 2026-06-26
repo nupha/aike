@@ -13,10 +13,7 @@ use zuqe::{
     },
 };
 
-use super::class_client::get_client;
-
-pub(super) const MAGIC_RESPONSES_STREAM: i32 = 4;
-pub(super) const MAGIC_RESPONSES_ONCE: i32 = 5;
+use super::{MAGIC_RESPONSES_ONCE, MAGIC_RESPONSES_STREAM, class_client::get_client};
 
 enum ResponsesReply {
     Event(Box<ResponseStreamEvent>),

@@ -43,10 +43,9 @@ use crate::{
         JSHttpRequest, JSHttpResponse, JSHttpServer, JSMcpStdio, gc_trace_stdio_state,
         init_mod_http,
     },
-    llm::{JSEngine, JSLlmClient, JSLlmContext, JSLlmModel, JSSamplerChain, init_mod_llm},
+    llm::JSLlmClient,
     path::init_mod_path,
     request::JSResponse,
-    yaml::init_mod_yaml,
     whatwg::{
         abort::{JSAbortController, JSAbortSignal},
         text_decoder::JSTextDecoder,
@@ -54,7 +53,11 @@ use crate::{
         timeout::gc_trace_timeout,
         url::{JSURL, JSURLSearchParams},
     },
+    yaml::init_mod_yaml,
 };
+
+#[cfg(feature = "llama_cpp")]
+use crate::llm::{JSEngine, JSLlmContext, JSLlmModel, JSSamplerChain, init_mod_llm};
 
 /// write data both to stderr and file
 struct TeeWriter<A: Write, B: Write> {
@@ -277,11 +280,7 @@ async fn main() -> ExitCode {
             // use classes
             cx.use_classes(&[
                 JSEventEmitter::class_id(),
-                JSLlmModel::class_id(),
-                JSLlmContext::class_id(),
-                JSEngine::class_id(),
                 JSLlmClient::class_id(),
-                JSSamplerChain::class_id(),
                 JSStdioHandle::class_id(),
                 JSFileHandle::class_id(),
                 JSResponse::class_id(),
@@ -302,7 +301,16 @@ async fn main() -> ExitCode {
                 JSTab::class_id(),
             ])?;
 
+            #[cfg(feature = "llama_cpp")]
+            cx.use_classes(&[
+                JSLlmModel::class_id(),
+                JSLlmContext::class_id(),
+                JSEngine::class_id(),
+                JSSamplerChain::class_id(),
+            ])?;
+
             // initialize native modules
+            #[cfg(feature = "llama_cpp")]
             init_mod_llm(cx)?;
             init_mod_fs(cx)?;
             init_mod_http(cx)?;

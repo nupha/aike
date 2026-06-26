@@ -1,13 +1,20 @@
 mod class_client;
 mod class_client_response;
+#[cfg(feature = "llama_cpp")]
 mod class_context;
+#[cfg(feature = "llama_cpp")]
 mod class_engine;
+#[cfg(feature = "llama_cpp")]
 mod class_model;
+#[cfg(feature = "llama_cpp")]
 mod class_sampler;
+#[cfg(feature = "llama_cpp")]
 pub(crate) mod engine;
 
+pub(crate) use class_client::JSLlmClient;
+
+#[cfg(feature = "llama_cpp")]
 pub(crate) use {
-    class_client::JSLlmClient,
     class_context::JSLlmContext,
     class_engine::{ERR_CANCELLED, ERR_ENGINE_SHUTDOWN, JSEngine},
     class_model::JSLlmModel,
@@ -21,12 +28,20 @@ pub(crate) const OUTMSG_FIELD_TOOL_CALLS: &str = "tool_calls";
 pub(crate) const OUTMSG_FIELD_FINISH_REASON: &str = "finish_reason";
 pub(crate) const OUTMSG_FIELD_CHOICES: &str = "choices";
 
+// Magic constants shared by gated and non-gated code.
+pub(crate) const MAGIC_CHAT_ONCE: i32 = 2;
+pub(crate) const MAGIC_CHAT_STREAM: i32 = 3;
+pub(crate) const MAGIC_RESPONSES_STREAM: i32 = 4;
+pub(crate) const MAGIC_RESPONSES_ONCE: i32 = 5;
+
+#[cfg(feature = "llama_cpp")]
 use llama_cpp_ffi::{FileType, KVCacheType, list_devices};
 use zuqe::{
     Array, CallContext, FieldDef, JS_PROP_ENUMERABLE, JSResult, JSValue, NativeObject,
     ScopedContext,
 };
 
+#[cfg(feature = "llama_cpp")]
 fn get_devices(ctx: &mut ScopedContext, _: CallContext) -> JSResult {
     let devs = list_devices();
 
@@ -50,6 +65,7 @@ fn get_devices(ctx: &mut ScopedContext, _: CallContext) -> JSResult {
     Array::from_values(ctx, lst).map(JSValue::from)
 }
 
+#[cfg(feature = "llama_cpp")]
 const MOD_LLAMA_ENTRIES: &[FieldDef] = &[
     FieldDef::CLASS(
         "Model",
@@ -217,6 +233,7 @@ const MOD_LLAMA_ENTRIES: &[FieldDef] = &[
     FieldDef::FUNC("getDevices", 0, get_devices, 0),
 ];
 
+#[cfg(feature = "llama_cpp")]
 pub fn init_mod_llm(ctx: &mut ScopedContext) -> Result<(), i32> {
     ctx.create_module("llama", MOD_LLAMA_ENTRIES)?;
     Ok(())

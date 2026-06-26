@@ -35,13 +35,12 @@ use zuqe::{
     gc_lite::{GcTrace, GcTraceCtx},
 };
 
-use crate::{
-    USER_CLASS_DEFS,
-    http::mcp::build_axum_mcp_route,
-    llm::{
-        JSEngine,
-        engine::{Engine, serve::engine_openai_router},
-    },
+use crate::{USER_CLASS_DEFS, http::mcp::build_axum_mcp_route};
+
+#[cfg(feature = "llama_cpp")]
+use crate::llm::{
+    JSEngine,
+    engine::{Engine, serve::engine_openai_router},
 };
 
 use super::{
@@ -71,6 +70,7 @@ pub(super) struct HttpRequest {
 }
 
 pub(super) struct HttpServerPayload {
+    #[cfg(feature = "llama_cpp")]
     openai: Option<(Arc<Mutex<Engine>>, String)>,
     js_routes: Vec<(Method, String, Object)>,
     mcp_endpoints: Vec<McpEndpoint>,
@@ -210,6 +210,7 @@ fn js_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         ctx,
         cc.this(),
         HttpServerPayload {
+            #[cfg(feature = "llama_cpp")]
             openai: None,
             js_routes: Vec::new(),
             mcp_endpoints: Vec::new(),
@@ -226,6 +227,7 @@ fn js_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 /// `engine` must be an Engine instance (ownership is transferred).
 /// `mountPath` must start with '/', e.g. "/v1".
 /// Calling after listen() raises an error.
+#[cfg(feature = "llama_cpp")]
 fn js_openai(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut this = cc.this();
 
@@ -1077,6 +1079,7 @@ fn js_listen(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
         // Base router with optional OpenAI engine routes
         let mut router: Router = Router::new();
+        #[cfg(feature = "llama_cpp")]
         if let Some((ref eng, ref mount_path)) = data.openai {
             let engine_router = engine_openai_router(eng.clone());
             router = router.nest(mount_path, engine_router);
@@ -1442,6 +1445,7 @@ fn hex_val(b: u8) -> Option<u8> {
 }
 
 const SERVER_PROTO: &[FieldDef] = &[
+    #[cfg(feature = "llama_cpp")]
     FieldDef::FUNC("openai", 2, js_openai, 0),
     FieldDef::FUNC("get", 2, js_route_add, 0),
     FieldDef::FUNC("post", 2, js_route_add, 1),
