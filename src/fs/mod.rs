@@ -11,7 +11,7 @@ use zuqe::{
     builtins::{promise::Promise, typed_array::TypedArray},
 };
 
-use crate::aike::{JSFileHandle, make_stats};
+use crate::{aike::{JSFileHandle, make_stats}, helpers::canonicalize_path};
 
 thread_local! {
     /// Sandbox restriction: limits all fs access to this directory.
@@ -21,7 +21,7 @@ thread_local! {
         if p.is_empty() {
             None
         } else {
-            std::fs::canonicalize(std::path::PathBuf::from(p))
+            canonicalize_path(std::path::PathBuf::from(p))
                 .ok()
                 .and_then(|p| if p.is_dir() { Some(p) } else { None })
         }
@@ -81,7 +81,7 @@ fn set_sandbox(path: Option<&str>) -> Result<(), String> {
         return Ok(());
     }
 
-    let abs_path = std::fs::canonicalize(Path::new(path.unwrap())).map_err(|e| e.to_string())?;
+    let abs_path = canonicalize_path(Path::new(path.unwrap())).map_err(|e| e.to_string())?;
 
     if !abs_path.is_dir() {
         return Err("sandbox path must be a directory".to_string());

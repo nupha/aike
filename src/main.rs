@@ -39,6 +39,7 @@ use crate::{
     class_event_emitter::JSEventEmitter,
     fs::init_mod_fs,
     global::setup_globals,
+    helpers::canonicalize_path,
     html::{HtmlDocument, HtmlElement, init_mod_html},
     http::{
         JSHttpRequest, JSHttpResponse, JSHttpServer, JSMcpStdio, gc_trace_stdio_state,
@@ -205,7 +206,8 @@ async fn main() -> ExitCode {
 
     // Build process.argv and process.execArgv
     let exe_path = std::env::current_exe()
-        .and_then(|p| p.canonicalize())
+        .ok()
+        .and_then(|p| canonicalize_path(p).ok())
         .map(|p| p.to_string_lossy().to_string())
         .expect("failed to resolve current executable path");
 
@@ -259,7 +261,7 @@ async fn main() -> ExitCode {
         }
     }
 
-    rt.set_module_loader(None, js_module_loader, std::ptr::null_mut());
+    rt.set_module_loader(Some(js_module_normalizer), js_module_loader, std::ptr::null_mut());
 
     rt.gc_set_trace_handler(|gcx| {
         aike::signal::gc_trace_zuq_signals(gcx);
@@ -462,6 +464,35 @@ async fn main() -> ExitCode {
         ExitStatus::Exception(Exception::No | Exception::TooManyClasses) => {
             unreachable!();
         }
+    }
+}
+
+/// Module name normalizer: resolves relative import paths, stripping `\\?\`
+/// prefix on Windows (canonicalize adds it, breaking display & path comparison).
+fn js_module_normalizer(
+    _: &mut ScopedContext,
+    base_name: &str,
+    name: &str,
+    _: *mut std::ffi::c_void,
+) -> Result<String, i32> {
+    // Bare names (not starting with '.') are global, not relative to base
+    if !name.starts_with('.') {
+        return Ok(name.to_string());
+    }
+
+    let base_dir = std::path::Path::new(base_name)
+        .parent()
+        .unwrap_or(std::path::Path::new(""));
+
+    let resolved = base_dir.join(name);
+
+    // Canonicalize if the file exists, otherwise use absolute to resolve ./ and ../
+    if let Ok(p) = crate::helpers::canonicalize_path(&resolved) {
+        Ok(p.to_string_lossy().into_owned())
+    } else if let Ok(p) = std::path::absolute(&resolved) {
+        Ok(p.to_string_lossy().into_owned())
+    } else {
+        Ok(resolved.to_string_lossy().into_owned())
     }
 }
 

@@ -6,6 +6,23 @@ use crossbeam::channel::TryRecvError;
 use serde_json::Value as JsonValue;
 use zuqe::{Exception, JobState, ScopedContext};
 
+/// Canonicalize a path, stripping the Windows `\\?\` prefix that `canonicalize()` adds.
+///
+/// On Windows, `std::fs::canonicalize()` returns paths with `\\?\` prefix (extended-length
+/// path format, e.g. `\\?\C:\Users\...`). This breaks user-facing display and `starts_with`
+/// comparisons. This wrapper strips that prefix for cross-platform consistency.
+pub(crate) fn canonicalize_path<P: AsRef<std::path::Path>>(path: P) -> std::io::Result<std::path::PathBuf> {
+    let p = std::fs::canonicalize(path)?;
+    #[cfg(windows)]
+    {
+        let s = p.to_string_lossy();
+        if s.starts_with(r"\\?\") {
+            return Ok(std::path::PathBuf::from(&s[4..]));
+        }
+    }
+    Ok(p)
+}
+
 /// Convert a camelCase string to snake_case.
 fn camel_to_snake(s: &str) -> String {
     let mut result = String::with_capacity(s.len() + 4);
