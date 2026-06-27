@@ -167,8 +167,12 @@ pub(crate) static USER_CLASS_DEFS: [fn(&mut Runtime) -> Result<ClassID, i32>];
 #[tokio::main]
 async fn main() -> ExitCode {
     if let Err(e) = dotenvy::dotenv() {
+        #[cfg(debug_assertions)]
         eprintln!("[INFO] .env not loaded: {e}");
     }
+
+    #[cfg(windows)]
+    check_terminal();
 
     #[cfg(debug_assertions)]
     {
@@ -480,5 +484,36 @@ fn js_module_loader(
                 Err(-1)
             }
         }
+    }
+}
+
+/// Check if we're running in a legacy Windows console (conhost.exe)
+/// and suggest a modern terminal if so.
+#[cfg(windows)]
+fn check_terminal() {
+    // Modern terminals set these env vars:
+    //   TERM_PROGRAM=vscode       — VS Code
+    //   TERM_PROGRAM=wt           — Windows Terminal
+    //   WT_SESSION=...            — Windows Terminal
+    //   ConEmuANSI=ON             — ConEmu
+    //   ALACRITTY_LOG=...         — Alacritty
+    //   WEZTERM_EXECUTABLE=...    — WezTerm
+    //   TABBY_CONFIG_DIR=...      — Tabby
+    //
+    // Classic conhost.exe (cmd / powershell.exe) sets none of these.
+    let is_modern = std::env::var("TERM_PROGRAM").is_ok()
+        || std::env::var("WT_SESSION").is_ok()
+        || std::env::var("ConEmuANSI").is_ok()
+        || std::env::var("ALACRITTY_LOG").is_ok()
+        || std::env::var("WEZTERM_EXECUTABLE").is_ok()
+        || std::env::var("TABBY_CONFIG_DIR").is_ok();
+
+    if !is_modern {
+        eprintln!(
+            "[TIP] You appear to be running in the classic Windows console (conhost.exe).\
+            \n      Some content (e.g. emoji) may not render correctly.\
+            \n      Consider using VS Code terminal, Windows Terminal, or WezTerm for the best experience.\
+            \n"
+        );
     }
 }
