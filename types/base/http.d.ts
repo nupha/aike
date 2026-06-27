@@ -274,9 +274,6 @@ declare module "http" {
       tools: McpToolDefinition[] | Record<string, McpToolShortDef>,
     ): this;
 
-    /** Mount OpenAI-compatible LLM inference routes. */
-    openai(engine: any, mountPath: string): this;
-
     /** Whether the server is currently running. */
     readonly isRunning: boolean;
 
