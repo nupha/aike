@@ -261,7 +261,7 @@ async fn main() -> ExitCode {
         }
     }
 
-    rt.set_module_loader(Some(js_module_normalizer), js_module_loader, std::ptr::null_mut());
+    rt.set_module_loader(None, js_module_loader, std::ptr::null_mut());
 
     rt.gc_set_trace_handler(|gcx| {
         aike::signal::gc_trace_zuq_signals(gcx);
@@ -464,35 +464,6 @@ async fn main() -> ExitCode {
         ExitStatus::Exception(Exception::No | Exception::TooManyClasses) => {
             unreachable!();
         }
-    }
-}
-
-/// Module name normalizer: resolves relative import paths, stripping `\\?\`
-/// prefix on Windows (canonicalize adds it, breaking display & path comparison).
-fn js_module_normalizer(
-    _: &mut ScopedContext,
-    base_name: &str,
-    name: &str,
-    _: *mut std::ffi::c_void,
-) -> Result<String, i32> {
-    // Bare names (not starting with '.') are global, not relative to base
-    if !name.starts_with('.') {
-        return Ok(name.to_string());
-    }
-
-    let base_dir = std::path::Path::new(base_name)
-        .parent()
-        .unwrap_or(std::path::Path::new(""));
-
-    let resolved = base_dir.join(name);
-
-    // Canonicalize if the file exists, otherwise use absolute to resolve ./ and ../
-    if let Ok(p) = crate::helpers::canonicalize_path(&resolved) {
-        Ok(p.to_string_lossy().into_owned())
-    } else if let Ok(p) = std::path::absolute(&resolved) {
-        Ok(p.to_string_lossy().into_owned())
-    } else {
-        Ok(resolved.to_string_lossy().into_owned())
     }
 }
 
