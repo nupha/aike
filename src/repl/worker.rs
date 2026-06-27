@@ -151,22 +151,22 @@ pub(crate) async fn run<'c>(mut rt: zuqe::Runtime, mut ctx0: zuqe::Context<'c>) 
     });
     editor.set_helper(Some(helper));
 
-    // Bind Up/Down to history navigation.
-    // Uses PreviousHistory/NextHistory (not HistorySearchBackward/Forward)
-    // so the cursor moves to the end of the line after loading a history entry.
+    // Bind Up/Down to history search by prefix.
+    // HistorySearchBackward/Forward filters history by the current input prefix
+    // (like bash's history-search-backward).
     // HistoryHandler clears the hint cache before navigation.
     editor.bind_sequence(
         KeyEvent(KeyCode::Up, Modifiers::NONE),
         EventHandler::Conditional(Box::new(HistoryHandler::new(
             completion_state.clone(),
-            Cmd::PreviousHistory,
+            Cmd::HistorySearchBackward,
         ))),
     );
     editor.bind_sequence(
         KeyEvent(KeyCode::Down, Modifiers::NONE),
         EventHandler::Conditional(Box::new(HistoryHandler::new(
             completion_state.clone(),
-            Cmd::NextHistory,
+            Cmd::HistorySearchForward,
         ))),
     );
 
