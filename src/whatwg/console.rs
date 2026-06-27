@@ -294,8 +294,12 @@ fn js_console_table(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     }
 
     let data = cc.arg(0);
-    if data.is_undefined() || data.is_null() {
+    if data.is_undefined() {
         console_println("undefined".to_string());
+        return Ok(JSValue::UNDEFINED);
+    }
+    if data.is_null() {
+        console_println("null".to_string());
         return Ok(JSValue::UNDEFINED);
     }
 
