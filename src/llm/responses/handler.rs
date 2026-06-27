@@ -16,7 +16,7 @@ use futures_util::StreamExt;
 use uuid::Uuid;
 
 use crate::{
-    helpers_llama::{PromptThinkPattern, apply_chat_template, detect_prompt_think_pattern},
+    helpers::{PromptThinkPattern, apply_chat_template, detect_prompt_think_pattern},
     llm::engine::{
         Engine, EngineReply, GrammarConfig, TaskConfig,
         serve::{

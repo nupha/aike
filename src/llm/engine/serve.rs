@@ -27,10 +27,9 @@ use tokio_stream::wrappers::UnboundedReceiverStream;
 use uuid::Uuid;
 
 use crate::{
-    helpers::now_unix_s,
-    helpers_llama::{
+    helpers::{
         PromptThinkPattern, apply_chat_template, compute_keep_tokens, detect_prompt_think_pattern,
-        to_lark_tool_choice,
+        now_unix_s, to_lark_tool_choice,
     },
     llm::engine::{Engine, EngineReply, EngineTask, GrammarConfig, TaskConfig},
     llm::output::{

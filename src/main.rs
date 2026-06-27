@@ -10,8 +10,6 @@ mod color;
 mod fs;
 mod global;
 mod helpers;
-#[cfg(feature = "llama_cpp")]
-mod helpers_llama;
 mod html;
 mod http;
 mod llm;
@@ -314,14 +312,15 @@ async fn main() -> ExitCode {
             ])?;
 
             // initialize native modules
-            #[cfg(feature = "llama_cpp")]
-            init_mod_llm(cx)?;
             init_mod_fs(cx)?;
             init_mod_http(cx)?;
             init_mod_path(cx)?;
             init_mod_html(cx)?;
             init_mod_browser(cx)?;
             init_mod_yaml(cx)?;
+
+            #[cfg(feature = "llama_cpp")]
+            init_mod_llm(cx)?;
 
             setup_globals(cx, &argv, &exec_argv, &exe_path)
         })

@@ -23,10 +23,9 @@ use zuqe::{
 
 use crate::{
     USER_CLASS_DEFS,
-    helpers::parse_chat_completion_req,
-    helpers_llama::{
+    helpers::{
         PromptThinkPattern, apply_chat_template, compute_keep_tokens, detect_prompt_think_pattern,
-        to_lark_tool_choice,
+        parse_chat_completion_req, to_lark_tool_choice,
     },
     llm::output::{
         ChunkSSE, ParserKind, collect_engine_reply_to_json, redirect_engine_reply_to_chat_sse,
