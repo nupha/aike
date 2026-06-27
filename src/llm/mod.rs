@@ -3,6 +3,7 @@
 
 mod class_client;
 mod class_client_response;
+
 #[cfg(feature = "llama_cpp")]
 mod class_context;
 #[cfg(feature = "llama_cpp")]
@@ -43,6 +44,7 @@ pub(crate) const MAGIC_RESPONSES_ONCE: i32 = 5;
 
 #[cfg(feature = "llama_cpp")]
 use llama_cpp_ffi::{FileType, KVCacheType, list_devices};
+#[cfg(feature = "llama_cpp")]
 use zuqe::{
     Array, CallContext, FieldDef, JS_PROP_ENUMERABLE, JSResult, JSValue, NativeObject,
     ScopedContext,
