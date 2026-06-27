@@ -339,8 +339,7 @@ async fn main() -> ExitCode {
     // REPL mode: run repl task and exit.
     //
     let Some(ref_filename) = filename else {
-        repl::run(rt, ctx).await;
-        return ExitCode::SUCCESS;
+        return repl::run(rt, ctx).await;
     };
 
     //

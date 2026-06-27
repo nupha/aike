@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-use std::sync::{Arc, atomic::Ordering};
+use std::{
+    process::ExitCode,
+    sync::{Arc, atomic::Ordering},
+};
 
 use rustyline::{
     Cmd, ConditionalEventHandler, Editor, Event, EventContext, EventHandler, KeyCode, KeyEvent,
@@ -15,6 +18,8 @@ use crate::repl::{
     init_printer, print_output,
     prompt::AikePrompt,
 };
+
+use zuqe::ExitStatus;
 
 /// Commands sent from the readline thread to the JS thread.
 #[derive(Debug)]
@@ -91,8 +96,8 @@ fn process_input_line(
     }
 }
 
-/// Start the REPL event loop.
-pub(crate) async fn run<'c>(mut rt: zuqe::Runtime, mut ctx0: zuqe::Context<'c>) {
+/// Start the REPL event loop. Returns the process exit code.
+pub(crate) async fn run<'c>(mut rt: zuqe::Runtime, mut ctx0: zuqe::Context<'c>) -> ExitCode {
     let completion_state = CompletionState::new();
 
     // Build rustyline editor
@@ -259,16 +264,20 @@ pub(crate) async fn run<'c>(mut rt: zuqe::Runtime, mut ctx0: zuqe::Context<'c>) 
     //
     let mut req_rx = completion_state.req_rx.lock().await;
 
-    loop {
+    let exit_code = loop {
         tokio::select! {
             // Drive the runtime tick.
-            _ =  rt.run_async() => {}
+            status = rt.run_async() => {
+                if let ExitStatus::Interrupted(code) = status {
+                    break ExitCode::from(code);
+                }
+            }
 
             // read input line
             cmd = input_rx.recv() => {
-                let Some(cmd) = cmd else { break; };
+                let Some(cmd) = cmd else { break ExitCode::SUCCESS; };
                 match cmd {
-                    InputCommand::Quit =>{ break; },
+                    InputCommand::Quit =>{ break ExitCode::SUCCESS; },
                     InputCommand::Eval(line) => {
                         process_input_line(&mut ctx0, &line, &ack_tx);
                     }
@@ -283,9 +292,14 @@ pub(crate) async fn run<'c>(mut rt: zuqe::Runtime, mut ctx0: zuqe::Context<'c>) 
                 });
             }
         }
-    }
+    };
 
-    let _ = readline_handle.join();
+    // Readline thread is blocked on editor.readline() and can't be cleanly
+    // interrupted from here. The process is exiting anyway, so detach the
+    // handle — OS cleanup will terminate the thread.
+    readline_handle.thread().unpark();
+
+    exit_code
 }
 
 const HELP: &str = "\
