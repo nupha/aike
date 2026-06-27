@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
+
 #![cfg(feature = "llama_cpp")]
 
 use std::{
@@ -305,7 +308,7 @@ fn js_engine_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
 
     if is_stream {
         // Streaming: AsyncIterableIterator
-        let (chunk_tx, chunk_rx) = crossbeam::channel::bounded::<crate::output::ChunkSSE>(8);
+        let (chunk_tx, chunk_rx) = crossbeam::channel::bounded::<crate::llm::output::ChunkSSE>(8);
         std::thread::spawn(move || {
             redirect_engine_reply_to_chat_sse(
                 rx,
@@ -319,22 +322,22 @@ fn js_engine_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
             );
         });
 
-        AsyncIterableIterator::create_with_receiver::<crate::output::ChunkSSE>(
+        AsyncIterableIterator::create_with_receiver::<crate::llm::output::ChunkSSE>(
             ctx,
             chunk_rx,
             move |cx, chunk| -> Result<Option<JSValue>, i32> {
                 match chunk {
-                    crate::output::ChunkSSE::Chunk(data) => {
+                    crate::llm::output::ChunkSSE::Chunk(data) => {
                         JSValue::from_serde_json(cx, &data).map(Some).map_err(|_| {
                             cx.throw_internal_error("serialize chunk failed");
                             -1
                         })
                     }
-                    crate::output::ChunkSSE::Error(e) => {
+                    crate::llm::output::ChunkSSE::Error(e) => {
                         cx.throw_internal_error(&e);
                         Err(-1)
                     }
-                    crate::output::ChunkSSE::Done => {
+                    crate::llm::output::ChunkSSE::Done => {
                         // End the iterator
                         Ok(None)
                     }

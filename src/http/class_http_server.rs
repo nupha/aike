@@ -212,10 +212,12 @@ fn js_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         ctx,
         cc.this(),
         HttpServerPayload {
-            #[cfg(feature = "llama_cpp")]
-            openai: None,
             js_routes: Vec::new(),
             mcp_endpoints: Vec::new(),
+
+            #[cfg(feature = "llama_cpp")]
+            openai: None,
+
             shutdown_tx: None,
             is_running: Arc::new(AtomicBool::new(false)),
             frozen: false,
@@ -1447,8 +1449,6 @@ fn hex_val(b: u8) -> Option<u8> {
 }
 
 const SERVER_PROTO: &[FieldDef] = &[
-    #[cfg(feature = "llama_cpp")]
-    FieldDef::FUNC("openai", 2, js_openai, 0),
     FieldDef::FUNC("get", 2, js_route_add, 0),
     FieldDef::FUNC("post", 2, js_route_add, 1),
     FieldDef::FUNC("put", 2, js_route_add, 2),
@@ -1459,6 +1459,8 @@ const SERVER_PROTO: &[FieldDef] = &[
     FieldDef::FUNC("mcp", 2, js_mcp, 0),
     FieldDef::FUNC("updateMcpTools", 2, js_update_tools, 0),
     FieldDef::FUNC("removeRoute", 2, js_remove_route, 0),
+    #[cfg(feature = "llama_cpp")]
+    FieldDef::FUNC("openai", 2, js_openai, 0),
     FieldDef::GETSET("isRunning", Some(js_is_running), None, 0),
     FieldDef::FUNC("listen", 1, js_listen, 0),
     FieldDef::FUNC("shutdown", 0, js_shutdown, 0),

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
+
 mod class_client;
 mod class_client_response;
 #[cfg(feature = "llama_cpp")]
@@ -10,6 +13,8 @@ mod class_model;
 mod class_sampler;
 #[cfg(feature = "llama_cpp")]
 pub(crate) mod engine;
+#[cfg(feature = "llama_cpp")]
+mod output;
 
 pub(crate) use class_client::JSLlmClient;
 

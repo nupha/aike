@@ -10,10 +10,11 @@ mod color;
 mod fs;
 mod global;
 mod helpers;
+#[cfg(feature = "llama_cpp")]
+mod helpers_llama;
 mod html;
 mod http;
 mod llm;
-mod output;
 mod path;
 mod repl;
 mod request;
@@ -31,6 +32,9 @@ use zuqe::{
     ClassID, EvalFlags, EvalType, Exception, ExitStatus, ModuleDef, NativeObject, Runtime,
     ScopedContext, builtins::promise::PromiseFuture,
 };
+
+#[cfg(feature = "llama_cpp")]
+use crate::llm::{JSEngine, JSLlmContext, JSLlmModel, JSSamplerChain, init_mod_llm};
 
 use crate::{
     aike::{JSCronJob, JSFileHandle, JSStdioHandle, gc_trace_cron, gc_trace_io},
@@ -55,9 +59,6 @@ use crate::{
     },
     yaml::init_mod_yaml,
 };
-
-#[cfg(feature = "llama_cpp")]
-use crate::llm::{JSEngine, JSLlmContext, JSLlmModel, JSSamplerChain, init_mod_llm};
 
 /// write data both to stderr and file
 struct TeeWriter<A: Write, B: Write> {
