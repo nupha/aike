@@ -211,7 +211,7 @@ impl Hinter for AikeHelper {
                 }
                 // Cache the hint
                 *self.completion_state.hint_cache.lock() = Some(suffix.clone());
-                Some(format!("\x1b[2m{}\x1b[0m", suffix))
+                Some(suffix)
             }
             Err(_) => {
                 // Timeout: return cached hint if available
@@ -228,6 +228,10 @@ impl Hinter for AikeHelper {
 impl Highlighter for AikeHelper {
     fn highlight<'l>(&self, line: &'l str, pos: usize) -> Cow<'l, str> {
         self.prompt.highlight(line, pos)
+    }
+
+    fn highlight_hint<'h>(&self, hint: &'h str) -> Cow<'h, str> {
+        self.prompt.highlight_hint(hint)
     }
 
     fn highlight_char(&self, line: &str, pos: usize, cmd: rustyline::highlight::CmdKind) -> bool {

@@ -198,7 +198,7 @@ pub(crate) async fn run<'c>(mut rt: zuqe::Runtime, mut ctx0: zuqe::Context<'c>) 
 
             loop {
                 IN_READLINE.store(true, Ordering::Release);
-                let readline_result = editor.readline(prompt.raw());
+                let readline_result = editor.readline(&prompt);
                 IN_READLINE.store(false, Ordering::Release);
 
                 match readline_result {

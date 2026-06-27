@@ -63,7 +63,7 @@ impl Prompt for AikePrompt {
         if self.is_multiline {
             "   ... "
         } else {
-            "aike > "
+            "aike> "
         }
     }
 
@@ -79,6 +79,14 @@ impl Prompt for AikePrompt {
 impl Highlighter for AikePrompt {
     fn highlight<'l>(&self, line: &'l str, _pos: usize) -> Cow<'l, str> {
         Cow::Owned(colorize_js(line))
+    }
+
+    fn highlight_hint<'h>(&self, hint: &'h str) -> Cow<'h, str> {
+        // Dim style for completion hints.
+        // Note: display() returns plain text for position calculation
+        // (required on Windows where calculate_position asserts no ANSI codes).
+        // The ANSI dim styling is applied here so it only affects rendering.
+        Cow::Owned(format!("\x1b[2m{}\x1b[0m", hint))
     }
 
     fn highlight_char(&self, _line: &str, _pos: usize, _cmd: CmdKind) -> bool {
