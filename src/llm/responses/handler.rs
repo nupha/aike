@@ -1,6 +1,3 @@
-#![cfg(feature = "llama_cpp")]
-
-#[cfg(feature = "llama_cpp")]
 use std::{
     ffi::CString,
     sync::{Arc, Mutex},
@@ -19,7 +16,7 @@ use futures_util::StreamExt;
 use uuid::Uuid;
 
 use crate::{
-    helpers::{PromptThinkPattern, apply_chat_template, detect_prompt_think_pattern},
+    helpers_llama::{PromptThinkPattern, apply_chat_template, detect_prompt_think_pattern},
     llm::engine::{
         Engine, EngineReply, GrammarConfig, TaskConfig,
         serve::{
@@ -27,13 +24,15 @@ use crate::{
             STREAM_TIMEOUT, oai_error,
         },
     },
-    output::{
+    llm::output::{
         ChunkSSE, ParserKind, collect_engine_reply_to_json, redirect_engine_reply_to_responses_sse,
     },
-    responses::stream::sse_event,
 };
 
-use super::convert::{input_item_to_chat_message, responses_tools_to_chat_tools};
+use super::{
+    convert::{input_item_to_chat_message, responses_tools_to_chat_tools},
+    stream::sse_event,
+};
 
 pub async fn handle_responses(
     State(engine): State<Arc<Mutex<Engine>>>,

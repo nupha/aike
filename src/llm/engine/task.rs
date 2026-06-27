@@ -1,6 +1,3 @@
-#![cfg(feature = "llama_cpp")]
-
-#[cfg(feature = "llama_cpp")]
 use std::{
     collections::{HashSet, VecDeque},
     io::Write,

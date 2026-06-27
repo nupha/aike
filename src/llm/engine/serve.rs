@@ -1,11 +1,8 @@
-#![cfg(feature = "llama_cpp")]
-
 // Engine OpenAI-compatible HTTP handlers.
 //
 // Provides handler functions and `engine_routes()` which returns RouteEntry
 // items for all Engine-related routes (/v1/chat/completions, /v1/models, etc).
 
-#[cfg(feature = "llama_cpp")]
 use std::{
     ffi::CString,
     sync::{Arc, Mutex},
@@ -30,12 +27,13 @@ use tokio_stream::wrappers::UnboundedReceiverStream;
 use uuid::Uuid;
 
 use crate::{
-    helpers::{
+    helpers::now_unix_s,
+    helpers_llama::{
         PromptThinkPattern, apply_chat_template, compute_keep_tokens, detect_prompt_think_pattern,
-        now_unix_s, to_lark_tool_choice,
+        to_lark_tool_choice,
     },
     llm::engine::{Engine, EngineReply, EngineTask, GrammarConfig, TaskConfig},
-    output::{
+    llm::output::{
         ChunkSSE, ParserKind, collect_engine_reply_to_json, redirect_engine_reply_to_chat_sse,
     },
 };
@@ -132,7 +130,7 @@ pub(crate) fn engine_openai_router(engine: Arc<Mutex<Engine>>) -> Router {
         )
         .route(
             "/v1/responses",
-            post(crate::responses::handle_responses).with_state(engine.clone()),
+            post(crate::llm::responses::handle_responses).with_state(engine.clone()),
         )
 }
 

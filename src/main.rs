@@ -18,7 +18,6 @@ mod llm;
 mod path;
 mod repl;
 mod request;
-mod responses;
 mod whatwg;
 mod worker;
 mod yaml;

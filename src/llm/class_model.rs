@@ -23,7 +23,7 @@ use zuqe::{
 
 use crate::{
     USER_CLASS_DEFS,
-    helpers::{JinjaMessage, TemplateContext, create_minijinja_env},
+    helpers_llama::{JinjaMessage, TemplateContext, create_minijinja_env},
 };
 
 use super::{

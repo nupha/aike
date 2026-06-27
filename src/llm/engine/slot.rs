@@ -1,8 +1,5 @@
-#![cfg(feature = "llama_cpp")]
-
 use std::collections::VecDeque;
 
-#[cfg(feature = "llama_cpp")]
 use llama_cpp_ffi::SamplerChain;
 
 use super::{

@@ -23,11 +23,12 @@ use zuqe::{
 
 use crate::{
     USER_CLASS_DEFS,
-    helpers::{
+    helpers::parse_chat_completion_req,
+    helpers_llama::{
         PromptThinkPattern, apply_chat_template, compute_keep_tokens, detect_prompt_think_pattern,
-        parse_chat_completion_req, to_lark_tool_choice,
+        to_lark_tool_choice,
     },
-    output::{
+    llm::output::{
         ChunkSSE, ParserKind, collect_engine_reply_to_json, redirect_engine_reply_to_chat_sse,
         redirect_engine_reply_to_responses_sse,
     },
@@ -37,6 +38,7 @@ use crate::{
 use crate::eval_logger::{EvalLogEntry, ToolCallLog, get_eval_logger};
 
 use super::{
+    MAGIC_CHAT_ONCE, MAGIC_CHAT_STREAM, MAGIC_RESPONSES_ONCE, MAGIC_RESPONSES_STREAM,
     class_client_response::{parse_responses_input, parse_responses_reasoning},
     engine::{Engine, GrammarConfig, TaskConfig},
 };
@@ -529,13 +531,13 @@ fn js_engine_responses(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     }
     let messages: Vec<_> = input_items
         .iter()
-        .filter_map(crate::responses::convert::input_item_to_chat_message)
+        .filter_map(crate::llm::responses::convert::input_item_to_chat_message)
         .collect();
 
     // Build prompt tokens
     let chat_tools: Option<Vec<async_openai::types::chat::ChatCompletionTools>> = tools
         .as_ref()
-        .map(|t| crate::responses::convert::responses_tools_to_chat_tools(t));
+        .map(|t| crate::llm::responses::convert::responses_tools_to_chat_tools(t));
 
     let reasoning_effort = reasoning
         .as_ref()

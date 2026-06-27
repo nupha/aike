@@ -15,6 +15,8 @@ mod class_sampler;
 pub(crate) mod engine;
 #[cfg(feature = "llama_cpp")]
 mod output;
+#[cfg(feature = "llama_cpp")]
+mod responses;
 
 pub(crate) use class_client::JSLlmClient;
 

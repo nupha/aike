@@ -1,25 +1,25 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
+
 //! Parallel inference engine for LLM.
 //!
 //! This module provides a multi-slot inference engine that can process
 //! multiple tasks concurrently on a single LlamaContext, with support for
 //! prefix caching, grammar-constrained generation, and streaming output.
+//!
+//! Only compiled when feature "llama_cpp" is enabled.
 
-#[cfg(feature = "llama_cpp")]
+#![cfg(feature = "llama_cpp")]
+
 mod caching;
-#[cfg(feature = "llama_cpp")]
 mod context;
-#[cfg(feature = "llama_cpp")]
 pub(crate) mod serve;
-#[cfg(feature = "llama_cpp")]
 mod slot;
-#[cfg(feature = "llama_cpp")]
 mod task;
-#[cfg(feature = "llama_cpp")]
 mod worker;
 
 mod output;
 
-#[cfg(feature = "llama_cpp")]
 pub use {
     context::Engine,
     task::{EngineReply, EngineTask, GrammarConfig, StopReason, TaskConfig, Token},

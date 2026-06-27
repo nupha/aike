@@ -1,9 +1,8 @@
-#![cfg(feature = "llama_cpp")]
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-#[cfg(feature = "llama_cpp")]
 use std::collections::VecDeque;
 
-#[cfg(feature = "llama_cpp")]
 use super::{
     Engine,
     slot::{Slot, SlotState},
