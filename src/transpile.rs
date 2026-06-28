@@ -28,6 +28,7 @@ mod transpile_impl {
 
     use super::TranspileResult;
 
+    #[inline(never)]
     pub fn transpile(source: &str) -> Result<TranspileResult, String> {
         let cm: Lrc<SourceMap> = Lrc::new(SourceMap::default());
         let globals = Globals::new();

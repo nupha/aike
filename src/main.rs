@@ -383,85 +383,80 @@ async fn main() -> ExitCode {
 
     let mut promise_future: Option<PromiseFuture> = None;
 
-    let res = ctx.with_new_scope(|cx| {
-        let r = cx
-            .eval(
-                script.as_bytes(),
-                ref_filename.as_str(),
-                if is_module {
-                    EvalType::Module
-                } else {
-                    EvalType::Global
-                },
-                EvalFlags::empty(),
-            )
-            .map(|v| v.as_object_Promise().copied());
-
-        match r {
-            Ok(Some(p)) => match p.into_future(cx) {
-                Ok(fut) => {
-                    promise_future = Some(fut);
-                    Ok(())
-                }
-                Err(_) => Err(-1),
+    let r = ctx
+        .eval(
+            script.as_bytes(),
+            ref_filename.as_str(),
+            if is_module {
+                EvalType::Module
+            } else {
+                EvalType::Global
             },
-            Ok(None) => Ok(()),
+            EvalFlags::empty(),
+        )
+        .map(|v| v.as_object_Promise().copied());
+
+    let res = match r {
+        Ok(Some(p)) => match p.into_future(&mut ctx.root_scope()) {
+            Ok(fut) => {
+                promise_future = Some(fut);
+                Ok(())
+            }
             Err(_) => Err(-1),
-        }
-    });
+        },
+        Ok(None) => Ok(()),
+        Err(_) => Err(-1),
+    };
 
     if res.is_err() {
-        let exit_code = ctx.with_root_scope(|mut cx0| {
-            let code: u8 = match cx0.take_exception() {
-                Exception::Error(e) => {
-                    colorize_println(e.to_string(&mut cx0).unwrap().encode_utf8(false), GreenFg);
+        let code = match ctx.take_exception() {
+            Exception::Error(e) => {
+                colorize_println(
+                    e.to_string(&mut ctx.root_scope())
+                        .unwrap()
+                        .encode_utf8(false),
+                    GreenFg,
+                );
+                // value 'e' is in cx0 (top-level scope), it won't be gc collected.
+                // we should remove it from protection manually.
+                if let Some(n) = e.gc_node_ptr() {
+                    ctx.root_scope().remove_local(n);
+                }
+                1
+            }
+            Exception::OutOfMemory => {
+                colorize_println("out of memory", RedFg);
+                1
+            }
+            Exception::No => {
+                #[cfg(debug_assertions)]
+                unreachable!();
+                #[cfg(not(debug_assertions))]
+                0
+            }
+            Exception::TooManyClasses => {
+                unreachable!();
+            }
+        };
 
-                    // value 'e' is in cx0 (top-level scope), it won't be gc collected.
-                    // we should remove it from protection manually.
-                    if let Some(n) = e.gc_node_ptr() {
-                        cx0.remove_local(n);
-                    }
-
-                    1
-                }
-                Exception::OutOfMemory => {
-                    colorize_println("out of memory", RedFg);
-                    1
-                }
-                Exception::No => {
-                    #[cfg(debug_assertions)]
-                    unreachable!();
-                    #[cfg(not(debug_assertions))]
-                    0
-                }
-                Exception::TooManyClasses => {
-                    unreachable!();
-                }
-            };
-            code
-        });
-        return ExitCode::from(exit_code);
+        return ExitCode::from(code);
     }
 
     // await till all background jobs are finished
     let result = if let Some(fut) = promise_future {
         let (rt_res, promise_res) = tokio::join!(rt.run_async(), fut);
-
         match promise_res {
-            Ok(result) => {
+            Ok(r) => {
                 // suppress eval result printing
-                let _ = result;
             }
             Err(reason) => {
                 // Promise reject
-                let err_msg = ctx.with_new_scope(|cx| {
+                ctx.root_scope().with_new_scope(|cx| {
                     let s = reason.to_string(cx).unwrap();
-                    s.encode_utf8(false).to_string()
+                    colorize_println(s.encode_utf8(false), RedFg);
                 });
-                colorize_println(err_msg, RedFg);
             }
         }
-
         rt_res
     } else {
         rt.run_async().await
@@ -469,6 +464,12 @@ async fn main() -> ExitCode {
 
     match result {
         ExitStatus::Value(_) => ExitCode::SUCCESS,
+        ExitStatus::Exception(Exception::Error(err)) => {
+            ctx.root_scope().with_new_scope(|cx| {
+                colorize_println(err.to_string(cx).unwrap().encode_utf8(false), RedFg);
+            });
+            ExitCode::FAILURE
+        }
         ExitStatus::Interrupted(code) => {
             #[cfg(debug_assertions)]
             log::debug!("Process interrupted with code {:?}", code);
@@ -476,12 +477,6 @@ async fn main() -> ExitCode {
         }
         ExitStatus::Exception(Exception::OutOfMemory) => {
             colorize_println("out of memory", RedFg);
-            ExitCode::FAILURE
-        }
-        ExitStatus::Exception(Exception::Error(err)) => {
-            ctx.with_new_scope(|cx| {
-                colorize_println(err.to_string(cx).unwrap().encode_utf8(false), RedFg);
-            });
             ExitCode::FAILURE
         }
         ExitStatus::Exception(Exception::No | Exception::TooManyClasses) => {
@@ -527,7 +522,8 @@ fn js_module_loader(
             buf.to_vec()
         };
 
-        ctx.compile_module(&code, &resolved_name, false)
+        // Note: should use original file name
+        ctx.compile_module(&code, file_name, false)
     }
 }
 
