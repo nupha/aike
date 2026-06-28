@@ -16,6 +16,7 @@ mod llm;
 mod path;
 mod repl;
 mod request;
+mod transpile;
 mod whatwg;
 mod worker;
 mod yaml;
@@ -354,6 +355,23 @@ async fn main() -> ExitCode {
         }
     };
 
+    // ── Auto-transpile .ts/.mts/.cts entry script (gated by typescript feature) ──
+    let script = if transpile::needs_transpile(&ref_filename) {
+        match transpile::transpile(&script) {
+            Ok(js) => js,
+            Err(e) => {
+                colorize_println(
+                    format!("error: failed to transpile '{ref_filename}': {e}"),
+                    RedFg,
+                );
+                std::process::exit(1);
+            }
+        }
+    } else {
+        script
+    };
+    // ── Transpile end ──
+
     let is_module = args.module
         || ref_filename.ends_with(".mjs")
         || ModuleDef::detect_module(script.as_bytes());
@@ -476,14 +494,38 @@ fn js_module_loader(
         ctx.throw_internal_error("dynamic library loading not implemented");
         Err(-1)
     } else {
-        // js file
-        match std::fs::read(file_name) {
-            Ok(buf) => ctx.compile_module(&buf, file_name, false),
+        let buf = match std::fs::read(file_name) {
+            Ok(b) => b,
             Err(e) => {
-                ctx.throw_reference_error(&format!("could not load module '{file_name}'. {e}"));
-                Err(-1)
+                ctx.throw_reference_error(&format!(
+                    "could not load module '{file_name}'. {e}"
+                ));
+                return Err(-1);
             }
-        }
+        };
+
+        // ── Transpile .ts/.mts/.cts modules before compilation (gated by typescript feature) ──
+        let code = if transpile::needs_transpile(file_name) {
+            if file_name.ends_with(".d.ts") {
+                // .d.ts has no executable code, return an empty module
+                return ctx.compile_module(b"export {}", file_name, false);
+            }
+            let source = String::from_utf8_lossy(&buf);
+            match transpile::transpile(&source) {
+                Ok(js) => js.into_bytes(),
+                Err(e) => {
+                    ctx.throw_syntax_error(&format!(
+                        "failed to transpile module '{file_name}': {e}"
+                    ));
+                    return Err(-1);
+                }
+            }
+        } else {
+            buf.to_vec()
+        };
+        // ── Transpile end ──
+
+        ctx.compile_module(&code, file_name, false)
     }
 }
 
