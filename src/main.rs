@@ -347,21 +347,21 @@ async fn main() -> ExitCode {
     //
     // Run script file mode
     //
-    let script = match std::fs::read_to_string(&ref_filename) {
-        Ok(s) => s,
+    let (script_bytes, script_path) = match read_script(&ref_filename) {
+        Ok((buf, name)) => (buf, name),
         Err(e) => {
-            colorize_println(format!("cannot load '{ref_filename}': {e}"), RedFg);
+            colorize_println(e, RedFg);
             std::process::exit(-1);
         }
     };
+    let script_str = String::from_utf8_lossy(&script_bytes).to_string();
 
-    // ── Auto-transpile .ts/.mts/.cts entry script (gated by typescript feature) ──
-    let (script, script_is_module): (String, bool) = if transpile::needs_transpile(&ref_filename) {
-        match transpile::transpile(&script) {
+    let (script, script_is_module): (String, bool) = if transpile::needs_transpile(&script_path) {
+        match transpile::transpile(&script_str) {
             Ok(result) => (result.code, result.is_module),
             Err(e) => {
                 colorize_println(
-                    format!("error: failed to transpile '{ref_filename}': {e}"),
+                    format!("error: failed to transpile '{script_path}': {e}"),
                     RedFg,
                 );
                 std::process::exit(1);
@@ -369,10 +369,12 @@ async fn main() -> ExitCode {
         }
     } else {
         // Non-TS files: use zuqe's built-in module detection
-        let detected = ModuleDef::detect_module(script.as_bytes());
-        (script, detected)
+        let detected = ModuleDef::detect_module(script_str.as_bytes());
+        (script_str, detected)
     };
     // ── Transpile end ──
+
+    let ref_filename = script_path;
 
     let is_module = script_is_module
         || args.module
@@ -497,26 +499,26 @@ fn js_module_loader(
         ctx.throw_internal_error("dynamic library loading not implemented");
         Err(-1)
     } else {
-        let buf = match std::fs::read(file_name) {
-            Ok(b) => b,
+        // Use resolved filename (may be .ts fallback from .js)
+        let resolved = read_script(file_name);
+        let (buf, resolved_name) = match resolved {
+            Ok((b, n)) => (b, n),
             Err(e) => {
                 ctx.throw_reference_error(&format!("could not load module '{file_name}'. {e}"));
                 return Err(-1);
             }
         };
 
-        let code = if transpile::needs_transpile(file_name) {
-            if file_name.ends_with(".d.ts") {
-                // .d.ts has no executable code, return an empty module
-                return ctx.compile_module(b"export {}", file_name, false);
+        let code = if transpile::needs_transpile(&resolved_name) {
+            if resolved_name.ends_with(".d.ts") {
+                return ctx.compile_module(b"export {}", &resolved_name, false);
             }
-
             let source = String::from_utf8_lossy(&buf);
             match transpile::transpile(&source) {
                 Ok(result) => result.code.into_bytes(),
                 Err(e) => {
                     ctx.throw_syntax_error(&format!(
-                        "failed to transpile module '{file_name}': {e}"
+                        "failed to transpile module '{resolved_name}': {e}"
                     ));
                     return Err(-1);
                 }
@@ -525,7 +527,43 @@ fn js_module_loader(
             buf.to_vec()
         };
 
-        ctx.compile_module(&code, file_name, false)
+        ctx.compile_module(&code, &resolved_name, false)
+    }
+}
+
+/// Read file with JS → TS fallback.
+/// If `foo.js` not found, tries `foo.ts`. Same for `.mjs` → `.mts`, `.cjs` → `.cts`.
+/// Returns (content bytes, resolved filename).
+fn read_script(file_name: &str) -> Result<(Vec<u8>, String), String> {
+    // Try exact path first
+    if let Ok(buf) = std::fs::read(file_name) {
+        return Ok((buf, file_name.to_string()));
+    }
+
+    // Try TS/MTS/CTS fallback
+    if let Some(ts_name) = ts_fallback(file_name) {
+        if let Ok(buf) = std::fs::read(&ts_name) {
+            return Ok((buf, ts_name));
+        }
+    }
+
+    // Report original error
+    match std::fs::read(file_name) {
+        Ok(buf) => Ok((buf, file_name.to_string())),
+        Err(e) => Err(format!("cannot load '{file_name}': {e}")),
+    }
+}
+
+/// Map `.js` → `.ts`, `.mjs` → `.mts`, `.cjs` → `.cts`
+fn ts_fallback(file_name: &str) -> Option<String> {
+    if let Some(base) = file_name.strip_suffix(".js") {
+        Some(format!("{}.ts", base))
+    } else if let Some(base) = file_name.strip_suffix(".mjs") {
+        Some(format!("{}.mts", base))
+    } else if let Some(base) = file_name.strip_suffix(".cjs") {
+        Some(format!("{}.cts", base))
+    } else {
+        None
     }
 }
 
