@@ -84,7 +84,10 @@ fn main() {
         bundle.len()
     );
 
-    // Tell Cargo to re-run this script only when source fragments change.
+    // Tell Cargo to re-run when features change (e.g. llama_cpp toggled).
+    println!("cargo::rerun-if-env-changed=CARGO_FEATURE_LLAMA_CPP");
+
+    // Also watch source fragments.
     for entry in &base_entries {
         println!("cargo::rerun-if-changed={}", entry.path().display());
     }

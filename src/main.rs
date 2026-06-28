@@ -31,8 +31,10 @@ use zuqe::{
     ScopedContext, builtins::promise::PromiseFuture,
 };
 
+use crate::llm::init_mod_llm;
+
 #[cfg(feature = "llama_cpp")]
-use crate::llm::{JSEngine, JSLlmContext, JSLlmModel, JSSamplerChain, init_mod_llm};
+use crate::llm::{JSEngine, JSLlmContext, JSLlmModel, JSSamplerChain};
 
 use crate::{
     aike::{JSCronJob, JSFileHandle, JSStdioHandle, gc_trace_cron, gc_trace_io},
@@ -285,7 +287,6 @@ async fn main() -> ExitCode {
             // use classes
             cx.use_classes(&[
                 JSEventEmitter::class_id(),
-                JSLlmClient::class_id(),
                 JSStdioHandle::class_id(),
                 JSFileHandle::class_id(),
                 JSResponse::class_id(),
@@ -304,6 +305,7 @@ async fn main() -> ExitCode {
                 HtmlElement::class_id(),
                 JSBrowser::class_id(),
                 JSTab::class_id(),
+                JSLlmClient::class_id(),
             ])?;
 
             #[cfg(feature = "llama_cpp")]
@@ -321,8 +323,6 @@ async fn main() -> ExitCode {
             init_mod_html(cx)?;
             init_mod_browser(cx)?;
             init_mod_yaml(cx)?;
-
-            #[cfg(feature = "llama_cpp")]
             init_mod_llm(cx)?;
 
             setup_globals(cx, &argv, &exec_argv, &exe_path)

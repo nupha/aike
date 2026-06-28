@@ -42,13 +42,12 @@ pub(crate) const MAGIC_CHAT_STREAM: i32 = 3;
 pub(crate) const MAGIC_RESPONSES_STREAM: i32 = 4;
 pub(crate) const MAGIC_RESPONSES_ONCE: i32 = 5;
 
+use zuqe::{FieldDef, JS_PROP_ENUMERABLE, NativeObject, ScopedContext};
+
 #[cfg(feature = "llama_cpp")]
 use llama_cpp_ffi::{FileType, KVCacheType, list_devices};
 #[cfg(feature = "llama_cpp")]
-use zuqe::{
-    Array, CallContext, FieldDef, JS_PROP_ENUMERABLE, JSResult, JSValue, NativeObject,
-    ScopedContext,
-};
+use zuqe::{Array, CallContext, JSResult, JSValue, NativeObject};
 
 #[cfg(feature = "llama_cpp")]
 fn get_devices(ctx: &mut ScopedContext, _: CallContext) -> JSResult {
@@ -74,18 +73,19 @@ fn get_devices(ctx: &mut ScopedContext, _: CallContext) -> JSResult {
     Array::from_values(ctx, lst).map(JSValue::from)
 }
 
-#[cfg(feature = "llama_cpp")]
 const MOD_LLAMA_ENTRIES: &[FieldDef] = &[
-    FieldDef::CLASS(
-        "Model",
-        || class_model::JSLlmModel::class_id(),
-        JS_PROP_ENUMERABLE,
-    ),
     FieldDef::CLASS(
         "Client",
         || class_client::JSLlmClient::class_id(),
         JS_PROP_ENUMERABLE,
     ),
+    #[cfg(feature = "llama_cpp")]
+    FieldDef::CLASS(
+        "Model",
+        || class_model::JSLlmModel::class_id(),
+        JS_PROP_ENUMERABLE,
+    ),
+    #[cfg(feature = "llama_cpp")]
     FieldDef::OBJECT(
         "FileType",
         &[
@@ -224,6 +224,7 @@ const MOD_LLAMA_ENTRIES: &[FieldDef] = &[
         ],
         JS_PROP_ENUMERABLE,
     ),
+    #[cfg(feature = "llama_cpp")]
     FieldDef::OBJECT(
         "KVCacheType",
         &[
@@ -239,10 +240,10 @@ const MOD_LLAMA_ENTRIES: &[FieldDef] = &[
         ],
         JS_PROP_ENUMERABLE,
     ),
+    #[cfg(feature = "llama_cpp")]
     FieldDef::FUNC("getDevices", 0, get_devices, 0),
 ];
 
-#[cfg(feature = "llama_cpp")]
 pub fn init_mod_llm(ctx: &mut ScopedContext) -> Result<(), i32> {
     ctx.create_module("llama", MOD_LLAMA_ENTRIES)?;
     Ok(())

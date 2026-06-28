@@ -1,5 +1,5 @@
-// Type declarations for the "llama" module
-// import { Model, Client, FileType, KVCacheType, getDevices } from "llama";
+// Type declarations for the "llama" module — llama_cpp feature only.
+// Declarations augment the base `llama` module with local model support.
 
 declare module "llama" {
   // ---------------------------------------------------------------------------
@@ -249,93 +249,7 @@ declare module "llama" {
   }
 
   // ---------------------------------------------------------------------------
-  // Chat types  —  shared by Engine and Client
-  // ---------------------------------------------------------------------------
-
-  export interface ChatMessage {
-    role: "system" | "user" | "assistant" | "tool";
-    content?: string;
-    tool_calls?: any[];
-    tool_call_id?: string;
-    [key: string]: any;
-  }
-
-  interface ResponseFormat {
-    type: string;
-    json_schema?: any;
-  }
-
-  interface StreamOptions {
-    include_usage?: boolean;
-  }
-
-  /** Token usage statistics. */
-  export interface ChatUsage {
-    prompt_tokens: number;
-    completion_tokens: number;
-    total_tokens: number;
-  }
-
-  /** Chat completion options (snake_case, matching OpenAI API). */
-  export interface ChatOptions {
-    messages: ChatMessage[];
-    model?: string;
-    temperature?: number;
-    top_p?: number;
-    max_completion_tokens?: number;
-    stop?: string | string[];
-    tools?: any[];
-    tool_choice?: string | object;
-    parallel_tool_calls?: boolean;
-    reasoning_effort?: string;
-    response_format?: ResponseFormat;
-    stream_options?: StreamOptions;
-  }
-
-  /** Chat request (camelCase variant, accepted by Client). */
-  export interface ChatRequest {
-    messages: ChatMessage[];
-    model?: string;
-    temperature?: number;
-    topP?: number;
-    maxCompletionTokens?: number;
-    stop?: string | string[];
-    tools?: any[];
-    toolChoice?: string | object;
-    parallelToolCalls?: boolean;
-    reasoningEffort?: string;
-    responseFormat?: ResponseFormat;
-    streamOptions?: StreamOptions;
-    timeout?: number;
-    [key: string]: any;
-  }
-
-  export interface ChatResponse {
-    id?: string;
-    model?: string;
-    choices: Array<{
-      index?: number;
-      message: ChatMessage;
-      finish_reason: string | null;
-    }>;
-    usage?: ChatUsage;
-    [key: string]: any;
-  }
-
-  export interface ChatStreamChunk {
-    id: string;
-    model: string;
-    choices: Array<{
-      index: number;
-      delta: Partial<ChatMessage>;
-      finish_reason: string | null;
-    }>;
-    usage?: ChatUsage;
-    [key: string]: any;
-  }
-
-  // ---------------------------------------------------------------------------
-  // Engine  —  local LLM inference engine
+  // Engine — local LLM inference engine
   // ---------------------------------------------------------------------------
 
   /** Local LLM inference engine with OpenAI-compatible chat API. Created via Context.createEngine(). */
@@ -347,41 +261,6 @@ declare module "llama" {
     chat(options: ChatOptions): AsyncIterableIterator<ChatStreamChunk>;
     responsesOnce(options: ChatOptions): Promise<any>;
     responses(options: ChatOptions): AsyncIterableIterator<any>;
-    dispose(): void;
-  }
-
-  // ---------------------------------------------------------------------------
-  // Client  —  remote LLM client
-  // ---------------------------------------------------------------------------
-
-  interface ClientOptions {
-    apiKey?: string;
-    baseUrl?: string;
-    model?: string;
-    maxTokens?: number;
-    timeout?: number;
-    extraBody?: object;
-  }
-
-  /** Remote LLM client compatible with OpenAI chat API. */
-  export class Client {
-    constructor(options?: ClientOptions);
-
-    readonly model: string;
-    readonly baseUrl: string;
-    readonly bufferedToolCall: boolean;
-    readonly maxTokens: number;
-    readonly extraBody: object | null;
-    readonly timeout: number;
-
-    responseNormalizer: ((response: any) => any) | null;
-
-    chatOnce(options: ChatOptions | ChatRequest): Promise<ChatResponse>;
-    chat(
-      options: ChatOptions | ChatRequest,
-    ): AsyncIterableIterator<ChatStreamChunk>;
-    responses(options: ChatOptions | ChatRequest): AsyncIterableIterator<any>;
-    responsesOnce(options: ChatOptions | ChatRequest): Promise<any>;
     dispose(): void;
   }
 }
