@@ -356,9 +356,9 @@ async fn main() -> ExitCode {
     };
 
     // ── Auto-transpile .ts/.mts/.cts entry script (gated by typescript feature) ──
-    let script = if transpile::needs_transpile(&ref_filename) {
+    let (script, script_is_module): (String, bool) = if transpile::needs_transpile(&ref_filename) {
         match transpile::transpile(&script) {
-            Ok(js) => js,
+            Ok(result) => (result.code, result.is_module),
             Err(e) => {
                 colorize_println(
                     format!("error: failed to transpile '{ref_filename}': {e}"),
@@ -368,13 +368,16 @@ async fn main() -> ExitCode {
             }
         }
     } else {
-        script
+        // Non-TS files: use zuqe's built-in module detection
+        let detected = ModuleDef::detect_module(script.as_bytes());
+        (script, detected)
     };
     // ── Transpile end ──
 
-    let is_module = args.module
+    let is_module = script_is_module
+        || args.module
         || ref_filename.ends_with(".mjs")
-        || ModuleDef::detect_module(script.as_bytes());
+        || ref_filename.ends_with(".mts");
 
     let mut promise_future: Option<PromiseFuture> = None;
 
@@ -497,22 +500,20 @@ fn js_module_loader(
         let buf = match std::fs::read(file_name) {
             Ok(b) => b,
             Err(e) => {
-                ctx.throw_reference_error(&format!(
-                    "could not load module '{file_name}'. {e}"
-                ));
+                ctx.throw_reference_error(&format!("could not load module '{file_name}'. {e}"));
                 return Err(-1);
             }
         };
 
-        // ── Transpile .ts/.mts/.cts modules before compilation (gated by typescript feature) ──
         let code = if transpile::needs_transpile(file_name) {
             if file_name.ends_with(".d.ts") {
                 // .d.ts has no executable code, return an empty module
                 return ctx.compile_module(b"export {}", file_name, false);
             }
+
             let source = String::from_utf8_lossy(&buf);
             match transpile::transpile(&source) {
-                Ok(js) => js.into_bytes(),
+                Ok(result) => result.code.into_bytes(),
                 Err(e) => {
                     ctx.throw_syntax_error(&format!(
                         "failed to transpile module '{file_name}': {e}"
@@ -523,7 +524,6 @@ fn js_module_loader(
         } else {
             buf.to_vec()
         };
-        // ── Transpile end ──
 
         ctx.compile_module(&code, file_name, false)
     }
