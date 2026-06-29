@@ -24,7 +24,7 @@ pub(crate) use class_client::JSLlmClient;
 #[cfg(feature = "llama_cpp")]
 pub(crate) use {
     class_context::JSLlmContext,
-    class_engine::{ERR_CANCELLED, ERR_ENGINE_SHUTDOWN, JSEngine},
+    class_engine::{JSEngine, ERR_CANCELLED, ERR_ENGINE_SHUTDOWN},
     class_model::JSLlmModel,
     class_sampler::JSSamplerChain,
 };
@@ -42,12 +42,12 @@ pub(crate) const MAGIC_CHAT_STREAM: i32 = 3;
 pub(crate) const MAGIC_RESPONSES_STREAM: i32 = 4;
 pub(crate) const MAGIC_RESPONSES_ONCE: i32 = 5;
 
-use zuqe::{FieldDef, JS_PROP_ENUMERABLE, NativeObject, ScopedContext};
+use zuqe::{FieldDef, NativeObject, ScopedContext, JS_PROP_ENUMERABLE};
 
 #[cfg(feature = "llama_cpp")]
-use llama_cpp_ffi::{FileType, KVCacheType, list_devices};
+use llama_cpp_ffi::{list_devices, FileType, KVCacheType};
 #[cfg(feature = "llama_cpp")]
-use zuqe::{Array, CallContext, JSResult, JSValue, NativeObject};
+use zuqe::{Array, CallContext, JSResult, JSValue};
 
 #[cfg(feature = "llama_cpp")]
 fn get_devices(ctx: &mut ScopedContext, _: CallContext) -> JSResult {
