@@ -18,22 +18,22 @@ async function main() {
   }
   console.log("  Browser launched, isRunning:", browser.isRunning);
 
-  // 2. create tab + set viewport
-  const tab = await browser.newTab();
-  console.log("  New tab created, targetId:", tab.targetId);
-  await tab.setViewport(1280, 800);
+  // 2. create page + set viewport
+  const page = await browser.newPage();
+  console.log("  New page created, targetId:", page.targetId);
+  await page.setViewport(1280, 800);
   console.log("  Viewport: 1280x800\n");
 
   // 3. go to bing.com
   console.log("  Navigate to bing.com ...");
-  await tab.navigate("https://www.bing.com");
-  await tab.waitForNavigation(15000);
+  await page.navigate("https://www.bing.com");
+  await page.waitForNavigation(15000);
   console.log("  Bing homepage loaded");
 
   // 4. type query into the search box and submit
   const query = "hello world";
   console.log("  Searching for:", query, "\n");
-  await tab.evaluate(`(function() {
+  await page.evaluate(`(function() {
     var input = document.querySelector('input[name="q"]');
     if (!input) throw new Error("search input not found");
     input.value = "${query}";
@@ -46,11 +46,11 @@ async function main() {
   })()`);
 
   // 5. wait for the search results page to load
-  await tab.waitForNavigation(15000);
+  await page.waitForNavigation(15000);
   console.log("  Search results page loaded\n");
 
   // 6. extract search results from the DOM
-  const results = await tab.evaluate(`(function() {
+  const results = await page.evaluate(`(function() {
     var items = document.querySelectorAll("#b_results .b_algo");
     var out = [];
     for (var i = 0; i < items.length; i++) {
@@ -73,7 +73,7 @@ async function main() {
       "  (no results found via #b_results .b_algo, trying fallback)\n",
     );
     // fallback: dump the page title and a snippet of text
-    const fallback = await tab.evaluate(`(function() {
+    const fallback = await page.evaluate(`(function() {
       return {
         title: document.title,
         text: document.body.innerText.substring(0, 500)
@@ -94,7 +94,7 @@ async function main() {
 
   // 8. scroll to bottom, then wait
   console.log("  Scrolling to bottom of page...");
-  await tab.evaluate(
+  await page.evaluate(
     "window.scrollTo(0, document.documentElement.scrollHeight)",
   );
   console.log("  Waiting 5 seconds...");
@@ -102,7 +102,7 @@ async function main() {
 
   // 9. close tab + browser
   console.log("  Closing tab...");
-  await tab.close();
+  await page.close();
   console.log("  Closing browser...");
   await browser.close();
   console.log("\nDone.");

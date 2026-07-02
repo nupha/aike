@@ -16,7 +16,7 @@ declare module "browser" {
   /** A Chrome browser instance. Cannot be constructed directly. */
   interface Browser {
     /** Create a new tab (page). */
-    newTab(): Promise<Tab>;
+    newPage(): Promise<Page>;
 
     /** Close the browser and release all resources. */
     close(): Promise<void>;
@@ -56,8 +56,22 @@ declare module "browser" {
     printBackground?: boolean;
   }
 
+  /** Mouse click options. */
+  interface MouseClickOptions {
+    /** Mouse button: "left" (default), "middle", "right". */
+    button?: "left" | "middle" | "right";
+    /** Click count: 1 (single), 2 (double). Default: 1. */
+    clickCount?: number;
+  }
+
+  /** Key press options. */
+  interface KeyPressOptions {
+    /** Modifier bitmask: 1=Alt, 2=Ctrl, 4=Meta, 8=Shift. */
+    modifiers?: number;
+  }
+
   /** A single browser tab/page. Cannot be constructed directly. */
-  interface Tab {
+  interface Page {
     /** Navigate to a URL. Resolves when the page starts loading. */
     navigate(url: string): Promise<void>;
 
@@ -121,7 +135,13 @@ declare module "browser" {
     getLayoutMetrics(): Promise<{
       contentSize: { width: number; height: number };
       layoutViewport: { x: number; y: number; width: number; height: number };
-      visualViewport: { x: number; y: number; width: number; height: number; scale: number };
+      visualViewport: {
+        x: number;
+        y: number;
+        width: number;
+        height: number;
+        scale: number;
+      };
     }>;
 
     /**
@@ -144,6 +164,71 @@ declare module "browser" {
 
     /** Unique target ID assigned by Chrome. */
     readonly targetId: string;
+
+    // -----------------------------------------------------------------------
+    // Input domain — mouse, keyboard, text
+    // -----------------------------------------------------------------------
+
+    /**
+     * Click at pixel coordinates (x, y).
+     * Performs mousePressed + mouseReleased via native CDP Input.dispatchMouseEvent.
+     */
+    mouseClick(
+      x: number,
+      y: number,
+      options?: MouseClickOptions,
+    ): Promise<void>;
+
+    /**
+     * Move mouse to pixel coordinates (x, y).
+     * Uses native CDP Input.dispatchMouseEvent (mouseMoved).
+     */
+    mouseMove(x: number, y: number): Promise<void>;
+
+    /**
+     * Simulate pressing a key (keyDown → char → keyUp).
+     * Uses native CDP Input.dispatchKeyEvent.
+     */
+    keyPress(key: string, options?: KeyPressOptions): Promise<void>;
+
+    /**
+     * Insert text directly into the focused element.
+     * Uses native CDP Input.insertText — reliable for CJK / Unicode.
+     */
+    insertText(text: string): Promise<void>;
+
+    // -----------------------------------------------------------------------
+    // Network domain — request/response body, capture
+    // -----------------------------------------------------------------------
+
+    /**
+     * Get the HTTP response body for a given request ID.
+     * Requires Network domain to be enabled (see startNetworkCapture).
+     * @returns `{ body: string, base64Encoded: boolean }`
+     */
+    getResponseBody(
+      requestId: string,
+    ): Promise<{ body: string; base64Encoded: boolean }>;
+
+    /**
+     * Start capturing network requests.
+     * Enables the CDP Network domain and begins recording
+     * Network.requestWillBeSent / responseReceived / loadingFinished events.
+     * Captured data can be retrieved via getCapturedRequests().
+     */
+    startNetworkCapture(): Promise<void>;
+
+    /** Stop the network capture background task. */
+    stopNetworkCapture(): Promise<void>;
+
+    /**
+     * Get all captured network requests/events.
+     * Each entry has `{ method, params }` from the raw CDP event.
+     */
+    getCapturedRequests(): Promise<Array<{ method: string; params: any }>>;
+
+    /** Clear captured network requests. */
+    clearCapturedRequests(): Promise<void>;
   }
 
   /** Launch a Chrome browser instance. */
