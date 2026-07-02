@@ -18,7 +18,7 @@ use zuqe::{
 
 use crate::browser::{
     cdp_network,
-    class_page::{get_page_payload, js_from_json_value},
+    class_page::{get_page_payload, get_str_prop, js_from_json_value},
 };
 
 /// Convert a CDP cookie JSON value to a JS object.
