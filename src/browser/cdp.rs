@@ -17,12 +17,23 @@ use std::{
 use crossbeam::channel::{Receiver, Sender, TryRecvError, unbounded};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
-use tokio::{net::TcpStream, sync::oneshot};
+use tokio::{
+    net::TcpStream,
+    sync::{broadcast, oneshot},
+};
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async, tungstenite::Message};
 
 type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
 type WsWriter = futures_util::stream::SplitSink<WsStream, Message>;
 type WsReader = futures_util::stream::SplitStream<WsStream>;
+
+/// A CDP event received from the browser (message with "method" but no "id").
+#[derive(Clone, Debug)]
+pub(crate) struct CdpEvent {
+    pub(crate) method: String,
+    pub(crate) params: Value,
+    pub(crate) session_id: Option<String>,
+}
 
 /// A command submitted from JS to the background WebSocket task.
 struct CdpCommand {
@@ -35,6 +46,7 @@ struct CdpCommand {
 pub(crate) struct CdpClient {
     cmd_tx: Sender<CdpCommand>,
     next_id: Arc<AtomicU64>,
+    event_tx: broadcast::Sender<CdpEvent>,
 }
 
 impl CdpClient {
@@ -50,30 +62,43 @@ impl CdpClient {
 
         let (cmd_tx, cmd_rx) = unbounded::<CdpCommand>();
         let next_id = Arc::new(AtomicU64::new(1));
+        let (event_tx, _) = broadcast::channel::<CdpEvent>(256);
 
         let bg_writer = writer.clone();
+        let bg_event_tx = event_tx.clone();
         let handle = tokio::spawn(async move {
-            Self::run_background(bg_writer, reader, cmd_rx).await;
+            Self::run_background(bg_writer, reader, cmd_rx, bg_event_tx).await;
         });
 
-        Ok((Self { cmd_tx, next_id }, handle))
+        Ok((
+            Self {
+                cmd_tx,
+                next_id,
+                event_tx,
+            },
+            handle,
+        ))
     }
 
-    /// Background loop: forward commands to WS and dispatch responses.
+    /// Background loop: forward commands to WS and dispatch responses / events.
     async fn run_background(
         writer: Arc<tokio::sync::Mutex<WsWriter>>,
         mut reader: WsReader,
         cmd_rx: Receiver<CdpCommand>,
+        event_tx: broadcast::Sender<CdpEvent>,
     ) {
         let pending: Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>> =
             Arc::new(Mutex::new(HashMap::new()));
 
         let pending_r = pending.clone();
+        let event_tx_r = event_tx.clone();
         let reader_handle = tokio::spawn(async move {
             while let Some(msg) = reader.next().await {
                 match msg {
                     Ok(Message::Text(text)) => {
-                        Self::dispatch_response(&pending_r, &text);
+                        if !Self::try_dispatch_response(&pending_r, &text) {
+                            Self::dispatch_event(&event_tx_r, &text);
+                        }
                     }
                     Ok(Message::Close(_)) => break,
                     Err(e) => {
@@ -132,17 +157,18 @@ impl CdpClient {
     }
 
     /// Parse a received WS text message and dispatch to the matching pending command.
-    fn dispatch_response(
+    /// Returns `true` if it was a command response (had "id"), `false` if it was not.
+    fn try_dispatch_response(
         pending: &Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>>,
         text: &str,
-    ) {
+    ) -> bool {
         let Ok(val) = serde_json::from_str::<Value>(text) else {
-            return;
+            return false;
         };
 
         let id = match val.get("id").and_then(|v| v.as_u64()) {
             Some(id) => id,
-            None => return,
+            None => return false, // Not a command response, it's an event
         };
 
         let tx = pending.lock().unwrap().remove(&id);
@@ -158,6 +184,28 @@ impl CdpClient {
             };
             let _ = tx.send(result);
         }
+        true
+    }
+
+    /// Forward a CDP event (message without "id") to the broadcast channel.
+    fn dispatch_event(event_tx: &broadcast::Sender<CdpEvent>, text: &str) {
+        let Ok(val) = serde_json::from_str::<Value>(text) else {
+            return;
+        };
+        let method = match val.get("method").and_then(|v| v.as_str()) {
+            Some(m) => m.to_string(),
+            None => return,
+        };
+        let params = val.get("params").cloned().unwrap_or(Value::Null);
+        let session_id = val
+            .get("sessionId")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let _ = event_tx.send(CdpEvent {
+            method,
+            params,
+            session_id,
+        });
     }
 
     /// Build a CDP JSON-RPC command message string.
@@ -189,6 +237,12 @@ impl CdpClient {
         let _ = self.cmd_tx.send(CdpCommand { msg, resp_tx: tx });
 
         rx
+    }
+
+    /// Subscribe to CDP events (messages without "id").
+    /// Returns a receiver that gets all CDP events from all sessions.
+    pub(crate) fn subscribe_events(&self) -> broadcast::Receiver<CdpEvent> {
+        self.event_tx.subscribe()
     }
 
     /// Create a new target (tab) and attach a session to it.

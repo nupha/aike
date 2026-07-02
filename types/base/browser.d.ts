@@ -113,6 +113,35 @@ declare module "browser" {
     /** Close this tab. */
     close(): Promise<void>;
 
+    // -----------------------------------------------------------------------
+    // Native CDP methods
+    // -----------------------------------------------------------------------
+
+    /** Layout metrics for the current page (content size, viewport, etc.). */
+    getLayoutMetrics(): Promise<{
+      contentSize: { width: number; height: number };
+      layoutViewport: { x: number; y: number; width: number; height: number };
+      visualViewport: { x: number; y: number; width: number; height: number; scale: number };
+    }>;
+
+    /**
+     * Inject a script that runs in every new document (before any other script).
+     * @param source - JavaScript source to inject.
+     * @returns The script identifier string.
+     */
+    addInitScript(source: string): Promise<string>;
+
+    /** Get the iframe/frame hierarchy tree. */
+    getFrameTree(): Promise<{
+      frameTree: {
+        frame: { id: string; parentId?: string; url: string; name?: string };
+        childFrames?: any[];
+      };
+    }>;
+
+    /** Enable Runtime domain events (consoleAPICalled, exceptionThrown, etc.). */
+    enableRuntime(): Promise<void>;
+
     /** Unique target ID assigned by Chrome. */
     readonly targetId: string;
   }

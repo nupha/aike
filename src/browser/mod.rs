@@ -11,12 +11,12 @@
 mod cdp;
 mod chrome;
 
-use std::cell::Cell;
-use std::sync::Arc;
+use std::{cell::Cell, sync::Arc, time::Duration};
 
 use linkme::distributed_slice;
 use serde_json::Value;
 use tokio::sync::Mutex as AsyncMutex;
+use tokio::sync::broadcast;
 use zuqe::{
     Array, CallContext, ClassID, FieldDef, JSResult, JSValue, Object, Runtime, ScopedContext,
     builtins::promise::{Promise, PromiseResultSlot},
@@ -75,20 +75,20 @@ fn js_launch(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut proxy_url: Option<String> = None;
     let mut chrome_path: Option<String> = None;
 
-    if cc.length() > 0 {
-        if let Some(opts) = cc.arg(0).as_object() {
-            proxy_url = get_str_prop(ctx, opts, "proxyUrl");
-            chrome_path = get_str_prop(ctx, opts, "chromePath");
-            if let Some(v) = get_number_prop(ctx, opts, "port") {
-                port = v as u16;
-            }
-            let hv = opts
-                .get_property_str(ctx, "headless")
-                .unwrap_or(JSValue::UNDEFINED);
-            if !hv.is_undefined() {
-                // JSValue: truthy check via to_bool
-                headless = hv.to_bool().unwrap_or(false);
-            }
+    if cc.length() > 0
+        && let Some(opts) = cc.arg(0).as_object()
+    {
+        proxy_url = get_str_prop(ctx, opts, "proxyUrl");
+        chrome_path = get_str_prop(ctx, opts, "chromePath");
+        if let Some(v) = get_number_prop(ctx, opts, "port") {
+            port = v as u16;
+        }
+        let hv = opts
+            .get_property_str(ctx, "headless")
+            .unwrap_or(JSValue::UNDEFINED);
+        if !hv.is_undefined() {
+            // JSValue: truthy check via to_bool
+            headless = hv.to_bool().unwrap_or(false);
         }
     }
 
@@ -284,6 +284,11 @@ const TAB_PROTO: &[FieldDef] = &[
     FieldDef::FUNC("printToPDF", 1, js_tab_print_to_pdf, 0),
     FieldDef::FUNC("uploadFile", 2, js_tab_upload_file, 0),
     FieldDef::FUNC("close", 0, js_tab_close, 0),
+    // Native CDP methods (replacing JS injection workarounds)
+    FieldDef::FUNC("getLayoutMetrics", 0, js_tab_get_layout_metrics, 0),
+    FieldDef::FUNC("addInitScript", 1, js_tab_add_init_script, 0),
+    FieldDef::FUNC("getFrameTree", 0, js_tab_get_frame_tree, 0),
+    FieldDef::FUNC("enableRuntime", 0, js_tab_enable_runtime, 0),
 ];
 
 def_native_object!("Tab", JSTab, TabPayload, TAB_PROTO, None);
@@ -519,14 +524,14 @@ fn js_tab_capture_screenshot(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
     let mut format = "png".to_string();
     let mut quality = None::<i32>;
 
-    if cc.length() > 0 {
-        if let Some(opts) = cc.arg(0).as_object() {
-            if let Some(f) = get_str_prop(ctx, opts, "format") {
-                format = f;
-            }
-            if let Some(q) = get_number_prop(ctx, opts, "quality") {
-                quality = Some(q as i32);
-            }
+    if cc.length() > 0
+        && let Some(opts) = cc.arg(0).as_object()
+    {
+        if let Some(f) = get_str_prop(ctx, opts, "format") {
+            format = f;
+        }
+        if let Some(q) = get_number_prop(ctx, opts, "quality") {
+            quality = Some(q as i32);
         }
     }
 
@@ -729,7 +734,19 @@ fn js_tab_set_cookie(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 }
 
 /// `tab.waitForNavigation(timeoutMs?)`
+/// Uses native CDP Page.loadEventFired event instead of JS Promise simulation.
 fn js_tab_wait_for_navigation(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let timeout_ms: u64 = if cc.length() > 0 {
+        let n = cc
+            .arg(0)
+            .to_number(ctx)
+            .map(|n| n.to_i32())
+            .unwrap_or(30000);
+        n.max(1000) as u64
+    } else {
+        30000
+    };
+
     let this = cc.this();
     let payload = get_tab_payload(ctx, &this)?;
     let client = payload.client.clone();
@@ -746,23 +763,39 @@ fn js_tab_wait_for_navigation(ctx: &mut ScopedContext, cc: CallContext) -> JSRes
         })?;
 
     tokio::spawn(async move {
+        // Enable Page domain to receive events
         let _ = client.send("Page.enable", None, Some(&session_id)).await;
-        let rx = client.send(
-            "Runtime.evaluate",
-            Some(serde_json::json!({
-                "expression": "new Promise(resolve => { \
-                    if (document.readyState === 'complete') { resolve(true); return; } \
-                    window.addEventListener('load', () => resolve(true), { once: true }); \
-                })",
-                "awaitPromise": true,
-            })),
-            Some(&session_id),
-        );
-        let result = rx.await.unwrap_or(Err("channel closed".into()));
-        match result {
-            Ok(_) => result_slot.commit(Ok(())).ok(),
-            Err(e) => result_slot.commit(Err(e)).ok(),
-        };
+
+        // Subscribe to CDP events and wait for Page.loadEventFired for this session
+        let mut event_rx = client.subscribe_events();
+        let timeout = tokio::time::sleep(Duration::from_millis(timeout_ms));
+        tokio::pin!(timeout);
+
+        loop {
+            tokio::select! {
+                event = event_rx.recv() => {
+                    match event {
+                        Ok(evt) => {
+                            if evt.method == "Page.loadEventFired"
+                                && evt.session_id.as_deref() == Some(&session_id)
+                            {
+                                result_slot.commit(Ok(())).ok();
+                                break;
+                            }
+                        }
+                        Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(broadcast::error::RecvError::Closed) => {
+                            result_slot.commit(Err("CDP connection closed".into())).ok();
+                            break;
+                        }
+                    }
+                }
+                _ = &mut timeout => {
+                    result_slot.commit(Err("navigation timeout".into())).ok();
+                    break;
+                }
+            }
+        }
     });
 
     Ok(promise.into())
@@ -819,20 +852,20 @@ fn js_tab_handle_dialog(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 fn js_tab_print_to_pdf(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut params = serde_json::json!({ "printBackground": true });
 
-    if cc.length() > 0 {
-        if let Some(opts) = cc.arg(0).as_object() {
-            if let Some(v) = get_bool_prop(ctx, opts, "landscape") {
-                params["landscape"] = Value::Bool(v);
-            }
-            if let Some(v) = get_number_prop(ctx, opts, "paperWidth") {
-                params["paperWidth"] = serde_json::json!(v);
-            }
-            if let Some(v) = get_number_prop(ctx, opts, "paperHeight") {
-                params["paperHeight"] = serde_json::json!(v);
-            }
-            if let Some(v) = get_bool_prop(ctx, opts, "printBackground") {
-                params["printBackground"] = Value::Bool(v);
-            }
+    if cc.length() > 0
+        && let Some(opts) = cc.arg(0).as_object()
+    {
+        if let Some(v) = get_bool_prop(ctx, opts, "landscape") {
+            params["landscape"] = Value::Bool(v);
+        }
+        if let Some(v) = get_number_prop(ctx, opts, "paperWidth") {
+            params["paperWidth"] = serde_json::json!(v);
+        }
+        if let Some(v) = get_number_prop(ctx, opts, "paperHeight") {
+            params["paperHeight"] = serde_json::json!(v);
+        }
+        if let Some(v) = get_bool_prop(ctx, opts, "printBackground") {
+            params["printBackground"] = Value::Bool(v);
         }
     }
 
@@ -875,6 +908,120 @@ fn js_tab_print_to_pdf(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     Ok(promise.into())
 }
 
+// ---------------------------------------------------------------------------
+// Native CDP Tab methods
+// ---------------------------------------------------------------------------
+
+/// `tab.getLayoutMetrics()` — native CDP Page.getLayoutMetrics.
+/// Returns `{contentSize, layoutViewport, visualViewport}`.
+fn js_tab_get_layout_metrics(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let this = cc.this();
+    let payload = get_tab_payload(ctx, &this)?;
+    let client = payload.client.clone();
+    let session_id = payload.session_id.clone();
+
+    let result_slot = PromiseResultSlot::<Result<Value, String>>::new();
+    let promise =
+        Promise::create_with_result_slot(ctx, result_slot.clone(), |cx, payload| -> JSResult {
+            let val = payload.map_err(|e| {
+                cx.throw_internal_error(&e);
+                -1
+            })?;
+            js_from_json_value(cx, &val)
+        })?;
+
+    tokio::spawn(async move {
+        let rx = client.send("Page.getLayoutMetrics", None, Some(&session_id));
+        let result = rx.await.unwrap_or(Err("channel closed".into()));
+        result_slot.commit(result).ok();
+    });
+
+    Ok(promise.into())
+}
+
+/// `tab.addInitScript(scriptSource)` — native CDP Page.addScriptToEvaluateOnNewDocument.
+/// Injects a script that runs in every new document (before any other script).
+fn js_tab_add_init_script(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let source = cc
+        .arg(0)
+        .to_string(ctx)
+        .map(|s| s.content().encode_utf8(false).to_string())
+        .unwrap_or_default();
+
+    let this = cc.this();
+    let payload = get_tab_payload(ctx, &this)?;
+    let client = payload.client.clone();
+    let session_id = payload.session_id.clone();
+
+    let result_slot = PromiseResultSlot::<Result<String, String>>::new();
+    let promise =
+        Promise::create_with_result_slot(ctx, result_slot.clone(), |cx, payload| -> JSResult {
+            let id = payload.map_err(|e| {
+                cx.throw_internal_error(&e);
+                -1
+            })?;
+            cx.create_string_from_utf8(id.into_bytes())
+                .map(JSValue::from)
+        })?;
+
+    tokio::spawn(async move {
+        let rx = client.send(
+            "Page.addScriptToEvaluateOnNewDocument",
+            Some(serde_json::json!({ "source": source })),
+            Some(&session_id),
+        );
+        let result = rx.await.unwrap_or(Err("channel closed".into()));
+        match result {
+            Ok(val) => {
+                let id = val
+                    .get("identifier")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let _ = result_slot.commit(Ok(id));
+            }
+            Err(e) => {
+                let _ = result_slot.commit(Err(e));
+            }
+        }
+    });
+
+    Ok(promise.into())
+}
+
+/// `tab.getFrameTree()` — native CDP Page.getFrameTree.
+/// Returns the iframe/frame hierarchy tree.
+fn js_tab_get_frame_tree(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let this = cc.this();
+    let payload = get_tab_payload(ctx, &this)?;
+    let client = payload.client.clone();
+    let session_id = payload.session_id.clone();
+
+    let result_slot = PromiseResultSlot::<Result<Value, String>>::new();
+    let promise =
+        Promise::create_with_result_slot(ctx, result_slot.clone(), |cx, payload| -> JSResult {
+            let val = payload.map_err(|e| {
+                cx.throw_internal_error(&e);
+                -1
+            })?;
+            js_from_json_value(cx, &val)
+        })?;
+
+    tokio::spawn(async move {
+        let rx = client.send("Page.getFrameTree", None, Some(&session_id));
+        let result = rx.await.unwrap_or(Err("channel closed".into()));
+        result_slot.commit(result).ok();
+    });
+
+    Ok(promise.into())
+}
+
+/// `tab.enableRuntime()` — native CDP Runtime.enable.
+/// Enables Runtime domain events (consoleAPICalled, exceptionThrown, etc.).
+fn js_tab_enable_runtime(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    send_tab_void_cmd(ctx, &cc, "Runtime.enable", None)
+}
+
 /// `tab.uploadFile(selector, filePaths)`
 fn js_tab_upload_file(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let selector = cc
@@ -884,12 +1031,12 @@ fn js_tab_upload_file(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         .unwrap_or_default();
 
     let mut file_paths: Vec<String> = Vec::new();
-    if cc.length() > 1 {
-        if let Some(arr) = cc.arg(1).as_object_Array() {
-            for v in arr.payload().values() {
-                if let Some(s) = v.as_string() {
-                    file_paths.push(s.content().encode_utf8(false).to_string());
-                }
+    if cc.length() > 1
+        && let Some(arr) = cc.arg(1).as_object_Array()
+    {
+        for v in arr.payload().values() {
+            if let Some(s) = v.as_string() {
+                file_paths.push(s.content().encode_utf8(false).to_string());
             }
         }
     }
