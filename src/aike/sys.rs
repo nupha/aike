@@ -234,3 +234,15 @@ pub(super) fn js_ttySetRaw(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
 
     Ok(JSValue::UNDEFINED)
 }
+
+pub(super) fn js_homedir(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
+    match dirs::home_dir() {
+        Some(p) => ctx
+            .create_string_from_utf8(p.to_string_lossy().as_bytes().to_vec())
+            .map(JSValue::from),
+        None => {
+            ctx.throw_internal_error("cannot determine home directory");
+            Err(-1)
+        }
+    }
+}

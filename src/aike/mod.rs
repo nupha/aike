@@ -89,6 +89,7 @@ pub fn init_aike(
         FieldDef::FUNC("ttyGetWinSize", 1, sys::js_ttyGetWinSize, 0),
         FieldDef::FUNC("ttySetRaw", 1, sys::js_ttySetRaw, 0),
         FieldDef::FUNC("now", 0, sys::js_now, 0),
+        FieldDef::FUNC("homedir", 0, sys::js_homedir, 0),
         // --- signal ---
         FieldDef::FUNC("onSignal", 2, signal::js_on_signal, 0),
         FieldDef::LAZY_VALUE("signals", signal::js_signals, JS_PROP_ENUMERABLE),

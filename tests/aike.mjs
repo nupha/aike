@@ -1,3 +1,5 @@
+import * as Path from "path";
+
 // --- Helpers ---
 let pass = 0;
 let fail = 0;
@@ -425,107 +427,110 @@ async function testSpawnSync() {
   // 1. Existence
   check("spawnSync exists", typeof Aike.spawnSync === "function");
 
-  // 2. Basic echo with args array
-  {
-    const r = Aike.spawnSync("echo", ["hello spawnSync"]);
-    check("returns object", typeof r === "object" && r !== null);
-    check("pid is positive int", Number.isInteger(r.pid) && r.pid > 0);
-    check("stdout is Uint8Array", r.stdout instanceof Uint8Array);
-    check(
-      "stdout content",
-      new TextDecoder().decode(r.stdout).trim() === "hello spawnSync",
-      `got ${JSON.stringify(new TextDecoder().decode(r.stdout))}`,
-    );
-    check(
-      "stderr is empty Uint8Array",
-      r.stderr instanceof Uint8Array && r.stderr.length === 0,
-    );
-    check("exitCode === 0", r.exitCode === 0);
-    check("signalCode === null", r.signalCode === null);
-    check("success === true", r.success === true);
-  }
+  // 2-10. Unix-only spawnSync tests (skip on Windows)
+  if (Aike.platform !== "windows") {
+    // 2. Basic echo with args array
+    {
+      const r = Aike.spawnSync("echo", ["hello spawnSync"]);
+      check("returns object", typeof r === "object" && r !== null);
+      check("pid is positive int", Number.isInteger(r.pid) && r.pid > 0);
+      check("stdout is Uint8Array", r.stdout instanceof Uint8Array);
+      check(
+        "stdout content",
+        new TextDecoder().decode(r.stdout).trim() === "hello spawnSync",
+        `got ${JSON.stringify(new TextDecoder().decode(r.stdout))}`,
+      );
+      check(
+        "stderr is empty Uint8Array",
+        r.stderr instanceof Uint8Array && r.stderr.length === 0,
+      );
+      check("exitCode === 0", r.exitCode === 0);
+      check("signalCode === null", r.signalCode === null);
+      check("success === true", r.success === true);
+    }
 
-  // 3. Non-zero exit
-  {
-    const r = Aike.spawnSync("false");
-    check("false exitCode !== 0", r.exitCode !== 0);
-    check("false success === false", r.success === false);
-    check("false signalCode === null", r.signalCode === null);
-  }
+    // 3. Non-zero exit
+    {
+      const r = Aike.spawnSync("false");
+      check("false exitCode !== 0", r.exitCode !== 0);
+      check("false success === false", r.success === false);
+      check("false signalCode === null", r.signalCode === null);
+    }
 
-  // 4. With input (stdin pipe)
-  {
-    const inputStr = "hello stdin\nline2";
-    const r = Aike.spawnSync("cat", [], { input: inputStr });
-    check(
-      "cat+input stdout matches",
-      new TextDecoder().decode(r.stdout) === inputStr,
-      `got ${JSON.stringify(new TextDecoder().decode(r.stdout))}`,
-    );
-    check("cat+input exitCode === 0", r.exitCode === 0);
-  }
+    // 4. With input (stdin pipe)
+    {
+      const inputStr = "hello stdin\nline2";
+      const r = Aike.spawnSync("cat", [], { input: inputStr });
+      check(
+        "cat+input stdout matches",
+        new TextDecoder().decode(r.stdout) === inputStr,
+        `got ${JSON.stringify(new TextDecoder().decode(r.stdout))}`,
+      );
+      check("cat+input exitCode === 0", r.exitCode === 0);
+    }
 
-  // 5. env option
-  {
-    const r = Aike.spawnSync("sh", ["-c", "echo $MY_VAR"], {
-      env: { MY_VAR: "test_env_val" },
-    });
-    check(
-      "env MY_VAR",
-      new TextDecoder().decode(r.stdout).trim() === "test_env_val",
-      `got ${JSON.stringify(new TextDecoder().decode(r.stdout))}`,
-    );
-    check("env exitCode === 0", r.exitCode === 0);
-  }
+    // 5. env option
+    {
+      const r = Aike.spawnSync("sh", ["-c", "echo $MY_VAR"], {
+        env: { MY_VAR: "test_env_val" },
+      });
+      check(
+        "env MY_VAR",
+        new TextDecoder().decode(r.stdout).trim() === "test_env_val",
+        `got ${JSON.stringify(new TextDecoder().decode(r.stdout))}`,
+      );
+      check("env exitCode === 0", r.exitCode === 0);
+    }
 
-  // 6. cwd option (macOS /tmp symlinks to /private/tmp)
-  {
-    const r = Aike.spawnSync("pwd", [], { cwd: "/tmp" });
-    const cwdOut = new TextDecoder().decode(r.stdout).trim();
-    check(
-      "cwd /tmp",
-      cwdOut === "/tmp" || cwdOut === "/private/tmp",
-      `got ${JSON.stringify(cwdOut)}`,
-    );
-  }
+    // 6. cwd option (macOS /tmp symlinks to /private/tmp)
+    {
+      const r = Aike.spawnSync("pwd", [], { cwd: "/tmp" });
+      const cwdOut = new TextDecoder().decode(r.stdout).trim();
+      check(
+        "cwd /tmp",
+        cwdOut === "/tmp" || cwdOut === "/private/tmp",
+        `got ${JSON.stringify(cwdOut)}`,
+      );
+    }
 
-  // 7. stdout mode = ignore
-  {
-    const r = Aike.spawnSync("echo", ["ignored"], { stdout: "ignore" });
-    check("stdout=ignore gives empty", r.stdout.length === 0);
-    check("stdout=ignore exitCode === 0", r.exitCode === 0);
-  }
+    // 7. stdout mode = ignore
+    {
+      const r = Aike.spawnSync("echo", ["ignored"], { stdout: "ignore" });
+      check("stdout=ignore gives empty", r.stdout.length === 0);
+      check("stdout=ignore exitCode === 0", r.exitCode === 0);
+    }
 
-  // 8. stderr content + stdout still works
-  {
-    const r = Aike.spawnSync("sh", ["-c", "echo err_msg >&2; echo out_msg"]);
-    check(
-      "stderr content",
-      new TextDecoder().decode(r.stderr).trim() === "err_msg",
-      `got ${JSON.stringify(new TextDecoder().decode(r.stderr))}`,
-    );
-    check(
-      "stdout still captured",
-      new TextDecoder().decode(r.stdout).trim() === "out_msg",
-      `got ${JSON.stringify(new TextDecoder().decode(r.stdout))}`,
-    );
-  }
+    // 8. stderr content + stdout still works
+    {
+      const r = Aike.spawnSync("sh", ["-c", "echo err_msg >&2; echo out_msg"]);
+      check(
+        "stderr content",
+        new TextDecoder().decode(r.stderr).trim() === "err_msg",
+        `got ${JSON.stringify(new TextDecoder().decode(r.stderr))}`,
+      );
+      check(
+        "stdout still captured",
+        new TextDecoder().decode(r.stdout).trim() === "out_msg",
+        `got ${JSON.stringify(new TextDecoder().decode(r.stdout))}`,
+      );
+    }
 
-  // 9. No args array — just command string
-  {
-    const r = Aike.spawnSync("true");
-    check("true exitCode === 0", r.exitCode === 0);
-    check("true success === true", r.success === true);
-  }
+    // 9. No args array — just command string
+    {
+      const r = Aike.spawnSync("true");
+      check("true exitCode === 0", r.exitCode === 0);
+      check("true success === true", r.success === true);
+    }
 
-  // 10. stdin/inherit (default stdin is inherit, so echo works without input)
-  {
-    const r = Aike.spawnSync("echo", ["default stdin"]);
-    check(
-      "default stdin inherit works",
-      new TextDecoder().decode(r.stdout).trim() === "default stdin",
-    );
-    check("pid is number", typeof r.pid === "number" && r.pid > 0);
+    // 10. stdin/inherit (default stdin is inherit, so echo works without input)
+    {
+      const r = Aike.spawnSync("echo", ["default stdin"]);
+      check(
+        "default stdin inherit works",
+        new TextDecoder().decode(r.stdout).trim() === "default stdin",
+      );
+      check("pid is number", typeof r.pid === "number" && r.pid > 0);
+    }
   }
 }
 
@@ -538,186 +543,189 @@ async function testSpawn() {
   // 1. Existence
   check("spawn exists", typeof Aike.spawn === "function");
 
-  // 2. Basic async echo — read stdout via FileHandle.text()
-  {
-    const p = Aike.spawn("echo", ["hello async"]);
-    check("returns object", typeof p === "object" && p !== null);
-    check(
-      "pid is positive int",
-      Number.isInteger(p.pid) && p.pid > 0,
-      `got ${p.pid}`,
-    );
-    check(
-      "stdout is IoHandle (not null)",
-      p.stdout !== null && typeof p.stdout === "object",
-      `got ${typeof p.stdout}`,
-    );
-    check(
-      "stderr is IoHandle (not null)",
-      p.stderr !== null && typeof p.stderr === "object",
-    );
-    check("stdin is null (inherit)", p.stdin === null);
-    check("exitCode is Promise", p.exitCode instanceof Promise);
-    check("signalCode is Promise", p.signalCode instanceof Promise);
-    check("kill is function", typeof p.kill === "function");
-    check("isRunning is function", typeof p.isRunning === "function");
+  // 2-12. Unix-only async spawn tests (skip on Windows)
+  if (Aike.platform !== "windows") {
+    // 2. Basic async echo — read stdout via FileHandle.text()
+    {
+      const p = Aike.spawn("echo", ["hello async"]);
+      check("returns object", typeof p === "object" && p !== null);
+      check(
+        "pid is positive int",
+        Number.isInteger(p.pid) && p.pid > 0,
+        `got ${p.pid}`,
+      );
+      check(
+        "stdout is IoHandle (not null)",
+        p.stdout !== null && typeof p.stdout === "object",
+        `got ${typeof p.stdout}`,
+      );
+      check(
+        "stderr is IoHandle (not null)",
+        p.stderr !== null && typeof p.stderr === "object",
+      );
+      check("stdin is null (inherit)", p.stdin === null);
+      check("exitCode is Promise", p.exitCode instanceof Promise);
+      check("signalCode is Promise", p.signalCode instanceof Promise);
+      check("kill is function", typeof p.kill === "function");
+      check("isRunning is function", typeof p.isRunning === "function");
 
-    const stdoutBytes = new TextDecoder().decode(await p.stdout.bytes()).trim();
-    check(
-      "stdout content via .bytes()",
-      stdoutBytes === "hello async",
-      `got ${JSON.stringify(stdoutBytes)}`,
-    );
-    const exitCode = await p.exitCode;
-    check("exitCode === 0", exitCode === 0, `got ${exitCode}`);
-    const sigCode = await p.signalCode;
-    check("signalCode === null", sigCode === null, `got ${sigCode}`);
-  }
-
-  // 3. spawn with stdin pipe + cat
-  {
-    const p = Aike.spawn("cat", [], { stdin: "pipe" });
-    check(
-      "stdin is IoHandle (piped)",
-      p.stdin !== null && typeof p.stdin === "object",
-    );
-    check("stdin.fd is number", typeof p.stdin.fd === "number");
-
-    const writeData = "hello from spawn stdin\nsecond line";
-    p.stdin.writeSync(writeData);
-    await p.stdin.close();
-
-    const stdoutBytes = await p.stdout.bytes();
-    const stdoutStr = new TextDecoder().decode(stdoutBytes);
-    check(
-      "cat stdin→stdout via .bytes()",
-      stdoutStr === writeData,
-      `got ${JSON.stringify(stdoutStr)}`,
-    );
-    const code = await p.exitCode;
-    check("cat exitCode === 0", code === 0, `got ${code}`);
-  }
-
-  // 4. stdout + stderr separation
-  {
-    const p = Aike.spawn("sh", [
-      "-c",
-      "echo stderr_line >&2; echo stdout_line",
-    ]);
-    const out = new TextDecoder().decode(await p.stdout.bytes()).trim();
-    const err = new TextDecoder().decode(await p.stderr.bytes()).trim();
-    await p.exitCode;
-    check(
-      "stdout content",
-      out === "stdout_line",
-      `got ${JSON.stringify(out)}`,
-    );
-    check(
-      "stderr content",
-      err === "stderr_line",
-      `got ${JSON.stringify(err)}`,
-    );
-  }
-
-  // 5. env option
-  {
-    const p = Aike.spawn("sh", ["-c", "echo $SPAWN_TEST"], {
-      env: { SPAWN_TEST: "env_works" },
-    });
-    const out = new TextDecoder().decode(await p.stdout.bytes()).trim();
-    await p.exitCode;
-    check("spawn env", out === "env_works", `got ${JSON.stringify(out)}`);
-  }
-
-  // 6. stdout mode = ignore
-  {
-    const p = Aike.spawn("echo", ["ignore_me"], { stdout: "ignore" });
-    check("stdout=ignore is null", p.stdout === null);
-    const code = await p.exitCode;
-    check("stdout=ignore exitCode === 0", code === 0, `got ${code}`);
-  }
-
-  // 7. stderr mode = ignore
-  {
-    const p = Aike.spawn("sh", ["-c", "echo visible"], { stderr: "ignore" });
-    const out = new TextDecoder().decode(await p.stdout.bytes()).trim();
-    await p.exitCode;
-    check(
-      "stderr=ignore stdout still works",
-      out === "visible",
-      `got ${JSON.stringify(out)}`,
-    );
-  }
-
-  // 8. stdout.read() — incremental read
-  {
-    const p = Aike.spawn("echo", ["chunk_test"]);
-    const chunk = await p.stdout.read();
-    check(
-      ".read() returns Uint8Array",
-      chunk instanceof Uint8Array,
-      `got ${typeof chunk}`,
-    );
-    check(
-      ".read() content",
-      new TextDecoder().decode(chunk).includes("chunk_test"),
-    );
-    await p.exitCode;
-  }
-
-  // 9. kill + signalCode
-  {
-    const p = Aike.spawn("sleep", ["30"]);
-    check("isRunning before kill", p.isRunning() === true);
-    const killed = p.kill();
-    check("kill returns true", killed === true, `got ${killed}`);
-    const exitCode = await p.exitCode;
-    // killed by signal: exitCode is -1
-    const sigCode = await p.signalCode;
-    check("signalCode is SIGTERM", sigCode === "SIGTERM", `got ${sigCode}`);
-    // wait a brief moment for OS to reap
-    await new Promise((resolve) => setTimeout(resolve, 200));
-    check("isRunning after kill", p.isRunning() === false);
-  }
-
-  // 10. async iteration (for await...of) on stdout
-  {
-    const p = Aike.spawn("echo", ["iter_test"]);
-    let collected = "";
-    for await (const chunk of p.stdout) {
-      collected += new TextDecoder().decode(chunk);
+      const stdoutBytes = new TextDecoder().decode(await p.stdout.bytes()).trim();
+      check(
+        "stdout content via .bytes()",
+        stdoutBytes === "hello async",
+        `got ${JSON.stringify(stdoutBytes)}`,
+      );
+      const exitCode = await p.exitCode;
+      check("exitCode === 0", exitCode === 0, `got ${exitCode}`);
+      const sigCode = await p.signalCode;
+      check("signalCode === null", sigCode === null, `got ${sigCode}`);
     }
-    await p.exitCode;
-    check(
-      "async iteration on stdout",
-      collected.trim() === "iter_test",
-      `got ${JSON.stringify(collected)}`,
-    );
-  }
 
-  // 11. stderr default mode = pipe
-  {
-    const p = Aike.spawn("sh", ["-c", "echo err_only >&2"]);
-    const errBytes = new TextDecoder().decode(await p.stderr.bytes()).trim();
-    await p.exitCode;
-    check(
-      "stderr piped (default)",
-      errBytes === "err_only",
-      `got ${JSON.stringify(errBytes)}`,
-    );
-  }
+    // 3. spawn with stdin pipe + cat
+    {
+      const p = Aike.spawn("cat", [], { stdin: "pipe" });
+      check(
+        "stdin is IoHandle (piped)",
+        p.stdin !== null && typeof p.stdin === "object",
+      );
+      check("stdin.fd is number", typeof p.stdin.fd === "number");
 
-  // 12. stderr ignore + stdout
-  {
-    const p = Aike.spawn("sh", ["-c", "echo out"], { stderr: "ignore" });
-    check("stderr is null when ignored", p.stderr === null);
-    const out = new TextDecoder().decode(await p.stdout.bytes()).trim();
-    await p.exitCode;
-    check(
-      "stdout after stderr=ignore",
-      out === "out",
-      `got ${JSON.stringify(out)}`,
-    );
+      const writeData = "hello from spawn stdin\nsecond line";
+      p.stdin.writeSync(writeData);
+      await p.stdin.close();
+
+      const stdoutBytes = await p.stdout.bytes();
+      const stdoutStr = new TextDecoder().decode(stdoutBytes);
+      check(
+        "cat stdin→stdout via .bytes()",
+        stdoutStr === writeData,
+        `got ${JSON.stringify(stdoutStr)}`,
+      );
+      const code = await p.exitCode;
+      check("cat exitCode === 0", code === 0, `got ${code}`);
+    }
+
+    // 4. stdout + stderr separation
+    {
+      const p = Aike.spawn("sh", [
+        "-c",
+        "echo stderr_line >&2; echo stdout_line",
+      ]);
+      const out = new TextDecoder().decode(await p.stdout.bytes()).trim();
+      const err = new TextDecoder().decode(await p.stderr.bytes()).trim();
+      await p.exitCode;
+      check(
+        "stdout content",
+        out === "stdout_line",
+        `got ${JSON.stringify(out)}`,
+      );
+      check(
+        "stderr content",
+        err === "stderr_line",
+        `got ${JSON.stringify(err)}`,
+      );
+    }
+
+    // 5. env option
+    {
+      const p = Aike.spawn("sh", ["-c", "echo $SPAWN_TEST"], {
+        env: { SPAWN_TEST: "env_works" },
+      });
+      const out = new TextDecoder().decode(await p.stdout.bytes()).trim();
+      await p.exitCode;
+      check("spawn env", out === "env_works", `got ${JSON.stringify(out)}`);
+    }
+
+    // 6. stdout mode = ignore
+    {
+      const p = Aike.spawn("echo", ["ignore_me"], { stdout: "ignore" });
+      check("stdout=ignore is null", p.stdout === null);
+      const code = await p.exitCode;
+      check("stdout=ignore exitCode === 0", code === 0, `got ${code}`);
+    }
+
+    // 7. stderr mode = ignore
+    {
+      const p = Aike.spawn("sh", ["-c", "echo visible"], { stderr: "ignore" });
+      const out = new TextDecoder().decode(await p.stdout.bytes()).trim();
+      await p.exitCode;
+      check(
+        "stderr=ignore stdout still works",
+        out === "visible",
+        `got ${JSON.stringify(out)}`,
+      );
+    }
+
+    // 8. stdout.read() — incremental read
+    {
+      const p = Aike.spawn("echo", ["chunk_test"]);
+      const chunk = await p.stdout.read();
+      check(
+        ".read() returns Uint8Array",
+        chunk instanceof Uint8Array,
+        `got ${typeof chunk}`,
+      );
+      check(
+        ".read() content",
+        new TextDecoder().decode(chunk).includes("chunk_test"),
+      );
+      await p.exitCode;
+    }
+
+    // 9. kill + signalCode
+    {
+      const p = Aike.spawn("sleep", ["30"]);
+      check("isRunning before kill", p.isRunning() === true);
+      const killed = p.kill();
+      check("kill returns true", killed === true, `got ${killed}`);
+      const exitCode = await p.exitCode;
+      // killed by signal: exitCode is -1
+      const sigCode = await p.signalCode;
+      check("signalCode is SIGTERM", sigCode === "SIGTERM", `got ${sigCode}`);
+      // wait a brief moment for OS to reap
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      check("isRunning after kill", p.isRunning() === false);
+    }
+
+    // 10. async iteration (for await...of) on stdout
+    {
+      const p = Aike.spawn("echo", ["iter_test"]);
+      let collected = "";
+      for await (const chunk of p.stdout) {
+        collected += new TextDecoder().decode(chunk);
+      }
+      await p.exitCode;
+      check(
+        "async iteration on stdout",
+        collected.trim() === "iter_test",
+        `got ${JSON.stringify(collected)}`,
+      );
+    }
+
+    // 11. stderr default mode = pipe
+    {
+      const p = Aike.spawn("sh", ["-c", "echo err_only >&2"]);
+      const errBytes = new TextDecoder().decode(await p.stderr.bytes()).trim();
+      await p.exitCode;
+      check(
+        "stderr piped (default)",
+        errBytes === "err_only",
+        `got ${JSON.stringify(errBytes)}`,
+      );
+    }
+
+    // 12. stderr ignore + stdout
+    {
+      const p = Aike.spawn("sh", ["-c", "echo out"], { stderr: "ignore" });
+      check("stderr is null when ignored", p.stderr === null);
+      const out = new TextDecoder().decode(await p.stdout.bytes()).trim();
+      await p.exitCode;
+      check(
+        "stdout after stderr=ignore",
+        out === "out",
+        `got ${JSON.stringify(out)}`,
+      );
+    }
   }
 }
 
@@ -729,7 +737,7 @@ function testCwd() {
   check("cwd is a function", typeof Aike.cwd === "function");
   const cwd = Aike.cwd();
   check("cwd returns a string", typeof cwd === "string");
-  check("cwd is absolute path", cwd.startsWith("/"), `got ${cwd}`);
+  check("cwd is absolute path", Path.isAbsolute(cwd), `got ${cwd}`);
   check("cwd is non-empty", cwd.length > 0);
 }
 
@@ -739,17 +747,17 @@ function testCwd() {
 function testEnv() {
   console.log("\n=== Aike.env ===");
   check("env exists", typeof Aike.env === "object" && Aike.env !== null);
+  // PATH: env var names are case-insensitive on Windows; check case-insensitively
+  const envKeys = Object.keys(Aike.env);
+  const pathKey = envKeys.find(k => k.toUpperCase() === "PATH");
   check(
-    "env has PATH",
-    typeof Aike.env.PATH === "string",
-    `got ${typeof Aike.env.PATH}`,
+    "env has PATH (case-insensitive)",
+    typeof pathKey === "string" && typeof Aike.env[pathKey] === "string",
+    `got PATH=${typeof Aike.env.PATH}, Path=${typeof Aike.env.Path}`,
   );
-  check(
-    "env has HOME",
-    typeof Aike.env.HOME === "string",
-    `got ${typeof Aike.env.HOME}`,
-  );
-  check("env PATH length > 0", Aike.env.PATH.length > 0);
+  if (pathKey) {
+    check("env PATH length > 0", Aike.env[pathKey].length > 0);
+  }
 
   // Property descriptor
   const d = Object.getOwnPropertyDescriptor(Aike, "env");
@@ -957,6 +965,13 @@ function testRuntimeProps() {
     `got ${JSON.stringify(Aike.platform)}`,
   );
 
+  // ── homedir ──
+  check("homedir is a function", typeof Aike.homedir === "function");
+  const home = Aike.homedir();
+  check("homedir returns a string", typeof home === "string", `got ${typeof home}`);
+  check("homedir is non-empty", home.length > 0, `got ${JSON.stringify(home)}`);
+  check("homedir is absolute path", Path.isAbsolute(home), `got ${home}`);
+
   check("argv is an array", Array.isArray(Aike.argv));
   check("argv has at least 1 element", Aike.argv.length >= 1);
   check("argv[0] is a string", typeof Aike.argv[0] === "string");
@@ -964,7 +979,7 @@ function testRuntimeProps() {
   check("execArgv is an array", Array.isArray(Aike.execArgv));
 
   check("execPath is a string", typeof Aike.execPath === "string");
-  check("execPath is absolute", Aike.execPath.startsWith("/"));
+  check("execPath is absolute", Path.isAbsolute(Aike.execPath), `got ${Aike.execPath}`);
 
   // Property descriptors
   for (const name of ["argv", "execArgv", "execPath"]) {

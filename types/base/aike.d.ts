@@ -236,6 +236,9 @@ declare namespace Aike {
   /** Returns the current monotonic time in milliseconds. */
   function now(): number;
 
+  /** Returns the current user's home directory path. */
+  function homedir(): string;
+
   // --- signal ---
 
   /**
