@@ -72,6 +72,17 @@ pub fn init_aike(
         FieldDef::FUNC("spawnSync", 0, spawn::js_spawn, 0),
         FieldDef::FUNC("spawn", 0, spawn::js_spawn, 1),
         // --- sys ---
+        FieldDef::STR(
+            "platform",
+            {
+                match std::env::consts::OS {
+                    "windows" => "windows",
+                    "macos" => "darwin",
+                    other => other,
+                }
+            },
+            JS_PROP_ENUMERABLE,
+        ),
         FieldDef::FUNC("evalScript", 1, sys::js_evalScript, 0),
         FieldDef::FUNC("gc", 0, sys::js_gc, 0),
         FieldDef::FUNC("isatty", 1, sys::js_isatty, 0),

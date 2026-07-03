@@ -298,6 +298,9 @@ declare namespace Aike {
 
   // --- runtime ---
 
+  /** Operating system platform. Follows Node.js convention: 'win32', 'darwin', 'linux', etc. */
+  const platform: "windows" | "darwin" | "linux" | "android" | "freebsd" | "openbsd" | "aix" | string;
+
   /** Command-line arguments (argv[1:]). */
   const argv: readonly string[];
   /** Runtime flags passed to the aike binary. */

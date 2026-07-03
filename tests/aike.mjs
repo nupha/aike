@@ -946,6 +946,17 @@ function testSchedule() {
 function testRuntimeProps() {
   console.log("\n=== Aike.runtime ===");
 
+  check("platform is a string", typeof Aike.platform === "string");
+  check("platform is non-empty", Aike.platform.length > 0);
+
+  // Platform should match one of the standard Node.js values
+  const knownPlatforms = ["windows", "darwin", "linux", "android", "freebsd", "openbsd", "aix", "sunos"];
+  check(
+    "platform is a known value",
+    knownPlatforms.includes(Aike.platform),
+    `got ${JSON.stringify(Aike.platform)}`,
+  );
+
   check("argv is an array", Array.isArray(Aike.argv));
   check("argv has at least 1 element", Aike.argv.length >= 1);
   check("argv[0] is a string", typeof Aike.argv[0] === "string");
