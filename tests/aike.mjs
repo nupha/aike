@@ -331,6 +331,15 @@ async function testEventEmitter() {
 function testOnSignal() {
   console.log("\n=== Aike.onSignal ===");
 
+  // 0. Aike.signals exists and contains platform-available signals
+  check("Aike.signals is an object", typeof Aike.signals === "object" && Aike.signals !== null);
+  check("Aike.signals.SIGINT is a number", typeof Aike.signals.SIGINT === "number");
+  check("Aike.signals.SIGTERM is a number", typeof Aike.signals.SIGTERM === "number");
+  check(
+    "Aike.signals.SIGUSR1 may be undefined (Windows) or number (Unix)",
+    Aike.signals.SIGUSR1 === undefined || typeof Aike.signals.SIGUSR1 === "number",
+  );
+
   // 1. onSignal exists and is a function
   check(
     "onSignal exists",
@@ -356,26 +365,31 @@ function testOnSignal() {
   }
   check("non-function handler throws", nonFuncError);
 
-  // 4. Register a handler returns `this` (Aike for chaining)
-  const ret = Aike.onSignal("SIGUSR1", () => {});
-  check("onSignal returns this", ret === Aike, `got ${typeof ret}`);
+  // 4-6. Unix-only signals (e.g. SIGUSR1) — test only if available on this platform
+  if (Aike.signals.SIGUSR1 !== undefined) {
+    // 4. Register a handler returns `this` (Aike for chaining)
+    const ret = Aike.onSignal("SIGUSR1", () => {});
+    check("onSignal returns this", ret === Aike, `got ${typeof ret}`);
 
-  // 5. Overwrite (re-register same signal) succeeds
-  let overwriteOk = false;
-  let lastCalled = null;
-  Aike.onSignal("SIGUSR1", () => {
-    lastCalled = "cb2";
-  });
-  overwriteOk = true;
-  check("re-registration overwrites", overwriteOk);
+    // 5. Overwrite (re-register same signal) succeeds
+    let overwriteOk = false;
+    let lastCalled = null;
+    Aike.onSignal("SIGUSR1", () => {
+      lastCalled = "cb2";
+    });
+    overwriteOk = true;
+    check("re-registration overwrites", overwriteOk);
 
-  // 6. Remove with null
-  let removeOk = false;
-  try {
-    Aike.onSignal("SIGUSR1", null);
-    removeOk = true;
-  } catch (e) {}
-  check("remove with null succeeds", removeOk);
+    // 6. Remove with null
+    let removeOk = false;
+    try {
+      Aike.onSignal("SIGUSR1", null);
+      removeOk = true;
+    } catch (e) {}
+    check("remove with null succeeds", removeOk);
+  } else {
+    console.log("  ⏭️  SIGUSR1 tests skipped (not available on this platform)");
+  }
 
   // 7. Remove non-existent handler is no-op (no crash)
   let removeMissingOk = false;
@@ -397,7 +411,9 @@ function testOnSignal() {
   // Cleanup: remove all handlers registered in this test
   Aike.onSignal("SIGINT", null);
   Aike.onSignal("SIGTERM", null);
-  Aike.onSignal("SIGUSR1", null);
+  if (Aike.signals.SIGUSR1 !== undefined) {
+    Aike.onSignal("SIGUSR1", null);
+  }
 }
 
 // ===================================================================

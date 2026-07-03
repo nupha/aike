@@ -80,6 +80,7 @@ pub fn init_aike(
         FieldDef::FUNC("now", 0, sys::js_now, 0),
         // --- signal ---
         FieldDef::FUNC("onSignal", 2, signal::js_on_signal, 0),
+        FieldDef::LAZY_VALUE("signals", signal::js_signals, JS_PROP_ENUMERABLE),
         // --- cron ---
         FieldDef::FUNC("schedule", 2, cron::js_schedule, 0),
         // --- stdio ---

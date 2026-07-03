@@ -10,7 +10,7 @@ use std::{
 
 use crossbeam::channel;
 use zuqe::{
-    CallContext, JSResult, JSValue, ScopedContext,
+    CallContext, FieldDef, JSResult, JSValue, JS_PROP_ENUMERABLE, ScopedContext,
     gc_lite::{GcTrace, GcTraceCtx},
 };
 
@@ -173,6 +173,41 @@ fn start_signal_microtask(ctx: &mut ScopedContext, rx: channel::Receiver<u32>) {
         || !HANDLER_MAP.with(|map| map.borrow().is_empty()),
         || {}, // no persistent state to clear for signals
     );
+}
+
+/// Build a platform-aware `Aike.signals` object.
+/// Only signals available on the current platform are included.
+/// The value is the numeric signal number (e.g. `Aike.signals.SIGTERM === 15`).
+pub(super) fn js_signals(ctx: &mut ScopedContext) -> Result<JSValue, i32> {
+    let mut obj = ctx.create_base_object()?;
+
+    // Cross-platform signals (POSIX-mandated, available on all supported platforms)
+    obj.install_fields(ctx, &[
+        FieldDef::INT32("SIGINT", libc::SIGINT, JS_PROP_ENUMERABLE),
+        FieldDef::INT32("SIGABRT", libc::SIGABRT, JS_PROP_ENUMERABLE),
+        FieldDef::INT32("SIGFPE", libc::SIGFPE, JS_PROP_ENUMERABLE),
+        FieldDef::INT32("SIGILL", libc::SIGILL, JS_PROP_ENUMERABLE),
+        FieldDef::INT32("SIGSEGV", libc::SIGSEGV, JS_PROP_ENUMERABLE),
+        FieldDef::INT32("SIGTERM", libc::SIGTERM, JS_PROP_ENUMERABLE),
+    ])?;
+
+    // Unix-only signals
+    #[cfg(not(windows))]
+    obj.install_fields(ctx, &[
+        FieldDef::INT32("SIGQUIT", libc::SIGQUIT, JS_PROP_ENUMERABLE),
+        FieldDef::INT32("SIGPIPE", libc::SIGPIPE, JS_PROP_ENUMERABLE),
+        FieldDef::INT32("SIGALRM", libc::SIGALRM, JS_PROP_ENUMERABLE),
+        FieldDef::INT32("SIGUSR1", libc::SIGUSR1, JS_PROP_ENUMERABLE),
+        FieldDef::INT32("SIGUSR2", libc::SIGUSR2, JS_PROP_ENUMERABLE),
+        FieldDef::INT32("SIGCHLD", libc::SIGCHLD, JS_PROP_ENUMERABLE),
+        FieldDef::INT32("SIGCONT", libc::SIGCONT, JS_PROP_ENUMERABLE),
+        FieldDef::INT32("SIGSTOP", libc::SIGSTOP, JS_PROP_ENUMERABLE),
+        FieldDef::INT32("SIGTSTP", libc::SIGTSTP, JS_PROP_ENUMERABLE),
+        FieldDef::INT32("SIGTTIN", libc::SIGTTIN, JS_PROP_ENUMERABLE),
+        FieldDef::INT32("SIGTTOU", libc::SIGTTOU, JS_PROP_ENUMERABLE),
+    ])?;
+
+    Ok(obj.into())
 }
 
 pub(super) fn js_on_signal(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {

@@ -239,6 +239,33 @@ declare namespace Aike {
   // --- signal ---
 
   /**
+   * Platform-available signal name → number mapping.
+   * On Windows, only SIGINT, SIGABRT, SIGFPE, SIGILL, SIGSEGV, SIGTERM are present.
+   * On Unix, all POSIX signals are available (including SIGQUIT, SIGUSR1, etc.).
+   * Check `Aike.signals.SIGUSR1 !== undefined` to detect platform support.
+   */
+  const signals: {
+    SIGINT: number;
+    SIGABRT: number;
+    SIGFPE: number;
+    SIGILL: number;
+    SIGSEGV: number;
+    SIGTERM: number;
+    // Unix-only signals (optional — check via !== undefined before use):
+    SIGQUIT?: number;
+    SIGPIPE?: number;
+    SIGALRM?: number;
+    SIGUSR1?: number;
+    SIGUSR2?: number;
+    SIGCHLD?: number;
+    SIGCONT?: number;
+    SIGSTOP?: number;
+    SIGTSTP?: number;
+    SIGTTIN?: number;
+    SIGTTOU?: number;
+  };
+
+  /**
    * Register or unregister a signal handler.
    * Pass null as handler to unregister.
    */
