@@ -8,11 +8,11 @@ use std::{
 
 use linkme::distributed_slice;
 use zuqe::{
-    Array, CallContext, ClassCtorDef, ClassID, FieldDef, JS_PROP_C_W_E, JSResult, JSValue, Object,
-    Runtime, ScopedContext, def_native_object, gc_lite::GcTrace,
+    def_native_object, gc_lite::GcTrace, Array, CallContext, ClassCtorDef, ClassID, FieldDef,
+    JSResult, JSValue, Object, Runtime, ScopedContext, JS_PROP_C_W_E,
 };
 
-use crate::{USER_CLASS_DEFS, aike::signal::signal_number};
+use crate::{aike::signal::signal_number, USER_CLASS_DEFS};
 
 #[derive(Debug)]
 pub(crate) struct EmitterPayload {
@@ -134,7 +134,7 @@ fn js_emit(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
         lst.retain(|(once, cb)| {
             if cb.call(ctx, JSValue::UNDEFINED, args).is_err() {
-                let _ = ctx.rt().exception(); // Ignore listener errors per Node.js convention
+                ctx.take_exception(); // Ignore listener errors
             }
             !*once
         });

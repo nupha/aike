@@ -14,7 +14,6 @@ use std::{
 #[cfg(unix)]
 use std::os::fd::AsRawFd;
 
-
 use crossbeam::channel::{Receiver, Sender};
 use linkme::distributed_slice;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
