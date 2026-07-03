@@ -4,7 +4,7 @@
 use std::{cell::Cell, process::ExitCode};
 
 use zuqe::{
-    Array, CallContext, EvalFlags, EvalType, JS_PROP_C_W_E, JSResult, JSValue, ScopedContext,
+    Array, CallContext, EvalFlags, EvalType, JSResult, JSValue, ScopedContext, JS_PROP_C_W_E,
 };
 
 pub(super) fn js_cwd(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
@@ -147,7 +147,7 @@ pub(super) fn js_ttyGetWinSize(ctx: &mut ScopedContext, cc: CallContext) -> JSRe
     #[cfg(windows)]
     unsafe {
         use windows_sys::Win32::System::Console::{
-            CONSOLE_SCREEN_BUFFER_INFO, GetConsoleScreenBufferInfo,
+            GetConsoleScreenBufferInfo, CONSOLE_SCREEN_BUFFER_INFO,
         };
 
         let mut info = std::mem::zeroed::<CONSOLE_SCREEN_BUFFER_INFO>();
@@ -170,11 +170,26 @@ pub(super) fn js_ttySetRaw(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
 
     #[cfg(unix)]
     unsafe {
-        static mut OLD_TTY: libc::termios = unsafe { std::mem::zeroed::<libc::termios>() };
+        let mut tty: libc::termios = std::mem::zeroed();
+        if libc::tcgetattr(fd, &mut tty) != 0 {
+            ctx.throw_type_error(&format!("cannot set raw mode on fd {}: not a terminal", fd));
+            return Err(-1);
+        }
 
-        let mut tty = std::mem::zeroed::<libc::termios>();
-        libc::tcgetattr(fd, &mut tty);
-        OLD_TTY = tty;
+        // Save original terminal state (once, first successful call only).
+        static mut OLD_TTY_SAVED: bool = false;
+        static mut OLD_TTY: libc::termios = unsafe { std::mem::zeroed::<libc::termios>() };
+        if !OLD_TTY_SAVED {
+            OLD_TTY = tty;
+            OLD_TTY_SAVED = true;
+
+            extern "C" fn term_exit() {
+                unsafe {
+                    libc::tcsetattr(0, libc::TCSANOW, &raw const OLD_TTY);
+                }
+            }
+            libc::atexit(term_exit);
+        }
 
         tty.c_iflag &= !(libc::IGNBRK
             | libc::BRKINT
@@ -192,21 +207,13 @@ pub(super) fn js_ttySetRaw(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
         tty.c_cc[libc::VTIME] = 0;
 
         libc::tcsetattr(fd, libc::TCSANOW, &tty);
-
-        extern "C" fn term_exit() {
-            unsafe {
-                libc::tcsetattr(0, libc::TCSANOW, &raw const OLD_TTY);
-            }
-        }
-        libc::atexit(term_exit);
     }
 
     #[cfg(windows)]
     unsafe {
         use windows_sys::Win32::System::Console::{
-            ENABLE_PROCESSED_OUTPUT, ENABLE_VIRTUAL_TERMINAL_INPUT,
+            SetConsoleMode, ENABLE_PROCESSED_OUTPUT, ENABLE_VIRTUAL_TERMINAL_INPUT,
             ENABLE_VIRTUAL_TERMINAL_PROCESSING, ENABLE_WINDOW_INPUT, ENABLE_WRAP_AT_EOL_OUTPUT,
-            SetConsoleMode,
         };
 
         SetConsoleMode(
