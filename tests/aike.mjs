@@ -774,14 +774,15 @@ function testEnv() {
   }
   check("Aike.env cannot be replaced", envReplaceError);
 
-  // Individual env properties are writable
+  // Individual env properties are writable (use case-insensitive PATH key)
+  const writablePathKey = pathKey || "PATH";
   check(
-    "env.PATH is writable",
+    `env.${writablePathKey} is writable`,
     (() => {
-      const orig = Aike.env.PATH;
-      Aike.env.PATH = "__test_writeable__";
-      const changed = Aike.env.PATH === "__test_writeable__";
-      Aike.env.PATH = orig;
+      const orig = Aike.env[writablePathKey];
+      Aike.env[writablePathKey] = "__test_writeable__";
+      const changed = Aike.env[writablePathKey] === "__test_writeable__";
+      Aike.env[writablePathKey] = orig;
       return changed;
     })(),
   );
@@ -866,14 +867,16 @@ function testTty() {
 
   check("ttySetRaw is a function", typeof Aike.ttySetRaw === "function");
 
-  // ttySetRaw on invalid fd throws TypeError
+  // ttySetRaw on invalid fd throws TypeError (Unix only — Windows impl doesn't validate fd)
   let ttyRawError = false;
-  try {
-    Aike.ttySetRaw(999);
-  } catch (e) {
-    ttyRawError = e instanceof TypeError;
+  if (Aike.platform !== "windows") {
+    try {
+      Aike.ttySetRaw(999);
+    } catch (e) {
+      ttyRawError = e instanceof TypeError;
+    }
+    check("ttySetRaw(999) throws TypeError", ttyRawError);
   }
-  check("ttySetRaw(999) throws TypeError", ttyRawError);
 }
 
 // ===================================================================
