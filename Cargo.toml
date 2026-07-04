@@ -32,6 +32,15 @@ debug = false
 opt-level = 3
 strip = "symbols"
 
+[profile.release-with-debug]
+inherits = "release"
+strip = "none"
+debug = true
+
+[profile.release-with-debug.package."*"]
+strip = "none"
+debug = true
+
 [dependencies]
 zuqe = { path = "../../../devel/zhuque", features = [
     "crossbeam_channel",
