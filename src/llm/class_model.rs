@@ -10,7 +10,7 @@ use std::{
 };
 
 use linkme::distributed_slice;
-use llama_cpp_ffi::{
+use llama::{
     AttentionType, BackendDevice, FlashAttentionType, KVCacheType, LlamaContext, LlamaModel,
     ModelOptions, PoolingType, RopeScalingType, SplitMode,
 };
@@ -75,15 +75,15 @@ fn format_model_load_error(err: String) -> String {
     }
 }
 
-fn normalize_model_params_for_runtime(params: &mut llama_cpp_ffi::llama_model_params) {
+fn normalize_model_params_for_runtime(params: &mut llama::llama_model_params) {
     let mut device_count = 0usize;
-    let n = unsafe { llama_cpp_ffi::ggml_backend_dev_count() };
+    let n = unsafe { llama::ggml_backend_dev_count() };
     for i in 0..n {
-        let dev = unsafe { llama_cpp_ffi::ggml_backend_dev_get(i) };
+        let dev = unsafe { llama::ggml_backend_dev_get(i) };
         if dev.is_null() {
             continue;
         }
-        let ty = unsafe { llama_cpp_ffi::ggml_backend_dev_type(dev) };
+        let ty = unsafe { llama::ggml_backend_dev_type(dev) };
         if matches!(
             BackendDevice::from_i32(ty as i32),
             Some(BackendDevice::Gpu | BackendDevice::Igpu)
@@ -224,13 +224,13 @@ fn parse_model_options(ctx: &mut ScopedContext, cc: &CallContext) -> Result<Mode
     // llama.cpp rejects main_gpu >= 0 when there are no available devices.
     let no_gpu = {
         let mut c = 0usize;
-        let n = unsafe { llama_cpp_ffi::ggml_backend_dev_count() };
+        let n = unsafe { llama::ggml_backend_dev_count() };
         for i in 0..n {
-            let dev = unsafe { llama_cpp_ffi::ggml_backend_dev_get(i) };
+            let dev = unsafe { llama::ggml_backend_dev_get(i) };
             if dev.is_null() {
                 continue;
             }
-            let ty = unsafe { llama_cpp_ffi::ggml_backend_dev_type(dev) };
+            let ty = unsafe { llama::ggml_backend_dev_type(dev) };
             if matches!(
                 BackendDevice::from_i32(ty as i32),
                 Some(BackendDevice::Gpu | BackendDevice::Igpu)
@@ -396,7 +396,7 @@ fn js_model_isEog(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     Ok(JSValue::Bool(model.is_eog(token)))
 }
 
-pub(super) fn default_context_params() -> llama_cpp_ffi::llama_context_params {
+pub(super) fn default_context_params() -> llama::llama_context_params {
     let mut ctx_params = LlamaContext::default_params();
     ctx_params.kv_unified = true;
     ctx_params.n_ctx = 4096;
@@ -411,7 +411,7 @@ pub(super) fn default_context_params() -> llama_cpp_ffi::llama_context_params {
 pub(super) fn parse_context_params(
     ctx: &mut ScopedContext,
     opts: Option<&Object>,
-) -> Result<llama_cpp_ffi::llama_context_params, i32> {
+) -> Result<llama::llama_context_params, i32> {
     let mut ctx_params = default_context_params();
 
     if let Some(opts) = opts {
@@ -1077,7 +1077,7 @@ impl JSLlmModel {
     fn on_register(_: &mut RuntimeImpl) {
         unsafe {
             extern "C" fn log_callback(
-                level: llama_cpp_ffi::ggml_log_level,
+                level: llama::ggml_log_level,
                 text: *const std::os::raw::c_char,
                 _user_data: *mut std::os::raw::c_void,
             ) {
@@ -1088,16 +1088,16 @@ impl JSLlmModel {
                 let msg = unsafe { CStr::from_ptr(text).to_string_lossy() };
 
                 match level {
-                    llama_cpp_ffi::ggml_log_level_GGML_LOG_LEVEL_DEBUG => {
+                    llama::ggml_log_level_GGML_LOG_LEVEL_DEBUG => {
                         log::debug!("{msg}");
                     }
-                    llama_cpp_ffi::ggml_log_level_GGML_LOG_LEVEL_INFO => {
+                    llama::ggml_log_level_GGML_LOG_LEVEL_INFO => {
                         log::info!("{msg}");
                     }
-                    llama_cpp_ffi::ggml_log_level_GGML_LOG_LEVEL_WARN => {
+                    llama::ggml_log_level_GGML_LOG_LEVEL_WARN => {
                         log::warn!("{msg}");
                     }
-                    llama_cpp_ffi::ggml_log_level_GGML_LOG_LEVEL_ERROR => {
+                    llama::ggml_log_level_GGML_LOG_LEVEL_ERROR => {
                         log::error!("{msg}");
                     }
                     _ => {
@@ -1108,14 +1108,14 @@ impl JSLlmModel {
                 append_llama_log(&msg);
             }
 
-            llama_cpp_ffi::llama_log_set(Some(log_callback), std::ptr::null_mut());
-            llama_cpp_ffi::llama_backend_init();
+            llama::llama_log_set(Some(log_callback), std::ptr::null_mut());
+            llama::llama_backend_init();
         }
     }
 
     fn on_unregister(_: &mut RuntimeImpl) {
         unsafe {
-            llama_cpp_ffi::llama_backend_free();
+            llama::llama_backend_free();
         }
     }
 }

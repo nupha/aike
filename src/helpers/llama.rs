@@ -11,7 +11,7 @@ use async_openai::types::chat::{
     ChatCompletionToolChoiceOption, ChatCompletionTools, ReasoningEffort, ResponseFormat,
     ToolChoiceOptions,
 };
-use llama_cpp_ffi::{LlamaModel, ToolChoice as LarkToolChoice};
+use llama::{LlamaModel, ToolChoice as LarkToolChoice};
 use minijinja::Environment;
 use minijinja_contrib::pycompat;
 use serde_json::Value as JsonValue;

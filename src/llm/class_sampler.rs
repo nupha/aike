@@ -9,7 +9,7 @@ use std::{
 };
 
 use linkme::distributed_slice;
-use llama_cpp_ffi::{SamplerChain, SamplerKind};
+use llama::{SamplerChain, SamplerKind};
 use zuqe::{
     CallContext, ClassID, FieldDef, IntOrFloat, JS_PROP_ENUMERABLE, JSResult, JSValue, Runtime,
     ScopedContext, def_native_object,

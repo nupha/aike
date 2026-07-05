@@ -45,7 +45,7 @@ pub(crate) const MAGIC_RESPONSES_ONCE: i32 = 5;
 use zuqe::{FieldDef, NativeObject, ScopedContext, JS_PROP_ENUMERABLE};
 
 #[cfg(feature = "llama_cpp")]
-use llama_cpp_ffi::{list_devices, FileType, KVCacheType};
+use llama::{list_devices, FileType, KVCacheType};
 #[cfg(feature = "llama_cpp")]
 use zuqe::{Array, CallContext, JSResult, JSValue};
 

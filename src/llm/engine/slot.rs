@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 
-use llama_cpp_ffi::SamplerChain;
+use llama::SamplerChain;
 
 use super::{
     Engine,

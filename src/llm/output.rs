@@ -21,7 +21,7 @@ use async_openai::types::{
         ResponseUsage, Status, SummaryPart, SummaryTextContent,
     },
 };
-use llama_cpp_ffi::ModelArch;
+use llama::ModelArch;
 use uuid::Uuid;
 
 use crate::{

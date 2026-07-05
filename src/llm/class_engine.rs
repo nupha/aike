@@ -11,7 +11,7 @@ use std::{
 
 use async_openai::types::chat::{ReasoningEffort, StopConfiguration};
 use linkme::distributed_slice;
-use llama_cpp_ffi::ToolChoice as LarkToolChoice;
+use llama::ToolChoice as LarkToolChoice;
 use zuqe::{
     CallContext, ClassID, FieldDef, JSResult, JSValue, Object, Runtime, ScopedContext,
     builtins::{
@@ -605,7 +605,7 @@ fn js_engine_responses(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         task_config = task_config.grammar(GrammarConfig::new(
             engine.lock().unwrap().model(),
             tools,
-            llama_cpp_ffi::ToolChoice::Auto,
+            llama::ToolChoice::Auto,
         ));
     }
 

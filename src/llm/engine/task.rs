@@ -6,7 +6,7 @@ use std::{
 
 use async_openai::types::chat::ChatCompletionTools;
 use crossbeam::channel::{Receiver, Sender};
-use llama_cpp_ffi::{ContentType, LlamaModel, ToolChoice};
+use llama::{ContentType, LlamaModel, ToolChoice};
 
 use crate::helpers::now_unix_s;
 

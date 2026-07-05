@@ -289,9 +289,9 @@ async fn handle_chat_completions(
             .tool_choice
             .as_ref()
             .map(to_lark_tool_choice)
-            .unwrap_or(llama_cpp_ffi::ToolChoice::Auto);
+            .unwrap_or(llama::ToolChoice::Auto);
 
-        if tc != llama_cpp_ffi::ToolChoice::None {
+        if tc != llama::ToolChoice::None {
             task_config = task_config.grammar(GrammarConfig::new(&model, tools, tc));
         }
     }

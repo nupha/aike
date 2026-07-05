@@ -11,7 +11,7 @@ use std::{
 };
 
 use linkme::distributed_slice;
-use llama_cpp_ffi::LlamaContext;
+use llama::LlamaContext;
 use zuqe::{
     CallContext, ClassID, FieldDef, IntOrFloat, JS_PROP_ENUMERABLE, JS_PROP_FORCE, JSResult,
     JSValue, Runtime, ScopedContext,

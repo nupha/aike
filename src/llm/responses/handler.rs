@@ -160,7 +160,7 @@ pub async fn handle_responses(
             task_config = task_config.grammar(GrammarConfig::new(
                 eng.model(),
                 tools,
-                llama_cpp_ffi::ToolChoice::Auto,
+                llama::ToolChoice::Auto,
             ));
         }
 

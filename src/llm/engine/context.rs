@@ -9,7 +9,7 @@ use std::{
 };
 
 use crossbeam::channel::{Receiver, SendError, Sender};
-use llama_cpp_ffi::{LlamaContext, LlamaModel, SamplerChain, SamplerKind};
+use llama::{LlamaContext, LlamaModel, SamplerChain, SamplerKind};
 
 use super::{
     caching::{CacheRam, ContextMode, SwapEntry},
