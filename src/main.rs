@@ -27,8 +27,8 @@ use clap::{CommandFactory, Parser};
 use color::{Color::*, colorize_println};
 use linkme::distributed_slice;
 use zuqe::{
-    ClassID, EvalFlags, EvalType, Exception, ExitStatus, ModuleDef, NativeObject, Runtime,
-    ScopedContext, builtins::promise::PromiseFuture,
+    ClassID, EvalFlags, EvalType, Exception, ExitStatus, JSValue, ModuleDef, NativeObject,
+    Runtime, ScopedContext, builtins::promise::PromiseFuture,
 };
 
 use crate::llm::init_mod_llm;
@@ -488,12 +488,23 @@ async fn main() -> ExitCode {
 fn js_module_loader(
     ctx: &mut ScopedContext,
     file_name: &str,
+    attrs: JSValue,
     _: *mut std::ffi::c_void,
 ) -> Result<ModuleDef, i32> {
     if file_name.ends_with(".dylib") || file_name.ends_with(".so") || file_name.ends_with(".dll") {
         ctx.throw_internal_error("dynamic library loading not implemented");
         Err(-1)
     } else {
+        // Check for import attributes: type: "json"
+        let is_json = attrs.is_object()
+            && attrs
+                .get_property_str(ctx, "type")
+                .map(|v| {
+                    v.as_string()
+                        .is_some_and(|s| s.content().encode_utf8(false).as_ref() == "json")
+                })
+                .unwrap_or(false);
+
         // Use resolved filename (may be .ts fallback from .js)
         let resolved = read_script(file_name);
         let (buf, resolved_name) = match resolved {
@@ -504,26 +515,35 @@ fn js_module_loader(
             }
         };
 
-        let code = if transpile::needs_transpile(&resolved_name) {
-            if resolved_name.ends_with(".d.ts") {
-                return ctx.compile_module(b"export {}", &resolved_name, false);
-            }
-            let source = String::from_utf8_lossy(&buf);
-            match transpile::transpile(&source) {
-                Ok(result) => result.code.into_bytes(),
-                Err(e) => {
-                    ctx.throw_syntax_error(&format!(
-                        "failed to transpile module '{resolved_name}': {e}"
-                    ));
-                    return Err(-1);
-                }
-            }
+        if is_json {
+            // JSON module: wrap as `export default <json>;\n`
+            let content = String::from_utf8_lossy(&buf);
+            let mut src = String::from("export default ");
+            src.push_str(&content);
+            src.push('\n');
+            ctx.compile_module(src.as_bytes(), file_name, false)
         } else {
-            buf.to_vec()
-        };
+            let code = if transpile::needs_transpile(&resolved_name) {
+                if resolved_name.ends_with(".d.ts") {
+                    return ctx.compile_module(b"export {}", &resolved_name, false);
+                }
+                let source = String::from_utf8_lossy(&buf);
+                match transpile::transpile(&source) {
+                    Ok(result) => result.code.into_bytes(),
+                    Err(e) => {
+                        ctx.throw_syntax_error(&format!(
+                            "failed to transpile module '{resolved_name}': {e}"
+                        ));
+                        return Err(-1);
+                    }
+                }
+            } else {
+                buf.to_vec()
+            };
 
-        // Note: should use original file name
-        ctx.compile_module(&code, file_name, false)
+            // Note: should use original file name
+            ctx.compile_module(&code, file_name, false)
+        }
     }
 }
 
