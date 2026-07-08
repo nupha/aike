@@ -64,6 +64,7 @@ reqwest = { version = "0.13", default-features = false, features = [
     "brotli",
     "deflate",
     "rustls",
+    "cookies",
 ] }
 llama = { path = "../llama", features = ["cmake_static"], optional = true }
 serde = { version = "1.0", features = ["derive"] }

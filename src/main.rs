@@ -50,7 +50,7 @@ use crate::{
     },
     llm::JSLlmClient,
     path::init_mod_path,
-    request::JSResponse,
+    whatwg::fetch::{headers::JSHeaders, request::JSRequest, response::JSResponse},
     whatwg::{
         abort::{JSAbortController, JSAbortSignal},
         text_decoder::JSTextDecoder,
@@ -290,6 +290,8 @@ async fn main() -> ExitCode {
                 JSStdioHandle::class_id(),
                 JSFileHandle::class_id(),
                 JSResponse::class_id(),
+                JSHeaders::class_id(),
+                JSRequest::class_id(),
                 JSTextDecoder::class_id(),
                 JSTextEncoder::class_id(),
                 JSURL::class_id(),

@@ -8,6 +8,9 @@
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::sync::Arc;
+
+use tokio::sync::Notify;
 
 use linkme::distributed_slice;
 use zuqe::{
@@ -26,6 +29,8 @@ struct SignalInner {
     reason: JSValue,
     // The associated AbortController (for follow signal to find controller)
     controller: Option<Object>,
+    /// Notifies waiters (e.g. an in-flight fetch) when this signal aborts.
+    notify: Arc<Notify>,
 }
 
 // ===========================================================================
@@ -99,7 +104,9 @@ fn js_signal_static_abort(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
         aborted: true,
         reason,
         controller: None,
+        notify: Arc::new(Notify::new()),
     }));
+    inner.borrow().notify.notify_waiters();
 
     let signal =
         JSAbortSignal::new_instance(ctx, JSValue::UNDEFINED, AbortSignalPayload { inner })?;
@@ -120,7 +127,9 @@ fn js_signal_static_timeout(ctx: &mut ScopedContext, cc: CallContext) -> JSResul
             .map(JSValue::from)
             .unwrap_or(JSValue::UNDEFINED),
         controller: None,
+        notify: Arc::new(Notify::new()),
     }));
+    inner.borrow().notify.notify_waiters();
 
     let signal =
         JSAbortSignal::new_instance(ctx, JSValue::UNDEFINED, AbortSignalPayload { inner })?;
@@ -155,6 +164,7 @@ fn js_controller_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
         aborted: false,
         reason: JSValue::UNDEFINED,
         controller: None,
+        notify: Arc::new(Notify::new()),
     }));
 
     let signal = JSAbortSignal::new_instance(
@@ -201,6 +211,7 @@ fn js_controller_abort(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     } else {
         JSValue::UNDEFINED
     };
+    inner.notify.notify_waiters();
 
     Ok(JSValue::UNDEFINED)
 }
@@ -279,6 +290,31 @@ def_native_object!(
 #[distributed_slice(USER_CLASS_DEFS)]
 fn register_class_abort_controller(rt: &mut Runtime) -> Result<ClassID, i32> {
     JSAbortController::register(rt)
+}
+
+impl AbortSignalPayload {
+    pub(crate) fn is_aborted(&self) -> bool {
+        self.inner.borrow().aborted
+    }
+
+    pub(crate) fn notify(&self) -> Arc<Notify> {
+        self.inner.borrow().notify.clone()
+    }
+}
+
+/// Get the abort `Notify` for a JS `AbortSignal` value, if it is one.
+pub(crate) fn signal_notify(val: &JSValue) -> Option<Arc<Notify>> {
+    val.as_native_object::<JSAbortSignal>()
+        .and_then(|o| o.payload())
+        .map(|p| p.notify())
+}
+
+/// Whether a JS `AbortSignal` value is already aborted.
+pub(crate) fn signal_is_aborted(val: &JSValue) -> bool {
+    val.as_native_object::<JSAbortSignal>()
+        .and_then(|o| o.payload())
+        .map(|p| p.is_aborted())
+        .unwrap_or(false)
 }
 
 /// Called during `install_whatwg_globals` to wire up static methods

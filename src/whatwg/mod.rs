@@ -12,6 +12,7 @@
 
 pub mod abort;
 pub mod console;
+pub mod fetch;
 pub mod text_decoder;
 pub mod text_encoder;
 pub mod timeout;
@@ -36,5 +37,6 @@ pub(crate) fn install_whatwg(ctx: &mut ScopedContext, mut global: Object) -> Res
     console::install_console(ctx, &mut global)?;
     timeout::install_timeout(ctx, global)?;
     abort::install_abort_statics(ctx, &mut global)?;
+    fetch::install_fetch(ctx, global)?;
     Ok(())
 }

@@ -293,3 +293,190 @@ declare class AbortController {
    */
   abort(reason?: any): void;
 }
+
+// ---------------------------------------------------------------------------
+// WHATWG Fetch — Headers / Request / Response / fetch
+// ---------------------------------------------------------------------------
+
+/** A header name/value pair. */
+type HeadersInit =
+  | Headers
+  | Record<string, string>
+  | Array<[string, string]>;
+
+/** Request/response body: a string or a binary buffer. */
+type BodyInit = string | ArrayBufferView | ArrayBuffer;
+
+/** Fetch input: a `Request` object or a URL string. */
+type RequestInfo = Request | string;
+
+/**
+ * WHATWG Fetch `Headers` class (per the Fetch Standard).
+ *
+ * Throws `TypeError` on an invalid header name (must be a token) or value
+ * (no control characters). `set`/`append` strip leading/trailing whitespace
+ * from the value.
+ */
+declare class Headers {
+  /** Construct from name/value pairs, a record, or another Headers. */
+  constructor(init?: HeadersInit);
+  /** Append a value (comma-joined if the name already exists). */
+  append(name: string, value: string): void;
+  /** Delete all values for a name. */
+  delete(name: string): void;
+  /** Get the combined value for a name, or null if absent. */
+  get(name: string): string | null;
+  /** Check if a name exists. */
+  has(name: string): boolean;
+  /** Set a name to a single value (replacing any existing values). */
+  set(name: string, value: string): void;
+  /** Iterate as (value, key, headers). */
+  forEach(
+    callback: (value: string, key: string, parent: Headers) => void,
+  ): void;
+  /** Returns an array of header names. */
+  keys(): string[];
+  /** Returns an array of header values. */
+  values(): string[];
+  /** Returns an array of [name, value] pairs. */
+  entries(): Array<[string, string]>;
+  /** Default iterator yields [name, value] pairs. */
+  [Symbol.iterator](): IterableIterator<[string, string]>;
+}
+
+/** Options for `fetch()` and `new Request()`. */
+interface RequestInit {
+  /** HTTP method. Defaults to "GET". */
+  method?: string;
+  /** Request headers. */
+  headers?: HeadersInit;
+  /** Request body (string or TypedArray). */
+  body?: BodyInit;
+  /** Redirect mode: "follow" | "error" | "manual". Default "follow". */
+  redirect?: "follow" | "error" | "manual";
+  /** AbortSignal to cancel the request. */
+  signal?: AbortSignal;
+  /** Aike extension: timeout in seconds (>0 overrides the 30s default). */
+  timeout?: number;
+  /** Request mode (structural only): "cors" | "no-cors" | "same-origin" | "navigate". */
+  mode?: string;
+  /** Credentials mode: "omit" | "same-origin" | "include". */
+  credentials?: "omit" | "same-origin" | "include";
+  /** Cache mode (structural only). */
+  cache?: string;
+  /** Referrer URL, or "about:client" for none. */
+  referrer?: string;
+  /** Referrer policy (structural only). */
+  referrerPolicy?: string;
+  /** Subresource integrity metadata (structural only). */
+  integrity?: string;
+  /** Keep-alive flag. */
+  keepalive?: boolean;
+}
+
+/**
+ * WHATWG Fetch `Request` class.
+ */
+declare class Request {
+  constructor(input: RequestInfo, init?: RequestInit);
+  /** HTTP method. */
+  readonly method: string;
+  /** Request URL. */
+  readonly url: string;
+  /** Request destination (always ""). */
+  readonly destination: string;
+  /** Referrer URL. */
+  readonly referrer: string;
+  /** Referrer policy. */
+  readonly referrerPolicy: string;
+  /** Request mode. */
+  readonly mode: string;
+  /** Credentials mode. */
+  readonly credentials: string;
+  /** Cache mode. */
+  readonly cache: string;
+  /** Redirect mode. */
+  readonly redirect: "follow" | "error" | "manual";
+  /** Integrity metadata. */
+  readonly integrity: string;
+  /** Keep-alive flag. */
+  readonly keepalive: boolean;
+  /** AbortSignal, or null. */
+  readonly signal: AbortSignal | null;
+  /** Request headers. */
+  readonly headers: Headers;
+  /** Whether the body has been consumed. */
+  readonly bodyUsed: boolean;
+  /** Async iterator over request body chunks, or null if none. */
+  readonly body: AsyncIterableIterator<Uint8Array> | null;
+  /** Read the body as bytes. */
+  bytes(): Promise<Uint8Array>;
+  /** Read the body as an ArrayBuffer. */
+  arrayBuffer(): Promise<ArrayBuffer>;
+  /** Clone the request (fails if the body was already consumed). */
+  clone(): Request;
+}
+
+/**
+ * WHATWG Fetch `Response` class. Shared by `fetch()` and the legacy
+ * `request()` global.
+ */
+declare class Response {
+  constructor(body?: BodyInit, init?: { status?: number; statusText?: string; headers?: HeadersInit });
+  /** Response type: "default" | "basic" | "error" | "opaqueredirect". */
+  readonly type: string;
+  /** Response URL. */
+  readonly url: string;
+  /** Whether the request was redirected. */
+  readonly redirected: boolean;
+  /** HTTP status code. */
+  readonly status: number;
+  /** Whether status is in the 2xx range. */
+  readonly ok: boolean;
+  /** HTTP status text. */
+  readonly statusText: string;
+  /** Aike extension: the Content-Type header value. */
+  readonly contentType: string;
+  /** Aike extension: the Content-Length, or null if absent. */
+  readonly contentLength: number | null;
+  /** Response headers. */
+  readonly headers: Headers;
+  /** Whether the body has been consumed. */
+  readonly bodyUsed: boolean;
+  /** Async iterator over response body chunks, or null for null-body responses. */
+  readonly body: AsyncIterableIterator<Uint8Array> | null;
+  /** Read the entire body as bytes. */
+  bytes(): Promise<Uint8Array>;
+  /**
+   * Read the entire body as a string. For text/html, an optional mode
+   * converts the body: "strip" removes HTML tags, "markdown" converts to Markdown.
+   */
+  text(convert?: "strip" | "markdown"): Promise<string>;
+  /** Read and parse the entire body as JSON. */
+  json(): Promise<any>;
+  /** Read the entire body as an ArrayBuffer. */
+  arrayBuffer(): Promise<ArrayBuffer>;
+  /** Clone the response (fails if the body was already consumed). */
+  clone(): Response;
+  /** Close the response and release underlying resources. */
+  close(): void;
+  /** Returns a network-error Response (type "error", null body). */
+  static error(): Response;
+  /**
+   * Returns a redirect Response (status 301/302/303/307/308) with a Location header.
+   * @param url - Redirect target.
+   * @param status - Redirect status; defaults to 302.
+   */
+  static redirect(url: string, status?: number): Response;
+}
+
+/**
+ * Fetch a resource. Resolves to a `Response` once response headers arrive.
+ *
+ * If the request is aborted via `init.signal`, the returned Promise rejects
+ * with a `TypeError` whose `name` is "AbortError".
+ *
+ * @param input - A `Request` object or a URL string.
+ * @param init - Optional `RequestInit`.
+ */
+declare function fetch(input: RequestInfo, init?: RequestInit): Promise<Response>;
