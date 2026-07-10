@@ -39,6 +39,33 @@ unsafe extern "system" {
     fn _setmode(fd: i32, mode: i32) -> i32;
 }
 
+// ucrt invalid-parameter handling. Passing an out-of-range fd to `_isatty`
+// (or other lowio functions) makes ucrt invoke the invalid-parameter handler,
+// which by default calls `__fastfail` and terminates the process with
+// STATUS_STACK_BUFFER_OVERRUN (0xC0000409). We install a per-thread no-op
+// handler around such calls so they fail gracefully instead of aborting.
+#[cfg(windows)]
+type CrtInvalidParamHandler =
+    Option<unsafe extern "C" fn(*const u16, *const u16, *const u16, u32, usize)>;
+
+#[cfg(windows)]
+unsafe extern "C" {
+    fn _set_thread_local_invalid_parameter_handler(
+        handler: CrtInvalidParamHandler,
+    ) -> CrtInvalidParamHandler;
+}
+
+#[cfg(windows)]
+unsafe extern "C" fn silent_invalid_parameter_handler(
+    _expression: *const u16,
+    _function: *const u16,
+    _file: *const u16,
+    _line: u32,
+    _reserved: usize,
+) {
+    // Swallow the invalid parameter instead of letting ucrt __fastfail.
+}
+
 pub(super) fn js_evalScript(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut backtrace_barrier = false;
     let mut is_async = false;
@@ -117,7 +144,26 @@ fn get_time_ns() -> u64 {
 
 pub(super) fn js_isatty(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let fd = cc.arg(0).to_number(ctx)?.to_i32();
-    Ok(JSValue::Bool(unsafe { libc::isatty(fd) != 0 }))
+
+    // Negative fds are never a tty.
+    if fd < 0 {
+        return Ok(JSValue::Bool(false));
+    }
+
+    #[cfg(windows)]
+    let is_tty = unsafe {
+        // Guard against ucrt __fastfail when `fd` is out of range.
+        let prev =
+            _set_thread_local_invalid_parameter_handler(Some(silent_invalid_parameter_handler));
+        let r = libc::isatty(fd);
+        _set_thread_local_invalid_parameter_handler(prev);
+        r != 0
+    };
+
+    #[cfg(not(windows))]
+    let is_tty = unsafe { libc::isatty(fd) != 0 };
+
+    Ok(JSValue::Bool(is_tty))
 }
 
 pub(super) fn js_ttyGetWinSize(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
