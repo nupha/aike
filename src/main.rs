@@ -376,19 +376,24 @@ async fn main() -> ExitCode {
     };
     // ── Transpile end ──
 
-    let ref_filename = script_path;
-
     let is_module = script_is_module
         || args.module
         || ref_filename.ends_with(".mjs")
         || ref_filename.ends_with(".mts");
+
+    // Convert the entry filename to a canonical `file://` URL for module resolution.
+    // Module names (and `import.meta.url`) are URLs, and a `file://` base is also
+    // required so that dynamic `import()` resolves relative specifiers correctly.
+    let entry_url = zuqe::path_to_url(&ref_filename)
+        .expect("entry path must convert to a file:// URL")
+        .to_string();
 
     let mut promise_future: Option<PromiseFuture> = None;
 
     let r = ctx
         .eval(
             script.as_bytes(),
-            ref_filename.as_str(),
+            &entry_url,
             if is_module {
                 EvalType::Module
             } else {
@@ -489,11 +494,27 @@ async fn main() -> ExitCode {
 
 fn js_module_loader(
     ctx: &mut ScopedContext,
-    file_name: &str,
+    file_name: &url::Url,
     attrs: JSValue,
     _: *mut std::ffi::c_void,
 ) -> Result<ModuleDef, i32> {
-    if file_name.ends_with(".dylib") || file_name.ends_with(".so") || file_name.ends_with(".dll") {
+    // Convert URL back to absolute path for filesystem access.
+    let file_path = match zuqe::url_to_abspath(file_name) {
+        Some(p) => p,
+        None => {
+            ctx.throw_reference_error(&format!(
+                "could not load module '{file_name}': not a file:// URL"
+            ));
+            return Err(-1);
+        }
+    };
+
+    let file_path_str = file_path.to_string_lossy().to_string();
+
+    if file_path_str.ends_with(".dylib")
+        || file_path_str.ends_with(".so")
+        || file_path_str.ends_with(".dll")
+    {
         ctx.throw_internal_error("dynamic library loading not implemented");
         Err(-1)
     } else {
@@ -508,7 +529,7 @@ fn js_module_loader(
                 .unwrap_or(false);
 
         // Use resolved filename (may be .ts fallback from .js)
-        let resolved = read_script(file_name);
+        let resolved = read_script(&file_path_str);
         let (buf, resolved_name) = match resolved {
             Ok((b, n)) => (b, n),
             Err(e) => {
@@ -523,7 +544,7 @@ fn js_module_loader(
             let mut src = String::from("export default ");
             src.push_str(&content);
             src.push('\n');
-            ctx.compile_module(src.as_bytes(), file_name, false)
+            ctx.compile_module(src.as_bytes(), file_name.as_str(), false)
         } else {
             let code = if transpile::needs_transpile(&resolved_name) {
                 if resolved_name.ends_with(".d.ts") {
@@ -543,8 +564,8 @@ fn js_module_loader(
                 buf.to_vec()
             };
 
-            // Note: should use original file name
-            ctx.compile_module(&code, file_name, false)
+            // Note: should use original file URL (not resolved path) as module name
+            ctx.compile_module(&code, file_name.as_str(), false)
         }
     }
 }
