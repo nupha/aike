@@ -28,8 +28,9 @@ enum TimerMsg {
     /// Wake-up signal: a per-timer tokio task reached its deadline. The poller
     /// decides the actual firing order from each entry's absolute `deadline`,
     /// NOT from the order these wake-ups arrive (which races under the async
-    /// runtime). `Fired` carries no data beyond the id.
-    Fired(u32),
+    /// runtime). `Fired` carries no data — it is only a wake-up signal; the
+    /// poller decides what to fire from each entry's absolute `deadline`.
+    Fired,
     Cancelled(u32),
 }
 
@@ -114,13 +115,14 @@ pub(crate) fn gc_trace_timeout(tr: &mut GcTraceCtx) {
 // ---------------------------------------------------------------------------
 
 /// Spawn a tokio task that sleeps until `deadline` and then sends a `Fired`
-/// wake-up. The deadline is captured by the caller (so it matches the value
-/// stored in the entry) and passed in, keeping the sleep and the registry in
-/// sync.
-fn spawn_timer(id: u32, deadline: Instant, tx: Sender<TimerMsg>) {
+/// wake-up signal. The deadline is captured by the caller (so it matches the
+/// value stored in the entry) and passed in, keeping the sleep and the
+/// registry in sync. `Fired` carries no payload — the poller scans all entries
+/// by deadline, so the id is not needed here.
+fn spawn_timer(deadline: Instant, tx: Sender<TimerMsg>) {
     tokio::spawn(async move {
         tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
-        let _ = tx.send(TimerMsg::Fired(id));
+        let _ = tx.send(TimerMsg::Fired);
     });
 }
 
@@ -157,7 +159,7 @@ fn add_timeout_notifier(ctx: &mut ScopedContext) {
                     Ok(TimerMsg::Cancelled(id)) => {
                         cancelled.push(id);
                     }
-                    Ok(TimerMsg::Fired(_)) => {}
+                    Ok(TimerMsg::Fired) => {}
                     Err(_) => break,
                 }
             }
@@ -236,7 +238,7 @@ fn add_timeout_notifier(ctx: &mut ScopedContext) {
                             }
                         });
                         if keep {
-                            spawn_timer(id, new_deadline, tx);
+                            spawn_timer(new_deadline, tx);
                         }
                     }
                 }
@@ -297,7 +299,7 @@ fn register_timer(ctx: &mut ScopedContext, cc: CallContext, is_interval: bool) -
         (id, tx, deadline, start_job)
     });
 
-    spawn_timer(id, deadline, tx.clone());
+    spawn_timer(deadline, tx.clone());
 
     if need_listener {
         add_timeout_notifier(ctx);
