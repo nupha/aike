@@ -27,8 +27,8 @@ use clap::{CommandFactory, Parser};
 use color::{Color::*, colorize_println};
 use linkme::distributed_slice;
 use zuqe::{
-    ClassID, EvalFlags, EvalType, Exception, ExitStatus, JSValue, ModuleDef, NativeObject,
-    Runtime, ScopedContext, builtins::promise::PromiseFuture,
+    ClassID, EvalFlags, EvalType, Exception, ExitStatus, JSValue, ModuleDef, NativeObject, Runtime,
+    ScopedContext, builtins::promise::PromiseFuture,
 };
 
 use crate::llm::init_mod_llm;
@@ -119,14 +119,21 @@ struct Args {
     #[arg(
         long,
         value_name = "n",
-        help = "set stack arena size to n (default: 256k)"
+        help = "set virtual stack arena size to n (default: 256k)"
     )]
     stack_arena: Option<String>,
 
     #[arg(
         long,
         value_name = "n",
-        help = "set C-stack recursion limit to n (default: 256k)"
+        help = "set virtual stack byte limit to n (default: 512k)"
+    )]
+    stack_limit: Option<String>,
+
+    #[arg(
+        long,
+        value_name = "n",
+        help = "set C-stack recursion limit to n (default: 512k)"
     )]
     stack_overflow: Option<String>,
 
@@ -241,6 +248,9 @@ async fn main() -> ExitCode {
         if let Some(ref sa) = args.stack_arena {
             v.push(format!("--stack-arena={}", sa));
         }
+        if let Some(ref sl) = args.stack_limit {
+            v.push(format!("--stack-limit={}", sl));
+        }
         if let Some(ref so) = args.stack_overflow {
             v.push(format!("--stack-overflow={}", so));
         }
@@ -273,6 +283,16 @@ async fn main() -> ExitCode {
             }
         } else {
             colorize_println(format!("invalid stack-arena: {ss}"), RedFg);
+            std::process::exit(-1);
+        }
+    }
+
+    // stack-limit (default: 512k)
+    if let Some(ref ss) = args.stack_limit {
+        if let Some(size) = parse_byte_size(ss) {
+            rt.set_stack_limit(size);
+        } else {
+            colorize_println(format!("invalid stack-limit: {ss}"), RedFg);
             std::process::exit(-1);
         }
     }
