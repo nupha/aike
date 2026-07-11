@@ -139,7 +139,7 @@ fn spawn_timer(deadline: Instant, tx: Sender<TimerMsg>) {
 /// delay (rather than in the arbitrary wake order of the per-timer tokio
 /// tasks).  `Cancelled` messages are applied first so an already-in-flight
 /// `Fired` for a cleared id is dropped instead of invoking its callback.
-fn add_timeout_notifier(ctx: &mut ScopedContext) {
+fn start_timer_task(ctx: &mut ScopedContext) {
     #[cfg(debug_assertions)]
     TIMER_STATE.with_borrow_mut(|opt| {
         debug_assert!(opt.is_some());
@@ -302,7 +302,7 @@ fn register_timer(ctx: &mut ScopedContext, cc: CallContext, is_interval: bool) -
     spawn_timer(deadline, tx.clone());
 
     if need_listener {
-        add_timeout_notifier(ctx);
+        start_timer_task(ctx);
     }
 
     Ok(JSValue::from(id as i32))
