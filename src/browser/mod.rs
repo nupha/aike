@@ -8,6 +8,7 @@ mod chrome;
 mod class_input;
 mod class_network;
 mod class_page;
+mod runtime;
 
 pub use class_page::{JSBrowser, JSPage};
 

@@ -8,9 +8,11 @@ use zuqe::{
     builtins::promise::{Promise, PromiseResultSlot},
 };
 
-use crate::whatwg::fetch::headers::{HeaderList, header_list_from_js};
-use crate::whatwg::fetch::response::build_response_from_transport;
-use crate::whatwg::fetch::transport::{TransportResponse, perform_request, request_with_headers};
+use crate::whatwg::fetch::{
+    headers::{HeaderList, header_list_from_js},
+    response::build_response_from_transport,
+    transport::{TransportResponse, perform_request, request_with_headers},
+};
 
 /// request(url, options?) — returns Promise<Response>
 ///
