@@ -54,7 +54,7 @@ fn cookie_to_js(ctx: &mut ScopedContext, c: &Value) -> Result<JSValue, i32> {
 // Cookies
 // ---------------------------------------------------------------------------
 
-/// `tab.getCookies()`
+/// `page.getCookies()`
 pub(crate) fn js_page_get_cookies(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let payload = get_page_payload(ctx, &this)?;
@@ -99,7 +99,7 @@ pub(crate) fn js_page_get_cookies(ctx: &mut ScopedContext, cc: CallContext) -> J
     Ok(promise.into())
 }
 
-/// `tab.setCookie(cookie)`
+/// `page.setCookie(cookie)`
 pub(crate) fn js_page_set_cookie(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let cookie_obj = cc.arg(0).as_object().copied().ok_or_else(|| {
         ctx.throw_type_error("setCookie requires an object argument");
@@ -153,7 +153,7 @@ pub(crate) fn js_page_set_cookie(ctx: &mut ScopedContext, cc: CallContext) -> JS
 // Network capture
 // ---------------------------------------------------------------------------
 
-/// `tab.getResponseBody(requestId)`
+/// `page.getResponseBody(requestId)`
 /// Returns `{ body: string, base64Encoded: boolean }`.
 pub(crate) fn js_page_get_response_body(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let request_id = cc
@@ -186,7 +186,7 @@ pub(crate) fn js_page_get_response_body(ctx: &mut ScopedContext, cc: CallContext
     Ok(promise.into())
 }
 
-/// `tab.startNetworkCapture()`
+/// `page.startNetworkCapture()`
 /// Enables the Network domain and begins capturing request/response events.
 /// Captured data can be retrieved via `getCapturedRequests()`.
 pub(crate) fn js_page_start_network_capture(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -257,7 +257,7 @@ pub(crate) fn js_page_start_network_capture(ctx: &mut ScopedContext, cc: CallCon
     Ok(promise.into())
 }
 
-/// `tab.stopNetworkCapture()`
+/// `page.stopNetworkCapture()`
 /// Stops the network capture background task.
 pub(crate) fn js_page_stop_network_capture(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
@@ -286,7 +286,7 @@ pub(crate) fn js_page_stop_network_capture(ctx: &mut ScopedContext, cc: CallCont
     Ok(promise.into())
 }
 
-/// `tab.getCapturedRequests()`
+/// `page.getCapturedRequests()`
 /// Returns the array of captured network events.
 pub(crate) fn js_page_get_captured_requests(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
@@ -303,7 +303,7 @@ pub(crate) fn js_page_get_captured_requests(ctx: &mut ScopedContext, cc: CallCon
     js_from_json_value(ctx, &Value::Array(requests))
 }
 
-/// `tab.clearCapturedRequests()`
+/// `page.clearCapturedRequests()`
 pub(crate) fn js_page_clear_captured_requests(
     ctx: &mut ScopedContext,
     cc: CallContext,

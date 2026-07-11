@@ -81,6 +81,17 @@ const PAGE_PROTO: &[FieldDef] = &[
         0,
     ),
     FieldDef::FUNC("close", 0, js_page_close, 0),
+    // Page domain — extended
+    FieldDef::FUNC("setContent", 1, js_page_set_content, 0),
+    FieldDef::FUNC("reload", 1, js_page_reload, 0),
+    FieldDef::FUNC("stopLoading", 0, js_page_stop_loading, 0),
+    FieldDef::FUNC("back", 0, js_page_back, 0),
+    FieldDef::FUNC("forward", 0, js_page_forward, 0),
+    FieldDef::FUNC("getNavigationHistory", 0, js_page_get_navigation_history, 0),
+    FieldDef::FUNC("bringToFront", 0, js_page_bring_to_front, 0),
+    FieldDef::FUNC("captureSnapshot", 1, js_page_capture_snapshot, 0),
+    FieldDef::FUNC("setDownloadBehavior", 1, js_page_set_download_behavior, 0),
+    FieldDef::FUNC("setBypassCSP", 1, js_page_set_bypass_csp, 0),
     // Input domain
     FieldDef::FUNC("mouseClick", 4, class_input::js_page_mouse_click, 0),
     FieldDef::FUNC("mouseMove", 2, class_input::js_page_mouse_move, 0),
@@ -249,7 +260,7 @@ pub(crate) fn js_from_json_value(ctx: &mut ScopedContext, val: &Value) -> JSResu
 // Page methods — Page domain
 // ---------------------------------------------------------------------------
 
-/// `tab.navigate(url)`
+/// `page.navigate(url)`
 fn js_page_navigate(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let url = cc
         .arg(0)
@@ -264,7 +275,7 @@ fn js_page_navigate(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     )
 }
 
-/// `tab.captureScreenshot(options?)`
+/// `page.captureScreenshot(options?)`
 fn js_page_capture_screenshot(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut format = "png".to_string();
     let mut quality = None::<i32>;
@@ -323,7 +334,7 @@ fn js_page_capture_screenshot(ctx: &mut ScopedContext, cc: CallContext) -> JSRes
     Ok(promise.into())
 }
 
-/// `tab.setViewport(width, height)`
+/// `page.setViewport(width, height)`
 fn js_page_set_viewport(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let width = cc
         .arg(0)
@@ -351,7 +362,7 @@ fn js_page_set_viewport(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     )
 }
 
-/// `tab.waitForNavigation(timeoutMs?)`
+/// `page.waitForNavigation(timeoutMs?)`
 fn js_page_wait_for_navigation(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let timeout_ms: u64 = if cc.length() > 0 {
         let n = cc
@@ -417,7 +428,7 @@ fn js_page_wait_for_navigation(ctx: &mut ScopedContext, cc: CallContext) -> JSRe
     Ok(promise.into())
 }
 
-/// `tab.handleDialog(accept, promptText?)`
+/// `page.handleDialog(accept, promptText?)`
 fn js_page_handle_dialog(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let accept = cc.arg(0).to_bool().unwrap_or(false);
     let prompt_text = if cc.length() > 1 && !cc.arg(1).is_undefined() {
@@ -464,7 +475,7 @@ fn js_page_handle_dialog(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     Ok(promise.into())
 }
 
-/// `tab.printToPDF(options?)`
+/// `page.printToPDF(options?)`
 fn js_page_print_to_pdf(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut params = serde_json::json!({ "printBackground": true });
 
@@ -528,7 +539,7 @@ fn js_page_print_to_pdf(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 // Native CDP Page methods
 // ---------------------------------------------------------------------------
 
-/// `tab.getLayoutMetrics()`
+/// `page.getLayoutMetrics()`
 fn js_page_get_layout_metrics(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let payload = get_page_payload(ctx, &this)?;
@@ -554,7 +565,7 @@ fn js_page_get_layout_metrics(ctx: &mut ScopedContext, cc: CallContext) -> JSRes
     Ok(promise.into())
 }
 
-/// `tab.addInitScript(source)`
+/// `page.addInitScript(source)`
 fn js_page_add_init_script(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let source = cc
         .arg(0)
@@ -603,7 +614,7 @@ fn js_page_add_init_script(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
     Ok(promise.into())
 }
 
-/// `tab.getFrameTree()`
+/// `page.getFrameTree()`
 fn js_page_get_frame_tree(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let payload = get_page_payload(ctx, &this)?;
@@ -629,12 +640,271 @@ fn js_page_get_frame_tree(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
     Ok(promise.into())
 }
 
-/// `tab.enableRuntime()`
-fn js_page_enable_runtime(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    send_page_void_cmd(ctx, &cc, "Runtime.enable", None)
+// ---------------------------------------------------------------------------
+// Page domain — extended methods
+// ---------------------------------------------------------------------------
+
+/// `page.setContent(html)` — replace the whole document via `Page.setDocumentContent`.
+fn js_page_set_content(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let html = cc
+        .arg(0)
+        .to_string(ctx)
+        .map(|s| s.content().encode_utf8(false).to_string())
+        .unwrap_or_default();
+
+    let this = cc.this();
+    let payload = get_page_payload(ctx, &this)?;
+    let client = payload.client.clone();
+    let session_id = payload.session_id.clone();
+
+    let result_slot = PromiseResultSlot::<Result<(), String>>::new();
+    let promise =
+        Promise::create_with_result_slot(ctx, result_slot.clone(), |cx, payload| -> JSResult {
+            payload.map_err(|e| {
+                cx.throw_internal_error(&e);
+                -1
+            })?;
+            Ok(JSValue::UNDEFINED)
+        })?;
+
+    tokio::spawn(async move {
+        // Need the main frame id to set document content.
+        let tree = client
+            .send("Page.getFrameTree", None, Some(&session_id))
+            .await
+            .unwrap_or(Ok(serde_json::Value::Null));
+        let frame_id = tree
+            .as_ref()
+            .ok()
+            .and_then(|v| v.get("frameTree"))
+            .and_then(|ft| ft.get("frame"))
+            .and_then(|f| f.get("id"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        match frame_id {
+            Some(fid) => {
+                let rx = client.send(
+                    "Page.setDocumentContent",
+                    Some(serde_json::json!({ "frameId": fid, "html": html })),
+                    Some(&session_id),
+                );
+                let result = rx.await.unwrap_or(Err("channel closed".into()));
+                match result {
+                    Ok(_) => result_slot.commit(Ok(())).ok(),
+                    Err(e) => result_slot.commit(Err(e)).ok(),
+                };
+            }
+            None => {
+                result_slot.commit(Err("setContent: cannot resolve main frame".into())).ok();
+            }
+        }
+    });
+
+    Ok(promise.into())
 }
 
-/// `tab.uploadFile(selector, filePaths)`
+/// `page.reload(opts?)` — `Page.reload`.
+fn js_page_reload(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let mut params = serde_json::json!({});
+    if cc.length() > 0
+        && let Some(opts) = cc.arg(0).as_object()
+    {
+        if let Some(v) = get_bool_prop(ctx, opts, "ignoreCache") {
+            params["ignoreCache"] = Value::Bool(v);
+        }
+    }
+    send_page_void_cmd(ctx, &cc, "Page.reload", Some(params))
+}
+
+/// `page.stopLoading()` — `Page.stopLoading`.
+fn js_page_stop_loading(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    send_page_void_cmd(ctx, &cc, "Page.stopLoading", None)
+}
+
+/// `page.back()` — navigate to the previous history entry.
+fn js_page_back(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    navigate_history(ctx, &cc, -1)
+}
+
+/// `page.forward()` — navigate to the next history entry.
+fn js_page_forward(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    navigate_history(ctx, &cc, 1)
+}
+
+/// Shared helper: go `delta` steps in the navigation history via
+/// `Page.getNavigationHistory` + `Page.navigateToHistoryEntry`.
+fn navigate_history(ctx: &mut ScopedContext, cc: &CallContext, delta: i64) -> JSResult {
+    let this = cc.this();
+    let payload = get_page_payload(ctx, &this)?;
+    let client = payload.client.clone();
+    let session_id = payload.session_id.clone();
+
+    let result_slot = PromiseResultSlot::<Result<(), String>>::new();
+    let promise =
+        Promise::create_with_result_slot(ctx, result_slot.clone(), |cx, payload| -> JSResult {
+            payload.map_err(|e| {
+                cx.throw_internal_error(&e);
+                -1
+            })?;
+            Ok(JSValue::UNDEFINED)
+        })?;
+
+    tokio::spawn(async move {
+        let hist = client
+            .send("Page.getNavigationHistory", None, Some(&session_id))
+            .await
+            .unwrap_or(Err("channel closed".into()));
+        let (target_id, ok) = match hist {
+            Ok(val) => {
+                let current = val
+                    .get("currentIndex")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(0);
+                let entries = val.get("entries").and_then(|v| v.as_array());
+                let target = current + delta;
+                let id = entries
+                    .and_then(|arr| arr.get(target as usize))
+                    .and_then(|e| e.get("id"))
+                    .and_then(|v| v.as_i64());
+                match id {
+                    Some(i) => (i, true),
+                    None => (0, false),
+                }
+            }
+            Err(_) => (0, false),
+        };
+
+        if !ok {
+            result_slot
+                .commit(Err("no history entry in that direction".into()))
+                .ok();
+            return;
+        }
+
+        let rx = client.send(
+            "Page.navigateToHistoryEntry",
+            Some(serde_json::json!({ "entryId": target_id })),
+            Some(&session_id),
+        );
+        let result = rx.await.unwrap_or(Err("channel closed".into()));
+        match result {
+            Ok(_) => result_slot.commit(Ok(())).ok(),
+            Err(e) => result_slot.commit(Err(e)).ok(),
+        };
+    });
+
+    Ok(promise.into())
+}
+
+/// `page.getNavigationHistory()` — returns `{ currentIndex, entries }`.
+fn js_page_get_navigation_history(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let this = cc.this();
+    let payload = get_page_payload(ctx, &this)?;
+    let client = payload.client.clone();
+    let session_id = payload.session_id.clone();
+
+    let result_slot = PromiseResultSlot::<Result<Value, String>>::new();
+    let promise =
+        Promise::create_with_result_slot(ctx, result_slot.clone(), |cx, payload| -> JSResult {
+            let val = payload.map_err(|e| {
+                cx.throw_internal_error(&e);
+                -1
+            })?;
+            js_from_json_value(cx, &val)
+        })?;
+
+    tokio::spawn(async move {
+        let rx = client.send("Page.getNavigationHistory", None, Some(&session_id));
+        let result = rx.await.unwrap_or(Err("channel closed".into()));
+        result_slot.commit(result).ok();
+    });
+
+    Ok(promise.into())
+}
+
+/// `page.bringToFront()` — `Page.bringToFront`.
+fn js_page_bring_to_front(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    send_page_void_cmd(ctx, &cc, "Page.bringToFront", None)
+}
+
+/// `page.captureSnapshot(opts?)` — `Page.captureSnapshot` (MHTML).
+fn js_page_capture_snapshot(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let mut params = serde_json::json!({ "format": "mhtml" });
+    if cc.length() > 0
+        && let Some(opts) = cc.arg(0).as_object()
+    {
+        if let Some(f) = get_str_prop(ctx, opts, "format") {
+            params["format"] = Value::String(f);
+        }
+    }
+
+    let this = cc.this();
+    let payload = get_page_payload(ctx, &this)?;
+    let client = payload.client.clone();
+    let session_id = payload.session_id.clone();
+
+    let result_slot = PromiseResultSlot::<Result<String, String>>::new();
+    let promise =
+        Promise::create_with_result_slot(ctx, result_slot.clone(), |cx, payload| -> JSResult {
+            let data = payload.map_err(|e| {
+                cx.throw_internal_error(&e);
+                -1
+            })?;
+            cx.create_string_from_utf8(data.into_bytes())
+                .map(JSValue::from)
+        })?;
+
+    tokio::spawn(async move {
+        let rx = client.send("Page.captureSnapshot", Some(params), Some(&session_id));
+        let result = rx.await.unwrap_or(Err("channel closed".into()));
+        match result {
+            Ok(val) => {
+                let data = val
+                    .get("data")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                result_slot.commit(Ok(data)).ok();
+            }
+            Err(e) => {
+                result_slot.commit(Err(e)).ok();
+            }
+        };
+    });
+
+    Ok(promise.into())
+}
+
+/// `page.setDownloadBehavior(path)` — `Page.setDownloadBehavior`.
+/// Empty path → "deny", otherwise "allow" with the given download path.
+fn js_page_set_download_behavior(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let path = cc
+        .arg(0)
+        .to_string(ctx)
+        .map(|s| s.content().encode_utf8(false).to_string())
+        .unwrap_or_default();
+
+    let params = if path.is_empty() {
+        serde_json::json!({ "behavior": "deny" })
+    } else {
+        serde_json::json!({ "behavior": "allow", "downloadPath": path })
+    };
+    send_page_void_cmd(ctx, &cc, "Page.setDownloadBehavior", Some(params))
+}
+
+/// `page.setBypassCSP(enabled)` — `Page.setBypassCSP`.
+fn js_page_set_bypass_csp(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let enabled = cc.arg(0).to_bool().unwrap_or(false);
+    send_page_void_cmd(
+        ctx,
+        &cc,
+        "Page.setBypassCSP",
+        Some(serde_json::json!({ "enabled": enabled })),
+    )
+}
+
+/// `page.uploadFile(selector, filePaths)`
 fn js_page_upload_file(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let selector = cc
         .arg(0)
@@ -716,7 +986,7 @@ fn js_page_upload_file(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     Ok(promise.into())
 }
 
-/// `tab.close()`
+/// `page.close()`
 fn js_page_close(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let payload = get_page_payload(ctx, &this)?;

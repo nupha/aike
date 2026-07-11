@@ -16,7 +16,7 @@ use zuqe::{
 
 use crate::browser::class_page::{get_page_payload, js_from_json_value, send_page_void_cmd};
 
-/// `tab.evaluate(jsCode)`
+/// `page.evaluate(jsCode)`
 pub(crate) fn js_page_evaluate(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let js_code = cc
         .arg(0)
@@ -84,7 +84,7 @@ pub(crate) fn js_page_evaluate(ctx: &mut ScopedContext, cc: CallContext) -> JSRe
     Ok(promise.into())
 }
 
-/// `tab.getOuterHTML()`
+/// `page.getOuterHTML()`
 pub(crate) fn js_page_get_outer_html(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let payload = get_page_payload(ctx, &this)?;
@@ -129,7 +129,7 @@ pub(crate) fn js_page_get_outer_html(ctx: &mut ScopedContext, cc: CallContext) -
     Ok(promise.into())
 }
 
-/// `tab.waitForSelector(selector, timeoutMs?)`
+/// `page.waitForSelector(selector, timeoutMs?)`
 pub(crate) fn js_page_wait_for_selector(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let selector = cc
         .arg(0)
@@ -208,7 +208,7 @@ pub(crate) fn js_page_wait_for_selector(ctx: &mut ScopedContext, cc: CallContext
     Ok(promise.into())
 }
 
-/// `tab.enableRuntime()`
+/// `page.enableRuntime()`
 pub(crate) fn js_page_enable_runtime(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     send_page_void_cmd(ctx, &cc, "Runtime.enable", None)
 }

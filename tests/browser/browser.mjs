@@ -5,6 +5,19 @@
 
 import { launch } from "browser";
 
+let apiPass = 0;
+let apiFail = 0;
+
+function check(label, condition, detail) {
+  if (condition) {
+    console.log("  [ok] " + label);
+    apiPass++;
+  } else {
+    console.log("  [FAIL] " + label + (detail ? " -- " + detail : ""));
+    apiFail++;
+  }
+}
+
 async function main() {
   console.log("=== CDP Browser: bing search demo ===\n");
 
@@ -92,6 +105,38 @@ async function main() {
   }
   console.log("=== End of Results ===\n");
 
+  // 7b. exercise new Page-domain APIs that are safe on any loaded page
+  //     (these don't mutate or reload the document, so the bing demo above
+  //     keeps working). See aike/memo/cdp-features.md:66-75. The destructive
+  //     APIs (setContent/reload + history back/forward) live in
+  //     tests/browser/document.mjs and tests/browser/navigation.mjs.
+  console.log("=== Exercise Page-domain APIs (on bing page) ===");
+  const tmpDir = "/tmp/aike_downloads";
+
+  await page.stopLoading();
+  check("stopLoading() resolves", true);
+
+  await page.setBypassCSP(true);
+  await page.setBypassCSP(false);
+  check("setBypassCSP(true/false) resolves", true);
+
+  await page.setDownloadBehavior(tmpDir);
+  await page.setDownloadBehavior("");
+  check("setDownloadBehavior(allow/deny) resolves", true);
+
+  await page.bringToFront();
+  check("bringToFront() resolves", true);
+
+  // captureSnapshot needs the CDP session attached; a readyState evaluate
+  // forces the session active first.
+  await page.evaluate("document.readyState");
+  const mhtml = await page.captureSnapshot();
+  check(
+    "captureSnapshot() returns MHTML",
+    typeof mhtml === "string" && mhtml.length > 0 &&
+      (mhtml.indexOf("MIME-Version") >= 0 || mhtml.indexOf("multipart/related") >= 0),
+  );
+
   // 8. scroll to bottom, then wait
   console.log("  Scrolling to bottom of page...");
   await page.evaluate(
@@ -106,6 +151,10 @@ async function main() {
   console.log("  Closing browser...");
   await browser.close();
   console.log("\nDone.");
+
+  console.log("\n" + "=".repeat(50));
+  console.log("Page-API checks on bing page: pass " + apiPass + ", fail " + apiFail);
+  Aike.exit(apiFail > 0 ? 1 : 0);
 }
 
 main().catch((err) => {

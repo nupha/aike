@@ -16,7 +16,7 @@ use crate::browser::{
     class_page::{get_page_payload, send_page_void_cmd},
 };
 
-/// `tab.mouseClick(x, y, options?)`
+/// `page.mouseClick(x, y, options?)`
 /// Clicks at pixel coordinates (x, y).
 /// `options.button` — "left" (default), "middle", "right"
 /// `options.clickCount` — 1 (default, single) or 2 (double)
@@ -63,7 +63,7 @@ pub(crate) fn js_page_mouse_click(ctx: &mut ScopedContext, cc: CallContext) -> J
     Ok(promise.into())
 }
 
-/// `tab.mouseMove(x, y)`
+/// `page.mouseMove(x, y)`
 pub(crate) fn js_page_mouse_move(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let x = cc.arg(0).to_number(ctx).map(|n| n.to_f64()).unwrap_or(0.0);
     let y = cc.arg(1).to_number(ctx).map(|n| n.to_f64()).unwrap_or(0.0);
@@ -94,7 +94,7 @@ pub(crate) fn js_page_mouse_move(ctx: &mut ScopedContext, cc: CallContext) -> JS
     Ok(promise.into())
 }
 
-/// `tab.keyPress(key, options?)`
+/// `page.keyPress(key, options?)`
 /// Simulates keyDown + char + keyUp for the given key.
 /// `options.modifiers` — bitmask (1=Alt, 2=Ctrl, 4=Meta, 8=Shift)
 pub(crate) fn js_page_key_press(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -158,7 +158,7 @@ pub(crate) fn js_page_key_press(ctx: &mut ScopedContext, cc: CallContext) -> JSR
     Ok(promise.into())
 }
 
-/// `tab.insertText(text)`
+/// `page.insertText(text)`
 /// Insert text via Input.insertText — handles CJK / Unicode reliably.
 pub(crate) fn js_page_insert_text(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let text = cc
