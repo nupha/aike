@@ -3,16 +3,17 @@
 
 //! WHATWG Timers Standard: setTimeout, setInterval, clearTimeout, clearInterval.
 //!
-//! Uses a crossbeam channel + tokio async sleep for background timer dispatch,
-//! and a single persistent JS job (via start_channel_poller) to invoke callbacks.
+//! Pending timers live in a single `Vec` kept sorted by `deadline` ascending, so
+//! `entries[0]` is always the nearest deadline.  A single self-requeuing JS job
+//! fires due timers in that order, driven entirely by the engine's job loop
+//! ticking this job (`JobState::Again`); there is no separate timer thread or
+//! per-timer sleep task.
 
 use std::{
     cell::{Cell, RefCell},
-    collections::HashMap,
     time::{Duration, Instant},
 };
 
-use crossbeam::channel::{Receiver, Sender};
 use zuqe::{
     CallContext, Callback, Exception, JS_PROP_C_W_E, JSResult, JSValue, JobState, Object,
     ScopedContext,
@@ -20,34 +21,20 @@ use zuqe::{
 };
 
 // ---------------------------------------------------------------------------
-// Channel message: fired or cancelled
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Copy)]
-enum TimerMsg {
-    /// Wake-up signal: a per-timer tokio task reached its deadline. The poller
-    /// decides the actual firing order from each entry's absolute `deadline`,
-    /// NOT from the order these wake-ups arrive (which races under the async
-    /// runtime). `Fired` carries no data — it is only a wake-up signal; the
-    /// poller decides what to fire from each entry's absolute `deadline`.
-    Fired,
-    Cancelled(u32),
-}
-
-// ---------------------------------------------------------------------------
 // Per-timer entry stored in the registry
 // ---------------------------------------------------------------------------
 
 struct TimerEntry {
+    /// Stable id returned to JS and used by clearTimeout/clearInterval. Never
+    /// reused, so a stale clear can't hit a later timer that recycled the id.
+    id: u32,
     /// JS function callback — must be GC-traced
     callback: Object,
     /// None for setTimeout; Some(ms) for setInterval
     interval_ms: Option<u64>,
-    /// tx clone used to re-send Fired for interval repetition
-    tx: Sender<TimerMsg>,
     /// Absolute deadline captured at registration (and on every re-arm for
-    /// intervals). This — and only this — determines firing order, so the
-    /// result is deterministic regardless of async wake-up races.
+    /// intervals). The `entries` vec is kept sorted by this, so firing order is
+    /// deterministic and `entries[0]` is always the nearest deadline.
     deadline: Instant,
 }
 
@@ -57,14 +44,14 @@ struct TimerEntry {
 
 struct TimerState {
     next_id: u32,
-    entries: HashMap<u32, TimerEntry>,
-    tx: Sender<TimerMsg>,
-    rx: Receiver<TimerMsg>,
+    /// Pending timers, kept sorted by `deadline` ascending. `entries[0]` is
+    /// always the nearest deadline, so firing order and the per-tick early
+    /// return need no separate index or cached timestamp.
+    entries: Vec<TimerEntry>,
 }
 
 impl TimerState {
     fn new() -> Self {
-        let (tx, rx) = crossbeam::channel::bounded::<TimerMsg>(64);
         let next_id = TIMER_SERIAL.with(|t| {
             let id = t.get();
             t.set(id + 1);
@@ -72,9 +59,7 @@ impl TimerState {
         });
         Self {
             next_id,
-            entries: HashMap::new(),
-            tx,
-            rx,
+            entries: Vec::new(),
         }
     }
 
@@ -86,6 +71,12 @@ impl TimerState {
         });
         self.next_id = id;
         id
+    }
+
+    /// Insert an entry keeping `entries` sorted by `deadline` ascending.
+    fn insert_sorted(&mut self, entry: TimerEntry) {
+        let pos = self.entries.partition_point(|e| e.deadline <= entry.deadline);
+        self.entries.insert(pos, entry);
     }
 }
 
@@ -103,26 +94,10 @@ thread_local! {
 pub(crate) fn gc_trace_timeout(tr: &mut GcTraceCtx) {
     TIMER_STATE.with_borrow(|opt| {
         if let Some(s) = opt.as_ref() {
-            for entry in s.entries.values() {
+            for entry in s.entries.iter() {
                 entry.callback.trace(tr);
             }
         }
-    });
-}
-
-// ---------------------------------------------------------------------------
-// Spawn a tokio task that sleeps then fires a message on the channel
-// ---------------------------------------------------------------------------
-
-/// Spawn a tokio task that sleeps until `deadline` and then sends a `Fired`
-/// wake-up signal. The deadline is captured by the caller (so it matches the
-/// value stored in the entry) and passed in, keeping the sleep and the
-/// registry in sync. `Fired` carries no payload — the poller scans all entries
-/// by deadline, so the id is not needed here.
-fn spawn_timer(deadline: Instant, tx: Sender<TimerMsg>) {
-    tokio::spawn(async move {
-        tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
-        let _ = tx.send(TimerMsg::Fired);
     });
 }
 
@@ -133,114 +108,90 @@ fn spawn_timer(deadline: Instant, tx: Sender<TimerMsg>) {
 /// Enqueue the polling microtask.  Called only when TIMER_STATE is Some
 /// (state already initialized by the caller).
 ///
-/// The poller drains every message that is currently ready and fires the
-/// `Fired` callbacks in **deadline order**, so multiple timers that become
-/// due in the same poll window still execute in the order of their requested
-/// delay (rather than in the arbitrary wake order of the per-timer tokio
-/// tasks).  `Cancelled` messages are applied first so an already-in-flight
-/// `Fired` for a cleared id is dropped instead of invoking its callback.
+/// The job self-requeues (`JobState::Again`) while timers are pending.  On each
+/// tick it first compares `entries[0].deadline` (the nearest, since `entries`
+/// is sorted) once against `Instant::now()` and bails immediately when nothing
+/// is due, so the idle cost is a single comparison.  When a timer is due it
+/// fires every elapsed timer in **deadline order**; execution order is
+/// deterministic.  A timer that was cleared (entry removed) is simply never
+/// fired.
 fn start_timer_task(ctx: &mut ScopedContext) {
     #[cfg(debug_assertions)]
     TIMER_STATE.with_borrow_mut(|opt| {
         debug_assert!(opt.is_some());
     });
 
-    let rx = TIMER_STATE.with_borrow(|opt| opt.as_ref().unwrap().rx.clone());
-
     ctx.queue_job(
         move |cx| {
-            // 1. Drain every wake-up currently ready. `Fired` is only a signal
-            //    that *some* deadline passed; the real firing order is decided
-            //    by each entry's absolute `deadline` below, which is immune to
-            //    the async wake-up race. `Cancelled` removes the entry.
-            let mut cancelled: Vec<u32> = Vec::new();
-            loop {
-                match rx.try_recv() {
-                    Ok(TimerMsg::Cancelled(id)) => {
-                        cancelled.push(id);
-                    }
-                    Ok(TimerMsg::Fired) => {}
-                    Err(_) => break,
+            let now = Instant::now();
+
+            // Fast path: if the nearest timer (`entries[0]`) isn't due yet, or
+            // there are no timers at all, bail.  Costs a single comparison.
+            match TIMER_STATE.with_borrow(|s| s.as_ref().and_then(|s| s.entries.first()).map(|e| e.deadline)) {
+                None => {
+                    TIMER_STATE.with_borrow_mut(|s| {
+                        s.take();
+                    });
+                    return Ok(JobState::Done);
                 }
+                Some(t) if now < t => return Ok(JobState::Again),
+                Some(_) => {}
             }
 
-            // Fire every entry whose deadline has been reached, in ascending
-            // deadline order. This is deterministic and correct even when the
-            // underlying tokio tasks delivered their `Fired` signals out of
-            // order (a later-deadline timer can wake before an earlier one).
-            // Cancelled entries are dropped here too, inside the same borrow so
-            // we don't re-enter TIMER_STATE once per cancelled id.
-            let now = Instant::now();
-            let mut due: Vec<(Instant, u32)> = TIMER_STATE.with_borrow_mut(|opt| {
-                let mut v = Vec::new();
-                if let Some(s) = opt.as_mut() {
-                    for id in &cancelled {
-                        s.entries.remove(id);
-                    }
-
-                    for (id, e) in s.entries.iter() {
-                        if e.deadline <= now {
-                            v.push((e.deadline, *id));
+            // At least one timer is due: fire every elapsed timer in deadline
+            // order.  `entries` is sorted, so `entries[0]` is always the nearest;
+            // each poll fires all due timers in order (catch-up).
+            loop {
+                // Peek the nearest timer and, if due, pull it out.
+                let step = TIMER_STATE.with_borrow_mut(
+                    |opt| -> Option<(Object, Option<u64>, u32)> {
+                        let s = opt.as_mut()?;
+                        let e = s.entries.first_mut()?;
+                        if e.deadline > now {
+                            return None;
                         }
-                    }
-                }
-                v
-            });
-
-            due.sort_by_key(|entry| entry.0);
-
-            for (_, id) in due {
-                // Extract the callback and settle this timer's fate in ONE borrow.
-                // A one-shot (setTimeout, interval_ms == None) is removed
-                // immediately, so no second borrow is needed after the callback.
-                // An interval keeps its entry and hands back its re-arm data —
-                // its liveness (whether the callback cleared it) is re-checked
-                // *after* cb.call below, since the callback may re-enter
-                // TIMER_STATE and we must not hold a borrow across it.
-                let (callback, re_arm) = TIMER_STATE.with_borrow_mut(|opt| {
-                    if let Some(s) = opt.as_mut()
-                        && let Some(e) = s.entries.get_mut(&id)
-                    {
                         let cb = e.callback;
+                        let id = e.id;
                         match e.interval_ms {
+                            // One-shot: drop it now (before the callback, so a
+                            // clearTimeout inside it is a no-op). The rest stay
+                            // sorted.
                             None => {
-                                s.entries.remove(&id);
-                                (Some(cb), None)
+                                s.entries.remove(0);
+                                Some((cb, None, id))
                             }
-                            Some(ms) => (Some(cb), Some((ms, e.tx.clone()))),
+                            // Interval: keep the entry; re-arm happens *after*
+                            // the callback, since it may clear itself.
+                            Some(ms) => Some((cb, Some(ms), id)),
                         }
-                    } else {
-                        (None, None)
-                    }
-                });
+                    },
+                );
 
-                if let Some(cb) = callback {
-                    if cb.call(cx, JSValue::UNDEFINED, &[]).is_err() {
-                        let msg = cx.rt().exception().to_text(cx);
-                        eprintln!("timer callback error: {}", msg.message);
-                        let _ = cx.take_exception();
-                    }
+                let (cb, interval_ms, id) = match step {
+                    Some(x) => x,
+                    None => break,
+                };
 
-                    if let Some((ms, tx)) = re_arm {
-                        // Re-arm only if not cleared inside the callback.
-                        // The liveness check and the deadline update are done in
-                        // a single borrow (a live entry is exactly one that
-                        // get_mut finds), avoiding a redundant with_borrow.
-                        let new_deadline = Instant::now() + Duration::from_millis(ms);
-                        let keep = TIMER_STATE.with_borrow_mut(|opt| {
-                            if let Some(s) = opt.as_mut()
-                                && let Some(e) = s.entries.get_mut(&id)
-                            {
+                if cb.call(cx, JSValue::UNDEFINED, &[]).is_err() {
+                    let msg = cx.rt().exception().to_text(cx);
+                    eprintln!("timer callback error: {}", msg.message);
+                    let _ = cx.take_exception();
+                }
+
+                if let Some(ms) = interval_ms {
+                    // Re-arm only if the callback didn't clear this timer.
+                    // Pull the entry out, bump its deadline, and re-insert in
+                    // sorted order so `entries[0]` stays the nearest.
+                    let new_deadline = Instant::now() + Duration::from_millis(ms);
+                    TIMER_STATE.with_borrow_mut(|opt| {
+                        if let Some(s) = opt.as_mut() {
+                            if let Some(pos) = s.entries.iter().position(|e| e.id == id) {
+                                let mut e = s.entries.remove(pos);
                                 e.deadline = new_deadline;
-                                true
-                            } else {
-                                false
+                                s.insert_sorted(e);
                             }
-                        });
-                        if keep {
-                            spawn_timer(new_deadline, tx);
                         }
-                    }
+                    });
                 }
             }
 
@@ -277,29 +228,22 @@ fn register_timer(ctx: &mut ScopedContext, cc: CallContext, is_interval: bool) -
     };
 
     // If no active job, initialize fresh state and prepare to start one.
-    // If already active, reuse the existing tx from the live state.
-    let (id, tx, deadline, need_listener) = TIMER_STATE.with_borrow_mut(|opt| {
+    // If already active, reuse the existing state (don't start a second job).
+    let (id, need_listener) = TIMER_STATE.with_borrow_mut(|opt| {
         let start_job = opt.is_none();
         let s = opt.get_or_insert_with(TimerState::new);
         let id = s.timer_id();
-        let tx = s.tx.clone();
-        // Capture the absolute deadline NOW, synchronously, so it is identical
-        // for the spawned sleep task and the registry entry (the single source
-        // of firing-order truth).
+        // Capture the absolute deadline NOW, synchronously. The `entries` vec is
+        // kept sorted by this, so it is the single source of firing-order truth.
         let deadline = Instant::now() + Duration::from_millis(delay_ms);
-        s.entries.insert(
+        s.insert_sorted(TimerEntry {
             id,
-            TimerEntry {
-                callback,
-                interval_ms: if is_interval { Some(delay_ms) } else { None },
-                tx: tx.clone(),
-                deadline,
-            },
-        );
-        (id, tx, deadline, start_job)
+            callback,
+            interval_ms: if is_interval { Some(delay_ms) } else { None },
+            deadline,
+        });
+        (id, start_job)
     });
-
-    spawn_timer(deadline, tx.clone());
 
     if need_listener {
         start_timer_task(ctx);
@@ -319,11 +263,14 @@ fn clear_timer(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     }
     let id = id as u32;
 
+    // Removing the entry is the entire cancellation: the self-requeuing job only
+    // fires timers still in `entries`, so a cleared timer is never fired. The
+    // rest of the vec stays sorted. No per-timer task needs aborting.
     TIMER_STATE.with_borrow_mut(|opt| {
-        if let Some(s) = opt.as_mut()
-            && s.entries.remove(&id).is_some()
-        {
-            let _ = s.tx.send(TimerMsg::Cancelled(id));
+        if let Some(s) = opt.as_mut() {
+            if let Some(pos) = s.entries.iter().position(|e| e.id == id) {
+                s.entries.remove(pos);
+            }
         }
     });
 
