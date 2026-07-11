@@ -5,9 +5,9 @@ mod cdp;
 mod cdp_input;
 mod cdp_network;
 mod chrome;
-mod class_input;
-mod class_network;
 mod class_page;
+mod input;
+mod network;
 mod runtime;
 
 pub use class_page::{JSBrowser, JSPage};
