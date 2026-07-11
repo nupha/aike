@@ -18,6 +18,7 @@ mod repl;
 mod request;
 mod transpile;
 mod whatwg;
+#[cfg(feature = "llama_cpp")]
 mod worker;
 mod yaml;
 

@@ -4,7 +4,7 @@
 use std::time::Duration;
 
 use zuqe::{
-    CallContext, JSResult, JSValue, ScopedContext,
+    CallContext, JSResult, ScopedContext,
     builtins::promise::{Promise, PromiseResultSlot},
 };
 
@@ -64,17 +64,14 @@ pub(crate) fn js_request(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     let result_slot = PromiseResultSlot::<Result<TransportResponse, String>>::new();
     let url_clone = url_str.clone();
-    let promise = Promise::create_with_result_slot(
-        ctx,
-        result_slot.clone(),
-        move |cx, data| -> JSResult {
+    let promise =
+        Promise::create_with_result_slot(ctx, result_slot.clone(), move |cx, data| -> JSResult {
             let tr = data.map_err(|e| {
                 cx.throw_internal_error(&e);
                 -1
             })?;
             build_response_from_transport(cx, tr, "basic", &url_clone, false)
-        },
-    )?;
+        })?;
 
     let req = request_with_headers(
         method,
@@ -170,7 +167,10 @@ mod tests {
 
     #[test]
     fn strip_no_tags() {
-        assert_eq!(convert_html("plain text", HtmlConvertMode::Strip), "plain text");
+        assert_eq!(
+            convert_html("plain text", HtmlConvertMode::Strip),
+            "plain text"
+        );
     }
 
     #[test]
