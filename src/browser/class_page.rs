@@ -17,7 +17,7 @@ use zuqe::{
 
 use crate::{
     USER_CLASS_DEFS,
-    browser::{cdp, chrome, class_input, class_network},
+    browser::{cdp, chrome, input, network},
 };
 
 // ---------------------------------------------------------------------------
@@ -93,41 +93,36 @@ const PAGE_PROTO: &[FieldDef] = &[
     FieldDef::FUNC("setDownloadBehavior", 1, js_page_set_download_behavior, 0),
     FieldDef::FUNC("setBypassCSP", 1, js_page_set_bypass_csp, 0),
     // Input domain
-    FieldDef::FUNC("mouseClick", 4, class_input::js_page_mouse_click, 0),
-    FieldDef::FUNC("mouseMove", 2, class_input::js_page_mouse_move, 0),
-    FieldDef::FUNC("keyPress", 2, class_input::js_page_key_press, 0),
-    FieldDef::FUNC("insertText", 1, class_input::js_page_insert_text, 0),
+    FieldDef::FUNC("mouseClick", 4, input::js_page_mouse_click, 0),
+    FieldDef::FUNC("mouseMove", 2, input::js_page_mouse_move, 0),
+    FieldDef::FUNC("keyPress", 2, input::js_page_key_press, 0),
+    FieldDef::FUNC("insertText", 1, input::js_page_insert_text, 0),
     // Network domain
-    FieldDef::FUNC("getCookies", 0, class_network::js_page_get_cookies, 0),
-    FieldDef::FUNC("setCookie", 1, class_network::js_page_set_cookie, 0),
-    FieldDef::FUNC(
-        "getResponseBody",
-        1,
-        class_network::js_page_get_response_body,
-        0,
-    ),
+    FieldDef::FUNC("getCookies", 0, network::js_page_get_cookies, 0),
+    FieldDef::FUNC("setCookie", 1, network::js_page_set_cookie, 0),
+    FieldDef::FUNC("getResponseBody", 1, network::js_page_get_response_body, 0),
     FieldDef::FUNC(
         "startNetworkCapture",
         0,
-        class_network::js_page_start_network_capture,
+        network::js_page_start_network_capture,
         0,
     ),
     FieldDef::FUNC(
         "stopNetworkCapture",
         0,
-        class_network::js_page_stop_network_capture,
+        network::js_page_stop_network_capture,
         0,
     ),
     FieldDef::FUNC(
         "getCapturedRequests",
         0,
-        class_network::js_page_get_captured_requests,
+        network::js_page_get_captured_requests,
         0,
     ),
     FieldDef::FUNC(
         "clearCapturedRequests",
         0,
-        class_network::js_page_clear_captured_requests,
+        network::js_page_clear_captured_requests,
         0,
     ),
 ];
@@ -696,7 +691,9 @@ fn js_page_set_content(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 };
             }
             None => {
-                result_slot.commit(Err("setContent: cannot resolve main frame".into())).ok();
+                result_slot
+                    .commit(Err("setContent: cannot resolve main frame".into()))
+                    .ok();
             }
         }
     });
