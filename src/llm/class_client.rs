@@ -359,6 +359,15 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
         } else if client.extra_body.is_object() {
             req.insert("extra_body".to_string(), client.extra_body.clone());
         }
+
+        // Always tell the server explicitly whether to stream.
+        req.insert("stream".into(), serde_json::Value::Bool(is_stream));
+
+        if is_stream && !req.contains_key("stream_options") {
+            let mut so = serde_json::Map::new();
+            so.insert("include_usage".into(), serde_json::Value::Bool(true));
+            req.insert("stream_options".into(), serde_json::Value::Object(so));
+        }
     }
 
     // Use reqwest to make HTTP request, build client
@@ -460,6 +469,31 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
                                             .as_array()
                                         && !tcs.is_empty()
                                     {
+                                        // A chunk may carry content/reasoning alongside tool_calls.
+                                        // Since we only buffer tool_calls here, emit that text now —
+                                        // otherwise it is lost when finish_reason arrives in a later,
+                                        // content-less chunk.
+                                        let has_finish = json[OUTMSG_FIELD_CHOICES][0]["finish_reason"]
+                                            .as_str()
+                                            .is_some();
+                                        let delta = &json[OUTMSG_FIELD_CHOICES][0]["delta"];
+                                        if !has_finish
+                                            && (delta.get("content").is_some()
+                                                || delta.get("reasoning_content").is_some())
+                                        {
+                                            let mut text_chunk = json.clone();
+                                            if let Some(obj) =
+                                                text_chunk[OUTMSG_FIELD_CHOICES][0]["delta"]
+                                                    .as_object_mut()
+                                            {
+                                                obj.remove("tool_calls");
+                                            }
+                                            if !has_normalizer {
+                                                normalize_message_shape(&mut text_chunk);
+                                            }
+                                            slot.commit_async(ChatReply::Chunk(text_chunk)).await;
+                                        }
+
                                         // Accumulate tool_call deltas
                                         for tc in tcs {
                                             let idx = tc["index"].as_i64().unwrap_or(0) as usize;
