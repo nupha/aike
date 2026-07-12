@@ -777,7 +777,9 @@ fn js_fs_makeDir(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 }
 
 // ---------------------------------------------------------------------------
-// removeDir - remove an empty directory
+// removeDir - remove a directory
+//   removeDir(path)                        – remove an empty directory
+//   removeDir(path, { recursive: true })   – recursively remove a directory tree
 // ---------------------------------------------------------------------------
 fn js_fs_removeDir(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let v = cc.arg(0).to_string(ctx)?;
@@ -786,16 +788,32 @@ fn js_fs_removeDir(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         -1
     })?;
 
+    // Parse optional options: removeDir(path, { recursive?: boolean })
+    let opts = cc.arg(1);
+    let recursive = if !opts.is_undefined() {
+        if opts.is_object() {
+            opts.get_property_str(ctx, "recursive")?.to_bool()?
+        } else {
+            ctx.throw_type_error("options must be an object");
+            return Err(-1);
+        }
+    } else {
+        false
+    };
+
     let (promise, tx) = make_void_promise(ctx)?;
 
     tokio::spawn(async move {
-        let _ = PollSender::from(tx)
-            .send_async(
-                tokio::fs::remove_dir(&path)
-                    .await
-                    .map_err(|e| e.to_string()),
-            )
-            .await;
+        let r = if recursive {
+            tokio::fs::remove_dir_all(&path)
+                .await
+                .map_err(|e| e.to_string())
+        } else {
+            tokio::fs::remove_dir(&path)
+                .await
+                .map_err(|e| e.to_string())
+        };
+        let _ = PollSender::from(tx).send_async(r).await;
     });
 
     Ok(promise.into())
@@ -871,7 +889,7 @@ const MOD_FS_ENTRIES: &[FieldDef] = &[
     FieldDef::FUNC("readDir", 1, js_fs_readDir, 0),
     FieldDef::FUNC("ensureDir", 2, js_fs_ensureDir, 0),
     FieldDef::FUNC("makeDir", 2, js_fs_makeDir, 0),
-    FieldDef::FUNC("removeDir", 1, js_fs_removeDir, 0),
+    FieldDef::FUNC("removeDir", 2, js_fs_removeDir, 0),
 ];
 
 pub fn init_mod_fs(ctx: &mut ScopedContext) -> Result<(), i32> {

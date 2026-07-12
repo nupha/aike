@@ -84,8 +84,11 @@ declare module "fs" {
     path: string,
     options?: { recursive?: boolean },
   ): Promise<void>;
-  /** Remove an empty directory. */
-  function removeDir(path: string): Promise<void>;
+  /** Remove a directory. Default recursive: false (empty dir only). Pass { recursive: true } to remove a directory tree. */
+  function removeDir(
+    path: string,
+    options?: { recursive?: boolean },
+  ): Promise<void>;
 
   // Remove
 
