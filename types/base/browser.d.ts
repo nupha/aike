@@ -173,6 +173,32 @@ declare module "browser" {
     /** Enable Runtime domain events (consoleAPICalled, exceptionThrown, etc.). */
     enableRuntime(): Promise<void>;
 
+    // ---- Runtime: remote objects ----
+    /** Evaluate an expression and return a handle `{ objectId }` referencing the result. */
+    evaluateHandle(expression: string): Promise<{ objectId: string }>;
+
+    /**
+     * Enumerate an object's own properties by its CDP `objectId`.
+     * @returns A plain object mapping each property name to its JSON value.
+     */
+    getProperties(objectId: string): Promise<Record<string, any>>;
+
+    /**
+     * Call a function on a remote object.
+     * @param objectId - CDP objectId returned by `evaluateHandle`.
+     * @param functionDeclaration - Full function source, e.g. `"function (x) { return this.a + x; }"`.
+     * @param args - Optional call arguments (JSON-serializable).
+     * @returns The JSON-serialized return value.
+     */
+    callFunctionOn(objectId: string, functionDeclaration: string, args?: any[]): Promise<any>;
+
+    /**
+     * Register a callback invoked for every `Runtime.consoleAPICalled` event
+     * (e.g. `console.log` in the page). The callback receives the raw event
+     * params object (`{ type, args, ... }`).
+     */
+    onConsole(callback: (msg: any) => void): void;
+
     // ---- Screenshot / PDF ----
     /** Capture a screenshot of the current page. */
     captureScreenshot(options?: ScreenshotOptions): Promise<Uint8Array>;

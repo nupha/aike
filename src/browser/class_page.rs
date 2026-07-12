@@ -80,6 +80,26 @@ const PAGE_PROTO: &[FieldDef] = &[
         super::runtime::js_page_enable_runtime,
         0,
     ),
+    // Runtime domain — P0/P1
+    FieldDef::FUNC(
+        "callFunctionOn",
+        2,
+        super::runtime::js_page_call_function_on,
+        0,
+    ),
+    FieldDef::FUNC(
+        "getProperties",
+        1,
+        super::runtime::js_page_get_properties,
+        0,
+    ),
+    FieldDef::FUNC(
+        "evaluateHandle",
+        1,
+        super::runtime::js_page_evaluate_handle,
+        0,
+    ),
+    FieldDef::FUNC("onConsole", 1, super::runtime::js_page_on_console, 0),
     FieldDef::FUNC("close", 0, js_page_close, 0),
     // Page domain — extended
     FieldDef::FUNC("setContent", 1, js_page_set_content, 0),

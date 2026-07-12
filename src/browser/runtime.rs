@@ -329,36 +329,61 @@ pub(crate) fn js_page_get_properties(ctx: &mut ScopedContext, cc: CallContext) -
         })?;
 
     tokio::spawn(async move {
-        let rx = client.send(
+        let props_rx = client.send(
             "Runtime.getProperties",
-            Some(serde_json::json!({ "objectId": object_id })),
+            Some(serde_json::json!({ "objectId": object_id, "ownProperties": true })),
             Some(&session_id),
         );
-        let result = rx.await.unwrap_or(Err("channel closed".into()));
-        match result {
-            Ok(val) => {
-                let props = val
-                    .get("result")
-                    .and_then(|a| a.as_array())
-                    .cloned()
-                    .unwrap_or_default();
-                let mut map = serde_json::Map::new();
-                for p in &props {
-                    if let Some(name) = p.get("name").and_then(|x| x.as_str()) {
-                        let value = p
-                            .get("value")
-                            .and_then(|x| x.get("value"))
-                            .cloned()
-                            .unwrap_or(Value::Null);
-                        map.insert(name.to_string(), value);
-                    }
-                }
-                result_slot.commit(Ok(Value::Object(map))).ok();
-            }
+        let props = match props_rx.await.unwrap_or(Err("channel closed".into())) {
+            Ok(val) => val
+                .get("result")
+                .and_then(|a| a.as_array())
+                .cloned()
+                .unwrap_or_default(),
             Err(e) => {
                 result_slot.commit(Err(e)).ok();
+                return;
             }
+        };
+
+        // Build a name -> value map. Primitive values come inline via `value`;
+        // object/array values only carry an `objectId`, so resolve them by value
+        // with a callFunctionOn round-trip (handles nested structures).
+        let mut map = serde_json::Map::new();
+        for p in &props {
+            let Some(name) = p.get("name").and_then(|x| x.as_str()) else {
+                continue;
+            };
+            let remote = p.get("value");
+            let resolved = if let Some(v) = remote.and_then(|x| x.get("value")) {
+                v.clone()
+            } else if let Some(oid) = remote.and_then(|x| x.get("objectId")).and_then(|x| x.as_str()) {
+                let r = client
+                    .send(
+                        "Runtime.callFunctionOn",
+                        Some(serde_json::json!({
+                            "objectId": oid,
+                            "functionDeclaration": "function () { return this; }",
+                            "returnByValue": true,
+                        })),
+                        Some(&session_id),
+                    )
+                    .await
+                    .unwrap_or(Ok(Value::Null));
+                match r {
+                    Ok(j) => j
+                        .get("result")
+                        .and_then(|x| x.get("value"))
+                        .cloned()
+                        .unwrap_or(Value::Null),
+                    Err(_) => Value::Null,
+                }
+            } else {
+                Value::Null
+            };
+            map.insert(name.to_string(), resolved);
         }
+        result_slot.commit(Ok(Value::Object(map))).ok();
     });
 
     Ok(promise.into())
