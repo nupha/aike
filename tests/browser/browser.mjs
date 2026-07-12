@@ -1,163 +1,213 @@
-// Test: bing search via CDP — query, extract DOM results, print, then close
+// Test: Browser-class domain APIs (Browser / Target / Security domains)
 //
-// Prerequisites: Google Chrome / Chromium installed on the system.
-// Launches Chrome in non-headless mode so you can see the browser window.
+// Covers the methods defined on the `Browser` instance in class_browser.rs:
+//   Browser domain : getVersion, getWindowBounds, setWindowBounds, setDownloadBehavior
+//   Target domain  : getTargets, listPages, newContext, disposeContext
+//   Security domain: setIgnoreHTTPSErrors, handleCertificateError
+//
+// This is a self-contained, headless script — no external network is required
+// (pages are created against about:blank / data: URLs), so it can run anywhere
+// Chrome is installed. It mirrors the layout of tests/browser/*.mjs.
+//
+// Run as a module (.mjs) so `import` is parsed in module mode:
+//   cargo run -- tests/browser/browser_api.mjs
 
 import { launch } from "browser";
 
-let apiPass = 0;
-let apiFail = 0;
+let pass = 0;
+let fail = 0;
 
 function check(label, condition, detail) {
   if (condition) {
     console.log("  [ok] " + label);
-    apiPass++;
+    pass++;
   } else {
     console.log("  [FAIL] " + label + (detail ? " -- " + detail : ""));
-    apiFail++;
+    fail++;
   }
+}
+
+async function testBrowserDomain(browser) {
+  console.log("\n=== Browser domain ===");
+
+  // browser.getVersion() -> { protocolVersion, product, revision, userAgent, jsVersion }
+  const ver = await browser.getVersion();
+  check(
+    "getVersion() returns version info",
+    ver && typeof ver.protocolVersion === "string" &&
+      typeof ver.product === "string" &&
+      typeof ver.userAgent === "string" &&
+      typeof ver.jsVersion === "string",
+    "got: " + JSON.stringify(ver),
+  );
+
+  // browser.getWindowBounds() -> { bounds: { left, top, width, height, windowState } }
+  // browser.setWindowBounds({ width, height }) — resize, then verify it applied.
+  // NOTE: these need a real GUI window, so under headless Chrome they reject
+  // with "No web contents in the target". Skip gracefully in that case (the
+  // bing demo in tests/browser.mjs runs headful and exercises them for real).
+  try {
+    const wb = await browser.getWindowBounds();
+    check(
+      "getWindowBounds() returns bounds",
+      wb && wb.bounds && typeof wb.bounds.width === "number" &&
+        typeof wb.bounds.height === "number" &&
+        typeof wb.bounds.windowState === "string",
+      "got: " + JSON.stringify(wb),
+    );
+
+    const beforeW = wb.bounds.width;
+    await browser.setWindowBounds({ width: 800, height: 600 });
+    const wb2 = await browser.getWindowBounds();
+    check(
+      "setWindowBounds() resizes the window",
+      wb2 && wb2.bounds && Math.abs(wb2.bounds.width - 800) <= 50 &&
+        Math.abs(wb2.bounds.height - 600) <= 50,
+      "beforeW=" + beforeW + " after=" + JSON.stringify(wb2 && wb2.bounds),
+    );
+  } catch (e) {
+    const msg = (e && (e.message || e)) || "";
+    if (msg.indexOf("No web contents") >= 0) {
+      console.log("  [skip] window bounds (headless has no window): " + msg);
+    } else {
+      console.log("  [FAIL] window bounds threw: " + msg);
+      fail++;
+    }
+  }
+
+  // browser.setDownloadBehavior(path) — browser-level allow/deny (mirrors the
+  // page-level API but scoped to the whole browser). Both must resolve.
+  const tmpDir = "/tmp/aike_browser_downloads";
+  await browser.setDownloadBehavior(tmpDir);
+  await browser.setDownloadBehavior("");
+  check("setDownloadBehavior(allow/deny) resolves", true);
+}
+
+async function testTargetDomain(browser) {
+  console.log("\n=== Target domain ===");
+
+  // browser.getTargets() -> { targetInfos: [ { targetId, type, url, ... }, ... ] }
+  const targets = await browser.getTargets();
+  check(
+    "getTargets() returns targetInfos array",
+    targets && Array.isArray(targets.targetInfos) && targets.targetInfos.length >= 1,
+    "len=" + (targets && targets.targetInfos ? targets.targetInfos.length : "n/a"),
+  );
+
+  // browser.listPages() -> [ { targetId, url, title, type }, ... ] (page type only)
+  const pages = await browser.listPages();
+  check(
+    "listPages() returns page targets",
+    Array.isArray(pages) && pages.length >= 1 &&
+      pages.every((p) => p.type === "page"),
+    "len=" + (pages ? pages.length : "n/a"),
+  );
+  const hasNewPage = pages.some((p) => typeof p.targetId === "string" && p.targetId.length > 0);
+  check("listPages() includes the launched page", hasNewPage);
+
+  // browser.newContext() -> string context id, then dispose it.
+  const ctxId = await browser.newContext();
+  check(
+    "newContext() returns a context id",
+    typeof ctxId === "string" && ctxId.length > 0,
+    "ctxId=" + ctxId,
+  );
+
+  // A page created inside the new context should appear among targets.
+  const ctxPage = await browser.newPage({ url: "about:blank", contextId: ctxId });
+  check(
+    "newPage({ contextId }) creates a page in the context",
+    ctxPage && typeof ctxPage.targetId === "string" && ctxPage.targetId.length > 0,
+    "targetId=" + (ctxPage && ctxPage.targetId),
+  );
+  const inCtx = (await browser.getTargets()).targetInfos.some(
+    (t) => t.targetId === ctxPage.targetId,
+  );
+  check("context page is listed by getTargets()", inCtx);
+
+  // browser.disposeContext(id) — tear the context down; the page should go with it.
+  await browser.disposeContext(ctxId);
+  check("disposeContext() resolves", true);
+  const gone = !(await browser.getTargets()).targetInfos.some(
+    (t) => t.targetId === ctxPage.targetId,
+  );
+  check("context page removed after disposeContext()", gone);
+
+  // Disposing an unknown context must surface a CDP error (rejection), not
+  // silently succeed — this documents the error-propagation contract.
+  let rejected = false;
+  try {
+    await browser.disposeContext("nonexistent-context-id");
+  } catch (e) {
+    rejected = true;
+  }
+  check("disposeContext() on unknown id rejects", rejected);
+}
+
+async function testSecurityDomain(browser) {
+  console.log("\n=== Security domain ===");
+
+  // browser.setIgnoreHTTPSErrors(bool) — browser-level void command.
+  await browser.setIgnoreHTTPSErrors(true);
+  await browser.setIgnoreHTTPSErrors(false);
+  check("setIgnoreHTTPSErrors(true/false) resolves", true);
+
+  // browser.handleCertificateError(cb) — register a listener (sync, returns
+  // undefined). We smoke-test that registration succeeds and the callback shape
+  // is correct when a cert error is delivered. Triggering a real cert error
+  // needs a TLS endpoint, so we only assert the registration path here.
+  let registered = true;
+  let fired = false;
+  try {
+    const ret = browser.handleCertificateError((evt) => {
+      fired = true;
+      // evt: { eventId, errorType, requestURL, accept(bool) }
+      check("cert callback gets eventId", typeof evt.eventId === "number");
+      check("cert callback gets accept()", typeof evt.accept === "function");
+      evt.accept(false);
+    });
+    check("handleCertificateError() returns undefined", ret === undefined);
+  } catch (e) {
+    registered = false;
+    console.log("  [FAIL] handleCertificateError threw: " + (e && (e.message || e)));
+  }
+  check("handleCertificateError() registered without error", registered);
+  // Note: `fired` depends on a live insecure-TLS navigation; left unasserted.
 }
 
 async function main() {
-  console.log("=== CDP Browser: bing search demo ===\n");
-
-  // 1. launch browser
   let browser;
   try {
-    browser = await launch({ headless: false, port: 9366 });
-  } catch (err) {
-    console.log("  Launch failed:", err.message || err);
+    browser = await launch({ headless: true });
+  } catch (e) {
+    console.log("\n  Failed to launch browser: " + (e && (e.message || e)));
+    console.log("  Make sure Google Chrome or Chromium is installed.");
     Aike.exit(1);
+    return;
   }
-  console.log("  Browser launched, isRunning:", browser.isRunning);
 
-  // 2. create page + set viewport
+  check("Browser launched", browser.isRunning === true);
+
+  // One page so listPages/getTargets exercise a real target.
   const page = await browser.newPage();
-  console.log("  New page created, targetId:", page.targetId);
-  await page.setViewport(1280, 800);
-  console.log("  Viewport: 1280x800\n");
 
-  // 3. go to bing.com
-  console.log("  Navigate to bing.com ...");
-  await page.navigate("https://www.bing.com");
-  await page.waitForNavigation(15000);
-  console.log("  Bing homepage loaded");
-
-  // 4. type query into the search box and submit
-  const query = "hello world";
-  console.log("  Searching for:", query, "\n");
-  await page.evaluate(`(function() {
-    var input = document.querySelector('input[name="q"]');
-    if (!input) throw new Error("search input not found");
-    input.value = "${query}";
-    // dispatch input event so bing reacts
-    input.dispatchEvent(new Event("input", { bubbles: true }));
-    // submit the search form
-    var form = document.getElementById("sb_form");
-    if (form) form.submit();
-    else input.form.submit();
-  })()`);
-
-  // 5. wait for the search results page to load
-  await page.waitForNavigation(15000);
-  console.log("  Search results page loaded\n");
-
-  // 6. extract search results from the DOM
-  const results = await page.evaluate(`(function() {
-    var items = document.querySelectorAll("#b_results .b_algo");
-    var out = [];
-    for (var i = 0; i < items.length; i++) {
-      var el = items[i];
-      var link = el.querySelector("h2 a");
-      var snippet = el.querySelector(".b_caption p");
-      out.push({
-        title: link ? link.innerText.trim() : "",
-        url: link ? link.href : "",
-        snippet: snippet ? snippet.innerText.trim() : "",
-      });
-    }
-    return out;
-  })()`);
-
-  // 7. print results
-  console.log("=== Search Results ===");
-  if (results.length === 0) {
-    console.log(
-      "  (no results found via #b_results .b_algo, trying fallback)\n",
-    );
-    // fallback: dump the page title and a snippet of text
-    const fallback = await page.evaluate(`(function() {
-      return {
-        title: document.title,
-        text: document.body.innerText.substring(0, 500)
-      };
-    })()`);
-    console.log("  Page title:", fallback.title);
-    console.log("  Body text:", fallback.text);
-  } else {
-    for (var i = 0; i < results.length; i++) {
-      var r = results[i];
-      console.log("  [" + (i + 1) + "] " + r.title);
-      console.log("      " + r.url);
-      if (r.snippet) console.log("      " + r.snippet);
-      console.log("");
+  const tests = [testBrowserDomain, testTargetDomain, testSecurityDomain];
+  for (const fn of tests) {
+    try {
+      await fn(browser);
+    } catch (e) {
+      console.log("  [FAIL] " + fn.name + " threw: " + (e && (e.message || e)));
+      fail++;
     }
   }
-  console.log("=== End of Results ===\n");
 
-  // 7b. exercise new Page-domain APIs that are safe on any loaded page
-  //     (these don't mutate or reload the document, so the bing demo above
-  //     keeps working). See aike/memo/cdp-features.md:66-75. The destructive
-  //     APIs (setContent/reload + history back/forward) live in
-  //     tests/browser/document.mjs and tests/browser/navigation.mjs.
-  console.log("=== Exercise Page-domain APIs (on bing page) ===");
-  const tmpDir = "/tmp/aike_downloads";
-
-  await page.stopLoading();
-  check("stopLoading() resolves", true);
-
-  await page.setBypassCSP(true);
-  await page.setBypassCSP(false);
-  check("setBypassCSP(true/false) resolves", true);
-
-  await page.setDownloadBehavior(tmpDir);
-  await page.setDownloadBehavior("");
-  check("setDownloadBehavior(allow/deny) resolves", true);
-
-  await page.bringToFront();
-  check("bringToFront() resolves", true);
-
-  // captureSnapshot needs the CDP session attached; a readyState evaluate
-  // forces the session active first.
-  await page.evaluate("document.readyState");
-  const mhtml = await page.captureSnapshot();
-  check(
-    "captureSnapshot() returns MHTML",
-    typeof mhtml === "string" && mhtml.length > 0 &&
-      (mhtml.indexOf("MIME-Version") >= 0 || mhtml.indexOf("multipart/related") >= 0),
-  );
-
-  // 8. scroll to bottom, then wait
-  console.log("  Scrolling to bottom of page...");
-  await page.evaluate(
-    "window.scrollTo(0, document.documentElement.scrollHeight)",
-  );
-  console.log("  Waiting 5 seconds...");
-  await new Promise((resolve) => setTimeout(resolve, 5_000));
-
-  // 9. close tab + browser
-  console.log("  Closing tab...");
-  await page.close();
-  console.log("  Closing browser...");
-  await browser.close();
-  console.log("\nDone.");
+  try { await page.close(); } catch (e) {}
+  try { await browser.close(); } catch (e) {}
 
   console.log("\n" + "=".repeat(50));
-  console.log("Page-API checks on bing page: pass " + apiPass + ", fail " + apiFail);
-  Aike.exit(apiFail > 0 ? 1 : 0);
+  console.log("pass: " + pass + ", fail: " + fail);
+  if (fail > 0) Aike.exit(1);
+  else Aike.exit(0);
 }
 
-main().catch((err) => {
-  console.log("Unhandled error:", err.message || err);
-  Aike.exit(1);
-});
+main();

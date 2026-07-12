@@ -17,7 +17,7 @@ use zuqe::{
 
 use crate::{
     USER_CLASS_DEFS,
-    browser::{cdp, chrome, input, network},
+    browser::{cdp, chrome, class_browser::{JSBrowser, BrowserPayload}, input, network},
 };
 
 // ---------------------------------------------------------------------------
@@ -97,6 +97,63 @@ const PAGE_PROTO: &[FieldDef] = &[
     FieldDef::FUNC("mouseMove", 2, input::js_page_mouse_move, 0),
     FieldDef::FUNC("keyPress", 2, input::js_page_key_press, 0),
     FieldDef::FUNC("insertText", 1, input::js_page_insert_text, 0),
+    // DOM domain
+    FieldDef::FUNC("querySelector", 1, super::dom::js_page_query_selector, 0),
+    FieldDef::FUNC(
+        "querySelectorAll",
+        1,
+        super::dom::js_page_query_selector_all,
+        0,
+    ),
+    FieldDef::FUNC("getAttribute", 2, super::dom::js_page_get_attribute, 0),
+    FieldDef::FUNC("focus", 1, super::dom::js_page_focus, 0),
+    FieldDef::FUNC("getBoxModel", 1, super::dom::js_page_get_box_model, 0),
+    FieldDef::FUNC("remove", 1, super::dom::js_page_remove, 0),
+    FieldDef::FUNC("click", 1, super::dom::js_page_click, 0),
+    FieldDef::FUNC("type", 2, super::dom::js_page_type, 0),
+    // Emulation domain
+    FieldDef::FUNC("setGeolocation", 3, super::emulation::js_page_set_geolocation, 0),
+    FieldDef::FUNC(
+        "setMediaFeatures",
+        1,
+        super::emulation::js_page_set_media_features,
+        0,
+    ),
+    FieldDef::FUNC("setTimezone", 1, super::emulation::js_page_set_timezone, 0),
+    FieldDef::FUNC("setLocale", 1, super::emulation::js_page_set_locale, 0),
+    FieldDef::FUNC(
+        "setTouchEnabled",
+        1,
+        super::emulation::js_page_set_touch_enabled,
+        0,
+    ),
+    FieldDef::FUNC(
+        "setCPUThrottling",
+        1,
+        super::emulation::js_page_set_cpu_throttling,
+        0,
+    ),
+    // Fetch domain (request interception)
+    FieldDef::FUNC(
+        "setRequestInterception",
+        1,
+        super::fetch::js_page_set_request_interception,
+        0,
+    ),
+    FieldDef::FUNC(
+        "continueRequest",
+        1,
+        super::fetch::js_page_continue_request,
+        0,
+    ),
+    FieldDef::FUNC("abortRequest", 1, super::fetch::js_page_abort_request, 0),
+    FieldDef::FUNC("respondRequest", 1, super::fetch::js_page_respond_request, 0),
+    FieldDef::FUNC(
+        "onRequestPaused",
+        1,
+        super::fetch::js_page_on_request_paused,
+        0,
+    ),
     // Network domain
     FieldDef::FUNC("getCookies", 0, network::js_page_get_cookies, 0),
     FieldDef::FUNC("setCookie", 1, network::js_page_set_cookie, 0),
@@ -123,6 +180,32 @@ const PAGE_PROTO: &[FieldDef] = &[
         "clearCapturedRequests",
         0,
         network::js_page_clear_captured_requests,
+        0,
+    ),
+    // Network domain — P0/P1 overrides
+    FieldDef::FUNC("setUserAgent", 1, network::js_page_set_user_agent, 0),
+    FieldDef::FUNC(
+        "setExtraHTTPHeaders",
+        1,
+        network::js_page_set_extra_http_headers,
+        0,
+    ),
+    FieldDef::FUNC("setOfflineMode", 1, network::js_page_set_offline_mode, 0),
+    FieldDef::FUNC("setCacheDisabled", 1, network::js_page_set_cache_disabled, 0),
+    FieldDef::FUNC("setCookies", 1, network::js_page_set_cookies, 0),
+    FieldDef::FUNC("deleteCookie", 2, network::js_page_delete_cookie, 0),
+    FieldDef::FUNC(
+        "clearBrowserCookies",
+        0,
+        network::js_page_clear_browser_cookies,
+        0,
+    ),
+    // Log domain
+    FieldDef::FUNC("onLog", 1, super::log::js_page_on_log, 0),
+    FieldDef::FUNC(
+        "getConsoleMessages",
+        1,
+        super::log::js_page_get_console_messages,
         0,
     ),
 ];
@@ -1022,11 +1105,6 @@ pub(crate) struct LaunchData {
     pub(crate) reader_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
-struct BrowserPayload {
-    client: cdp::CdpClient,
-    chrome_child: Arc<tokio::sync::Mutex<Option<tokio::process::Child>>>,
-}
-
 // ---------------------------------------------------------------------------
 // Module-level: launch()
 // ---------------------------------------------------------------------------
@@ -1106,125 +1184,4 @@ pub(crate) fn js_launch(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     Ok(promise.into())
 }
 
-// ---------------------------------------------------------------------------
-// Browser class
-// ---------------------------------------------------------------------------
 
-const BROWSER_PROTO: &[FieldDef] = &[
-    FieldDef::FUNC("newPage", 1, js_browser_new_page, 0),
-    FieldDef::FUNC("close", 0, js_browser_close, 0),
-    FieldDef::GETSET("isRunning", Some(js_browser_is_running), None, 0),
-];
-
-def_native_object!("Browser", JSBrowser, BrowserPayload, BROWSER_PROTO, None);
-
-#[distributed_slice(USER_CLASS_DEFS)]
-fn register_browser(rt: &mut Runtime) -> Result<ClassID, i32> {
-    JSBrowser::register(rt)
-}
-
-fn get_browser_payload<'a>(
-    ctx: &mut ScopedContext,
-    val: &'a JSValue,
-) -> Result<&'a BrowserPayload, i32> {
-    val.as_native_object::<JSBrowser>()
-        .and_then(|o| o.payload())
-        .ok_or_else(|| {
-            ctx.throw_type_error("not a Browser instance");
-            -1
-        })
-}
-
-/// `browser.newTab()` → Promise<Page>
-fn js_browser_new_page(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let this = cc.this();
-    let payload = get_browser_payload(ctx, &this)?;
-    let client = payload.client.clone();
-    let client_cb = client.clone();
-
-    let result_slot = PromiseResultSlot::<Result<(String, String), String>>::new();
-    let promise = Promise::create_with_result_slot(
-        ctx,
-        result_slot.clone(),
-        move |cx, payload| -> JSResult {
-            let (target_id, session_id) = payload.map_err(|e| {
-                cx.throw_internal_error(&e);
-                -1
-            })?;
-
-            let mut page = JSPage::new_instance(
-                cx,
-                JSValue::UNDEFINED,
-                PagePayload {
-                    client: client_cb.clone(),
-                    session_id,
-                    target_id: target_id.clone(),
-                    network: PageNetworkState::new(),
-                },
-            )?;
-
-            // Set targetId readonly property
-            let js_id = cx.create_string_from_utf8(target_id.into_bytes())?;
-            page.define_property_value_str(cx, "targetId", js_id.into(), zuqe::JS_PROP_C_W_E)?;
-            Ok(page.into())
-        },
-    )?;
-
-    tokio::spawn(async move {
-        let result = client.create_target("about:blank").await;
-        match result {
-            Ok((tid, sid)) => {
-                result_slot.commit(Ok((tid, sid))).ok();
-            }
-            Err(e) => {
-                result_slot.commit(Err(e)).ok();
-            }
-        }
-    });
-
-    Ok(promise.into())
-}
-
-/// `browser.close()`
-fn js_browser_close(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let this = cc.this();
-    let payload = get_browser_payload(ctx, &this)?;
-    let client = payload.client.clone();
-    let chrome_child = payload.chrome_child.clone();
-
-    let result_slot = PromiseResultSlot::<Result<(), String>>::new();
-    let promise =
-        Promise::create_with_result_slot(ctx, result_slot.clone(), |cx, payload| -> JSResult {
-            payload.map_err(|e| {
-                cx.throw_internal_error(&e);
-                -1
-            })?;
-            Ok(JSValue::UNDEFINED)
-        })?;
-
-    tokio::spawn(async move {
-        let rx = client.send("Browser.close", None, None);
-        let _ = rx.await;
-        // Kill the Chrome process
-        if let Ok(mut guard) = chrome_child.try_lock() {
-            if let Some(child) = guard.as_mut() {
-                let _ = child.start_kill();
-            }
-            *guard = None;
-        }
-        result_slot.commit(Ok(())).ok();
-    });
-
-    Ok(promise.into())
-}
-
-/// `browser.isRunning` getter
-fn js_browser_is_running(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let this = cc.this();
-    let payload = get_browser_payload(ctx, &this)?;
-    let guard = payload.chrome_child.try_lock();
-    match guard {
-        Ok(inner) => Ok(JSValue::Bool(inner.is_some())),
-        Err(_) => Ok(JSValue::Bool(false)),
-    }
-}

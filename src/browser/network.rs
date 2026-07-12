@@ -18,7 +18,9 @@ use zuqe::{
 
 use crate::browser::{
     cdp_network,
-    class_page::{get_page_payload, get_str_prop, js_from_json_value},
+    class_page::{
+        get_bool_prop, get_page_payload, get_str_prop, js_from_json_value, send_page_void_cmd,
+    },
 };
 
 /// Convert a CDP cookie JSON value to a JS object.
@@ -147,6 +149,170 @@ pub(crate) fn js_page_set_cookie(ctx: &mut ScopedContext, cc: CallContext) -> JS
     });
 
     Ok(promise.into())
+}
+
+// ---------------------------------------------------------------------------
+// Network domain — P0/P1 overrides & helpers
+// ---------------------------------------------------------------------------
+
+/// Convert a zuqe plain object to a `serde_json::Value` (shallow).
+fn net_obj_to_json(ctx: &mut ScopedContext, obj: &mut zuqe::Object) -> Value {
+    let mut map = serde_json::Map::new();
+    let flags = zuqe::JS_GPN_ENUM_ONLY | zuqe::JS_GPN_STR_OR_INT_MASK;
+    if let Ok(keys) = obj.get_own_property_names(ctx, flags) {
+        for pk in keys.iter() {
+            let v = match obj.get_property(ctx, pk.atom) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            let key = pk
+                .atom
+                .to_value(ctx)
+                .ok()
+                .and_then(|v| v.to_string(ctx).ok())
+                .map(|s| s.content().encode_utf8(false).to_string())
+                .unwrap_or_default();
+            if let Some(s) = v.as_string() {
+                map.insert(key, Value::String(s.content().encode_utf8(false).to_string()));
+            } else if let Some(n) = v.to_number(ctx).ok() {
+                map.insert(key, Value::from(n.to_f64()));
+            } else if v.is_bool() {
+                map.insert(key, Value::Bool(v.to_bool().unwrap_or(false)));
+            }
+        }
+    }
+    Value::Object(map)
+}
+
+/// `page.setUserAgent(userAgent)` — `Network.setUserAgentOverride`.
+pub(crate) fn js_page_set_user_agent(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let ua = cc
+        .arg(0)
+        .to_string(ctx)
+        .map(|s| s.content().encode_utf8(false).to_string())
+        .unwrap_or_default();
+    send_page_void_cmd(
+        ctx,
+        &cc,
+        "Network.setUserAgentOverride",
+        Some(serde_json::json!({ "userAgent": ua })),
+    )
+}
+
+/// `page.setExtraHTTPHeaders(headers)` — `Network.setExtraHTTPHeaders`.
+pub(crate) fn js_page_set_extra_http_headers(
+    ctx: &mut ScopedContext,
+    cc: CallContext,
+) -> JSResult {
+    let mut headers = serde_json::Map::new();
+    if cc.length() > 0
+        && let Some(obj) = cc.arg(0).as_object()
+    {
+        let mut obj = obj.clone();
+        let v = net_obj_to_json(ctx, &mut obj);
+        if let Value::Object(m) = v {
+            headers = m;
+        }
+    }
+    send_page_void_cmd(
+        ctx,
+        &cc,
+        "Network.setExtraHTTPHeaders",
+        Some(serde_json::json!({ "headers": headers })),
+    )
+}
+
+/// `page.setOfflineMode(bool)` — `Network.emulateNetworkConditions`.
+pub(crate) fn js_page_set_offline_mode(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let offline = cc.arg(0).to_bool().unwrap_or(false);
+    send_page_void_cmd(
+        ctx,
+        &cc,
+        "Network.emulateNetworkConditions",
+        Some(serde_json::json!({
+            "offline": offline,
+            "latency": 0,
+            "downloadThroughput": -1,
+            "uploadThroughput": -1,
+        })),
+    )
+}
+
+/// `page.setCacheDisabled(bool)` — `Network.setCacheDisabled`.
+pub(crate) fn js_page_set_cache_disabled(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let disabled = cc.arg(0).to_bool().unwrap_or(false);
+    send_page_void_cmd(
+        ctx,
+        &cc,
+        "Network.setCacheDisabled",
+        Some(serde_json::json!({ "cacheDisabled": disabled })),
+    )
+}
+
+/// `page.setCookies(cookies)` — `Network.setCookies` (batch).
+pub(crate) fn js_page_set_cookies(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let mut cookies = Vec::new();
+    if cc.length() > 0
+        && let Some(arr) = cc.arg(0).as_object_Array()
+    {
+        for item in arr.payload().values() {
+            if let Some(obj) = item.as_object() {
+                let mut c = serde_json::Map::new();
+                if let Some(name) = get_str_prop(ctx, &obj, "name") {
+                    c.insert("name".into(), Value::String(name));
+                }
+                if let Some(value) = get_str_prop(ctx, &obj, "value") {
+                    c.insert("value".into(), Value::String(value));
+                }
+                if let Some(domain) = get_str_prop(ctx, &obj, "domain") {
+                    c.insert("domain".into(), Value::String(domain));
+                }
+                if let Some(path) = get_str_prop(ctx, &obj, "path") {
+                    c.insert("path".into(), Value::String(path));
+                }
+                if let Some(secure) = get_bool_prop(ctx, &obj, "secure") {
+                    c.insert("secure".into(), Value::Bool(secure));
+                }
+                if let Some(http_only) = get_bool_prop(ctx, &obj, "httpOnly") {
+                    c.insert("httpOnly".into(), Value::Bool(http_only));
+                }
+                cookies.push(Value::Object(c));
+            }
+        }
+    }
+    send_page_void_cmd(
+        ctx,
+        &cc,
+        "Network.setCookies",
+        Some(serde_json::json!({ "cookies": cookies })),
+    )
+}
+
+/// `page.deleteCookie(name, url)` — `Network.deleteCookies`.
+pub(crate) fn js_page_delete_cookie(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let name = cc
+        .arg(0)
+        .to_string(ctx)
+        .map(|s| s.content().encode_utf8(false).to_string())
+        .unwrap_or_default();
+    let url = cc
+        .arg(1)
+        .to_string(ctx)
+        .map(|s| s.content().encode_utf8(false).to_string())
+        .unwrap_or_default();
+    let mut params = serde_json::json!({ "name": name });
+    if !url.is_empty() {
+        params["url"] = Value::String(url);
+    }
+    send_page_void_cmd(ctx, &cc, "Network.deleteCookies", Some(params))
+}
+
+/// `page.clearBrowserCookies()` — `Network.clearBrowserCookies`.
+pub(crate) fn js_page_clear_browser_cookies(
+    ctx: &mut ScopedContext,
+    cc: CallContext,
+) -> JSResult {
+    send_page_void_cmd(ctx, &cc, "Network.clearBrowserCookies", None)
 }
 
 // ---------------------------------------------------------------------------

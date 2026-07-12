@@ -5,12 +5,19 @@ mod cdp;
 mod cdp_input;
 mod cdp_network;
 mod chrome;
+mod class_browser;
 mod class_page;
+mod dom;
+mod emulation;
+mod fetch;
 mod input;
+mod log;
 mod network;
 mod runtime;
+mod security;
+mod target;
 
-pub use class_page::{JSBrowser, JSPage};
+pub use {class_browser::JSBrowser, class_page::JSPage};
 
 use zuqe::{FieldDef, ScopedContext};
 
