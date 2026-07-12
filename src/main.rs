@@ -462,12 +462,11 @@ async fn main() -> ExitCode {
     if res.is_err() {
         let code = match ctx.take_exception() {
             Exception::Error(e) => {
-                colorize_println(
-                    e.to_string(&mut ctx.root_scope())
-                        .unwrap()
-                        .encode_utf8(false),
-                    GreenFg,
-                );
+                let text = Exception::Error(e).to_text(&mut ctx.root_scope());
+                colorize_println(text.message, GreenFg);
+                if let Some(tb) = text.traceback {
+                    eprintln!("{}", tb);
+                }
                 // value 'e' is in cx0 (top-level scope), it won't be gc collected.
                 // we should remove it from protection manually.
                 if let Some(n) = e.gc_node_ptr() {
@@ -503,8 +502,11 @@ async fn main() -> ExitCode {
             Err(reason) => {
                 // Promise reject
                 ctx.root_scope().with_new_scope(|cx| {
-                    let s = reason.to_string(cx).unwrap();
-                    colorize_println(s.encode_utf8(false), RedFg);
+                    let text = Exception::Error(reason).to_text(cx);
+                    colorize_println(text.message, RedFg);
+                    if let Some(tb) = text.traceback {
+                        eprintln!("{}", tb);
+                    }
                 });
             }
         }
@@ -517,7 +519,11 @@ async fn main() -> ExitCode {
         ExitStatus::Value(_) => ExitCode::SUCCESS,
         ExitStatus::Exception(Exception::Error(err)) => {
             ctx.root_scope().with_new_scope(|cx| {
-                colorize_println(err.to_string(cx).unwrap().encode_utf8(false), RedFg);
+                let text = Exception::Error(err).to_text(cx);
+                colorize_println(text.message, RedFg);
+                if let Some(tb) = text.traceback {
+                    eprintln!("{}", tb);
+                }
             });
             ExitCode::FAILURE
         }
