@@ -21,7 +21,8 @@ use crate::browser::{
 
 /// Enable the DOM domain and resolve a CSS selector to a `nodeId`.
 /// The context node is the document root obtained via `DOM.getDocument`.
-async fn resolve_selector(
+/// Exposed so sibling modules (CSS/Overlay) can reuse selector → nodeId.
+pub(crate) async fn resolve_selector(
     client: &CdpClient,
     session_id: &str,
     selector: &str,
@@ -431,6 +432,51 @@ pub(crate) fn js_page_type(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
                 .await
                 .unwrap_or(Err("channel closed".into()))?;
             Ok(())
+        }
+        .await;
+        result_slot.commit(r).ok();
+    });
+    Ok(promise.into())
+}
+
+/// `page.getNodeValue(selector)` → outerHTML (string) of the single matched node.
+pub(crate) fn js_page_get_node_value(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let selector = cc
+        .arg(0)
+        .to_string(ctx)
+        .map(|s| s.content().encode_utf8(false).to_string())
+        .unwrap_or_default();
+
+    let this = cc.this();
+    let payload = get_page_payload(ctx, &this)?;
+    let client = payload.client.clone();
+    let session_id = payload.session_id.clone();
+
+    let result_slot = PromiseResultSlot::<Result<String, String>>::new();
+    let promise =
+        Promise::create_with_result_slot(ctx, result_slot.clone(), |cx, html| -> JSResult {
+            let html = html.map_err(|e| {
+                cx.throw_internal_error(&e);
+                -1
+            })?;
+            cx.create_string_from_utf8(html.into_bytes()).map(JSValue::from)
+        })?;
+
+    tokio::spawn(async move {
+        let r: Result<String, String> = async {
+            let node_id = resolve_selector(&client, &session_id, &selector).await?;
+            let m = client
+                .send(
+                    "DOM.getOuterHTML",
+                    Some(serde_json::json!({ "nodeId": node_id })),
+                    Some(&session_id),
+                )
+                .await
+                .unwrap_or(Err("channel closed".into()))?;
+            m.get("outerHTML")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .ok_or_else(|| "no outerHTML".to_string())
         }
         .await;
         result_slot.commit(r).ok();

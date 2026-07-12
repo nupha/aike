@@ -469,6 +469,62 @@ pub(crate) fn js_page_get_captured_requests(ctx: &mut ScopedContext, cc: CallCon
     js_from_json_value(ctx, &Value::Array(requests))
 }
 
+/// `page.getRequestPostData(requestId)` → POST body (string) via
+/// `Network.getRequestPostData`. Requires the request to be intercepted
+/// (Fetch domain) so the body is buffered.
+pub(crate) fn js_page_get_request_post_data(
+    ctx: &mut ScopedContext,
+    cc: CallContext,
+) -> JSResult {
+    let request_id = cc
+        .arg(0)
+        .to_string(ctx)
+        .map(|s| s.content().encode_utf8(false).to_string())
+        .unwrap_or_default();
+
+    let this = cc.this();
+    let payload = get_page_payload(ctx, &this)?;
+    let client = payload.client.clone();
+    let session_id = payload.session_id.clone();
+
+    let result_slot = PromiseResultSlot::<Result<String, String>>::new();
+    let promise =
+        Promise::create_with_result_slot(ctx, result_slot.clone(), |cx, body| -> JSResult {
+            let body = body.map_err(|e| {
+                cx.throw_internal_error(&e);
+                -1
+            })?;
+            cx.create_string_from_utf8(body.into_bytes()).map(JSValue::from)
+        })?;
+
+    tokio::spawn(async move {
+        // Ensure the Network domain is enabled (idempotent) so the request's
+        // post body is tracked.
+        let _ = cdp_network::enable_network(&client, &session_id).await;
+        let rx = client.send(
+            "Network.getRequestPostData",
+            Some(serde_json::json!({ "requestId": request_id })),
+            Some(&session_id),
+        );
+        let result = rx.await.unwrap_or(Err("channel closed".into()));
+        match result {
+            Ok(val) => {
+                let body = val
+                    .get("postData")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                result_slot.commit(Ok(body)).ok();
+            }
+            Err(e) => {
+                result_slot.commit(Err(e)).ok();
+            }
+        }
+    });
+
+    Ok(promise.into())
+}
+
 /// `page.clearCapturedRequests()`
 pub(crate) fn js_page_clear_captured_requests(
     ctx: &mut ScopedContext,

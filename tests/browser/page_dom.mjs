@@ -3,6 +3,7 @@
 // Covers (all flat on `Page`, exercised offline against a data: URL):
 //   DOM (P0): querySelector, querySelectorAll, getAttribute, focus, getBoxModel
 //   DOM (P1): remove, click, type
+//   DOM (P2): getNodeValue
 //   Emulation (P0): setGeolocation, setMediaFeatures
 //   Emulation (P1): setTimezone, setLocale, setTouchEnabled, setCPUThrottling
 //   Log (P1): onLog, getConsoleMessages
@@ -99,6 +100,12 @@ async function testDom(page) {
   await page.remove("#box");
   const gone = await page.evaluate("document.getElementById('box') === null");
   check("remove('#box') deletes node", gone === true);
+
+  // getNodeValue -> outerHTML string of the matched node (use #name input)
+  const html = await page.getNodeValue("#name");
+  check("getNodeValue('#name') returns outerHTML",
+    typeof html === "string" && html.indexOf("<input") >= 0,
+    "html=" + JSON.stringify(html));
 }
 
 async function testEmulation(page) {

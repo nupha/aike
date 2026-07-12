@@ -273,6 +273,9 @@ declare module "browser" {
     /** Remove the first element matching the selector. */
     remove(selector: string): Promise<void>;
 
+    /** Get the outerHTML of the first element matching the selector. */
+    getNodeValue(selector: string): Promise<string>;
+
     /** Click the first element matching the selector. */
     click(selector: string): Promise<void>;
 
@@ -362,6 +365,13 @@ declare module "browser" {
     getResponseBody(requestId: string): Promise<{ body: string; base64Encoded: boolean }>;
 
     /**
+     * Get the POST body of a request by its (Network-domain) request ID.
+     * Requires the request to be intercepted (Fetch domain) so the body is
+     * buffered; pass `event.networkId` from `onRequestPaused`.
+     */
+    getRequestPostData(requestId: string): Promise<string>;
+
+    /**
      * Start capturing network requests.
      * Enables the CDP Network domain and begins recording
      * Network.requestWillBeSent / responseReceived / loadingFinished events.
@@ -386,6 +396,38 @@ declare module "browser" {
 
     /** Return buffered console/log messages. Pass `clear=true` to flush the buffer. */
     getConsoleMessages(clear?: boolean): Promise<ConsoleMessage[]>;
+
+    // ---- Storage ----
+    /** Clear cache/storage for an origin. `storageTypes` defaults to `"all"`. */
+    clearData(origin: string, storageTypes?: string): Promise<void>;
+
+    /** Resolve a frame's storage key (string) by its CDP frameId. */
+    getStorageKeyForFrame(frameId: string): Promise<string>;
+
+    // ---- Overlay (debug highlight) ----
+    /** Highlight the first element matching the selector. */
+    highlight(selector: string, options?: any): Promise<void>;
+
+    /** Remove any active overlay highlight. */
+    hideHighlight(): Promise<void>;
+
+    // ---- CSS ----
+    /** Get the computed style of the first element matching the selector. */
+    getComputedStyle(selector: string): Promise<Record<string, string>>;
+
+    /** Get the matched CSS rules of the first element matching the selector. */
+    getMatchedStyles(selector: string): Promise<any>;
+
+    // ---- IO ----
+    /** Read a CDP IO stream handle to completion and return its text. */
+    readStream(handle: string): Promise<string>;
+
+    // ---- Tracing ----
+    /** Start a Chrome trace. `categories` is a comma-separated CDP filter. */
+    startTracing(categories?: string): Promise<void>;
+
+    /** Stop tracing and return the captured trace as a `{ traceEvents: [...] }` JSON string. */
+    stopTracing(): Promise<string>;
   }
 
   // =========================================================================

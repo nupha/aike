@@ -129,6 +129,7 @@ const PAGE_PROTO: &[FieldDef] = &[
     FieldDef::FUNC("focus", 1, super::dom::js_page_focus, 0),
     FieldDef::FUNC("getBoxModel", 1, super::dom::js_page_get_box_model, 0),
     FieldDef::FUNC("remove", 1, super::dom::js_page_remove, 0),
+    FieldDef::FUNC("getNodeValue", 1, super::dom::js_page_get_node_value, 0),
     FieldDef::FUNC("click", 1, super::dom::js_page_click, 0),
     FieldDef::FUNC("type", 2, super::dom::js_page_type, 0),
     // Emulation domain
@@ -189,6 +190,12 @@ const PAGE_PROTO: &[FieldDef] = &[
     FieldDef::FUNC("setCookie", 1, network::js_page_set_cookie, 0),
     FieldDef::FUNC("getResponseBody", 1, network::js_page_get_response_body, 0),
     FieldDef::FUNC(
+        "getRequestPostData",
+        1,
+        network::js_page_get_request_post_data,
+        0,
+    ),
+    FieldDef::FUNC(
         "startNetworkCapture",
         0,
         network::js_page_start_network_capture,
@@ -243,6 +250,35 @@ const PAGE_PROTO: &[FieldDef] = &[
         super::log::js_page_get_console_messages,
         0,
     ),
+    // Storage domain
+    FieldDef::FUNC("clearData", 2, super::storage::js_page_clear_data, 0),
+    FieldDef::FUNC(
+        "getStorageKeyForFrame",
+        1,
+        super::storage::js_page_get_storage_key_for_frame,
+        0,
+    ),
+    // Overlay domain (debug highlight)
+    FieldDef::FUNC("highlight", 2, super::overlay::js_page_highlight, 0),
+    FieldDef::FUNC("hideHighlight", 0, super::overlay::js_page_hide_highlight, 0),
+    // CSS domain
+    FieldDef::FUNC(
+        "getComputedStyle",
+        1,
+        super::css::js_page_get_computed_style,
+        0,
+    ),
+    FieldDef::FUNC(
+        "getMatchedStyles",
+        1,
+        super::css::js_page_get_matched_styles,
+        0,
+    ),
+    // IO domain
+    FieldDef::FUNC("readStream", 1, super::io::js_page_read_stream, 0),
+    // Tracing domain
+    FieldDef::FUNC("startTracing", 1, super::tracing::js_page_start_tracing, 0),
+    FieldDef::FUNC("stopTracing", 0, super::tracing::js_page_stop_tracing, 0),
 ];
 
 def_native_object!("Page", JSPage, PagePayload, PAGE_PROTO, None);

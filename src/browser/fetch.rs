@@ -16,8 +16,11 @@ use zuqe::{
     CallContext, JSResult, JSValue, ScopedContext, JS_PROP_C_W_E,
 };
 
-use crate::browser::class_page::{
-    get_number_prop, get_page_payload, get_str_prop, js_from_json_value, send_page_void_cmd,
+use crate::browser::{
+    cdp_network,
+    class_page::{
+        get_number_prop, get_page_payload, get_str_prop, js_from_json_value, send_page_void_cmd,
+    },
 };
 
 // ---------------------------------------------------------------------------
@@ -53,6 +56,9 @@ pub(crate) fn js_page_set_request_interception(
                     Some(&session_ev),
                 )
                 .await;
+            // Enabling the Network domain up-front ensures request bodies are
+            // tracked, so `Network.getRequestPostData` can read them later.
+            let _ = cdp_network::enable_network(&client_ev, &session_ev).await;
             let mut event_rx = client_ev.subscribe_events();
             loop {
                 match event_rx.recv().await {

@@ -7,15 +7,20 @@ mod cdp_network;
 mod chrome;
 mod class_browser;
 mod class_page;
+mod css;
 mod dom;
 mod emulation;
 mod fetch;
 mod input;
+mod io;
 mod log;
 mod network;
+mod overlay;
 mod runtime;
 mod security;
+mod storage;
 mod target;
+mod tracing;
 
 pub use {class_browser::JSBrowser, class_page::JSPage};
 
