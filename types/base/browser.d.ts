@@ -1,5 +1,5 @@
 // Type declarations for the "browser" module
-// import { launch } from "browser";
+// import { Browser } from "browser";
 
 declare module "browser" {
   interface LaunchOptions {
@@ -231,6 +231,9 @@ declare module "browser" {
     clearCapturedRequests(): Promise<void>;
   }
 
-  /** Launch a Chrome browser instance. */
-  export function launch(options?: LaunchOptions): Promise<Browser>;
+  /** The Browser class. Launch a Chrome instance via the static `launch` factory. */
+  export class Browser {
+    /** Launch a Chrome browser instance. */
+    static launch(options?: LaunchOptions): Promise<Browser>;
+  }
 }

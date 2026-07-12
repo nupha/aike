@@ -10,7 +10,7 @@
 // Run as a module (.mjs) so `import` is parsed in module mode:
 //   cargo run -- tests/browser/page_dom.mjs
 
-import { launch } from "browser";
+import { Browser } from "browser";
 
 let pass = 0;
 let fail = 0;
@@ -184,7 +184,7 @@ async function testLog(page) {
 async function main() {
   let browser;
   try {
-    browser = await launch({ headless: true });
+    browser = await Browser.launch({ headless: true });
   } catch (e) {
     console.log("\n  Failed to launch browser: " + (e && (e.message || e)));
     console.log("  Make sure Google Chrome or Chromium is installed.");

@@ -3,7 +3,7 @@
 // Prerequisites: Google Chrome / Chromium installed on the system.
 // Launches Chrome in non-headless mode so you can see the browser window.
 
-import { launch } from "browser";
+import { Browser } from "browser";
 
 let apiPass = 0;
 let apiFail = 0;
@@ -24,7 +24,7 @@ async function main() {
   // 1. launch browser
   let browser;
   try {
-    browser = await launch({ headless: false, port: 9366 });
+    browser = await Browser.launch({ headless: false, port: 9366 });
   } catch (err) {
     console.log("  Launch failed:", err.message || err);
     Aike.exit(1);

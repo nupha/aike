@@ -11,7 +11,8 @@ use std::{cell::Cell, sync::Arc};
 use linkme::distributed_slice;
 use serde_json::Value;
 use zuqe::{
-    CallContext, ClassID, FieldDef, JS_PROP_C_W_E, JSResult, JSValue, Runtime, ScopedContext,
+    CallContext, ClassCtorDef, ClassID, FieldDef, JS_PROP_C_W_E, JSResult, JSValue, Runtime,
+    ScopedContext,
     builtins::promise::{Promise, PromiseResultSlot},
     def_native_object,
 };
@@ -19,7 +20,7 @@ use zuqe::{
 use crate::{
     USER_CLASS_DEFS,
     browser::{
-        cdp,
+        cdp, chrome,
         class_page::{
             JSPage, PageNetworkState, PagePayload, get_number_prop, get_str_prop,
             js_from_json_value,
@@ -76,11 +77,91 @@ const BROWSER_PROTO: &[FieldDef] = &[
     ),
 ];
 
-def_native_object!("Browser", JSBrowser, BrowserPayload, BROWSER_PROTO, None);
-
 #[distributed_slice(USER_CLASS_DEFS)]
 fn register_browser(rt: &mut Runtime) -> Result<ClassID, i32> {
     JSBrowser::register(rt)
+}
+
+/// Data passed from async launch task to JS callback.
+pub(crate) struct LaunchData {
+    pub(crate) client: cdp::CdpClient,
+    pub(crate) child: Option<tokio::process::Child>,
+    pub(crate) reader_handle: Option<tokio::task::JoinHandle<()>>,
+}
+
+/// `launch(options?)` → Promise<Browser> (exported from the `browser` module)
+pub(crate) fn js_browser_launch(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let mut headless = true;
+    let mut port = 9222u16;
+    let mut proxy_url: Option<String> = None;
+    let mut chrome_path: Option<String> = None;
+
+    if cc.length() > 0
+        && let Some(opts) = cc.arg(0).as_object()
+    {
+        proxy_url = get_str_prop(ctx, opts, "proxyUrl");
+        chrome_path = get_str_prop(ctx, opts, "chromePath");
+        if let Some(v) = get_number_prop(ctx, opts, "port") {
+            port = v as u16;
+        }
+        let hv = opts
+            .get_property_str(ctx, "headless")
+            .unwrap_or(JSValue::UNDEFINED);
+        if !hv.is_undefined() {
+            headless = hv.to_bool().unwrap_or(false);
+        }
+    }
+
+    let result_slot = PromiseResultSlot::<Result<LaunchData, String>>::new();
+    let promise =
+        Promise::create_with_result_slot(ctx, result_slot.clone(), |cx, payload| -> JSResult {
+            let data = payload.map_err(|e| {
+                cx.throw_internal_error(&e);
+                -1
+            })?;
+
+            let obj = JSBrowser::new_instance(
+                cx,
+                JSValue::UNDEFINED,
+                BrowserPayload {
+                    client: data.client,
+                    chrome_child: Arc::new(tokio::sync::Mutex::new(data.child)),
+                },
+            )?;
+
+            Ok(obj.into())
+        })?;
+
+    tokio::spawn(async move {
+        let result =
+            chrome::launch(headless, port, proxy_url.as_deref(), chrome_path.as_deref()).await;
+
+        let (mut chrome_child, ws_url) = match result {
+            Ok(r) => r,
+            Err(e) => {
+                result_slot.commit(Err(e)).ok();
+                return;
+            }
+        };
+
+        let (client, reader_handle) = match cdp::CdpClient::connect(&ws_url).await {
+            Ok(r) => r,
+            Err(e) => {
+                let _ = chrome_child.start_kill();
+                result_slot.commit(Err(e)).ok();
+                return;
+            }
+        };
+
+        let data = LaunchData {
+            client,
+            child: Some(chrome_child),
+            reader_handle: Some(reader_handle),
+        };
+        result_slot.commit(Ok(data)).ok();
+    });
+
+    Ok(promise.into())
 }
 
 /// Extract the `BrowserPayload` from a `Browser` JS value.
@@ -436,3 +517,23 @@ fn js_browser_is_running(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         Err(_) => Ok(JSValue::Bool(false)),
     }
 }
+
+const BROWSER_CTOR: ClassCtorDef = ClassCtorDef::new(
+    |ctx: &mut ScopedContext, _cc: CallContext| {
+        ctx.throw_type_error(
+            "Browser cannot be constructed directly; use Browser.launch() to start a browser",
+        );
+        Err(-1)
+    },
+    0,
+    false,
+)
+.entries(&[FieldDef::FUNC("launch", 1, js_browser_launch, 0)]);
+
+def_native_object!(
+    "Browser",
+    JSBrowser,
+    BrowserPayload,
+    BROWSER_PROTO,
+    Some(BROWSER_CTOR)
+);

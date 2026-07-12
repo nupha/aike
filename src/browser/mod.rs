@@ -19,12 +19,15 @@ mod target;
 
 pub use {class_browser::JSBrowser, class_page::JSPage};
 
-use zuqe::{FieldDef, ScopedContext};
+use zuqe::{FieldDef, NativeObject, ScopedContext};
 
-/// Initialize the `browser` JS module.
+/// Initialize the `browser` JS module (exports the `Browser` class).
 pub fn init_mod_browser(ctx: &mut ScopedContext) -> Result<(), i32> {
-    const MOD_BROWSER_ENTRIES: &[FieldDef] =
-        &[FieldDef::FUNC("launch", 1, class_page::js_launch, 0)];
+    const MOD_BROWSER_ENTRIES: &[FieldDef] = &[FieldDef::CLASS(
+        "Browser",
+        JSBrowser::class_id,
+        zuqe::JS_PROP_ENUMERABLE,
+    )];
     ctx.create_module("browser", MOD_BROWSER_ENTRIES)?;
     Ok(())
 }
