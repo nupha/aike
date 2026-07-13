@@ -38,7 +38,7 @@ pub(crate) async fn launch(
                 .join(format!("aike-chrome-{}", port))
                 .display()
         ),
-        
+
         // === Anti-detection parameters (Phase 1) ===
         // Hide navigator.webdriver attribute (most important one)
         "--disable-blink-features=AutomationControlled".to_string(),
