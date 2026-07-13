@@ -4,20 +4,32 @@
 use std::cell::Cell;
 
 use linkme::distributed_slice;
+use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use zuqe::{
     CallContext, ClassID, FieldDef, IntOrFloat, JSResult, JSValue, NativeObject, Runtime,
     ScopedContext, def_native_object,
+    gc_lite::{GcTrace, GcTraceCtx},
 };
 
 use crate::USER_CLASS_DEFS;
 
+use super::outbound_buffer::{OUTBOUND_CAP, OutboundBuffer, js_stream_write};
+
 /// Response data sent back from JS to the axum handler.
-#[derive(Debug)]
-pub(crate) struct HttpResponseMessage {
-    pub(crate) status: u16,
-    pub(crate) headers: Vec<(String, String)>,
-    pub(crate) body: Option<String>,
+pub(crate) enum HttpResponseMessage {
+    /// Normal one-shot response (status + headers + optional body).
+    Normal {
+        status: u16,
+        headers: Vec<(String, String)>,
+        body: Option<String>,
+    },
+    /// SSE streaming response: headers + a receiver the axum `Sse` reads from.
+    Streaming {
+        status: u16,
+        headers: Vec<(String, String)>,
+        receiver: mpsc::Receiver<String>,
+    },
 }
 
 /// Internal payload for HttpResponse classes.
@@ -26,6 +38,10 @@ pub(crate) struct HttpResponsePayload {
     pub(crate) headers: Vec<(String, String)>,
     pub(crate) body: Option<String>,
     pub(crate) ended: bool,
+    /// Set once `sse()` is called — every other method then throws, because
+    /// the original response object is consumed and replaced by an
+    /// `HttpResponseSse` instance.
+    pub(crate) switched: bool,
     pub(crate) response_tx: Option<oneshot::Sender<HttpResponseMessage>>,
 }
 
@@ -33,7 +49,7 @@ impl HttpResponsePayload {
     /// Send the response via the oneshot channel, consuming the sender.
     pub(crate) fn send_response(&mut self) {
         if let Some(tx) = self.response_tx.take() {
-            let msg = HttpResponseMessage {
+            let msg = HttpResponseMessage::Normal {
                 status: self.status,
                 headers: std::mem::take(&mut self.headers),
                 body: self.body.take(),
@@ -56,7 +72,12 @@ pub(crate) fn get_res_payload<'a>(
         ctx.throw_internal_error("HttpResponse was detached");
         Err(-1)
     } else {
-        Ok(unsafe { &mut *opaque.cast::<HttpResponsePayload>() })
+        let p = unsafe { &mut *opaque.cast::<HttpResponsePayload>() };
+        if p.switched {
+            ctx.throw_type_error("response already switched to SSE");
+            return Err(-1);
+        }
+        Ok(p)
     }
 }
 
@@ -262,6 +283,7 @@ const RES_PROTO: &[FieldDef] = &[
     FieldDef::FUNC("json", 1, js_res_finish, FINISH_JSON as _),
     FieldDef::FUNC("sendStatus", 1, js_res_finish, FINISH_SEND_STATUS as _),
     FieldDef::FUNC("redirect", 2, js_res_finish, FINISH_REDIRECT as _),
+    FieldDef::FUNC("sse", 0, js_res_sse, 0),
 ];
 
 def_native_object!(
@@ -275,4 +297,149 @@ def_native_object!(
 #[distributed_slice(USER_CLASS_DEFS)]
 fn register_http_response(rt: &mut Runtime) -> Result<ClassID, i32> {
     JSHttpResponse::register(rt)
+}
+
+// ---------------------------------------------------------------------------
+// SSE response (`HttpResponseSse`) — independent streaming object returned by
+// `res.sse()`. Only exposes write/flush/close; the original `HttpServerResponse`
+// is consumed (payload invalidated) so json/setHeader/end can no longer be used.
+// ---------------------------------------------------------------------------
+
+/// SSE-only payload: a write-side `OutboundBuffer` plus a closed flag.
+/// Holds no status/headers/body — those were already sent when `sse()` opened
+/// the streaming response.
+pub(crate) struct HttpResponseSsePayload {
+    pub(crate) sink: OutboundBuffer,
+    pub(crate) closed: bool,
+}
+
+impl HttpResponseSsePayload {
+    /// GC trace callback wired via `def_native_object!`'s `on_payload_gc`.
+    pub(crate) fn gc_trace(&self, gcx: &mut GcTraceCtx) {
+        self.sink.trace(gcx);
+    }
+}
+
+pub(crate) fn get_sse_payload<'a>(
+    ctx: &mut ScopedContext,
+    val: &'a mut JSValue,
+) -> Result<&'a mut HttpResponseSsePayload, i32> {
+    val.as_native_object_mut::<JSHttpResponseSse>()
+        .and_then(|o| o.payload_mut())
+        .ok_or_else(|| {
+            ctx.throw_type_error("not an HttpResponseSse instance");
+            -1
+        })
+}
+
+/// Append SSE-default headers if not already set by the user.
+fn ensure_sse_headers(headers: &mut Vec<(String, String)>) {
+    let has_ct = headers
+        .iter()
+        .any(|(k, _)| k.eq_ignore_ascii_case("content-type"));
+    if !has_ct {
+        headers.push(("content-type".into(), "text/event-stream".into()));
+    }
+    let has_cc = headers
+        .iter()
+        .any(|(k, _)| k.eq_ignore_ascii_case("cache-control"));
+    if !has_cc {
+        headers.push(("cache-control".into(), "no-cache".into()));
+    }
+    let has_accel = headers
+        .iter()
+        .any(|(k, _)| k.eq_ignore_ascii_case("x-accel-buffering"));
+    if !has_accel {
+        headers.push(("x-accel-buffering".into(), "no".into()));
+    }
+}
+
+/// `res.sse()` — open an SSE streaming response and return an `HttpResponseSse`.
+fn js_res_sse(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let this = cc.this();
+    let data = get_res_payload(ctx, &this)?;
+    // Already switched → error.
+    if data.response_tx.is_none() {
+        ctx.throw_type_error("response already switched to SSE");
+        return Err(-1);
+    }
+
+    let mut headers = std::mem::take(&mut data.headers);
+    ensure_sse_headers(&mut headers);
+    let status = data.status;
+
+    // Build the shared write-side buffer; its receiver drives the axum Sse.
+    let (sink, rx) = OutboundBuffer::new(OUTBOUND_CAP);
+
+    // Open the streaming response immediately (before JS writes the first frame).
+    let msg = HttpResponseMessage::Streaming {
+        status,
+        headers,
+        receiver: rx,
+    };
+    if let Some(tx) = data.response_tx.take() {
+        let _ = tx.send(msg);
+    }
+
+    // Invalidate the original response object.
+    data.switched = true;
+    data.ended = true;
+
+    let sse = JSHttpResponseSse::new_instance(
+        ctx,
+        JSValue::UNDEFINED,
+        HttpResponseSsePayload {
+            sink,
+            closed: false,
+        },
+    )?;
+    Ok(sse.into())
+}
+
+fn js_sse_write(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let frame = cc.arg(0).to_string(ctx)?;
+    let frame = frame.content().encode_utf8(false).to_string();
+    let mut this = cc.this();
+    let p = get_sse_payload(ctx, &mut this)?;
+    if p.closed {
+        return Ok(JSValue::UNDEFINED);
+    }
+    let ret = js_stream_write(&mut p.sink, ctx, frame)?;
+    Ok(ret.unwrap_or(JSValue::UNDEFINED))
+}
+
+fn js_sse_flush(_ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
+    // Frames are pushed to the bounded channel immediately; the axum `Sse`
+    // consumer reads them as they arrive. Nothing to flush on our side.
+    Ok(JSValue::UNDEFINED)
+}
+
+fn js_sse_close(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let mut this = cc.this();
+    let p = get_sse_payload(ctx, &mut this)?;
+    if !p.closed {
+        p.closed = true;
+        p.sink.shutdown(); // drop sender → Sse stream ends
+    }
+    Ok(JSValue::UNDEFINED)
+}
+
+const SSE_PROTO: &[FieldDef] = &[
+    FieldDef::FUNC("write", 1, js_sse_write, 0),
+    FieldDef::FUNC("flush", 0, js_sse_flush, 0),
+    FieldDef::FUNC("close", 0, js_sse_close, 0),
+];
+
+def_native_object!(
+    "HttpResponseSse",
+    JSHttpResponseSse,
+    HttpResponseSsePayload,
+    SSE_PROTO,
+    None,
+    on_payload_gc: HttpResponseSsePayload::gc_trace
+);
+
+#[distributed_slice(USER_CLASS_DEFS)]
+fn register_http_response_sse(rt: &mut Runtime) -> Result<ClassID, i32> {
+    JSHttpResponseSse::register(rt)
 }

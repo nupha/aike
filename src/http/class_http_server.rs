@@ -10,23 +10,26 @@
 
 use std::{
     cell::{Cell, RefCell},
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
 
+use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::{
     Router,
     body::Body,
-    extract::{FromRequestParts as _, RawPathParams, Request},
+    extract::{FromRequestParts as _, RawPathParams, Request, ws::WebSocketUpgrade},
     response::{IntoResponse, Response as AxumResponse},
     routing::{MethodRouter, delete, get, head, options, patch, post, put},
 };
 use crossbeam::channel;
 use linkme::distributed_slice;
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot};
+use tokio_stream::wrappers::ReceiverStream;
+use tower_http::services::ServeDir;
 use zuqe::{
     CallContext, Callback, ClassCtorDef, ClassID, FieldDef, IntOrFloat, JSResult, JSValue, Object,
     PollSender, Runtime, ScopedContext,
@@ -44,17 +47,34 @@ use crate::llm::{
 };
 
 use super::{
-    Method,
+    JSWebSocketStream, Method,
     mcp::{McpEndpoint, McpSchemas, McpToolCallRequest, NativeMcpToolFn, handle_mcp_tool_call},
+    outbound_buffer::OUTBOUND_CAP,
     request::{HttpRequestPayload, JSHttpRequest},
     response::{HttpResponseMessage, HttpResponsePayload, JSHttpResponse, get_res_payload},
     server::spawn_http_server,
+    ws::{WsControl, WsStreamEvent, bridge_ws, dispatch_ws_data, dispatch_ws_open},
 };
 
 /// Unified request message sent from axum delegate to the JS server job.
 pub(crate) enum IncomingRequest {
     Http(HttpRequest),
     McpToolCall(McpToolCallRequest),
+    /// A fresh WebSocket connection was upgraded; the JS poller must build the
+    /// `WebSocketStream` and invoke the user's `ws()` handler.
+    ResponseStreamOpen {
+        handler_index: usize,
+        id: u64,
+        out_tx: mpsc::Sender<String>,
+        control_tx: mpsc::Sender<WsControl>,
+        query: String,
+        params: HashMap<String, String>,
+    },
+    /// An inbound event for an existing WS connection (client message / close).
+    ResponseStreamData {
+        id: u64,
+        event: WsStreamEvent,
+    },
 }
 
 /// HTTP route request (existing logic, fields unchanged).
@@ -72,6 +92,10 @@ pub(super) struct HttpRequest {
 pub(super) struct HttpServerPayload {
     js_routes: Vec<(Method, String, Object)>,
     mcp_endpoints: Vec<McpEndpoint>,
+    /// WebSocket routes registered via `server.ws(path, handler)`.
+    ws_routes: Vec<(String, Object)>,
+    /// Static file mounts registered via `server.staticFiles(mount, dir)`.
+    static_dirs: Vec<(String, String)>,
 
     #[cfg(feature = "llama_cpp")]
     openai: Option<(Arc<std::sync::Mutex<Engine>>, String)>,
@@ -79,6 +103,11 @@ pub(super) struct HttpServerPayload {
     shutdown_tx: Option<oneshot::Sender<()>>,
     is_running: Arc<AtomicBool>,
     frozen: bool,
+
+    /// Live WebSocket connections keyed by stream id (for dispatch/cleanup).
+    pub(crate) stream_registry: RefCell<HashMap<u64, Object>>,
+    /// Topic → set of subscribed stream ids (Bun pub/sub).
+    pub(crate) topic_registry: RefCell<HashMap<String, HashSet<u64>>>,
 }
 
 impl HttpServerPayload {
@@ -180,6 +209,12 @@ impl HttpServerPayload {
         for ep in &self.mcp_endpoints {
             ep.gc_trace(gcx);
         }
+        for (_, handler) in &self.ws_routes {
+            handler.trace(gcx);
+        }
+        for v in self.stream_registry.borrow().values() {
+            v.trace(gcx);
+        }
     }
 }
 
@@ -195,7 +230,7 @@ fn get_server_payload<'a>(
         })
 }
 
-fn get_server_payload_mut<'a>(
+pub(crate) fn get_server_payload_mut<'a>(
     ctx: &mut ScopedContext,
     val: &'a mut JSValue,
 ) -> Result<&'a mut HttpServerPayload, i32> {
@@ -214,6 +249,8 @@ fn js_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         HttpServerPayload {
             js_routes: Vec::new(),
             mcp_endpoints: Vec::new(),
+            ws_routes: Vec::new(),
+            static_dirs: Vec::new(),
 
             #[cfg(feature = "llama_cpp")]
             openai: None,
@@ -221,6 +258,9 @@ fn js_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             shutdown_tx: None,
             is_running: Arc::new(AtomicBool::new(false)),
             frozen: false,
+
+            stream_registry: RefCell::new(HashMap::new()),
+            topic_registry: RefCell::new(HashMap::new()),
         },
     )
     .map(|v| v.into())
@@ -982,21 +1022,52 @@ fn delegate_js_route(
             }
 
             match res_rx.await {
-                Ok(msg) => {
-                    let status = axum::http::StatusCode::from_u16(msg.status)
-                        .unwrap_or(axum::http::StatusCode::OK);
-                    let mut response = AxumResponse::new(Body::from(msg.body.unwrap_or_default()));
-                    *response.status_mut() = status;
-                    for (k, v) in &msg.headers {
-                        if let (Ok(name), Ok(val)) = (
-                            axum::http::HeaderName::from_bytes(k.as_bytes()),
-                            axum::http::HeaderValue::from_str(v),
-                        ) {
-                            response.headers_mut().insert(name, val);
+                Ok(msg) => match msg {
+                    HttpResponseMessage::Normal {
+                        status,
+                        headers,
+                        body,
+                    } => {
+                        let status = axum::http::StatusCode::from_u16(status)
+                            .unwrap_or(axum::http::StatusCode::OK);
+                        let mut response = AxumResponse::new(Body::from(body.unwrap_or_default()));
+                        *response.status_mut() = status;
+                        for (k, v) in &headers {
+                            if let (Ok(name), Ok(val)) = (
+                                axum::http::HeaderName::from_bytes(k.as_bytes()),
+                                axum::http::HeaderValue::from_str(v),
+                            ) {
+                                response.headers_mut().insert(name, val);
+                            }
                         }
+                        response
                     }
-                    response
-                }
+                    HttpResponseMessage::Streaming {
+                        status,
+                        headers,
+                        receiver,
+                    } => {
+                        use futures_util::StreamExt;
+                        // Map each frame to an SSE `data:` event.
+                        let stream = ReceiverStream::new(receiver)
+                            .map(|data| Ok::<_, std::io::Error>(Event::default().data(data)));
+                        let mut response = Sse::new(stream)
+                            .keep_alive(KeepAlive::default())
+                            .into_response();
+                        if let Ok(s) = axum::http::StatusCode::from_u16(status) {
+                            *response.status_mut() = s;
+                        }
+                        for (k, v) in &headers {
+                            if let (Ok(name), Ok(val)) = (
+                                axum::http::HeaderName::from_bytes(k.as_bytes()),
+                                axum::http::HeaderValue::from_str(v),
+                            ) {
+                                response.headers_mut().insert(name, val);
+                            }
+                        }
+                        response
+                    }
+                },
                 Err(_) => (
                     axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                     "Internal Server Error",
@@ -1020,6 +1091,59 @@ fn delegate_js_route(
     (axum_path, handler)
 }
 
+/// Global counter assigning unique ids to WebSocket connections.
+static NEXT_WS_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Create a route that upgrades an HTTP connection to a WebSocket and bridges
+/// it to the JS poller. The bridge task (`bridge_ws`) runs on tokio; inbound
+/// client messages and the close event are reported back via
+/// `IncomingRequest::ResponseStreamData`, and the freshly-upgraded connection
+/// is announced via `IncomingRequest::ResponseStreamOpen` (so the JS-side
+/// `WebSocketStream` is created and the user's `ws()` handler runs).
+fn delegate_ws_route(
+    path: String,
+    handler_index: usize,
+    request_tx: channel::Sender<IncomingRequest>,
+) -> (String, MethodRouter<()>) {
+    let axum_path = express_to_axum_path(&path);
+    let tx = request_tx;
+
+    let handler_fn = move |ws: WebSocketUpgrade, uri: axum::extract::OriginalUri| {
+        let tx = tx.clone();
+        async move {
+            let query_string = uri.0.query().unwrap_or("").to_string();
+            let id = NEXT_WS_ID.fetch_add(1, Ordering::Relaxed);
+            let (out_tx, out_rx) = mpsc::channel(OUTBOUND_CAP);
+            let (control_tx, control_rx) = mpsc::channel::<WsControl>(8);
+            let event_tx = tx.clone();
+
+            if tx
+                .send(IncomingRequest::ResponseStreamOpen {
+                    handler_index,
+                    id,
+                    out_tx,
+                    control_tx,
+                    query: query_string,
+                    params: HashMap::new(),
+                })
+                .is_err()
+            {
+                return (
+                    axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                    "Server is shutting down",
+                )
+                    .into_response();
+            }
+
+            // Hand the socket to the bridge task; it owns out_rx + control_rx
+            // and forwards client traffic to the JS poller via event_tx.
+            ws.on_upgrade(move |socket| bridge_ws(socket, out_rx, control_rx, event_tx, id))
+        }
+    };
+
+    (axum_path, get(handler_fn))
+}
+
 fn js_handler_then(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let is_reject = cc.magic() == 1;
 
@@ -1033,7 +1157,10 @@ fn js_handler_then(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     }
 
     let res_val = cc.data(0);
-    let p = get_res_payload(ctx, &res_val).unwrap();
+    let p = match get_res_payload(ctx, &res_val) {
+        Ok(p) => p,
+        Err(_) => return Ok(JSValue::UNDEFINED),
+    };
 
     if !p.ended {
         p.status = 204;
@@ -1077,7 +1204,14 @@ fn js_listen(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     }
 
     // Build router, channel, and handler tables in one scope
-    let (router, js_rx_opt, http_handler_table, mcp_handler_tables, mcp_update_rxs) = {
+    let (
+        router,
+        js_rx_opt,
+        http_handler_table,
+        mcp_handler_tables,
+        mcp_update_rxs,
+        ws_handler_table,
+    ) = {
         let data = get_server_payload_mut(ctx, &mut this)?;
         data.frozen = true;
 
@@ -1089,9 +1223,32 @@ fn js_listen(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             router = router.nest(mount_path, engine_router);
         }
 
-        let has_js = !data.js_routes.is_empty() || !data.mcp_endpoints.is_empty();
+        // --- Static file mounts: served directly by axum, no poller needed ---
+        for (mount, dir) in &data.static_dirs {
+            let mount = if mount.ends_with('/') {
+                mount.clone()
+            } else {
+                format!("{mount}/")
+            };
+            if mount == "/" {
+                // axum 0.8 forbids nesting at the root; a root mount is the
+                // catch-all for anything not matched by a JS route, so it is a
+                // `fallback_service`. JS `route()`s always take precedence.
+                router = router
+                    .fallback_service(ServeDir::new(dir).append_index_html_on_directories(true));
+            } else {
+                router = router.nest_service(
+                    &mount,
+                    ServeDir::new(dir).append_index_html_on_directories(true),
+                );
+            }
+        }
+
+        let has_js = !data.js_routes.is_empty()
+            || !data.mcp_endpoints.is_empty()
+            || !data.ws_routes.is_empty();
         if !has_js {
-            (router, None, Vec::new(), Vec::new(), Vec::new())
+            (router, None, Vec::new(), Vec::new(), Vec::new(), Vec::new())
         } else {
             let (js_tx, js_rx) = channel::unbounded::<IncomingRequest>();
 
@@ -1100,6 +1257,17 @@ fn js_listen(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             for (i, (method, path, _)) in data.js_routes.iter().enumerate() {
                 let (axum_path, handler) =
                     delegate_js_route(*method, path.clone(), i, js_tx.clone());
+                if let Err(e) = validate_axum_path(&axum_path) {
+                    ctx.throw_type_error(&e);
+                    return Err(-1);
+                }
+                router = router.route(&axum_path, handler);
+            }
+
+            // --- WS routes ---
+            let ws_table: Vec<Object> = data.ws_routes.iter().map(|(_, h)| *h).collect();
+            for (i, (path, _)) in data.ws_routes.iter().enumerate() {
+                let (axum_path, handler) = delegate_ws_route(path.clone(), i, js_tx.clone());
                 if let Err(e) = validate_axum_path(&axum_path) {
                     ctx.throw_type_error(&e);
                     return Err(-1);
@@ -1122,7 +1290,14 @@ fn js_listen(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 mcp_update_rxs.push(urx);
             }
 
-            (router, Some(js_rx), http_table, mcp_tables, mcp_update_rxs)
+            (
+                router,
+                Some(js_rx),
+                http_table,
+                mcp_tables,
+                mcp_update_rxs,
+                ws_table,
+            )
         }
     };
 
@@ -1145,7 +1320,12 @@ fn js_listen(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     // Clone is_running for the exit promise before handle.is_running gets moved
     let running_flag = handle.is_running.clone();
 
-    // Start unified server job on JS thread (handles HTTP and MCP tool calls)
+    // Keep a handle to the HttpServer instance for the poller (WS dispatch needs
+    // to reach stream_registry / topic_registry). Wrapped in RefCell because the
+    // poller closure is `Fn` (shared) but mutates the payload through it.
+    let server_ref = RefCell::new(this.clone());
+
+    // Start unified server job on JS thread (handles HTTP, MCP, and WS events)
     if let Some(js_rx) = js_rx_opt {
         js_start_server_job(
             ctx,
@@ -1153,6 +1333,8 @@ fn js_listen(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             http_handler_table,
             mcp_handler_tables,
             mcp_update_rxs,
+            ws_handler_table,
+            server_ref,
             handle.is_running,
         );
     }
@@ -1212,13 +1394,15 @@ fn js_listen(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 }
 
 /// Start the unified server job via queue_job — polls crossbeam channel on JS thread.
-/// Handles HTTP and MCP tool call requests through the same channel.
+/// Handles HTTP, MCP tool call, and WebSocket stream requests through the same channel.
 fn js_start_server_job(
     ctx: &mut ScopedContext,
     rx: channel::Receiver<IncomingRequest>,
     http_handler_table: Vec<Object>,
     mcp_handler_tables: Vec<Vec<Object>>,
     mcp_update_rxs: Vec<channel::Receiver<Vec<Object>>>,
+    ws_handler_table: Vec<Object>,
+    server_ref: RefCell<JSValue>,
     is_running: Arc<AtomicBool>,
 ) {
     let is_running2 = is_running.clone();
@@ -1241,6 +1425,31 @@ fn js_start_server_job(
                 }
                 IncomingRequest::McpToolCall(req) => {
                     handle_mcp_tool_call(cx, req, &mcp_tables.borrow());
+                }
+                IncomingRequest::ResponseStreamOpen {
+                    handler_index,
+                    id,
+                    out_tx,
+                    control_tx,
+                    query,
+                    params,
+                } => {
+                    let mut sv = server_ref.borrow_mut();
+                    dispatch_ws_open(
+                        cx,
+                        handler_index,
+                        id,
+                        out_tx,
+                        query,
+                        params,
+                        control_tx,
+                        &ws_handler_table,
+                        &mut *sv,
+                    );
+                }
+                IncomingRequest::ResponseStreamData { id, event } => {
+                    let mut sv = server_ref.borrow_mut();
+                    dispatch_ws_data(cx, id, event, &mut *sv);
                 }
             }
             true // keep polling
@@ -1279,6 +1488,7 @@ fn dispatch_http_request(cx: &mut ScopedContext, incoming: HttpRequest, handler_
             headers: Vec::new(),
             body: None,
             ended: false,
+            switched: false,
             response_tx: Some(incoming.response_tx),
         },
     ) {
@@ -1313,10 +1523,11 @@ fn dispatch_http_request(cx: &mut ScopedContext, incoming: HttpRequest, handler_
                 };
 
                 if promise.then(cx, ok_fn, fail_fn).is_err() {
-                    let p = get_res_payload(cx, &val).unwrap();
-                    p.status = 500;
-                    p.body = Some(String::from("Internal Server Error"));
-                    p.send_response();
+                    if let Ok(p) = get_res_payload(cx, &val) {
+                        p.status = 500;
+                        p.body = Some(String::from("Internal Server Error"));
+                        p.send_response();
+                    }
                 }
             } else {
                 // Sync handler
@@ -1448,6 +1659,94 @@ fn hex_val(b: u8) -> Option<u8> {
     }
 }
 
+/// HttpServer.ws(path, handler) — register a WebSocket route.
+fn js_route_ws(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let mut this = cc.this();
+    let path = cc
+        .arg(0)
+        .to_string(ctx)?
+        .content()
+        .encode_utf8(false)
+        .to_string();
+    let handler = cc.arg(1).into_callable(ctx)?;
+    let p = get_server_payload_mut(ctx, &mut this)?;
+    if p.frozen {
+        ctx.throw_type_error("cannot add ws route while server is running");
+        return Err(-1);
+    }
+    p.ws_routes.push((path, handler));
+    Ok(this)
+}
+
+/// HttpServer.staticFiles(mountPath, dir) — serve a directory of static files.
+fn js_static_files(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let mut this = cc.this();
+    let mount = cc
+        .arg(0)
+        .to_string(ctx)?
+        .content()
+        .encode_utf8(false)
+        .to_string();
+    if !mount.starts_with('/') {
+        ctx.throw_type_error("mountPath must start with '/'");
+        return Err(-1);
+    }
+    let dir = cc
+        .arg(1)
+        .to_string(ctx)?
+        .content()
+        .encode_utf8(false)
+        .to_string();
+    let p = get_server_payload_mut(ctx, &mut this)?;
+    if p.frozen {
+        ctx.throw_type_error("cannot add static dir while server is running");
+        return Err(-1);
+    }
+    p.static_dirs.push((mount, dir));
+    Ok(this)
+}
+
+/// HttpServer.publish(topic, data) — broadcast `data` to all WS streams that
+/// subscribed to `topic` (Bun server.publish semantics).
+fn js_publish(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let topic = cc
+        .arg(0)
+        .to_string(ctx)?
+        .content()
+        .encode_utf8(false)
+        .to_string();
+    let msg = cc
+        .arg(1)
+        .to_string(ctx)?
+        .content()
+        .encode_utf8(false)
+        .to_string();
+
+    let mut this = cc.this();
+    let p = get_server_payload_mut(ctx, &mut this)?;
+
+    // Snapshot the subscriber ids for this topic.
+    let ids: Vec<u64> = match p.topic_registry.borrow().get(&topic) {
+        Some(set) => set.iter().copied().collect(),
+        None => return Ok(JSValue::UNDEFINED),
+    };
+
+    for id in ids {
+        if let Some(mut obj) = p.stream_registry.borrow().get(&id).cloned() {
+            if let Some(ws) = obj
+                .as_native_object_mut::<JSWebSocketStream>()
+                .and_then(|o| o.payload_mut())
+            {
+                if let Some(tx) = &ws.sink.tx {
+                    let _ = tx.try_send(msg.clone());
+                }
+            }
+        }
+    }
+
+    Ok(JSValue::UNDEFINED)
+}
+
 const SERVER_PROTO: &[FieldDef] = &[
     FieldDef::FUNC("get", 2, js_route_add, 0),
     FieldDef::FUNC("post", 2, js_route_add, 1),
@@ -1459,6 +1758,9 @@ const SERVER_PROTO: &[FieldDef] = &[
     FieldDef::FUNC("mcp", 2, js_mcp, 0),
     FieldDef::FUNC("updateMcpTools", 2, js_update_tools, 0),
     FieldDef::FUNC("removeRoute", 2, js_remove_route, 0),
+    FieldDef::FUNC("ws", 2, js_route_ws, 0),
+    FieldDef::FUNC("staticFiles", 2, js_static_files, 0),
+    FieldDef::FUNC("publish", 2, js_publish, 0),
     #[cfg(feature = "llama_cpp")]
     FieldDef::FUNC("openai", 2, js_openai, 0),
     FieldDef::GETSET("isRunning", Some(js_is_running), None, 0),

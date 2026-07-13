@@ -4,15 +4,18 @@
 mod class_http_server;
 mod class_mcp_stdio;
 mod mcp;
+mod outbound_buffer;
 mod request;
 mod response;
 pub(crate) mod server;
+mod ws;
 
 pub(crate) use {
     class_http_server::JSHttpServer,
     class_mcp_stdio::{JSMcpStdio, gc_trace_stdio_state},
     request::JSHttpRequest,
-    response::JSHttpResponse,
+    response::{JSHttpResponse, JSHttpResponseSse},
+    ws::JSWebSocketStream,
 };
 
 use zuqe::{FieldDef, NativeObject, ScopedContext};

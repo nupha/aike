@@ -220,6 +220,61 @@ declare module "http" {
      * @param url Redirect target URL. If omitted, only the status is set.
      */
     redirect(code?: number, url?: string): void;
+    /**
+     * Switch this response into SSE (Server-Sent Events) streaming mode and
+     * return an independent `HttpResponseSse` object. The response is opened
+     * immediately (with `text/event-stream` + no-cache + `X-Accel-Buffering: no`
+     * headers by default) and this `HttpServerResponse` is invalidated — calling
+     * `json`/`setHeader`/`end`/`sse` on it afterwards throws.
+     */
+    sse(): HttpResponseSse;
+  }
+
+  /**
+   * SSE streaming response returned by `HttpServerResponse.sse()`. Only exposes
+   * write/flush/close — `json`/`setHeader`/`end` are intentionally absent.
+   */
+  export class HttpResponseSse {
+    /** Push one SSE frame. Returns a Promise that resolves when the write drains. */
+    write(data: string): void | Promise<void>;
+    /** Force-flush buffered frames (no-op here; frames are sent immediately). */
+    flush(): void;
+    /** End the stream. Idempotent. */
+    close(): void;
+  }
+
+  /**
+   * WebSocket connection handle delivered to `server.ws(path, handler)`.
+   * A real bidirectional long connection with its own lifecycle.
+   */
+  export class WebSocketStream {
+    /** Unique stream id, used by `server.stream_registry` dispatch. */
+    readonly id: number;
+    /** Connection state: 0 connecting / 1 open / 2 closing / 3 closed. */
+    readonly readyState: number;
+    /** Remote client address (Bun `remoteAddress`). */
+    readonly remoteAddress: string;
+
+    /** Async-iterable: `for await (const msg of stream) { ... }` (pull mode). */
+    [Symbol.asyncIterator](): AsyncIterator<string>;
+    /** Write a frame to the client. Returns a Promise when the write must await drain. */
+    write(data: string): void | Promise<void>;
+    /** Send a ping frame. */
+    ping(): void;
+    /** Close the connection. */
+    close(): void;
+
+    /** Push mode (alternative to `for await`): receive messages via callback. */
+    onMessage(cb: (data: string) => void): void;
+    onOpen(cb: () => void): void;
+    onClose(cb: () => void): void;
+    onError(cb: (err: any) => void): void;
+    /** Fired when the write backlog drains (Bun `drain`). */
+    onDrain(cb: () => void): void;
+    /** Subscribe to a broadcast topic (Bun `subscribe`). */
+    subscribe(topic: string): void;
+    /** Unsubscribe from a broadcast topic. */
+    unsubscribe(topic: string): void;
   }
 
   /** Route handler function. May be sync or async. */
@@ -253,6 +308,25 @@ declare module "http" {
     head(path: string, handler: RouteHandler): this;
     /** Register an OPTIONS route. */
     options(path: string, handler: RouteHandler): this;
+
+    /**
+     * Register a WebSocket route. The `handler` receives a `WebSocketStream`
+     * handle; read via `for await (const msg of stream)` and write via
+     * `stream.write(...)`.
+     */
+    ws(path: string, handler: (stream: WebSocketStream) => void | Promise<void>): this;
+
+    /**
+     * Serve a directory of static files at `mountPath`. `GET /` falls back to
+     * `index.html`. Returns this for chaining.
+     */
+    staticFiles(mountPath: string, dir: string): this;
+
+    /**
+     * Broadcast `data` to every WebSocket that subscribed to `topic`
+     * (Bun `server.publish` semantics).
+     */
+    publish(topic: string, data: string): void;
 
     /** Remove a previously registered route. Returns true if a route was removed. */
     removeRoute(method: string, path: string): boolean;
