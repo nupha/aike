@@ -1,13 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-// JS binding for HttpServer.
-//
-// HttpServer is a JS-side server instance with full lifecycle:
-// create → register routes → listen → shutdown.
-// Rust-side state is carried by HttpServerPayload.
-// JS routes are delegated to axum via crossbeam channel + handler_index lookup.
-
 use std::{
     cell::{Cell, RefCell},
     collections::{HashMap, HashSet},
@@ -17,12 +10,14 @@ use std::{
     },
 };
 
-use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::{
     Router,
     body::Body,
     extract::{FromRequestParts as _, RawPathParams, Request, ws::WebSocketUpgrade},
-    response::{IntoResponse, Response as AxumResponse},
+    response::{
+        IntoResponse, Response as AxumResponse,
+        sse::{Event, KeepAlive, Sse},
+    },
     routing::{MethodRouter, delete, get, head, options, patch, post, put},
 };
 use crossbeam::channel;
