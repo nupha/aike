@@ -285,7 +285,9 @@ pub(crate) fn js_page_call_function_on(ctx: &mut ScopedContext, cc: CallContext)
         match result {
             Ok(val) => {
                 if val.get("exceptionDetails").is_some() {
-                    result_slot.commit(Err("callFunctionOn: JS exception".into())).ok();
+                    result_slot
+                        .commit(Err("callFunctionOn: JS exception".into()))
+                        .ok();
                 } else {
                     let r = val
                         .get("result")
@@ -357,7 +359,10 @@ pub(crate) fn js_page_get_properties(ctx: &mut ScopedContext, cc: CallContext) -
             let remote = p.get("value");
             let resolved = if let Some(v) = remote.and_then(|x| x.get("value")) {
                 v.clone()
-            } else if let Some(oid) = remote.and_then(|x| x.get("objectId")).and_then(|x| x.as_str()) {
+            } else if let Some(oid) = remote
+                .and_then(|x| x.get("objectId"))
+                .and_then(|x| x.as_str())
+            {
                 let r = client
                     .send(
                         "Runtime.callFunctionOn",
@@ -502,8 +507,8 @@ pub(crate) fn js_page_on_console(ctx: &mut ScopedContext, cc: CallContext) -> JS
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string());
             let params = msg.get("params").cloned().unwrap_or(Value::Null);
-            let cb = CONSOLE_CALLBACK
-                .with(|m| sess.as_ref().and_then(|s| m.borrow().get(s).cloned()));
+            let cb =
+                CONSOLE_CALLBACK.with(|m| sess.as_ref().and_then(|s| m.borrow().get(s).cloned()));
             if let (Some(cb), Some(_sess)) = (cb, sess) {
                 let obj = js_from_json_value(cx, &params).unwrap_or(JSValue::UNDEFINED);
                 let _ = cb.call(cx, JSValue::UNDEFINED, &[obj]);

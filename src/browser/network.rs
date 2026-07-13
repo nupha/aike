@@ -173,7 +173,10 @@ fn net_obj_to_json(ctx: &mut ScopedContext, obj: &mut zuqe::Object) -> Value {
                 .map(|s| s.content().encode_utf8(false).to_string())
                 .unwrap_or_default();
             if let Some(s) = v.as_string() {
-                map.insert(key, Value::String(s.content().encode_utf8(false).to_string()));
+                map.insert(
+                    key,
+                    Value::String(s.content().encode_utf8(false).to_string()),
+                );
             } else if let Some(n) = v.to_number(ctx).ok() {
                 map.insert(key, Value::from(n.to_f64()));
             } else if v.is_bool() {
@@ -200,10 +203,7 @@ pub(crate) fn js_page_set_user_agent(ctx: &mut ScopedContext, cc: CallContext) -
 }
 
 /// `page.setExtraHTTPHeaders(headers)` — `Network.setExtraHTTPHeaders`.
-pub(crate) fn js_page_set_extra_http_headers(
-    ctx: &mut ScopedContext,
-    cc: CallContext,
-) -> JSResult {
+pub(crate) fn js_page_set_extra_http_headers(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut headers = serde_json::Map::new();
     if cc.length() > 0
         && let Some(obj) = cc.arg(0).as_object()
@@ -308,10 +308,7 @@ pub(crate) fn js_page_delete_cookie(ctx: &mut ScopedContext, cc: CallContext) ->
 }
 
 /// `page.clearBrowserCookies()` — `Network.clearBrowserCookies`.
-pub(crate) fn js_page_clear_browser_cookies(
-    ctx: &mut ScopedContext,
-    cc: CallContext,
-) -> JSResult {
+pub(crate) fn js_page_clear_browser_cookies(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     send_page_void_cmd(ctx, &cc, "Network.clearBrowserCookies", None)
 }
 
@@ -472,10 +469,7 @@ pub(crate) fn js_page_get_captured_requests(ctx: &mut ScopedContext, cc: CallCon
 /// `page.getRequestPostData(requestId)` → POST body (string) via
 /// `Network.getRequestPostData`. Requires the request to be intercepted
 /// (Fetch domain) so the body is buffered.
-pub(crate) fn js_page_get_request_post_data(
-    ctx: &mut ScopedContext,
-    cc: CallContext,
-) -> JSResult {
+pub(crate) fn js_page_get_request_post_data(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let request_id = cc
         .arg(0)
         .to_string(ctx)
@@ -494,7 +488,8 @@ pub(crate) fn js_page_get_request_post_data(
                 cx.throw_internal_error(&e);
                 -1
             })?;
-            cx.create_string_from_utf8(body.into_bytes()).map(JSValue::from)
+            cx.create_string_from_utf8(body.into_bytes())
+                .map(JSValue::from)
         })?;
 
     tokio::spawn(async move {

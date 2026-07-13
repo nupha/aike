@@ -7,7 +7,10 @@
 //! `getStorageKeyForFrame` (resolve a frame's storage key).
 
 use serde_json::Value;
-use zuqe::{CallContext, JSResult, JSValue, ScopedContext, builtins::promise::{Promise, PromiseResultSlot}};
+use zuqe::{
+    CallContext, JSResult, JSValue, ScopedContext,
+    builtins::promise::{Promise, PromiseResultSlot},
+};
 
 use crate::browser::class_page::{get_page_payload, send_page_void_cmd};
 
@@ -61,7 +64,8 @@ pub(crate) fn js_page_get_storage_key_for_frame(
             })?;
             // Return the storageKey string directly for ergonomics.
             if let Some(k) = val.get("storageKey").and_then(|v| v.as_str()) {
-                cx.create_string_from_utf8(k.as_bytes().to_vec()).map(JSValue::from)
+                cx.create_string_from_utf8(k.as_bytes().to_vec())
+                    .map(JSValue::from)
             } else {
                 Ok(JSValue::NULL)
             }

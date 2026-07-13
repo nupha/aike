@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
+#[cfg(unix)]
+use std::os::fd::AsRawFd;
 use std::{
     collections::HashMap,
     io::{Read, Write},
     process::{ExitStatus, Stdio},
 };
-#[cfg(unix)]
-use std::os::fd::AsRawFd;
 
 use zuqe::{
     CallContext, Callback, JS_GPN_ENUM_ONLY, JS_GPN_STR_OR_INT_MASK, JS_PROP_C_W_E,
@@ -377,8 +377,8 @@ fn js_child_kill(_ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 }
 #[cfg(windows)]
 unsafe fn terminate_process(pid: i32) -> bool {
-    use windows_sys::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
     use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_TERMINATE, TerminateProcess};
 
     // SAFETY: pid is a valid process id from a spawned child process.
     let handle = unsafe { OpenProcess(PROCESS_TERMINATE, 0, pid as u32) };
@@ -409,8 +409,10 @@ fn js_child_isRunning(_ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         return Ok(JSValue::Bool(false));
     }
     unsafe {
-        use windows_sys::Win32::System::Threading::{OpenProcess, WaitForSingleObject, PROCESS_QUERY_INFORMATION};
         use windows_sys::Win32::Foundation::{CloseHandle, WAIT_TIMEOUT};
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, PROCESS_QUERY_INFORMATION, WaitForSingleObject,
+        };
 
         let handle = OpenProcess(PROCESS_QUERY_INFORMATION, 0, pid as u32);
         if handle.is_null() {

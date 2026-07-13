@@ -13,7 +13,9 @@ use zuqe::{Exception, JobState, ScopedContext};
 /// comparisons. This wrapper strips that prefix for cross-platform consistency.
 ///
 /// Also handles `\\?\UNC\server\share\...` → `\\server\share\...` conversion correctly.
-pub(crate) fn canonicalize_path<P: AsRef<std::path::Path>>(path: P) -> std::io::Result<std::path::PathBuf> {
+pub(crate) fn canonicalize_path<P: AsRef<std::path::Path>>(
+    path: P,
+) -> std::io::Result<std::path::PathBuf> {
     let p = std::fs::canonicalize(path)?;
 
     #[cfg(windows)]
@@ -21,14 +23,17 @@ pub(crate) fn canonicalize_path<P: AsRef<std::path::Path>>(path: P) -> std::io::
         let s = p.to_string_lossy();
         if let Some(rest) = s.strip_prefix(r"\\?\") {
             // UNC paths: `\\?\UNC\server\share\...` → `\\server\share\...`
-            if let Some(unc) = rest.strip_prefix("UNC\\").or_else(|| rest.strip_prefix("UNC/")) {
+            if let Some(unc) = rest
+                .strip_prefix("UNC\\")
+                .or_else(|| rest.strip_prefix("UNC/"))
+            {
                 return Ok(std::path::PathBuf::from(format!("\\{}", unc)));
             }
             // Regular paths: `\\?\C:\...` → `C:\...`
             return Ok(std::path::PathBuf::from(rest));
         }
     }
-    
+
     Ok(p)
 }
 

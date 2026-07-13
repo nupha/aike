@@ -8,7 +8,10 @@
 //! module to drain a trace stream.
 
 use base64::Engine as _;
-use zuqe::{CallContext, JSResult, JSValue, ScopedContext, builtins::promise::{Promise, PromiseResultSlot}};
+use zuqe::{
+    CallContext, JSResult, JSValue, ScopedContext,
+    builtins::promise::{Promise, PromiseResultSlot},
+};
 
 use crate::browser::{cdp::CdpClient, class_page::get_page_payload};
 
@@ -33,7 +36,10 @@ pub(crate) async fn read_io_stream(
         let resp = rx.await.unwrap_or(Err("channel closed".into()))?;
 
         let data = resp.get("data").and_then(|v| v.as_str()).unwrap_or("");
-        let base64 = resp.get("base64Encoded").and_then(|v| v.as_bool()).unwrap_or(false);
+        let base64 = resp
+            .get("base64Encoded")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         let written = if base64 {
             let bytes = base64::engine::general_purpose::STANDARD
                 .decode(data)
@@ -76,7 +82,8 @@ pub(crate) fn js_page_read_stream(ctx: &mut ScopedContext, cc: CallContext) -> J
                 cx.throw_internal_error(&e);
                 -1
             })?;
-            cx.create_string_from_utf8(text.into_bytes()).map(JSValue::from)
+            cx.create_string_from_utf8(text.into_bytes())
+                .map(JSValue::from)
         })?;
 
     tokio::spawn(async move {

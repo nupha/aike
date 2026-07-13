@@ -18,13 +18,18 @@ use zuqe::{
     ScopedContext, def_native_object,
 };
 
-use crate::USER_CLASS_DEFS;
-use crate::html::HtmlConvertMode;
-use crate::whatwg::fetch::body::{
-    body_to_bytes, drain_body, make_body_stream, BODY_AS_BYTES, BODY_AS_JSON, BODY_AS_TEXT,
+use crate::{
+    USER_CLASS_DEFS,
+    html::HtmlConvertMode,
+    whatwg::fetch::{
+        body::{
+            BODY_AS_BYTES, BODY_AS_JSON, BODY_AS_TEXT, body_to_bytes, drain_body,
+            make_body_async_iterator,
+        },
+        headers::{HeaderList, HeadersPayload, JSHeaders, header_list_from_js},
+        transport::TransportResponse,
+    },
 };
-use crate::whatwg::fetch::headers::{HeaderList, HeadersPayload, JSHeaders, header_list_from_js};
-use crate::whatwg::fetch::transport::TransportResponse;
 
 /// Payload backing a `Response` instance.
 pub(crate) struct ResponsePayload {
@@ -254,7 +259,13 @@ fn js_response_static_redirect(ctx: &mut ScopedContext, cc: CallContext) -> JSRe
         ctx.throw_type_error("Response.redirect requires a url");
         return Err(-1);
     }
-    let url = cc.arg(0).to_string(ctx)?.content().encode_utf8(false).to_string();
+    let url = cc
+        .arg(0)
+        .to_string(ctx)?
+        .content()
+        .encode_utf8(false)
+        .to_string();
+
     let status = if cc.length() > 1 {
         let s = cc.arg(1).to_number(ctx)?.to_i32();
         if ![301, 302, 303, 307, 308].contains(&s) {
@@ -304,8 +315,12 @@ pub(crate) fn register_response_statics(
         ctx.create_native_function(Callback::Func(js_response_static_error), "error", 0, 0)?;
     ctor.define_property_value_str(ctx, "error", error_fn.into(), zuqe::JS_PROP_C_W_E)?;
 
-    let redirect_fn =
-        ctx.create_native_function(Callback::Func(js_response_static_redirect), "redirect", 2, 0)?;
+    let redirect_fn = ctx.create_native_function(
+        Callback::Func(js_response_static_redirect),
+        "redirect",
+        2,
+        0,
+    )?;
     ctor.define_property_value_str(ctx, "redirect", redirect_fn.into(), zuqe::JS_PROP_C_W_E)?;
 
     Ok(())
@@ -315,83 +330,65 @@ pub(crate) fn register_response_statics(
 // Spec property getters
 // ---------------------------------------------------------------------------
 
-fn js_response_type_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+/// Magic constants distinguishing which field the shared `js_response_getter` returns.
+const RESPONSE_GET_TYPE: i16 = 0;
+const RESPONSE_GET_URL: i16 = 1;
+const RESPONSE_GET_REDIRECTED: i16 = 2;
+const RESPONSE_GET_STATUS: i16 = 3;
+const RESPONSE_GET_OK: i16 = 4;
+const RESPONSE_GET_STATUS_TEXT: i16 = 5;
+const RESPONSE_GET_CONTENT_TYPE: i16 = 6;
+const RESPONSE_GET_CONTENT_LENGTH: i16 = 7;
+const RESPONSE_GET_HEADERS: i16 = 8;
+const RESPONSE_GET_BODY_USED: i16 = 9;
+
+/// Single getter for all `Response` data properties, dispatched by `cc.magic()`.
+fn js_response_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let kind = cc.magic() as i16;
     let this = cc.this();
     let p = get_response_payload(ctx, &this)?;
-    let s = ctx.create_string_from_utf8(p.resp_type.as_bytes().to_vec())?;
-    Ok(s.into())
-}
 
-fn js_response_url_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let this = cc.this();
-    let p = get_response_payload(ctx, &this)?;
-    let s = ctx.create_string_from_utf8(p.url.as_bytes().to_vec())?;
-    Ok(s.into())
+    match kind {
+        RESPONSE_GET_TYPE => {
+            let s = ctx.create_string_from_utf8(p.resp_type.as_bytes().to_vec())?;
+            Ok(s.into())
+        }
+        RESPONSE_GET_URL => {
+            let s = ctx.create_string_from_utf8(p.url.as_bytes().to_vec())?;
+            Ok(s.into())
+        }
+        RESPONSE_GET_REDIRECTED => Ok(JSValue::Bool(p.redirected)),
+        RESPONSE_GET_STATUS => Ok(JSValue::from(p.status as i32)),
+        RESPONSE_GET_OK => Ok(JSValue::Bool(p.status >= 200 && p.status < 300)),
+        RESPONSE_GET_STATUS_TEXT => {
+            let s = ctx.create_string_from_utf8(p.status_text.as_bytes().to_vec())?;
+            Ok(s.into())
+        }
+        RESPONSE_GET_CONTENT_TYPE => {
+            let s = ctx.create_string_from_utf8(p.content_type.as_bytes().to_vec())?;
+            Ok(s.into())
+        }
+        RESPONSE_GET_CONTENT_LENGTH => Ok(p
+            .content_length
+            .map(|v| JSValue::from(v as f64))
+            .unwrap_or(JSValue::NULL)),
+        RESPONSE_GET_HEADERS => {
+            let headers = JSHeaders::new_instance(
+                ctx,
+                JSValue::UNDEFINED,
+                HeadersPayload {
+                    list: HeaderList::from_vec(p.headers.clone()),
+                },
+            )?;
+            Ok(headers.into())
+        }
+        RESPONSE_GET_BODY_USED => Ok(JSValue::Bool(p.body_consumed)),
+        _ => {
+            ctx.throw_type_error("unknown Response getter");
+            Err(-1)
+        }
+    }
 }
-
-fn js_response_redirected_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let this = cc.this();
-    let p = get_response_payload(ctx, &this)?;
-    Ok(JSValue::Bool(p.redirected))
-}
-
-fn js_response_status_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let this = cc.this();
-    let p = get_response_payload(ctx, &this)?;
-    Ok(JSValue::from(p.status as i32))
-}
-
-fn js_response_ok_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let this = cc.this();
-    let p = get_response_payload(ctx, &this)?;
-    Ok(JSValue::Bool(p.status >= 200 && p.status < 300))
-}
-
-fn js_response_status_text_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let this = cc.this();
-    let p = get_response_payload(ctx, &this)?;
-    let s = ctx.create_string_from_utf8(p.status_text.as_bytes().to_vec())?;
-    Ok(s.into())
-}
-
-fn js_response_content_type_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let this = cc.this();
-    let p = get_response_payload(ctx, &this)?;
-    let s = ctx.create_string_from_utf8(p.content_type.as_bytes().to_vec())?;
-    Ok(s.into())
-}
-
-fn js_response_content_length_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let this = cc.this();
-    let p = get_response_payload(ctx, &this)?;
-    Ok(p
-        .content_length
-        .map(|v| JSValue::from(v as f64))
-        .unwrap_or(JSValue::NULL))
-}
-
-fn js_response_headers_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let this = cc.this();
-    let p = get_response_payload(ctx, &this)?;
-    let headers = JSHeaders::new_instance(
-        ctx,
-        JSValue::UNDEFINED,
-        HeadersPayload {
-            list: HeaderList::from_vec(p.headers.clone()),
-        },
-    )?;
-    Ok(headers.into())
-}
-
-fn js_response_body_used_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let this = cc.this();
-    let p = get_response_payload(ctx, &this)?;
-    Ok(JSValue::Bool(p.body_consumed))
-}
-
-// ---------------------------------------------------------------------------
-// Body mixin
-// ---------------------------------------------------------------------------
 
 fn js_response_body(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut this = cc.this();
@@ -402,15 +399,16 @@ fn js_response_body(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 Ok(rx) => Some(rx),
                 Err(_) => None,
             }
-        } else if p.resp_type == "error" || p.resp_type == "opaque" || p.resp_type == "opaqueredirect" {
+        } else if matches!(p.resp_type.as_str(), "error" | "opaque" | "opaqueredirect") {
             // null body
             return Ok(JSValue::NULL);
         } else {
             None
         }
     };
+
     match rx {
-        Some(rx) => make_body_stream(ctx, rx),
+        Some(rx) => make_body_async_iterator(ctx, rx),
         None => {
             ctx.throw_type_error("body already consumed");
             Err(-1)
@@ -427,14 +425,17 @@ fn js_response_body_as(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         let is_html = p.content_type.starts_with("text/html");
         let convert = if magic == BODY_AS_TEXT && is_html && cc.length() > 0 {
             let arg0 = cc.arg(0);
-            arg0.to_string(ctx).ok().and_then(|s| match s.content().encode_utf8(false).as_ref() {
-                "strip" => Some(HtmlConvertMode::Strip),
-                "markdown" => Some(HtmlConvertMode::Markdown),
-                _ => None,
-            })
+            arg0.to_string(ctx)
+                .ok()
+                .and_then(|s| match s.content().encode_utf8(false).as_ref() {
+                    "strip" => Some(HtmlConvertMode::Strip),
+                    "markdown" => Some(HtmlConvertMode::Markdown),
+                    _ => None,
+                })
         } else {
             None
         };
+
         if p.resp.is_none() && p.synthetic_body.is_none() {
             (None, convert)
         } else {
@@ -459,10 +460,6 @@ fn js_response_close(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let _ = data.synthetic_body.take();
     Ok(JSValue::UNDEFINED)
 }
-
-// ---------------------------------------------------------------------------
-// clone()
-// ---------------------------------------------------------------------------
 
 fn js_response_clone(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut this = cc.this();
@@ -503,26 +500,52 @@ fn js_response_clone(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     JSResponse::new_instance(ctx, cc.this(), payload).map(JSValue::from)
 }
 
-// ---------------------------------------------------------------------------
-// Registration
-// ---------------------------------------------------------------------------
-
 const RESPONSE_PROTO: &[FieldDef] = &[
-    FieldDef::GETSET("type", Some(js_response_type_getter), None, 0),
-    FieldDef::GETSET("url", Some(js_response_url_getter), None, 0),
-    FieldDef::GETSET("redirected", Some(js_response_redirected_getter), None, 0),
-    FieldDef::GETSET("status", Some(js_response_status_getter), None, 0),
-    FieldDef::GETSET("ok", Some(js_response_ok_getter), None, 0),
-    FieldDef::GETSET("statusText", Some(js_response_status_text_getter), None, 0),
-    FieldDef::GETSET("contentType", Some(js_response_content_type_getter), None, 0),
+    FieldDef::GETSET("type", Some(js_response_getter), None, RESPONSE_GET_TYPE),
+    FieldDef::GETSET("url", Some(js_response_getter), None, RESPONSE_GET_URL),
+    FieldDef::GETSET(
+        "redirected",
+        Some(js_response_getter),
+        None,
+        RESPONSE_GET_REDIRECTED,
+    ),
+    FieldDef::GETSET(
+        "status",
+        Some(js_response_getter),
+        None,
+        RESPONSE_GET_STATUS,
+    ),
+    FieldDef::GETSET("ok", Some(js_response_getter), None, RESPONSE_GET_OK),
+    FieldDef::GETSET(
+        "statusText",
+        Some(js_response_getter),
+        None,
+        RESPONSE_GET_STATUS_TEXT,
+    ),
+    FieldDef::GETSET(
+        "contentType",
+        Some(js_response_getter),
+        None,
+        RESPONSE_GET_CONTENT_TYPE,
+    ),
     FieldDef::GETSET(
         "contentLength",
-        Some(js_response_content_length_getter),
+        Some(js_response_getter),
         None,
-        0,
+        RESPONSE_GET_CONTENT_LENGTH,
     ),
-    FieldDef::GETSET("headers", Some(js_response_headers_getter), None, 0),
-    FieldDef::GETSET("bodyUsed", Some(js_response_body_used_getter), None, 0),
+    FieldDef::GETSET(
+        "headers",
+        Some(js_response_getter),
+        None,
+        RESPONSE_GET_HEADERS,
+    ),
+    FieldDef::GETSET(
+        "bodyUsed",
+        Some(js_response_getter),
+        None,
+        RESPONSE_GET_BODY_USED,
+    ),
     FieldDef::GETSET("body", Some(js_response_body), None, 0),
     FieldDef::FUNC("bytes", 0, js_response_body_as, BODY_AS_BYTES as i16),
     FieldDef::FUNC("text", 0, js_response_body_as, BODY_AS_TEXT as i16),
@@ -544,6 +567,3 @@ def_native_object!(
 fn register_class_response(rt: &mut Runtime) -> Result<ClassID, i32> {
     JSResponse::register(rt)
 }
-
-// Re-export so the legacy `request()` global can keep returning this class.
-pub(crate) use JSResponse as HttpResponse;

@@ -11,7 +11,10 @@ use zuqe::{
     builtins::{promise::Promise, typed_array::TypedArray},
 };
 
-use crate::{aike::{JSFileHandle, make_stats}, helpers::canonicalize_path};
+use crate::{
+    aike::{JSFileHandle, make_stats},
+    helpers::canonicalize_path,
+};
 
 thread_local! {
     /// Sandbox restriction: limits all fs access to this directory.

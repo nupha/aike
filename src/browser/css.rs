@@ -7,7 +7,10 @@
 //! node resolved from a selector.
 
 use serde_json::Value;
-use zuqe::{CallContext, JSResult, ScopedContext, builtins::promise::{Promise, PromiseResultSlot}};
+use zuqe::{
+    CallContext, JSResult, ScopedContext,
+    builtins::promise::{Promise, PromiseResultSlot},
+};
 
 use crate::browser::{
     class_page::{get_page_payload, js_from_json_value},
@@ -58,10 +61,9 @@ pub(crate) fn js_page_get_computed_style(ctx: &mut ScopedContext, cc: CallContex
                 .unwrap_or_default();
             let mut map = serde_json::Map::new();
             for e in &entries {
-                if let (Some(name), Some(value)) = (
-                    e.get("name").and_then(|v| v.as_str()),
-                    e.get("value"),
-                ) {
+                if let (Some(name), Some(value)) =
+                    (e.get("name").and_then(|v| v.as_str()), e.get("value"))
+                {
                     map.insert(name.to_string(), value.clone());
                 }
             }

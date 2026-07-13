@@ -75,7 +75,9 @@ impl TimerState {
 
     /// Insert an entry keeping `entries` sorted by `deadline` ascending.
     fn insert_sorted(&mut self, entry: TimerEntry) {
-        let pos = self.entries.partition_point(|e| e.deadline <= entry.deadline);
+        let pos = self
+            .entries
+            .partition_point(|e| e.deadline <= entry.deadline);
         self.entries.insert(pos, entry);
     }
 }
@@ -127,7 +129,11 @@ fn start_timer_task(ctx: &mut ScopedContext) {
 
             // Fast path: if the nearest timer (`entries[0]`) isn't due yet, or
             // there are no timers at all, bail.  Costs a single comparison.
-            match TIMER_STATE.with_borrow(|s| s.as_ref().and_then(|s| s.entries.first()).map(|e| e.deadline)) {
+            match TIMER_STATE.with_borrow(|s| {
+                s.as_ref()
+                    .and_then(|s| s.entries.first())
+                    .map(|e| e.deadline)
+            }) {
                 None => {
                     TIMER_STATE.with_borrow_mut(|s| {
                         s.take();
@@ -143,8 +149,8 @@ fn start_timer_task(ctx: &mut ScopedContext) {
             // each poll fires all due timers in order (catch-up).
             loop {
                 // Peek the nearest timer and, if due, pull it out.
-                let step = TIMER_STATE.with_borrow_mut(
-                    |opt| -> Option<(Object, Option<u64>, u32)> {
+                let step =
+                    TIMER_STATE.with_borrow_mut(|opt| -> Option<(Object, Option<u64>, u32)> {
                         let s = opt.as_mut()?;
                         let e = s.entries.first_mut()?;
                         if e.deadline > now {
@@ -164,8 +170,7 @@ fn start_timer_task(ctx: &mut ScopedContext) {
                             // the callback, since it may clear itself.
                             Some(ms) => Some((cb, Some(ms), id)),
                         }
-                    },
-                );
+                    });
 
                 let (cb, interval_ms, id) = match step {
                     Some(x) => x,

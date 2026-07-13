@@ -12,9 +12,7 @@ use std::cell::RefCell;
 use base64::Engine as _;
 use crossbeam::channel;
 use serde_json::Value;
-use zuqe::{
-    CallContext, JSResult, JSValue, ScopedContext, JS_PROP_C_W_E,
-};
+use zuqe::{CallContext, JS_PROP_C_W_E, JSResult, JSValue, ScopedContext};
 
 use crate::browser::{
     cdp_network,
@@ -91,8 +89,8 @@ pub(crate) fn js_page_set_request_interception(
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string());
                 let params = msg.get("params").cloned().unwrap_or(Value::Null);
-                let cb = FETCH_CALLBACK
-                    .with(|m| sess.as_ref().and_then(|s| m.borrow().get(s).cloned()));
+                let cb =
+                    FETCH_CALLBACK.with(|m| sess.as_ref().and_then(|s| m.borrow().get(s).cloned()));
                 if let (Some(cb), Some(_sess)) = (cb, sess) {
                     let mut obj = cx.create_base_object().ok();
                     if let Some(o) = obj.as_mut() {
@@ -107,14 +105,9 @@ pub(crate) fn js_page_set_request_interception(
                             }
                         }
                         if let Some(req) = params.get("request") {
-                            let req_val =
-                                js_from_json_value(cx, req).unwrap_or(JSValue::UNDEFINED);
-                            let _ = o.define_property_value_str(
-                                cx,
-                                "request",
-                                req_val,
-                                JS_PROP_C_W_E,
-                            );
+                            let req_val = js_from_json_value(cx, req).unwrap_or(JSValue::UNDEFINED);
+                            let _ =
+                                o.define_property_value_str(cx, "request", req_val, JS_PROP_C_W_E);
                         }
                         for key in ["frameId", "resourceType", "networkId"] {
                             if let Some(v) = params.get(key).and_then(|x| x.as_str()) {
@@ -293,7 +286,10 @@ fn js_obj_to_json(ctx: &mut ScopedContext, obj: &mut zuqe::Object) -> Value {
                 .map(|s| s.content().encode_utf8(false).to_string())
                 .unwrap_or_default();
             if let Some(s) = v.as_string() {
-                map.insert(key, Value::String(s.content().encode_utf8(false).to_string()));
+                map.insert(
+                    key,
+                    Value::String(s.content().encode_utf8(false).to_string()),
+                );
             } else if let Some(n) = v.to_number(ctx).ok() {
                 map.insert(key, Value::from(n.to_f64()));
             } else if v.is_bool() {

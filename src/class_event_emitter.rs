@@ -8,11 +8,11 @@ use std::{
 
 use linkme::distributed_slice;
 use zuqe::{
-    def_native_object, gc_lite::GcTrace, Array, CallContext, ClassCtorDef, ClassID, FieldDef,
-    JSResult, JSValue, Object, Runtime, ScopedContext, JS_PROP_C_W_E,
+    Array, CallContext, ClassCtorDef, ClassID, FieldDef, JS_PROP_C_W_E, JSResult, JSValue, Object,
+    Runtime, ScopedContext, def_native_object, gc_lite::GcTrace,
 };
 
-use crate::{aike::signal::signal_number, USER_CLASS_DEFS};
+use crate::{USER_CLASS_DEFS, aike::signal::signal_number};
 
 #[derive(Debug)]
 pub(crate) struct EmitterPayload {

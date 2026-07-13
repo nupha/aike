@@ -9,9 +9,7 @@
 use std::cell::RefCell;
 
 use crossbeam::channel;
-use zuqe::{
-    CallContext, Callback, JSResult, JSValue, JS_PROP_C_W_E, ScopedContext,
-};
+use zuqe::{CallContext, Callback, JS_PROP_C_W_E, JSResult, JSValue, ScopedContext};
 
 use crate::browser::{
     cdp::CdpClient,
@@ -119,12 +117,22 @@ pub(crate) fn js_browser_handle_certificate_error(
                     );
                     if let Some(et) = params.get("errorType").and_then(|v| v.as_str()) {
                         if let Ok(s) = cx.create_string_from_utf8(et.as_bytes().to_vec()) {
-                            let _ = o.define_property_value_str(cx, "errorType", s.into(), JS_PROP_C_W_E);
+                            let _ = o.define_property_value_str(
+                                cx,
+                                "errorType",
+                                s.into(),
+                                JS_PROP_C_W_E,
+                            );
                         }
                     }
                     if let Some(u) = params.get("requestURL").and_then(|v| v.as_str()) {
                         if let Ok(s) = cx.create_string_from_utf8(u.as_bytes().to_vec()) {
-                            let _ = o.define_property_value_str(cx, "requestURL", s.into(), JS_PROP_C_W_E);
+                            let _ = o.define_property_value_str(
+                                cx,
+                                "requestURL",
+                                s.into(),
+                                JS_PROP_C_W_E,
+                            );
                         }
                     }
                     // Attach the accept(bool) method.

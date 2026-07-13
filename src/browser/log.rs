@@ -71,10 +71,13 @@ pub(crate) fn js_page_on_log(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
         "log",
         rx,
         move |msg, cx| {
-            let sess = msg.get("sessionId").and_then(|v| v.as_str()).map(|s| s.to_string());
+            let sess = msg
+                .get("sessionId")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
             let params = msg.get("params").cloned().unwrap_or(Value::Null);
-            let cb = CONSOLE_CALLBACK
-                .with(|m| sess.as_ref().and_then(|s| m.borrow().get(s).cloned()));
+            let cb =
+                CONSOLE_CALLBACK.with(|m| sess.as_ref().and_then(|s| m.borrow().get(s).cloned()));
             if let (Some(cb), Some(_sess)) = (cb, sess) {
                 let obj = js_from_json_value(cx, &params).unwrap_or(JSValue::UNDEFINED);
                 let _ = cb.call(cx, JSValue::UNDEFINED, &[obj]);
@@ -95,10 +98,7 @@ thread_local! {
 
 /// `page.getConsoleMessages(clear?)` — return the buffered console/log entries
 /// for this page. Pass `true` to clear the buffer after reading.
-pub(crate) fn js_page_get_console_messages(
-    ctx: &mut ScopedContext,
-    cc: CallContext,
-) -> JSResult {
+pub(crate) fn js_page_get_console_messages(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let clear = cc.length() > 0 && cc.arg(0).to_bool().unwrap_or(false);
     let this = cc.this();
     let payload = get_page_payload(ctx, &this)?;

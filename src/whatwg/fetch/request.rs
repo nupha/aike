@@ -11,10 +11,16 @@ use zuqe::{
     def_native_object,
 };
 
-use crate::USER_CLASS_DEFS;
-use crate::whatwg::abort::JSAbortSignal;
-use crate::whatwg::fetch::body::{body_to_bytes, drain_body, make_body_stream, BODY_AS_BYTES};
-use crate::whatwg::fetch::headers::{HeaderList, HeadersPayload, JSHeaders, header_list_from_js};
+use crate::{
+    USER_CLASS_DEFS,
+    whatwg::{
+        abort::JSAbortSignal,
+        fetch::{
+            body::{BODY_AS_BYTES, body_to_bytes, drain_body, make_body_async_iterator},
+            headers::{HeaderList, HeadersPayload, JSHeaders, header_list_from_js},
+        },
+    },
+};
 
 pub(crate) struct RequestPayload {
     pub(crate) method: String,
@@ -70,7 +76,10 @@ fn js_request_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
     let mut signal: Option<JSValue> = None;
 
     // Inherit from a Request input.
-    if let Some(p) = input.as_native_object::<JSRequest>().and_then(|o| o.payload()) {
+    if let Some(p) = input
+        .as_native_object::<JSRequest>()
+        .and_then(|o| o.payload())
+    {
         url_str = p.url.clone();
         method = p.method.clone();
         header_list = p.headers.clone();
@@ -80,9 +89,17 @@ fn js_request_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
     } else if !input.is_undefined_or_null() {
         let href = input.get_property_str(ctx, "href")?;
         if !href.is_undefined() {
-            url_str = href.to_string(ctx)?.content().encode_utf8(false).to_string();
+            url_str = href
+                .to_string(ctx)?
+                .content()
+                .encode_utf8(false)
+                .to_string();
         } else {
-            url_str = input.to_string(ctx)?.content().encode_utf8(false).to_string();
+            url_str = input
+                .to_string(ctx)?
+                .content()
+                .encode_utf8(false)
+                .to_string();
         }
     }
 
@@ -161,7 +178,10 @@ fn js_request_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
             payload.integrity = str_field(o, "integrity", "");
             let ka = o.get_property_str(ctx, "keepalive")?;
             if !ka.is_undefined() {
-                payload.keepalive = ka.to_number(ctx).map(|n| n.to_f64() != 0.0).unwrap_or(false);
+                payload.keepalive = ka
+                    .to_number(ctx)
+                    .map(|n| n.to_f64() != 0.0)
+                    .unwrap_or(false);
             }
         }
     }
@@ -242,7 +262,7 @@ fn js_req_body(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         }
     };
     match rx {
-        Some(rx) => make_body_stream(ctx, rx),
+        Some(rx) => make_body_async_iterator(ctx, rx),
         None => Ok(JSValue::NULL),
     }
 }
@@ -265,6 +285,7 @@ fn js_req_body_as(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             None
         }
     };
+
     match rx {
         Some(rx) => drain_body(ctx, rx, BODY_AS_BYTES, None),
         None => {
@@ -278,16 +299,13 @@ fn js_req_clone(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut this = cc.this();
     let cloned = {
         let p = get_request_payload_mut(ctx, &mut this)?;
-        if p.body_consumed {
-            None
-        } else {
-            Some(p)
-        }
+        if p.body_consumed { None } else { Some(p) }
     };
     let Some(src) = cloned else {
         ctx.throw_type_error("Cannot clone a Request whose body has already been used");
         return Err(-1);
     };
+
     let synthetic = src.synthetic_body.clone();
     let payload = RequestPayload {
         method: src.method.clone(),

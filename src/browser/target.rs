@@ -96,7 +96,8 @@ pub(crate) fn js_browser_new_context(ctx: &mut ScopedContext, cc: CallContext) -
                 cx.throw_internal_error(&e);
                 -1
             })?;
-            cx.create_string_from_utf8(id.into_bytes()).map(JSValue::from)
+            cx.create_string_from_utf8(id.into_bytes())
+                .map(JSValue::from)
         })?;
 
     tokio::spawn(async move {

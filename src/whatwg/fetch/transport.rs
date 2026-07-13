@@ -61,7 +61,7 @@ pub(crate) async fn perform_request(req: TransportRequest) -> Result<TransportRe
     if req.credentials == "include" || req.credentials == "same-origin" {
         builder = builder.cookie_store(true);
     }
-    
+
     let client = builder.build().map_err(|e| e.to_string())?;
     let method = reqwest::Method::from_bytes(req.method.as_bytes()).unwrap_or(reqwest::Method::GET);
     let mut rb = client.request(method, &req.url).timeout(req.timeout);

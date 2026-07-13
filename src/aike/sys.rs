@@ -4,7 +4,7 @@
 use std::{cell::Cell, process::ExitCode};
 
 use zuqe::{
-    Array, CallContext, EvalFlags, EvalType, JSResult, JSValue, ScopedContext, JS_PROP_C_W_E,
+    Array, CallContext, EvalFlags, EvalType, JS_PROP_C_W_E, JSResult, JSValue, ScopedContext,
 };
 
 pub(super) fn js_cwd(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
@@ -193,7 +193,7 @@ pub(super) fn js_ttyGetWinSize(ctx: &mut ScopedContext, cc: CallContext) -> JSRe
     #[cfg(windows)]
     unsafe {
         use windows_sys::Win32::System::Console::{
-            GetConsoleScreenBufferInfo, CONSOLE_SCREEN_BUFFER_INFO,
+            CONSOLE_SCREEN_BUFFER_INFO, GetConsoleScreenBufferInfo,
         };
 
         let mut info = std::mem::zeroed::<CONSOLE_SCREEN_BUFFER_INFO>();
@@ -258,8 +258,9 @@ pub(super) fn js_ttySetRaw(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
     #[cfg(windows)]
     unsafe {
         use windows_sys::Win32::System::Console::{
-            SetConsoleMode, ENABLE_PROCESSED_OUTPUT, ENABLE_VIRTUAL_TERMINAL_INPUT,
+            ENABLE_PROCESSED_OUTPUT, ENABLE_VIRTUAL_TERMINAL_INPUT,
             ENABLE_VIRTUAL_TERMINAL_PROCESSING, ENABLE_WINDOW_INPUT, ENABLE_WRAP_AT_EOL_OUTPUT,
+            SetConsoleMode,
         };
 
         SetConsoleMode(

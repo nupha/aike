@@ -10,7 +10,7 @@ use std::{
 
 use crossbeam::channel;
 use zuqe::{
-    CallContext, FieldDef, JSResult, JSValue, JS_PROP_ENUMERABLE, ScopedContext,
+    CallContext, FieldDef, JS_PROP_ENUMERABLE, JSResult, JSValue, ScopedContext,
     gc_lite::{GcTrace, GcTraceCtx},
 };
 
@@ -182,30 +182,36 @@ pub(super) fn js_signals(ctx: &mut ScopedContext) -> Result<JSValue, i32> {
     let mut obj = ctx.create_base_object()?;
 
     // Cross-platform signals (POSIX-mandated, available on all supported platforms)
-    obj.install_fields(ctx, &[
-        FieldDef::INT32("SIGINT", libc::SIGINT, JS_PROP_ENUMERABLE),
-        FieldDef::INT32("SIGABRT", libc::SIGABRT, JS_PROP_ENUMERABLE),
-        FieldDef::INT32("SIGFPE", libc::SIGFPE, JS_PROP_ENUMERABLE),
-        FieldDef::INT32("SIGILL", libc::SIGILL, JS_PROP_ENUMERABLE),
-        FieldDef::INT32("SIGSEGV", libc::SIGSEGV, JS_PROP_ENUMERABLE),
-        FieldDef::INT32("SIGTERM", libc::SIGTERM, JS_PROP_ENUMERABLE),
-    ])?;
+    obj.install_fields(
+        ctx,
+        &[
+            FieldDef::INT32("SIGINT", libc::SIGINT, JS_PROP_ENUMERABLE),
+            FieldDef::INT32("SIGABRT", libc::SIGABRT, JS_PROP_ENUMERABLE),
+            FieldDef::INT32("SIGFPE", libc::SIGFPE, JS_PROP_ENUMERABLE),
+            FieldDef::INT32("SIGILL", libc::SIGILL, JS_PROP_ENUMERABLE),
+            FieldDef::INT32("SIGSEGV", libc::SIGSEGV, JS_PROP_ENUMERABLE),
+            FieldDef::INT32("SIGTERM", libc::SIGTERM, JS_PROP_ENUMERABLE),
+        ],
+    )?;
 
     // Unix-only signals
     #[cfg(not(windows))]
-    obj.install_fields(ctx, &[
-        FieldDef::INT32("SIGQUIT", libc::SIGQUIT, JS_PROP_ENUMERABLE),
-        FieldDef::INT32("SIGPIPE", libc::SIGPIPE, JS_PROP_ENUMERABLE),
-        FieldDef::INT32("SIGALRM", libc::SIGALRM, JS_PROP_ENUMERABLE),
-        FieldDef::INT32("SIGUSR1", libc::SIGUSR1, JS_PROP_ENUMERABLE),
-        FieldDef::INT32("SIGUSR2", libc::SIGUSR2, JS_PROP_ENUMERABLE),
-        FieldDef::INT32("SIGCHLD", libc::SIGCHLD, JS_PROP_ENUMERABLE),
-        FieldDef::INT32("SIGCONT", libc::SIGCONT, JS_PROP_ENUMERABLE),
-        FieldDef::INT32("SIGSTOP", libc::SIGSTOP, JS_PROP_ENUMERABLE),
-        FieldDef::INT32("SIGTSTP", libc::SIGTSTP, JS_PROP_ENUMERABLE),
-        FieldDef::INT32("SIGTTIN", libc::SIGTTIN, JS_PROP_ENUMERABLE),
-        FieldDef::INT32("SIGTTOU", libc::SIGTTOU, JS_PROP_ENUMERABLE),
-    ])?;
+    obj.install_fields(
+        ctx,
+        &[
+            FieldDef::INT32("SIGQUIT", libc::SIGQUIT, JS_PROP_ENUMERABLE),
+            FieldDef::INT32("SIGPIPE", libc::SIGPIPE, JS_PROP_ENUMERABLE),
+            FieldDef::INT32("SIGALRM", libc::SIGALRM, JS_PROP_ENUMERABLE),
+            FieldDef::INT32("SIGUSR1", libc::SIGUSR1, JS_PROP_ENUMERABLE),
+            FieldDef::INT32("SIGUSR2", libc::SIGUSR2, JS_PROP_ENUMERABLE),
+            FieldDef::INT32("SIGCHLD", libc::SIGCHLD, JS_PROP_ENUMERABLE),
+            FieldDef::INT32("SIGCONT", libc::SIGCONT, JS_PROP_ENUMERABLE),
+            FieldDef::INT32("SIGSTOP", libc::SIGSTOP, JS_PROP_ENUMERABLE),
+            FieldDef::INT32("SIGTSTP", libc::SIGTSTP, JS_PROP_ENUMERABLE),
+            FieldDef::INT32("SIGTTIN", libc::SIGTTIN, JS_PROP_ENUMERABLE),
+            FieldDef::INT32("SIGTTOU", libc::SIGTTOU, JS_PROP_ENUMERABLE),
+        ],
+    )?;
 
     Ok(obj.into())
 }

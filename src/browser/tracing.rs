@@ -11,12 +11,12 @@ use std::time::Duration;
 
 use serde_json::Value;
 use tokio::sync::broadcast;
-use zuqe::{CallContext, JSResult, JSValue, ScopedContext, builtins::promise::{Promise, PromiseResultSlot}};
-
-use crate::browser::{
-    class_page::get_page_payload,
-    io::read_io_stream,
+use zuqe::{
+    CallContext, JSResult, JSValue, ScopedContext,
+    builtins::promise::{Promise, PromiseResultSlot},
 };
+
+use crate::browser::{class_page::get_page_payload, io::read_io_stream};
 
 /// `page.startTracing(categories?)` — `Tracing.start`.
 /// `categories` is a comma-separated CDP category filter (default: all).
@@ -82,7 +82,8 @@ pub(crate) fn js_page_stop_tracing(ctx: &mut ScopedContext, cc: CallContext) -> 
                 cx.throw_internal_error(&e);
                 -1
             })?;
-            cx.create_string_from_utf8(text.into_bytes()).map(JSValue::from)
+            cx.create_string_from_utf8(text.into_bytes())
+                .map(JSValue::from)
         })?;
 
     tokio::spawn(async move {
@@ -121,7 +122,9 @@ pub(crate) fn js_page_stop_tracing(ctx: &mut ScopedContext, cc: CallContext) -> 
         }
 
         let trace = match stream_handle {
-            Some(h) => read_io_stream(&client, &session_id, &h).await.unwrap_or_default(),
+            Some(h) => read_io_stream(&client, &session_id, &h)
+                .await
+                .unwrap_or_default(),
             None => String::new(),
         };
         result_slot.commit(Ok(trace)).ok();

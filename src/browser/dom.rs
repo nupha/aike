@@ -16,7 +16,9 @@ use zuqe::{
 };
 
 use crate::browser::{
-    cdp::CdpClient, cdp_input, class_page::{get_page_payload, js_from_json_value},
+    cdp::CdpClient,
+    cdp_input,
+    class_page::{get_page_payload, js_from_json_value},
 };
 
 /// Enable the DOM domain and resolve a CSS selector to a `nodeId`.
@@ -370,7 +372,12 @@ pub(crate) fn js_page_click(ctx: &mut ScopedContext, cc: CallContext) -> JSResul
                 .and_then(|v| v.as_array())
                 .ok_or_else(|| "no box model content".to_string())?;
             let xs: Vec<f64> = quad.iter().step_by(2).filter_map(|v| v.as_f64()).collect();
-            let ys: Vec<f64> = quad.iter().skip(1).step_by(2).filter_map(|v| v.as_f64()).collect();
+            let ys: Vec<f64> = quad
+                .iter()
+                .skip(1)
+                .step_by(2)
+                .filter_map(|v| v.as_f64())
+                .collect();
             if xs.len() < 2 || ys.len() < 2 {
                 return Err("malformed box model".to_string());
             }
@@ -459,7 +466,8 @@ pub(crate) fn js_page_get_node_value(ctx: &mut ScopedContext, cc: CallContext) -
                 cx.throw_internal_error(&e);
                 -1
             })?;
-            cx.create_string_from_utf8(html.into_bytes()).map(JSValue::from)
+            cx.create_string_from_utf8(html.into_bytes())
+                .map(JSValue::from)
         })?;
 
     tokio::spawn(async move {

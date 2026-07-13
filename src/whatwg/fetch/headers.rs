@@ -36,7 +36,11 @@ impl HeaderList {
     /// header as a comma-separated list.
     pub(crate) fn append(&mut self, name: &str, value: &str) {
         let lower = name.to_lowercase();
-        if let Some(pos) = self.list.iter().position(|(k, _)| k.to_lowercase() == lower) {
+        if let Some(pos) = self
+            .list
+            .iter()
+            .position(|(k, _)| k.to_lowercase() == lower)
+        {
             self.list[pos].1.push_str(", ");
             self.list[pos].1.push_str(value);
         } else {
@@ -81,10 +85,12 @@ impl HeaderList {
 /// WHATWG valid header name = 1+ `tchar` (token chars).
 fn is_valid_header_name(name: &str) -> bool {
     !name.is_empty()
-        && name.bytes().all(|b| matches!(b,
+        && name.bytes().all(|b| {
+            matches!(b,
             b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9'
             | b'!' | b'#' | b'$' | b'%' | b'&' | b'\'' | b'*'
-            | b'+' | b'-' | b'.' | b'^' | b'_' | b'`' | b'|' | b'~'))
+            | b'+' | b'-' | b'.' | b'^' | b'_' | b'`' | b'|' | b'~')
+        })
 }
 
 /// WHATWG valid header value: no control characters (0x00-0x1F, 0x7F).
@@ -135,8 +141,14 @@ fn get_headers_mut<'a>(
 
 /// Build a `HeaderList` from a JS init: a Headers instance, an array of
 /// `[name, value]` pairs, or a plain record object.
-pub(crate) fn header_list_from_js(ctx: &mut ScopedContext, val: &mut JSValue) -> Result<HeaderList, i32> {
-    if let Some(h) = val.as_native_object::<JSHeaders>().and_then(|o| o.payload()) {
+pub(crate) fn header_list_from_js(
+    ctx: &mut ScopedContext,
+    val: &mut JSValue,
+) -> Result<HeaderList, i32> {
+    if let Some(h) = val
+        .as_native_object::<JSHeaders>()
+        .and_then(|o| o.payload())
+    {
         return Ok(h.list.clone());
     }
     let mut list = HeaderList::new();
@@ -144,10 +156,8 @@ pub(crate) fn header_list_from_js(ctx: &mut ScopedContext, val: &mut JSValue) ->
         return Ok(list);
     }
     if let Some(obj) = val.as_object_mut() {
-        let pks = obj.get_own_property_names(
-            ctx,
-            zuqe::JS_GPN_ENUM_ONLY | zuqe::JS_GPN_STR_OR_INT_MASK,
-        )?;
+        let pks =
+            obj.get_own_property_names(ctx, zuqe::JS_GPN_ENUM_ONLY | zuqe::JS_GPN_STR_OR_INT_MASK)?;
         for pk in pks.iter() {
             let elem = obj.get_property(ctx, pk.atom)?;
             if elem.is_array(ctx)? {
@@ -205,8 +215,18 @@ fn js_headers_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
 fn js_headers_append(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut this = cc.this();
     let h = get_headers_mut(ctx, &mut this)?;
-    let name = cc.arg(0).to_string(ctx)?.content().encode_utf8(false).to_string();
-    let value = cc.arg(1).to_string(ctx)?.content().encode_utf8(false).to_string();
+    let name = cc
+        .arg(0)
+        .to_string(ctx)?
+        .content()
+        .encode_utf8(false)
+        .to_string();
+    let value = cc
+        .arg(1)
+        .to_string(ctx)?
+        .content()
+        .encode_utf8(false)
+        .to_string();
     check_header_name(ctx, &name)?;
     let value = value.trim().to_string();
     check_header_value(ctx, &value)?;
@@ -217,7 +237,12 @@ fn js_headers_append(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 fn js_headers_delete(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut this = cc.this();
     let h = get_headers_mut(ctx, &mut this)?;
-    let name = cc.arg(0).to_string(ctx)?.content().encode_utf8(false).to_string();
+    let name = cc
+        .arg(0)
+        .to_string(ctx)?
+        .content()
+        .encode_utf8(false)
+        .to_string();
     check_header_name(ctx, &name)?;
     h.list.delete(&name);
     Ok(JSValue::UNDEFINED)
@@ -226,7 +251,12 @@ fn js_headers_delete(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 fn js_headers_get(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let h = get_headers(ctx, &this)?;
-    let name = cc.arg(0).to_string(ctx)?.content().encode_utf8(false).to_string();
+    let name = cc
+        .arg(0)
+        .to_string(ctx)?
+        .content()
+        .encode_utf8(false)
+        .to_string();
     check_header_name(ctx, &name)?;
     match h.list.get(&name) {
         Some(v) => {
@@ -240,7 +270,12 @@ fn js_headers_get(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 fn js_headers_has(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let h = get_headers(ctx, &this)?;
-    let name = cc.arg(0).to_string(ctx)?.content().encode_utf8(false).to_string();
+    let name = cc
+        .arg(0)
+        .to_string(ctx)?
+        .content()
+        .encode_utf8(false)
+        .to_string();
     check_header_name(ctx, &name)?;
     Ok(JSValue::Bool(h.list.has(&name)))
 }
@@ -248,8 +283,18 @@ fn js_headers_has(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 fn js_headers_set(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut this = cc.this();
     let h = get_headers_mut(ctx, &mut this)?;
-    let name = cc.arg(0).to_string(ctx)?.content().encode_utf8(false).to_string();
-    let value = cc.arg(1).to_string(ctx)?.content().encode_utf8(false).to_string();
+    let name = cc
+        .arg(0)
+        .to_string(ctx)?
+        .content()
+        .encode_utf8(false)
+        .to_string();
+    let value = cc
+        .arg(1)
+        .to_string(ctx)?
+        .content()
+        .encode_utf8(false)
+        .to_string();
     check_header_name(ctx, &name)?;
     let value = value.trim().to_string();
     check_header_value(ctx, &value)?;
@@ -264,7 +309,10 @@ fn js_headers_keys(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         .list
         .entries()
         .iter()
-        .map(|(k, _)| ctx.create_string_from_utf8(k.as_bytes().to_vec()).map(JSValue::from))
+        .map(|(k, _)| {
+            ctx.create_string_from_utf8(k.as_bytes().to_vec())
+                .map(JSValue::from)
+        })
         .collect::<Result<Vec<_>, _>>()?;
     Array::from_values(ctx, names).map(JSValue::from)
 }
@@ -276,7 +324,10 @@ fn js_headers_values(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         .list
         .entries()
         .iter()
-        .map(|(_, v)| ctx.create_string_from_utf8(v.as_bytes().to_vec()).map(JSValue::from))
+        .map(|(_, v)| {
+            ctx.create_string_from_utf8(v.as_bytes().to_vec())
+                .map(JSValue::from)
+        })
         .collect::<Result<Vec<_>, _>>()?;
     Array::from_values(ctx, vals).map(JSValue::from)
 }
@@ -301,7 +352,11 @@ fn js_headers_for_each(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         return Err(-1);
     }
     let cb = cc.arg(0).into_callable(ctx)?;
-    let this_arg = if cc.length() > 1 { cc.arg(1) } else { JSValue::UNDEFINED };
+    let this_arg = if cc.length() > 1 {
+        cc.arg(1)
+    } else {
+        JSValue::UNDEFINED
+    };
     for (k, v) in h.list.entries() {
         let k_js = ctx.create_string_from_utf8(k.as_bytes().to_vec())?;
         let v_js = ctx.create_string_from_utf8(v.as_bytes().to_vec())?;

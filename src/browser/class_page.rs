@@ -260,7 +260,12 @@ const PAGE_PROTO: &[FieldDef] = &[
     ),
     // Overlay domain (debug highlight)
     FieldDef::FUNC("highlight", 2, super::overlay::js_page_highlight, 0),
-    FieldDef::FUNC("hideHighlight", 0, super::overlay::js_page_hide_highlight, 0),
+    FieldDef::FUNC(
+        "hideHighlight",
+        0,
+        super::overlay::js_page_hide_highlight,
+        0,
+    ),
     // CSS domain
     FieldDef::FUNC(
         "getComputedStyle",

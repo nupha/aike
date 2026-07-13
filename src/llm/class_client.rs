@@ -473,9 +473,10 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
                                         // Since we only buffer tool_calls here, emit that text now —
                                         // otherwise it is lost when finish_reason arrives in a later,
                                         // content-less chunk.
-                                        let has_finish = json[OUTMSG_FIELD_CHOICES][0]["finish_reason"]
-                                            .as_str()
-                                            .is_some();
+                                        let has_finish =
+                                            json[OUTMSG_FIELD_CHOICES][0]["finish_reason"]
+                                                .as_str()
+                                                .is_some();
                                         let delta = &json[OUTMSG_FIELD_CHOICES][0]["delta"];
                                         if !has_finish
                                             && (delta.get("content").is_some()

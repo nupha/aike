@@ -38,7 +38,8 @@ enum FetchError {
 /// Throw a WHATWG-conformant `AbortError` (a `TypeError` whose `name` is
 /// "AbortError"), as required when a fetch is cancelled by a signal.
 fn throw_abort_error(cx: &mut ScopedContext) -> JSResult {
-    let mut err = match cx.create_error_object(ErrorKind::Type, "The operation was aborted", false) {
+    let mut err = match cx.create_error_object(ErrorKind::Type, "The operation was aborted", false)
+    {
         Some(e) => e,
         None => return Err(-1),
     };
@@ -68,7 +69,7 @@ pub(crate) fn js_fetch(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut body_bytes: Option<Vec<u8>> = None;
     let mut redirect = String::from("follow");
     let mut timeout = Duration::from_secs(30);
-    
+
     // RequestInit fields (forwarded to transport; some map to reqwest behavior).
     let mut mode = String::from("cors");
     let mut credentials = String::from("same-origin");
@@ -80,7 +81,10 @@ pub(crate) fn js_fetch(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut signal_val: Option<JSValue> = None;
 
     // Inherit from a Request input.
-    if let Some(p) = input.as_native_object::<JSRequest>().and_then(|o| o.payload()) {
+    if let Some(p) = input
+        .as_native_object::<JSRequest>()
+        .and_then(|o| o.payload())
+    {
         url_str = p.url.clone();
         method = p.method.clone();
         header_list = p.headers.clone();
@@ -97,9 +101,17 @@ pub(crate) fn js_fetch(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     } else if !input.is_undefined_or_null() {
         let href = input.get_property_str(ctx, "href")?;
         if !href.is_undefined() {
-            url_str = href.to_string(ctx)?.content().encode_utf8(false).to_string();
+            url_str = href
+                .to_string(ctx)?
+                .content()
+                .encode_utf8(false)
+                .to_string();
         } else {
-            url_str = input.to_string(ctx)?.content().encode_utf8(false).to_string();
+            url_str = input
+                .to_string(ctx)?
+                .content()
+                .encode_utf8(false)
+                .to_string();
         }
     }
 
@@ -140,13 +152,19 @@ pub(crate) fn js_fetch(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                     timeout = Duration::from_secs_f64(secs);
                 }
             }
-            
+
             let mut read_str = |o: &Object, key: &str| -> Option<String> {
                 let v = o.get_property_str(ctx, key).ok()?;
                 if v.is_undefined() {
                     None
                 } else {
-                    Some(v.to_string(ctx).ok()?.content().encode_utf8(false).to_string())
+                    Some(
+                        v.to_string(ctx)
+                            .ok()?
+                            .content()
+                            .encode_utf8(false)
+                            .to_string(),
+                    )
                 }
             };
             if let Some(v) = read_str(o, "mode") {
@@ -169,7 +187,10 @@ pub(crate) fn js_fetch(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             }
             let ka = o.get_property_str(ctx, "keepalive")?;
             if !ka.is_undefined() {
-                keepalive = ka.to_number(ctx).map(|n| n.to_f64() != 0.0).unwrap_or(false);
+                keepalive = ka
+                    .to_number(ctx)
+                    .map(|n| n.to_f64() != 0.0)
+                    .unwrap_or(false);
             }
         }
     }
@@ -177,9 +198,8 @@ pub(crate) fn js_fetch(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let notify = signal_val.as_ref().and_then(|s| signal_notify(s));
     let already_aborted = signal_val.as_ref().map_or(false, |s| signal_is_aborted(s));
 
-    let result_slot = zuqe::builtins::promise::PromiseResultSlot::<
-        Result<TransportResponse, FetchError>,
-    >::new();
+    let result_slot =
+        zuqe::builtins::promise::PromiseResultSlot::<Result<TransportResponse, FetchError>>::new();
     let url_clone = url_str.clone();
     let redirect_clone = redirect.clone();
     let promise = zuqe::builtins::promise::Promise::create_with_result_slot(
@@ -199,7 +219,9 @@ pub(crate) fn js_fetch(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 }
             };
             let status = tr.status;
-            if (redirect_clone == "error" || redirect_clone == "manual") && (300..400).contains(&status) {
+            if (redirect_clone == "error" || redirect_clone == "manual")
+                && (300..400).contains(&status)
+            {
                 if redirect_clone == "error" {
                     cx.throw_type_error("Failed to fetch: redirect not allowed (mode 'error')");
                     return Err(-1);

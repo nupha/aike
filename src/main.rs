@@ -46,8 +46,8 @@ use crate::{
     helpers::canonicalize_path,
     html::{HtmlDocument, HtmlElement, init_mod_html},
     http::{
-        JSWebSocketStream, JSHttpRequest, JSHttpResponse, JSHttpResponseSse, JSHttpServer,
-        JSMcpStdio, gc_trace_stdio_state, init_mod_http,
+        JSHttpRequest, JSHttpResponse, JSHttpResponseSse, JSHttpServer, JSMcpStdio,
+        JSWebSocketStream, gc_trace_stdio_state, init_mod_http,
     },
     llm::JSLlmClient,
     path::init_mod_path,

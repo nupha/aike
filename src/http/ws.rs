@@ -15,13 +15,13 @@ use std::{
     cell::{Cell, RefCell},
     collections::{HashMap, HashSet},
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc,
+        atomic::{AtomicBool, Ordering},
     },
 };
 
 use axum::extract::ws::{Message, WebSocket};
-use crossbeam::channel::{bounded, Receiver, Sender, TryRecvError};
+use crossbeam::channel::{Receiver, Sender, TryRecvError, bounded};
 use linkme::distributed_slice;
 use tokio::sync::mpsc;
 use zuqe::{
@@ -32,8 +32,8 @@ use zuqe::{
 };
 
 use super::{
-    class_http_server::{get_server_payload_mut, IncomingRequest},
-    outbound_buffer::{js_stream_write, OutboundBuffer},
+    class_http_server::{IncomingRequest, get_server_payload_mut},
+    outbound_buffer::{OutboundBuffer, js_stream_write},
 };
 
 use crate::USER_CLASS_DEFS;
@@ -192,7 +192,9 @@ impl AsyncIteratorFetcher for WsReadFetcher {
         let mut g = self.rx.borrow_mut();
         match g.as_ref() {
             Some(rx) => match rx.try_recv() {
-                Ok(s) => Ok(IterFetchStatus::Value(cx.create_string_from_str(&s)?.into())),
+                Ok(s) => Ok(IterFetchStatus::Value(
+                    cx.create_string_from_str(&s)?.into(),
+                )),
                 Err(TryRecvError::Empty) => Ok(IterFetchStatus::Wait),
                 Err(TryRecvError::Disconnected) => {
                     g.take();
