@@ -119,7 +119,7 @@ pub(crate) fn get_ws_payload<'a>(
 /// - `out_rx`: frames JS wrote via `stream.write()` → forwarded to the socket.
 /// - `control_rx`: `WsControl` commands (Close / Ping) from the JS side.
 /// - `event_tx`: client messages / close are reported back to the JS poller as
-///   `IncomingRequest::ResponseStreamData`.
+///   `IncomingRequest::WebSocketData`.
 pub(crate) async fn bridge_ws(
     mut socket: WebSocket,
     mut out_rx: mpsc::Receiver<String>,
@@ -142,7 +142,7 @@ pub(crate) async fn bridge_ws(
             maybe_msg = socket.recv() => {
                 match maybe_msg {
                     Some(Ok(Message::Text(t))) => {
-                        let _ = event_tx.send(IncomingRequest::ResponseStreamData {
+                        let _ = event_tx.send(IncomingRequest::WebSocketData {
                             id,
                             event: WsStreamEvent::Message(t.to_string()),
                         });
@@ -169,7 +169,7 @@ pub(crate) async fn bridge_ws(
     }
 
     // Notify the JS poller that the connection is gone.
-    let _ = event_tx.send(IncomingRequest::ResponseStreamData {
+    let _ = event_tx.send(IncomingRequest::WebSocketData {
         id,
         event: WsStreamEvent::Close,
     });

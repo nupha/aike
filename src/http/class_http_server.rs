@@ -48,9 +48,9 @@ use crate::llm::{
 
 use super::{
     JSWebSocketStream, Method,
+    class_request::{HttpRequestPayload, JSHttpRequest},
     mcp::{McpEndpoint, McpSchemas, McpToolCallRequest, NativeMcpToolFn, handle_mcp_tool_call},
     outbound_buffer::OUTBOUND_CAP,
-    request::{HttpRequestPayload, JSHttpRequest},
     response::{HttpResponseMessage, HttpResponsePayload, JSHttpResponse, get_res_payload},
     server::spawn_http_server,
     ws::{WsControl, WsStreamEvent, bridge_ws, dispatch_ws_data, dispatch_ws_open},
@@ -62,7 +62,7 @@ pub(crate) enum IncomingRequest {
     McpToolCall(McpToolCallRequest),
     /// A fresh WebSocket connection was upgraded; the JS poller must build the
     /// `WebSocketStream` and invoke the user's `ws()` handler.
-    ResponseStreamOpen {
+    WebSocketOpen {
         handler_index: usize,
         id: u64,
         out_tx: mpsc::Sender<String>,
@@ -71,7 +71,7 @@ pub(crate) enum IncomingRequest {
         params: HashMap<String, String>,
     },
     /// An inbound event for an existing WS connection (client message / close).
-    ResponseStreamData {
+    WebSocketData {
         id: u64,
         event: WsStreamEvent,
     },
@@ -1097,8 +1097,8 @@ static NEXT_WS_ID: AtomicU64 = AtomicU64::new(1);
 /// Create a route that upgrades an HTTP connection to a WebSocket and bridges
 /// it to the JS poller. The bridge task (`bridge_ws`) runs on tokio; inbound
 /// client messages and the close event are reported back via
-/// `IncomingRequest::ResponseStreamData`, and the freshly-upgraded connection
-/// is announced via `IncomingRequest::ResponseStreamOpen` (so the JS-side
+/// `IncomingRequest::WebSocketData`, and the freshly-upgraded connection
+/// is announced via `IncomingRequest::WebSocketOpen` (so the JS-side
 /// `WebSocketStream` is created and the user's `ws()` handler runs).
 fn delegate_ws_route(
     path: String,
@@ -1118,7 +1118,7 @@ fn delegate_ws_route(
             let event_tx = tx.clone();
 
             if tx
-                .send(IncomingRequest::ResponseStreamOpen {
+                .send(IncomingRequest::WebSocketOpen {
                     handler_index,
                     id,
                     out_tx,
@@ -1426,7 +1426,7 @@ fn js_start_server_job(
                 IncomingRequest::McpToolCall(req) => {
                     handle_mcp_tool_call(cx, req, &mcp_tables.borrow());
                 }
-                IncomingRequest::ResponseStreamOpen {
+                IncomingRequest::WebSocketOpen {
                     handler_index,
                     id,
                     out_tx,
@@ -1447,7 +1447,7 @@ fn js_start_server_job(
                         &mut *sv,
                     );
                 }
-                IncomingRequest::ResponseStreamData { id, event } => {
+                IncomingRequest::WebSocketData { id, event } => {
                     let mut sv = server_ref.borrow_mut();
                     dispatch_ws_data(cx, id, event, &mut *sv);
                 }

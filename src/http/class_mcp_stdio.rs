@@ -156,8 +156,7 @@ fn js_start(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                     handle_mcp_tool_call(cx, req, &mcp_tables.borrow());
                 }
                 // WS is HTTP-server-only; never produced in stdio MCP mode.
-                IncomingRequest::ResponseStreamOpen { .. }
-                | IncomingRequest::ResponseStreamData { .. } => {}
+                IncomingRequest::WebSocketOpen { .. } | IncomingRequest::WebSocketData { .. } => {}
             }
             true
         },

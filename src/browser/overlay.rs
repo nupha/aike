@@ -6,7 +6,10 @@
 //! `highlight` / `hideHighlight` — debug highlight of a DOM node.
 
 use serde_json::Value;
-use zuqe::{CallContext, JSResult, JSValue, ScopedContext, builtins::promise::{Promise, PromiseResultSlot}};
+use zuqe::{
+    CallContext, JSResult, JSValue, ScopedContext,
+    builtins::promise::{Promise, PromiseResultSlot},
+};
 
 use crate::browser::{
     class_page::{get_page_payload, send_page_void_cmd},
@@ -54,9 +57,10 @@ pub(crate) fn js_page_highlight(ctx: &mut ScopedContext, cc: CallContext) -> JSR
         // Overlay.enable is required before highlightNode in some Chrome builds.
         let en = client.send("Overlay.enable", None, Some(&session_id)).await;
         let r: Result<(), String> = async {
-            en.map_err(|e| format!("Overlay.enable failed: {e}"))?;
+            let _ = en.map_err(|e| format!("Overlay.enable failed: {e}"))?;
             let node_id = dom::resolve_selector(&client, &session_id, &selector).await?;
-            client
+
+            let _ = client
                 .send(
                     "Overlay.highlightNode",
                     Some(serde_json::json!({ "nodeId": node_id, "highlightConfig": config })),
@@ -64,6 +68,7 @@ pub(crate) fn js_page_highlight(ctx: &mut ScopedContext, cc: CallContext) -> JSR
                 )
                 .await
                 .map_err(|e| format!("Overlay.highlightNode failed: {e}"))?;
+
             Ok(())
         }
         .await;

@@ -3,17 +3,17 @@
 
 mod class_http_server;
 mod class_mcp_stdio;
+mod class_request;
 mod mcp;
 mod outbound_buffer;
-mod request;
 mod response;
-pub(crate) mod server;
+mod server;
 mod ws;
 
 pub(crate) use {
     class_http_server::JSHttpServer,
     class_mcp_stdio::{JSMcpStdio, gc_trace_stdio_state},
-    request::JSHttpRequest,
+    class_request::JSHttpRequest,
     response::{JSHttpResponse, JSHttpResponseSse},
     ws::JSWebSocketStream,
 };

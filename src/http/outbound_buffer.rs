@@ -22,7 +22,7 @@ use std::{
 
 use tokio::sync::mpsc;
 use zuqe::{
-    CallContext, JSResult, JSValue, Object, ScopedContext,
+    JSValue, Object, ScopedContext,
     builtins::promise::Promise,
     gc_lite::{GcTrace, GcTraceCtx},
 };
@@ -100,10 +100,8 @@ impl OutboundBuffer {
             Some(tx) => match tx.try_send(frame) {
                 Ok(()) => Ok(None),
                 Err(mpsc::error::TrySendError::Full(f)) => {
-                    let (p, slot) = Promise::create_with_channel::<()>(
-                        ctx,
-                        |_cx, _| Ok(JSValue::UNDEFINED),
-                    )?;
+                    let (p, slot) =
+                        Promise::create_with_channel::<()>(ctx, |_cx, _| Ok(JSValue::UNDEFINED))?;
                     self.pending.lock().unwrap().push_back((slot, f));
                     self.arm_drain_watcher();
                     Ok(Some(p.into()))
@@ -174,5 +172,6 @@ pub(crate) fn js_stream_write(
         // Entered (or still in) backlog → remember to notify when it clears.
         buf.drain_notified = true;
     }
+
     Ok(ret)
 }
