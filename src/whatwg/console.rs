@@ -1,11 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-//! WHATWG Console Standard implementation.
-//!
-//! Provides `console.log`, `console.error`, `console.time`, etc. as a global object.
-
-use std::{cell::RefCell, collections::HashMap, ops::Deref, time::Instant};
+use std::{cell::RefCell, collections::HashMap, time::Instant};
 
 use zuqe::{CallContext, EvalFlags, EvalType, FieldDef, JSResult, JSValue, Object, ScopedContext};
 
@@ -93,7 +89,7 @@ fn js_console_trace(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             EvalFlags::empty(),
         ) && let Ok(s) = stack_val.to_string(scope)
         {
-            let stack_str = format!("{}", s.deref());
+            let stack_str = format!("{}", s);
             for line in stack_str.lines().skip(1) {
                 let mut out = String::new();
                 for _ in 0..indent {
@@ -123,7 +119,7 @@ fn js_console_dir(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
 fn js_console_count(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let label = if cc.length() > 0 && !cc.arg(0).is_undefined() {
-        cc.arg(0).to_string(ctx)?.deref().to_string()
+        cc.arg(0).to_string(ctx)?.to_string()
     } else {
         "default".to_string()
     };
@@ -148,7 +144,7 @@ fn js_console_count(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
 fn js_console_count_reset(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let label = if cc.length() > 0 && !cc.arg(0).is_undefined() {
-        cc.arg(0).to_string(ctx)?.deref().to_string()
+        cc.arg(0).to_string(ctx)?.to_string()
     } else {
         "default".to_string()
     };
@@ -162,7 +158,7 @@ fn js_console_count_reset(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
 
 fn js_console_time(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let label = if cc.length() > 0 && !cc.arg(0).is_undefined() {
-        cc.arg(0).to_string(ctx)?.deref().to_string()
+        cc.arg(0).to_string(ctx)?.to_string()
     } else {
         "default".to_string()
     };
@@ -190,7 +186,7 @@ fn js_console_time(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
 fn js_console_time_log(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let label = if cc.length() > 0 && !cc.arg(0).is_undefined() {
-        cc.arg(0).to_string(ctx)?.deref().to_string()
+        cc.arg(0).to_string(ctx)?.to_string()
     } else {
         "default".to_string()
     };
@@ -230,7 +226,7 @@ fn js_console_time_log(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
 fn js_console_time_end(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let label = if cc.length() > 0 && !cc.arg(0).is_undefined() {
-        cc.arg(0).to_string(ctx)?.deref().to_string()
+        cc.arg(0).to_string(ctx)?.to_string()
     } else {
         "default".to_string()
     };

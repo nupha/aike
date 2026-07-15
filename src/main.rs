@@ -138,6 +138,15 @@ struct Args {
     )]
     stack_overflow: Option<String>,
 
+    #[arg(
+        short = 'e',
+        long,
+        value_name = "code",
+        help = "eval script directly (no file)",
+        conflicts_with = "filename"
+    )]
+    eval: Option<String>,
+
     #[arg(help = "file to execute (omit for REPL mode)")]
     filename: Option<String>,
 
@@ -208,9 +217,9 @@ async fn main() -> ExitCode {
 
     let mut args = Args::parse();
 
-    // --help without filename: show aike help and exit
-    // --help with filename: pass through to script
-    if args.help && args.filename.is_none() {
+    // --help without filename/eval: show aike help and exit
+    // --help with filename/eval: pass through to script
+    if args.help && args.filename.is_none() && args.eval.is_none() {
         let _ = Args::command().print_help();
         return ExitCode::SUCCESS;
     }
@@ -232,6 +241,7 @@ async fn main() -> ExitCode {
         v.push(exe_path.clone());
         match &filename {
             Some(f) => v.push(f.clone()),
+            None if args.eval.is_some() => v.push("[eval]".to_string()),
             None => v.push("<repl>".to_string()),
         }
         v.extend(args.script_args.iter().cloned());
@@ -385,54 +395,69 @@ async fn main() -> ExitCode {
         })
         .unwrap();
 
-    //
-    // REPL mode: run repl task and exit.
-    //
-    let Some(ref_filename) = filename else {
+    let script: String;
+    let entry_url: String;
+    let is_module: bool;
+
+    if let Some(ref_filename) = filename {
+        //
+        // Run script file
+        //
+        let (script_bytes, script_path) = match read_script(&ref_filename) {
+            Ok((buf, name)) => (buf, name),
+            Err(e) => {
+                colorize_println(e, RedFg);
+                std::process::exit(-1);
+            }
+        };
+        let script_str = String::from_utf8_lossy(&script_bytes).to_string();
+
+        let (transpiled, detected_module): (String, bool) =
+            if transpile::needs_transpile(&script_path) {
+                match transpile::transpile(&script_str) {
+                    Ok(result) => (result.code, result.is_module),
+                    Err(e) => {
+                        colorize_println(
+                            format!("error: failed to transpile '{script_path}': {e}"),
+                            RedFg,
+                        );
+                        std::process::exit(1);
+                    }
+                }
+            } else {
+                // Non-TS files: use zuqe's built-in module detection
+                let detected = ModuleDef::detect_module(script_str.as_bytes());
+                (script_str, detected)
+            };
+
+        let is_module_value = detected_module
+            || args.module
+            || ref_filename.ends_with(".mjs")
+            || ref_filename.ends_with(".mts");
+
+        // Convert the entry filename to a canonical `file://` URL for module resolution.
+        // Module names (and `import.meta.url`) are URLs, and a `file://` base is also
+        // required so that dynamic `import()` resolves relative specifiers correctly.
+        let url = zuqe::path_to_url(&ref_filename)
+            .expect("entry path must convert to a file:// URL")
+            .to_string();
+
+        script = transpiled;
+        entry_url = url;
+        is_module = is_module_value;
+    } else if let Some(eval_code) = args.eval {
+        //
+        // Eval mode: inline script
+        //
+        script = eval_code;
+        entry_url = "eval".to_string();
+        is_module = args.module;
+    } else {
+        //
+        // REPL mode: run repl task and exit.
+        //
         return repl::run(rt, ctx).await;
     };
-
-    //
-    // Run script file mode
-    //
-    let (script_bytes, script_path) = match read_script(&ref_filename) {
-        Ok((buf, name)) => (buf, name),
-        Err(e) => {
-            colorize_println(e, RedFg);
-            std::process::exit(-1);
-        }
-    };
-    let script_str = String::from_utf8_lossy(&script_bytes).to_string();
-
-    let (script, script_is_module): (String, bool) = if transpile::needs_transpile(&script_path) {
-        match transpile::transpile(&script_str) {
-            Ok(result) => (result.code, result.is_module),
-            Err(e) => {
-                colorize_println(
-                    format!("error: failed to transpile '{script_path}': {e}"),
-                    RedFg,
-                );
-                std::process::exit(1);
-            }
-        }
-    } else {
-        // Non-TS files: use zuqe's built-in module detection
-        let detected = ModuleDef::detect_module(script_str.as_bytes());
-        (script_str, detected)
-    };
-    // ── Transpile end ──
-
-    let is_module = script_is_module
-        || args.module
-        || ref_filename.ends_with(".mjs")
-        || ref_filename.ends_with(".mts");
-
-    // Convert the entry filename to a canonical `file://` URL for module resolution.
-    // Module names (and `import.meta.url`) are URLs, and a `file://` base is also
-    // required so that dynamic `import()` resolves relative specifiers correctly.
-    let entry_url = zuqe::path_to_url(&ref_filename)
-        .expect("entry path must convert to a file:// URL")
-        .to_string();
 
     let mut promise_future: Option<PromiseFuture> = None;
 
