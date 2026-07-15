@@ -107,9 +107,6 @@ struct Args {
     #[arg(short = 'h', long = "help", help = "Print help")]
     help: bool,
 
-    #[arg(short, long, default_value_t = false, help = "load as esm module")]
-    module: bool,
-
     #[arg(
         long,
         value_name = "n",
@@ -137,6 +134,9 @@ struct Args {
         help = "set C-stack recursion limit to n (default: 512k)"
     )]
     stack_overflow: Option<String>,
+
+    #[arg(short, long, default_value_t = false, help = "eval as esm module")]
+    module: bool,
 
     #[arg(
         short = 'e',
@@ -523,7 +523,7 @@ async fn main() -> ExitCode {
     let result = if let Some(fut) = promise_future {
         let (rt_res, promise_res) = tokio::join!(rt.run_async(), fut);
         match promise_res {
-            Ok(r) => {
+            Ok(_) => {
                 // suppress eval result printing
             }
             Err(reason) => {
