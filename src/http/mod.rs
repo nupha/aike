@@ -50,11 +50,15 @@ impl Method {
 
 const MOD_HTTP_ENTRIES: &[FieldDef] = &[
     FieldDef::CLASS(
-        "HttpServer",
+        JSHttpServer::CLASS_NAME,
         JSHttpServer::class_id,
         zuqe::JS_PROP_ENUMERABLE,
     ),
-    FieldDef::CLASS("McpStdio", JSMcpStdio::class_id, zuqe::JS_PROP_ENUMERABLE),
+    FieldDef::CLASS(
+        JSMcpStdio::CLASS_NAME,
+        JSMcpStdio::class_id,
+        zuqe::JS_PROP_ENUMERABLE,
+    ),
 ];
 
 pub fn init_mod_http(ctx: &mut ScopedContext) -> Result<(), i32> {

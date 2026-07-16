@@ -29,10 +29,11 @@ use zuqe::{FieldDef, NativeObject, ScopedContext};
 /// Initialize the `browser` JS module (exports the `Browser` class).
 pub fn init_mod_browser(ctx: &mut ScopedContext) -> Result<(), i32> {
     const MOD_BROWSER_ENTRIES: &[FieldDef] = &[FieldDef::CLASS(
-        "Browser",
+        JSBrowser::CLASS_NAME,
         JSBrowser::class_id,
         zuqe::JS_PROP_ENUMERABLE,
     )];
+
     ctx.create_module("browser", MOD_BROWSER_ENTRIES)?;
     Ok(())
 }

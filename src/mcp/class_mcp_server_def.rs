@@ -1,18 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-//! Native implementation of the `MCPServerDef` builder class and the
-//! `defineMCPStdio` factory, ported from `ravenclaw/src/mcp-server-def.ts`.
-//!
-//! `MCPServerDef` collects a declarative MCP stdio server definition via a
-//! chainable builder API (`version`, `description`, `shared`, `args`, `env`,
-//! `tool`, `extraFiles`, `beforeRun`). `info()` returns the metadata without
-//! side effects; `run()` starts the server via the native `McpStdio` class.
-
 use std::{
     borrow::Cow,
     cell::{Cell, RefCell},
     collections::HashMap,
+    ops::{Deref, DerefMut},
 };
 
 use linkme::distributed_slice;
@@ -29,12 +22,14 @@ use crate::{USER_CLASS_DEFS, http::JSMcpStdio};
 
 /// Environment entry value: a static string, or a JS function resolving to
 /// `string | undefined`.
+#[derive(Clone)]
 enum EnvVal {
     Text(String),
     Func(Object),
 }
 
 /// args entry: a static string array, or a JS function resolving to `string[]`.
+#[derive(Clone)]
 enum ArgsVal {
     Text(Vec<String>),
     Func(Object),
@@ -48,66 +43,95 @@ struct McpToolDef {
     args: Option<Object>,
 }
 
-/// Payload stored on every `MCPServerDef` instance.
-pub(crate) struct MCPServerDefPayload {
+enum McpServerType {
+    Stdio {
+        tools: HashMap<String, McpToolDef>,
+        command: Cow<'static, str>,
+        command_args: Option<Vec<String>>,
+        args_entry: Option<ArgsVal>,
+        before_run: Option<Object>,
+        shared: bool,
+        extra_files: Vec<String>,
+    },
+    Http {
+        url: String,
+        tools_schema: Option<Array>,
+    },
+}
+
+pub(crate) struct McpServerDefPayload {
     server_name: String,
     version: RefCell<Cow<'static, str>>,
     description: RefCell<Cow<'static, str>>,
-    shared: Cell<bool>,
-    extra_files: RefCell<Vec<String>>,
-    tools: RefCell<HashMap<String, McpToolDef>>,
-    env_entries: RefCell<HashMap<String, EnvVal>>,
-    args_entry: RefCell<Option<ArgsVal>>,
-    before_run: RefCell<Option<Object>>,
+
+    /// Transport-agnostic key/value config: environment variables for stdio,
+    /// request headers for http. Set via the `env()` builder method.
+    env_or_header: RefCell<HashMap<String, EnvVal>>,
+
+    /// The transport-specific definition. `Stdio` carries the stdio-only
+    /// fields (shared/extraFiles/args/beforeRun); `Http` carries its own.
+    /// Only accessed through the `McpServerDef` builder methods, never
+    /// directly from JS.
+    server_type: RefCell<McpServerType>,
 }
 
-impl MCPServerDefPayload {
-    fn new(server_name: String) -> Self {
+impl McpServerDefPayload {
+    fn new_stdio(server_name: String) -> Self {
         Self {
             server_name,
             version: RefCell::new(Cow::Borrowed("1.0.0")),
             description: RefCell::new(Cow::Borrowed("")),
-            shared: Cell::new(false),
-            extra_files: RefCell::new(Vec::new()),
-            tools: RefCell::new(HashMap::new()),
-            env_entries: RefCell::new(HashMap::new()),
-            args_entry: RefCell::new(None),
-            before_run: RefCell::new(None),
+            env_or_header: RefCell::new(HashMap::new()),
+            server_type: RefCell::new(McpServerType::Stdio {
+                tools: HashMap::new(),
+                command: Cow::Borrowed(""),
+                command_args: None,
+                args_entry: None,
+                before_run: None,
+                shared: false,
+                extra_files: Vec::new(),
+            }),
         }
     }
 
     /// GC trace — keeps referenced JS objects (handlers, callbacks) alive.
     fn gc_trace(&self, gcx: &mut GcTraceCtx) {
-        if let Ok(tools) = self.tools.try_borrow() {
-            for t in tools.values() {
-                t.handler.trace(gcx);
-                if let Some(a) = &t.args {
-                    a.trace(gcx);
-                }
-            }
-        }
-        if let Ok(envs) = self.env_entries.try_borrow() {
-            for (_, v) in envs.iter() {
+        if let Ok(envs) = self.env_or_header.try_borrow() {
+            for v in envs.values() {
                 if let EnvVal::Func(f) = v {
                     f.trace(gcx);
                 }
             }
         }
-        if let Ok(a) = self.args_entry.try_borrow() {
-            if let Some(ArgsVal::Func(f)) = a.as_ref() {
-                f.trace(gcx);
-            }
-        }
-        if let Ok(br) = self.before_run.try_borrow() {
-            if let Some(f) = br.as_ref() {
-                f.trace(gcx);
+        if let Ok(t) = self.server_type.try_borrow() {
+            match &*t {
+                McpServerType::Stdio {
+                    tools,
+                    args_entry,
+                    before_run,
+                    ..
+                } => {
+                    for t in tools.values() {
+                        t.handler.trace(gcx);
+                        if let Some(a) = &t.args {
+                            a.trace(gcx);
+                        }
+                    }
+                    if let Some(ArgsVal::Func(f)) = args_entry {
+                        f.trace(gcx);
+                    }
+                    if let Some(f) = before_run {
+                        f.trace(gcx);
+                    }
+                }
+                McpServerType::Http { .. } => {}
             }
         }
     }
 }
 
-fn get_def<'a>(ctx: &mut ScopedContext, val: &'a JSValue) -> Result<&'a MCPServerDefPayload, i32> {
-    val.as_native_object::<JSMCPServerDef>()
+fn get_def<'a>(ctx: &mut ScopedContext, val: &'a JSValue) -> Result<&'a McpServerDefPayload, i32> {
+    val.as_native_object::<JSMcpServerDef>()
         .and_then(|o| o.payload())
         .ok_or_else(|| {
             ctx.throw_type_error("not an MCPServerDef instance");
@@ -130,20 +154,37 @@ fn js_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         .content()
         .encode_utf8(false)
         .to_string();
-    JSMCPServerDef::new_instance(ctx, cc.this(), MCPServerDefPayload::new(name)).map(JSValue::from)
+
+    JSMcpServerDef::new_instance(ctx, cc.this(), McpServerDefPayload::new_stdio(name))
+        .map(JSValue::from)
 }
 
 // ── Chain methods ──
 
 /// Magic consts distinguishing which string field `js_set_string` writes.
-const SET_VERSION: i16 = 0;
-const SET_DESCRIPTION: i16 = 1;
+const FIELD_VERSION: i16 = 0;
+const FIELD_DESCRIPTION: i16 = 1;
+/// Magic consts for the `mode` / `name` getters in `js_get_string`.
+const FIELD_MODE: i16 = 2;
+const FIELD_NAME: i16 = 3;
+/// Magic consts for the http-only `url` / `headers` getters in `js_http_get`.
+const FIELD_URL: i16 = 4;
+const FIELD_HEADERS: i16 = 5;
 
-/// Shared setter for `version` / `description` — the target field is
-/// selected via the function's magic const.
+/// Getter/setter for `version` / `description` — the target field is
+/// selected via the function's magic const. With no argument it returns the
+/// current value; with an argument it stores it and returns `this`.
 fn js_set_string(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let p = get_def(ctx, &this)?;
+    if cc.length() == 0 {
+        let s = match cc.magic() as i16 {
+            FIELD_VERSION => p.version.borrow().to_string(),
+            _ => p.description.borrow().to_string(),
+        };
+        return js_str(ctx, s);
+    }
+
     let v = cc
         .arg(0)
         .to_string(ctx)?
@@ -151,7 +192,7 @@ fn js_set_string(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         .encode_utf8(false)
         .to_string();
     match cc.magic() as i16 {
-        SET_VERSION => *p.version.borrow_mut() = Cow::Owned(v),
+        FIELD_VERSION => *p.version.borrow_mut() = Cow::Owned(v),
         _ => *p.description.borrow_mut() = Cow::Owned(v),
     }
     Ok(this)
@@ -160,13 +201,43 @@ fn js_set_string(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 fn js_shared(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let p = get_def(ctx, &this)?;
-    p.shared.set(cc.arg(0).to_bool().unwrap_or(false));
+    if cc.length() == 0 {
+        let shared = match &*p.server_type.borrow() {
+            McpServerType::Stdio { shared, .. } => *shared,
+            McpServerType::Http { .. } => false,
+        };
+        return Ok(JSValue::from(shared));
+    }
+
+    // stdio-only setter: a no-op in http mode where the match fails.
+    if let McpServerType::Stdio { shared, .. } = &mut *p.server_type.borrow_mut() {
+        *shared = cc.arg(0).to_bool().unwrap_or(false);
+    }
     Ok(this)
 }
 
 fn js_args(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let p = get_def(ctx, &this)?;
+    if cc.length() == 0 {
+        let entry = match &*p.server_type.borrow() {
+            McpServerType::Stdio { args_entry, .. } => (*args_entry).clone(),
+            McpServerType::Http { .. } => None,
+        };
+        return match entry {
+            None => Ok(JSValue::UNDEFINED),
+            Some(ArgsVal::Text(v)) => {
+                let mut arr = Array::create(ctx)?;
+                for (i, s) in v.iter().enumerate() {
+                    let s_val = js_str(ctx, s.clone())?;
+                    arr.define_property_value_u32(ctx, i as u32, s_val, JS_PROP_ENUMERABLE)?;
+                }
+                Ok(arr.into())
+            }
+            Some(ArgsVal::Func(f)) => Ok(f.into()),
+        };
+    }
+
     let v = cc.arg(0);
     let is_func = v.as_object().map_or(false, |o| o.is_callable());
     let val = if is_func {
@@ -191,13 +262,28 @@ fn js_args(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         ArgsVal::Text(out)
     };
 
-    *p.args_entry.borrow_mut() = Some(val);
+    // stdio-only setter: a no-op in http mode where the match fails.
+    if let McpServerType::Stdio { args_entry, .. } = &mut *p.server_type.borrow_mut() {
+        *args_entry = Some(val);
+    }
     Ok(this)
 }
 
 fn js_env(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let p = get_def(ctx, &this)?;
+    if cc.length() == 0 {
+        let mut obj = ctx.create_base_object()?;
+        for (k, v) in p.env_or_header.borrow().iter() {
+            let val = match v {
+                EnvVal::Text(s) => js_str(ctx, s.clone())?,
+                EnvVal::Func(f) => f.clone().into(),
+            };
+            obj.define_property_value_str(ctx, k, val, JS_PROP_ENUMERABLE)?;
+        }
+        return Ok(obj.into());
+    }
+
     let vars = cc.arg(0);
     let Some(mut obj) = vars.as_object().copied() else {
         ctx.throw_type_error("env expects an object");
@@ -205,7 +291,7 @@ fn js_env(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     };
 
     let keys = obj.get_own_property_names(ctx, JS_GPN_ENUM_ONLY | JS_GPN_STR_OR_INT_MASK)?;
-    let mut envs = HashMap::<String, EnvVal>::new();
+    let mut settings = HashMap::<String, EnvVal>::new();
 
     for pk in keys.iter() {
         let v = obj.get_property(ctx, pk.atom)?;
@@ -227,88 +313,98 @@ fn js_env(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             let s = v.to_string(ctx)?.content().encode_utf8(false).to_string();
             EnvVal::Text(s)
         };
-        envs.insert(name, val);
+        settings.insert(name, val);
     }
 
-    *p.env_entries.borrow_mut() = envs;
+    *p.env_or_header.borrow_mut() = settings;
     Ok(this)
 }
 
-fn js_tool(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+fn js_stdio_tool(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let p = get_def(ctx, &this)?;
-    let name = cc
-        .arg(0)
-        .to_string(ctx)?
-        .content()
-        .encode_utf8(false)
-        .to_string();
-    let def = cc
-        .arg(1)
-        .as_object()
-        .ok_or_else(|| {
-            ctx.throw_type_error("tool def must be an object");
-            -1
-        })?
-        .clone();
-    let desc = def
-        .get_property_str(ctx, "desc")
-        .and_then(|v| v.to_string(ctx))
-        .map(|s| s.content().encode_utf8(false).to_string())
-        .unwrap_or_default();
-    let handler = def
-        .get_property_str(ctx, "handler")
-        .and_then(|v| v.into_callable(ctx))
-        .map_err(|_| {
-            ctx.throw_type_error(&format!("tool '{}' handler must be a function", name));
-            -1
-        })?;
-    let args = def
-        .get_property_str(ctx, "args")
-        .ok()
-        .filter(|v| !v.is_undefined())
-        .and_then(|v| v.as_object().copied());
-    p.tools.borrow_mut().insert(
-        name,
-        McpToolDef {
-            desc,
-            handler,
-            args: args.clone(),
-        },
-    );
+
+    if let McpServerType::Stdio { tools, .. } = p.server_type.borrow_mut().deref_mut() {
+        let name = cc
+            .arg(0)
+            .to_string(ctx)?
+            .content()
+            .encode_utf8(false)
+            .to_string();
+
+        let opt = cc
+            .arg(1)
+            .as_object()
+            .ok_or_else(|| {
+                ctx.throw_type_error("tool def must be an object");
+                -1
+            })?
+            .clone();
+
+        let desc = opt
+            .get_property_str(ctx, "desc")
+            .and_then(|v| v.to_string(ctx))
+            .map(|s| s.content().encode_utf8(false).to_string())
+            .unwrap_or_default();
+        let handler = opt
+            .get_property_str(ctx, "handler")
+            .and_then(|v| v.into_callable(ctx))
+            .map_err(|_| {
+                ctx.throw_type_error(&format!("tool '{}' handler must be a function", name));
+                -1
+            })?;
+        let args = opt
+            .get_property_str(ctx, "args")
+            .ok()
+            .filter(|v| !v.is_undefined())
+            .and_then(|v| v.as_object().copied());
+
+        tools.insert(
+            name,
+            McpToolDef {
+                desc,
+                handler,
+                args: args.clone(),
+            },
+        );
+    }
+
     Ok(this)
 }
 
 fn js_extra_files(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let p = get_def(ctx, &this)?;
-    let n = cc.length();
-    let mut paths = Vec::with_capacity(n as usize);
-    for i in 0..n {
-        let s = cc
-            .arg(i)
-            .to_string(ctx)?
-            .content()
-            .encode_utf8(false)
-            .to_string();
-        paths.push(s);
+
+    if let McpServerType::Stdio { extra_files, .. } = p.server_type.borrow_mut().deref_mut() {
+        let n = cc.length();
+        let mut paths = Vec::with_capacity(n as usize);
+        for i in 0..n {
+            let s = cc
+                .arg(i)
+                .to_string(ctx)?
+                .content()
+                .encode_utf8(false)
+                .to_string();
+            paths.push(s);
+        }
+        *extra_files = paths;
     }
-    *p.extra_files.borrow_mut() = paths;
     Ok(this)
 }
 
 fn js_before_run(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let p = get_def(ctx, &this)?;
+
     let func = cc.arg(0).into_callable(ctx)?;
-    *p.before_run.borrow_mut() = Some(func);
+    if let McpServerType::Stdio { before_run, .. } = p.server_type.borrow_mut().deref_mut() {
+        *before_run = Some(func);
+    }
     Ok(this)
 }
 
-// ── Metadata (no side effects) ──
-
-/// Build the JSON-schema `inputSchema` for a tool's `args` DSL object,
-/// mirroring the TS `dslToJsonSchema`.
+/// Build the JSON-schema `inputSchema` for a tool's `args` DSL object
 fn dsl_to_json_schema(ctx: &mut ScopedContext, mut args_obj: Object) -> JSResult {
     let pks = args_obj.get_own_property_names(ctx, JS_GPN_ENUM_ONLY | JS_GPN_STR_OR_INT_MASK)?;
     let mut properties = ctx.create_base_object()?;
@@ -413,69 +509,118 @@ fn dsl_to_json_schema(ctx: &mut ScopedContext, mut args_obj: Object) -> JSResult
     Ok(schema.into())
 }
 
-fn js_info(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+/// tools JOSN-schema
+fn js_tool_schema(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let p = get_def(ctx, &this)?;
 
-    let mut info = ctx.create_base_object()?;
-    let sn = js_str(ctx, p.server_name.clone())?;
-    info.define_property_value_str(ctx, "serverName", sn, JS_PROP_ENUMERABLE)?;
+    if cc.length() == 0 {
+        let ret: JSValue = match p.server_type.borrow().deref() {
+            McpServerType::Stdio { tools, .. } => {
+                let mut lst = Vec::<JSValue>::with_capacity(tools.len());
 
-    let desc = js_str(ctx, p.description.borrow().to_string())?;
-    info.define_property_value_str(ctx, "description", desc, JS_PROP_ENUMERABLE)?;
+                for (name, t) in tools.iter() {
+                    let mut meta = ctx.create_base_object()?;
 
-    let ver = js_str(ctx, p.version.borrow().to_string())?;
-    info.define_property_value_str(ctx, "version", ver, JS_PROP_ENUMERABLE)?;
+                    let name_val = js_str(ctx, name.clone())?;
+                    meta.define_property_value_str(ctx, "name", name_val, JS_PROP_C_W_E)?;
 
-    info.define_property_value_str(
-        ctx,
-        "shared",
-        JSValue::from(p.shared.get()),
-        JS_PROP_ENUMERABLE,
-    )?;
+                    let desc_val = js_str(ctx, t.desc.clone())?;
+                    meta.define_property_value_str(ctx, "description", desc_val, JS_PROP_C_W_E)?;
 
-    // tools info
-    let mut tools_list = Vec::<JSValue>::with_capacity(p.tools.borrow().len());
-    for (name, t) in p.tools.borrow().iter() {
-        let mut meta = ctx.create_base_object()?;
+                    let schema = if let Some(args_obj) = t.args {
+                        dsl_to_json_schema(ctx, args_obj)?
+                    } else {
+                        let mut empty = ctx.create_base_object()?;
+                        let type_val = js_str(ctx, "object".to_string())?;
+                        empty.define_property_value_str(ctx, "type", type_val, JS_PROP_C_W_E)?;
+                        empty.into()
+                    };
+                    meta.define_property_value_str(ctx, "inputSchema", schema, JS_PROP_C_W_E)?;
 
-        let name_val = js_str(ctx, name.clone())?;
-        meta.define_property_value_str(ctx, "name", name_val, JS_PROP_C_W_E)?;
+                    lst.push(meta.into());
+                }
 
-        let desc_val = js_str(ctx, t.desc.clone())?;
-        meta.define_property_value_str(ctx, "description", desc_val, JS_PROP_C_W_E)?;
-
-        let schema = if let Some(args_obj) = t.args {
-            dsl_to_json_schema(ctx, args_obj)?
-        } else {
-            let mut empty = ctx.create_base_object()?;
-            let type_val = js_str(ctx, "object".to_string())?;
-            empty.define_property_value_str(ctx, "type", type_val, JS_PROP_C_W_E)?;
-            empty.into()
+                Array::from_values(ctx, lst)?.into()
+            }
+            McpServerType::Http {
+                tools_schema: Some(schema),
+                ..
+            } => (*schema).into(),
+            _ => JSValue::UNDEFINED,
         };
-        meta.define_property_value_str(ctx, "inputSchema", schema, JS_PROP_C_W_E)?;
 
-        tools_list.push(meta.into());
+        Ok(ret)
+    } else {
+        match p.server_type.borrow_mut().deref_mut() {
+            McpServerType::Http { tools_schema, .. } => {
+                if let Ok(schema) = Array::try_from(cc.arg(0)) {
+                    // TODO: validate schema
+                    tools_schema.replace(schema);
+                } else {
+                    eprintln!("Error: tool schema must be an object");
+                }
+            }
+            _ => {
+                eprintln!("Warn: set tools schema for stdio is ignored");
+            }
+        }
+        Ok(this)
     }
-    let tools = Array::from_values(ctx, tools_list)?;
-    info.define_property_value_str(ctx, "tools", tools.into(), JS_PROP_ENUMERABLE)?;
-
-    // extra files
-    let mut extra_files = Vec::<JSValue>::with_capacity(p.extra_files.borrow().len());
-    for f in p.extra_files.borrow().iter() {
-        extra_files.push(js_str(ctx, f.to_string())?.into());
-    }
-    if !extra_files.is_empty() {
-        let lst = Array::from_values(ctx, extra_files)?;
-        info.define_property_value_str(ctx, "extraFiles", lst.into(), JS_PROP_ENUMERABLE)?;
-    }
-
-    Ok(info.into())
 }
 
-fn js_run(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+/// Getter for `mode` / `name` — the target field is selected via the
+/// function's magic const (`FIELD_MODE` / `FIELD_NAME`).
+fn js_get_string(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
-    let before_run = get_def(ctx, &this)?.before_run.borrow().clone();
+    let p = get_def(ctx, &this)?;
+    match cc.magic() as i16 {
+        FIELD_MODE => {
+            let mode = match &*p.server_type.borrow() {
+                McpServerType::Stdio { .. } => "stdio",
+                McpServerType::Http { .. } => "http",
+            };
+            Ok(ctx.create_string_from_static(mode)?.into())
+        }
+        FIELD_NAME => Ok(js_str(ctx, p.server_name.clone())?),
+        _ => Ok(JSValue::UNDEFINED),
+    }
+}
+
+/// Getter for the http-only views `url` / `headers`. Returns the http server's
+/// endpoint url and registered request headers; for a stdio server these return
+/// `undefined` (that transport has no url / headers). The target field is selected
+/// via the function's magic const (`FIELD_URL` / `FIELD_HEADERS`).
+fn js_http_get(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let this = cc.this();
+    let p = get_def(ctx, &this)?;
+
+    match p.server_type.borrow().deref() {
+        McpServerType::Http { url, .. } => match cc.magic() as i16 {
+            FIELD_URL => js_str(ctx, url.clone()),
+            FIELD_HEADERS => {
+                let mut obj = ctx.create_base_object()?;
+                for (k, v) in p.env_or_header.borrow().iter() {
+                    let val = match v {
+                        EnvVal::Text(s) => js_str(ctx, s.clone())?,
+                        EnvVal::Func(f) => f.clone().into(),
+                    };
+                    obj.define_property_value_str(ctx, k, val, JS_PROP_ENUMERABLE)?;
+                }
+                Ok(obj.into())
+            }
+            _ => Ok(JSValue::UNDEFINED),
+        },
+        _ => Ok(JSValue::UNDEFINED),
+    }
+}
+
+fn js_launch_server(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let this = cc.this();
+    let before_run = match &*get_def(ctx, &this)?.server_type.borrow() {
+        McpServerType::Stdio { before_run, .. } => before_run.clone(),
+        McpServerType::Http { .. } => None,
+    };
 
     if let Some(func) = before_run {
         let r = func.call(ctx, JSValue::UNDEFINED, &[])?;
@@ -513,19 +658,21 @@ fn js_run_ignore_err(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     run_start(ctx, this)
 }
 
-/// Build the options object and start the stdio MCP server, then register
-/// signal handlers that stop it and force-exit once the server stops.
+/// Start the stdio MCP server: build the options object, call `McpStdio.start`,
+/// then register signal handlers that stop it and force-exit once it stops.
+/// The http transport is a remote connection and never calls `run()`; reaching
+/// it here is a bug, so the http branch is `unreachable!()`.
 fn run_start(ctx: &mut ScopedContext, this: JSValue) -> JSResult {
-    let (server_name, version, tools) = {
-        let p = get_def(ctx, &this)?;
-        let tools: Vec<(String, McpToolDef)> = p
-            .tools
-            .borrow()
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-        (p.server_name.clone(), p.version.borrow().clone(), tools)
+    let p = get_def(ctx, &this)?;
+    let tools: Vec<(String, McpToolDef)> = match &*p.server_type.borrow() {
+        McpServerType::Stdio { tools, .. } => {
+            tools.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+        }
+        McpServerType::Http { .. } => unreachable!("http McpServerDef never runs"),
     };
+
+    let server_name = p.server_name.clone();
+    let version = p.version.borrow().clone();
     let version = version.as_ref();
 
     let mut options = ctx.create_base_object()?;
@@ -611,35 +758,43 @@ pub(crate) fn js_define_mcp_stdio(ctx: &mut ScopedContext, cc: CallContext) -> J
         .content()
         .encode_utf8(false)
         .to_string();
-    JSMCPServerDef::new_instance(ctx, JSValue::UNDEFINED, MCPServerDefPayload::new(name))
-        .map(JSValue::from)
+    JSMcpServerDef::new_instance(
+        ctx,
+        JSValue::UNDEFINED,
+        McpServerDefPayload::new_stdio(name),
+    )
+    .map(JSValue::from)
 }
 
 // ── Class definition ──
 
 const MCP_SERVER_DEF_PROTO: &[FieldDef] = &[
-    FieldDef::GETSET("info", Some(js_info), None, 0),
-    FieldDef::FUNC("version", 1, js_set_string, SET_VERSION),
-    FieldDef::FUNC("description", 1, js_set_string, SET_DESCRIPTION),
+    FieldDef::GETSET("name", Some(js_get_string), None, FIELD_NAME),
+    FieldDef::GETSET("mode", Some(js_get_string), None, FIELD_MODE),
+    FieldDef::GETSET("toolSchema", Some(js_tool_schema), Some(js_tool_schema), 0),
+    FieldDef::GETSET("url", Some(js_http_get), None, FIELD_URL),
+    FieldDef::GETSET("headers", Some(js_http_get), None, FIELD_HEADERS),
+    FieldDef::FUNC("version", 1, js_set_string, FIELD_VERSION),
+    FieldDef::FUNC("description", 1, js_set_string, FIELD_DESCRIPTION),
     FieldDef::FUNC("shared", 1, js_shared, 0),
     FieldDef::FUNC("args", 1, js_args, 0),
     FieldDef::FUNC("env", 1, js_env, 0),
-    FieldDef::FUNC("tool", 2, js_tool, 0),
+    FieldDef::FUNC("tool", 2, js_stdio_tool, 0),
     FieldDef::FUNC("extraFiles", 0, js_extra_files, 0),
     FieldDef::FUNC("beforeRun", 1, js_before_run, 0),
-    FieldDef::FUNC("run", 0, js_run, 0),
+    FieldDef::FUNC("run", 0, js_launch_server, 0),
 ];
 
 def_native_object!(
-    "MCPServerDef",
-    JSMCPServerDef,
-    MCPServerDefPayload,
+    "McpServerDef",
+    JSMcpServerDef,
+    McpServerDefPayload,
     MCP_SERVER_DEF_PROTO,
     Some(ClassCtorDef::new(js_constructor, 1, true)),
-    on_payload_gc: MCPServerDefPayload::gc_trace
+    on_payload_gc: McpServerDefPayload::gc_trace
 );
 
 #[distributed_slice(USER_CLASS_DEFS)]
 fn register_mcp_server_def(rt: &mut Runtime) -> Result<ClassID, i32> {
-    JSMCPServerDef::register(rt)
+    JSMcpServerDef::register(rt)
 }

@@ -86,7 +86,7 @@ fn js_client_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             serde_json::Value::Null
         }
     };
-    let mut buffered_tool_call = true;
+    let buffered_tool_call = true;
 
     let new_target = cc.this();
 

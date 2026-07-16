@@ -75,14 +75,14 @@ fn get_devices(ctx: &mut ScopedContext, _: CallContext) -> JSResult {
 
 const MOD_LLAMA_ENTRIES: &[FieldDef] = &[
     FieldDef::CLASS(
-        "Client",
-        || class_client::JSLlmClient::class_id(),
+        JSLlmClient::CLASS_NAME,
+        JSLlmClient::class_id,
         JS_PROP_ENUMERABLE,
     ),
     #[cfg(feature = "llama_cpp")]
     FieldDef::CLASS(
-        "Model",
-        || class_model::JSLlmModel::class_id(),
+        class_model::JSLlmModel::CLASS_NAME,
+        class_model::JSLlmModel::class_id,
         JS_PROP_ENUMERABLE,
     ),
     #[cfg(feature = "llama_cpp")]

@@ -1,7 +1,110 @@
-// Type declarations for the "mcp" module
-// import { MCPServerDef, defineMCPStdio } from "mcp";
-
 declare module "mcp" {
+  /**
+   * The native `McpServerDef` class — a single runtime class backing both
+   * stdio and http transports. `StdioMcpDef` / `HttpMcpDef` (and the `McpDef`
+   * union) are transport-narrowed *views*: this class declares only the
+   * members common to every server; each transport adds its own config
+   * methods via `extends`. Every member is declared exactly once — no
+   * duplication, and the split is what makes `mode`-based narrowing real.
+   */
+  export class McpServerDef {
+    private constructor(serverName: string);
+
+    /** Advertised server name. */
+    readonly name: string;
+
+    /** Transport mode of this server: `"stdio"` or `"http"`. */
+    readonly mode: "stdio" | "http";
+
+    /** Schema for tool definitions */
+    get toolSchema(): McpToolMeta[] | undefined;
+
+    /** Get the advertised server version. */
+    version(): string;
+    /** Set the advertised server version. Returns `this` for chaining. */
+    version(v: string): this;
+
+    /** Get the human-readable server description. */
+    description(): string;
+    /** Set the human-readable server description. Returns `this`. */
+    description(v: string): this;
+
+    /** Get all registered tool definitions keyed by name. */
+    tool(): Record<string, McpToolShortDef>;
+    /** Register a tool definition. Returns `this`. */
+    tool(name: string, def: McpToolShortDef): this;
+
+    /**
+     * Server entry point (called by the bootstrap runner): awaits
+     * `beforeRun` if set, starts the server, registers SIGINT/SIGTERM stop
+     * handlers, and force-exits once the server stops.
+     */
+    run(): Promise<void>;
+  }
+
+  /**
+   * stdio view of `McpServerDef` — narrows `mode` to `"stdio"` and adds the
+   * stdio-only config: env vars, shared flag, CLI args, extra files, and the
+   * before-run hook. (At runtime these are no-ops on an http server, so they
+   * are intentionally absent from `HttpMcpDef`.)
+   */
+  export interface StdioMcpDef extends McpServerDef {
+    readonly mode: "stdio";
+
+    /** Get the currently registered env entries. */
+    env(): Record<string, string | ((ctx?: McpCtx) => string | undefined)>;
+    /**
+     * Register one or more env vars at once.
+     * @param vars — map of env name to either a static `string` or a resolver
+     *   `(ctx) => string | undefined`. Keys whose resolver returns `undefined`
+     *   (or a literal `undefined` value) are omitted. Returns `this` for chaining.
+     */
+    env(
+      vars: Record<string, string | ((ctx?: McpCtx) => string | undefined)>,
+    ): this;
+
+    /** Get whether the server is shared. */
+    shared(): boolean;
+    /** Mark the server as shared (discoverable). Returns `this`. */
+    shared(v: boolean): this;
+
+    /** Get the configured CLI args, resolver, or `undefined` if unset. */
+    args(): string[] | ((ctx: McpCtx) => string[]) | undefined;
+    /** Set static CLI args, or a resolver `(ctx) => string[]`. Returns `this`. */
+    args(v: string[]): this;
+    args(fn: (ctx: McpCtx) => string[]): this;
+
+    /** Register extra file paths bundled with the server. Returns `this`. */
+    extraFiles(...paths: string[]): this;
+
+    /** Register an async hook that runs before the server starts. Returns `this`. */
+    beforeRun(fn: () => Promise<void>): this;
+  }
+
+  /**
+   * http view of `McpServerDef` — narrows `mode` to `"http"` and adds the
+   * http-only config: request headers. (At runtime `env`/`shared`/`args`/…
+   * are no-ops on an http server, so they are intentionally absent here.)
+   */
+  export interface HttpMcpDef extends McpServerDef {
+    readonly mode: "http";
+
+    /** http endpoint url. */
+    readonly url: string;
+
+    /** Request headers registered for the http transport. */
+    get headers(): Record<string, string>;
+
+    /** Set the tool schema. http transport only. */
+    set toolSchema(schema: McpToolMeta[]);
+  }
+
+  /**
+   * Factory returning a new `McpServerDef` for a stdio MCP server.
+   * @param serverName — the advertised server name.
+   */
+  export function defineStdioMcp(serverName: string): StdioMcpDef;
+
   /**
    * Runtime context passed to `env`/`args` resolver callbacks.
    * Add new fields by extending this interface. The native
@@ -59,87 +162,27 @@ declare module "mcp" {
     args: Record<string, McpToolArgShort>;
   }
 
-  /** Metadata returned by `MCPServerDef.info()`. */
+  /** Metadata of tool defination */
   export interface McpToolMeta {
     name: string;
     description: string;
     inputSchema: Record<string, unknown>;
   }
 
-  /** Server metadata object returned by `info()`. */
+  /** Metadata of mcp server */
   export interface McpServerInfo {
+    transport: "stdio" | "http";
     serverName: string;
     description: string;
     version: string;
-    shared: boolean;
     tools: McpToolMeta[];
+
+    // stdio only
+    shared?: boolean;
+    /** Only present when at least one extra file is registered. */
     extraFiles?: string[];
+
+    // http only
+    url?: string;
   }
-
-  /**
-   * Runtime env resolver. Receives the MCP context and returns a `string`,
-   * or `undefined` to omit that env var.
-   */
-  export type EnvValFunc = (ctx?: McpCtx) => string | undefined;
-
-  /**
-   * Declarative MCP stdio server definition with a chainable Builder API.
-   *
-   * @example
-   *   export default defineMCPStdio("my-server")
-   *     .version("1.0.0")
-   *     .description("My tools")
-   *     .tool("greet", { desc: "...", handler: async args => ({...}), args: { ... } })
-   *     .tool("calc", { ... });
-   *
-   * Use `info()` for metadata (no side effects) or `run()` in the bootstrap
-   * runner to start the stdio server.
-   */
-  export class MCPServerDef {
-    /**
-     * Return server definition metadata
-     */
-    readonly info: McpServerInfo;
-
-    /** Set the advertised server version. Returns `this` for chaining. */
-    version(v: string): this;
-    /** Set the human-readable server description. Returns `this`. */
-    description(v: string): this;
-    /** Mark the server as shared (discoverable). Returns `this`. */
-    shared(v: boolean): this;
-
-    /** Set static CLI args, or a resolver `(ctx) => string[]`. Returns `this`. */
-    args(v: string[]): this;
-    args(fn: (ctx: McpCtx) => string[]): this;
-
-    /**
-     * Register one or more env vars at once.
-     * @param vars — map of env name to either a static `string` or a resolver
-     *   `EnvValFunc` `(ctx) => string | undefined`. Keys whose resolver
-     *   returns `undefined` (or a literal `undefined` value) are omitted.
-     *   Returns `this` for chaining.
-     */
-    env(vars: Record<string, string | EnvValFunc>): this;
-
-    /** Register a tool definition. Returns `this`. */
-    tool(name: string, def: McpToolShortDef): this;
-    /** Register extra file paths bundled with the server. Returns `this`. */
-    extraFiles(...paths: string[]): this;
-    /** Register an async hook that runs before the server starts. Returns `this`. */
-    beforeRun(fn: () => Promise<void>): this;
-
-    /**
-     * Server entry point (called by the bootstrap runner): awaits
-     * `beforeRun` if set, starts the stdio server via native `McpStdio`,
-     * registers SIGINT/SIGTERM stop handlers, and force-exits once the
-     * server stops.
-     */
-    run(): Promise<void>;
-  }
-
-  /**
-   * Factory returning a new `MCPServerDef` for a stdio MCP server.
-   * @param serverName — the advertised server name.
-   */
-  export function defineMCPStdio(serverName: string): MCPServerDef;
 }
