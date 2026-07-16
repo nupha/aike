@@ -13,6 +13,7 @@ mod helpers;
 mod html;
 mod http;
 mod llm;
+mod mcp;
 mod path;
 mod repl;
 mod request;
@@ -50,6 +51,7 @@ use crate::{
         JSWebSocketStream, gc_trace_stdio_state, init_mod_http,
     },
     llm::JSLlmClient,
+    mcp::init_mod_mcp,
     path::init_mod_path,
     whatwg::fetch::{headers::JSHeaders, request::JSRequest, response::JSResponse},
     whatwg::{
@@ -382,6 +384,7 @@ async fn main() -> ExitCode {
             init_mod_browser(cx)?;
             init_mod_yaml(cx)?;
             init_mod_llm(cx)?;
+            init_mod_mcp(cx)?;
 
             setup_globals(cx, &argv, &exec_argv, &exe_path)
         })
