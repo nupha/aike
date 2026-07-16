@@ -18,8 +18,8 @@ use std::{
 use linkme::distributed_slice;
 use zuqe::{
     Array, CallContext, Callback, ClassCtorDef, ClassID, FieldDef, JS_GPN_ENUM_ONLY,
-    JS_GPN_STR_OR_INT_MASK, JS_PROP_C_W_E, JSResult, JSValue, NativeObject, Object, Runtime,
-    ScopedContext,
+    JS_GPN_STR_OR_INT_MASK, JS_PROP_C_W_E, JS_PROP_ENUMERABLE, JSResult, JSValue, NativeObject,
+    Object, Runtime, ScopedContext,
     builtins::promise::Promise,
     def_native_object,
     gc_lite::{GcTrace, GcTraceCtx},
@@ -30,13 +30,13 @@ use crate::{USER_CLASS_DEFS, http::JSMcpStdio};
 /// Environment entry value: a static string, or a JS function resolving to
 /// `string | undefined`.
 enum EnvVal {
-    Static(String),
+    Text(String),
     Func(Object),
 }
 
 /// args entry: a static string array, or a JS function resolving to `string[]`.
 enum ArgsVal {
-    Static(Vec<String>),
+    Text(Vec<String>),
     Func(Object),
 }
 
@@ -56,7 +56,7 @@ pub(crate) struct MCPServerDefPayload {
     shared: Cell<bool>,
     extra_files: RefCell<Vec<String>>,
     tools: RefCell<HashMap<String, McpToolDef>>,
-    env_entries: RefCell<Vec<(String, EnvVal)>>,
+    env_entries: RefCell<HashMap<String, EnvVal>>,
     args_entry: RefCell<Option<ArgsVal>>,
     before_run: RefCell<Option<Object>>,
 }
@@ -70,7 +70,7 @@ impl MCPServerDefPayload {
             shared: Cell::new(false),
             extra_files: RefCell::new(Vec::new()),
             tools: RefCell::new(HashMap::new()),
-            env_entries: RefCell::new(Vec::new()),
+            env_entries: RefCell::new(HashMap::new()),
             args_entry: RefCell::new(None),
             before_run: RefCell::new(None),
         }
@@ -188,8 +188,9 @@ fn js_args(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 .to_string();
             out.push(s);
         }
-        ArgsVal::Static(out)
+        ArgsVal::Text(out)
     };
+
     *p.args_entry.borrow_mut() = Some(val);
     Ok(this)
 }
@@ -197,21 +198,39 @@ fn js_args(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 fn js_env(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let p = get_def(ctx, &this)?;
-    let name = cc
-        .arg(0)
-        .to_string(ctx)?
-        .content()
-        .encode_utf8(false)
-        .to_string();
-    let v = cc.arg(1);
-    let is_func = v.as_object().map_or(false, |o| o.is_callable());
-    let val = if is_func {
-        EnvVal::Func(v.into_callable(ctx)?)
-    } else {
-        let s = v.to_string(ctx)?.content().encode_utf8(false).to_string();
-        EnvVal::Static(s)
+    let vars = cc.arg(0);
+    let Some(mut obj) = vars.as_object().copied() else {
+        ctx.throw_type_error("env expects an object");
+        return Err(-1);
     };
-    p.env_entries.borrow_mut().push((name, val));
+
+    let keys = obj.get_own_property_names(ctx, JS_GPN_ENUM_ONLY | JS_GPN_STR_OR_INT_MASK)?;
+    let mut envs = HashMap::<String, EnvVal>::new();
+
+    for pk in keys.iter() {
+        let v = obj.get_property(ctx, pk.atom)?;
+        // A literal `undefined` value is omitted (mirrors resolver → undefined).
+        if v.is_undefined() {
+            continue;
+        }
+
+        let key_v = pk.atom.to_value(ctx)?;
+        let name = key_v
+            .to_string(ctx)?
+            .content()
+            .encode_utf8(false)
+            .to_string();
+
+        let val = if v.as_object().map_or(false, |o| o.is_callable()) {
+            EnvVal::Func(v.into_callable(ctx)?)
+        } else {
+            let s = v.to_string(ctx)?.content().encode_utf8(false).to_string();
+            EnvVal::Text(s)
+        };
+        envs.insert(name, val);
+    }
+
+    *p.env_entries.borrow_mut() = envs;
     Ok(this)
 }
 
@@ -290,7 +309,7 @@ fn js_before_run(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
 /// Build the JSON-schema `inputSchema` for a tool's `args` DSL object,
 /// mirroring the TS `dslToJsonSchema`.
-fn dsl_to_json_schema(mut ctx: &mut ScopedContext, mut args_obj: Object) -> JSResult {
+fn dsl_to_json_schema(ctx: &mut ScopedContext, mut args_obj: Object) -> JSResult {
     let pks = args_obj.get_own_property_names(ctx, JS_GPN_ENUM_ONLY | JS_GPN_STR_OR_INT_MASK)?;
     let mut properties = ctx.create_base_object()?;
     let mut required: Vec<String> = Vec::new();
@@ -376,20 +395,20 @@ fn dsl_to_json_schema(mut ctx: &mut ScopedContext, mut args_obj: Object) -> JSRe
             }
         }
 
-        properties.define_property_value_str(ctx, &name, prop.into(), JS_PROP_C_W_E)?;
+        properties.define_property_value_str(ctx, &name, prop.into(), JS_PROP_ENUMERABLE)?;
     }
 
     let mut schema = ctx.create_base_object()?;
     let type_val = js_str(ctx, "object".to_string())?;
-    schema.define_property_value_str(ctx, "type", type_val, JS_PROP_C_W_E)?;
-    schema.define_property_value_str(ctx, "properties", properties.into(), JS_PROP_C_W_E)?;
+    schema.define_property_value_str(ctx, "type", type_val, JS_PROP_ENUMERABLE)?;
+    schema.define_property_value_str(ctx, "properties", properties.into(), JS_PROP_ENUMERABLE)?;
     if !required.is_empty() {
         let mut req_arr = Array::create(ctx)?;
         for (i, n) in required.iter().enumerate() {
             let v = js_str(ctx, n.clone())?;
-            req_arr.define_property_value_u32(ctx, i as u32, v, JS_PROP_C_W_E)?;
+            req_arr.define_property_value_u32(ctx, i as u32, v, JS_PROP_ENUMERABLE)?;
         }
-        schema.define_property_value_str(ctx, "required", req_arr.into(), JS_PROP_C_W_E)?;
+        schema.define_property_value_str(ctx, "required", req_arr.into(), JS_PROP_ENUMERABLE)?;
     }
     Ok(schema.into())
 }
@@ -397,62 +416,35 @@ fn dsl_to_json_schema(mut ctx: &mut ScopedContext, mut args_obj: Object) -> JSRe
 fn js_info(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let p = get_def(ctx, &this)?;
-    let ctx_arg = if cc.length() > 0 && !cc.arg(0).is_undefined() {
-        cc.arg(0)
-    } else {
-        JSValue::UNDEFINED
-    };
 
-    // env
-    let env_empty = p.env_entries.borrow().is_empty();
-    let mut env_obj = ctx.create_base_object()?;
-    for (name, val) in p.env_entries.borrow().iter() {
-        let resolved: Option<String> = match val {
-            EnvVal::Static(s) => Some(s.clone()),
-            EnvVal::Func(f) => {
-                let r = f.call(ctx, JSValue::UNDEFINED, &[ctx_arg])?;
-                if r.is_undefined() {
-                    None
-                } else {
-                    Some(r.to_string(ctx)?.content().encode_utf8(false).to_string())
-                }
-            }
-        };
-        if let Some(s) = resolved {
-            let v = js_str(ctx, s)?;
-            env_obj.define_property_value_str(ctx, name, v, JS_PROP_C_W_E)?;
-        }
-    }
+    let mut info = ctx.create_base_object()?;
+    let sn = js_str(ctx, p.server_name.clone())?;
+    info.define_property_value_str(ctx, "serverName", sn, JS_PROP_ENUMERABLE)?;
 
-    // args
-    let args_val: JSValue = match p.args_entry.borrow().as_ref() {
-        Some(ArgsVal::Static(a)) => {
-            let mut arr = Array::create(ctx)?;
-            for (i, s) in a.iter().enumerate() {
-                let v = js_str(ctx, s.clone())?;
-                arr.define_property_value_u32(ctx, i as u32, v, JS_PROP_C_W_E)?;
-            }
-            arr.into()
-        }
-        Some(ArgsVal::Func(f)) => {
-            let r = f.call(ctx, JSValue::UNDEFINED, &[ctx_arg])?;
-            if r.is_undefined() {
-                JSValue::UNDEFINED
-            } else {
-                r
-            }
-        }
-        None => JSValue::UNDEFINED,
-    };
+    let desc = js_str(ctx, p.description.borrow().to_string())?;
+    info.define_property_value_str(ctx, "description", desc, JS_PROP_ENUMERABLE)?;
 
-    // tools
-    let mut tools_arr = Array::create(ctx)?;
-    for (i, (name, t)) in p.tools.borrow().iter().enumerate() {
+    let ver = js_str(ctx, p.version.borrow().to_string())?;
+    info.define_property_value_str(ctx, "version", ver, JS_PROP_ENUMERABLE)?;
+
+    info.define_property_value_str(
+        ctx,
+        "shared",
+        JSValue::from(p.shared.get()),
+        JS_PROP_ENUMERABLE,
+    )?;
+
+    // tools info
+    let mut tools_list = Vec::<JSValue>::with_capacity(p.tools.borrow().len());
+    for (name, t) in p.tools.borrow().iter() {
         let mut meta = ctx.create_base_object()?;
+
         let name_val = js_str(ctx, name.clone())?;
         meta.define_property_value_str(ctx, "name", name_val, JS_PROP_C_W_E)?;
+
         let desc_val = js_str(ctx, t.desc.clone())?;
         meta.define_property_value_str(ctx, "description", desc_val, JS_PROP_C_W_E)?;
+
         let schema = if let Some(args_obj) = t.args {
             dsl_to_json_schema(ctx, args_obj)?
         } else {
@@ -462,36 +454,24 @@ fn js_info(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             empty.into()
         };
         meta.define_property_value_str(ctx, "inputSchema", schema, JS_PROP_C_W_E)?;
-        tools_arr.define_property_value_u32(ctx, i as u32, meta.into(), JS_PROP_C_W_E)?;
+
+        tools_list.push(meta.into());
+    }
+    let tools = Array::from_values(ctx, tools_list)?;
+    info.define_property_value_str(ctx, "tools", tools.into(), JS_PROP_ENUMERABLE)?;
+
+    // extra files
+    let mut extra_files = Vec::<JSValue>::with_capacity(p.extra_files.borrow().len());
+    for f in p.extra_files.borrow().iter() {
+        extra_files.push(js_str(ctx, f.to_string())?.into());
+    }
+    if !extra_files.is_empty() {
+        let lst = Array::from_values(ctx, extra_files)?;
+        info.define_property_value_str(ctx, "extraFiles", lst.into(), JS_PROP_ENUMERABLE)?;
     }
 
-    let server_name = p.server_name.clone();
-    let description = p.description.borrow().clone();
-    let description = description.as_ref();
-    let shared = p.shared.get();
-
-    let mut info = ctx.create_base_object()?;
-    let sn = js_str(ctx, server_name)?;
-    info.define_property_value_str(ctx, "serverName", sn, JS_PROP_C_W_E)?;
-    let desc = js_str(ctx, description.to_string())?;
-    info.define_property_value_str(ctx, "description", desc, JS_PROP_C_W_E)?;
-    info.define_property_value_str(ctx, "shared", JSValue::from(shared), JS_PROP_C_W_E)?;
-    info.define_property_value_str(
-        ctx,
-        "env",
-        if env_empty {
-            JSValue::UNDEFINED
-        } else {
-            env_obj.into()
-        },
-        JS_PROP_C_W_E,
-    )?;
-    info.define_property_value_str(ctx, "args", args_val, JS_PROP_C_W_E)?;
-    info.define_property_value_str(ctx, "tools", tools_arr.into(), JS_PROP_C_W_E)?;
     Ok(info.into())
 }
-
-// ── Server entry point ──
 
 fn js_run(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
@@ -517,8 +497,8 @@ fn js_run(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             )?;
             return p.then(ctx, start_fn.into(), fail_fn.into()).map(Into::into);
         }
-        // beforeRun returned a non-promise value: start immediately.
     }
+
     run_start(ctx, this)
 }
 
@@ -638,15 +618,15 @@ pub(crate) fn js_define_mcp_stdio(ctx: &mut ScopedContext, cc: CallContext) -> J
 // ── Class definition ──
 
 const MCP_SERVER_DEF_PROTO: &[FieldDef] = &[
+    FieldDef::GETSET("info", Some(js_info), None, 0),
     FieldDef::FUNC("version", 1, js_set_string, SET_VERSION),
     FieldDef::FUNC("description", 1, js_set_string, SET_DESCRIPTION),
     FieldDef::FUNC("shared", 1, js_shared, 0),
     FieldDef::FUNC("args", 1, js_args, 0),
-    FieldDef::FUNC("env", 2, js_env, 0),
+    FieldDef::FUNC("env", 1, js_env, 0),
     FieldDef::FUNC("tool", 2, js_tool, 0),
     FieldDef::FUNC("extraFiles", 0, js_extra_files, 0),
     FieldDef::FUNC("beforeRun", 1, js_before_run, 0),
-    FieldDef::FUNC("info", 0, js_info, 0),
     FieldDef::FUNC("run", 0, js_run, 0),
 ];
 

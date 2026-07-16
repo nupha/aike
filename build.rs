@@ -87,12 +87,17 @@ fn main() {
     // Tell Cargo to re-run when features change (e.g. llama_cpp toggled).
     println!("cargo::rerun-if-env-changed=CARGO_FEATURE_LLAMA_CPP");
 
-    // Also watch source fragments.
+    // Watch source fragments. Also watch each directory itself so that
+    // *newly added* `.d.ts` files (not yet in the per-file tracking list)
+    // trigger a rebuild — otherwise a freshly added file like `mcp.d.ts`
+    // would be silently omitted from the generated bundle.
+    println!("cargo::rerun-if-changed={}", base_dir.display());
     for entry in &base_entries {
         println!("cargo::rerun-if-changed={}", entry.path().display());
     }
     if feature_llama {
         let feat_dir = types_dir.join("features").join("llama_cpp");
+        println!("cargo::rerun-if-changed={}", feat_dir.display());
         if feat_dir.exists() {
             for entry in fs::read_dir(&feat_dir).unwrap().filter_map(|e| e.ok()) {
                 println!("cargo::rerun-if-changed={}", entry.path().display());

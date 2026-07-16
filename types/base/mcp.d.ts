@@ -39,7 +39,11 @@ declare module "mcp" {
      * Schema for array items. Only meaningful when `type="array"`.
      * @example { type: "integer" } | { type: "string", desc: "Tag name" }
      */
-    items?: { type: "string" | "integer" | "boolean"; desc?: string; enum?: string[] };
+    items?: {
+      type: "string" | "integer" | "boolean";
+      desc?: string;
+      enum?: string[];
+    };
   }
 
   /** Simplified tool definition consumed by `MCPServerDef.tool`. */
@@ -66,11 +70,17 @@ declare module "mcp" {
   export interface McpServerInfo {
     serverName: string;
     description: string;
+    version: string;
     shared: boolean;
-    env: Record<string, string> | undefined;
-    args: string[] | undefined;
     tools: McpToolMeta[];
+    extraFiles?: string[];
   }
+
+  /**
+   * Runtime env resolver. Receives the MCP context and returns a `string`,
+   * or `undefined` to omit that env var.
+   */
+  export type EnvValFunc = (ctx?: McpCtx) => string | undefined;
 
   /**
    * Declarative MCP stdio server definition with a chainable Builder API.
@@ -86,8 +96,10 @@ declare module "mcp" {
    * runner to start the stdio server.
    */
   export class MCPServerDef {
-    /** Server name (immutable, set at construction). */
-    readonly serverName: string;
+    /**
+     * Return server definition metadata
+     */
+    readonly info: McpServerInfo;
 
     /** Set the advertised server version. Returns `this` for chaining. */
     version(v: string): this;
@@ -100,9 +112,14 @@ declare module "mcp" {
     args(v: string[]): this;
     args(fn: (ctx: McpCtx) => string[]): this;
 
-    /** Add a static env var, or a resolver `(ctx) => string | undefined`. Returns `this`. */
-    env(name: string, val: string): this;
-    env(name: string, val: (ctx: McpCtx) => string | undefined): this;
+    /**
+     * Register one or more env vars at once.
+     * @param vars — map of env name to either a static `string` or a resolver
+     *   `EnvValFunc` `(ctx) => string | undefined`. Keys whose resolver
+     *   returns `undefined` (or a literal `undefined` value) are omitted.
+     *   Returns `this` for chaining.
+     */
+    env(vars: Record<string, string | EnvValFunc>): this;
 
     /** Register a tool definition. Returns `this`. */
     tool(name: string, def: McpToolShortDef): this;
@@ -110,13 +127,6 @@ declare module "mcp" {
     extraFiles(...paths: string[]): this;
     /** Register an async hook that runs before the server starts. Returns `this`. */
     beforeRun(fn: () => Promise<void>): this;
-
-    /**
-     * Return server metadata without side effects (no McpStdio start,
-     * no signal handlers). The optional `ctx` is forwarded to `env`/`args`
-     * resolver callbacks.
-     */
-    info(ctx?: McpCtx): McpServerInfo;
 
     /**
      * Server entry point (called by the bootstrap runner): awaits
