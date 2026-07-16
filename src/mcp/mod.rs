@@ -16,7 +16,7 @@ pub(crate) fn init_mod_mcp(ctx: &mut ScopedContext) -> Result<(), i32> {
         ),
         FieldDef::FUNC(
             "defineStdioMcp",
-            1,
+            2,
             class_mcp_server_def::js_define_mcp_stdio,
             0,
         ),
