@@ -10,16 +10,15 @@ use std::{
 
 use linkme::distributed_slice;
 use zuqe::{
-    CallContext, ClassCtorDef, ClassID, FieldDef, JSResult, JSValue, Object, Runtime,
+    CallContext, ClassCtorDef, ClassID, FieldDef, JSResult, JSValue, NativeObject, Object, Runtime,
     ScopedContext, def_native_object,
 };
 
 use crate::USER_CLASS_DEFS;
 
 use super::{
-    class_stdio_mcp::{
-        get_payload, get_payload_mut, js_add_tool, js_initialize_info, js_instructions, js_name,
-        js_str, js_tools_list, js_version,
+    class_mcp::{
+        JSBaseMcp, get_payload, js_str,
     },
     service::{McpSchemas, McpServicePayload, McpTransport, parse_mcp_tools},
 };
@@ -121,78 +120,15 @@ fn js_http_get(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     }
 }
 
-/// `HttpMcp.updateTools(tools)` — hot-reload: REPLACE all JS tools (native
-/// tools are preserved). For an HTTP server that is already listening, the
-/// new handler table is pushed through the hot-reload channel so it takes
-/// effect on the next request.
-fn js_http_update_tools(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let mut this = cc.this();
-    let p = get_payload_mut(ctx, &mut this)?;
-
-    // HttpMcp is always an Http transport, but guard for safety.
-    match &p.transport {
-        McpTransport::Http { .. } => {}
-        _ => {
-            ctx.throw_type_error("updateTools is only supported on an Http transport");
-            return Err(-1);
-        }
-    }
-
-    // arg(0): tools (array or object-keyed format)
-    let tools_val = cc.arg(0);
-    let (tools, name_to_index, js_handlers) = parse_mcp_tools(ctx, &tools_val)?;
-
-    // Replace all JS tools, preserving native tool entries.
-    {
-        let mut guard = p.schemas.write().unwrap();
-        let native_names: Vec<String> = guard.native_map.keys().cloned().collect();
-        let mut new_tools = tools;
-        let mut new_name_to_index = name_to_index;
-        let mut new_native_map = HashMap::new();
-
-        for name in &native_names {
-            if let Some(&old_idx) = guard.name_to_index.get(name) {
-                let new_idx = new_tools.len();
-                new_tools.push(guard.tools[old_idx].clone());
-                new_name_to_index.insert(name.clone(), new_idx);
-                if let Some(&ni) = guard.native_map.get(name) {
-                    new_native_map.insert(name.clone(), ni);
-                }
-            }
-        }
-
-        guard.tools = new_tools;
-        guard.name_to_index = new_name_to_index;
-        guard.native_map = new_native_map;
-    }
-
-    // Update JS handlers on payload (for GC tracing).
-    p.js_handlers = RefCell::new(js_handlers.clone());
-
-    // Send new handler table to the poller via update channel.
-    if let McpTransport::Http { update_tx, .. } = &p.transport {
-        if let Some(utx) = update_tx {
-            let _ = utx.send(js_handlers);
-        }
-    }
-
-    Ok(this)
-}
-
 const HTTP_MCP_STATIC_ENTRIES: &[FieldDef] = &[FieldDef::FUNC("define", 3, js_http_define, 0)];
 
 const HTTP_MCP_CTOR: ClassCtorDef =
     ClassCtorDef::new(js_http_constructor, 1, true).entries(HTTP_MCP_STATIC_ENTRIES);
 
+// Instance prototype — the http-only surface (shared getters/methods are
+// inherited from `BaseMcp`, see class_mcp.rs).
 const HTTP_MCP_PROTO: &[FieldDef] = &[
-    FieldDef::GETSET("initializeInfo", Some(js_initialize_info), None, 0),
-    FieldDef::GETSET("toolsList", Some(js_tools_list), Some(js_tools_list), 0),
-    FieldDef::GETSET("name", Some(js_name), None, 0),
-    FieldDef::GETSET("version", Some(js_version), None, 0),
-    FieldDef::GETSET("instructions", Some(js_instructions), None, 0),
     FieldDef::GETSET("mountPath", Some(js_http_get), None, FIELD_MOUNT_PATH),
-    FieldDef::FUNC("addTool", 1, js_add_tool, 0),
-    FieldDef::FUNC("updateTools", 1, js_http_update_tools, 0),
 ];
 
 def_native_object!(
@@ -201,6 +137,7 @@ def_native_object!(
     McpServicePayload,
     HTTP_MCP_PROTO,
     Some(HTTP_MCP_CTOR),
+    extends: JSBaseMcp::class_id,
     on_payload_gc: McpServicePayload::gc_trace
 );
 

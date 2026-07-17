@@ -32,8 +32,9 @@ use zuqe::{
     gc_lite::{GcTrace, GcTraceCtx},
 };
 
-use super::{ArgsVal, EnvVal};
 use crate::{USER_CLASS_DEFS, http::IncomingRequest};
+
+use super::{ArgsVal, EnvVal};
 
 /// Native tool handler function type.
 pub(crate) type NativeMcpToolFn = Arc<
@@ -377,10 +378,6 @@ fn create_mcp_bridge(
     JSMcpBridge::new_instance(ctx, JSValue::UNDEFINED, McpBridgePayload { tx: Some(tx) })
         .map(|v| v.into())
 }
-
-// ---------------------------------------------------------------------------
-// MCP service (rmcp-based) — dynamic tool dispatch
-// ---------------------------------------------------------------------------
 
 /// The MCP service that bridges rmcp protocol to our native + JS tool handlers.
 ///

@@ -2,12 +2,14 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
 mod class_http_mcp;
+mod class_mcp;
 mod class_mcp_server_def;
 mod class_stdio_mcp;
 mod service;
 
 pub(crate) use {
     class_http_mcp::JSHttpMcp,
+    class_mcp::JSBaseMcp,
     class_mcp_server_def::JSMcpServerDef,
     class_stdio_mcp::{JSStdioMcp, gc_trace_stdio_state},
     service::{
@@ -67,10 +69,12 @@ pub(crate) fn init_mod_mcp(ctx: &mut ScopedContext) -> Result<(), i32> {
     ];
 
     ctx.use_classes(&[
+        JSBaseMcp::class_id(),
         JSMcpServerDef::class_id(),
         JSStdioMcp::class_id(),
         JSHttpMcp::class_id(),
     ])?;
+
     ctx.create_module("mcp", MOD_MCP_ENTRIES)?;
 
     Ok(())

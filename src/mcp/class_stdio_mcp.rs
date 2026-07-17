@@ -16,7 +16,7 @@ use linkme::distributed_slice;
 use rmcp::service::RoleServer;
 use zuqe::{
     Array, CallContext, Callback, ClassCtorDef, ClassID, FieldDef, JS_PROP_ENUMERABLE, JSResult,
-    JSValue, Object, PollSender, Runtime, ScopedContext,
+    JSValue, NativeObject, Object, PollSender, Runtime, ScopedContext,
     builtins::promise::Promise,
     def_native_object,
     gc_lite::{GcTrace, GcTraceCtx},
@@ -26,7 +26,7 @@ use crate::{USER_CLASS_DEFS, http::IncomingRequest};
 
 use super::{
     ArgsVal, EnvVal,
-    class_http_mcp::JSHttpMcp,
+    class_mcp::{JSBaseMcp, get_payload, js_str},
     class_mcp_server_def::{parse_env_object, register_signal},
     service::{
         McpSchemas, McpService, McpServicePayload, McpTransport, handle_mcp_tool_call,
@@ -65,67 +65,6 @@ pub(crate) fn gc_trace_stdio_state(gcx: &mut GcTraceCtx) {
 /// The `StdioMcp` / `HttpMcp` payload type (`McpServicePayload`) and its
 /// `McpTransport` enum now live in `service.rs` (merged from the old
 /// `StdioMcpPayload` + `McpEndpoint`, see mcp-service.md §3).
-
-/// Create a JS string value, taking ownership of `s` so no extra allocation
-/// is needed when the caller already holds a `String`.
-pub(crate) fn js_str(ctx: &mut ScopedContext, s: String) -> JSResult {
-    Ok(ctx.create_string_from_utf8(s.into_bytes())?.into())
-}
-
-/// Resolve the shared `McpServicePayload` from either a `JSStdioMcp` or a
-/// `JSHttpMcp` instance (both wrap the same payload type).
-pub(crate) fn get_payload<'a>(
-    ctx: &mut ScopedContext,
-    val: &'a JSValue,
-) -> Result<&'a McpServicePayload, i32> {
-    if let Some(o) = val.as_native_object::<JSStdioMcp>() {
-        if let Some(p) = o.payload() {
-            return Ok(p);
-        }
-    }
-    if let Some(o) = val.as_native_object::<JSHttpMcp>() {
-        if let Some(p) = o.payload() {
-            return Ok(p);
-        }
-    }
-    ctx.throw_type_error("not a Mcp server instance");
-    Err(-1)
-}
-
-/// Mutable variant of `get_payload` — returns the payload for mutation
-/// (e.g. dynamically adding tools).
-pub(crate) fn get_payload_mut<'a>(
-    ctx: &mut ScopedContext,
-    val: &'a mut JSValue,
-) -> Result<&'a mut McpServicePayload, i32> {
-    // Peek the class via immutable borrows first (repeatable), then take a
-    // single mutable borrow inside the matching branch. This avoids two
-    // sequential `&mut` borrows of `val`, which the borrow checker rejects
-    // (the `&'a mut` return would otherwise tie `val` as borrowed for `'a`
-    // across the whole function).
-    let is_stdio = val.as_native_object::<JSStdioMcp>().is_some();
-    let is_http = val.as_native_object::<JSHttpMcp>().is_some();
-    if is_stdio {
-        return val
-            .as_native_object_mut::<JSStdioMcp>()
-            .and_then(|o| o.payload_mut())
-            .ok_or_else(|| {
-                ctx.throw_type_error("not a Mcp server instance");
-                -1
-            });
-    }
-    if is_http {
-        return val
-            .as_native_object_mut::<JSHttpMcp>()
-            .and_then(|o| o.payload_mut())
-            .ok_or_else(|| {
-                ctx.throw_type_error("not a Mcp server instance");
-                -1
-            });
-    }
-    ctx.throw_type_error("not a Mcp server instance");
-    Err(-1)
-}
 
 /// Constructor callback — `StdioMcp` is NOT constructable. Instances must be
 /// created via the static `StdioMcp.define(name, tools, options)`. Calling it
@@ -254,30 +193,6 @@ fn js_get(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         },
         _ => Ok(JSValue::UNDEFINED),
     }
-}
-
-/// tools JSON-schema getter (mirrors `McpServerDef.toolSchema`). Setting it on
-/// a stdio server is a no-op, so the setter just returns `this`.
-pub(crate) fn js_tools_list(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let this = cc.this();
-    let p = get_payload(ctx, &this)?;
-    p.make_schemas_json(ctx).map(JSValue::from)
-}
-
-/// `initializeInfo` getter — returns the object advertised in the MCP
-/// `initialize` handshake result. Built from `make_server_info` (== the
-/// `InitializeResult` the server actually returns), then serialized to a JS
-/// object via serde_json.
-pub(crate) fn js_initialize_info(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let this = cc.this();
-    let p = get_payload(ctx, &this)?;
-
-    let info = p.make_server_info();
-    let val = serde_json::to_value(info).map_err(|e| {
-        ctx.throw_internal_error(&format!("server info serialize failed: {}", e));
-        -1
-    })?;
-    JSValue::from_serde_json(ctx, &val)
 }
 
 /// Instance `run()` — launch this server's stdio transport via the shared
@@ -616,50 +531,6 @@ fn js_noop(_ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
     Ok(JSValue::UNDEFINED)
 }
 
-// ── Shared instance getters (same for JSStdioMcp and JSHttpMcp) ──
-
-pub(crate) fn js_name(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let this = cc.this();
-    let p = get_payload(ctx, &this)?;
-    js_str(ctx, p.server_name.clone())
-}
-
-pub(crate) fn js_version(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let this = cc.this();
-    let p = get_payload(ctx, &this)?;
-    js_str(ctx, p.version.borrow().to_string())
-}
-
-pub(crate) fn js_instructions(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let this = cc.this();
-    let p = get_payload(ctx, &this)?;
-    js_str(ctx, p.instructions.borrow().to_string())
-}
-
-/// Dynamically add JS tools after construction. Accepts the same `tools` DSL as
-/// `define` (object-keyed map or `McpToolDefinition[]` array). For an HTTP server
-/// that is already listening, the new handler table is pushed through the
-/// hot-reload channel so it takes effect on the next request. For stdio, call
-/// BEFORE `run()` (the server is built from the payload at run time).
-pub(crate) fn js_add_tool(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let mut this = cc.this();
-    let p = get_payload_mut(ctx, &mut this)?;
-
-    let tools_val = cc.arg(0);
-    let (tools, name_to_index, js_handlers) = parse_mcp_tools(ctx, &tools_val)?;
-
-    let new_handlers = p.register_js_tools(tools, name_to_index, js_handlers);
-
-    // HTTP hot-reload: push the new handler table so the running poller picks it up.
-    if let McpTransport::Http { update_tx, .. } = &p.transport {
-        if let Some(tx) = update_tx {
-            let _ = tx.send(new_handlers);
-        }
-    }
-
-    Ok(this)
-}
-
 // ── JSStdioMcp ──
 
 // Static methods defined on the class constructor (not prototype)
@@ -675,20 +546,15 @@ const STDIO_MCP_STATIC_ENTRIES: &[FieldDef] = &[
 const STDIO_MCP_CTOR: ClassCtorDef =
     ClassCtorDef::new(js_constructor, 1, true).entries(STDIO_MCP_STATIC_ENTRIES);
 
-// Instance prototype — the stdio builder surface, mirroring McpServerDef.
+// Instance prototype — the stdio-only surface (shared getters/methods are
+// inherited from `BaseMcp`, see class_mcp.rs).
 const STDIO_MCP_PROTO: &[FieldDef] = &[
-    FieldDef::GETSET("initializeInfo", Some(js_initialize_info), None, 0),
-    FieldDef::GETSET("toolsList", Some(js_get), None, FIELD_TOOLS),
     FieldDef::GETSET("shared", Some(js_get), None, FIELD_SHARED),
     FieldDef::GETSET("extraFiles", Some(js_get), None, FIELD_EXTRA_FILES),
     FieldDef::GETSET("beforeRun", Some(js_get), None, FIELD_BEFORE_RUN),
     FieldDef::GETSET("spawnEnv", Some(js_get), None, FIELD_SPAWN_ENV),
     FieldDef::GETSET("spawnArgs", Some(js_get), None, FIELD_SPAWN_ARGS),
-    FieldDef::FUNC("addTool", 1, js_add_tool, 0),
     FieldDef::FUNC("run", 0, js_run, 0),
-    FieldDef::GETSET("name", Some(js_name), None, 0),
-    FieldDef::GETSET("version", Some(js_version), None, 0),
-    FieldDef::GETSET("instructions", Some(js_instructions), None, 0),
 ];
 
 def_native_object!(
@@ -697,6 +563,7 @@ def_native_object!(
     McpServicePayload,
     STDIO_MCP_PROTO,
     Some(STDIO_MCP_CTOR),
+    extends: JSBaseMcp::class_id,
     on_payload_gc: McpServicePayload::gc_trace
 );
 
@@ -704,5 +571,3 @@ def_native_object!(
 fn register_stdio_mcp(rt: &mut Runtime) -> Result<ClassID, i32> {
     JSStdioMcp::register(rt)
 }
-
-
