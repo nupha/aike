@@ -17,22 +17,12 @@ use zuqe::{
 use crate::USER_CLASS_DEFS;
 
 use super::{
-    class_mcp::{
-        JSBaseMcp, get_payload, js_str,
-    },
+    class_mcp::{JSBaseMcp, get_payload, js_str},
     service::{McpSchemas, McpServicePayload, McpTransport, parse_mcp_tools},
 };
 
 const FIELD_MOUNT_PATH: i16 = 12;
 
-/// `HttpMcp.define(name, tools, options)` — static factory.
-///
-/// `name` is the advertised server name (required, same position as
-/// `StdioMcp.define`). `tools` is the required second argument (object-keyed
-/// DSL or array). `options` carries version / instructions (everything except
-/// `tools`). The compiled schemas + handlers are written into the payload at
-/// define() time. The mount path is NOT set here — it is assigned by
-/// `HttpServer.mcp(mountPath, server)` at mount time.
 fn js_http_define(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     // name — required first argument (advertised server name).
     let name = cc.arg(0).to_string(ctx).map_err(|_| {
@@ -73,8 +63,6 @@ fn js_http_define(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     JSHttpMcp::new_instance(ctx, JSValue::UNDEFINED, payload).map(JSValue::from)
 }
 
-/// Apply the `HttpMcp.define(name, tools, options)` options object onto a
-/// fresh payload. Covers version / instructions (serverName is positional).
 fn apply_http_options(
     ctx: &mut ScopedContext,
     p: &mut McpServicePayload,
@@ -120,23 +108,20 @@ fn js_http_get(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     }
 }
 
-const HTTP_MCP_STATIC_ENTRIES: &[FieldDef] = &[FieldDef::FUNC("define", 3, js_http_define, 0)];
-
-const HTTP_MCP_CTOR: ClassCtorDef =
-    ClassCtorDef::new(js_http_constructor, 1, true).entries(HTTP_MCP_STATIC_ENTRIES);
-
-// Instance prototype — the http-only surface (shared getters/methods are
-// inherited from `BaseMcp`, see class_mcp.rs).
-const HTTP_MCP_PROTO: &[FieldDef] = &[
-    FieldDef::GETSET("mountPath", Some(js_http_get), None, FIELD_MOUNT_PATH),
-];
+const HTTP_MCP_STATIC: &[FieldDef] = &[FieldDef::FUNC("define", 3, js_http_define, 0)];
+const HTTP_MCP_PROTO: &[FieldDef] = &[FieldDef::GETSET(
+    "mountPath",
+    Some(js_http_get),
+    None,
+    FIELD_MOUNT_PATH,
+)];
 
 def_native_object!(
     "HttpMcp",
     JSHttpMcp,
     McpServicePayload,
     HTTP_MCP_PROTO,
-    Some(HTTP_MCP_CTOR),
+    Some( ClassCtorDef::new(js_http_constructor, 1, true).entries(HTTP_MCP_STATIC)),
     extends: JSBaseMcp::class_id,
     on_payload_gc: McpServicePayload::gc_trace
 );

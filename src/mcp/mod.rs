@@ -12,10 +12,7 @@ pub(crate) use {
     class_mcp::JSBaseMcp,
     class_mcp_server_def::JSMcpServerDef,
     class_stdio_mcp::{JSStdioMcp, gc_trace_stdio_state},
-    service::{
-        McpToolCallRequest, McpTransport, build_axum_mcp_route, handle_mcp_tool_call,
-        parse_mcp_tools,
-    },
+    service::{McpToolCallRequest, McpTransport, build_axum_mcp_route, handle_mcp_tool_call},
 };
 
 use zuqe::{FieldDef, JS_PROP_ENUMERABLE, NativeObject, Object, ScopedContext};

@@ -37,7 +37,6 @@ use crate::{
     USER_CLASS_DEFS,
     mcp::{
         JSHttpMcp, McpToolCallRequest, McpTransport, build_axum_mcp_route, handle_mcp_tool_call,
-        parse_mcp_tools,
     },
 };
 

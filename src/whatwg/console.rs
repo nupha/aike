@@ -19,7 +19,8 @@ fn console_println(msg: String) {
 }
 
 fn js_console_print(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let clr = || match cc.magic() {
+    let magic = cc.magic();
+    let clr = || match magic {
         1 => Color::CyanFg,
         2 => Color::GreenFg,
         3 => Color::YellowFg,
@@ -40,7 +41,13 @@ fn js_console_print(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         let arg = cc.arg(i);
         out.push_str(&colorize(&arg.inspect(ctx)?, clr()));
     }
-    console_println(out);
+
+    if magic == 4 {
+        // error
+        eprintln!("{}", out);
+    } else {
+        console_println(out);
+    }
 
     Ok(JSValue::UNDEFINED)
 }
@@ -58,8 +65,10 @@ fn js_console_assert(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             out.push_str(&colorize(" ", Color::RedFg));
             out.push_str(&colorize(&cc.arg(i).inspect(ctx)?, Color::RedFg));
         }
-        console_println(out);
+
+        eprintln!("{}", out);
     }
+
     Ok(JSValue::UNDEFINED)
 }
 
