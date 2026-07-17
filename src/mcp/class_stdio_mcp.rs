@@ -15,8 +15,9 @@ use crossbeam::channel;
 use linkme::distributed_slice;
 use rmcp::service::RoleServer;
 use zuqe::{
-    Array, CallContext, Callback, ClassCtorDef, ClassID, FieldDef, JS_PROP_ENUMERABLE, JSResult,
-    JSValue, NativeObject, Object, PollSender, Runtime, ScopedContext,
+    Array, CallContext, Callback, ClassCtorDef, ClassID, FieldDef, JS_GPN_ENUM_ONLY,
+    JS_GPN_STR_OR_INT_MASK, JS_PROP_ENUMERABLE, JSResult, JSValue, NativeObject, Object,
+    PollSender, Runtime, ScopedContext,
     builtins::promise::Promise,
     def_native_object,
     gc_lite::{GcTrace, GcTraceCtx},
@@ -27,7 +28,6 @@ use crate::{USER_CLASS_DEFS, http::IncomingRequest};
 use super::{
     ArgsVal, EnvVal,
     class_mcp::{JSBaseMcp, get_payload, js_str},
-    class_mcp_server_def::{parse_env_object, register_signal},
     service::{
         McpSchemas, McpService, McpServicePayload, McpTransport, handle_mcp_tool_call,
         parse_mcp_tools,
@@ -531,7 +531,52 @@ fn js_noop(_ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
     Ok(JSValue::UNDEFINED)
 }
 
-// ── JSStdioMcp ──
+/// Parse an env object (`Record<string, string | (() => string | undefined)>`)
+/// into the internal `EnvVal` map. Used by the `spawnEnv` option.
+fn parse_env_object(
+    ctx: &mut ScopedContext,
+    mut obj: Object,
+) -> Result<HashMap<String, EnvVal>, i32> {
+    let keys = obj.get_own_property_names(ctx, JS_GPN_ENUM_ONLY | JS_GPN_STR_OR_INT_MASK)?;
+    let mut settings = HashMap::<String, EnvVal>::new();
+
+    for pk in keys.iter() {
+        let v = obj.get_property(ctx, pk.atom)?;
+        // A literal `undefined` value is omitted (mirrors resolver → undefined).
+        if v.is_undefined() {
+            continue;
+        }
+
+        let name = pk
+            .atom
+            .to_value(ctx)?
+            .to_string(ctx)?
+            .content()
+            .encode_utf8(false)
+            .to_string();
+
+        let val = if v.as_object().map_or(false, |o| o.is_callable()) {
+            EnvVal::Func(v.into_callable(ctx)?)
+        } else {
+            let s = v.to_string(ctx)?.content().encode_utf8(false).to_string();
+            EnvVal::Text(s)
+        };
+        settings.insert(name, val);
+    }
+
+    Ok(settings)
+}
+
+/// Register `Aike.onSignal(sig, () => StdioMcp.stop())` so the server stops
+/// gracefully on SIGINT / SIGTERM.
+fn register_signal(ctx: &mut ScopedContext, sig: &str) -> JSResult {
+    let aike = ctx.global_obj().get_property_str(ctx, "Aike")?;
+    let onsignal = aike.get_property_str(ctx, "onSignal")?;
+    let stop_fn = ctx.create_native_function(Callback::Func(js_stop), "mcpStop", 0, 0)?;
+    let sig_val = js_str(ctx, sig.to_string())?;
+    onsignal.call(ctx, aike, &[sig_val, stop_fn.into()])?;
+    Ok(JSValue::UNDEFINED)
+}
 
 // Static methods defined on the class constructor (not prototype)
 const STDIO_MCP_STATIC_ENTRIES: &[FieldDef] = &[
