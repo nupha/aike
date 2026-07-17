@@ -20,27 +20,23 @@ pub(crate) use {
 
 use zuqe::{FieldDef, JS_PROP_ENUMERABLE, NativeObject, Object, ScopedContext};
 
-/// Shared payload types for the stdio / server-def MCP builders.
-/// `class_mcp_stdio` (`StdioMcp`) and `class_mcp_server_def` (`McpServerDef`)
-/// both store tools / env / args and reuse them via `parse_env_object` /
-/// `dsl_to_json_schema`.
 #[derive(Clone)]
-pub(crate) enum EnvVal {
+pub(super) enum EnvVal {
     Text(String),
     Func(Object),
 }
 
 #[derive(Clone)]
-pub(crate) enum ArgsVal {
+pub(super) enum ArgsVal {
     Text(Vec<String>),
     Func(Object),
 }
 
 #[derive(Clone)]
-pub(crate) struct McpToolDef {
-    pub(crate) desc: String,
-    pub(crate) handler: Object,
-    pub(crate) args: Option<Object>,
+pub(super) struct McpToolDef {
+    pub desc: String,
+    pub handler: Object,
+    pub args: Option<Object>,
 }
 
 pub(crate) fn init_mod_mcp(ctx: &mut ScopedContext) -> Result<(), i32> {

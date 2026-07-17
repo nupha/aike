@@ -237,9 +237,47 @@ declare module "mcp" {
   };
 
   /**
+   * Abstract base class shared by {@link StdioMcp} and {@link HttpMcp} (both wrap
+   * the same server payload). Holds the prototype surface common to every MCP
+   * server: identity getters, tool listing, and the dynamic tool helpers.
+   *
+   * Never constructed directly — use `StdioMcp.define` / `HttpMcp.define`.
+   */
+  abstract class BaseMcp {
+    /** MCP `initialize` handshake result advertised by this server. */
+    readonly initializeInfo: McpInitializeResult;
+
+    /** Tool definitions */
+    readonly toolsList: McpToolMeta[];
+
+    /** Advertised server name. */
+    readonly name: string;
+
+    /** Advertised server version. */
+    readonly version: string;
+
+    /** Server instructions. */
+    readonly instructions: string;
+
+    /**
+     * Dynamically add JS tools after construction. Accepts the same `tools` DSL
+     * as `define` (object-keyed map or `McpToolDefinition[]` array).
+     */
+    addTool(tools: McpToolDefinition[] | Record<string, McpToolShortDef>): this;
+
+    /**
+     * Hot-reload: REPLACE all JS tools (native tools are preserved). Accepts the
+     * same `tools` DSL as `define`.
+     */
+    updateTools(
+      tools: McpToolDefinition[] | Record<string, McpToolShortDef>,
+    ): this;
+  }
+
+  /**
    * MCP server over stdio transport (stdin/stdout).
    */
-  export class StdioMcp {
+  export class StdioMcp extends BaseMcp {
     private constructor();
 
     /**
@@ -264,12 +302,6 @@ declare module "mcp" {
       },
     ): StdioMcp;
 
-    /** MCP `initialize` handshake result advertised by this server. */
-    readonly initializeInfo: McpInitializeResult;
-
-    /** Tool definitions */
-    readonly toolsList: McpToolMeta[];
-
     /** Whether the server is shared. */
     readonly shared: boolean;
 
@@ -278,13 +310,6 @@ declare module "mcp" {
 
     /** Async hook run before the server starts, or `null`. */
     readonly beforeRun: (() => Promise<void>) | null;
-
-    /**
-     * Dynamically add JS tools after construction. Accepts the same `tools` DSL
-     * as `define` (object-keyed map or `McpToolDefinition[]` array). Must be
-     * called BEFORE `run()` to take effect on the stdio server.
-     */
-    addTool(tools: McpToolDefinition[] | Record<string, McpToolShortDef>): this;
 
     /**
      * Launch this server: awaits `beforeRun` if set, starts the stdio
@@ -318,7 +343,7 @@ declare module "mcp" {
    * `server.updateTools(tools)` (replace all JS tools) or `server.addTool(tools)`
    * (append).
    */
-  export class HttpMcp {
+  export class HttpMcp extends BaseMcp {
     private constructor();
 
     /**
@@ -340,38 +365,7 @@ declare module "mcp" {
       },
     ): HttpMcp;
 
-    /** MCP `initialize` handshake result advertised by this server. */
-    readonly initializeInfo: McpInitializeResult;
-
-    /** Tool definitions */
-    readonly toolsList: McpToolMeta[];
-
-    /** Advertised server name. */
-    readonly name: string;
-
-    /** Advertised server version. */
-    readonly version: string;
-
-    /** Server instructions. */
-    readonly instructions: string;
-
     /** The URL mount path this server is served at. */
     readonly mountPath: string;
-
-    /**
-     * Dynamically add JS tools after construction. Accepts the same `tools` DSL
-     * as `define` (object-keyed map or `McpToolDefinition[]` array). On a server
-     * that is already listening, the new tools hot-reload on the next request.
-     */
-    addTool(tools: McpToolDefinition[] | Record<string, McpToolShortDef>): this;
-
-    /**
-     * Hot-reload: REPLACE all JS tools (native tools are preserved). Accepts the
-     * same `tools` DSL as `define`. On a server that is already listening, the
-     * new tools take effect on the next request.
-     */
-    updateTools(
-      tools: McpToolDefinition[] | Record<string, McpToolShortDef>,
-    ): this;
   }
 }
