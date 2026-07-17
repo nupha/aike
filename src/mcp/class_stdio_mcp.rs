@@ -6,18 +6,19 @@ use std::{
     cell::{Cell, RefCell},
     collections::HashMap,
     sync::{
-        Mutex, OnceLock,
+        Arc, Mutex, OnceLock, RwLock,
         atomic::{AtomicBool, Ordering},
     },
 };
 
 use crossbeam::channel;
 use linkme::distributed_slice;
+use rmcp::model::{Implementation, ProtocolVersion, ServerCapabilities, ServerInfo};
 use rmcp::service::RoleServer;
 use zuqe::{
     Array, CallContext, Callback, ClassCtorDef, ClassID, FieldDef, JS_GPN_ENUM_ONLY,
-    JS_GPN_STR_OR_INT_MASK, JS_PROP_C_W_E, JS_PROP_ENUMERABLE, JSResult, JSValue, Object,
-    PollSender, Runtime, ScopedContext,
+    JS_GPN_STR_OR_INT_MASK, JSResult, JSValue, Object, PollSender, Runtime,
+    ScopedContext,
     builtins::promise::Promise,
     def_native_object,
     gc_lite::{GcTrace, GcTraceCtx},
@@ -29,9 +30,9 @@ use crate::{
 };
 
 use super::{
-    ArgsVal, EnvVal, McpToolDef,
-    class_mcp_server_def::{dsl_to_json_schema, parse_env_object, register_signal},
-    service::{McpEndpoint, McpSchemas, McpService, handle_mcp_tool_call},
+    ArgsVal, EnvVal,
+    class_mcp_server_def::{parse_env_object, register_signal},
+    service::{McpSchemas, McpService, handle_mcp_tool_call},
 };
 
 struct StdioMcpShutdown {
@@ -62,19 +63,26 @@ pub(crate) fn gc_trace_stdio_state(gcx: &mut GcTraceCtx) {
     });
 }
 
-/// Builder payload for an instantiable `StdioMcp` server: the stdio-only
-/// fields borrowed from `McpServerDefPayload` (server name / version /
-/// instructions / env / tools / args / beforeRun / shared / extraFiles).
+/// Builder payload for an instantiable `StdioMcp` server. Holds the stdio-only
+/// options (env / args / beforeRun / extraFiles / shared flag) plus the
+/// compiled tool registry (`schemas`) and the JS handler closures. The raw
+/// tool DSL is consumed at `define()` time, so only the compiled form remains.
 pub(crate) struct StdioMcpPayload {
     server_name: String,
     version: RefCell<Cow<'static, str>>,
     instructions: RefCell<Cow<'static, str>>,
+
     env: RefCell<HashMap<String, EnvVal>>,
-    tools: RefCell<HashMap<String, McpToolDef>>,
     args_entry: RefCell<Option<ArgsVal>>,
     before_run: RefCell<Option<Object>>,
-    shared: Cell<bool>,
+    /// Whether this server is a shared (reusable) stdio server.
+    is_shared: Cell<bool>,
     extra_files: RefCell<Vec<String>>,
+
+    /// Compiled RMCP tool registry, shared with the tokio service.
+    schemas: Arc<RwLock<McpSchemas>>,
+    /// JS handler objects — GC roots + dispatch targets for the poller.
+    js_handlers: RefCell<Vec<Object>>,
 }
 
 impl StdioMcpPayload {
@@ -84,11 +92,16 @@ impl StdioMcpPayload {
             version: RefCell::new(Cow::Borrowed("1.0.0")),
             instructions: RefCell::new(Cow::Borrowed("")),
             env: RefCell::new(HashMap::new()),
-            tools: RefCell::new(HashMap::new()),
             args_entry: RefCell::new(None),
             before_run: RefCell::new(None),
-            shared: Cell::new(false),
+            is_shared: Cell::new(false),
             extra_files: RefCell::new(Vec::new()),
+            schemas: Arc::new(RwLock::new(McpSchemas {
+                tools: Vec::new(),
+                name_to_index: HashMap::new(),
+                native_map: HashMap::new(),
+            })),
+            js_handlers: RefCell::new(Vec::new()),
         }
     }
 
@@ -99,63 +112,62 @@ impl StdioMcpPayload {
                 f.trace(gcx);
             }
         }
-        for t in self.tools.borrow().values() {
-            t.handler.trace(gcx);
-            if let Some(a) = &t.args {
-                a.trace(gcx);
-            }
-        }
         if let Some(ArgsVal::Func(f)) = &*self.args_entry.borrow() {
             f.trace(gcx);
         }
         if let Some(f) = &*self.before_run.borrow() {
             f.trace(gcx);
         }
+        for h in self.js_handlers.borrow().iter() {
+            h.trace(gcx);
+        }
     }
 
-    /// Convert the payload's object-keyed tool DSL into the rmcp tool tuple
-    /// `(Tool vec, name→index map, JS handler vec)` directly, without going
-    /// through a JS options object.
-    fn parse_tools(
-        &self,
-        ctx: &mut ScopedContext,
-    ) -> Result<(Vec<rmcp::model::Tool>, HashMap<String, usize>, Vec<Object>), i32> {
-        let tools_map = self.tools.borrow();
-        let mut tools: Vec<rmcp::model::Tool> = Vec::with_capacity(tools_map.len());
-        let mut name_to_index: HashMap<String, usize> = HashMap::new();
-        let mut js_handlers: Vec<Object> = Vec::with_capacity(tools_map.len());
+    /// Build the MCP `initialize` handshake result from this payload. Mirrors
+    /// the `ServerInfo` (== `InitializeResult`) the live server advertises, so
+    /// it stays in sync with the handshake.
+    fn make_server_info(&self) -> ServerInfo {
+        let capabilities = ServerCapabilities::builder()
+            .enable_tools()
+            .enable_tool_list_changed()
+            .build();
+        let info = ServerInfo::new(capabilities)
+            .with_server_info(Implementation::new(
+                self.server_name.clone(),
+                self.version.borrow().to_string(),
+            ))
+            .with_protocol_version(ProtocolVersion::V_2025_06_18);
+        if self.instructions.borrow().is_empty() {
+            info
+        } else {
+            info.with_instructions(self.instructions.borrow().to_string())
+        }
+    }
 
-        for (name, t) in tools_map.iter() {
-            let description = t.desc.clone();
-            let handler = t.handler.clone();
+    /// Serialize the registered tools into a JS `Array` of JSON-schema objects.
+    /// Each `Tool` is `#[derive(Serialize)]`, so it is converted via serde_json
+    /// rather than hand-built.
+    fn make_schemas_json(&self, ctx: &mut ScopedContext) -> Result<Array, i32> {
+        let guard = self.schemas.read().map_err(|e| {
+            ctx.throw_internal_error(&format!("schema lock poisoned: {}", e));
+            -1
+        })?;
 
-            let input_schema_json = match &t.args {
-                Some(args_obj) => build_input_schema_from_args(ctx, args_obj.clone())?
-                    .unwrap_or(serde_json::json!({"type": "object"})),
-                None => serde_json::json!({"type": "object"}),
-            };
-            let input_schema_obj: serde_json::Map<String, serde_json::Value> =
-                match input_schema_json {
-                    serde_json::Value::Object(m) => m,
-                    _ => serde_json::json!({"type": "object"})
-                        .as_object()
-                        .unwrap()
-                        .clone(),
-                };
-
-            let tool = rmcp::model::Tool::new(
-                name.clone(),
-                description,
-                std::sync::Arc::new(input_schema_obj.into()),
-            );
-
-            let idx = tools.len();
-            tools.push(tool);
-            name_to_index.insert(name.clone(), idx);
-            js_handlers.push(handler);
+        let mut lst = Vec::with_capacity(guard.tools.len());
+        for tool in guard.tools.iter() {
+            let val = serde_json::to_value(tool).map_err(|e| {
+                ctx.throw_internal_error(&format!("tool serialize failed: {}", e));
+                -1
+            })?;
+            let meta = JSValue::from_serde_json(ctx, &val).unwrap_or_else(|_| {
+                ctx.create_base_object()
+                    .map(|o| o.into())
+                    .unwrap_or(JSValue::UNDEFINED)
+            });
+            lst.push(meta);
         }
 
-        Ok((tools, name_to_index, js_handlers))
+        Array::from_values(ctx, lst)
     }
 }
 
@@ -218,12 +230,10 @@ fn js_define(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     }
 
     // tools is lifted out of options: parse it directly from the 2nd arg.
-    parse_stdio_tools(ctx, &mut payload, tools_obj)?;
+    parse_tools_defination(ctx, &mut payload, tools_obj)?;
 
     JSStdioMcp::new_instance(ctx, JSValue::UNDEFINED, payload).map(JSValue::from)
 }
-
-// ── Field magic constants ──
 
 const FIELD_VERSION: i16 = 0;
 const FIELD_INSTRUCTIONS: i16 = 1;
@@ -240,7 +250,7 @@ fn js_get(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         FIELD_NAME => js_str(ctx, p.server_name.clone()),
         FIELD_VERSION => js_str(ctx, p.version.borrow().to_string()),
         FIELD_INSTRUCTIONS => js_str(ctx, p.instructions.borrow().to_string()),
-        FIELD_SHARED => Ok(JSValue::from(p.shared.get())),
+        FIELD_SHARED => Ok(JSValue::from(p.is_shared.get())),
         FIELD_EXTRA_FILES => {
             let files: Vec<String> = p.extra_files.borrow().clone();
             let mut lst = Vec::with_capacity(files.len());
@@ -263,70 +273,26 @@ fn js_tools_list(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let p = get_payload(ctx, &this)?;
     if cc.length() == 0 {
-        get_tool_schema(ctx, p)
+        p.make_schemas_json(ctx).map(JSValue::from)
     } else {
         Ok(this)
     }
 }
 
 /// `initializeInfo` getter — returns the object advertised in the MCP
-/// `initialize` handshake result. `capabilities` is an empty `{}` by design;
-/// name / version / instructions come from the payload.
+/// `initialize` handshake result. Built from `make_server_info` (== the
+/// `InitializeResult` the server actually returns), then serialized to a JS
+/// object via serde_json.
 fn js_initialize_info(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let p = get_payload(ctx, &this)?;
 
-    let mut obj = ctx.create_base_object()?;
-
-    let protocol = js_str(ctx, "2025-06-18".to_string())?;
-    obj.define_property_value_str(ctx, "protocolVersion", protocol, JS_PROP_ENUMERABLE)?;
-
-    let capabilities = ctx.create_base_object()?;
-    obj.define_property_value_str(ctx, "capabilities", capabilities.into(), JS_PROP_ENUMERABLE)?;
-
-    let mut server_info = ctx.create_base_object()?;
-    let name = js_str(ctx, p.server_name.clone())?;
-    server_info.define_property_value_str(ctx, "name", name, JS_PROP_ENUMERABLE)?;
-    let version = js_str(ctx, p.version.borrow().to_string())?;
-    server_info.define_property_value_str(ctx, "version", version, JS_PROP_ENUMERABLE)?;
-    obj.define_property_value_str(ctx, "serverInfo", server_info.into(), JS_PROP_ENUMERABLE)?;
-
-    let instructions = js_str(ctx, p.instructions.borrow().to_string())?;
-    obj.define_property_value_str(ctx, "instructions", instructions, JS_PROP_ENUMERABLE)?;
-
-    Ok(obj.into())
-}
-
-fn get_tool_schema(ctx: &mut ScopedContext, p: &StdioMcpPayload) -> JSResult {
-    let tools: Vec<(String, McpToolDef)> = p
-        .tools
-        .borrow()
-        .iter()
-        .map(|(k, v)| (k.clone(), v.clone()))
-        .collect();
-
-    let mut lst = Vec::with_capacity(tools.len());
-    for (name, t) in &tools {
-        let mut meta = ctx.create_base_object()?;
-        let name_val = js_str(ctx, name.clone())?;
-        meta.define_property_value_str(ctx, "name", name_val, JS_PROP_C_W_E)?;
-        let desc_val = js_str(ctx, t.desc.clone())?;
-        meta.define_property_value_str(ctx, "description", desc_val, JS_PROP_C_W_E)?;
-
-        let schema = if let Some(args_obj) = t.args {
-            dsl_to_json_schema(ctx, args_obj)?
-        } else {
-            let mut empty = ctx.create_base_object()?;
-            let type_val = js_str(ctx, "object".to_string())?;
-            empty.define_property_value_str(ctx, "type", type_val, JS_PROP_C_W_E)?;
-            empty.into()
-        };
-        meta.define_property_value_str(ctx, "inputSchema", schema, JS_PROP_C_W_E)?;
-
-        lst.push(meta.into());
-    }
-
-    Ok(Array::from_values(ctx, lst)?.into())
+    let info = p.make_server_info();
+    let val = serde_json::to_value(info).map_err(|e| {
+        ctx.throw_internal_error(&format!("server info serialize failed: {}", e));
+        -1
+    })?;
+    JSValue::from_serde_json(ctx, &val)
 }
 
 /// Instance `run()` — launch this server's stdio transport via the shared
@@ -438,7 +404,7 @@ fn apply_stdio_options(
         .filter(|v| !v.is_undefined())
     {
         let b = v.to_bool().unwrap_or(false);
-        p.shared.set(b);
+        p.is_shared.set(b);
     }
 
     // extraFiles — string[].
@@ -470,14 +436,19 @@ fn apply_stdio_options(
 }
 
 /// Parse the object-keyed tool DSL `{ name: { desc, handler, args } }` from a
-/// JS object into the payload. Shared by `StdioMcp.define()` (where `tools` is
-/// the lifted second argument).
-fn parse_stdio_tools(
+/// JS object and compile it directly into the payload's `schemas` registry and
+/// `js_handlers` closures. The raw DSL is consumed here — only the compiled
+/// form is retained for launch.
+fn parse_tools_defination(
     ctx: &mut ScopedContext,
     p: &mut StdioMcpPayload,
     mut tools_obj: Object,
 ) -> Result<(), i32> {
     let pks = tools_obj.get_own_property_names(ctx, JS_GPN_ENUM_ONLY | JS_GPN_STR_OR_INT_MASK)?;
+    let mut tools: Vec<rmcp::model::Tool> = Vec::with_capacity(pks.len());
+    let mut name_to_index: HashMap<String, usize> = HashMap::new();
+    let mut js_handlers: Vec<Object> = Vec::with_capacity(pks.len());
+
     for pk in pks.iter() {
         let name = pk
             .atom
@@ -491,6 +462,7 @@ fn parse_stdio_tools(
         if name.is_empty() {
             continue;
         }
+
         let val = tools_obj.get_property(ctx, pk.atom).map_err(|_| {
             ctx.throw_type_error(&format!("tool '{}' must be an object", name));
             -1
@@ -502,6 +474,7 @@ fn parse_stdio_tools(
                 -1
             })?
             .clone();
+
         let desc = tool_obj
             .get_property_str(ctx, "desc")
             .ok()
@@ -521,15 +494,38 @@ fn parse_stdio_tools(
             .ok()
             .filter(|v| !v.is_undefined())
             .and_then(|v| v.as_object().copied());
-        p.tools.borrow_mut().insert(
-            name,
-            McpToolDef {
-                desc,
-                handler,
-                args,
-            },
+
+        let input_schema_json = match args {
+            Some(args_obj) => build_input_schema_from_args(ctx, args_obj.clone())?
+                .unwrap_or(serde_json::json!({"type": "object"})),
+            None => serde_json::json!({"type": "object"}),
+        };
+        let input_schema_obj: serde_json::Map<String, serde_json::Value> = match input_schema_json {
+            serde_json::Value::Object(m) => m,
+            _ => serde_json::json!({"type": "object"})
+                .as_object()
+                .unwrap()
+                .clone(),
+        };
+
+        let tool = rmcp::model::Tool::new(
+            name.clone(),
+            desc,
+            std::sync::Arc::new(input_schema_obj.into()),
         );
+
+        let idx = tools.len();
+        tools.push(tool);
+        name_to_index.insert(name.clone(), idx);
+        js_handlers.push(handler);
     }
+
+    p.schemas = Arc::new(RwLock::new(McpSchemas {
+        tools,
+        name_to_index,
+        native_map: HashMap::new(),
+    }));
+    *p.js_handlers.borrow_mut() = js_handlers;
 
     Ok(())
 }
@@ -553,33 +549,26 @@ fn start_stdio_server(ctx: &mut ScopedContext, p: &StdioMcpPayload) -> Result<Pr
     let server_version = p.version.borrow().to_string();
     let server_instructions = p.instructions.borrow().to_string();
 
-    // tools (object-keyed DSL stored in the payload)
-    let (tools, name_to_index, js_handlers) = p.parse_tools(ctx)?;
+    // Read compiled schemas + JS handlers produced at define() time.
+    let schemas = p.schemas.clone();
+    let js_handlers = p.js_handlers.borrow().clone();
 
-    // Build McpEndpoint (stdio mode: no mount_path, no update_tx)
-    let endpoint = McpEndpoint {
-        mount_path: String::new(),
+    // Create crossbeam channel (same IncomingRequest mechanism as HTTP mode)
+    let (js_tx, js_rx) = channel::unbounded::<IncomingRequest>();
+
+    // Build McpService directly (stdio: no native handlers, single endpoint).
+    let service = McpService::new(
+        schemas,
+        Vec::new(),
+        js_tx,
+        0,
         server_name,
         server_version,
         server_instructions,
-        shared: std::sync::Arc::new(std::sync::RwLock::new(McpSchemas {
-            tools,
-            name_to_index,
-            native_map: HashMap::new(),
-        })),
-        js_handlers,
-        handlers: Vec::new(),
-        update_tx: None,
-    };
+    );
 
-    // 4. Create crossbeam channel (same IncomingRequest mechanism as HTTP mode)
-    let (js_tx, js_rx) = channel::unbounded::<IncomingRequest>();
-
-    // 5. Build McpService (reuse mcp.rs)
-    let service = McpService::from_endpoint(&endpoint, js_tx, 0);
-
-    // 6. Start JS poller job for tool call dispatch
-    let mcp_tables = RefCell::new(vec![endpoint.js_handlers.clone()]);
+    // Start JS poller job for tool call dispatch
+    let mcp_tables = RefCell::new(vec![js_handlers.clone()]);
     let is_running = std::sync::Arc::new(AtomicBool::new(true));
 
     crate::helpers::start_channel_poller(
@@ -613,7 +602,7 @@ fn start_stdio_server(ctx: &mut ScopedContext, p: &StdioMcpPayload) -> Result<Pr
 
     // Store js_handlers in thread_local for GC tracing (Object is !Send)
     STDIO_JS_HANDLERS.with(|h| {
-        *h.borrow_mut() = endpoint.js_handlers.clone();
+        *h.borrow_mut() = js_handlers;
     });
 
     // Initialize shutdown state (only Send+Sync fields in static)

@@ -181,21 +181,50 @@ declare module "mcp" {
     tools: McpToolDefinition[] | Record<string, McpToolShortDef>;
   }
 
-  /** what "initialize" method returns */
+  /** An icon advertised by an MCP server (`Implementation.icons`). */
+  export interface McpIcon {
+    /** URI pointing to the icon resource. */
+    src: string;
+    /** Optional MIME type override when the server's type is missing/generic. */
+    mimeType?: string;
+    /** Size specs in `WxH` format (e.g. `"48x48"`) or `"any"`. */
+    sizes?: string[];
+    /** Optional theme this icon is designed for. */
+    theme?: string;
+  }
+
+  /** what "initialize" method returns — mirrors `rmcp::ServerInfo` (== `InitializeResult`). */
   export interface McpInitializeResult {
-    protocolVersion: "2025-06-18";
+    protocolVersion:
+      | "2024-11-05"
+      | "2025-03-26"
+      | "2025-06-18"
+      | "2025-11-25";
     capabilities: {
-      logging?: {};
-      prompts?: { listChanged: boolean };
-      resources?: {
-        subscribe: boolean;
-        listChanged: boolean;
+      experimental?: Record<string, any>;
+      extensions?: Record<string, any>;
+      logging?: Record<string, any>;
+      completions?: Record<string, any>;
+      prompts?: { listChanged?: boolean };
+      resources?: { subscribe?: boolean; listChanged?: boolean };
+      tools?: { listChanged?: boolean };
+      tasks?: {
+        requests?: {
+          sampling?: Record<string, any>;
+          elicitation?: Record<string, any>;
+          tools?: Record<string, any>;
+        };
+        list?: Record<string, any>;
+        cancel?: Record<string, any>;
       };
-      tools?: { listChanged: boolean };
     };
     serverInfo: {
       name: string;
+      title?: string;
       version: string;
+      description?: string;
+      icons?: McpIcon[];
+      websiteUrl?: string;
     };
     instructions?: string;
   }
