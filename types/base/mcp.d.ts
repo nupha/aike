@@ -181,35 +181,8 @@ declare module "mcp" {
     tools: McpToolDefinition[] | Record<string, McpToolShortDef>;
   }
 
-  /**
-   * The native `McpServerDef` class — a single runtime class backing both
-   * stdio and http transports. `StdioMcpDef` / `HttpMcpDef` (and the `McpDef`
-   * union) are transport-narrowed *views*: this class declares only the
-   * members common to every server; each transport adds its own config
-   * methods via `extends`. Every member is declared exactly once — no
-   * duplication, and the split is what makes `mode`-based narrowing real.
-   */
-  export class McpServerDef {
-    private constructor(serverName: string);
-
-    /** Transport mode of this server: `"stdio"` or `"http"`. */
-    readonly mode: "stdio" | "http";
-
-    /** Advertised server name. */
-    readonly name: string;
-
-    /** Advertised server version (read-only; set via the `defineStdioMcp` options). */
-    readonly version: string;
-
-    /** Human-readable server description (read-only; set via the `defineStdioMcp` options). */
-    readonly instructions: string;
-
-    /** Schema for tool definitions */
-    get toolSchema(): McpToolMeta[] | undefined;
-  }
-
   /** what "initialize" method returns */
-  interface McpInitializeResult {
+  export interface McpInitializeResult {
     protocolVersion: "2025-06-18";
     capabilities: {
       logging?: {};
@@ -227,52 +200,79 @@ declare module "mcp" {
     instructions?: string;
   }
 
-  /**
-   * stdio view of `McpServerDef` — narrows `mode` to `"stdio"` and adds the
-   * stdio-only config: env vars, shared flag, CLI args, extra files, and the
-   * before-run hook. (At runtime these are no-ops on an http server, so they
-   * are intentionally absent from `HttpMcpDef`.)
-   */
-  export interface StdioMcpDef extends McpServerDef {
-    readonly mode: "stdio";
+  // /**
+  //  * The native `McpServerDef` class — a single runtime class backing both
+  //  * stdio and http transports. `StdioMcpDef` / `HttpMcpDef` (and the `McpDef`
+  //  * union) are transport-narrowed *views*: this class declares only the
+  //  * members common to every server; each transport adds its own config
+  //  * methods via `extends`. Every member is declared exactly once — no
+  //  * duplication, and the split is what makes `mode`-based narrowing real.
+  //  */
+  // export class McpServerDef {
+  //   private constructor(serverName: string);
 
-    /** Whether the server is shared (read-only; set via the `defineStdioMcp` options). */
-    readonly shared: boolean;
+  //   /** Transport mode of this server: `"stdio"` or `"http"`. */
+  //   readonly mode: "stdio" | "http";
 
-    /** Extra file paths bundled with the server (read-only; set via options). */
-    readonly extraFiles: string[];
+  //   /** Advertised server name. */
+  //   readonly name: string;
 
-    /** Register a tool definition. Returns `this`. */
-    tool(name: string, def: McpToolShortDef): this;
+  //   /** Advertised server version (read-only; set via the `defineStdioMcp` options). */
+  //   readonly version: string;
 
-    /** Async hook run before the server starts, or `undefined` (read-only; set via options). */
-    readonly beforeRun: (() => Promise<void>) | null;
+  //   /** Human-readable server description (read-only; set via the `defineStdioMcp` options). */
+  //   readonly instructions: string;
 
-    /**
-     * Server entry point (called by the bootstrap runner): awaits
-     * `beforeRun` if set, starts the server, registers SIGINT/SIGTERM stop
-     * handlers, and force-exits once the server stops.
-     */
-    run(): Promise<void>;
-  }
+  //   /** Schema for tool definitions */
+  //   get toolSchema(): McpToolMeta[] | undefined;
+  // }
 
-  /**
-   * http view of `McpServerDef` — narrows `mode` to `"http"` and adds the
-   * http-only config: request headers. (At runtime `env`/`shared`/`args`/…
-   * are no-ops on an http server, so they are intentionally absent here.)
-   */
-  export interface HttpMcpDef extends McpServerDef {
-    readonly mode: "http";
+  // /**
+  //  * stdio view of `McpServerDef` — narrows `mode` to `"stdio"` and adds the
+  //  * stdio-only config: env vars, shared flag, CLI args, extra files, and the
+  //  * before-run hook. (At runtime these are no-ops on an http server, so they
+  //  * are intentionally absent from `HttpMcpDef`.)
+  //  */
+  // export interface StdioMcpDef extends McpServerDef {
+  //   readonly mode: "stdio";
 
-    /** http endpoint url. */
-    readonly url: string;
+  //   /** Whether the server is shared (read-only; set via the `defineStdioMcp` options). */
+  //   readonly shared: boolean;
 
-    /** Request headers registered for the http transport. */
-    readonly headers: Record<string, string>;
+  //   /** Extra file paths bundled with the server (read-only; set via options). */
+  //   readonly extraFiles: string[];
 
-    /** Set the tool schema. http transport only. */
-    set toolSchema(schema: McpToolMeta[]);
-  }
+  //   /** Register a tool definition. Returns `this`. */
+  //   tool(name: string, def: McpToolShortDef): this;
+
+  //   /** Async hook run before the server starts, or `undefined` (read-only; set via options). */
+  //   readonly beforeRun: (() => Promise<void>) | null;
+
+  //   /**
+  //    * Server entry point (called by the bootstrap runner): awaits
+  //    * `beforeRun` if set, starts the server, registers SIGINT/SIGTERM stop
+  //    * handlers, and force-exits once the server stops.
+  //    */
+  //   run(): Promise<void>;
+  // }
+
+  // /**
+  //  * http view of `McpServerDef` — narrows `mode` to `"http"` and adds the
+  //  * http-only config: request headers. (At runtime `env`/`shared`/`args`/…
+  //  * are no-ops on an http server, so they are intentionally absent here.)
+  //  */
+  // export interface HttpMcpDef extends McpServerDef {
+  //   readonly mode: "http";
+
+  //   /** http endpoint url. */
+  //   readonly url: string;
+
+  //   /** Request headers registered for the http transport. */
+  //   readonly headers: Record<string, string>;
+
+  //   /** Set the tool schema. http transport only. */
+  //   set toolSchema(schema: McpToolMeta[]);
+  // }
 
   /** Simplified argument definition for the DSL format. */
   export interface McpToolShortArg {
@@ -329,22 +329,22 @@ declare module "mcp" {
     [key: string]: string;
   };
 
-  /**
-   * Factory returning a new `McpServerDef` for a stdio MCP server.
-   * @param serverName — the advertised server name.
-   */
-  export function defineStdioMcp(
-    serverName: string,
-    options?: {
-      description?: string;
-      version?: string;
-      env?: Record<string, string | (() => string | undefined)>;
-      args?: string[] | (() => string[]);
-      beforeRun?: () => Promise<void>;
-      shared?: boolean;
-      extraFiles?: string[];
-    },
-  ): StdioMcpDef;
+  // /**
+  //  * Factory returning a new `McpServerDef` for a stdio MCP server.
+  //  * @param serverName — the advertised server name.
+  //  */
+  // export function defineStdioMcp(
+  //   serverName: string,
+  //   options?: {
+  //     description?: string;
+  //     version?: string;
+  //     env?: Record<string, string | (() => string | undefined)>;
+  //     args?: string[] | (() => string[]);
+  //     beforeRun?: () => Promise<void>;
+  //     shared?: boolean;
+  //     extraFiles?: string[];
+  //   },
+  // ): StdioMcpDef;
 
   /**
    * MCP server over stdio transport (stdin/stdout).
@@ -374,17 +374,11 @@ declare module "mcp" {
       },
     ): StdioMcp;
 
-    /** Advertised server name. */
-    readonly name: string;
-
-    /** Advertised server version. */
-    readonly version: string;
-
-    /** Human-readable server description. */
-    readonly instructions: string;
+    /** MCP `initialize` handshake result advertised by this server. */
+    readonly initializeInfo: McpInitializeResult;
 
     /** Tool definitions */
-    readonly toolSchema: McpToolMeta[];
+    readonly toolsList: McpToolMeta[];
 
     /** Whether the server is shared. */
     readonly shared: boolean;

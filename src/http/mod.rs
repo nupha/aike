@@ -3,18 +3,14 @@
 
 mod class_http_server;
 mod class_request;
-mod mcp;
 mod outbound_buffer;
 mod response;
 mod server;
 mod ws;
 
 pub(crate) use {
-    class_http_server::{
-        IncomingRequest, JSHttpServer, build_input_schema_from_args, parse_mcp_tools,
-    },
+    class_http_server::{IncomingRequest, JSHttpServer, build_input_schema_from_args},
     class_request::JSHttpRequest,
-    mcp::{McpEndpoint, McpSchemas, McpService, handle_mcp_tool_call},
     response::{JSHttpResponse, JSHttpResponseSse},
     ws::JSWebSocketStream,
 };

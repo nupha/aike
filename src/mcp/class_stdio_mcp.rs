@@ -25,14 +25,14 @@ use zuqe::{
 
 use crate::{
     USER_CLASS_DEFS,
-    http::{
-        IncomingRequest, McpEndpoint, McpSchemas, McpService, build_input_schema_from_args,
-        handle_mcp_tool_call,
-    },
+    http::{IncomingRequest, build_input_schema_from_args},
 };
 
-use super::class_mcp_server_def::{dsl_to_json_schema, parse_env_object, register_signal};
-use super::{ArgsVal, EnvVal, McpToolDef};
+use super::{
+    ArgsVal, EnvVal, McpToolDef,
+    class_mcp_server_def::{dsl_to_json_schema, parse_env_object, register_signal},
+    service::{McpEndpoint, McpSchemas, McpService, handle_mcp_tool_call},
+};
 
 struct StdioMcpShutdown {
     /// Handle to the running rmcp service. Taken by waiting() on shutdown.
@@ -227,7 +227,6 @@ fn js_define(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
 const FIELD_VERSION: i16 = 0;
 const FIELD_INSTRUCTIONS: i16 = 1;
-const FIELD_MODE: i16 = 2;
 const FIELD_NAME: i16 = 3;
 const FIELD_SHARED: i16 = 6;
 const FIELD_EXTRA_FILES: i16 = 8;
@@ -238,7 +237,6 @@ fn js_get(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let p = get_payload(ctx, &this)?;
 
     match cc.magic() as i16 {
-        FIELD_MODE => Ok(ctx.create_string_from_static("stdio")?.into()),
         FIELD_NAME => js_str(ctx, p.server_name.clone()),
         FIELD_VERSION => js_str(ctx, p.version.borrow().to_string()),
         FIELD_INSTRUCTIONS => js_str(ctx, p.instructions.borrow().to_string()),
@@ -261,7 +259,7 @@ fn js_get(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
 /// tools JSON-schema getter (mirrors `McpServerDef.toolSchema`). Setting it on
 /// a stdio server is a no-op, so the setter just returns `this`.
-fn js_tool_schema(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+fn js_tools_list(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let p = get_payload(ctx, &this)?;
     if cc.length() == 0 {
@@ -269,6 +267,34 @@ fn js_tool_schema(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     } else {
         Ok(this)
     }
+}
+
+/// `initializeInfo` getter — returns the object advertised in the MCP
+/// `initialize` handshake result. `capabilities` is an empty `{}` by design;
+/// name / version / instructions come from the payload.
+fn js_initialize_info(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let this = cc.this();
+    let p = get_payload(ctx, &this)?;
+
+    let mut obj = ctx.create_base_object()?;
+
+    let protocol = js_str(ctx, "2025-06-18".to_string())?;
+    obj.define_property_value_str(ctx, "protocolVersion", protocol, JS_PROP_ENUMERABLE)?;
+
+    let capabilities = ctx.create_base_object()?;
+    obj.define_property_value_str(ctx, "capabilities", capabilities.into(), JS_PROP_ENUMERABLE)?;
+
+    let mut server_info = ctx.create_base_object()?;
+    let name = js_str(ctx, p.server_name.clone())?;
+    server_info.define_property_value_str(ctx, "name", name, JS_PROP_ENUMERABLE)?;
+    let version = js_str(ctx, p.version.borrow().to_string())?;
+    server_info.define_property_value_str(ctx, "version", version, JS_PROP_ENUMERABLE)?;
+    obj.define_property_value_str(ctx, "serverInfo", server_info.into(), JS_PROP_ENUMERABLE)?;
+
+    let instructions = js_str(ctx, p.instructions.borrow().to_string())?;
+    obj.define_property_value_str(ctx, "instructions", instructions, JS_PROP_ENUMERABLE)?;
+
+    Ok(obj.into())
 }
 
 fn get_tool_schema(ctx: &mut ScopedContext, p: &StdioMcpPayload) -> JSResult {
@@ -301,90 +327,6 @@ fn get_tool_schema(ctx: &mut ScopedContext, p: &StdioMcpPayload) -> JSResult {
     }
 
     Ok(Array::from_values(ctx, lst)?.into())
-}
-
-/// Register a tool definition (mirrors `McpServerDef.tool`).
-fn js_tool(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let this = cc.this();
-    let p = get_payload(ctx, &this)?;
-
-    let name = cc
-        .arg(0)
-        .to_string(ctx)?
-        .content()
-        .encode_utf8(false)
-        .to_string();
-
-    let opt = cc
-        .arg(1)
-        .as_object()
-        .ok_or_else(|| {
-            ctx.throw_type_error("tool def must be an object");
-            -1
-        })?
-        .clone();
-
-    let desc = opt
-        .get_property_str(ctx, "desc")
-        .and_then(|v| v.to_string(ctx))
-        .map(|s| s.content().encode_utf8(false).to_string())
-        .unwrap_or_default();
-    let handler = opt
-        .get_property_str(ctx, "handler")
-        .and_then(|v| v.into_callable(ctx))
-        .map_err(|_| {
-            ctx.throw_type_error(&format!("tool '{}' handler must be a function", name));
-            -1
-        })?;
-    let args = opt
-        .get_property_str(ctx, "args")
-        .ok()
-        .filter(|v| !v.is_undefined())
-        .and_then(|v| v.as_object().copied());
-
-    p.tools.borrow_mut().insert(
-        name,
-        McpToolDef {
-            desc,
-            handler,
-            args,
-        },
-    );
-
-    Ok(this)
-}
-
-/// Set or read the transport environment variables (mirrors `McpServerDef.env`).
-fn js_env(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let this = cc.this();
-    let p = get_payload(ctx, &this)?;
-
-    if cc.length() == 0 {
-        let env: Vec<(String, EnvVal)> = p
-            .env
-            .borrow()
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-        let mut obj = ctx.create_base_object()?;
-        for (k, v) in env {
-            let val = match v {
-                EnvVal::Text(s) => js_str(ctx, s)?,
-                EnvVal::Func(f) => f.into(),
-            };
-            obj.define_property_value_str(ctx, &k, val, JS_PROP_ENUMERABLE)?;
-        }
-        return Ok(obj.into());
-    }
-
-    let vars = cc.arg(0);
-    let Some(obj) = vars.as_object().copied() else {
-        ctx.throw_type_error("env expects an object");
-        return Err(-1);
-    };
-    let settings = parse_env_object(ctx, obj)?;
-    *p.env.borrow_mut() = settings;
-    Ok(this)
 }
 
 /// Instance `run()` — launch this server's stdio transport via the shared
@@ -592,12 +534,6 @@ fn parse_stdio_tools(
     Ok(())
 }
 
-/// Shared stdio server launcher. Reads config directly from `p`
-/// (the `StdioMcp` instance payload) — no options object is assembled.
-/// Returns a Promise<void> that resolves when the server stops
-/// (via stop(), stdin EOF, or error). Non-blocking.
-///
-/// Refuses if already started — StdioMcp is a process-wide singleton.
 fn start_stdio_server(ctx: &mut ScopedContext, p: &StdioMcpPayload) -> Result<Promise, i32> {
     if MCP_STDIO_STATE.get().is_some() {
         ctx.throw_internal_error(
@@ -615,6 +551,7 @@ fn start_stdio_server(ctx: &mut ScopedContext, p: &StdioMcpPayload) -> Result<Pr
 
     let server_name = p.server_name.clone();
     let server_version = p.version.borrow().to_string();
+    let server_instructions = p.instructions.borrow().to_string();
 
     // tools (object-keyed DSL stored in the payload)
     let (tools, name_to_index, js_handlers) = p.parse_tools(ctx)?;
@@ -624,6 +561,7 @@ fn start_stdio_server(ctx: &mut ScopedContext, p: &StdioMcpPayload) -> Result<Pr
         mount_path: String::new(),
         server_name,
         server_version,
+        server_instructions,
         shared: std::sync::Arc::new(std::sync::RwLock::new(McpSchemas {
             tools,
             name_to_index,
@@ -791,17 +729,18 @@ const STDIO_MCP_CTOR: ClassCtorDef =
 
 // Instance prototype — the stdio builder surface, mirroring McpServerDef.
 const STDIO_MCP_PROTO: &[FieldDef] = &[
-    FieldDef::GETSET("mode", Some(js_get), None, FIELD_MODE),
+    FieldDef::GETSET("initializeInfo", Some(js_initialize_info), None, 0),
+    FieldDef::GETSET("toolsList", Some(js_tools_list), Some(js_tools_list), 0),
+    FieldDef::GETSET("shared", Some(js_get), None, FIELD_SHARED),
+    FieldDef::GETSET("extraFiles", Some(js_get), None, FIELD_EXTRA_FILES),
+    FieldDef::GETSET("beforeRun", Some(js_get), None, FIELD_BEFORE_RUN),
+    FieldDef::FUNC("run", 0, js_run, 0),
+    //
+    // not required
+    //
     FieldDef::GETSET("name", Some(js_get), None, FIELD_NAME),
     FieldDef::GETSET("version", Some(js_get), None, FIELD_VERSION),
     FieldDef::GETSET("instructions", Some(js_get), None, FIELD_INSTRUCTIONS),
-    FieldDef::GETSET("toolSchema", Some(js_tool_schema), Some(js_tool_schema), 0),
-    FieldDef::GETSET("shared", Some(js_get), None, FIELD_SHARED),
-    FieldDef::FUNC("tool", 2, js_tool, 0),
-    FieldDef::GETSET("extraFiles", Some(js_get), None, FIELD_EXTRA_FILES),
-    FieldDef::GETSET("beforeRun", Some(js_get), None, FIELD_BEFORE_RUN),
-    FieldDef::FUNC("env", 1, js_env, 0),
-    FieldDef::FUNC("run", 0, js_run, 0),
 ];
 
 def_native_object!(

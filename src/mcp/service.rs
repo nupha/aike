@@ -30,9 +30,7 @@ use zuqe::{
     gc_lite::{GcTrace, GcTraceCtx},
 };
 
-use crate::USER_CLASS_DEFS;
-
-use super::class_http_server::IncomingRequest;
+use crate::{USER_CLASS_DEFS, http::IncomingRequest};
 
 /// Native tool handler function type.
 pub(crate) type NativeMcpToolFn = Arc<
@@ -59,6 +57,8 @@ pub(crate) struct McpEndpoint {
     pub(crate) mount_path: String,
     pub(crate) server_name: String,
     pub(crate) server_version: String,
+    pub(crate) server_instructions: String,
+
     /// Shared schemas accessible from tokio (Send + Sync)
     pub(crate) shared: Arc<RwLock<McpSchemas>>,
     /// Native handlers: (name, schema, handler_fn)
@@ -184,9 +184,11 @@ pub(crate) struct McpService {
     js_tx: channel::Sender<IncomingRequest>,
     /// Index of this endpoint in the global mcp_tables
     endpoint_index: usize,
+
     /// Server metadata
     server_name: String,
     server_version: String,
+    server_instructions: String,
 }
 
 impl McpService {
@@ -197,11 +199,13 @@ impl McpService {
         endpoint_index: usize,
         server_name: String,
         server_version: String,
+        server_instructions: String,
     ) -> Self {
         let native_handlers: HashMap<String, NativeMcpToolFn> = handlers
             .into_iter()
             .map(|(name, _schema, f)| (name, f))
             .collect();
+
         Self {
             shared,
             native_handlers: Arc::new(native_handlers),
@@ -209,6 +213,7 @@ impl McpService {
             endpoint_index,
             server_name,
             server_version,
+            server_instructions,
         }
     }
 
@@ -225,6 +230,7 @@ impl McpService {
             endpoint_index,
             ep.server_name.clone(),
             ep.server_version.clone(),
+            ep.server_instructions.clone(),
         )
     }
 }
@@ -235,12 +241,19 @@ impl ServerHandler for McpService {
             .enable_tools()
             .enable_tool_list_changed()
             .build();
-        ServerInfo::new(capabilities)
+
+        let info = ServerInfo::new(capabilities)
             .with_server_info(Implementation::new(
                 self.server_name.clone(),
                 self.server_version.clone(),
             ))
-            .with_protocol_version(ProtocolVersion::V_2025_03_26)
+            .with_protocol_version(ProtocolVersion::V_2025_03_26);
+
+        if !self.server_instructions.is_empty() {
+            info.with_instructions(self.server_instructions.clone())
+        } else {
+            info
+        }
     }
 
     fn list_tools(

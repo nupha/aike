@@ -3,8 +3,13 @@
 
 mod class_mcp_server_def;
 mod class_stdio_mcp;
+mod service;
 
 pub(crate) use class_stdio_mcp::gc_trace_stdio_state;
+pub(crate) use service::{
+    McpEndpoint, McpSchemas, McpToolCallRequest, NativeMcpToolFn, build_axum_mcp_route,
+    handle_mcp_tool_call,
+};
 
 use {class_mcp_server_def::JSMcpServerDef, class_stdio_mcp::JSStdioMcp};
 

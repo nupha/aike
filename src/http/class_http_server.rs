@@ -33,7 +33,11 @@ use zuqe::{
     gc_lite::{GcTrace, GcTraceCtx},
 };
 
-use crate::{USER_CLASS_DEFS, http::mcp::build_axum_mcp_route};
+use crate::{
+    USER_CLASS_DEFS,
+    mcp::build_axum_mcp_route,
+    mcp::{McpEndpoint, McpSchemas, McpToolCallRequest, NativeMcpToolFn, handle_mcp_tool_call},
+};
 
 #[cfg(feature = "llama_cpp")]
 use crate::llm::{
@@ -44,13 +48,11 @@ use crate::llm::{
 use super::{
     JSWebSocketStream, Method,
     class_request::{HttpRequestPayload, JSHttpRequest},
-    mcp::{McpEndpoint, McpSchemas, McpToolCallRequest, NativeMcpToolFn, handle_mcp_tool_call},
     outbound_buffer::OUTBOUND_CAP,
     response::{HttpResponseMessage, HttpResponsePayload, JSHttpResponse, get_res_payload},
     server::spawn_http_server,
     ws::{WsControl, WsStreamEvent, bridge_ws, dispatch_ws_data, dispatch_ws_open},
 };
-
 /// Unified request message sent from axum delegate to the JS server job.
 pub(crate) enum IncomingRequest {
     Http(HttpRequest),
@@ -743,6 +745,12 @@ fn js_mcp(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         .map(|s| s.content().encode_utf8(false).to_string())
         .unwrap_or_else(|_| "1.0.0".into());
 
+    let server_instructions = opts
+        .get_property_str(ctx, "instructions")
+        .and_then(|v| v.to_string(ctx))
+        .map(|s| s.content().encode_utf8(false).to_string())
+        .unwrap_or_else(|_| "".into());
+
     // tools (array or object-keyed format)
     let tools_val = opts.get_property_str(ctx, "tools").map_err(|_| {
         ctx.throw_type_error("options.tools is required");
@@ -761,6 +769,7 @@ fn js_mcp(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         mount_path,
         server_name,
         server_version,
+        server_instructions,
         shared: Arc::new(std::sync::RwLock::new(McpSchemas {
             tools,
             name_to_index,
