@@ -33,7 +33,7 @@ use zuqe::{
     ScopedContext, builtins::promise::PromiseFuture,
 };
 
-use crate::llm::init_mod_llm;
+use crate::{llm::init_mod_llm, mcp::gc_trace_stdio_state};
 
 #[cfg(feature = "llama_cpp")]
 use crate::llm::{JSEngine, JSLlmContext, JSLlmModel, JSSamplerChain};
@@ -47,8 +47,8 @@ use crate::{
     helpers::canonicalize_path,
     html::{HtmlDocument, HtmlElement, init_mod_html},
     http::{
-        JSHttpRequest, JSHttpResponse, JSHttpResponseSse, JSHttpServer, JSMcpStdio,
-        JSWebSocketStream, gc_trace_stdio_state, init_mod_http,
+        JSHttpRequest, JSHttpResponse, JSHttpResponseSse, JSHttpServer, JSWebSocketStream,
+        init_mod_http,
     },
     llm::JSLlmClient,
     mcp::init_mod_mcp,
@@ -356,7 +356,6 @@ async fn main() -> ExitCode {
                 JSAbortSignal::class_id(),
                 JSCronJob::class_id(),
                 JSHttpServer::class_id(),
-                JSMcpStdio::class_id(),
                 JSHttpRequest::class_id(),
                 JSHttpResponse::class_id(),
                 JSHttpResponseSse::class_id(),

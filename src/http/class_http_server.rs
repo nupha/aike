@@ -73,7 +73,7 @@ pub(crate) enum IncomingRequest {
 }
 
 /// HTTP route request (existing logic, fields unchanged).
-pub(super) struct HttpRequest {
+pub(crate) struct HttpRequest {
     handler_index: usize,
     method: Method,
     path: String,

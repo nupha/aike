@@ -2,7 +2,6 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
 mod class_http_server;
-mod class_mcp_stdio;
 mod class_request;
 mod mcp;
 mod outbound_buffer;
@@ -11,9 +10,9 @@ mod server;
 mod ws;
 
 pub(crate) use {
-    class_http_server::JSHttpServer,
-    class_mcp_stdio::{JSMcpStdio, gc_trace_stdio_state},
+    class_http_server::{IncomingRequest, JSHttpServer, parse_mcp_tools},
     class_request::JSHttpRequest,
+    mcp::{McpEndpoint, McpSchemas, McpService, handle_mcp_tool_call},
     response::{JSHttpResponse, JSHttpResponseSse},
     ws::JSWebSocketStream,
 };
@@ -48,18 +47,11 @@ impl Method {
     }
 }
 
-const MOD_HTTP_ENTRIES: &[FieldDef] = &[
-    FieldDef::CLASS(
-        JSHttpServer::CLASS_NAME,
-        JSHttpServer::class_id,
-        zuqe::JS_PROP_ENUMERABLE,
-    ),
-    FieldDef::CLASS(
-        JSMcpStdio::CLASS_NAME,
-        JSMcpStdio::class_id,
-        zuqe::JS_PROP_ENUMERABLE,
-    ),
-];
+const MOD_HTTP_ENTRIES: &[FieldDef] = &[FieldDef::CLASS(
+    JSHttpServer::CLASS_NAME,
+    JSHttpServer::class_id,
+    zuqe::JS_PROP_ENUMERABLE,
+)];
 
 pub fn init_mod_http(ctx: &mut ScopedContext) -> Result<(), i32> {
     ctx.create_module("http", MOD_HTTP_ENTRIES)?;

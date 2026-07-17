@@ -18,7 +18,9 @@ use zuqe::{
     gc_lite::{GcTrace, GcTraceCtx},
 };
 
-use crate::{USER_CLASS_DEFS, http::JSMcpStdio};
+use crate::USER_CLASS_DEFS;
+
+use super::JSMcpStdio;
 
 /// Environment entry value: a static string, or a JS function resolving to
 /// `string | undefined`.
