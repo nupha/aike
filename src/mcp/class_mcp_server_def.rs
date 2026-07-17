@@ -62,7 +62,7 @@ enum McpServerType {
 pub(crate) struct McpServerDefPayload {
     server_name: String,
     version: RefCell<Cow<'static, str>>,
-    description: RefCell<Cow<'static, str>>,
+    instructions: RefCell<Cow<'static, str>>,
 
     /// Transport-agnostic key/value config: environment variables for stdio,
     /// request headers for http. Set via the `env()` builder method.
@@ -80,7 +80,7 @@ impl McpServerDefPayload {
         Self {
             server_name,
             version: RefCell::new(Cow::Borrowed("1.0.0")),
-            description: RefCell::new(Cow::Borrowed("")),
+            instructions: RefCell::new(Cow::Borrowed("")),
             env_or_header: RefCell::new(HashMap::new()),
             server_type: RefCell::new(McpServerType::Stdio {
                 tools: HashMap::new(),
@@ -162,7 +162,7 @@ fn js_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 // ── Chain methods ──
 
 const FIELD_VERSION: i16 = 0;
-const FIELD_DESCRIPTION: i16 = 1;
+const FIELD_INSTRUCTIONS: i16 = 1;
 const FIELD_MODE: i16 = 2;
 const FIELD_NAME: i16 = 3;
 const FIELD_URL: i16 = 4;
@@ -432,62 +432,62 @@ fn get_tool_schema(ctx: &mut ScopedContext, p: &McpServerDefPayload) -> JSResult
     }
 }
 
-fn js_info(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let this = cc.this();
-    let p = get_def(ctx, &this)?;
+// fn js_info(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+//     let this = cc.this();
+//     let p = get_def(ctx, &this)?;
 
-    let mut info = ctx.create_base_object()?;
+//     let mut info = ctx.create_base_object()?;
 
-    // `tools` is common to both modes.
-    let tools = get_tool_schema(ctx, p)?;
-    info.define_property_value_str(ctx, "tools", tools, JS_PROP_C_W_E)?;
+//     // `tools` is common to both modes.
+//     let tools = get_tool_schema(ctx, p)?;
+//     info.define_property_value_str(ctx, "tools", tools, JS_PROP_C_W_E)?;
 
-    match p.server_type.borrow().deref() {
-        McpServerType::Stdio {
-            shared,
-            extra_files,
-            ..
-        } => {
-            let mode_val = ctx.create_string_from_static("stdio")?.into();
-            info.define_property_value_str(ctx, "mode", mode_val, JS_PROP_C_W_E)?;
-            info.define_property_value_str(ctx, "shared", JSValue::from(*shared), JS_PROP_C_W_E)?;
+//     match p.server_type.borrow().deref() {
+//         McpServerType::Stdio {
+//             shared,
+//             extra_files,
+//             ..
+//         } => {
+//             let mode_val = ctx.create_string_from_static("stdio")?.into();
+//             info.define_property_value_str(ctx, "mode", mode_val, JS_PROP_C_W_E)?;
+//             info.define_property_value_str(ctx, "shared", JSValue::from(*shared), JS_PROP_C_W_E)?;
 
-            let mut extra = Vec::<JSValue>::with_capacity(extra_files.len());
-            for f in extra_files {
-                extra.push(js_str(ctx, f.clone())?.into());
-            }
-            let arr = Array::from_values(ctx, extra)?.into();
-            info.define_property_value_str(ctx, "extraFiles", arr, JS_PROP_C_W_E)?;
-        }
-        McpServerType::Http { url, .. } => {
-            let mode_val = ctx.create_string_from_static("http")?.into();
-            info.define_property_value_str(ctx, "mode", mode_val, JS_PROP_C_W_E)?;
+//             let mut extra = Vec::<JSValue>::with_capacity(extra_files.len());
+//             for f in extra_files {
+//                 extra.push(js_str(ctx, f.clone())?.into());
+//             }
+//             let arr = Array::from_values(ctx, extra)?.into();
+//             info.define_property_value_str(ctx, "extraFiles", arr, JS_PROP_C_W_E)?;
+//         }
+//         McpServerType::Http { url, .. } => {
+//             let mode_val = ctx.create_string_from_static("http")?.into();
+//             info.define_property_value_str(ctx, "mode", mode_val, JS_PROP_C_W_E)?;
 
-            let url_val = js_str(ctx, url.clone())?;
-            info.define_property_value_str(ctx, "url", url_val, JS_PROP_C_W_E)?;
+//             let url_val = js_str(ctx, url.clone())?;
+//             info.define_property_value_str(ctx, "url", url_val, JS_PROP_C_W_E)?;
 
-            let mut headers = ctx.create_base_object()?;
-            for (k, v) in p.env_or_header.borrow().iter() {
-                let val = match v {
-                    EnvVal::Text(s) => js_str(ctx, s.clone())?,
-                    EnvVal::Func(f) => f.clone().into(),
-                };
-                headers.define_property_value_str(ctx, k, val, JS_PROP_ENUMERABLE)?;
-            }
-            info.define_property_value_str(ctx, "headers", headers.into(), JS_PROP_C_W_E)?;
-        }
-    }
+//             let mut headers = ctx.create_base_object()?;
+//             for (k, v) in p.env_or_header.borrow().iter() {
+//                 let val = match v {
+//                     EnvVal::Text(s) => js_str(ctx, s.clone())?,
+//                     EnvVal::Func(f) => f.clone().into(),
+//                 };
+//                 headers.define_property_value_str(ctx, k, val, JS_PROP_ENUMERABLE)?;
+//             }
+//             info.define_property_value_str(ctx, "headers", headers.into(), JS_PROP_C_W_E)?;
+//         }
+//     }
 
-    // Base fields present in both modes.
-    let server_name_val = js_str(ctx, p.server_name.clone())?;
-    info.define_property_value_str(ctx, "serverName", server_name_val, JS_PROP_C_W_E)?;
-    let desc_val = js_str(ctx, p.description.borrow().to_string())?;
-    info.define_property_value_str(ctx, "description", desc_val, JS_PROP_C_W_E)?;
-    let ver_val = js_str(ctx, p.version.borrow().to_string())?;
-    info.define_property_value_str(ctx, "version", ver_val, JS_PROP_C_W_E)?;
+//     // Base fields present in both modes.
+//     let server_name_val = js_str(ctx, p.server_name.clone())?;
+//     info.define_property_value_str(ctx, "serverName", server_name_val, JS_PROP_C_W_E)?;
+//     let desc_val = js_str(ctx, p.description.borrow().to_string())?;
+//     info.define_property_value_str(ctx, "description", desc_val, JS_PROP_C_W_E)?;
+//     let ver_val = js_str(ctx, p.version.borrow().to_string())?;
+//     info.define_property_value_str(ctx, "version", ver_val, JS_PROP_C_W_E)?;
 
-    Ok(info.into())
-}
+//     Ok(info.into())
+// }
 
 /// tools JOSN-schema
 fn js_tool_schema(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -531,7 +531,7 @@ fn js_get(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         }
         FIELD_NAME => Ok(js_str(ctx, p.server_name.clone())?),
         FIELD_VERSION => Ok(js_str(ctx, p.version.borrow().to_string())?),
-        FIELD_DESCRIPTION => Ok(js_str(ctx, p.description.borrow().to_string())?),
+        FIELD_INSTRUCTIONS => Ok(js_str(ctx, p.instructions.borrow().to_string())?),
         FIELD_SHARED => {
             let shared = match &*p.server_type.borrow() {
                 McpServerType::Stdio { shared, .. } => *shared,
@@ -641,36 +641,38 @@ fn js_launch_server(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         }
     }
 
-    run_start(ctx, this)
+    launch_stdio_server(ctx, this)
 }
 
 fn js_run_do_start(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.data(0);
-    run_start(ctx, this)
+    launch_stdio_server(ctx, this)
 }
 
 /// Ignore beforeRun errors and still start the server.
 fn js_run_ignore_err(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.data(0);
-    run_start(ctx, this)
+    launch_stdio_server(ctx, this)
 }
 
 /// Start the stdio MCP server: build the options object, call `McpStdio.start`,
 /// then register signal handlers that stop it and force-exit once it stops.
 /// The http transport is a remote connection and never calls `run()`; reaching
 /// it here is a bug, so the http branch is `unreachable!()`.
-fn run_start(ctx: &mut ScopedContext, this: JSValue) -> JSResult {
+fn launch_stdio_server(ctx: &mut ScopedContext, this: JSValue) -> JSResult {
     let p = get_def(ctx, &this)?;
+
     let tools: Vec<(String, McpToolDef)> = match &*p.server_type.borrow() {
         McpServerType::Stdio { tools, .. } => {
             tools.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
         }
-        McpServerType::Http { .. } => unreachable!("http McpServerDef never runs"),
+        McpServerType::Http { .. } => {
+            unreachable!("http McpServerDef never runs");
+        }
     };
 
     let server_name = p.server_name.clone();
     let version = p.version.borrow().clone();
-    let version = version.as_ref();
 
     let mut options = ctx.create_base_object()?;
     let sn = js_str(ctx, server_name)?;
@@ -710,6 +712,7 @@ fn run_start(ctx: &mut ScopedContext, this: JSValue) -> JSResult {
     let exit_fn = ctx.create_native_function(Callback::Func(js_run_exit), "exit", 0, 0)?;
     let noop = ctx.create_native_function(Callback::Func(js_noop), "noop", 0, 0)?;
     let _ = p_promise.then(ctx, exit_fn.into(), noop.into())?;
+
     Ok(p.into())
 }
 
@@ -777,15 +780,7 @@ fn apply_stdio_options(
     p: &mut McpServerDefPayload,
     opt: Object,
 ) -> Result<(), i32> {
-    // description / version — plain strings.
-    if let Some(v) = opt
-        .get_property_str(ctx, "description")
-        .ok()
-        .filter(|v| !v.is_undefined())
-    {
-        let s = v.to_string(ctx)?.content().encode_utf8(false).to_string();
-        *p.description.borrow_mut() = Cow::Owned(s);
-    }
+    // version
     if let Some(v) = opt
         .get_property_str(ctx, "version")
         .ok()
@@ -793,6 +788,16 @@ fn apply_stdio_options(
     {
         let s = v.to_string(ctx)?.content().encode_utf8(false).to_string();
         *p.version.borrow_mut() = Cow::Owned(s);
+    }
+
+    // instructions
+    if let Some(v) = opt
+        .get_property_str(ctx, "instructions")
+        .ok()
+        .filter(|v| !v.is_undefined())
+    {
+        let s = v.to_string(ctx)?.content().encode_utf8(false).to_string();
+        *p.instructions.borrow_mut() = Cow::Owned(s);
     }
 
     // env — Record<string, string | (() => string | undefined)>.
@@ -897,17 +902,15 @@ const MCP_SERVER_DEF_PROTO: &[FieldDef] = &[
     FieldDef::GETSET("mode", Some(js_get), None, FIELD_MODE),
     FieldDef::GETSET("name", Some(js_get), None, FIELD_NAME),
     FieldDef::GETSET("version", Some(js_get), None, FIELD_VERSION),
-    FieldDef::GETSET("description", Some(js_get), None, FIELD_DESCRIPTION),
+    FieldDef::GETSET("instructions", Some(js_get), None, FIELD_INSTRUCTIONS),
     FieldDef::GETSET("toolSchema", Some(js_tool_schema), Some(js_tool_schema), 0),
     FieldDef::GETSET("url", Some(js_http_get), None, FIELD_URL),
     FieldDef::GETSET("headers", Some(js_http_get), None, FIELD_HEADERS),
     FieldDef::GETSET("shared", Some(js_get), None, FIELD_SHARED),
-    // FieldDef::GETSET("args", Some(js_get), None, FIELD_ARGS),
-    // FieldDef::FUNC("env", 1, js_env, 0),
     FieldDef::FUNC("tool", 2, js_stdio_tool, 0),
     FieldDef::GETSET("extraFiles", Some(js_get), None, FIELD_EXTRA_FILES),
     FieldDef::GETSET("beforeRun", Some(js_get), None, FIELD_BEFORE_RUN),
-    FieldDef::GETSET("info", Some(js_info), None, FIELD_INFO),
+    // FieldDef::GETSET("info", Some(js_info), None, FIELD_INFO),
     FieldDef::FUNC("run", 0, js_launch_server, 0),
 ];
 

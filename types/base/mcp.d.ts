@@ -20,31 +20,29 @@ declare module "mcp" {
     readonly version: string;
 
     /** Human-readable server description (read-only; set via the `defineStdioMcp` options). */
-    readonly description: string;
+    readonly instructions: string;
 
     /** Schema for tool definitions */
     get toolSchema(): McpToolMeta[] | undefined;
   }
 
-  /** Metadata of mcp server */
-  interface BaseMcpServerInfo {
-    mode: "stdio" | "http";
-    serverName: string;
-    description: string;
-    version: string;
-    tools: McpToolMeta[];
-  }
-
-  export interface StdioMcpServerInfo extends BaseMcpServerInfo {
-    mode: "stdio";
-    shared?: boolean;
-    extraFiles?: string[];
-  }
-
-  export interface HttpMcpServerInfo extends BaseMcpServerInfo {
-    mode: "http";
-    url: string;
-    headers: Record<string, string>;
+  /** what "initialize" method returns */
+  interface McpInitializeResponse {
+    protocolVersion: "2025-06-18";
+    capabilities: {
+      logging?: {};
+      prompts?: { listChanged: boolean };
+      resources?: {
+        subscribe: boolean;
+        listChanged: boolean;
+      };
+      tools?: { listChanged: boolean };
+    };
+    serverInfo: {
+      name: string;
+      version: string;
+    };
+    instructions?: string;
   }
 
   /**
@@ -61,8 +59,6 @@ declare module "mcp" {
 
     /** Extra file paths bundled with the server (read-only; set via options). */
     readonly extraFiles: string[];
-
-    readonly info: StdioMcpServerInfo;
 
     /** Register a tool definition. Returns `this`. */
     tool(name: string, def: McpToolShortDef): this;
@@ -85,8 +81,6 @@ declare module "mcp" {
    */
   export interface HttpMcpDef extends McpServerDef {
     readonly mode: "http";
-
-    readonly info: HttpMcpServerInfo;
 
     /** http endpoint url. */
     readonly url: string;
