@@ -20,30 +20,7 @@ use zuqe::{
 
 use crate::USER_CLASS_DEFS;
 
-use super::JSMcpStdio;
-
-/// Environment entry value: a static string, or a JS function resolving to
-/// `string | undefined`.
-#[derive(Clone)]
-enum EnvVal {
-    Text(String),
-    Func(Object),
-}
-
-/// args entry: a static string array, or a JS function resolving to `string[]`.
-#[derive(Clone)]
-enum ArgsVal {
-    Text(Vec<String>),
-    Func(Object),
-}
-
-/// Per-tool definition: description, JS handler function, and optional args schema.
-#[derive(Clone)]
-struct McpToolDef {
-    desc: String,
-    handler: Object,
-    args: Option<Object>,
-}
+use super::{ArgsVal, EnvVal, JSStdioMcp, McpToolDef};
 
 enum McpServerType {
     Stdio {
@@ -178,7 +155,7 @@ const FIELD_INFO: i16 = 10;
 /// Parse an env/headers object (`Record<string, string | (() => string | undefined)>`)
 /// into the internal `EnvVal` map. Shared by the `env()`/`headers()` builder methods
 /// and the `defineStdioMcp` options object.
-fn parse_env_object(
+pub(crate) fn parse_env_object(
     ctx: &mut ScopedContext,
     mut obj: Object,
 ) -> Result<HashMap<String, EnvVal>, i32> {
@@ -290,7 +267,7 @@ fn js_stdio_tool(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 }
 
 /// Build the JSON-schema `inputSchema` for a tool's `args` DSL object
-fn dsl_to_json_schema(ctx: &mut ScopedContext, mut args_obj: Object) -> JSResult {
+pub(crate) fn dsl_to_json_schema(ctx: &mut ScopedContext, mut args_obj: Object) -> JSResult {
     let pks = args_obj.get_own_property_names(ctx, JS_GPN_ENUM_ONLY | JS_GPN_STR_OR_INT_MASK)?;
     let mut properties = ctx.create_base_object()?;
     let mut required: Vec<String> = Vec::new();
@@ -697,7 +674,7 @@ fn launch_stdio_server(ctx: &mut ScopedContext, this: JSValue) -> JSResult {
 
     // McpStdio.start(options) — returns a Promise that resolves when stopped.
     let mc = ctx
-        .class_constructor(JSMcpStdio::class_id())
+        .class_constructor(JSStdioMcp::class_id())
         .ok_or_else(|| {
             ctx.throw_internal_error("McpStdio class is not registered");
             -1
@@ -718,8 +695,8 @@ fn launch_stdio_server(ctx: &mut ScopedContext, this: JSValue) -> JSResult {
     Ok(p.into())
 }
 
-/// Register `Aike.onSignal(sig, () => McpStdio.stop())`.
-fn register_signal(ctx: &mut ScopedContext, sig: &str) -> JSResult {
+/// Register `Aike.onSignal(sig, () => StdioMcp.stop())`.
+pub(crate) fn register_signal(ctx: &mut ScopedContext, sig: &str) -> JSResult {
     let aike = ctx.global_obj().get_property_str(ctx, "Aike")?;
     let onsignal = aike.get_property_str(ctx, "onSignal")?;
     let stop_fn = ctx.create_native_function(Callback::Func(js_mcp_stop), "mcpStop", 0, 0)?;
@@ -730,7 +707,7 @@ fn register_signal(ctx: &mut ScopedContext, sig: &str) -> JSResult {
 
 fn js_mcp_stop(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
     let mc = ctx
-        .class_constructor(JSMcpStdio::class_id())
+        .class_constructor(JSStdioMcp::class_id())
         .ok_or_else(|| {
             ctx.throw_internal_error("McpStdio class is not registered");
             -1

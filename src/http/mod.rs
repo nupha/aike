@@ -10,7 +10,9 @@ mod server;
 mod ws;
 
 pub(crate) use {
-    class_http_server::{IncomingRequest, JSHttpServer, parse_mcp_tools},
+    class_http_server::{
+        IncomingRequest, JSHttpServer, build_input_schema_from_args, parse_mcp_tools,
+    },
     class_request::JSHttpRequest,
     mcp::{McpEndpoint, McpSchemas, McpService, handle_mcp_tool_call},
     response::{JSHttpResponse, JSHttpResponseSse},

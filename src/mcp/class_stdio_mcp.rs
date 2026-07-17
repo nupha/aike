@@ -1,0 +1,819 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
+
+use std::{
+    borrow::Cow,
+    cell::{Cell, RefCell},
+    collections::HashMap,
+    sync::{
+        Mutex, OnceLock,
+        atomic::{AtomicBool, Ordering},
+    },
+};
+
+use crossbeam::channel;
+use linkme::distributed_slice;
+use rmcp::service::RoleServer;
+use zuqe::{
+    Array, CallContext, Callback, ClassCtorDef, ClassID, FieldDef, JS_GPN_ENUM_ONLY,
+    JS_GPN_STR_OR_INT_MASK, JS_PROP_C_W_E, JS_PROP_ENUMERABLE, JSResult, JSValue, Object,
+    PollSender, Runtime, ScopedContext,
+    builtins::promise::Promise,
+    def_native_object,
+    gc_lite::{GcTrace, GcTraceCtx},
+};
+
+use crate::{
+    USER_CLASS_DEFS,
+    http::{
+        IncomingRequest, McpEndpoint, McpSchemas, McpService, build_input_schema_from_args,
+        handle_mcp_tool_call,
+    },
+};
+
+use super::class_mcp_server_def::{dsl_to_json_schema, parse_env_object, register_signal};
+use super::{ArgsVal, EnvVal, McpToolDef};
+
+struct StdioMcpShutdown {
+    /// Handle to the running rmcp service. Taken by waiting() on shutdown.
+    running_service: Mutex<Option<rmcp::service::RunningService<RoleServer, McpService>>>,
+    /// Cancellation token for sync stop signal.
+    cancellation_token: Mutex<Option<rmcp::service::RunningServiceCancellationToken>>,
+    /// True while the server is actively serving.
+    is_running: AtomicBool,
+}
+
+/// Shutdown control state in static — only Send+Sync types.
+/// OnceLock is set once by start() and never released.
+static MCP_STDIO_STATE: OnceLock<StdioMcpShutdown> = OnceLock::new();
+
+// Thread-local GC roots for JS handler objects (Object is !Send, so can't
+// live in a static). Set in start(), cleared on shutdown.
+thread_local! {
+    static STDIO_JS_HANDLERS: RefCell<Vec<Object>> = RefCell::new(Vec::new());
+}
+
+/// GC trace callback for the stdio MCP server's JS handler objects.
+pub(crate) fn gc_trace_stdio_state(gcx: &mut GcTraceCtx) {
+    STDIO_JS_HANDLERS.with(|handlers| {
+        for h in handlers.borrow().iter() {
+            h.trace(gcx);
+        }
+    });
+}
+
+/// Builder payload for an instantiable `StdioMcp` server: the stdio-only
+/// fields borrowed from `McpServerDefPayload` (server name / version /
+/// instructions / env / tools / args / beforeRun / shared / extraFiles).
+pub(crate) struct StdioMcpPayload {
+    server_name: String,
+    version: RefCell<Cow<'static, str>>,
+    instructions: RefCell<Cow<'static, str>>,
+    env: RefCell<HashMap<String, EnvVal>>,
+    tools: RefCell<HashMap<String, McpToolDef>>,
+    args_entry: RefCell<Option<ArgsVal>>,
+    before_run: RefCell<Option<Object>>,
+    shared: Cell<bool>,
+    extra_files: RefCell<Vec<String>>,
+}
+
+impl StdioMcpPayload {
+    fn new(server_name: String) -> Self {
+        Self {
+            server_name,
+            version: RefCell::new(Cow::Borrowed("1.0.0")),
+            instructions: RefCell::new(Cow::Borrowed("")),
+            env: RefCell::new(HashMap::new()),
+            tools: RefCell::new(HashMap::new()),
+            args_entry: RefCell::new(None),
+            before_run: RefCell::new(None),
+            shared: Cell::new(false),
+            extra_files: RefCell::new(Vec::new()),
+        }
+    }
+
+    /// GC trace — keeps referenced JS objects (handlers, callbacks) alive.
+    fn gc_trace(&self, gcx: &mut GcTraceCtx) {
+        for v in self.env.borrow().values() {
+            if let EnvVal::Func(f) = v {
+                f.trace(gcx);
+            }
+        }
+        for t in self.tools.borrow().values() {
+            t.handler.trace(gcx);
+            if let Some(a) = &t.args {
+                a.trace(gcx);
+            }
+        }
+        if let Some(ArgsVal::Func(f)) = &*self.args_entry.borrow() {
+            f.trace(gcx);
+        }
+        if let Some(f) = &*self.before_run.borrow() {
+            f.trace(gcx);
+        }
+    }
+
+    /// Convert the payload's object-keyed tool DSL into the rmcp tool tuple
+    /// `(Tool vec, name→index map, JS handler vec)` directly, without going
+    /// through a JS options object.
+    fn parse_tools(
+        &self,
+        ctx: &mut ScopedContext,
+    ) -> Result<(Vec<rmcp::model::Tool>, HashMap<String, usize>, Vec<Object>), i32> {
+        let tools_map = self.tools.borrow();
+        let mut tools: Vec<rmcp::model::Tool> = Vec::with_capacity(tools_map.len());
+        let mut name_to_index: HashMap<String, usize> = HashMap::new();
+        let mut js_handlers: Vec<Object> = Vec::with_capacity(tools_map.len());
+
+        for (name, t) in tools_map.iter() {
+            let description = t.desc.clone();
+            let handler = t.handler.clone();
+
+            let input_schema_json = match &t.args {
+                Some(args_obj) => build_input_schema_from_args(ctx, args_obj.clone())?
+                    .unwrap_or(serde_json::json!({"type": "object"})),
+                None => serde_json::json!({"type": "object"}),
+            };
+            let input_schema_obj: serde_json::Map<String, serde_json::Value> =
+                match input_schema_json {
+                    serde_json::Value::Object(m) => m,
+                    _ => serde_json::json!({"type": "object"})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                };
+
+            let tool = rmcp::model::Tool::new(
+                name.clone(),
+                description,
+                std::sync::Arc::new(input_schema_obj.into()),
+            );
+
+            let idx = tools.len();
+            tools.push(tool);
+            name_to_index.insert(name.clone(), idx);
+            js_handlers.push(handler);
+        }
+
+        Ok((tools, name_to_index, js_handlers))
+    }
+}
+
+/// Create a JS string value, taking ownership of `s` so no extra allocation
+/// is needed when the caller already holds a `String`.
+fn js_str(ctx: &mut ScopedContext, s: String) -> JSResult {
+    Ok(ctx.create_string_from_utf8(s.into_bytes())?.into())
+}
+
+fn get_payload<'a>(ctx: &mut ScopedContext, val: &'a JSValue) -> Result<&'a StdioMcpPayload, i32> {
+    val.as_native_object::<JSStdioMcp>()
+        .and_then(|o| o.payload())
+        .ok_or_else(|| {
+            ctx.throw_type_error("not a StdioMcp instance");
+            -1
+        })
+}
+
+/// Constructor callback — `StdioMcp` is NOT constructable. Instances must be
+/// created via the static `StdioMcp.define(name, tools, options)`. Calling it
+/// with `new` (or as a plain function) throws a TypeError.
+fn js_constructor(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
+    ctx.throw_type_error(
+        "StdioMcp cannot be constructed with `new`; use StdioMcp.define(name, tools, options)",
+    );
+    Err(-1)
+}
+
+/// StdioMcp.define(name, tools, options) — static factory.
+///
+/// `tools` is the required second argument: an object-keyed DSL
+/// `{ name: { desc, handler, args } }`. The optional third `options` object
+/// carries version / instructions / env / args / beforeRun / shared /
+/// extraFiles (everything except `tools`, which is lifted to its own arg).
+fn js_define(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let name = cc
+        .arg(0)
+        .to_string(ctx)?
+        .content()
+        .encode_utf8(false)
+        .to_string();
+
+    // tools — required second argument.
+    let tools_val = cc.arg(1);
+    let Some(tools_obj) = tools_val.as_object().copied() else {
+        ctx.throw_type_error("`tools` must be an object");
+        return Err(-1);
+    };
+
+    let mut payload = StdioMcpPayload::new(name);
+
+    // Optional third `options` object (everything except tools).
+    let opt = cc.arg(2);
+    if !opt.is_undefined() {
+        let Some(obj) = opt.as_object().copied() else {
+            ctx.throw_type_error("StdioMcp.define options must be an object");
+            return Err(-1);
+        };
+        apply_stdio_options(ctx, &mut payload, obj)?;
+    }
+
+    // tools is lifted out of options: parse it directly from the 2nd arg.
+    parse_stdio_tools(ctx, &mut payload, tools_obj)?;
+
+    JSStdioMcp::new_instance(ctx, JSValue::UNDEFINED, payload).map(JSValue::from)
+}
+
+// ── Field magic constants ──
+
+const FIELD_VERSION: i16 = 0;
+const FIELD_INSTRUCTIONS: i16 = 1;
+const FIELD_MODE: i16 = 2;
+const FIELD_NAME: i16 = 3;
+const FIELD_SHARED: i16 = 6;
+const FIELD_EXTRA_FILES: i16 = 8;
+const FIELD_BEFORE_RUN: i16 = 9;
+
+fn js_get(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let this = cc.this();
+    let p = get_payload(ctx, &this)?;
+
+    match cc.magic() as i16 {
+        FIELD_MODE => Ok(ctx.create_string_from_static("stdio")?.into()),
+        FIELD_NAME => js_str(ctx, p.server_name.clone()),
+        FIELD_VERSION => js_str(ctx, p.version.borrow().to_string()),
+        FIELD_INSTRUCTIONS => js_str(ctx, p.instructions.borrow().to_string()),
+        FIELD_SHARED => Ok(JSValue::from(p.shared.get())),
+        FIELD_EXTRA_FILES => {
+            let files: Vec<String> = p.extra_files.borrow().clone();
+            let mut lst = Vec::with_capacity(files.len());
+            for f in &files {
+                lst.push(js_str(ctx, f.clone())?.into());
+            }
+            Ok(Array::from_values(ctx, lst)?.into())
+        }
+        FIELD_BEFORE_RUN => match &*p.before_run.borrow() {
+            None => Ok(JSValue::NULL),
+            Some(f) => Ok(f.clone().into()),
+        },
+        _ => Ok(JSValue::UNDEFINED),
+    }
+}
+
+/// tools JSON-schema getter (mirrors `McpServerDef.toolSchema`). Setting it on
+/// a stdio server is a no-op, so the setter just returns `this`.
+fn js_tool_schema(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let this = cc.this();
+    let p = get_payload(ctx, &this)?;
+    if cc.length() == 0 {
+        get_tool_schema(ctx, p)
+    } else {
+        Ok(this)
+    }
+}
+
+fn get_tool_schema(ctx: &mut ScopedContext, p: &StdioMcpPayload) -> JSResult {
+    let tools: Vec<(String, McpToolDef)> = p
+        .tools
+        .borrow()
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+
+    let mut lst = Vec::with_capacity(tools.len());
+    for (name, t) in &tools {
+        let mut meta = ctx.create_base_object()?;
+        let name_val = js_str(ctx, name.clone())?;
+        meta.define_property_value_str(ctx, "name", name_val, JS_PROP_C_W_E)?;
+        let desc_val = js_str(ctx, t.desc.clone())?;
+        meta.define_property_value_str(ctx, "description", desc_val, JS_PROP_C_W_E)?;
+
+        let schema = if let Some(args_obj) = t.args {
+            dsl_to_json_schema(ctx, args_obj)?
+        } else {
+            let mut empty = ctx.create_base_object()?;
+            let type_val = js_str(ctx, "object".to_string())?;
+            empty.define_property_value_str(ctx, "type", type_val, JS_PROP_C_W_E)?;
+            empty.into()
+        };
+        meta.define_property_value_str(ctx, "inputSchema", schema, JS_PROP_C_W_E)?;
+
+        lst.push(meta.into());
+    }
+
+    Ok(Array::from_values(ctx, lst)?.into())
+}
+
+/// Register a tool definition (mirrors `McpServerDef.tool`).
+fn js_tool(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let this = cc.this();
+    let p = get_payload(ctx, &this)?;
+
+    let name = cc
+        .arg(0)
+        .to_string(ctx)?
+        .content()
+        .encode_utf8(false)
+        .to_string();
+
+    let opt = cc
+        .arg(1)
+        .as_object()
+        .ok_or_else(|| {
+            ctx.throw_type_error("tool def must be an object");
+            -1
+        })?
+        .clone();
+
+    let desc = opt
+        .get_property_str(ctx, "desc")
+        .and_then(|v| v.to_string(ctx))
+        .map(|s| s.content().encode_utf8(false).to_string())
+        .unwrap_or_default();
+    let handler = opt
+        .get_property_str(ctx, "handler")
+        .and_then(|v| v.into_callable(ctx))
+        .map_err(|_| {
+            ctx.throw_type_error(&format!("tool '{}' handler must be a function", name));
+            -1
+        })?;
+    let args = opt
+        .get_property_str(ctx, "args")
+        .ok()
+        .filter(|v| !v.is_undefined())
+        .and_then(|v| v.as_object().copied());
+
+    p.tools.borrow_mut().insert(
+        name,
+        McpToolDef {
+            desc,
+            handler,
+            args,
+        },
+    );
+
+    Ok(this)
+}
+
+/// Set or read the transport environment variables (mirrors `McpServerDef.env`).
+fn js_env(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let this = cc.this();
+    let p = get_payload(ctx, &this)?;
+
+    if cc.length() == 0 {
+        let env: Vec<(String, EnvVal)> = p
+            .env
+            .borrow()
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        let mut obj = ctx.create_base_object()?;
+        for (k, v) in env {
+            let val = match v {
+                EnvVal::Text(s) => js_str(ctx, s)?,
+                EnvVal::Func(f) => f.into(),
+            };
+            obj.define_property_value_str(ctx, &k, val, JS_PROP_ENUMERABLE)?;
+        }
+        return Ok(obj.into());
+    }
+
+    let vars = cc.arg(0);
+    let Some(obj) = vars.as_object().copied() else {
+        ctx.throw_type_error("env expects an object");
+        return Err(-1);
+    };
+    let settings = parse_env_object(ctx, obj)?;
+    *p.env.borrow_mut() = settings;
+    Ok(this)
+}
+
+/// Instance `run()` — launch this server's stdio transport via the shared
+/// `start_stdio_server`, which owns the process-wide running state. Mirrors
+/// `McpServerDef.run()`: stops on SIGINT/SIGTERM and force-exits once the
+/// server stops.
+fn js_run(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let this = cc.this();
+    let p = get_payload(ctx, &this)?;
+
+    // Launch the stdio server
+    let mut promise = start_stdio_server(ctx, p)?;
+
+    // Stop on SIGINT / SIGTERM.
+    register_signal(ctx, "SIGINT")?;
+    register_signal(ctx, "SIGTERM")?;
+
+    // Force process exit once the server has stopped.
+    let exit_fn = ctx.create_native_function(Callback::Func(js_run_exit), "exit", 0, 0)?;
+    let noop = ctx.create_native_function(Callback::Func(js_noop), "noop", 0, 0)?;
+    let _ = promise.then(ctx, exit_fn.into(), noop.into())?;
+
+    Ok(promise.into())
+}
+
+/// Apply the `StdioMcp.define(name, tools, options)` options object onto a
+/// fresh payload. `tools` is handled separately (it is the lifted 2nd arg),
+/// so this covers version / instructions / env / args / beforeRun / shared /
+/// extraFiles.
+fn apply_stdio_options(
+    ctx: &mut ScopedContext,
+    p: &mut StdioMcpPayload,
+    opt: Object,
+) -> Result<(), i32> {
+    // version
+    if let Some(v) = opt
+        .get_property_str(ctx, "version")
+        .ok()
+        .filter(|v| !v.is_undefined())
+    {
+        let s = v.to_string(ctx)?.content().encode_utf8(false).to_string();
+        *p.version.borrow_mut() = Cow::Owned(s);
+    }
+
+    // instructions
+    if let Some(v) = opt
+        .get_property_str(ctx, "instructions")
+        .ok()
+        .filter(|v| !v.is_undefined())
+    {
+        let s = v.to_string(ctx)?.content().encode_utf8(false).to_string();
+        *p.instructions.borrow_mut() = Cow::Owned(s);
+    }
+
+    // env — Record<string, string | (() => string | undefined)>.
+    if let Some(v) = opt
+        .get_property_str(ctx, "env")
+        .ok()
+        .filter(|v| !v.is_undefined())
+    {
+        if let Some(obj) = v.as_object().copied() {
+            *p.env.borrow_mut() = parse_env_object(ctx, obj)?;
+        }
+    }
+
+    // args — string[] | (() => string[]).
+    if let Some(v) = opt
+        .get_property_str(ctx, "args")
+        .ok()
+        .filter(|v| !v.is_undefined())
+    {
+        let val = if v.as_object().map_or(false, |o| o.is_callable()) {
+            ArgsVal::Func(v.into_callable(ctx)?)
+        } else {
+            let arr = v.into_object(ctx)?;
+            let len = arr
+                .get_property_str(ctx, "length")
+                .and_then(|l| l.to_number(ctx))
+                .map(|n| n.to_i32())? as usize;
+            let mut out = Vec::with_capacity(len);
+            for i in 0..len {
+                let s = arr
+                    .get_property_u32(ctx, i as u32)?
+                    .to_string(ctx)?
+                    .content()
+                    .encode_utf8(false)
+                    .to_string();
+                out.push(s);
+            }
+            ArgsVal::Text(out)
+        };
+        *p.args_entry.borrow_mut() = Some(val);
+    }
+
+    // beforeRun — () => Promise<void>.
+    if let Some(v) = opt
+        .get_property_str(ctx, "beforeRun")
+        .ok()
+        .filter(|v| !v.is_undefined())
+    {
+        let func = v.into_callable(ctx)?;
+        *p.before_run.borrow_mut() = Some(func);
+    }
+
+    // shared — boolean.
+    if let Some(v) = opt
+        .get_property_str(ctx, "shared")
+        .ok()
+        .filter(|v| !v.is_undefined())
+    {
+        let b = v.to_bool().unwrap_or(false);
+        p.shared.set(b);
+    }
+
+    // extraFiles — string[].
+    if let Some(v) = opt
+        .get_property_str(ctx, "extraFiles")
+        .ok()
+        .filter(|v| !v.is_undefined())
+    {
+        if let Some(arr) = v.as_object().copied() {
+            let len = arr
+                .get_property_str(ctx, "length")
+                .and_then(|l| l.to_number(ctx))
+                .map(|n| n.to_i32())? as usize;
+            let mut paths = Vec::with_capacity(len);
+            for i in 0..len {
+                let s = arr
+                    .get_property_u32(ctx, i as u32)?
+                    .to_string(ctx)?
+                    .content()
+                    .encode_utf8(false)
+                    .to_string();
+                paths.push(s);
+            }
+            *p.extra_files.borrow_mut() = paths;
+        }
+    }
+
+    Ok(())
+}
+
+/// Parse the object-keyed tool DSL `{ name: { desc, handler, args } }` from a
+/// JS object into the payload. Shared by `StdioMcp.define()` (where `tools` is
+/// the lifted second argument).
+fn parse_stdio_tools(
+    ctx: &mut ScopedContext,
+    p: &mut StdioMcpPayload,
+    mut tools_obj: Object,
+) -> Result<(), i32> {
+    let pks = tools_obj.get_own_property_names(ctx, JS_GPN_ENUM_ONLY | JS_GPN_STR_OR_INT_MASK)?;
+    for pk in pks.iter() {
+        let name = pk
+            .atom
+            .to_value(ctx)
+            .and_then(|v| v.to_string(ctx))
+            .map(|s| s.content().encode_utf8(false).to_string())
+            .map_err(|_| {
+                ctx.throw_type_error("tool name must be a string");
+                -1
+            })?;
+        if name.is_empty() {
+            continue;
+        }
+        let val = tools_obj.get_property(ctx, pk.atom).map_err(|_| {
+            ctx.throw_type_error(&format!("tool '{}' must be an object", name));
+            -1
+        })?;
+        let tool_obj = val
+            .as_object()
+            .ok_or_else(|| {
+                ctx.throw_type_error(&format!("tool '{}' must be an object", name));
+                -1
+            })?
+            .clone();
+        let desc = tool_obj
+            .get_property_str(ctx, "desc")
+            .ok()
+            .filter(|v| !v.is_undefined())
+            .and_then(|v| v.to_string(ctx).ok())
+            .map(|s| s.content().encode_utf8(false).to_string())
+            .unwrap_or_default();
+        let handler = tool_obj
+            .get_property_str(ctx, "handler")
+            .and_then(|v| v.into_callable(ctx))
+            .map_err(|_| {
+                ctx.throw_type_error(&format!("tool '{}' handler must be a function", name));
+                -1
+            })?;
+        let args = tool_obj
+            .get_property_str(ctx, "args")
+            .ok()
+            .filter(|v| !v.is_undefined())
+            .and_then(|v| v.as_object().copied());
+        p.tools.borrow_mut().insert(
+            name,
+            McpToolDef {
+                desc,
+                handler,
+                args,
+            },
+        );
+    }
+
+    Ok(())
+}
+
+/// Shared stdio server launcher. Reads config directly from `p`
+/// (the `StdioMcp` instance payload) — no options object is assembled.
+/// Returns a Promise<void> that resolves when the server stops
+/// (via stop(), stdin EOF, or error). Non-blocking.
+///
+/// Refuses if already started — StdioMcp is a process-wide singleton.
+fn start_stdio_server(ctx: &mut ScopedContext, p: &StdioMcpPayload) -> Result<Promise, i32> {
+    if MCP_STDIO_STATE.get().is_some() {
+        ctx.throw_internal_error(
+            "Has running stdio mcp server — it can only be started once per process.",
+        );
+        return Err(-1);
+    }
+
+    // Route all console.log output to stderr to keep stdout clean for MCP protocol.
+    // Refuse if stdio is already captured by another (concurrent) server.
+    if let Err(msg) = crate::repl::caupture_stdio(true) {
+        ctx.throw_type_error(msg.as_str());
+        return Err(-1);
+    }
+
+    let server_name = p.server_name.clone();
+    let server_version = p.version.borrow().to_string();
+
+    // tools (object-keyed DSL stored in the payload)
+    let (tools, name_to_index, js_handlers) = p.parse_tools(ctx)?;
+
+    // Build McpEndpoint (stdio mode: no mount_path, no update_tx)
+    let endpoint = McpEndpoint {
+        mount_path: String::new(),
+        server_name,
+        server_version,
+        shared: std::sync::Arc::new(std::sync::RwLock::new(McpSchemas {
+            tools,
+            name_to_index,
+            native_map: HashMap::new(),
+        })),
+        js_handlers,
+        handlers: Vec::new(),
+        update_tx: None,
+    };
+
+    // 4. Create crossbeam channel (same IncomingRequest mechanism as HTTP mode)
+    let (js_tx, js_rx) = channel::unbounded::<IncomingRequest>();
+
+    // 5. Build McpService (reuse mcp.rs)
+    let service = McpService::from_endpoint(&endpoint, js_tx, 0);
+
+    // 6. Start JS poller job for tool call dispatch
+    let mcp_tables = RefCell::new(vec![endpoint.js_handlers.clone()]);
+    let is_running = std::sync::Arc::new(AtomicBool::new(true));
+
+    crate::helpers::start_channel_poller(
+        ctx,
+        "stdio_mcp",
+        js_rx,
+        move |incoming: IncomingRequest, cx| {
+            match incoming {
+                IncomingRequest::McpToolCall(req) => {
+                    handle_mcp_tool_call(cx, req, &mcp_tables.borrow());
+                }
+                IncomingRequest::Http(_)
+                | IncomingRequest::WebSocketOpen { .. }
+                | IncomingRequest::WebSocketData { .. } => {
+                    // should never happen in stdio mode
+                }
+            }
+
+            true
+        },
+        {
+            let b = is_running.clone();
+            move || b.load(Ordering::Acquire)
+        },
+        || {},
+    );
+
+    // Create Promise that resolves when server stops
+    let (promise, tx) =
+        Promise::create_with_channel::<Result<(), ()>>(ctx, |_, _| Ok(JSValue::UNDEFINED))?;
+
+    // Store js_handlers in thread_local for GC tracing (Object is !Send)
+    STDIO_JS_HANDLERS.with(|h| {
+        *h.borrow_mut() = endpoint.js_handlers.clone();
+    });
+
+    // Initialize shutdown state (only Send+Sync fields in static)
+    MCP_STDIO_STATE
+        .set(StdioMcpShutdown {
+            running_service: Mutex::new(None),
+            cancellation_token: Mutex::new(None),
+            is_running: AtomicBool::new(true),
+        })
+        .ok();
+
+    // Spawn background tokio task to run rmcp serve_server
+    tokio::spawn(async move {
+        let transport = (tokio::io::stdin(), tokio::io::stdout());
+
+        // Step 1: Initialize (handshake) — returns quickly on error or cancel
+        let running = match rmcp::serve_server(service, transport).await {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("[StdioMcp] init error: {:?}", e);
+                if let Some(state) = MCP_STDIO_STATE.get() {
+                    state.is_running.store(false, Ordering::Release);
+                    // Also stop the poller
+                    // (is_running_poller is the poller's keep-alive flag)
+                }
+                is_running.store(false, Ordering::Release);
+                let _ = crate::repl::caupture_stdio(false);
+                let _ = PollSender::from(tx).send_async(Ok(())).await;
+                return;
+            }
+        };
+
+        // Step 2: Store RunningService + cancellation token
+        let ct = running.cancellation_token();
+        if let Some(state) = MCP_STDIO_STATE.get() {
+            *state.cancellation_token.lock().unwrap() = Some(ct);
+            *state.running_service.lock().unwrap() = Some(running);
+        }
+
+        // Step 3: Wait for termination (natural EOF, cancel, or error)
+        // Take the RunningService out and call waiting() which consumes it.
+        let running = MCP_STDIO_STATE
+            .get()
+            .and_then(|s| s.running_service.lock().unwrap().take());
+        if let Some(r) = running {
+            let _ = r.waiting().await;
+        }
+
+        // Step 4: Cleanup — mark stopped and resolve Promise
+        if let Some(state) = MCP_STDIO_STATE.get() {
+            state.is_running.store(false, Ordering::Release);
+        }
+        is_running.store(false, Ordering::Release);
+        let _ = crate::repl::caupture_stdio(false);
+        let _ = PollSender::from(tx).send_async(Ok(())).await;
+    });
+
+    Ok(promise)
+}
+
+fn js_stop(_ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
+    let Some(state) = MCP_STDIO_STATE.get() else {
+        return Ok(JSValue::UNDEFINED); // never started
+    };
+    if !state.is_running.load(Ordering::Acquire) {
+        return Ok(JSValue::UNDEFINED); // already stopped
+    }
+
+    // Take the cancellation token and fire it (sync, no blocking)
+    let token = state.cancellation_token.lock().unwrap().take();
+    if let Some(t) = token {
+        t.cancel();
+    }
+
+    // The background task's waiting() will return, triggering cleanup
+    // and Promise resolution.
+
+    Ok(JSValue::UNDEFINED)
+}
+
+/// StdioMcp.isRunning() — returns true if the server is currently serving.
+fn js_is_running(_ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
+    match MCP_STDIO_STATE.get() {
+        Some(state) => Ok(JSValue::from(state.is_running.load(Ordering::Acquire))),
+        None => Ok(JSValue::from(false)),
+    }
+}
+
+/// Force process exit once the server stops (used by `run`'s `.then`).
+fn js_run_exit(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
+    let aike = ctx.global_obj().get_property_str(ctx, "Aike")?;
+    let exit_fn = aike.get_property_str(ctx, "exit")?;
+    exit_fn.call(ctx, aike, &[JSValue::from(0)])?;
+    Ok(JSValue::UNDEFINED)
+}
+
+fn js_noop(_ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
+    Ok(JSValue::UNDEFINED)
+}
+
+// Static methods defined on the class constructor (not prototype)
+const STDIO_MCP_STATIC_ENTRIES: &[FieldDef] = &[
+    FieldDef::FUNC("define", 3, js_define, 0),
+    FieldDef::FUNC("stop", 0, js_stop, 0),
+    FieldDef::FUNC("isRunning", 0, js_is_running, 0),
+];
+
+// Constructor + static entries, built once as a const so the macro's
+// `$ctor:expr` matcher sees a plain identifier rather than a method-call
+// chain (which can confuse macro argument parsing).
+const STDIO_MCP_CTOR: ClassCtorDef =
+    ClassCtorDef::new(js_constructor, 1, true).entries(STDIO_MCP_STATIC_ENTRIES);
+
+// Instance prototype — the stdio builder surface, mirroring McpServerDef.
+const STDIO_MCP_PROTO: &[FieldDef] = &[
+    FieldDef::GETSET("mode", Some(js_get), None, FIELD_MODE),
+    FieldDef::GETSET("name", Some(js_get), None, FIELD_NAME),
+    FieldDef::GETSET("version", Some(js_get), None, FIELD_VERSION),
+    FieldDef::GETSET("instructions", Some(js_get), None, FIELD_INSTRUCTIONS),
+    FieldDef::GETSET("toolSchema", Some(js_tool_schema), Some(js_tool_schema), 0),
+    FieldDef::GETSET("shared", Some(js_get), None, FIELD_SHARED),
+    FieldDef::FUNC("tool", 2, js_tool, 0),
+    FieldDef::GETSET("extraFiles", Some(js_get), None, FIELD_EXTRA_FILES),
+    FieldDef::GETSET("beforeRun", Some(js_get), None, FIELD_BEFORE_RUN),
+    FieldDef::FUNC("env", 1, js_env, 0),
+    FieldDef::FUNC("run", 0, js_run, 0),
+];
+
+def_native_object!(
+    "StdioMcp",
+    JSStdioMcp,
+    StdioMcpPayload,
+    STDIO_MCP_PROTO,
+    Some(STDIO_MCP_CTOR),
+    on_payload_gc: StdioMcpPayload::gc_trace
+);
+
+#[distributed_slice(USER_CLASS_DEFS)]
+fn register_mcp_stdio(rt: &mut Runtime) -> Result<ClassID, i32> {
+    JSStdioMcp::register(rt)
+}

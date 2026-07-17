@@ -348,45 +348,59 @@ declare module "mcp" {
 
   /**
    * MCP server over stdio transport (stdin/stdout).
-   *
-   * stdin/stdout is a process-wide exclusive resource, so McpStdio
-   * is a singleton — all methods are static. Only one instance can
-   * be running at a time.
-   *
-   * Usage:
-   *   const p = McpStdio.start({
-   *     serverName: "my-tools",
-   *     version: "1.0.0",
-   *     tools: {
-   *       echo: {
-   *         desc: "Echo back the message",
-   *         handler(args) { return { message: args.text }; },
-   *         args: { text: { desc: "Text to echo", required: true } }
-   *       }
-   *     }
-   *   });
-   *   // server is running in background...
-   *   McpStdio.stop(); // or wait for stdin EOF
-   *   await p;
    */
-  export class McpStdio {
-    /** Cannot instantiate — use static methods. */
+  export class StdioMcp {
     private constructor();
 
     /**
-     * Start the MCP stdio server.
-     *
-     * Returns a Promise that resolves when the server stops,
-     * either because:
-     * - stop() was called
-     * - The MCP client disconnected (stdin EOF)
-     * - An error occurred
-     *
-     * This is NON-BLOCKING — the server runs in the background.
-     *
-     * @throws TypeError if the server is already running.
+     * Create a stdio MCP server.
+     * @param serverName — the advertised server name.
+     * @param tools — required object-keyed tool DSL
+     *   `{ name: { desc, handler, args } }`.
+     * @param options — optional config (everything except `tools`):
+     *   version / instructions / env / args / beforeRun / shared / extraFiles.
      */
-    static start(options: McpOptions): Promise<void>;
+    static define(
+      serverName: string,
+      tools: Record<string, McpToolShortDef>,
+      options?: {
+        version?: string;
+        instructions?: string;
+        env?: Record<string, string | (() => string | undefined)>;
+        args?: string[] | (() => string[]);
+        beforeRun?: () => Promise<void>;
+        shared?: boolean;
+        extraFiles?: string[];
+      },
+    ): StdioMcp;
+
+    /** Advertised server name. */
+    readonly name: string;
+
+    /** Advertised server version. */
+    readonly version: string;
+
+    /** Human-readable server description. */
+    readonly instructions: string;
+
+    /** Tool definitions */
+    readonly toolSchema: McpToolMeta[];
+
+    /** Whether the server is shared. */
+    readonly shared: boolean;
+
+    /** Extra file paths bundled with the server. */
+    readonly extraFiles: string[];
+
+    /** Async hook run before the server starts, or `null`. */
+    readonly beforeRun: (() => Promise<void>) | null;
+
+    /**
+     * Launch this server: awaits `beforeRun` if set, starts the stdio
+     * server, registers SIGINT/SIGTERM stop handlers, and force-exits once
+     * the server stops.
+     */
+    run(): Promise<void>;
 
     /**
      * Gracefully stop the MCP stdio server.
