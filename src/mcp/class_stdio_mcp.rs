@@ -26,6 +26,7 @@ use crate::{USER_CLASS_DEFS, http::IncomingRequest};
 
 use super::{
     ArgsVal, EnvVal,
+    class_http_mcp::JSHttpMcp,
     class_mcp_server_def::{parse_env_object, register_signal},
     service::{
         McpSchemas, McpService, McpServicePayload, McpTransport, handle_mcp_tool_call,
@@ -67,13 +68,13 @@ pub(crate) fn gc_trace_stdio_state(gcx: &mut GcTraceCtx) {
 
 /// Create a JS string value, taking ownership of `s` so no extra allocation
 /// is needed when the caller already holds a `String`.
-fn js_str(ctx: &mut ScopedContext, s: String) -> JSResult {
+pub(crate) fn js_str(ctx: &mut ScopedContext, s: String) -> JSResult {
     Ok(ctx.create_string_from_utf8(s.into_bytes())?.into())
 }
 
 /// Resolve the shared `McpServicePayload` from either a `JSStdioMcp` or a
 /// `JSHttpMcp` instance (both wrap the same payload type).
-fn get_payload<'a>(
+pub(crate) fn get_payload<'a>(
     ctx: &mut ScopedContext,
     val: &'a JSValue,
 ) -> Result<&'a McpServicePayload, i32> {
@@ -93,7 +94,7 @@ fn get_payload<'a>(
 
 /// Mutable variant of `get_payload` — returns the payload for mutation
 /// (e.g. dynamically adding tools).
-fn get_payload_mut<'a>(
+pub(crate) fn get_payload_mut<'a>(
     ctx: &mut ScopedContext,
     val: &'a mut JSValue,
 ) -> Result<&'a mut McpServicePayload, i32> {
@@ -185,6 +186,7 @@ const FIELD_VERSION: i16 = 0;
 const FIELD_INSTRUCTIONS: i16 = 1;
 const FIELD_NAME: i16 = 3;
 const FIELD_SHARED: i16 = 6;
+const FIELD_TOOLS: i16 = 7;
 const FIELD_EXTRA_FILES: i16 = 8;
 const FIELD_BEFORE_RUN: i16 = 9;
 const FIELD_SPAWN_ENV: i16 = 10;
@@ -198,6 +200,7 @@ fn js_get(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         FIELD_NAME => js_str(ctx, p.server_name.clone()),
         FIELD_VERSION => js_str(ctx, p.version.borrow().to_string()),
         FIELD_INSTRUCTIONS => js_str(ctx, p.instructions.borrow().to_string()),
+        FIELD_TOOLS => p.make_schemas_json(ctx).map(JSValue::from),
         FIELD_SHARED => match &p.transport {
             McpTransport::Stdio { is_shared, .. } => Ok(JSValue::from(is_shared.get())),
             _ => Ok(JSValue::from(false)),
@@ -255,21 +258,17 @@ fn js_get(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
 /// tools JSON-schema getter (mirrors `McpServerDef.toolSchema`). Setting it on
 /// a stdio server is a no-op, so the setter just returns `this`.
-fn js_tools_list(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+pub(crate) fn js_tools_list(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let p = get_payload(ctx, &this)?;
-    if cc.length() == 0 {
-        p.make_schemas_json(ctx).map(JSValue::from)
-    } else {
-        Ok(this)
-    }
+    p.make_schemas_json(ctx).map(JSValue::from)
 }
 
 /// `initializeInfo` getter — returns the object advertised in the MCP
 /// `initialize` handshake result. Built from `make_server_info` (== the
 /// `InitializeResult` the server actually returns), then serialized to a JS
 /// object via serde_json.
-fn js_initialize_info(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+pub(crate) fn js_initialize_info(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let p = get_payload(ctx, &this)?;
 
@@ -619,19 +618,19 @@ fn js_noop(_ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
 
 // ── Shared instance getters (same for JSStdioMcp and JSHttpMcp) ──
 
-fn js_name(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+pub(crate) fn js_name(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let p = get_payload(ctx, &this)?;
     js_str(ctx, p.server_name.clone())
 }
 
-fn js_version(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+pub(crate) fn js_version(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let p = get_payload(ctx, &this)?;
     js_str(ctx, p.version.borrow().to_string())
 }
 
-fn js_instructions(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+pub(crate) fn js_instructions(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let p = get_payload(ctx, &this)?;
     js_str(ctx, p.instructions.borrow().to_string())
@@ -642,7 +641,7 @@ fn js_instructions(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 /// that is already listening, the new handler table is pushed through the
 /// hot-reload channel so it takes effect on the next request. For stdio, call
 /// BEFORE `run()` (the server is built from the payload at run time).
-fn js_add_tool(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+pub(crate) fn js_add_tool(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut this = cc.this();
     let p = get_payload_mut(ctx, &mut this)?;
 
@@ -655,64 +654,6 @@ fn js_add_tool(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     if let McpTransport::Http { update_tx, .. } = &p.transport {
         if let Some(tx) = update_tx {
             let _ = tx.send(new_handlers);
-        }
-    }
-
-    Ok(this)
-}
-
-/// `HttpMcp.updateTools(tools)` — hot-reload: REPLACE all JS tools (native
-/// tools are preserved). For an HTTP server that is already listening, the
-/// new handler table is pushed through the hot-reload channel so it takes
-/// effect on the next request.
-fn js_http_update_tools(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let mut this = cc.this();
-    let p = get_payload_mut(ctx, &mut this)?;
-
-    // HttpMcp is always an Http transport, but guard for safety.
-    match &p.transport {
-        McpTransport::Http { .. } => {}
-        _ => {
-            ctx.throw_type_error("updateTools is only supported on an Http transport");
-            return Err(-1);
-        }
-    }
-
-    // arg(0): tools (array or object-keyed format)
-    let tools_val = cc.arg(0);
-    let (tools, name_to_index, js_handlers) = parse_mcp_tools(ctx, &tools_val)?;
-
-    // Replace all JS tools, preserving native tool entries.
-    {
-        let mut guard = p.schemas.write().unwrap();
-        let native_names: Vec<String> = guard.native_map.keys().cloned().collect();
-        let mut new_tools = tools;
-        let mut new_name_to_index = name_to_index;
-        let mut new_native_map = HashMap::new();
-
-        for name in &native_names {
-            if let Some(&old_idx) = guard.name_to_index.get(name) {
-                let new_idx = new_tools.len();
-                new_tools.push(guard.tools[old_idx].clone());
-                new_name_to_index.insert(name.clone(), new_idx);
-                if let Some(&ni) = guard.native_map.get(name) {
-                    new_native_map.insert(name.clone(), ni);
-                }
-            }
-        }
-
-        guard.tools = new_tools;
-        guard.name_to_index = new_name_to_index;
-        guard.native_map = new_native_map;
-    }
-
-    // Update JS handlers on payload (for GC tracing).
-    p.js_handlers = RefCell::new(js_handlers.clone());
-
-    // Send new handler table to the poller via update channel.
-    if let McpTransport::Http { update_tx, .. } = &p.transport {
-        if let Some(utx) = update_tx {
-            let _ = utx.send(js_handlers);
         }
     }
 
@@ -737,7 +678,7 @@ const STDIO_MCP_CTOR: ClassCtorDef =
 // Instance prototype — the stdio builder surface, mirroring McpServerDef.
 const STDIO_MCP_PROTO: &[FieldDef] = &[
     FieldDef::GETSET("initializeInfo", Some(js_initialize_info), None, 0),
-    FieldDef::GETSET("toolsList", Some(js_tools_list), Some(js_tools_list), 0),
+    FieldDef::GETSET("toolsList", Some(js_get), None, FIELD_TOOLS),
     FieldDef::GETSET("shared", Some(js_get), None, FIELD_SHARED),
     FieldDef::GETSET("extraFiles", Some(js_get), None, FIELD_EXTRA_FILES),
     FieldDef::GETSET("beforeRun", Some(js_get), None, FIELD_BEFORE_RUN),
@@ -764,129 +705,4 @@ fn register_stdio_mcp(rt: &mut Runtime) -> Result<ClassID, i32> {
     JSStdioMcp::register(rt)
 }
 
-const FIELD_MOUNT_PATH: i16 = 12;
 
-/// `HttpMcp.define(name, tools, options)` — static factory.
-///
-/// `name` is the advertised server name (required, same position as
-/// `StdioMcp.define`). `tools` is the required second argument (object-keyed
-/// DSL or array). `options` carries version / instructions (everything except
-/// `tools`). The compiled schemas + handlers are written into the payload at
-/// define() time. The mount path is NOT set here — it is assigned by
-/// `HttpServer.mcp(mountPath, server)` at mount time.
-fn js_http_define(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    // name — required first argument (advertised server name).
-    let name = cc.arg(0).to_string(ctx).map_err(|_| {
-        ctx.throw_type_error("HttpMcp.define name must be a string");
-        -1
-    })?;
-    let name = name.content().encode_utf8(false).to_string();
-
-    // tools — required second argument (object-keyed DSL or array).
-    let tools_val = cc.arg(1);
-    if tools_val.as_object().is_none() {
-        ctx.throw_type_error("`tools` must be an array or object");
-        return Err(-1);
-    }
-
-    let mut payload = McpServicePayload::new_http();
-    payload.server_name = name;
-
-    // Optional third `options` object (version / instructions).
-    let opt = cc.arg(2);
-    if !opt.is_undefined() {
-        let Some(obj) = opt.as_object().copied() else {
-            ctx.throw_type_error("HttpMcp.define options must be an object");
-            return Err(-1);
-        };
-        apply_http_options(ctx, &mut payload, obj)?;
-    }
-
-    // Shared parser: write compiled schemas + js_handlers into the payload.
-    let (tools, name_to_index, js_handlers) = parse_mcp_tools(ctx, &tools_val)?;
-    payload.schemas = Arc::new(RwLock::new(McpSchemas {
-        tools,
-        name_to_index,
-        native_map: HashMap::new(),
-    }));
-    payload.js_handlers = RefCell::new(js_handlers);
-
-    JSHttpMcp::new_instance(ctx, JSValue::UNDEFINED, payload).map(JSValue::from)
-}
-
-/// Apply the `HttpMcp.define(name, tools, options)` options object onto a
-/// fresh payload. Covers version / instructions (serverName is positional).
-fn apply_http_options(
-    ctx: &mut ScopedContext,
-    p: &mut McpServicePayload,
-    opt: Object,
-) -> Result<(), i32> {
-    if let Some(v) = opt
-        .get_property_str(ctx, "version")
-        .ok()
-        .filter(|v| !v.is_undefined())
-    {
-        let s = v.to_string(ctx)?.content().encode_utf8(false).to_string();
-        *p.version.borrow_mut() = Cow::Owned(s);
-    }
-    if let Some(v) = opt
-        .get_property_str(ctx, "instructions")
-        .ok()
-        .filter(|v| !v.is_undefined())
-    {
-        let s = v.to_string(ctx)?.content().encode_utf8(false).to_string();
-        *p.instructions.borrow_mut() = Cow::Owned(s);
-    }
-
-    Ok(())
-}
-
-fn js_http_constructor(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
-    ctx.throw_type_error(
-        "HttpMcp cannot be constructed with `new`; use HttpMcp.define(name, tools, options)",
-    );
-    Err(-1)
-}
-
-/// http-only getter for `mountPath`.
-fn js_http_get(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let this = cc.this();
-    let p = get_payload(ctx, &this)?;
-    match cc.magic() as i16 {
-        FIELD_MOUNT_PATH => match &p.transport {
-            McpTransport::Http { mount_path, .. } => js_str(ctx, mount_path.clone()),
-            _ => Ok(JSValue::UNDEFINED),
-        },
-        _ => Ok(JSValue::UNDEFINED),
-    }
-}
-
-const HTTP_MCP_STATIC_ENTRIES: &[FieldDef] = &[FieldDef::FUNC("define", 3, js_http_define, 0)];
-
-const HTTP_MCP_CTOR: ClassCtorDef =
-    ClassCtorDef::new(js_http_constructor, 1, true).entries(HTTP_MCP_STATIC_ENTRIES);
-
-const HTTP_MCP_PROTO: &[FieldDef] = &[
-    FieldDef::GETSET("initializeInfo", Some(js_initialize_info), None, 0),
-    FieldDef::GETSET("toolsList", Some(js_tools_list), Some(js_tools_list), 0),
-    FieldDef::GETSET("name", Some(js_name), None, 0),
-    FieldDef::GETSET("version", Some(js_version), None, 0),
-    FieldDef::GETSET("instructions", Some(js_instructions), None, 0),
-    FieldDef::GETSET("mountPath", Some(js_http_get), None, FIELD_MOUNT_PATH),
-    FieldDef::FUNC("addTool", 1, js_add_tool, 0),
-    FieldDef::FUNC("updateTools", 1, js_http_update_tools, 0),
-];
-
-def_native_object!(
-    "HttpMcp",
-    JSHttpMcp,
-    McpServicePayload,
-    HTTP_MCP_PROTO,
-    Some(HTTP_MCP_CTOR),
-    on_payload_gc: McpServicePayload::gc_trace
-);
-
-#[distributed_slice(USER_CLASS_DEFS)]
-fn register_http_mcp(rt: &mut Runtime) -> Result<ClassID, i32> {
-    JSHttpMcp::register(rt)
-}

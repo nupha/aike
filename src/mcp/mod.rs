@@ -1,16 +1,18 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
+mod class_http_mcp;
 mod class_mcp_server_def;
 mod class_stdio_mcp;
 mod service;
 
 pub(crate) use {
+    class_http_mcp::JSHttpMcp,
     class_mcp_server_def::JSMcpServerDef,
-    class_stdio_mcp::{JSHttpMcp, JSStdioMcp, gc_trace_stdio_state},
+    class_stdio_mcp::{JSStdioMcp, gc_trace_stdio_state},
     service::{
-        McpToolCallRequest, McpTransport, build_axum_mcp_route,
-        handle_mcp_tool_call, parse_mcp_tools,
+        McpToolCallRequest, McpTransport, build_axum_mcp_route, handle_mcp_tool_call,
+        parse_mcp_tools,
     },
 };
 
