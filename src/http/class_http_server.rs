@@ -35,8 +35,10 @@ use zuqe::{
 
 use crate::{
     USER_CLASS_DEFS,
-    mcp::build_axum_mcp_route,
-    mcp::{McpEndpoint, McpSchemas, McpToolCallRequest, NativeMcpToolFn, handle_mcp_tool_call},
+    mcp::{
+        JSHttpMcp, McpToolCallRequest, McpTransport, build_axum_mcp_route, handle_mcp_tool_call,
+        parse_mcp_tools,
+    },
 };
 
 #[cfg(feature = "llama_cpp")]
@@ -88,7 +90,7 @@ pub(crate) struct HttpRequest {
 
 pub(super) struct HttpServerPayload {
     js_routes: Vec<(Method, String, Object)>,
-    mcp_endpoints: Vec<McpEndpoint>,
+    mcp_endpoints: Vec<Object>,
     /// WebSocket routes registered via `server.ws(path, handler)`.
     ws_routes: Vec<(String, Object)>,
     /// Static file mounts registered via `server.staticFiles(mount, dir)`.
@@ -140,71 +142,12 @@ impl HttpServerPayload {
         Ok(self.js_routes.len() < before)
     }
 
-    /// Register a rust MCP tool on an existing MCP endpoint.
-    ///
-    /// Must be called BEFORE `listen()` because native handler closures are
-    /// captured at router-build time. The schema is added to the shared table
-    /// so `tools/list` and `tools/call` can find it.
-    #[allow(dead_code)]
-    pub(crate) fn register_mcp_tool(
-        &mut self,
-        mount_path: &str,
-        name: &str,
-        schema: serde_json::Value,
-        handler: NativeMcpToolFn,
-    ) -> Result<(), &'static str> {
-        let ep = self
-            .mcp_endpoints
-            .iter_mut()
-            .find(|e| e.mount_path == mount_path)
-            .ok_or("no MCP endpoint at given mount path")?;
-
-        // Add native handler
-        let native_idx = ep.handlers.len();
-        ep.handlers
-            .push((name.to_string(), schema.clone(), handler));
-
-        // Build rmcp::model::Tool from the schema
-        let description = schema
-            .get("description")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        let input_schema = schema
-            .get("inputSchema")
-            .cloned()
-            .unwrap_or(serde_json::json!({"type": "object"}));
-        let input_schema_obj: serde_json::Map<String, serde_json::Value> = match input_schema {
-            serde_json::Value::Object(m) => m,
-            _ => serde_json::json!({"type": "object"})
-                .as_object()
-                .unwrap()
-                .clone(),
-        };
-
-        let tool = rmcp::model::Tool::new(
-            name.to_string(),
-            description.to_string(),
-            Arc::new(input_schema_obj.into()),
-        );
-
-        // Update shared schemas
-        {
-            let mut guard = ep.shared.write().map_err(|_| "schema lock poisoned")?;
-            let schema_idx = guard.tools.len();
-            guard.tools.push(tool);
-            guard.name_to_index.insert(name.to_string(), schema_idx);
-            guard.native_map.insert(name.to_string(), native_idx);
-        }
-
-        Ok(())
-    }
-
     fn gc_trace(&self, gcx: &mut GcTraceCtx) {
         for (_, _, handler) in &self.js_routes {
             handler.trace(gcx);
         }
-        for ep in &self.mcp_endpoints {
-            ep.gc_trace(gcx);
+        for o in &self.mcp_endpoints {
+            o.trace(gcx);
         }
         for (_, handler) in &self.ws_routes {
             handler.trace(gcx);
@@ -339,425 +282,59 @@ fn js_route_add(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     Ok(this)
 }
 
-/// Convert DSL `args` object to standard JSON Schema `inputSchema`.
+/// HttpServer.mcp(httpMcp) — register an `HttpMcp` instance at its `mountPath`.
 ///
-/// Input: `{ fieldName: { desc, type?, required?, enum?, default? } }`
-/// Output: `{ type: "object", properties: { ... }, required: [...] }`
-pub(crate) fn build_input_schema_from_args(
-    ctx: &mut ScopedContext,
-    mut args_obj: Object,
-) -> Result<Option<serde_json::Value>, i32> {
-    let pks = args_obj
-        .get_own_property_names(ctx, zuqe::JS_GPN_ENUM_ONLY | zuqe::JS_GPN_STR_OR_INT_MASK)?;
-
-    if pks.is_empty() {
-        return Ok(None);
-    }
-
-    let mut properties = serde_json::Map::new();
-    let mut required: Vec<serde_json::Value> = Vec::new();
-
-    for pk in pks.iter() {
-        let field_name = match pk.atom.to_value(ctx).and_then(|v| v.to_string(ctx)) {
-            Ok(s) => s.content().encode_utf8(false).to_string(),
-            Err(_) => continue,
-        };
-
-        if field_name.is_empty() {
-            continue;
-        }
-
-        let field_val = args_obj.get_property(ctx, pk.atom)?;
-        let field_obj = match field_val.as_object() {
-            Some(o) => o.clone(),
-            None => continue,
-        };
-
-        let mut prop = serde_json::Map::new();
-
-        // description
-        if let Some(desc_val) = field_obj.get_property_str(ctx, "desc").ok() {
-            if let Ok(s) = desc_val.to_string(ctx) {
-                prop.insert(
-                    "description".into(),
-                    serde_json::Value::String(s.content().encode_utf8(false).to_string()),
-                );
-            }
-        }
-
-        // type (default: "string")
-        let type_str = field_obj
-            .get_property_str(ctx, "type")
-            .ok()
-            .and_then(|v| v.to_string(ctx).ok())
-            .map(|s| s.content().encode_utf8(false).to_string())
-            .unwrap_or_else(|| "string".into());
-
-        // enum
-        let has_enum = field_obj
-            .get_property_str(ctx, "enum")
-            .ok()
-            .filter(|v| !v.is_undefined())
-            .is_some();
-        if has_enum {
-            if let Ok(enum_val) = field_obj.get_property_str(ctx, "enum") {
-                if !enum_val.is_undefined() {
-                    if let Ok(enum_json) = enum_val.to_serde_json(ctx) {
-                        if !enum_json.is_null() {
-                            prop.insert("enum".into(), enum_json);
-                        }
-                    }
-                }
-            }
-        } else if type_str == "array" {
-            prop.insert("type".into(), serde_json::Value::String("array".into()));
-
-            // Parse items schema (defaults to { type: "string" })
-            let mut items = serde_json::Map::new();
-            if let Some(items_obj) = field_obj
-                .get_property_str(ctx, "items")
-                .ok()
-                .filter(|v| !v.is_undefined())
-                .and_then(|v| v.as_object().cloned())
-            {
-                let item_type = items_obj
-                    .get_property_str(ctx, "type")
-                    .ok()
-                    .filter(|v| !v.is_undefined())
-                    .and_then(|v| v.to_string(ctx).ok())
-                    .map(|s| s.content().encode_utf8(false).to_string())
-                    .unwrap_or_else(|| "string".into());
-                items.insert("type".into(), serde_json::Value::String(item_type));
-
-                if let Some(desc) = items_obj
-                    .get_property_str(ctx, "desc")
-                    .ok()
-                    .filter(|v| !v.is_undefined())
-                    .and_then(|v| v.to_string(ctx).ok())
-                    .map(|s| s.content().encode_utf8(false).to_string())
-                {
-                    items.insert("description".into(), serde_json::Value::String(desc));
-                }
-
-                if let Some(enum_val) = items_obj
-                    .get_property_str(ctx, "enum")
-                    .ok()
-                    .filter(|v| !v.is_undefined())
-                    .and_then(|v| v.to_serde_json(ctx).ok())
-                    .filter(|v| !v.is_null())
-                {
-                    items.insert("enum".into(), enum_val);
-                }
-            } else {
-                items.insert("type".into(), serde_json::Value::String("string".into()));
-            }
-            prop.insert("items".into(), serde_json::Value::Object(items));
-        } else {
-            prop.insert("type".into(), serde_json::Value::String(type_str));
-        }
-
-        // default
-        if let Some(default_val) = field_obj.get_property_str(ctx, "default").ok() {
-            if let Ok(default_json) = default_val.to_serde_json(ctx) {
-                if !default_json.is_null() {
-                    prop.insert("default".into(), default_json);
-                }
-            }
-        }
-
-        // required
-        if let Ok(req_val) = field_obj.get_property_str(ctx, "required") {
-            if let Ok(req_json) = req_val.to_serde_json(ctx) {
-                if req_json.as_bool() == Some(true) {
-                    required.push(serde_json::Value::String(field_name.clone()));
-                }
-            }
-        }
-
-        properties.insert(field_name, serde_json::Value::Object(prop));
-    }
-
-    if properties.is_empty() {
-        return Ok(None);
-    }
-
-    let mut schema = serde_json::Map::new();
-    schema.insert("type".into(), serde_json::Value::String("object".into()));
-    schema.insert("properties".into(), serde_json::Value::Object(properties));
-    if !required.is_empty() {
-        schema.insert("required".into(), serde_json::Value::Array(required));
-    }
-
-    Ok(Some(serde_json::Value::Object(schema)))
-}
-
-/// Parse tools from either array format (McpToolDefinition[]) or
-/// object-keyed DSL format (ToolsMap).
-///
-/// Returns (rmcp Tool vec, name→index map, JS handler vec).
-pub(crate) fn parse_mcp_tools(
-    ctx: &mut ScopedContext,
-    tools_val: &JSValue,
-) -> Result<(Vec<rmcp::model::Tool>, HashMap<String, usize>, Vec<Object>), i32> {
-    if let Some(o) = tools_val.as_object().copied() {
-        if o.is_array(ctx).map_err(|_| {
-            ctx.throw_type_error("tools is_array check failed");
-            -1
-        })? {
-            parse_mcp_tools_array(ctx, o)
-        } else {
-            parse_mcp_tools_object(ctx, o)
-        }
-    } else {
-        ctx.throw_type_error("tools must be an array or object");
-        Err(-1)
-    }
-}
-
-/// Parse tools in array format (McpToolDefinition[]).
-///
-/// Each element is standard MCP schema: `{ name, description?, inputSchema?, handler }`.
-/// Extracts handler for JS call table, builds rmcp::model::Tool for protocol.
-pub(crate) fn parse_mcp_tools_array(
-    ctx: &mut ScopedContext,
-    tools_arr: Object,
-) -> Result<(Vec<rmcp::model::Tool>, HashMap<String, usize>, Vec<Object>), i32> {
-    // Get array length via the standard JS `length` property
-    let len = tools_arr
-        .get_property_str(ctx, "length")
-        .and_then(|v| v.to_number(ctx))
-        .map(|n| n.to_i32())
-        .map_err(|_| {
-            ctx.throw_type_error("tools array must have a valid length");
-            -1
-        })? as usize;
-
-    let mut tools: Vec<rmcp::model::Tool> = Vec::with_capacity(len);
-    let mut name_to_index: HashMap<String, usize> = HashMap::new();
-    let mut js_handlers: Vec<Object> = Vec::with_capacity(len);
-
-    for i in 0..len {
-        let elem = tools_arr.get_property_u32(ctx, i as u32)?;
-        let tool_obj = elem
-            .as_object()
-            .ok_or_else(|| {
-                ctx.throw_type_error("each tool must be an object");
-                -1
-            })?
-            .clone();
-
-        // name (required by MCP spec)
-        let name = tool_obj
-            .get_property_str(ctx, "name")
-            .and_then(|v| v.to_string(ctx))
-            .map(|s| s.content().encode_utf8(false).to_string())
-            .map_err(|_| {
-                ctx.throw_type_error("tool.name is required");
-                -1
-            })?;
-
-        // description
-        let description = tool_obj
-            .get_property_str(ctx, "description")
-            .ok()
-            .filter(|v| !v.is_undefined())
-            .and_then(|v| v.to_string(ctx).ok())
-            .map(|s| s.content().encode_utf8(false).to_string())
-            .unwrap_or_default();
-
-        // inputSchema (required for array format — standard MCP Schema)
-        let input_schema_json = tool_obj
-            .get_property_str(ctx, "inputSchema")
-            .and_then(|v| {
-                v.as_object().copied().ok_or_else(|| {
-                    ctx.throw_type_error(&format!("tool '{}' inputSchema must be an object", name));
-                    -1
-                })
-            })
-            .and_then(|o| o.to_serde_json(ctx))?;
-
-        // handler (required) — stored in JS call table
-        let handler = tool_obj
-            .get_property_str(ctx, "handler")
-            .and_then(|v| v.into_callable(ctx))
-            .map_err(|_| {
-                ctx.throw_type_error(&format!("tool '{}' handler must be a function", name));
-                -1
-            })?;
-
-        let input_schema_obj: serde_json::Map<String, serde_json::Value> = match input_schema_json {
-            serde_json::Value::Object(m) => m,
-            _ => serde_json::json!({"type": "object"})
-                .as_object()
-                .unwrap()
-                .clone(),
-        };
-
-        let tool =
-            rmcp::model::Tool::new(name.clone(), description, Arc::new(input_schema_obj.into()));
-
-        let idx = tools.len();
-        tools.push(tool);
-        name_to_index.insert(name, idx);
-        js_handlers.push(handler);
-    }
-
-    Ok((tools, name_to_index, js_handlers))
-}
-
-/// Parse tools in object-keyed DSL format.
-///
-/// Keys are tool names, values are `{ desc, handler, args }`.
-/// This mode does NOT accept `inputSchema` — use array format for that.
-pub(crate) fn parse_mcp_tools_object(
-    ctx: &mut ScopedContext,
-    mut tools_obj: Object,
-) -> Result<(Vec<rmcp::model::Tool>, HashMap<String, usize>, Vec<Object>), i32> {
-    let pks = tools_obj
-        .get_own_property_names(ctx, zuqe::JS_GPN_ENUM_ONLY | zuqe::JS_GPN_STR_OR_INT_MASK)?;
-
-    let mut tools: Vec<rmcp::model::Tool> = Vec::new();
-    let mut name_to_index: HashMap<String, usize> = HashMap::new();
-    let mut js_handlers: Vec<Object> = Vec::new();
-
-    for pk in pks.iter() {
-        let name = pk
-            .atom
-            .to_value(ctx)
-            .and_then(|v| v.to_string(ctx))
-            .map(|s| s.content().encode_utf8(false).to_string())
-            .map_err(|_| {
-                ctx.throw_type_error("tool name must be a string");
-                -1
-            })?;
-
-        if name.is_empty() {
-            continue;
-        }
-
-        let tool_obj = tools_obj
-            .get_property(ctx, pk.atom)?
-            .as_object()
-            .ok_or_else(|| {
-                ctx.throw_type_error(&format!("tool '{}' must be an object", name));
-                -1
-            })?
-            .clone();
-
-        // desc → description
-        let description = tool_obj
-            .get_property_str(ctx, "desc")
-            .ok()
-            .filter(|v| !v.is_undefined())
-            .and_then(|v| v.to_string(ctx).ok())
-            .map(|s| s.content().encode_utf8(false).to_string())
-            .unwrap_or_default();
-
-        // handler (required)
-        let handler = tool_obj
-            .get_property_str(ctx, "handler")
-            .and_then(|v| v.into_callable(ctx))
-            .map_err(|_| {
-                ctx.throw_type_error(&format!("tool '{}' handler must be a function", name));
-                -1
-            })?;
-
-        // Build inputSchema from args DSL (only mode for object-keyed format)
-        let input_schema_json = if let Some(args_val) = tool_obj.get_property_str(ctx, "args").ok()
-        {
-            if !args_val.is_undefined() {
-                if let Some(args_obj) = args_val.as_object() {
-                    let args_cloned = args_obj.clone();
-                    build_input_schema_from_args(ctx, args_cloned)?
-                        .unwrap_or(serde_json::json!({"type": "object"}))
-                } else {
-                    serde_json::json!({"type": "object"})
-                }
-            } else {
-                serde_json::json!({"type": "object"})
-            }
-        } else {
-            serde_json::json!({"type": "object"})
-        };
-
-        let input_schema_obj: serde_json::Map<String, serde_json::Value> = match input_schema_json {
-            serde_json::Value::Object(m) => m,
-            _ => serde_json::json!({"type": "object"})
-                .as_object()
-                .unwrap()
-                .clone(),
-        };
-
-        let tool =
-            rmcp::model::Tool::new(name.clone(), description, Arc::new(input_schema_obj.into()));
-
-        let idx = tools.len();
-        tools.push(tool);
-        name_to_index.insert(name, idx);
-        js_handlers.push(handler);
-    }
-
-    Ok((tools, name_to_index, js_handlers))
-}
-
-/// HttpServer.mcp(mountPath, options) — register MCP server with tools.
-///
-/// `mountPath` must start with '/', e.g. "/mcp".
-/// `options` is `{ serverName, version, tools: [{ name, description, inputSchema, handler }] }`.
-/// Protocol methods (initialize, notifications/initialized, tools/list, tools/call)
-/// are auto-generated in Rust. Returns `this` for chain-style calls.
+/// The `HttpMcp` instance already carries the compiled tool registry and
+/// `mountPath` (in its `Http` transport variant). We just store the JS handle
+/// as the single source of truth; `listen()` reads it back to build the route
+/// and backfills the hot-reload channel (mcp-service.md §6). Must be called
+/// BEFORE `listen()`.
 fn js_mcp(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut this = cc.this();
 
-    // arg(0): mountPath
+    // arg(0): mountPath — the URL the endpoint is mounted at (must start with '/').
     let mount_path = {
         let s = cc.arg(0).to_string(ctx).map_err(|_| {
-            ctx.throw_type_error("mountPath must be a string");
+            ctx.throw_type_error("mcp() mountPath must be a string");
             -1
         })?;
-        let text = s.content().encode_utf8(false).to_string();
-        if !text.starts_with('/') {
-            ctx.throw_type_error("mountPath must start with '/'");
+        let s = s.content().encode_utf8(false).to_string();
+        if !s.starts_with('/') {
+            ctx.throw_type_error("mcp() mountPath must start with '/'");
             return Err(-1);
         }
-        text
+        s
     };
 
-    // arg(1): options object
-    let opts = cc
-        .arg(1)
-        .as_object()
-        .ok_or_else(|| {
-            ctx.throw_type_error("options must be an object");
-            -1
-        })?
-        .clone();
-
-    let server_name = opts
-        .get_property_str(ctx, "serverName")
-        .and_then(|v| v.to_string(ctx))
-        .map(|s| s.content().encode_utf8(false).to_string())
-        .unwrap_or_else(|_| "mcp-server".into());
-
-    let server_version = opts
-        .get_property_str(ctx, "version")
-        .and_then(|v| v.to_string(ctx))
-        .map(|s| s.content().encode_utf8(false).to_string())
-        .unwrap_or_else(|_| "1.0.0".into());
-
-    let server_instructions = opts
-        .get_property_str(ctx, "instructions")
-        .and_then(|v| v.to_string(ctx))
-        .map(|s| s.content().encode_utf8(false).to_string())
-        .unwrap_or_else(|_| "".into());
-
-    // tools (array or object-keyed format)
-    let tools_val = opts.get_property_str(ctx, "tools").map_err(|_| {
-        ctx.throw_type_error("options.tools is required");
+    // arg(1): an HttpMcp instance.
+    let mut http_obj = cc.arg(1).as_object().copied().ok_or_else(|| {
+        ctx.throw_type_error("mcp() expects an HttpMcp instance");
         -1
     })?;
 
-    let (tools, name_to_index, js_handlers) = parse_mcp_tools(ctx, &tools_val)?;
+    // Validate it is an HttpMcp with an Http transport, then assign the
+    // mount path the server owns (not baked into the HttpMcp at define time).
+    {
+        let h = http_obj
+            .as_native_object_mut::<JSHttpMcp>()
+            .ok_or_else(|| {
+                ctx.throw_type_error("mcp() expects an HttpMcp instance");
+                -1
+            })?;
+        let p = h.payload_mut().ok_or_else(|| {
+            ctx.throw_type_error("invalid HttpMcp instance");
+            -1
+        })?;
+        match &mut p.transport {
+            McpTransport::Http { mount_path: mp, .. } => {
+                *mp = mount_path;
+            }
+            _ => {
+                ctx.throw_type_error("mcp() expects an Http (not stdio) Mcp server");
+                return Err(-1);
+            }
+        }
+    }
 
     let p = get_server_payload_mut(ctx, &mut this)?;
     if p.frozen {
@@ -765,66 +342,48 @@ fn js_mcp(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         return Err(-1);
     }
 
-    p.mcp_endpoints.push(McpEndpoint {
-        mount_path,
-        server_name,
-        server_version,
-        server_instructions,
-        shared: Arc::new(std::sync::RwLock::new(McpSchemas {
-            tools,
-            name_to_index,
-            native_map: HashMap::new(),
-        })),
-        js_handlers,
-        handlers: Vec::new(),
-        update_tx: None,
-    });
-
+    p.mcp_endpoints.push(http_obj);
     Ok(this)
 }
 
-/// HttpServer.updateMcpTools(mountPath, tools) — hot-reload MCP tools at runtime.
+/// HttpServer.updateMcpTools(httpMcp, tools) — hot-reload MCP tools at runtime.
 ///
 /// Replaces all JS tools (native tools are preserved). Next request uses new handlers.
 fn js_update_tools(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let mut this = cc.this();
+    let this = cc.this();
 
-    // arg(0): mountPath
-    let mount_path = cc
-        .arg(0)
-        .to_string(ctx)
-        .map(|s| s.content().encode_utf8(false).to_string())
-        .map_err(|_| {
-            ctx.throw_type_error("mountPath must be a string");
-            -1
-        })?;
+    // arg(0): an HttpMcp instance.
+    let mut arg0 = cc.arg(0);
+    let http = arg0.as_native_object_mut::<JSHttpMcp>().ok_or_else(|| {
+        ctx.throw_type_error("updateMcpTools expects an HttpMcp instance");
+        -1
+    })?;
+    let p = http.payload_mut().ok_or_else(|| {
+        ctx.throw_type_error("invalid HttpMcp instance");
+        -1
+    })?;
+
+    // Ensure it is an Http transport.
+    match &p.transport {
+        McpTransport::Http { .. } => {}
+        _ => {
+            ctx.throw_type_error("updateMcpTools expects an Http (not stdio) Mcp server");
+            return Err(-1);
+        }
+    }
 
     // arg(1): tools (array or object-keyed format)
     let tools_val = cc.arg(1);
-
     let (tools, name_to_index, js_handlers) = parse_mcp_tools(ctx, &tools_val)?;
 
-    // Find endpoint and update
-    let p = get_server_payload_mut(ctx, &mut this)?;
-    let ep = p
-        .mcp_endpoints
-        .iter_mut()
-        .find(|e| e.mount_path == mount_path)
-        .ok_or_else(|| {
-            ctx.throw_type_error(&format!("no MCP endpoint at '{}'", mount_path));
-            -1
-        })?;
-
-    // Update shared schemas (write lock)
+    // Update shared schemas (write lock), preserving native tool entries.
     {
-        let mut guard = ep.shared.write().unwrap();
-        // Preserve native tool entries (names that are in native_map)
+        let mut guard = p.schemas.write().unwrap();
         let native_names: Vec<String> = guard.native_map.keys().cloned().collect();
         let mut new_tools = tools;
         let mut new_name_to_index = name_to_index;
         let mut new_native_map = HashMap::new();
 
-        // Re-add native tool schemas at the end
         for name in &native_names {
             if let Some(&old_idx) = guard.name_to_index.get(name) {
                 let new_idx = new_tools.len();
@@ -841,12 +400,14 @@ fn js_update_tools(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         guard.native_map = new_native_map;
     }
 
-    // Update JS handlers on endpoint (for GC tracing)
-    ep.js_handlers = js_handlers.clone();
+    // Update JS handlers on payload (for GC tracing).
+    p.js_handlers = RefCell::new(js_handlers.clone());
 
-    // Send new handler table to the poller via update channel
-    if let Some(ref utx) = ep.update_tx {
-        let _ = utx.send(js_handlers);
+    // Send new handler table to the poller via update channel.
+    if let McpTransport::Http { update_tx, .. } = &p.transport {
+        if let Some(utx) = update_tx {
+            let _ = utx.send(js_handlers);
+        }
     }
 
     Ok(this)
@@ -1282,15 +843,30 @@ fn js_listen(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             // --- MCP routes: rmcp-based, protocol handled by rmcp crate ---
             let mut mcp_tables: Vec<Vec<Object>> = Vec::new();
             let mut mcp_update_rxs: Vec<channel::Receiver<Vec<Object>>> = Vec::new();
-            for (i, ep) in data.mcp_endpoints.iter_mut().enumerate() {
+            for (i, obj) in data.mcp_endpoints.iter_mut().enumerate() {
+                // Read the payload (immutable) to build the route + handler table.
+                let p = obj
+                    .as_native_object::<JSHttpMcp>()
+                    .and_then(|o| o.payload())
+                    .ok_or_else(|| {
+                        ctx.throw_type_error("invalid HttpMcp endpoint");
+                        -1
+                    })?;
                 // Build axum route via rmcp's StreamableHttpService
-                let mcp_axum_router = build_axum_mcp_route(ep, js_tx.clone(), i);
+                let mcp_axum_router = build_axum_mcp_route(p, js_tx.clone(), i);
                 router = router.merge(mcp_axum_router);
                 // JS handler table for poller-side dispatch
-                mcp_tables.push(ep.js_handlers.clone());
+                mcp_tables.push(p.js_handlers.borrow().clone());
                 // Create update channel for hot-reload of tools
                 let (utx, urx) = channel::unbounded::<Vec<Object>>();
-                ep.update_tx = Some(utx);
+                // Backfill the update sender into the payload (mcp-service.md §6).
+                if let Some(h) = obj.as_native_object_mut::<JSHttpMcp>() {
+                    if let Some(p_mut) = h.payload_mut() {
+                        if let McpTransport::Http { update_tx, .. } = &mut p_mut.transport {
+                            *update_tx = Some(utx);
+                        }
+                    }
+                }
                 mcp_update_rxs.push(urx);
             }
 

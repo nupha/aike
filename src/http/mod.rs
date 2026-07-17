@@ -9,7 +9,7 @@ mod server;
 mod ws;
 
 pub(crate) use {
-    class_http_server::{IncomingRequest, JSHttpServer, build_input_schema_from_args},
+    class_http_server::{IncomingRequest, JSHttpServer},
     class_request::JSHttpRequest,
     response::{JSHttpResponse, JSHttpResponseSse},
     ws::JSWebSocketStream,

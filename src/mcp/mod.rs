@@ -5,13 +5,14 @@ mod class_mcp_server_def;
 mod class_stdio_mcp;
 mod service;
 
-pub(crate) use class_stdio_mcp::gc_trace_stdio_state;
-pub(crate) use service::{
-    McpEndpoint, McpSchemas, McpToolCallRequest, NativeMcpToolFn, build_axum_mcp_route,
-    handle_mcp_tool_call,
+pub(crate) use {
+    class_mcp_server_def::JSMcpServerDef,
+    class_stdio_mcp::{JSHttpMcp, JSStdioMcp, gc_trace_stdio_state},
+    service::{
+        McpToolCallRequest, McpTransport, build_axum_mcp_route,
+        handle_mcp_tool_call, parse_mcp_tools,
+    },
 };
-
-use {class_mcp_server_def::JSMcpServerDef, class_stdio_mcp::JSStdioMcp};
 
 use zuqe::{FieldDef, JS_PROP_ENUMERABLE, NativeObject, Object, ScopedContext};
 
@@ -50,6 +51,11 @@ pub(crate) fn init_mod_mcp(ctx: &mut ScopedContext) -> Result<(), i32> {
             JSStdioMcp::class_id,
             JS_PROP_ENUMERABLE,
         ),
+        FieldDef::CLASS(
+            JSHttpMcp::CLASS_NAME,
+            JSHttpMcp::class_id,
+            JS_PROP_ENUMERABLE,
+        ),
         FieldDef::FUNC(
             "defineStdioMcp",
             2,
@@ -58,7 +64,11 @@ pub(crate) fn init_mod_mcp(ctx: &mut ScopedContext) -> Result<(), i32> {
         ),
     ];
 
-    ctx.use_classes(&[JSMcpServerDef::class_id(), JSStdioMcp::class_id()])?;
+    ctx.use_classes(&[
+        JSMcpServerDef::class_id(),
+        JSStdioMcp::class_id(),
+        JSHttpMcp::class_id(),
+    ])?;
     ctx.create_module("mcp", MOD_MCP_ENTRIES)?;
 
     Ok(())

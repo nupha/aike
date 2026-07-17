@@ -137,19 +137,6 @@ declare module "mcp" {
     handler: McpToolHandler;
   }
 
-  export interface McpOptions {
-    /** Server name advertised in `initialize` response. */
-    serverName: string;
-    /** Server version advertised in `initialize` response. */
-    version: string;
-    /**
-     * Tool definitions. Accepts either:
-     * - `McpToolDefinition[]` — array of standard mcp tool definitions
-     * - `Record<string, McpToolShortDef>` — object-keyed format with simplified DSL
-     */
-    tools: McpToolDefinition[] | Record<string, McpToolShortDef>;
-  }
-
   /** An icon advertised by an MCP server (`Implementation.icons`). */
   export interface McpIcon {
     /** URI pointing to the icon resource. */
@@ -293,6 +280,13 @@ declare module "mcp" {
     readonly beforeRun: (() => Promise<void>) | null;
 
     /**
+     * Dynamically add JS tools after construction. Accepts the same `tools` DSL
+     * as `define` (object-keyed map or `McpToolDefinition[]` array). Must be
+     * called BEFORE `run()` to take effect on the stdio server.
+     */
+    addTool(tools: McpToolDefinition[] | Record<string, McpToolShortDef>): this;
+
+    /**
      * Launch this server: awaits `beforeRun` if set, starts the stdio
      * server, registers SIGINT/SIGTERM stop handlers, and force-exits once
      * the server stops.
@@ -313,5 +307,61 @@ declare module "mcp" {
      * Returns true if the server is currently running.
      */
     static isRunning(): boolean;
+  }
+
+  /**
+   * MCP server over HTTP transport (Streamable HTTP).
+   *
+   * Unlike {@link StdioMcp}, an `HttpMcp` instance is NOT self-running — it is
+   * mounted onto an `HttpServer` via `HttpServer.mcp(server)` and served over
+   * Streamable HTTP. Tools can be hot-reloaded at runtime with
+   * `HttpServer.updateMcpTools(server, tools)`.
+   */
+  export class HttpMcp {
+    private constructor();
+
+    /**
+     * Create an HTTP MCP server.
+     *
+     * The mount path is NOT set here — it is supplied when the server is
+     * mounted via `HttpServer.mcp(mountPath, server)`.
+     * @param name — the advertised server name (required, positional).
+     * @param tools — required tool DSL, either an object-keyed map
+     *   `{ name: { desc, handler, args } }` or a `McpToolDefinition[]` array.
+     * @param options — optional config: `version` / `instructions`.
+     */
+    static define(
+      name: string,
+      tools: McpToolDefinition[] | Record<string, McpToolShortDef>,
+      options?: {
+        version?: string;
+        instructions?: string;
+      },
+    ): HttpMcp;
+
+    /** MCP `initialize` handshake result advertised by this server. */
+    readonly initializeInfo: McpInitializeResult;
+
+    /** Tool definitions */
+    readonly toolsList: McpToolMeta[];
+
+    /** Advertised server name. */
+    readonly name: string;
+
+    /** Advertised server version. */
+    readonly version: string;
+
+    /** Server instructions. */
+    readonly instructions: string;
+
+    /** The URL mount path this server is served at. */
+    readonly mountPath: string;
+
+    /**
+     * Dynamically add JS tools after construction. Accepts the same `tools` DSL
+     * as `define` (object-keyed map or `McpToolDefinition[]` array). On a server
+     * that is already listening, the new tools hot-reload on the next request.
+     */
+    addTool(tools: McpToolDefinition[] | Record<string, McpToolShortDef>): this;
   }
 }

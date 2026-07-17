@@ -1,5 +1,5 @@
 declare module "http" {
-  import { McpOptions, McpToolDefinition, McpToolShortDef } from "mcp";
+  import { HttpMcp, McpToolDefinition, McpToolShortDef } from "mcp";
 
   /** Incoming HTTP request passed to route handlers. Cannot be constructed directly. */
   export class HttpServerRequest {
@@ -144,19 +144,23 @@ declare module "http" {
     ): this;
 
     /**
-     * Register an MCP (Model Context Protocol) server at `mountPath`.
-     * Rust auto-generates the four protocol methods: `initialize`,
+     * Register an HTTP-transport MCP (Model Context Protocol) server.
+     *
+     * Pass the mount path and an `HttpMcp` instance created via
+     * `HttpMcp.define(name, tools, options)`. The `mountPath` (must start with `/`)
+     * is assigned here — it is the URL the endpoint is served at. Rust
+     * auto-generates the four protocol methods: `initialize`,
      * `notifications/initialized`, `tools/list`, `tools/call`.
      * Must be called BEFORE `listen()`.
      */
-    mcp(mountPath: string, options: McpOptions): this;
+    mcp(mountPath: string, server: HttpMcp): this;
 
     /**
-     * Hot-reload JS tools on an existing MCP endpoint (native tools preserved).
+     * Hot-reload JS tools on an existing HTTP MCP server (native tools preserved).
      * The new handler table takes effect on the very next request.
      */
     updateMcpTools(
-      mountPath: string,
+      server: HttpMcp,
       tools: McpToolDefinition[] | Record<string, McpToolShortDef>,
     ): this;
 
