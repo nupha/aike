@@ -17,8 +17,8 @@ use rmcp::model::{Implementation, ProtocolVersion, ServerCapabilities, ServerInf
 use rmcp::service::RoleServer;
 use zuqe::{
     Array, CallContext, Callback, ClassCtorDef, ClassID, FieldDef, JS_GPN_ENUM_ONLY,
-    JS_GPN_STR_OR_INT_MASK, JSResult, JSValue, Object, PollSender, Runtime,
-    ScopedContext,
+    JS_GPN_STR_OR_INT_MASK, JS_PROP_ENUMERABLE, JSResult, JSValue, Object, PollSender,
+    Runtime, ScopedContext,
     builtins::promise::Promise,
     def_native_object,
     gc_lite::{GcTrace, GcTraceCtx},
@@ -64,16 +64,22 @@ pub(crate) fn gc_trace_stdio_state(gcx: &mut GcTraceCtx) {
 }
 
 /// Builder payload for an instantiable `StdioMcp` server. Holds the stdio-only
-/// options (env / args / beforeRun / extraFiles / shared flag) plus the
-/// compiled tool registry (`schemas`) and the JS handler closures. The raw
+/// options (spawn_env / spawn_args / beforeRun / extraFiles / shared flag) plus
+/// the compiled tool registry (`schemas`) and the JS handler closures. The raw
 /// tool DSL is consumed at `define()` time, so only the compiled form remains.
+///
+/// `spawn_env` / `spawn_args` are the env vars and CLI args forwarded to
+/// `Aike.spawn` when the framework launches the aike child process that hosts
+/// this server (see ravenclaw `mcp-registry.ts::launchStdioMcp`). They are NOT
+/// consumed by the in-process `serve_server`; the spawned process's tool
+/// handlers read secrets from `process.env` at runtime.
 pub(crate) struct StdioMcpPayload {
     server_name: String,
     version: RefCell<Cow<'static, str>>,
     instructions: RefCell<Cow<'static, str>>,
 
-    env: RefCell<HashMap<String, EnvVal>>,
-    args_entry: RefCell<Option<ArgsVal>>,
+    spawn_env: RefCell<HashMap<String, EnvVal>>,
+    spawn_args: RefCell<Option<ArgsVal>>,
     before_run: RefCell<Option<Object>>,
     /// Whether this server is a shared (reusable) stdio server.
     is_shared: Cell<bool>,
@@ -91,8 +97,8 @@ impl StdioMcpPayload {
             server_name,
             version: RefCell::new(Cow::Borrowed("1.0.0")),
             instructions: RefCell::new(Cow::Borrowed("")),
-            env: RefCell::new(HashMap::new()),
-            args_entry: RefCell::new(None),
+            spawn_env: RefCell::new(HashMap::new()),
+            spawn_args: RefCell::new(None),
             before_run: RefCell::new(None),
             is_shared: Cell::new(false),
             extra_files: RefCell::new(Vec::new()),
@@ -107,12 +113,12 @@ impl StdioMcpPayload {
 
     /// GC trace — keeps referenced JS objects (handlers, callbacks) alive.
     fn gc_trace(&self, gcx: &mut GcTraceCtx) {
-        for v in self.env.borrow().values() {
+        for v in self.spawn_env.borrow().values() {
             if let EnvVal::Func(f) = v {
                 f.trace(gcx);
             }
         }
-        if let Some(ArgsVal::Func(f)) = &*self.args_entry.borrow() {
+        if let Some(ArgsVal::Func(f)) = &*self.spawn_args.borrow() {
             f.trace(gcx);
         }
         if let Some(f) = &*self.before_run.borrow() {
@@ -200,7 +206,7 @@ fn js_constructor(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
 ///
 /// `tools` is the required second argument: an object-keyed DSL
 /// `{ name: { desc, handler, args } }`. The optional third `options` object
-/// carries version / instructions / env / args / beforeRun / shared /
+/// carries version / instructions / spawnEnv / spawnArgs / beforeRun / shared /
 /// extraFiles (everything except `tools`, which is lifted to its own arg).
 fn js_define(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let name = cc
@@ -241,6 +247,8 @@ const FIELD_NAME: i16 = 3;
 const FIELD_SHARED: i16 = 6;
 const FIELD_EXTRA_FILES: i16 = 8;
 const FIELD_BEFORE_RUN: i16 = 9;
+const FIELD_SPAWN_ENV: i16 = 10;
+const FIELD_SPAWN_ARGS: i16 = 11;
 
 fn js_get(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
@@ -262,6 +270,29 @@ fn js_get(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         FIELD_BEFORE_RUN => match &*p.before_run.borrow() {
             None => Ok(JSValue::NULL),
             Some(f) => Ok(f.clone().into()),
+        },
+        FIELD_SPAWN_ENV => {
+            // Build { key: string | (() => string | undefined) } from stored EnvVal map.
+            let mut obj = ctx.create_base_object()?;
+            for (k, v) in p.spawn_env.borrow().iter() {
+                let val = match v {
+                    EnvVal::Text(s) => js_str(ctx, s.clone())?.into(),
+                    EnvVal::Func(f) => f.clone().into(),
+                };
+                obj.define_property_value_str(ctx, k, val, JS_PROP_ENUMERABLE)?;
+            }
+            Ok(obj.into())
+        }
+        FIELD_SPAWN_ARGS => match &*p.spawn_args.borrow() {
+            None => Ok(JSValue::UNDEFINED),
+            Some(ArgsVal::Text(v)) => {
+                let mut lst = Vec::with_capacity(v.len());
+                for s in v {
+                    lst.push(js_str(ctx, s.clone())?.into());
+                }
+                Ok(Array::from_values(ctx, lst)?.into())
+            }
+            Some(ArgsVal::Func(f)) => Ok(f.clone().into()),
         },
         _ => Ok(JSValue::UNDEFINED),
     }
@@ -303,6 +334,15 @@ fn js_run(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let p = get_payload(ctx, &this)?;
 
+    // beforeRun — user init hook, run once before serving (memo/mcp-service.md §2.2).
+    // On the JS thread here; fire-and-forget (async hook may still be pending when
+    // serve starts — awaiting a JS Promise would block this thread).
+    if let Some(hook) = p.before_run.borrow().clone() {
+        if let Err(e) = hook.call(ctx, this, &[]) {
+            return Err(e);
+        }
+    }
+
     // Launch the stdio server
     let mut promise = start_stdio_server(ctx, p)?;
 
@@ -320,7 +360,7 @@ fn js_run(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
 /// Apply the `StdioMcp.define(name, tools, options)` options object onto a
 /// fresh payload. `tools` is handled separately (it is the lifted 2nd arg),
-/// so this covers version / instructions / env / args / beforeRun / shared /
+/// so this covers version / instructions / spawnEnv / spawnArgs / beforeRun / shared /
 /// extraFiles.
 fn apply_stdio_options(
     ctx: &mut ScopedContext,
@@ -347,20 +387,22 @@ fn apply_stdio_options(
         *p.instructions.borrow_mut() = Cow::Owned(s);
     }
 
-    // env — Record<string, string | (() => string | undefined)>.
+    // spawnEnv — Record<string, string | (() => string | undefined)>.
+    // Forwarded to Aike.spawn when the framework launches this server process.
     if let Some(v) = opt
-        .get_property_str(ctx, "env")
+        .get_property_str(ctx, "spawnEnv")
         .ok()
         .filter(|v| !v.is_undefined())
     {
         if let Some(obj) = v.as_object().copied() {
-            *p.env.borrow_mut() = parse_env_object(ctx, obj)?;
+            *p.spawn_env.borrow_mut() = parse_env_object(ctx, obj)?;
         }
     }
 
-    // args — string[] | (() => string[]).
+    // spawnArgs — string[] | (() => string[]).
+    // e.g. ["--stack-overflow", "1m"]; forwarded to Aike.spawn as CLI args.
     if let Some(v) = opt
-        .get_property_str(ctx, "args")
+        .get_property_str(ctx, "spawnArgs")
         .ok()
         .filter(|v| !v.is_undefined())
     {
@@ -384,7 +426,7 @@ fn apply_stdio_options(
             }
             ArgsVal::Text(out)
         };
-        *p.args_entry.borrow_mut() = Some(val);
+        *p.spawn_args.borrow_mut() = Some(val);
     }
 
     // beforeRun — () => Promise<void>.
@@ -723,6 +765,8 @@ const STDIO_MCP_PROTO: &[FieldDef] = &[
     FieldDef::GETSET("shared", Some(js_get), None, FIELD_SHARED),
     FieldDef::GETSET("extraFiles", Some(js_get), None, FIELD_EXTRA_FILES),
     FieldDef::GETSET("beforeRun", Some(js_get), None, FIELD_BEFORE_RUN),
+    FieldDef::GETSET("spawnEnv", Some(js_get), None, FIELD_SPAWN_ENV),
+    FieldDef::GETSET("spawnArgs", Some(js_get), None, FIELD_SPAWN_ARGS),
     FieldDef::FUNC("run", 0, js_run, 0),
     //
     // not required
