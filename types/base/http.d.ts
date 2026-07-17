@@ -1,5 +1,5 @@
 declare module "http" {
-  import { HttpMcp, McpToolDefinition, McpToolShortDef } from "mcp";
+  import { HttpMcp } from "mcp";
 
   /** Incoming HTTP request passed to route handlers. Cannot be constructed directly. */
   export class HttpServerRequest {
@@ -154,15 +154,6 @@ declare module "http" {
      * Must be called BEFORE `listen()`.
      */
     mcp(mountPath: string, server: HttpMcp): this;
-
-    /**
-     * Hot-reload JS tools on an existing HTTP MCP server (native tools preserved).
-     * The new handler table takes effect on the very next request.
-     */
-    updateMcpTools(
-      server: HttpMcp,
-      tools: McpToolDefinition[] | Record<string, McpToolShortDef>,
-    ): this;
 
     /**
      * Serve a directory of static files at `mountPath`. `GET /` falls back to

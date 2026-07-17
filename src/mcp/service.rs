@@ -48,11 +48,11 @@ pub(crate) type NativeMcpToolFn = Arc<
 /// Does NOT contain Object (which is !Send).
 pub(crate) struct McpSchemas {
     /// All tool schemas (native + JS), as rmcp::model::Tool values
-    pub(crate) tools: Vec<rmcp::model::Tool>,
+    pub tools: Vec<rmcp::model::Tool>,
     /// Tool name -> index in tools
-    pub(crate) name_to_index: HashMap<String, usize>,
+    pub name_to_index: HashMap<String, usize>,
     /// Tool name -> index in native_handlers (only for native tools)
-    pub(crate) native_map: HashMap<String, usize>,
+    pub native_map: HashMap<String, usize>,
 }
 
 /// Transport-specific difference — the only thing needing an enum.
@@ -88,10 +88,12 @@ pub(crate) struct McpServicePayload {
     pub(crate) version: RefCell<Cow<'static, str>>,
     pub(crate) instructions: RefCell<Cow<'static, str>>,
 
-    /// Shared schemas accessible from tokio (Send + Sync).
+    /// tool schemas accessible from tokio (Send + Sync).
     pub(crate) schemas: Arc<RwLock<McpSchemas>>,
+
     /// JS handler objects — GC roots + dispatch targets for the poller.
     pub(crate) js_handlers: RefCell<Vec<Object>>,
+
     /// Native handlers (always empty in the JS path today; kept for future
     /// Rust-registered native tools). See mcp-service.md §8.
     pub(crate) handlers: Vec<(String, serde_json::Value, NativeMcpToolFn)>,

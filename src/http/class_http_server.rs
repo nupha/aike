@@ -346,73 +346,6 @@ fn js_mcp(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     Ok(this)
 }
 
-/// HttpServer.updateMcpTools(httpMcp, tools) — hot-reload MCP tools at runtime.
-///
-/// Replaces all JS tools (native tools are preserved). Next request uses new handlers.
-fn js_update_tools(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let this = cc.this();
-
-    // arg(0): an HttpMcp instance.
-    let mut arg0 = cc.arg(0);
-    let http = arg0.as_native_object_mut::<JSHttpMcp>().ok_or_else(|| {
-        ctx.throw_type_error("updateMcpTools expects an HttpMcp instance");
-        -1
-    })?;
-    let p = http.payload_mut().ok_or_else(|| {
-        ctx.throw_type_error("invalid HttpMcp instance");
-        -1
-    })?;
-
-    // Ensure it is an Http transport.
-    match &p.transport {
-        McpTransport::Http { .. } => {}
-        _ => {
-            ctx.throw_type_error("updateMcpTools expects an Http (not stdio) Mcp server");
-            return Err(-1);
-        }
-    }
-
-    // arg(1): tools (array or object-keyed format)
-    let tools_val = cc.arg(1);
-    let (tools, name_to_index, js_handlers) = parse_mcp_tools(ctx, &tools_val)?;
-
-    // Update shared schemas (write lock), preserving native tool entries.
-    {
-        let mut guard = p.schemas.write().unwrap();
-        let native_names: Vec<String> = guard.native_map.keys().cloned().collect();
-        let mut new_tools = tools;
-        let mut new_name_to_index = name_to_index;
-        let mut new_native_map = HashMap::new();
-
-        for name in &native_names {
-            if let Some(&old_idx) = guard.name_to_index.get(name) {
-                let new_idx = new_tools.len();
-                new_tools.push(guard.tools[old_idx].clone());
-                new_name_to_index.insert(name.clone(), new_idx);
-                if let Some(&ni) = guard.native_map.get(name) {
-                    new_native_map.insert(name.clone(), ni);
-                }
-            }
-        }
-
-        guard.tools = new_tools;
-        guard.name_to_index = new_name_to_index;
-        guard.native_map = new_native_map;
-    }
-
-    // Update JS handlers on payload (for GC tracing).
-    p.js_handlers = RefCell::new(js_handlers.clone());
-
-    // Send new handler table to the poller via update channel.
-    if let McpTransport::Http { update_tx, .. } = &p.transport {
-        if let Some(utx) = update_tx {
-            let _ = utx.send(js_handlers);
-        }
-    }
-
-    Ok(this)
-}
-
 fn js_remove_route(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut this = cc.this();
     let method = match &*cc.arg(0).to_string(ctx)?.content().encode_utf8(false) {
@@ -1336,7 +1269,6 @@ const SERVER_PROTO: &[FieldDef] = &[
     FieldDef::FUNC("head", 2, js_route_add, 5),
     FieldDef::FUNC("options", 2, js_route_add, 6),
     FieldDef::FUNC("mcp", 2, js_mcp, 0),
-    FieldDef::FUNC("updateMcpTools", 2, js_update_tools, 0),
     FieldDef::FUNC("removeRoute", 2, js_remove_route, 0),
     FieldDef::FUNC("ws", 2, js_route_ws, 0),
     FieldDef::FUNC("staticFiles", 2, js_static_files, 0),

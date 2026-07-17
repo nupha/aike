@@ -661,6 +661,64 @@ fn js_add_tool(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     Ok(this)
 }
 
+/// `HttpMcp.updateTools(tools)` — hot-reload: REPLACE all JS tools (native
+/// tools are preserved). For an HTTP server that is already listening, the
+/// new handler table is pushed through the hot-reload channel so it takes
+/// effect on the next request.
+fn js_http_update_tools(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let mut this = cc.this();
+    let p = get_payload_mut(ctx, &mut this)?;
+
+    // HttpMcp is always an Http transport, but guard for safety.
+    match &p.transport {
+        McpTransport::Http { .. } => {}
+        _ => {
+            ctx.throw_type_error("updateTools is only supported on an Http transport");
+            return Err(-1);
+        }
+    }
+
+    // arg(0): tools (array or object-keyed format)
+    let tools_val = cc.arg(0);
+    let (tools, name_to_index, js_handlers) = parse_mcp_tools(ctx, &tools_val)?;
+
+    // Replace all JS tools, preserving native tool entries.
+    {
+        let mut guard = p.schemas.write().unwrap();
+        let native_names: Vec<String> = guard.native_map.keys().cloned().collect();
+        let mut new_tools = tools;
+        let mut new_name_to_index = name_to_index;
+        let mut new_native_map = HashMap::new();
+
+        for name in &native_names {
+            if let Some(&old_idx) = guard.name_to_index.get(name) {
+                let new_idx = new_tools.len();
+                new_tools.push(guard.tools[old_idx].clone());
+                new_name_to_index.insert(name.clone(), new_idx);
+                if let Some(&ni) = guard.native_map.get(name) {
+                    new_native_map.insert(name.clone(), ni);
+                }
+            }
+        }
+
+        guard.tools = new_tools;
+        guard.name_to_index = new_name_to_index;
+        guard.native_map = new_native_map;
+    }
+
+    // Update JS handlers on payload (for GC tracing).
+    p.js_handlers = RefCell::new(js_handlers.clone());
+
+    // Send new handler table to the poller via update channel.
+    if let McpTransport::Http { update_tx, .. } = &p.transport {
+        if let Some(utx) = update_tx {
+            let _ = utx.send(js_handlers);
+        }
+    }
+
+    Ok(this)
+}
+
 // ── JSStdioMcp ──
 
 // Static methods defined on the class constructor (not prototype)
@@ -816,6 +874,7 @@ const HTTP_MCP_PROTO: &[FieldDef] = &[
     FieldDef::GETSET("instructions", Some(js_instructions), None, 0),
     FieldDef::GETSET("mountPath", Some(js_http_get), None, FIELD_MOUNT_PATH),
     FieldDef::FUNC("addTool", 1, js_add_tool, 0),
+    FieldDef::FUNC("updateTools", 1, js_http_update_tools, 0),
 ];
 
 def_native_object!(

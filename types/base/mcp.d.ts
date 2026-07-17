@@ -315,7 +315,8 @@ declare module "mcp" {
    * Unlike {@link StdioMcp}, an `HttpMcp` instance is NOT self-running — it is
    * mounted onto an `HttpServer` via `HttpServer.mcp(server)` and served over
    * Streamable HTTP. Tools can be hot-reloaded at runtime with
-   * `HttpServer.updateMcpTools(server, tools)`.
+   * `server.updateTools(tools)` (replace all JS tools) or `server.addTool(tools)`
+   * (append).
    */
   export class HttpMcp {
     private constructor();
@@ -363,5 +364,14 @@ declare module "mcp" {
      * that is already listening, the new tools hot-reload on the next request.
      */
     addTool(tools: McpToolDefinition[] | Record<string, McpToolShortDef>): this;
+
+    /**
+     * Hot-reload: REPLACE all JS tools (native tools are preserved). Accepts the
+     * same `tools` DSL as `define`. On a server that is already listening, the
+     * new tools take effect on the next request.
+     */
+    updateTools(
+      tools: McpToolDefinition[] | Record<string, McpToolShortDef>,
+    ): this;
   }
 }
