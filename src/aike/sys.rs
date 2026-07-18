@@ -25,7 +25,13 @@ pub(super) fn js_exit(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     } else {
         0
     };
+
+    // Set the runtime interrupt flag rather than calling `std::process::exit`:
+    // the latter skips destructors and leaks GC nodes. The interrupt makes
+    // `run_async` return `Interrupted` on the next tick, so `main.rs` exits
+    // through the normal path and finalizes GC nodes.
     ctx.rt_mut().interrupt(ExitCode::from(code as u8));
+
     // Return Ok instead of Err: interrupt flag is set on runtime, tick() detects
     // it on the next synchronization point.  Returning Err would cause async
     // callers to reject a Promise, triggering user-level .catch() handlers.

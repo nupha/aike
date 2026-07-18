@@ -14,19 +14,11 @@ use zuqe::{
     gc_lite::{GcTrace, GcTraceCtx},
 };
 
-// ---------------------------------------------------------------------------
-// Thread-local state
-// ---------------------------------------------------------------------------
-
 thread_local! {
     // Per-thread signal handler registry.
     // Signal number -> callback (non-overlapping: last `onSignal` wins).
     static HANDLER_MAP: RefCell<HashMap<u32, JSValue>> = RefCell::new(HashMap::new());
 }
-
-// ---------------------------------------------------------------------------
-// Global (process-wide) state
-// ---------------------------------------------------------------------------
 
 /// All per-thread senders, keyed by ThreadId.
 /// The C signal handler broadcasts to every registered sender.
@@ -42,16 +34,35 @@ static SIGNAL_REFCOUNT: LazyLock<Mutex<HashMap<u32, u32>>> =
 /// Signal name -> number mapping
 pub(crate) fn signal_number(name: &str) -> Option<u32> {
     Some(match name {
+        "SIGHUP" => libc::SIGHUP,
         "SIGINT" => libc::SIGINT,
+        "SIGQUIT" => libc::SIGQUIT,
+        "SIGILL" => libc::SIGILL,
         "SIGABRT" => libc::SIGABRT,
         "SIGFPE" => libc::SIGFPE,
-        "SIGILL" => libc::SIGILL,
+        "SIGKILL" => libc::SIGKILL,
         "SIGSEGV" => libc::SIGSEGV,
-        "SIGTERM" => libc::SIGTERM,
-        #[cfg(not(windows))]
-        "SIGQUIT" => libc::SIGQUIT,
-        #[cfg(not(windows))]
         "SIGPIPE" => libc::SIGPIPE,
+        "SIGALRM" => libc::SIGALRM,
+        "SIGTERM" => libc::SIGTERM,
+        "SIGBUS" => libc::SIGBUS,
+        "SIGTRAP" => libc::SIGTRAP,
+        "SIGURG" => libc::SIGURG,
+        "SIGSYS" => libc::SIGSYS,
+        "SIGUSR1" => libc::SIGUSR1,
+        "SIGUSR2" => libc::SIGUSR2,
+        "SIGCHLD" => libc::SIGCHLD,
+        "SIGCONT" => libc::SIGCONT,
+        "SIGSTOP" => libc::SIGSTOP,
+        "SIGTSTP" => libc::SIGTSTP,
+        "SIGTTIN" => libc::SIGTTIN,
+        "SIGTTOU" => libc::SIGTTOU,
+        "SIGXCPU" => libc::SIGXCPU,
+        "SIGXFSZ" => libc::SIGXFSZ,
+        "SIGVTALRM" => libc::SIGVTALRM,
+        "SIGPROF" => libc::SIGPROF,
+        "SIGWINCH" => libc::SIGWINCH,
+        "SIGIO" => libc::SIGIO,
         #[cfg(not(windows))]
         "SIGALRM" => libc::SIGALRM,
         #[cfg(not(windows))]
@@ -77,16 +88,35 @@ pub(crate) fn signal_number(name: &str) -> Option<u32> {
 /// Reverse of signal_number: convert a signal number back to its name.
 pub(crate) fn signal_name(sig: u32) -> Option<&'static str> {
     Some(match sig as i32 {
+        n if n == libc::SIGHUP => "SIGHUP",
         n if n == libc::SIGINT => "SIGINT",
+        n if n == libc::SIGQUIT => "SIGQUIT",
+        n if n == libc::SIGILL => "SIGILL",
         n if n == libc::SIGABRT => "SIGABRT",
         n if n == libc::SIGFPE => "SIGFPE",
-        n if n == libc::SIGILL => "SIGILL",
+        n if n == libc::SIGKILL => "SIGKILL",
         n if n == libc::SIGSEGV => "SIGSEGV",
-        n if n == libc::SIGTERM => "SIGTERM",
-        #[cfg(not(windows))]
-        n if n == libc::SIGQUIT => "SIGQUIT",
-        #[cfg(not(windows))]
         n if n == libc::SIGPIPE => "SIGPIPE",
+        n if n == libc::SIGALRM => "SIGALRM",
+        n if n == libc::SIGTERM => "SIGTERM",
+        n if n == libc::SIGBUS => "SIGBUS",
+        n if n == libc::SIGTRAP => "SIGTRAP",
+        n if n == libc::SIGURG => "SIGURG",
+        n if n == libc::SIGSYS => "SIGSYS",
+        n if n == libc::SIGUSR1 => "SIGUSR1",
+        n if n == libc::SIGUSR2 => "SIGUSR2",
+        n if n == libc::SIGCHLD => "SIGCHLD",
+        n if n == libc::SIGCONT => "SIGCONT",
+        n if n == libc::SIGSTOP => "SIGSTOP",
+        n if n == libc::SIGTSTP => "SIGTSTP",
+        n if n == libc::SIGTTIN => "SIGTTIN",
+        n if n == libc::SIGTTOU => "SIGTTOU",
+        n if n == libc::SIGXCPU => "SIGXCPU",
+        n if n == libc::SIGXFSZ => "SIGXFSZ",
+        n if n == libc::SIGVTALRM => "SIGVTALRM",
+        n if n == libc::SIGPROF => "SIGPROF",
+        n if n == libc::SIGWINCH => "SIGWINCH",
+        n if n == libc::SIGIO => "SIGIO",
         #[cfg(not(windows))]
         n if n == libc::SIGALRM => "SIGALRM",
         #[cfg(not(windows))]
@@ -111,6 +141,7 @@ pub(crate) fn signal_name(sig: u32) -> Option<&'static str> {
 
 /// Process-wide C signal handler — broadcasts to all registered senders
 extern "C" fn c_signal_handler(sig_num: i32) {
+    // signal-safe trace (only async-signal-safe syscalls)
     // try_lock: non-blocking, safe in signal context.
     if let Ok(guard) = SIGNAL_SENDERS.try_lock() {
         for tx in guard.values() {
@@ -185,12 +216,19 @@ pub(super) fn js_signals(ctx: &mut ScopedContext) -> Result<JSValue, i32> {
     obj.install_fields(
         ctx,
         &[
+            FieldDef::INT32("SIGHUP", libc::SIGHUP, JS_PROP_ENUMERABLE),
             FieldDef::INT32("SIGINT", libc::SIGINT, JS_PROP_ENUMERABLE),
+            FieldDef::INT32("SIGQUIT", libc::SIGQUIT, JS_PROP_ENUMERABLE),
+            FieldDef::INT32("SIGILL", libc::SIGILL, JS_PROP_ENUMERABLE),
             FieldDef::INT32("SIGABRT", libc::SIGABRT, JS_PROP_ENUMERABLE),
             FieldDef::INT32("SIGFPE", libc::SIGFPE, JS_PROP_ENUMERABLE),
-            FieldDef::INT32("SIGILL", libc::SIGILL, JS_PROP_ENUMERABLE),
+            FieldDef::INT32("SIGKILL", libc::SIGKILL, JS_PROP_ENUMERABLE),
             FieldDef::INT32("SIGSEGV", libc::SIGSEGV, JS_PROP_ENUMERABLE),
             FieldDef::INT32("SIGTERM", libc::SIGTERM, JS_PROP_ENUMERABLE),
+            FieldDef::INT32("SIGBUS", libc::SIGBUS, JS_PROP_ENUMERABLE),
+            FieldDef::INT32("SIGTRAP", libc::SIGTRAP, JS_PROP_ENUMERABLE),
+            FieldDef::INT32("SIGURG", libc::SIGURG, JS_PROP_ENUMERABLE),
+            FieldDef::INT32("SIGSYS", libc::SIGSYS, JS_PROP_ENUMERABLE),
         ],
     )?;
 
@@ -199,7 +237,6 @@ pub(super) fn js_signals(ctx: &mut ScopedContext) -> Result<JSValue, i32> {
     obj.install_fields(
         ctx,
         &[
-            FieldDef::INT32("SIGQUIT", libc::SIGQUIT, JS_PROP_ENUMERABLE),
             FieldDef::INT32("SIGPIPE", libc::SIGPIPE, JS_PROP_ENUMERABLE),
             FieldDef::INT32("SIGALRM", libc::SIGALRM, JS_PROP_ENUMERABLE),
             FieldDef::INT32("SIGUSR1", libc::SIGUSR1, JS_PROP_ENUMERABLE),
@@ -210,10 +247,113 @@ pub(super) fn js_signals(ctx: &mut ScopedContext) -> Result<JSValue, i32> {
             FieldDef::INT32("SIGTSTP", libc::SIGTSTP, JS_PROP_ENUMERABLE),
             FieldDef::INT32("SIGTTIN", libc::SIGTTIN, JS_PROP_ENUMERABLE),
             FieldDef::INT32("SIGTTOU", libc::SIGTTOU, JS_PROP_ENUMERABLE),
+            FieldDef::INT32("SIGXCPU", libc::SIGXCPU, JS_PROP_ENUMERABLE),
+            FieldDef::INT32("SIGXFSZ", libc::SIGXFSZ, JS_PROP_ENUMERABLE),
+            FieldDef::INT32("SIGVTALRM", libc::SIGVTALRM, JS_PROP_ENUMERABLE),
+            FieldDef::INT32("SIGPROF", libc::SIGPROF, JS_PROP_ENUMERABLE),
+            FieldDef::INT32("SIGWINCH", libc::SIGWINCH, JS_PROP_ENUMERABLE),
+            FieldDef::INT32("SIGIO", libc::SIGIO, JS_PROP_ENUMERABLE),
         ],
     )?;
 
     Ok(obj.into())
+}
+
+/// Register `handler` (a JS-callable) for the named signal on the current
+/// thread. Internal native API used by both `Aike.onSignal` and other Rust
+/// code that wants to hook a signal without going through the JS binding.
+///
+/// On first registration for a signal it installs the process-wide C handler
+/// and lazily starts the per-thread polling microtask.
+/// Signals the OS forbids catching or ignoring (POSIX-mandated). Installing a
+/// handler for them is a silent no-op, so we reject with a hint instead.
+fn is_untrappable(sig: u32) -> bool {
+    sig == libc::SIGKILL as u32 || sig == libc::SIGSTOP as u32
+}
+
+pub(crate) fn register_signal_handler(
+    ctx: &mut ScopedContext,
+    sig_name: &str,
+    handler: JSValue,
+) -> JSResult {
+    let Some(sig_num) = signal_number(sig_name) else {
+        ctx.throw_type_error(&format!("unknown signal: {sig_name}"));
+        return Err(-1);
+    };
+
+    // SIGKILL / SIGSTOP cannot be trapped by the OS; a handler would never
+    // fire, giving a false sense of safety. Ignore the request with a hint.
+    if is_untrappable(sig_num) {
+        eprintln!(
+            "[aike] warning: cannot trap {sig_name}; signal handler ignored \
+             (the OS does not allow catching SIGKILL or SIGSTOP)"
+        );
+        return Ok(JSValue::UNDEFINED);
+    }
+
+    handler.ensure_callable(ctx)?;
+
+    // Atomically: check emptiness, detect new signal, store callback.
+    let (was_empty, is_new) = HANDLER_MAP.with(|map| {
+        let mut b = map.borrow_mut();
+        let was_empty = b.is_empty();
+        let existed = b.contains_key(&sig_num);
+        b.insert(sig_num, handler);
+        (was_empty, !existed)
+    });
+
+    // Lazy-init the per-thread channel on first registration.
+    // When HANDLER_MAP was empty, the previous microtask has already
+    // exited (Disconnected), so we need a fresh channel + microtask.
+    if was_empty {
+        let (tx, rx) = channel::bounded::<u32>(16);
+        SIGNAL_SENDERS
+            .lock()
+            .unwrap()
+            .insert(std::thread::current().id(), tx);
+        start_signal_microtask(ctx, rx);
+    }
+
+    if is_new {
+        install_c_handler(sig_num);
+    }
+
+    Ok(JSValue::UNDEFINED)
+}
+
+/// Unregister the handler for the named signal on the current thread.
+/// Returns true if a handler was actually removed. Used by both
+/// `Aike.onSignal(null)` and internal native code.
+pub(crate) fn unregister_signal_handler(sig_name: &str) -> bool {
+    let Some(sig_num) = signal_number(sig_name) else {
+        return false;
+    };
+
+    // Symmetric with register: never installed a handler for untrappable
+    // signals, so there is nothing to remove.
+    if is_untrappable(sig_num) {
+        return false;
+    }
+
+    let tid = std::thread::current().id();
+
+    // If this thread has no more handlers, remove its sender
+    // from the global broadcast list.  The microtask will detect
+    // Disconnected on next poll and return Done.
+    let (is_empty, removed) = HANDLER_MAP.with(|lut| {
+        let mut b = lut.borrow_mut();
+        let removed = b.remove(&sig_num).is_some();
+        let is_empty = b.is_empty();
+        (is_empty, removed)
+    });
+
+    if is_empty {
+        SIGNAL_SENDERS.lock().unwrap().remove(&tid);
+    }
+    if removed {
+        uninstall_c_handler(sig_num);
+    }
+    removed
 }
 
 pub(super) fn js_on_signal(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -222,57 +362,12 @@ pub(super) fn js_on_signal(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
     // Resolve signal name -> number
     let name_str = cc.arg(0).to_string(ctx)?;
     let sig_name = name_str.content().encode_utf8(false);
-    let Some(sig_num) = signal_number(sig_name.as_ref()) else {
-        ctx.throw_type_error(&format!("unknown signal: {sig_name}"));
-        return Err(-1);
-    };
 
     let handler = cc.arg(1);
-    let tid = std::thread::current().id();
-
     if handler.is_null() {
-        let (is_empty, removed) = HANDLER_MAP.with(|lut| {
-            let mut b = lut.borrow_mut();
-            let removed = b.remove(&sig_num).is_some();
-            let is_empty = b.is_empty();
-            (is_empty, removed)
-        });
-
-        // If this thread has no more handlers, remove its sender
-        // from the global broadcast list.  The microtask will detect
-        // Disconnected on next poll and return Done.
-        if is_empty {
-            SIGNAL_SENDERS.lock().unwrap().remove(&tid);
-        }
-
-        if removed {
-            uninstall_c_handler(sig_num);
-        }
+        unregister_signal_handler(sig_name.as_ref());
     } else {
-        // Register handler
-        handler.ensure_callable(ctx)?;
-
-        // Atomically: check emptiness, detect new signal, store callback.
-        let (was_empty, is_new) = HANDLER_MAP.with(|map| {
-            let mut b = map.borrow_mut();
-            let was_empty = b.is_empty();
-            let existed = b.contains_key(&sig_num);
-            b.insert(sig_num, handler);
-            (was_empty, !existed)
-        });
-
-        // Lazy-init the per-thread channel on first registration.
-        // When HANDLER_MAP was empty, the previous microtask has already
-        // exited (Disconnected), so we need a fresh channel + microtask.
-        if was_empty {
-            let (tx, rx) = channel::bounded::<u32>(16);
-            SIGNAL_SENDERS.lock().unwrap().insert(tid, tx);
-            start_signal_microtask(ctx, rx);
-        }
-
-        if is_new {
-            install_c_handler(sig_num);
-        }
+        register_signal_handler(ctx, sig_name.as_ref(), handler)?;
     }
 
     Ok(this)

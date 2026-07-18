@@ -4,6 +4,7 @@
 use std::{
     cell::{Cell, RefCell},
     collections::HashMap,
+    process::ExitCode,
     sync::{
         Mutex, OnceLock,
         atomic::{AtomicBool, Ordering},
@@ -12,7 +13,8 @@ use std::{
 
 use crossbeam::channel;
 use linkme::distributed_slice;
-use rmcp::service::RoleServer;
+use rmcp::service::{RoleServer, serve_server_with_ct};
+use tokio_util::sync::CancellationToken;
 use zuqe::{
     Array, CallContext, Callback, ClassCtorDef, ClassID, FieldDef, JS_GPN_ENUM_ONLY,
     JS_GPN_STR_OR_INT_MASK, JS_PROP_ENUMERABLE, JSResult, JSValue, NativeObject, Object,
@@ -35,10 +37,31 @@ use super::{
 struct StdioMcpShutdown {
     /// Handle to the running rmcp service. Taken by waiting() on shutdown.
     running_service: Mutex<Option<rmcp::service::RunningService<RoleServer, McpService>>>,
-    /// Cancellation token for sync stop signal.
-    cancellation_token: Mutex<Option<rmcp::service::RunningServiceCancellationToken>>,
+    /// Cancellation token, created up front (before handshake) so stop()/SIGTERM
+    /// can cancel even while `serve_server_with_ct` is still handshaking.
+    cancellation_token: Mutex<Option<CancellationToken>>,
     /// True while the server is actively serving.
     is_running: AtomicBool,
+}
+
+impl StdioMcpShutdown {
+    /// Reset to the stopped/clean state: clear the server handle and the
+    /// cancellation token, and flip `is_running` to false. Call on every exit
+    /// path so a later `start()` begins from a clean slate and `isRunning()`/
+    /// `stop()` report the correct stopped state.
+    fn clear(&self) {
+        self.is_running.store(false, Ordering::Release);
+        *self.running_service.lock().unwrap() = None;
+        *self.cancellation_token.lock().unwrap() = None;
+    }
+
+    /// Record the running server handle. Call after a successful
+    /// `serve_server_with_ct` (Step 2) before entering the serve loop.
+    /// The cancellation token is stored earlier, before the handshake begins.
+    fn set_running(&self, running: rmcp::service::RunningService<RoleServer, McpService>) {
+        self.is_running.store(true, Ordering::Release);
+        *self.running_service.lock().unwrap() = Some(running);
+    }
 }
 
 /// Shutdown control state in static — only Send+Sync types.
@@ -238,12 +261,31 @@ fn js_run(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut promise = start_stdio_server(ctx, p)?;
 
     // Stop on SIGINT / SIGTERM.
-    register_signal(ctx, "SIGINT")?;
-    register_signal(ctx, "SIGTERM")?;
+    {
+        let stop_fn: JSValue = ctx
+            .create_native_function(Callback::Func(js_stop), "mcpStop", 0, 0)?
+            .into();
 
-    // Force process exit once the server has stopped.
-    let exit_fn = ctx.create_native_function(Callback::Func(js_run_exit), "exit", 0, 0)?;
-    let noop = ctx.create_native_function(Callback::Func(js_noop), "noop", 0, 0)?;
+        crate::aike::register_signal_handler(ctx, "SIGINT", stop_fn)?;
+        crate::aike::register_signal_handler(ctx, "SIGTERM", stop_fn)?;
+    }
+
+    // Force process exit once the server stops (via `run`'s `.then`). All MCP
+    // cleanup has already happened — the promise only resolves after the
+    // background server task finishes. Set the runtime interrupt flag (NOT
+    // `std::process::exit`, which would skip GC finalization and leak nodes);
+    // `main.rs` detects it and exits through the normal path.
+    let exit_fn = ctx.create_native_function(
+        Callback::Func(|ctx: &mut ScopedContext, _| {
+            ctx.rt_mut().interrupt(ExitCode::SUCCESS);
+            Ok(JSValue::UNDEFINED)
+        }),
+        "exit",
+        0,
+        0,
+    )?;
+    let noop =
+        ctx.create_native_function(Callback::Func(|_, _| Ok(JSValue::UNDEFINED)), "noop", 0, 0)?;
     let _ = promise.then(ctx, exit_fn.into(), noop.into())?;
 
     Ok(promise.into())
@@ -384,49 +426,79 @@ fn start_stdio_server(ctx: &mut ScopedContext, p: &McpServicePayload) -> Result<
         })
         .ok();
 
-    // Spawn background tokio task to run rmcp serve_server
+    // Spawn background tokio task to run rmcp serve_server_with_ct
     tokio::spawn(async move {
+        // Create the cancellation token up front — before the handshake — so
+        // stop()/SIGINT/SIGTERM can cancel even while serve_server_with_ct is
+        // still handshaking. The same token is handed to serve_server_with_ct
+        // and lives on in RunningService, so cancelling it works at any stage.
+        let ct = CancellationToken::new();
+        if let Some(state) = MCP_STDIO_STATE.get() {
+            *state.cancellation_token.lock().unwrap() = Some(ct.clone());
+        }
+
+        // Close fd 0 on shutdown so the transport's blocking stdin read
+        // (on tokio's blocking pool, not cancellable by the token) returns and
+        // the runtime can tear down. See cleanup blocks below for rationale.
+        let close_stdin = || {
+            #[cfg(unix)]
+            let _ = unsafe { libc::close(libc::STDIN_FILENO) };
+        };
+
         let transport = (tokio::io::stdin(), tokio::io::stdout());
 
-        // Step 1: Initialize (handshake) — returns quickly on error or cancel
-        let running = match rmcp::serve_server(service, transport).await {
+        // Step 1: Initialize (handshake). serve_server_with_ct returns quickly
+        // with Cancelled if ct is cancelled mid-handshake, so SIGTERM during
+        // the handshake no longer hangs.
+        let running = match serve_server_with_ct(service, transport, ct.clone()).await {
             Ok(r) => r,
             Err(e) => {
                 eprintln!("[StdioMcp] init error: {:?}", e);
+
+                // Fully clear running state so a later start() gets a clean slate.
                 if let Some(state) = MCP_STDIO_STATE.get() {
-                    state.is_running.store(false, Ordering::Release);
-                    // Also stop the poller
-                    // (is_running_poller is the poller's keep-alive flag)
+                    state.clear();
                 }
+
                 is_running.store(false, Ordering::Release);
                 let _ = crate::repl::caupture_stdio(false);
+                close_stdin();
                 let _ = PollSender::from(tx).send_async(Ok(())).await;
                 return;
             }
         };
 
-        // Step 2: Store RunningService + cancellation token
-        let ct = running.cancellation_token();
+        // Step 2: Store RunningService handle (token already stored above).
         if let Some(state) = MCP_STDIO_STATE.get() {
-            *state.cancellation_token.lock().unwrap() = Some(ct);
-            *state.running_service.lock().unwrap() = Some(running);
+            state.set_running(running);
         }
 
-        // Step 3: Wait for termination (natural EOF, cancel, or error)
-        // Take the RunningService out and call waiting() which consumes it.
-        let running = MCP_STDIO_STATE
+        // Step 3: Wait for termination (natural EOF, cancel, or error).
+        // r.waiting().await returns when rmcp sees stdin EOF, or when the
+        // cancellation token fires (SIGTERM/SIGINT/stop).
+        if let Some(r) = MCP_STDIO_STATE
             .get()
-            .and_then(|s| s.running_service.lock().unwrap().take());
-        if let Some(r) = running {
+            .and_then(|s| s.running_service.lock().unwrap().take())
+        {
             let _ = r.waiting().await;
         }
 
-        // Step 4: Cleanup — mark stopped and resolve Promise
+        // Step 4: Cleanup — fully reset running state and resolve Promise.
         if let Some(state) = MCP_STDIO_STATE.get() {
-            state.is_running.store(false, Ordering::Release);
+            state.clear();
         }
         is_running.store(false, Ordering::Release);
         let _ = crate::repl::caupture_stdio(false);
+
+        // Unblock the runtime teardown. rmcp's stdio transport reads stdin via
+        // tokio's blocking pool (a synchronous read(fd 0) on a worker thread),
+        // which is NOT cancelled by the cancellation token. If the parent still
+        // holds the stdin write end (no EOF), that read never returns and
+        // tokio's BlockingPool::shutdown hangs forever — the process never
+        // exits. Closing fd 0 makes the in-flight read return, so the blocking
+        // task ends and the runtime can shut down. Safe here: stdin is the MCP
+        // protocol and the process is exiting anyway.
+        close_stdin();
         let _ = PollSender::from(tx).send_async(Ok(())).await;
     });
 
@@ -441,7 +513,8 @@ fn js_stop(_ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
         return Ok(JSValue::UNDEFINED); // already stopped
     }
 
-    // Take the cancellation token and fire it (sync, no blocking)
+    // Take the cancellation token (created before the handshake) and fire it.
+    // Works whether the server is mid-handshake or already serving.
     let token = state.cancellation_token.lock().unwrap().take();
     if let Some(t) = token {
         t.cancel();
@@ -459,18 +532,6 @@ fn js_is_running(_ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
         Some(state) => Ok(JSValue::from(state.is_running.load(Ordering::Acquire))),
         None => Ok(JSValue::from(false)),
     }
-}
-
-/// Force process exit once the server stops (used by `run`'s `.then`).
-fn js_run_exit(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
-    let aike = ctx.global_obj().get_property_str(ctx, "Aike")?;
-    let exit_fn = aike.get_property_str(ctx, "exit")?;
-    exit_fn.call(ctx, aike, &[JSValue::from(0)])?;
-    Ok(JSValue::UNDEFINED)
-}
-
-fn js_noop(_ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
-    Ok(JSValue::UNDEFINED)
 }
 
 /// Parse an env object (`Record<string, string | (() => string | undefined)>`)
@@ -507,17 +568,6 @@ fn parse_env_object(
     }
 
     Ok(settings)
-}
-
-/// Register `Aike.onSignal(sig, () => StdioMcp.stop())` so the server stops
-/// gracefully on SIGINT / SIGTERM.
-fn register_signal(ctx: &mut ScopedContext, sig: &str) -> JSResult {
-    let aike = ctx.global_obj().get_property_str(ctx, "Aike")?;
-    let onsignal = aike.get_property_str(ctx, "onSignal")?;
-    let stop_fn = ctx.create_native_function(Callback::Func(js_stop), "mcpStop", 0, 0)?;
-    let sig_val = js_str(ctx, sig.to_string())?;
-    onsignal.call(ctx, aike, &[sig_val, stop_fn.into()])?;
-    Ok(JSValue::UNDEFINED)
 }
 
 // Static methods defined on the class constructor (not prototype)

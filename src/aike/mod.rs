@@ -7,6 +7,8 @@ pub(crate) mod signal;
 mod spawn;
 mod sys;
 
+#[allow(unused_imports)]
+pub(crate) use signal::{register_signal_handler, unregister_signal_handler};
 pub(crate) use {
     class_io_handle::{JSFileHandle, JSStdioHandle, gc_trace_io, make_stats},
     cron::{JSCronJob, gc_trace_cron},

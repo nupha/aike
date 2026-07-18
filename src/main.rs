@@ -522,24 +522,54 @@ async fn main() -> ExitCode {
     }
 
     // await till all background jobs are finished
+    //
+    // Drive the runtime event loop (`run_async`) together with the script's
+    // top-level promise. Exit as soon as the runtime reports back: `run_async`
+    // returns `Interrupted` once the interrupt flag is set (e.g. via
+    // `Aike.exit`). We must NOT wait for `fut` in that case — `fut` only
+    // resolves after `run_async` ticks it, so if `run_async` has already
+    // returned on interrupt, `fut` can never progress and the process would
+    // hang forever.
+    //
+    // `rt_fut` is polled from a single site at any time (either the `select!`
+    // here, or the `rt_fut.await` after the script promise settles) to avoid
+    // double-polling the same future, which would let one poll consume the
+    // interrupt while the other is left pending.
     let result = if let Some(fut) = promise_future {
-        let (rt_res, promise_res) = tokio::join!(rt.run_async(), fut);
-        match promise_res {
-            Ok(_) => {
-                // suppress eval result printing
-            }
-            Err(reason) => {
-                // Promise reject
-                ctx.root_scope().with_new_scope(|cx| {
-                    let text = Exception::Error(reason).to_text(cx);
-                    colorize_println(text.message, RedFg);
-                    if let Some(tb) = text.traceback {
-                        eprintln!("{}", tb);
+        let mut rt_fut = std::pin::pin!(rt.run_async());
+        let mut script = Some(fut);
+
+        loop {
+            if let Some(s) = script.take() {
+                tokio::select! {
+                    rt_res = &mut rt_fut => {
+                        break rt_res;
+                    },
+
+                    promise_res = s => {
+                        match promise_res {
+                            Ok(_) => {
+                                // suppress eval result printing
+                            }
+                            Err(reason) => {
+                                // Promise reject
+                                ctx.root_scope().with_new_scope(|cx| {
+                                    let text = Exception::Error(reason).to_text(cx);
+                                    colorize_println(text.message, RedFg);
+                                    if let Some(tb) = text.traceback {
+                                        eprintln!("{}", tb);
+                                    }
+                                });
+                            }
+                        }
+                        // Script settled; drop it and keep driving the runtime
+                        // until it returns (interrupt / drained).
                     }
-                });
+                }
+            } else {
+                break rt_fut.await;
             }
         }
-        rt_res
     } else {
         rt.run_async().await
     };
