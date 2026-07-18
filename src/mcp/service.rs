@@ -34,7 +34,7 @@ use zuqe::{
 
 use crate::{USER_CLASS_DEFS, http::IncomingRequest};
 
-use super::{ArgsVal, EnvVal};
+use super::{CommandArgs, EnvVal};
 
 /// Native tool handler function type.
 pub(crate) type NativeMcpToolFn = Arc<
@@ -69,7 +69,7 @@ pub(crate) enum McpTransport {
     /// them.
     Stdio {
         spawn_env: RefCell<HashMap<String, EnvVal>>,
-        spawn_args: RefCell<Option<ArgsVal>>,
+        spawn_args: RefCell<CommandArgs>,
         before_run: RefCell<Option<Object>>,
         is_shared: Cell<bool>,
         extra_files: RefCell<Vec<String>>,
@@ -118,7 +118,7 @@ impl McpServicePayload {
             handlers: Vec::new(),
             transport: McpTransport::Stdio {
                 spawn_env: RefCell::new(HashMap::new()),
-                spawn_args: RefCell::new(None),
+                spawn_args: RefCell::new(CommandArgs::Empty),
                 before_run: RefCell::new(None),
                 is_shared: Cell::new(false),
                 extra_files: RefCell::new(Vec::new()),
@@ -159,7 +159,7 @@ impl McpServicePayload {
                         f.trace(gcx);
                     }
                 }
-                if let Some(ArgsVal::Func(f)) = &*spawn_args.borrow() {
+                if let CommandArgs::Func(f) = &*spawn_args.borrow() {
                     f.trace(gcx);
                 }
                 if let Some(f) = &*before_run.borrow() {

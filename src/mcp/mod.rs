@@ -22,7 +22,8 @@ pub(super) enum EnvVal {
 }
 
 #[derive(Clone)]
-pub(super) enum ArgsVal {
+pub(super) enum CommandArgs {
+    Empty,
     Text(Vec<String>),
     Func(Object),
 }

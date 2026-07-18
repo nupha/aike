@@ -26,7 +26,7 @@ use zuqe::{
 use crate::{USER_CLASS_DEFS, http::IncomingRequest};
 
 use super::{
-    ArgsVal, EnvVal,
+    CommandArgs, EnvVal,
     class_mcp::{JSBaseMcp, get_payload, js_str},
     service::{
         McpSchemas, McpService, McpServicePayload, McpTransport, handle_mcp_tool_call,
@@ -106,7 +106,7 @@ fn js_define(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             ctx.throw_type_error("StdioMcp.define options must be an object");
             return Err(-1);
         };
-        apply_stdio_options(ctx, &mut payload, obj)?;
+        parse_stdio_define_options(ctx, &mut payload, obj)?;
     }
 
     // Shared parser: write compiled schemas + js_handlers into the payload.
@@ -162,35 +162,7 @@ fn js_get(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             },
             _ => Ok(JSValue::NULL),
         },
-        FIELD_SPAWN_ENV => match &p.transport {
-            McpTransport::Stdio { spawn_env, .. } => {
-                // Build { key: string | (() => string | undefined) } from stored EnvVal map.
-                let mut obj = ctx.create_base_object()?;
-                for (k, v) in spawn_env.borrow().iter() {
-                    let val = match v {
-                        EnvVal::Text(s) => js_str(ctx, s.clone())?.into(),
-                        EnvVal::Func(f) => f.clone().into(),
-                    };
-                    obj.define_property_value_str(ctx, k, val, JS_PROP_ENUMERABLE)?;
-                }
-                Ok(obj.into())
-            }
-            _ => Ok(ctx.create_base_object()?.into()),
-        },
-        FIELD_SPAWN_ARGS => match &p.transport {
-            McpTransport::Stdio { spawn_args, .. } => match &*spawn_args.borrow() {
-                None => Ok(JSValue::UNDEFINED),
-                Some(ArgsVal::Text(v)) => {
-                    let mut lst = Vec::with_capacity(v.len());
-                    for s in v {
-                        lst.push(js_str(ctx, s.clone())?.into());
-                    }
-                    Ok(Array::from_values(ctx, lst)?.into())
-                }
-                Some(ArgsVal::Func(f)) => Ok(f.clone().into()),
-            },
-            _ => Ok(JSValue::UNDEFINED),
-        },
+
         _ => Ok(JSValue::UNDEFINED),
     }
 }
@@ -229,11 +201,70 @@ fn js_run(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     Ok(promise.into())
 }
 
+/// Resolve `spawnEnv` / `spawnArgs` against the agent's context.
+///
+/// Both are exposed as `(ctx: Record<string,string>) => result` functions so the
+/// framework can evaluate them at launch time with the agent's McpCtx:
+/// - `spawnEnv(ctx)` builds `{ key: value }`: `Text` entries are copied
+///   verbatim; `Func` entries are called as `f(ctx)` and, when they return a
+///   non-undefined string, set `key = result` (an undefined return is skipped).
+/// - `spawnArgs(ctx)` returns the static `string[]` for `Text`, or `f(ctx)` for
+///   `Func` (which must return `string[] | undefined`).
+fn js_spawn_resolve(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let this = cc.this();
+    let p = get_payload(ctx, &this)?;
+
+    // ns arg — the agent's McpCtx (Record<string,string>); default to {}.
+    let nsobj = match cc.arg(0).as_object().copied() {
+        Some(o) => o,
+        None => ctx.create_base_object()?,
+    };
+
+    match &p.transport {
+        McpTransport::Stdio {
+            spawn_env,
+            spawn_args,
+            ..
+        } => match cc.magic() as i16 {
+            FIELD_SPAWN_ENV => {
+                let mut env = ctx.create_base_object()?;
+                for (k, v) in spawn_env.borrow().iter() {
+                    let val = match v {
+                        EnvVal::Text(s) => js_str(ctx, s.clone())?.into(),
+                        EnvVal::Func(f) => {
+                            let r = f.call(ctx, JSValue::UNDEFINED, &[nsobj.into()])?;
+                            if r.is_undefined() {
+                                continue;
+                            }
+                            r
+                        }
+                    };
+                    env.define_property_value_str(ctx, k, val, JS_PROP_ENUMERABLE)?;
+                }
+                Ok(env.into())
+            }
+            FIELD_SPAWN_ARGS => match &*spawn_args.borrow() {
+                CommandArgs::Empty => Ok(Array::with_capacity(ctx, 0)?.into()),
+                CommandArgs::Text(v) => {
+                    let mut lst = Vec::with_capacity(v.len());
+                    for s in v {
+                        lst.push(js_str(ctx, s.clone())?.into());
+                    }
+                    Ok(Array::from_values(ctx, lst)?.into())
+                }
+                CommandArgs::Func(f) => f.call(ctx, JSValue::UNDEFINED, &[nsobj.into()]),
+            },
+            _ => Ok(JSValue::UNDEFINED),
+        },
+        _ => Ok(JSValue::UNDEFINED),
+    }
+}
+
 /// Apply the `StdioMcp.define(name, tools, options)` options object onto a
 /// fresh payload. `tools` is handled separately (it is the lifted 2nd arg),
 /// so this covers version / instructions / spawnEnv / spawnArgs / beforeRun / shared /
 /// extraFiles.
-fn apply_stdio_options(
+fn parse_stdio_define_options(
     ctx: &mut ScopedContext,
     p: &mut McpServicePayload,
     opt: Object,
@@ -280,13 +311,10 @@ fn apply_stdio_options(
         .filter(|v| !v.is_undefined())
     {
         let val = if v.as_object().map_or(false, |o| o.is_callable()) {
-            ArgsVal::Func(v.into_callable(ctx)?)
+            CommandArgs::Func(v.into_callable(ctx)?)
         } else {
-            let arr = v.into_object(ctx)?;
-            let len = arr
-                .get_property_str(ctx, "length")
-                .and_then(|l| l.to_number(ctx))
-                .map(|n| n.to_i32())? as usize;
+            let arr = Array::try_from(v)?;
+            let len = arr.get_length_prop(ctx)? as usize;
             let mut out = Vec::with_capacity(len);
             for i in 0..len {
                 let s = arr
@@ -297,10 +325,12 @@ fn apply_stdio_options(
                     .to_string();
                 out.push(s);
             }
-            ArgsVal::Text(out)
+
+            CommandArgs::Text(out)
         };
+
         if let McpTransport::Stdio { spawn_args, .. } = &mut p.transport {
-            *spawn_args.borrow_mut() = Some(val);
+            *spawn_args.borrow_mut() = val;
         }
     }
 
@@ -597,8 +627,8 @@ const STDIO_MCP_PROTO: &[FieldDef] = &[
     FieldDef::GETSET("shared", Some(js_get), None, FIELD_SHARED),
     FieldDef::GETSET("extraFiles", Some(js_get), None, FIELD_EXTRA_FILES),
     FieldDef::GETSET("beforeRun", Some(js_get), None, FIELD_BEFORE_RUN),
-    FieldDef::GETSET("spawnEnv", Some(js_get), None, FIELD_SPAWN_ENV),
-    FieldDef::GETSET("spawnArgs", Some(js_get), None, FIELD_SPAWN_ARGS),
+    FieldDef::FUNC("spawnEnv", 1, js_spawn_resolve, FIELD_SPAWN_ENV),
+    FieldDef::FUNC("spawnArgs", 1, js_spawn_resolve, FIELD_SPAWN_ARGS),
     FieldDef::FUNC("run", 0, js_run, 0),
 ];
 

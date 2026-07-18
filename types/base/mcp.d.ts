@@ -230,12 +230,6 @@ declare module "mcp" {
     inputSchema: Record<string, unknown>;
   }
 
-  export type McpCtx = {
-    MCP_AGENT_NAME: string;
-    MCP_AGENT_WORKSPACE: string;
-    [key: string]: string;
-  };
-
   /**
    * Abstract base class shared by {@link StdioMcp} and {@link HttpMcp} (both wrap
    * the same server payload). Holds the prototype surface common to every MCP
@@ -310,6 +304,9 @@ declare module "mcp" {
 
     /** Async hook run before the server starts, or `null`. */
     readonly beforeRun: (() => Promise<void>) | null;
+
+    spawnArgs(ns: Record<string, string>): string[];
+    spawnEnv(ns: Record<string, string>): Record<string, string>;
 
     /**
      * Launch this server: awaits `beforeRun` if set, starts the stdio
