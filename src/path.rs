@@ -104,36 +104,40 @@ const COMBINE_RESOLVE: i32 = 1;
 fn js_path_combine(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let argc = cc.length();
 
-    let buf = if cc.magic() == COMBINE_JOIN {
-        // join: accumulate left to right
-        let mut buf = PathBuf::new();
-        for i in 0..argc {
-            let seg = arg_to_string(ctx, &cc, i)?;
-            buf.push(&seg);
-        }
-        buf
-    } else {
-        // resolve: right to left, stop at first absolute segment
-        let mut buf = PathBuf::new();
-        let mut absolute = false;
-        for i in (0..argc).rev() {
-            let seg = arg_to_string(ctx, &cc, i)?;
-            let p = Path::new(&seg);
-            if p.is_absolute() {
-                buf = p.to_path_buf().join(&buf);
-                absolute = true;
-                break;
+    let buf = match cc.magic() {
+        COMBINE_JOIN => {
+            // join: accumulate segments left to right (no `.`/`..` normalization
+            // beyond PathBuf::push collapsing them; caller normalizes at the end).
+            let mut buf = PathBuf::new();
+            for i in 0..argc {
+                let seg = arg_to_string(ctx, &cc, i)?;
+                buf.push(&seg);
             }
-            buf = p.to_path_buf().join(&buf);
+            buf
         }
-        if !absolute {
-            let cwd = std::env::current_dir().map_err(|e| {
-                ctx.throw_internal_error(&e.to_string());
-                -1
-            })?;
-            buf = cwd.join(&buf);
+        COMBINE_RESOLVE => {
+            // resolve: like Node's path.resolve — process segments right to left;
+            // an absolute segment discards everything to its left. If the
+            // accumulation is still relative, anchor it at the cwd so the result
+            // is always an absolute path.
+            let mut buf = PathBuf::new();
+            for i in (0..argc).rev() {
+                let seg = arg_to_string(ctx, &cc, i)?;
+                buf = Path::new(&seg).to_path_buf().join(&buf);
+                if Path::new(&seg).is_absolute() {
+                    break;
+                }
+            }
+            if !buf.is_absolute() {
+                let cwd = std::env::current_dir().map_err(|e| {
+                    ctx.throw_internal_error(&e.to_string());
+                    -1
+                })?;
+                buf = cwd.join(&buf);
+            }
+            buf
         }
-        buf
+        _ => unreachable!(),
     };
 
     let result = normalize_path(&buf);
