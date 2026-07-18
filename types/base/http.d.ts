@@ -147,7 +147,7 @@ declare module "http" {
      * Register an HTTP-transport MCP (Model Context Protocol) server.
      *
      * Pass the mount path and an `HttpMcp` instance created via
-     * `HttpMcp.define(name, tools, options)`. The `mountPath` (must start with `/`)
+     * `HttpMcp.define(config)`. The `mountPath` (must start with `/`)
      * is assigned here — it is the URL the endpoint is served at. Rust
      * auto-generates the four protocol methods: `initialize`,
      * `notifications/initialized`, `tools/list`, `tools/call`.

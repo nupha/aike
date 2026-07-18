@@ -120,7 +120,7 @@ fn js_add_tool(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let new_handlers = p.register_js_tools(tools, name_to_index, js_handlers);
 
     // HTTP hot-reload: push the new handler table so the running poller picks it up.
-    if let McpTransport::Http { update_tx, .. } = &p.transport {
+    if let McpTransport::Http { update_tx, .. } = &*p.transport.borrow() {
         if let Some(tx) = update_tx {
             let _ = tx.send(new_handlers);
         }
@@ -165,7 +165,7 @@ fn js_update_tools(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     p.js_handlers = RefCell::new(js_handlers.clone());
 
     // HTTP hot-reload: push the new handler table so the running poller picks it up.
-    if let McpTransport::Http { update_tx, .. } = &p.transport {
+    if let McpTransport::Http { update_tx, .. } = &*p.transport.borrow() {
         if let Some(utx) = update_tx {
             let _ = utx.send(js_handlers);
         }

@@ -1,16 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-use std::{
-    borrow::Cow,
-    cell::{Cell, RefCell},
-    collections::HashMap,
-    sync::{Arc, RwLock},
-};
+use std::cell::Cell;
 
 use linkme::distributed_slice;
 use zuqe::{
-    CallContext, ClassCtorDef, ClassID, FieldDef, JSResult, JSValue, NativeObject, Object, Runtime,
+    CallContext, ClassCtorDef, ClassID, FieldDef, JSResult, JSValue, NativeObject, Runtime,
     ScopedContext, def_native_object,
 };
 
@@ -18,80 +13,29 @@ use crate::USER_CLASS_DEFS;
 
 use super::{
     class_mcp::{JSBaseMcp, get_payload, js_str},
-    service::{McpSchemas, McpServicePayload, McpTransport, parse_mcp_tools},
+    service::{McpServicePayload, McpTransport, parse_mcp_define},
 };
 
 const FIELD_MOUNT_PATH: i16 = 12;
 
 fn js_http_define(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    // name — required first argument (advertised server name).
-    let name = cc.arg(0).to_string(ctx).map_err(|_| {
-        ctx.throw_type_error("HttpMcp.define name must be a string");
-        -1
-    })?;
-    let name = name.content().encode_utf8(false).to_string();
-
-    // tools — required second argument (object-keyed DSL or array).
-    let tools_val = cc.arg(1);
-    if tools_val.as_object().is_none() {
-        ctx.throw_type_error("`tools` must be an array or object");
+    let Some(cfg) = cc.arg(0).as_object().copied() else {
+        ctx.throw_type_error("HttpMcp.define(config) — config must be an object");
         return Err(-1);
-    }
+    };
 
-    let mut payload = McpServicePayload::new_http();
-    payload.server_name = name;
+    let transport = McpTransport::Http {
+        mount_path: String::new(),
+        update_tx: None,
+    };
 
-    // Optional third `options` object (version / instructions).
-    let opt = cc.arg(2);
-    if !opt.is_undefined() {
-        let Some(obj) = opt.as_object().copied() else {
-            ctx.throw_type_error("HttpMcp.define options must be an object");
-            return Err(-1);
-        };
-        apply_http_options(ctx, &mut payload, obj)?;
-    }
-
-    // Shared parser: write compiled schemas + js_handlers into the payload.
-    let (tools, name_to_index, js_handlers) = parse_mcp_tools(ctx, &tools_val)?;
-    payload.schemas = Arc::new(RwLock::new(McpSchemas {
-        tools,
-        name_to_index,
-        native_map: HashMap::new(),
-    }));
-    payload.js_handlers = RefCell::new(js_handlers);
+    let payload = parse_mcp_define(ctx, cfg, transport)?;
 
     JSHttpMcp::new_instance(ctx, JSValue::UNDEFINED, payload).map(JSValue::from)
 }
 
-fn apply_http_options(
-    ctx: &mut ScopedContext,
-    p: &mut McpServicePayload,
-    opt: Object,
-) -> Result<(), i32> {
-    if let Some(v) = opt
-        .get_property_str(ctx, "version")
-        .ok()
-        .filter(|v| !v.is_undefined())
-    {
-        let s = v.to_string(ctx)?.content().encode_utf8(false).to_string();
-        *p.version.borrow_mut() = Cow::Owned(s);
-    }
-    if let Some(v) = opt
-        .get_property_str(ctx, "instructions")
-        .ok()
-        .filter(|v| !v.is_undefined())
-    {
-        let s = v.to_string(ctx)?.content().encode_utf8(false).to_string();
-        *p.instructions.borrow_mut() = Cow::Owned(s);
-    }
-
-    Ok(())
-}
-
 fn js_http_constructor(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
-    ctx.throw_type_error(
-        "HttpMcp cannot be constructed with `new`; use HttpMcp.define(name, tools, options)",
-    );
+    ctx.throw_type_error("HttpMcp cannot be constructed with `new`; use HttpMcp.define(config)");
     Err(-1)
 }
 
@@ -100,7 +44,7 @@ fn js_http_get(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let p = get_payload(ctx, &this)?;
     match cc.magic() as i16 {
-        FIELD_MOUNT_PATH => match &p.transport {
+        FIELD_MOUNT_PATH => match &*p.transport.borrow() {
             McpTransport::Http { mount_path, .. } => js_str(ctx, mount_path.clone()),
             _ => Ok(JSValue::UNDEFINED),
         },
@@ -108,7 +52,7 @@ fn js_http_get(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     }
 }
 
-const HTTP_MCP_STATIC: &[FieldDef] = &[FieldDef::FUNC("define", 3, js_http_define, 0)];
+const HTTP_MCP_STATIC: &[FieldDef] = &[FieldDef::FUNC("define", 1, js_http_define, 0)];
 const HTTP_MCP_PROTO: &[FieldDef] = &[FieldDef::GETSET(
     "mountPath",
     Some(js_http_get),

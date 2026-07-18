@@ -100,7 +100,6 @@ declare module "mcp" {
    *
    * Tool name is the key — no `name` field needed.
    * Arguments are defined via `args` DSL, auto-converted to JSON Schema.
-   * For raw JSON Schema, use the array format (`McpToolDefinition[]`).
    *
    * @example
    * const tools = {
@@ -123,18 +122,6 @@ declare module "mcp" {
      * Argument DSL — Rust auto-converts this to standard JSON Schema inputSchema.
      */
     args: Record<string, McpToolShortArg>;
-  }
-
-  /** Definition of a single MCP tool in array format (backward compat). */
-  export interface McpToolDefinition {
-    /** Unique tool name (required by MCP spec). */
-    name: string;
-    /** Human-readable description of what the tool does. */
-    description?: string;
-    /** JSON Schema for the tool's arguments. */
-    inputSchema: McpToolInputSchema;
-    /** Handler invoked on `tools/call`. */
-    handler: McpToolHandler;
   }
 
   /** An icon advertised by an MCP server (`Implementation.icons`). */
@@ -254,18 +241,49 @@ declare module "mcp" {
     readonly instructions: string;
 
     /**
-     * Dynamically add JS tools after construction. Accepts the same `tools` DSL
-     * as `define` (object-keyed map or `McpToolDefinition[]` array).
+     * Dynamically add JS tools after construction. Accepts the same object-keyed
+     * `tools` DSL as `define`.
      */
-    addTool(tools: McpToolDefinition[] | Record<string, McpToolShortDef>): this;
+    addTool(tools: Record<string, McpToolShortDef>): this;
 
     /**
      * Hot-reload: REPLACE all JS tools (native tools are preserved). Accepts the
-     * same `tools` DSL as `define`.
+     * same object-keyed `tools` DSL as `define`.
      */
-    updateTools(
-      tools: McpToolDefinition[] | Record<string, McpToolShortDef>,
-    ): this;
+    updateTools(tools: Record<string, McpToolShortDef>): this;
+  }
+
+  /**
+   * Common config shared by {@link StdioMcp.define} and {@link HttpMcp.define}.
+   * `name` and `tools` are required in every variant; `version` /
+   * `instructions` are optional server-identity fields.
+   */
+  interface BaseMcpConfig {
+    /** Required: advertised server name. */
+    name: string;
+    /** Required: object-keyed tool DSL `{ name: { desc, handler, args } }`. */
+    tools: Record<string, McpToolShortDef>;
+    /** Advertised server version. */
+    version?: string;
+    /** Server instructions shown to clients. */
+    instructions?: string;
+  }
+
+  /**
+   * Config for {@link StdioMcp.define}. Extends {@link BaseMcpConfig} with the
+   * stdio spawn-time transport options.
+   */
+  export interface StdioMcpConfig extends BaseMcpConfig {
+    /** Process command to spawn (defaults to the current aike binary). */
+    command?: string;
+    /** Environment passed to the spawned process. */
+    env?: Record<string, string | (() => string | undefined)>;
+    /** CLI args passed to the spawned process. */
+    args?: string[] | (() => string[]);
+    /** Async hook run once before the server starts. */
+    beforeRun?: () => Promise<void>;
+    /** Extra source files bundled with the server. */
+    extraFiles?: string[];
   }
 
   /**
@@ -275,29 +293,13 @@ declare module "mcp" {
     private constructor();
 
     /**
-     * Create a stdio MCP server.
-     * @param serverName — the advertised server name.
-     * @param tools — required object-keyed tool DSL
-     *   `{ name: { desc, handler, args } }`.
-     * @param options — optional config (everything except `tools`):
-     *   version / instructions / env / args / beforeRun / shared / extraFiles.
+     * Create a stdio MCP server from a single config object.
+     * @param config — see {@link StdioMcpConfig}. `name` and `tools` are required.
      */
-    static define(
-      serverName: string,
-      tools: Record<string, McpToolShortDef>,
-      options?: {
-        version?: string;
-        instructions?: string;
-        env?: Record<string, string | (() => string | undefined)>;
-        args?: string[] | (() => string[]);
-        beforeRun?: () => Promise<void>;
-        shared?: boolean;
-        extraFiles?: string[];
-      },
-    ): StdioMcp;
+    static define(config: StdioMcpConfig): StdioMcp;
 
-    /** Whether the server is shared. */
-    readonly shared: boolean;
+    /** Process command used to spawn the server (empty string = default aike binary). */
+    readonly command: string;
 
     /** Extra file paths bundled with the server. */
     readonly extraFiles: string[];
@@ -309,9 +311,8 @@ declare module "mcp" {
     spawnEnv(ns: Record<string, string>): Record<string, string>;
 
     /**
-     * Launch this server: awaits `beforeRun` if set, starts the stdio
-     * server, registers SIGINT/SIGTERM stop handlers, and force-exits once
-     * the server stops.
+     * Launch this server: starts the stdio server.
+     * Registers SIGINT/SIGTERM stop handlers, and force-exits once the server stops.
      */
     run(): Promise<void>;
 
@@ -340,27 +341,22 @@ declare module "mcp" {
    * `server.updateTools(tools)` (replace all JS tools) or `server.addTool(tools)`
    * (append).
    */
+  /**
+   * Config for {@link HttpMcp.define}. Extends {@link BaseMcpConfig}; the HTTP
+   * transport has no define-time options — the URL `mountPath` is NOT part of
+   * this config, it is supplied when mounted via `HttpServer.mcp(path, server)`.
+   */
+  export interface HttpMcpConfig extends BaseMcpConfig {}
+
   export class HttpMcp extends BaseMcp {
     private constructor();
 
     /**
-     * Create an HTTP MCP server.
-     *
-     * The mount path is NOT set here — it is supplied when the server is
-     * mounted via `HttpServer.mcp(mountPath, server)`.
-     * @param name — the advertised server name (required, positional).
-     * @param tools — required tool DSL, either an object-keyed map
-     *   `{ name: { desc, handler, args } }` or a `McpToolDefinition[]` array.
-     * @param options — optional config: `version` / `instructions`.
+     * Create an HTTP MCP server from a single config object.
+     * The mount path is supplied later via `HttpServer.mcp(mountPath, server)`.
+     * @param config — see {@link HttpMcpConfig}. `name` and `tools` are required.
      */
-    static define(
-      name: string,
-      tools: McpToolDefinition[] | Record<string, McpToolShortDef>,
-      options?: {
-        version?: string;
-        instructions?: string;
-      },
-    ): HttpMcp;
+    static define(config: HttpMcpConfig): HttpMcp;
 
     /** The URL mount path this server is served at. */
     readonly mountPath: string;

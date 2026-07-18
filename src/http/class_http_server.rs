@@ -324,7 +324,7 @@ fn js_mcp(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             ctx.throw_type_error("invalid HttpMcp instance");
             -1
         })?;
-        match &mut p.transport {
+        match &mut *p.transport.borrow_mut() {
             McpTransport::Http { mount_path: mp, .. } => {
                 *mp = mount_path;
             }
@@ -784,21 +784,28 @@ fn js_listen(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                         ctx.throw_type_error("invalid HttpMcp endpoint");
                         -1
                     })?;
+
                 // Build axum route via rmcp's StreamableHttpService
                 let mcp_axum_router = build_axum_mcp_route(p, js_tx.clone(), i);
                 router = router.merge(mcp_axum_router);
+
                 // JS handler table for poller-side dispatch
                 mcp_tables.push(p.js_handlers.borrow().clone());
+
                 // Create update channel for hot-reload of tools
                 let (utx, urx) = channel::unbounded::<Vec<Object>>();
+
                 // Backfill the update sender into the payload (mcp-service.md §6).
                 if let Some(h) = obj.as_native_object_mut::<JSHttpMcp>() {
                     if let Some(p_mut) = h.payload_mut() {
-                        if let McpTransport::Http { update_tx, .. } = &mut p_mut.transport {
+                        if let McpTransport::Http { update_tx, .. } =
+                            &mut *p_mut.transport.borrow_mut()
+                        {
                             *update_tx = Some(utx);
                         }
                     }
                 }
+
                 mcp_update_rxs.push(urx);
             }
 

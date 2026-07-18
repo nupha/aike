@@ -68,11 +68,11 @@ pub(crate) enum McpTransport {
     /// process. The server side only exposes getters — the framework consumes
     /// them.
     Stdio {
-        spawn_env: RefCell<HashMap<String, EnvVal>>,
-        spawn_args: RefCell<CommandArgs>,
-        before_run: RefCell<Option<Object>>,
-        is_shared: Cell<bool>,
-        extra_files: RefCell<Vec<String>>,
+        command: String,
+        command_env: HashMap<String, EnvVal>,
+        command_args: CommandArgs,
+        before_run: Option<Object>,
+        extra_files: Vec<String>,
     },
     /// http-only install / hot-reload fields.
     Http {
@@ -100,11 +100,12 @@ pub(crate) struct McpServicePayload {
     pub(crate) handlers: Vec<(String, serde_json::Value, NativeMcpToolFn)>,
 
     /// Transport-specific difference.
-    pub(crate) transport: McpTransport,
+    pub(crate) transport: RefCell<McpTransport>,
 }
 
 impl McpServicePayload {
-    pub(crate) fn new_stdio(server_name: String) -> Self {
+    /// Initialize common fields; the transport is supplied by the caller.
+    fn new(server_name: String, transport: McpTransport) -> Self {
         Self {
             server_name,
             version: RefCell::new(Cow::Borrowed("1.0.0")),
@@ -114,55 +115,31 @@ impl McpServicePayload {
                 name_to_index: HashMap::new(),
                 native_map: HashMap::new(),
             })),
-            js_handlers: RefCell::new(Vec::new()),
             handlers: Vec::new(),
-            transport: McpTransport::Stdio {
-                spawn_env: RefCell::new(HashMap::new()),
-                spawn_args: RefCell::new(CommandArgs::Empty),
-                before_run: RefCell::new(None),
-                is_shared: Cell::new(false),
-                extra_files: RefCell::new(Vec::new()),
-            },
-        }
-    }
-
-    pub(crate) fn new_http() -> Self {
-        Self {
-            server_name: "mcp-server".to_string(),
-            version: RefCell::new(Cow::Borrowed("1.0.0")),
-            instructions: RefCell::new(Cow::Borrowed("")),
-            schemas: Arc::new(RwLock::new(McpSchemas {
-                tools: Vec::new(),
-                name_to_index: HashMap::new(),
-                native_map: HashMap::new(),
-            })),
             js_handlers: RefCell::new(Vec::new()),
-            handlers: Vec::new(),
-            transport: McpTransport::Http {
-                mount_path: String::new(),
-                update_tx: None,
-            },
+            transport: RefCell::new(transport),
         }
     }
 
     /// GC trace — keeps referenced JS objects (handlers, callbacks) alive.
     pub(crate) fn gc_trace(&self, gcx: &mut GcTraceCtx) {
-        match &self.transport {
+        let t = self.transport.borrow();
+        match &*t {
             McpTransport::Stdio {
-                spawn_env,
-                spawn_args,
+                command_env: spawn_env,
+                command_args: spawn_args,
                 before_run,
                 ..
             } => {
-                for v in spawn_env.borrow().values() {
+                for v in spawn_env.values() {
                     if let EnvVal::Func(f) = v {
                         f.trace(gcx);
                     }
                 }
-                if let CommandArgs::Func(f) = &*spawn_args.borrow() {
+                if let CommandArgs::Func(f) = spawn_args {
                     f.trace(gcx);
                 }
-                if let Some(f) = &*before_run.borrow() {
+                if let Some(f) = before_run {
                     f.trace(gcx);
                 }
             }
@@ -625,7 +602,7 @@ pub(crate) fn build_axum_mcp_route(
         config,
     );
 
-    let mount_path = match &p.transport {
+    let mount_path = match &*p.transport.borrow() {
         McpTransport::Http { mount_path, .. } => mount_path.clone(),
         _ => String::new(),
     };
@@ -792,6 +769,77 @@ pub(crate) fn build_input_schema_from_args(
     Ok(Some(serde_json::Value::Object(schema)))
 }
 
+/// Shared config parsing for `StdioMcp.define` / `HttpMcp.define`.
+///
+/// Parses the common fields (`name` (required, non-empty), `version`,
+/// `instructions`, `tools` (required, object)) from the single config object,
+/// compiles the tool schemas + JS handlers, and returns a fully-initialized
+/// `McpServicePayload` carrying `transport`. The caller then applies
+/// transport-specific options (e.g. stdio's command/env/args).
+///
+/// Returns the constructed payload.
+pub(crate) fn parse_mcp_define(
+    ctx: &mut ScopedContext,
+    cfg: Object,
+    transport: McpTransport,
+) -> Result<McpServicePayload, i32> {
+    // name — required.
+    let name_val = cfg.get_property_str(ctx, "name")?;
+    if name_val.is_undefined() {
+        ctx.throw_type_error("Mcp.define: `name` is required");
+        return Err(-1);
+    }
+    let name = name_val
+        .to_string(ctx)?
+        .content()
+        .encode_utf8(false)
+        .to_string();
+    if name.is_empty() {
+        ctx.throw_type_error("Mcp.define: `name` must not be empty");
+        return Err(-1);
+    }
+
+    // tools — required
+    let tools_val = cfg.get_property_str(ctx, "tools")?;
+    if tools_val.as_object().is_none() {
+        ctx.throw_type_error("Mcp.define: `tools` must be an object");
+        return Err(-1);
+    }
+
+    let mut payload = McpServicePayload::new(name, transport);
+
+    // version
+    if let Some(v) = cfg
+        .get_property_str(ctx, "version")
+        .ok()
+        .filter(|v| !v.is_undefined())
+    {
+        let s = v.to_string(ctx)?.content().encode_utf8(false).to_string();
+        *payload.version.borrow_mut() = Cow::Owned(s);
+    }
+
+    // instructions
+    if let Some(v) = cfg
+        .get_property_str(ctx, "instructions")
+        .ok()
+        .filter(|v| !v.is_undefined())
+    {
+        let s = v.to_string(ctx)?.content().encode_utf8(false).to_string();
+        *payload.instructions.borrow_mut() = Cow::Owned(s);
+    }
+
+    // Shared tool parser: write compiled schemas + js_handlers into the payload.
+    let (tools, name_to_index, js_handlers) = parse_mcp_tools(ctx, &tools_val)?;
+    payload.schemas = Arc::new(RwLock::new(McpSchemas {
+        tools,
+        name_to_index,
+        native_map: HashMap::new(),
+    }));
+    payload.js_handlers = RefCell::new(js_handlers);
+
+    Ok(payload)
+}
+
 /// Parse tools from either array format (McpToolDefinition[]) or
 /// object-keyed DSL format (ToolsMap).
 ///
@@ -800,109 +848,19 @@ pub(crate) fn parse_mcp_tools(
     ctx: &mut ScopedContext,
     tools_val: &JSValue,
 ) -> Result<(Vec<Tool>, HashMap<String, usize>, Vec<Object>), i32> {
-    if let Some(o) = tools_val.as_object().copied() {
-        if o.is_array(ctx).map_err(|_| {
-            ctx.throw_type_error("tools is_array check failed");
-            -1
-        })? {
-            parse_mcp_tools_array(ctx, o)
-        } else {
-            parse_mcp_tools_object(ctx, o)
-        }
-    } else {
-        ctx.throw_type_error("tools must be an array or object");
-        Err(-1)
+    let Some(o) = tools_val.as_object().copied() else {
+        ctx.throw_type_error("tools must be an object");
+        return Err(-1);
+    };
+    // Only the object-keyed DSL is supported; arrays are rejected.
+    if o.is_array(ctx).map_err(|_| {
+        ctx.throw_type_error("tools is_array check failed");
+        -1
+    })? {
+        ctx.throw_type_error("tools must be an object, not an array");
+        return Err(-1);
     }
-}
-
-/// Parse tools in array format (McpToolDefinition[]).
-///
-/// Each element is standard MCP schema: `{ name, description?, inputSchema?, handler }`.
-/// Extracts handler for JS call table, builds rmcp::model::Tool for protocol.
-pub(crate) fn parse_mcp_tools_array(
-    ctx: &mut ScopedContext,
-    tools_arr: Object,
-) -> Result<(Vec<Tool>, HashMap<String, usize>, Vec<Object>), i32> {
-    // Get array length via the standard JS `length` property
-    let len = tools_arr
-        .get_property_str(ctx, "length")
-        .and_then(|v| v.to_number(ctx))
-        .map(|n| n.to_i32())
-        .map_err(|_| {
-            ctx.throw_type_error("tools array must have a valid length");
-            -1
-        })? as usize;
-
-    let mut tools: Vec<Tool> = Vec::with_capacity(len);
-    let mut name_to_index: HashMap<String, usize> = HashMap::new();
-    let mut js_handlers: Vec<Object> = Vec::with_capacity(len);
-
-    for i in 0..len {
-        let elem = tools_arr.get_property_u32(ctx, i as u32)?;
-        let tool_obj = elem
-            .as_object()
-            .ok_or_else(|| {
-                ctx.throw_type_error("each tool must be an object");
-                -1
-            })?
-            .clone();
-
-        // name (required by MCP spec)
-        let name = tool_obj
-            .get_property_str(ctx, "name")
-            .and_then(|v| v.to_string(ctx))
-            .map(|s| s.content().encode_utf8(false).to_string())
-            .map_err(|_| {
-                ctx.throw_type_error("tool.name is required");
-                -1
-            })?;
-
-        // description
-        let description = tool_obj
-            .get_property_str(ctx, "description")
-            .ok()
-            .filter(|v| !v.is_undefined())
-            .and_then(|v| v.to_string(ctx).ok())
-            .map(|s| s.content().encode_utf8(false).to_string())
-            .unwrap_or_default();
-
-        // inputSchema (required for array format — standard MCP Schema)
-        let input_schema_json = tool_obj
-            .get_property_str(ctx, "inputSchema")
-            .and_then(|v| {
-                v.as_object().copied().ok_or_else(|| {
-                    ctx.throw_type_error(&format!("tool '{}' inputSchema must be an object", name));
-                    -1
-                })
-            })
-            .and_then(|o| o.to_serde_json(ctx))?;
-
-        // handler (required) — stored in JS call table
-        let handler = tool_obj
-            .get_property_str(ctx, "handler")
-            .and_then(|v| v.into_callable(ctx))
-            .map_err(|_| {
-                ctx.throw_type_error(&format!("tool '{}' handler must be a function", name));
-                -1
-            })?;
-
-        let input_schema_obj: serde_json::Map<String, serde_json::Value> = match input_schema_json {
-            serde_json::Value::Object(m) => m,
-            _ => serde_json::json!({"type": "object"})
-                .as_object()
-                .unwrap()
-                .clone(),
-        };
-
-        let tool = Tool::new(name.clone(), description, Arc::new(input_schema_obj.into()));
-
-        let idx = tools.len();
-        tools.push(tool);
-        name_to_index.insert(name, idx);
-        js_handlers.push(handler);
-    }
-
-    Ok((tools, name_to_index, js_handlers))
+    parse_mcp_tools_object(ctx, o)
 }
 
 /// Parse tools in object-keyed DSL format.

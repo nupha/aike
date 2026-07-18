@@ -2,11 +2,10 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
 use std::{
-    borrow::Cow,
     cell::{Cell, RefCell},
     collections::HashMap,
     sync::{
-        Arc, Mutex, OnceLock, RwLock,
+        Mutex, OnceLock,
         atomic::{AtomicBool, Ordering},
     },
 };
@@ -29,8 +28,7 @@ use super::{
     CommandArgs, EnvVal,
     class_mcp::{JSBaseMcp, get_payload, js_str},
     service::{
-        McpSchemas, McpService, McpServicePayload, McpTransport, handle_mcp_tool_call,
-        parse_mcp_tools,
+        McpService, McpServicePayload, McpTransport, handle_mcp_tool_call, parse_mcp_define,
     },
 };
 
@@ -70,83 +68,129 @@ pub(crate) fn gc_trace_stdio_state(gcx: &mut GcTraceCtx) {
 /// created via the static `StdioMcp.define(name, tools, options)`. Calling it
 /// with `new` (or as a plain function) throws a TypeError.
 fn js_constructor(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
-    ctx.throw_type_error(
-        "StdioMcp cannot be constructed with `new`; use StdioMcp.define(name, tools, options)",
-    );
+    ctx.throw_type_error("StdioMcp cannot be constructed with `new`; use StdioMcp.define(config)");
     Err(-1)
 }
 
-/// StdioMcp.define(name, tools, options) — static factory.
-///
-/// `tools` is the required second argument: an object-keyed DSL
-/// `{ name: { desc, handler, args } }`. The optional third `options` object
-/// carries version / instructions / spawnEnv / spawnArgs / beforeRun / shared /
-/// extraFiles (everything except `tools`, which is lifted to its own arg).
-fn js_define(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let name = cc
-        .arg(0)
-        .to_string(ctx)?
-        .content()
-        .encode_utf8(false)
-        .to_string();
-
-    // tools — required second argument (object-keyed DSL or array).
-    let tools_val = cc.arg(1);
-    if tools_val.as_object().is_none() {
-        ctx.throw_type_error("`tools` must be an array or object");
+/// StdioMcp.define(config) — static factory taking a single config object.
+fn js_stdio_define(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let Some(cfg) = cc.arg(0).as_object().copied() else {
+        ctx.throw_type_error("StdioMcp.define(config) — config must be an object");
         return Err(-1);
+    };
+
+    // command — allow undefined/string.
+    let mut command = String::new();
+    if let Some(v) = cfg
+        .get_property_str(ctx, "command")
+        .ok()
+        .filter(|v| !v.is_undefined())
+    {
+        command = v.to_string(ctx)?.content().encode_utf8(false).to_string();
     }
 
-    let mut payload = McpServicePayload::new_stdio(name);
+    // env — Record<string, string | (() => string | undefined)>.
+    let mut command_env = HashMap::new();
+    if let Some(v) = cfg
+        .get_property_str(ctx, "env")
+        .ok()
+        .filter(|v| !v.is_undefined())
+    {
+        if let Some(o) = v.as_object().copied() {
+            command_env = parse_env_object(ctx, o)?;
+        }
+    }
 
-    // Optional third `options` object (everything except tools).
-    let opt = cc.arg(2);
-    if !opt.is_undefined() {
-        let Some(obj) = opt.as_object().copied() else {
-            ctx.throw_type_error("StdioMcp.define options must be an object");
-            return Err(-1);
+    // args — string[] | (() => string[]).
+    let mut command_args = CommandArgs::Empty;
+    if let Some(v) = cfg
+        .get_property_str(ctx, "args")
+        .ok()
+        .filter(|v| !v.is_undefined())
+    {
+        command_args = if v.as_object().map_or(false, |o| o.is_callable()) {
+            CommandArgs::Func(v.into_callable(ctx)?)
+        } else {
+            let arr = Array::try_from(v)?;
+            let len = arr.get_length_prop(ctx)? as usize;
+            let mut out = Vec::with_capacity(len);
+            for i in 0..len {
+                let s = arr
+                    .get_property_u32(ctx, i as u32)?
+                    .to_string(ctx)?
+                    .content()
+                    .encode_utf8(false)
+                    .to_string();
+                out.push(s);
+            }
+            CommandArgs::Text(out)
         };
-        parse_stdio_define_options(ctx, &mut payload, obj)?;
     }
 
-    // Shared parser: write compiled schemas + js_handlers into the payload.
-    let (tools, name_to_index, js_handlers) = parse_mcp_tools(ctx, &tools_val)?;
-    payload.schemas = Arc::new(RwLock::new(McpSchemas {
-        tools,
-        name_to_index,
-        native_map: HashMap::new(),
-    }));
-    payload.js_handlers = RefCell::new(js_handlers);
+    // beforeRun — () => Promise<void>.
+    let mut before_run = None;
+    if let Some(v) = cfg
+        .get_property_str(ctx, "beforeRun")
+        .ok()
+        .filter(|v| !v.is_undefined())
+    {
+        before_run = Some(v.into_callable(ctx)?);
+    }
+
+    // extraFiles — string[].
+    let mut extra_files = Vec::new();
+    if let Some(v) = cfg
+        .get_property_str(ctx, "extraFiles")
+        .ok()
+        .filter(|v| !v.is_undefined())
+    {
+        if let Some(arr) = v.as_object().copied() {
+            let len = arr
+                .get_property_str(ctx, "length")
+                .and_then(|l| l.to_number(ctx))
+                .map(|n| n.to_i32())? as usize;
+            let mut paths = Vec::with_capacity(len);
+            for i in 0..len {
+                let s = arr
+                    .get_property_u32(ctx, i as u32)?
+                    .to_string(ctx)?
+                    .content()
+                    .encode_utf8(false)
+                    .to_string();
+                paths.push(s);
+            }
+            extra_files = paths;
+        }
+    }
+
+    let transport = McpTransport::Stdio {
+        command,
+        command_env,
+        command_args,
+        before_run,
+        extra_files,
+    };
+
+    // Common config (name/version/instructions/tools) + compiled schemas.
+    let payload = parse_mcp_define(ctx, cfg, transport)?;
 
     JSStdioMcp::new_instance(ctx, JSValue::UNDEFINED, payload).map(JSValue::from)
 }
 
-const FIELD_VERSION: i16 = 0;
-const FIELD_INSTRUCTIONS: i16 = 1;
-const FIELD_NAME: i16 = 3;
-const FIELD_SHARED: i16 = 6;
-const FIELD_TOOLS: i16 = 7;
 const FIELD_EXTRA_FILES: i16 = 8;
 const FIELD_BEFORE_RUN: i16 = 9;
 const FIELD_SPAWN_ENV: i16 = 10;
 const FIELD_SPAWN_ARGS: i16 = 11;
+const FIELD_COMMAND: i16 = 12;
 
 fn js_get(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let p = get_payload(ctx, &this)?;
 
     match cc.magic() as i16 {
-        FIELD_NAME => js_str(ctx, p.server_name.clone()),
-        FIELD_VERSION => js_str(ctx, p.version.borrow().to_string()),
-        FIELD_INSTRUCTIONS => js_str(ctx, p.instructions.borrow().to_string()),
-        FIELD_TOOLS => p.make_schemas_json(ctx).map(JSValue::from),
-        FIELD_SHARED => match &p.transport {
-            McpTransport::Stdio { is_shared, .. } => Ok(JSValue::from(is_shared.get())),
-            _ => Ok(JSValue::from(false)),
-        },
-        FIELD_EXTRA_FILES => match &p.transport {
+        FIELD_EXTRA_FILES => match &*p.transport.borrow() {
             McpTransport::Stdio { extra_files, .. } => {
-                let files: Vec<String> = extra_files.borrow().clone();
+                let files: Vec<String> = extra_files.clone();
                 let mut lst = Vec::with_capacity(files.len());
                 for f in &files {
                     lst.push(js_str(ctx, f.clone())?.into());
@@ -155,12 +199,16 @@ fn js_get(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             }
             _ => Ok(Array::with_capacity(ctx, 0)?.into()),
         },
-        FIELD_BEFORE_RUN => match &p.transport {
-            McpTransport::Stdio { before_run, .. } => match &*before_run.borrow() {
+        FIELD_BEFORE_RUN => match &*p.transport.borrow() {
+            McpTransport::Stdio { before_run, .. } => match before_run {
                 None => Ok(JSValue::NULL),
                 Some(f) => Ok(f.clone().into()),
             },
             _ => Ok(JSValue::NULL),
+        },
+        FIELD_COMMAND => match &*p.transport.borrow() {
+            McpTransport::Stdio { command, .. } => js_str(ctx, command.clone()),
+            _ => Ok(JSValue::UNDEFINED),
         },
 
         _ => Ok(JSValue::UNDEFINED),
@@ -178,8 +226,8 @@ fn js_run(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     // beforeRun — user init hook, run once before serving (memo/mcp-service.md §2.2).
     // On the JS thread here; fire-and-forget (async hook may still be pending when
     // serve starts — awaiting a JS Promise would block this thread).
-    if let McpTransport::Stdio { before_run, .. } = &p.transport {
-        if let Some(hook) = before_run.borrow().clone() {
+    if let McpTransport::Stdio { before_run, .. } = &*p.transport.borrow() {
+        if let Some(hook) = before_run.clone() {
             if let Err(e) = hook.call(ctx, this, &[]) {
                 return Err(e);
             }
@@ -202,14 +250,6 @@ fn js_run(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 }
 
 /// Resolve `spawnEnv` / `spawnArgs` against the agent's context.
-///
-/// Both are exposed as `(ctx: Record<string,string>) => result` functions so the
-/// framework can evaluate them at launch time with the agent's McpCtx:
-/// - `spawnEnv(ctx)` builds `{ key: value }`: `Text` entries are copied
-///   verbatim; `Func` entries are called as `f(ctx)` and, when they return a
-///   non-undefined string, set `key = result` (an undefined return is skipped).
-/// - `spawnArgs(ctx)` returns the static `string[]` for `Text`, or `f(ctx)` for
-///   `Func` (which must return `string[] | undefined`).
 fn js_spawn_resolve(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let p = get_payload(ctx, &this)?;
@@ -220,15 +260,15 @@ fn js_spawn_resolve(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         None => ctx.create_base_object()?,
     };
 
-    match &p.transport {
+    match &*p.transport.borrow() {
         McpTransport::Stdio {
-            spawn_env,
-            spawn_args,
+            command_env: spawn_env,
+            command_args: spawn_args,
             ..
         } => match cc.magic() as i16 {
             FIELD_SPAWN_ENV => {
                 let mut env = ctx.create_base_object()?;
-                for (k, v) in spawn_env.borrow().iter() {
+                for (k, v) in spawn_env.iter() {
                     let val = match v {
                         EnvVal::Text(s) => js_str(ctx, s.clone())?.into(),
                         EnvVal::Func(f) => {
@@ -243,7 +283,7 @@ fn js_spawn_resolve(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 }
                 Ok(env.into())
             }
-            FIELD_SPAWN_ARGS => match &*spawn_args.borrow() {
+            FIELD_SPAWN_ARGS => match spawn_args {
                 CommandArgs::Empty => Ok(Array::with_capacity(ctx, 0)?.into()),
                 CommandArgs::Text(v) => {
                     let mut lst = Vec::with_capacity(v.len());
@@ -258,134 +298,6 @@ fn js_spawn_resolve(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         },
         _ => Ok(JSValue::UNDEFINED),
     }
-}
-
-/// Apply the `StdioMcp.define(name, tools, options)` options object onto a
-/// fresh payload. `tools` is handled separately (it is the lifted 2nd arg),
-/// so this covers version / instructions / spawnEnv / spawnArgs / beforeRun / shared /
-/// extraFiles.
-fn parse_stdio_define_options(
-    ctx: &mut ScopedContext,
-    p: &mut McpServicePayload,
-    opt: Object,
-) -> Result<(), i32> {
-    // version
-    if let Some(v) = opt
-        .get_property_str(ctx, "version")
-        .ok()
-        .filter(|v| !v.is_undefined())
-    {
-        let s = v.to_string(ctx)?.content().encode_utf8(false).to_string();
-        *p.version.borrow_mut() = Cow::Owned(s);
-    }
-
-    // instructions
-    if let Some(v) = opt
-        .get_property_str(ctx, "instructions")
-        .ok()
-        .filter(|v| !v.is_undefined())
-    {
-        let s = v.to_string(ctx)?.content().encode_utf8(false).to_string();
-        *p.instructions.borrow_mut() = Cow::Owned(s);
-    }
-
-    // spawnEnv — Record<string, string | (() => string | undefined)>.
-    // Forwarded to Aike.spawn when the framework launches this server process.
-    if let Some(v) = opt
-        .get_property_str(ctx, "spawnEnv")
-        .ok()
-        .filter(|v| !v.is_undefined())
-    {
-        if let Some(obj) = v.as_object().copied() {
-            if let McpTransport::Stdio { spawn_env, .. } = &mut p.transport {
-                *spawn_env.borrow_mut() = parse_env_object(ctx, obj)?;
-            }
-        }
-    }
-
-    // spawnArgs — string[] | (() => string[]).
-    // e.g. ["--stack-overflow", "1m"]; forwarded to Aike.spawn as CLI args.
-    if let Some(v) = opt
-        .get_property_str(ctx, "spawnArgs")
-        .ok()
-        .filter(|v| !v.is_undefined())
-    {
-        let val = if v.as_object().map_or(false, |o| o.is_callable()) {
-            CommandArgs::Func(v.into_callable(ctx)?)
-        } else {
-            let arr = Array::try_from(v)?;
-            let len = arr.get_length_prop(ctx)? as usize;
-            let mut out = Vec::with_capacity(len);
-            for i in 0..len {
-                let s = arr
-                    .get_property_u32(ctx, i as u32)?
-                    .to_string(ctx)?
-                    .content()
-                    .encode_utf8(false)
-                    .to_string();
-                out.push(s);
-            }
-
-            CommandArgs::Text(out)
-        };
-
-        if let McpTransport::Stdio { spawn_args, .. } = &mut p.transport {
-            *spawn_args.borrow_mut() = val;
-        }
-    }
-
-    // beforeRun — () => Promise<void>.
-    if let Some(v) = opt
-        .get_property_str(ctx, "beforeRun")
-        .ok()
-        .filter(|v| !v.is_undefined())
-    {
-        let func = v.into_callable(ctx)?;
-        if let McpTransport::Stdio { before_run, .. } = &mut p.transport {
-            *before_run.borrow_mut() = Some(func);
-        }
-    }
-
-    // shared — boolean.
-    if let Some(v) = opt
-        .get_property_str(ctx, "shared")
-        .ok()
-        .filter(|v| !v.is_undefined())
-    {
-        let b = v.to_bool().unwrap_or(false);
-        if let McpTransport::Stdio { is_shared, .. } = &mut p.transport {
-            is_shared.set(b);
-        }
-    }
-
-    // extraFiles — string[].
-    if let Some(v) = opt
-        .get_property_str(ctx, "extraFiles")
-        .ok()
-        .filter(|v| !v.is_undefined())
-    {
-        if let Some(arr) = v.as_object().copied() {
-            let len = arr
-                .get_property_str(ctx, "length")
-                .and_then(|l| l.to_number(ctx))
-                .map(|n| n.to_i32())? as usize;
-            let mut paths = Vec::with_capacity(len);
-            for i in 0..len {
-                let s = arr
-                    .get_property_u32(ctx, i as u32)?
-                    .to_string(ctx)?
-                    .content()
-                    .encode_utf8(false)
-                    .to_string();
-                paths.push(s);
-            }
-            if let McpTransport::Stdio { extra_files, .. } = &mut p.transport {
-                *extra_files.borrow_mut() = paths;
-            }
-        }
-    }
-
-    Ok(())
 }
 
 fn start_stdio_server(ctx: &mut ScopedContext, p: &McpServicePayload) -> Result<Promise, i32> {
@@ -610,7 +522,7 @@ fn register_signal(ctx: &mut ScopedContext, sig: &str) -> JSResult {
 
 // Static methods defined on the class constructor (not prototype)
 const STDIO_MCP_STATIC_ENTRIES: &[FieldDef] = &[
-    FieldDef::FUNC("define", 3, js_define, 0),
+    FieldDef::FUNC("define", 1, js_stdio_define, 0),
     FieldDef::FUNC("stop", 0, js_stop, 0),
     FieldDef::FUNC("isRunning", 0, js_is_running, 0),
 ];
@@ -624,7 +536,7 @@ const STDIO_MCP_CTOR: ClassCtorDef =
 // Instance prototype — the stdio-only surface (shared getters/methods are
 // inherited from `BaseMcp`, see class_mcp.rs).
 const STDIO_MCP_PROTO: &[FieldDef] = &[
-    FieldDef::GETSET("shared", Some(js_get), None, FIELD_SHARED),
+    FieldDef::GETSET("command", Some(js_get), None, FIELD_COMMAND),
     FieldDef::GETSET("extraFiles", Some(js_get), None, FIELD_EXTRA_FILES),
     FieldDef::GETSET("beforeRun", Some(js_get), None, FIELD_BEFORE_RUN),
     FieldDef::FUNC("spawnEnv", 1, js_spawn_resolve, FIELD_SPAWN_ENV),
