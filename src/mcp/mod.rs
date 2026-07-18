@@ -8,9 +8,9 @@ mod service;
 
 pub(crate) use {
     class_http_mcp::JSHttpMcp,
-    class_mcp::JSBaseMcp,
+    class_mcp::{JSBaseMcp, McpTransport},
     class_stdio_mcp::{JSStdioMcp, gc_trace_stdio_state},
-    service::{McpToolCallRequest, McpTransport, build_axum_mcp_route, handle_mcp_tool_call},
+    service::{McpToolCallRequest, build_axum_mcp_route, handle_mcp_tool_call},
 };
 
 use zuqe::{FieldDef, JS_PROP_ENUMERABLE, NativeObject, Object, ScopedContext};

@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
 use std::{
-    cell::{Cell, RefCell},
+    cell::RefCell,
     collections::HashMap,
     process::ExitCode,
     sync::{
@@ -28,10 +28,10 @@ use crate::{USER_CLASS_DEFS, http::IncomingRequest};
 
 use super::{
     CommandArgs, EnvVal,
-    class_mcp::{JSBaseMcp, get_payload, js_str},
-    service::{
-        McpService, McpServicePayload, McpTransport, handle_mcp_tool_call, parse_mcp_define,
+    class_mcp::{
+        JSBaseMcp, McpServicePayload, McpTransport, get_payload, js_str, parse_mcp_define,
     },
+    service::{McpService, handle_mcp_tool_call},
 };
 
 struct StdioMcpShutdown {
@@ -357,27 +357,13 @@ fn start_stdio_server(ctx: &mut ScopedContext, p: &McpServicePayload) -> Result<
         return Err(-1);
     }
 
-    let server_name = p.server_name.clone();
-    let server_version = p.version.borrow().to_string();
-    let server_instructions = p.instructions.borrow().to_string();
-
-    // Read compiled schemas + JS handlers produced at define() time.
-    let schemas = p.schemas.clone();
+    // Read compiled JS handlers produced at define() time.
     let js_handlers = p.js_handlers.borrow().clone();
 
     // Create crossbeam channel (same IncomingRequest mechanism as HTTP mode)
     let (js_tx, js_rx) = channel::unbounded::<IncomingRequest>();
-
-    // Build McpService directly (stdio: no native handlers, single endpoint).
-    let service = McpService::new(
-        schemas,
-        Vec::new(),
-        js_tx,
-        0,
-        server_name,
-        server_version,
-        server_instructions,
-    );
+    // Build McpService from payload (stdio: no native handlers, single endpoint).
+    let service = McpService::from_payload(p, js_tx, 0);
 
     // Start JS poller job for tool call dispatch
     let mcp_tables = RefCell::new(vec![js_handlers.clone()]);

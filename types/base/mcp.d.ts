@@ -265,6 +265,7 @@ declare module "mcp" {
     tools: Record<string, McpToolShortDef>;
     /** Advertised server version. */
     version?: string;
+    description?: string;
     /** Server instructions shown to clients. */
     instructions?: string;
   }

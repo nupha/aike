@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-use std::cell::Cell;
-
 use linkme::distributed_slice;
 use zuqe::{
     CallContext, ClassCtorDef, ClassID, FieldDef, JSResult, JSValue, NativeObject, Runtime,
@@ -11,9 +9,8 @@ use zuqe::{
 
 use crate::USER_CLASS_DEFS;
 
-use super::{
-    class_mcp::{JSBaseMcp, get_payload, js_str},
-    service::{McpServicePayload, McpTransport, parse_mcp_define},
+use super::class_mcp::{
+    JSBaseMcp, McpServicePayload, McpTransport, get_payload, js_str, parse_mcp_define,
 };
 
 const FIELD_MOUNT_PATH: i16 = 12;
