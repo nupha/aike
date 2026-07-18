@@ -445,12 +445,6 @@ fn register_base_mcp(rt: &mut Runtime) -> Result<ClassID, i32> {
     JSBaseMcp::register(rt)
 }
 
-// ---------------------------------------------------------------------------
-// Unified tool DSL parser — shared by StdioMcp.define and HttpMcp.define.
-// Returns (rmcp Tool vec, name→index map, JS handler vec). This is the single
-// source of truth for both transports (mcp-service.md §4).
-// ---------------------------------------------------------------------------
-
 /// Convert DSL `args` object to standard JSON Schema `inputSchema`.
 ///
 /// Input: `{ fieldName: { desc, type?, required?, enum?, default? } }`
@@ -474,17 +468,19 @@ pub(crate) fn build_input_schema_from_args(
     for pk in pks.iter() {
         let field_name = match pk.atom.to_value(ctx).and_then(|v| v.to_string(ctx)) {
             Ok(s) => s.content().encode_utf8(false).to_string(),
-            Err(_) => continue,
+            Err(_) => {
+                continue;
+            }
         };
-
         if field_name.is_empty() {
             continue;
         }
 
-        let field_val = args_obj.get_property(ctx, pk.atom)?;
-        let field_obj = match field_val.as_object() {
+        let field_obj = match args_obj.get_property(ctx, pk.atom)?.as_object() {
             Some(o) => o.clone(),
-            None => continue,
+            None => {
+                continue;
+            }
         };
 
         let mut prop = serde_json::Map::new();
@@ -708,6 +704,7 @@ pub(crate) fn parse_mcp_tools(
         ctx.throw_type_error("tools must be an object, not an array");
         return Err(-1);
     }
+
     parse_mcp_tools_object(ctx, o)
 }
 
