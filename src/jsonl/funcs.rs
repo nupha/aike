@@ -229,8 +229,15 @@ pub(crate) fn js_count_lines_from_file(cx: &mut ScopedContext, cc: CallContext) 
     Ok(promise.into())
 }
 
-/// JSONL.appendToFile(path, ...values) — append values to a file.
-pub(crate) fn js_append_to_file(cx: &mut ScopedContext, cc: CallContext) -> JSResult {
+pub(crate) const JSONL_WRITE_APPEND: i32 = 0;
+pub(crate) const JSONL_WRITE_REWRITE: i32 = 1;
+
+/// Backend for both `appendToFile` and `rewriteToFile` (both register this fn
+/// with a different `FieldDef` flag). Serializes every value to a JSONL line up
+/// front (so no JS context is needed inside the async task), then writes them —
+/// appending or truncating based on `cc.magic()`.
+pub(crate) fn js_write_to_file(cx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let rewrite = cc.magic() == JSONL_WRITE_REWRITE;
     let path_val = cc.arg(0).to_string(cx)?;
     let path = path_val.content().encode_utf8(false).to_string();
 
@@ -262,19 +269,28 @@ pub(crate) fn js_append_to_file(cx: &mut ScopedContext, cc: CallContext) -> JSRe
     tokio::spawn(async move {
         let res = async {
             use tokio::io::AsyncWriteExt;
-            let mut f = tokio::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .write(true)
-                .open(&path)
-                .await?;
-            if !content.is_empty() {
-                f.write_all(content.as_bytes()).await?;
+            if rewrite {
+                // Truncate (or create) the file, then write — full rewrite.
+                let mut f = tokio::fs::File::create(&path).await?;
+                if !content.is_empty() {
+                    f.write_all(content.as_bytes()).await?;
+                }
+            } else {
+                let mut f = tokio::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .write(true)
+                    .open(&path)
+                    .await?;
+                if !content.is_empty() {
+                    f.write_all(content.as_bytes()).await?;
+                }
             }
             Ok::<(), std::io::Error>(())
         }
         .await
         .map_err(|e| e.to_string());
+
         let _ = PollSender::from(tx).send_async(res).await;
     });
 

@@ -151,8 +151,6 @@ pub(crate) fn jsonl_stringify_from_values(
     Ok(out)
 }
 
-// ── Instance methods ─────────────────────────────────────────────────────────
-
 fn js_length(cx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let arr = get_payload(cx, &this)?;

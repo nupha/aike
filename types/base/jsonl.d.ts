@@ -71,6 +71,14 @@ declare module "jsonl" {
     ...values: T[]
   ): Promise<void>;
 
+  /** Clear the file, then write `values` as JSONL lines (full rewrite).
+   *  Each argument is one line. Pass individual values, or spread a plain
+   *  array / JSONLArray with `...arr`. With no values, truncates to empty. */
+  export function rewriteToFile<T = unknown>(
+    path: string,
+    ...values: T[]
+  ): Promise<void>;
+
   /** Parse a complete chunk: returns { values, read, done, error }. */
   export function parseChunk<T = unknown>(
     input: string | ArrayBuffer | Uint8Array,

@@ -28,6 +28,7 @@ check("tryParse 是函数", typeof JSONL.tryParse === "function");
 check("read 是函数", typeof JSONL.readFromFile === "function");
 check("stringify 是函数", typeof JSONL.stringify === "function");
 check("append 是函数", typeof JSONL.appendToFile === "function");
+check("rewrite 是函数", typeof JSONL.rewriteToFile === "function");
 check("fromArray 是函数", typeof JSONL.fromArray === "function");
 check("countLinesFromFile 是函数", typeof JSONL.countLinesFromFile === "function");
 check("parseChunk 是函数", typeof JSONL.parseChunk === "function");
@@ -330,6 +331,49 @@ check(
   "不 spread 传 JSONLArray -> 仅 1 行(对比基线)",
   sp3Back.length === 1,
   "len=" + sp3Back.length,
+);
+
+// ===================================================================
+// rewriteToFile — 清空后重写（magic const = REWRITE 分支）
+// ===================================================================
+console.log("\n=== rewriteToFile ===");
+// 先写 3 条，再 rewrite 为 2 条 —— 结果必须只剩这 2 条（先 truncate）
+const rw = "/tmp/jsonl_rewrite_" + Date.now() + ".jsonl";
+await JSONL.appendToFile(rw, { id: 1 }, { id: 2 }, { id: 3 });
+await JSONL.rewriteToFile(rw, { a: 10 }, { a: 20 });
+const rwBack = await JSONL.readFromFile(rw);
+check(
+  "rewriteToFile 清空+重写 -> 只剩新 2 条",
+  rwBack.length === 2 && eq(rwBack.get(0), { a: 10 }) && eq(rwBack.get(1), { a: 20 }),
+  "len=" + rwBack.length,
+);
+
+// rewrite 后再 append —— append 不破坏 rewrite 的内容，文件变为 3 条
+await JSONL.appendToFile(rw, { a: 30 });
+const rwBack2 = await JSONL.readFromFile(rw);
+check(
+  "rewrite 后 append 叠加 -> 3 条",
+  rwBack2.length === 3 && eq(rwBack2.get(2), { a: 30 }),
+  "len=" + rwBack2.length,
+);
+
+// rewrite 无 values -> 清空文件为 0 条（等价于 truncate）
+const rwEmpty = "/tmp/jsonl_rewrite_empty_" + Date.now() + ".jsonl";
+await JSONL.appendToFile(rwEmpty, { x: 1 }, { x: 2 });
+await JSONL.rewriteToFile(rwEmpty);
+const rwEmptyBack = await JSONL.readFromFile(rwEmpty);
+check("rewriteToFile 无 values -> 清空为 0 条", rwEmptyBack.length === 0, "len=" + rwEmptyBack.length);
+
+// spread 普通数组到 rewriteToFile
+const rwSpread = "/tmp/jsonl_rewrite_spread_" + Date.now() + ".jsonl";
+await JSONL.appendToFile(rwSpread, { old: 1 });
+await JSONL.rewriteToFile(rwSpread, ...plainArr);
+const rwSpreadBack = await JSONL.readFromFile(rwSpread);
+check(
+  "rewriteToFile spread 普通数组 -> 每行一个元素",
+  rwSpreadBack.length === plainArr.length &&
+    eq(rwSpreadBack.get(0), { id: 1 }) && eq(rwSpreadBack.get(2), { id: 3 }),
+  "len=" + rwSpreadBack.length,
 );
 
 // ===================================================================
