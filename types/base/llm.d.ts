@@ -2,9 +2,9 @@ declare module "llama" {
   export interface ChatMessage {
     role: "system" | "user" | "assistant" | "tool";
     content?: string;
+    reasoning_content?: string;
     tool_calls?: ToolCall[];
     tool_call_id?: string;
-    [key: string]: unknown;
   }
 
   export interface ToolCall {
