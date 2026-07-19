@@ -28,6 +28,8 @@ check("tryParse 是函数", typeof JSONL.tryParse === "function");
 check("read 是函数", typeof JSONL.readFromFile === "function");
 check("stringify 是函数", typeof JSONL.stringify === "function");
 check("append 是函数", typeof JSONL.appendToFile === "function");
+check("fromArray 是函数", typeof JSONL.fromArray === "function");
+check("countLinesFromFile 是函数", typeof JSONL.countLinesFromFile === "function");
 check("parseChunk 是函数", typeof JSONL.parseChunk === "function");
 check("parseStream 是函数", typeof JSONL.parseStream === "function");
 
@@ -53,10 +55,10 @@ check(
   records.stringify() === '{"id":1}\n{"id":2}\n{"id":3}\n',
   records.stringify(),
 );
-check("toString == stringify", records.toString() === records.stringify());
 check(
-  "JSON.stringify(arr) 为普通数组",
-  JSON.stringify(records) === '[{"id":1},{"id":2},{"id":3}]',
+  "toArray 返回普通数组",
+  Array.isArray(records.toArray()) && records.toArray().length === 3,
+  "len=" + records.toArray().length,
 );
 
 // 负索引
@@ -89,10 +91,26 @@ let sum = 0;
 for (const v of records) sum += v.id;
 check("for..of 遍历", sum === 2 + 9 + 3, "sum=" + sum);
 
-// toJSON
+// toArray
 check(
-  "toJSON 为普通数组",
-  Array.isArray(records.toJSON()) && records.toJSON().length === 3,
+  "toArray 为普通数组",
+  Array.isArray(records.toArray()) && records.toArray().length === 3,
+);
+
+// fromArray — 普通数组 -> JSONLArray
+const wrapped = JSONL.fromArray([{ id: 1 }, { id: 2 }, { id: 3 }]);
+check(
+  "fromArray 返回 JSONLArray(length=3)",
+  wrapped instanceof JSONL.JSONLArray && wrapped.length === 3,
+  "len=" + wrapped.length,
+);
+check(
+  "fromArray 内容正确",
+  eq(wrapped.get(0), { id: 1 }) && eq(wrapped.get(2), { id: 3 }),
+);
+check(
+  "fromArray 往返 toArray",
+  eq(wrapped.toArray(), [{ id: 1 }, { id: 2 }, { id: 3 }]),
 );
 
 // ===================================================================
@@ -215,6 +233,12 @@ check(
   "read 内容正确",
   eq(fromFile.get(0), { id: 1 }) && eq(fromFile.get(2), { id: 3 }),
 );
+// countLinesFromFile 为轻量估计：跳过空行与字面量 undefined，但不校验 JSON，
+// 故对合法行返回估计数；缺失文件返回 0。
+const est = await JSONL.countLinesFromFile(fsPath);
+check("countLinesFromFile 估计 3 行", est === 3, "est=" + est);
+const estMissing = await JSONL.countLinesFromFile("/tmp/no_such_" + Date.now() + ".jsonl");
+check("countLinesFromFile 缺失文件返回 0", estMissing === 0);
 // read 完全无效抛（promise reject）。append 永远写出合法 JSON，故用手写畸形文件。
 let readThrew = false;
 const badPath = "/tmp/jsonl_bad_" + Date.now() + ".jsonl";
@@ -268,6 +292,44 @@ check(
   "parseStream replace 畸形行",
   outBad.length === 3 && outBad[1] === null,
   JSON.stringify(outBad),
+);
+
+// ===================================================================
+// spread — appendToFile(path, ...values) 的展开行为
+// ===================================================================
+console.log("\n=== spread ===");
+// 1) 展开普通 Array：每个元素一条线（基准，必定正确）
+const plainArr = [{ id: 1 }, { id: 2 }, { id: 3 }];
+const sp1 = "/tmp/jsonl_spread_plain_" + Date.now() + ".jsonl";
+await JSONL.appendToFile(sp1, ...plainArr);
+const sp1Back = await JSONL.readFromFile(sp1);
+check(
+  "spread 普通数组 -> 每行一个元素",
+  sp1Back.length === plainArr.length &&
+    eq(sp1Back.get(0), { id: 1 }) && eq(sp1Back.get(2), { id: 3 }),
+  "len=" + sp1Back.length,
+);
+
+// 2) 展开 JSONLArray：依赖引擎对原生 iterable 的 ...spread 支持
+const jArr = JSONL.fromArray(plainArr);
+const sp2 = "/tmp/jsonl_spread_jsonl_" + Date.now() + ".jsonl";
+await JSONL.appendToFile(sp2, ...jArr);
+const sp2Back = await JSONL.readFromFile(sp2);
+check(
+  "spread JSONLArray -> 每行一个元素(展开正确)",
+  sp2Back.length === jArr.length &&
+    eq(sp2Back.get(0), { id: 1 }) && eq(sp2Back.get(2), { id: 3 }),
+  "len=" + sp2Back.length,
+);
+
+// 3) 对照：不 spread 直接传 JSONLArray -> 单值序列化成 1 行 ({} 之类)
+const sp3 = "/tmp/jsonl_spread_nospread_" + Date.now() + ".jsonl";
+await JSONL.appendToFile(sp3, jArr);
+const sp3Back = await JSONL.readFromFile(sp3);
+check(
+  "不 spread 传 JSONLArray -> 仅 1 行(对比基线)",
+  sp3Back.length === 1,
+  "len=" + sp3Back.length,
 );
 
 // ===================================================================

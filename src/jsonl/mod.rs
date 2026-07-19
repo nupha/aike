@@ -12,9 +12,11 @@ const JSONL_MOD_ENTRIES: &[FieldDef] = &[
     FieldDef::CLASS("JSONLArray", JSJSONLArray::class_id, JS_PROP_ENUMERABLE),
     FieldDef::FUNC("parse", 1, funcs::js_parse, 0),
     FieldDef::FUNC("tryParse", 1, funcs::js_try_parse, 0),
+    FieldDef::FUNC("fromArray", 1, funcs::js_from_array, 0),
     FieldDef::FUNC("stringify", 1, funcs::js_stringify, 0),
     FieldDef::FUNC("readFromFile", 1, funcs::js_read_from_file, 0),
     FieldDef::FUNC("appendToFile", 1, funcs::js_append_to_file, 0),
+    FieldDef::FUNC("countLinesFromFile", 1, funcs::js_count_lines_from_file, 0),
     FieldDef::FUNC("parseChunk", 1, funcs::js_parse_chunk, 0),
     FieldDef::FUNC("parseStream", 1, funcs::js_parse_stream, 0),
 ];

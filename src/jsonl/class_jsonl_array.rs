@@ -34,8 +34,7 @@ const CLASS_JSONLARRAY_PROTO: &[FieldDef] = &[
     FieldDef::FUNC("slice", 0, js_slice, 0),
     FieldDef::FUNC("[Symbol.iterator]", 0, js_iterator, 0),
     FieldDef::FUNC("stringify", 0, js_stringify, 0),
-    FieldDef::FUNC("toString", 0, js_stringify, 0),
-    FieldDef::FUNC("toJSON", 0, js_to_json, 0),
+    FieldDef::FUNC("toArray", 0, js_to_array, 0),
 ];
 
 /// Constructor: `new JSONLArray(values?)` — copy elements of an optional array.
@@ -229,6 +228,7 @@ fn js_splice(cx: &mut ScopedContext, cc: CallContext) -> JSResult {
         values.insert(start_usize + off, item);
     }
     drop(values);
+
     make_jsonl_array(cx, removed)
 }
 
@@ -286,7 +286,8 @@ fn js_stringify(cx: &mut ScopedContext, cc: CallContext) -> JSResult {
         .map(JSValue::from)
 }
 
-fn js_to_json(cx: &mut ScopedContext, cc: CallContext) -> JSResult {
+/// `toArray()` — return a plain array copy of the JSONLArray elements.
+fn js_to_array(cx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let arr = get_payload(cx, &this)?;
     Array::from_values(cx, arr.values.borrow().clone()).map(JSValue::from)

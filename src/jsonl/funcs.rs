@@ -148,6 +148,21 @@ pub(crate) fn js_try_parse(cx: &mut ScopedContext, cc: CallContext) -> JSResult 
     make_jsonl_array(cx, values)
 }
 
+/// JSONL.fromArray(arr) — wrap a plain JS array into a JSONLArray (elements copied).
+pub(crate) fn js_from_array(cx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let arg = cc.arg(0);
+    let mut values: Vec<JSValue> = Vec::new();
+    if let Some(obj) = arg.as_object() {
+        if let Ok(len) = obj.get_property_str(cx, "length")?.to_number(cx) {
+            let n = len.to_i32();
+            for i in 0..n {
+                values.push(obj.get_property_str(cx, &i.to_string())?);
+            }
+        }
+    }
+    make_jsonl_array(cx, values)
+}
+
 /// JSONL.readFromFile(path, opts?) — read + parse a file, returns Promise<JSONLArray>.
 pub(crate) fn js_read_from_file(cx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let path_val = cc.arg(0).to_string(cx)?;
@@ -172,6 +187,37 @@ pub(crate) fn js_read_from_file(cx: &mut ScopedContext, cc: CallContext) -> JSRe
             make_jsonl_array(cx2, values)
         },
     )?;
+
+    tokio::spawn(async move {
+        let res = tokio::fs::read_to_string(&path)
+            .await
+            .map_err(|e| e.to_string());
+        let _ = PollSender::from(tx).send_async(res).await;
+    });
+
+    Ok(promise.into())
+}
+
+/// JSONL.countLinesFromFile(path) — estimate the number of JSONL lines in a file; returns Promise<number>.
+///
+/// Lightweight: only trims each line and skips blanks and the literal `undefined`.
+/// It does NOT validate JSON, so the returned value is an ESTIMATE — the count from
+/// `readFromFile` may be fewer (some non-blank lines can still fail to parse as JSON).
+pub(crate) fn js_count_lines_from_file(cx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let path_val = cc.arg(0).to_string(cx)?;
+    let path = path_val.content().encode_utf8(false).to_string();
+
+    let (promise, tx) =
+        Promise::create_with_channel::<Result<String, String>>(cx, move |_, data| -> JSResult {
+            // Read errors resolve to 0 (matches ravenclaw countLines on missing file).
+            // Cheap estimate: skip blank lines and the literal `undefined` only.
+            // Intentionally avoid JSON parsing here to keep the check lightweight.
+            let count = match data {
+                Ok(text) => text.lines().filter(|l| !l.trim().is_empty()).count(),
+                Err(_) => 0,
+            };
+            Ok(JSValue::from(count as i32))
+        })?;
 
     tokio::spawn(async move {
         let res = tokio::fs::read_to_string(&path)

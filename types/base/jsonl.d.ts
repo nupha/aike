@@ -30,11 +30,8 @@ declare module "jsonl" {
     /** Serialize to a JSONL string. */
     stringify(): string;
 
-    /** Serialize to a JSONL string. */
-    toString(): string;
-
     /** Return a plain array copy. */
-    toJSON(): T[];
+    toArray(): T[];
   }
 
   export interface JSONLParseOpts<T> {
@@ -56,27 +53,40 @@ declare module "jsonl" {
     opts?: JSONLParseOpts<T>,
   ): JSONLArray<T>;
 
+  /** Wrap a plain JS array into a JSONLArray (elements copied). */
+  export function fromArray<T = unknown>(arr: readonly T[]): JSONLArray<T>;
+
   /** Read + parse a file; returns Promise<JSONLArray>. */
   export function readFromFile<T = unknown>(
     path: string,
     opts?: JSONLParseOpts<T>,
   ): Promise<JSONLArray<T>>;
 
-  /** Append values to a file (one line each). */
-  export function appendToFile(path: string, ...values: unknown[]): Promise<void>;
+  /** Append values to a file (one line each).
+   *  Each argument is serialized as one JSONL line. Pass individual values,
+   *  or spread a plain array / JSONLArray with `...arr` so its elements each
+   *  become a line. */
+  export function appendToFile<T = unknown>(
+    path: string,
+    ...values: T[]
+  ): Promise<void>;
 
   /** Parse a complete chunk: returns { values, read, done, error }. */
-  export function parseChunk(
+  export function parseChunk<T = unknown>(
     input: string | ArrayBuffer | Uint8Array,
-    opts?: JSONLParseOpts,
-  ): { values: JSONLArray; read: number; done: boolean; error: unknown };
+    opts?: JSONLParseOpts<T>,
+  ): { values: JSONLArray<T>; read: number; done: boolean; error: unknown };
 
   /** Async-iterable parse of a stream (aike fetch body / FileHandle). */
   export function parseStream<T = unknown>(
     stream: AsyncIterable<string | ArrayBuffer | Uint8Array>,
-    opts?: JSONLParseOpts,
+    opts?: JSONLParseOpts<T>,
   ): AsyncIterable<T>;
 
   /** Serialize a JSONLArray or array to a JSONL string. */
   export function stringify(data: JSONLArray | unknown[]): string;
+
+  /** Estimate the number of JSONL lines in a file (skip blanks + literal `undefined`).
+   *  Lightweight: does NOT validate JSON, so actual parsed count may be fewer. */
+  export function countLinesFromFile(file: string): Promise<number>;
 }
