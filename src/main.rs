@@ -12,6 +12,7 @@ mod global;
 mod helpers;
 mod html;
 mod http;
+mod jsonl;
 mod llm;
 mod mcp;
 mod path;
@@ -382,6 +383,7 @@ async fn main() -> ExitCode {
             init_mod_html(cx)?;
             init_mod_browser(cx)?;
             init_mod_yaml(cx)?;
+            jsonl::init_mod_jsonl(cx)?;
             init_mod_llm(cx)?;
             init_mod_mcp(cx)?;
 
