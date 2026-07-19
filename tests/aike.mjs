@@ -952,6 +952,62 @@ function testSchedule() {
 }
 
 // ===================================================================
+// Aike.sleep tests
+// ===================================================================
+async function testSleep() {
+  console.log("\n=== Aike.sleep ===");
+
+  // 1. Existence and type
+  check("sleep is a function", typeof Aike.sleep === "function");
+
+  // 2. Resolves after the requested delay (event-loop driven, not blocking)
+  {
+    const start = Date.now();
+    await Aike.sleep(120);
+    const elapsed = Date.now() - start;
+    check("resolves after ~120ms", elapsed >= 100, `elapsed=${elapsed}ms`);
+  }
+
+  // 3. Yields to the event loop — .then callback runs after code continues
+  {
+    const order = [];
+    Aike.sleep(40).then(() => order.push("sleep-done"));
+    order.push("after-await");
+    await Aike.sleep(60);
+    check(
+      "sleep callback runs after await",
+      order[0] === "after-await" && order[1] === "sleep-done",
+      `order=${JSON.stringify(order)}`,
+    );
+  }
+
+  // 4. Chains with setTimeout on the same timer queue
+  {
+    const seq = [];
+    setTimeout(() => seq.push("timeout"), 20);
+    Aike.sleep(20).then(() => seq.push("sleep"));
+    await Aike.sleep(50);
+    check("both timers fired", seq.length === 2, `seq=${JSON.stringify(seq)}`);
+    check(
+      "order respects delay",
+      seq.includes("timeout") && seq.includes("sleep"),
+      `seq=${JSON.stringify(seq)}`,
+    );
+  }
+
+  // 5. sleep(0) fires on the next tick, not synchronously
+  {
+    let fired = false;
+    Aike.sleep(0).then(() => {
+      fired = true;
+    });
+    check("not fired synchronously", !fired, "");
+    await Aike.sleep(10);
+    check("fired after yield", fired, "");
+  }
+}
+
+// ===================================================================
 // Aike runtime properties (argv, execArgv, execPath) tests
 // ===================================================================
 function testRuntimeProps() {
@@ -1007,6 +1063,7 @@ await testIsatty();
 await testTty();
 await testNow();
 await testSchedule();
+await testSleep();
 await testRuntimeProps();
 
 // Summary

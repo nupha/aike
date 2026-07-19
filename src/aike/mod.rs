@@ -95,8 +95,9 @@ pub fn init_aike(
         // --- signal ---
         FieldDef::FUNC("onSignal", 2, signal::js_on_signal, 0),
         FieldDef::LAZY_VALUE("signals", signal::js_signals, JS_PROP_ENUMERABLE),
-        // --- cron ---
+        // --- cron / timer ---
         FieldDef::FUNC("schedule", 2, cron::js_schedule, 0),
+        FieldDef::FUNC("sleep", 0, crate::whatwg::timeout::js_sleep, 0),
         // --- stdio ---
         FieldDef::LAZY_VALUE(
             "stdin",

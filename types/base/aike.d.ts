@@ -144,13 +144,33 @@ declare namespace Aike {
   /** Environment variables as a read-only key-value object. */
   const env: Record<string, string>;
 
+  // --- timer / promise ---
+
+  /**
+   * Delay execution for `ms` milliseconds.
+   *
+   * Uses the event loop — does NOT block the thread. Returns a `Promise` that
+   * resolves with `undefined` after the delay. Analogous to `Bun.sleep(ms)`.
+   *
+   * @param ms - Milliseconds to wait (clamped to >= 0).
+   */
+  function sleep(ms: number): Promise<void>;
+
   // --- spawn ---
 
   /** Spawn a child process synchronously. */
-  function spawnSync(command: string, args?: string[], options?: SpawnOptions): SpawnSyncResult;
+  function spawnSync(
+    command: string,
+    args?: string[],
+    options?: SpawnOptions,
+  ): SpawnSyncResult;
 
   /** Spawn a child process asynchronously. */
-  function spawn(command: string, args?: string[], options?: SpawnOptions): SpawnAsyncResult;
+  function spawn(
+    command: string,
+    args?: string[],
+    options?: SpawnOptions,
+  ): SpawnAsyncResult;
 
   interface SpawnOptions {
     /** Working directory for the child process. */
@@ -264,7 +284,10 @@ declare namespace Aike {
    * Register or unregister a signal handler.
    * Pass null as handler to unregister.
    */
-  function onSignal(signal: SignalName, handler: (() => void) | null): typeof Aike;
+  function onSignal(
+    signal: SignalName,
+    handler: (() => void) | null,
+  ): typeof Aike;
 
   // --- cron ---
 
@@ -273,7 +296,11 @@ declare namespace Aike {
    * Supports 5-field (min hour dom month dow) or 6/7-field expressions.
    * Returns a CronJob instance.
    */
-  function schedule(pattern: string, callback: () => void, options?: { name?: string }): CronJob;
+  function schedule(
+    pattern: string,
+    callback: () => void,
+    options?: { name?: string },
+  ): CronJob;
 
   // --- stdio ---
 

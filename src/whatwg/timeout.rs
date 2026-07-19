@@ -16,7 +16,7 @@ use std::{
 
 use zuqe::{
     CallContext, Callback, Exception, JS_PROP_C_W_E, JSResult, JSValue, JobState, Object,
-    ScopedContext,
+    ScopedContext, builtins::promise::Promise,
     gc_lite::{GcTrace, GcTraceCtx},
 };
 
@@ -280,6 +280,43 @@ fn clear_timer(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     });
 
     Ok(JSValue::UNDEFINED)
+}
+
+/// `Aike.sleep(ms)` — returns a `Promise` that resolves after `ms` milliseconds.
+///
+/// Analogous to `Bun.sleep(ms)`. Implemented by creating a `Promise` and using
+/// its native resolve function directly as a one-shot timer callback: when the
+/// timer fires, calling resolve() settles the `Promise` with `undefined`. This
+/// reuses the exact same timer queue as `setTimeout`/`setInterval`, so sleep is
+/// driven by the event loop and never blocks the thread.
+pub(crate) fn js_sleep(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let ms = cc.arg(0).to_number(ctx)?.to_f64();
+    let delay_ms = if ms.is_nan() || ms < 0.0 { 0 } else { ms as u64 };
+
+    // Build the Promise and grab its native resolve function. The resolve fn is
+    // callable, so it can serve directly as the timer callback.
+    let (promise, resolving) = Promise::create(ctx)?;
+    let resolve_fn = resolving[0].into_callable(ctx)?;
+
+    let (_id, need_listener) = TIMER_STATE.with_borrow_mut(|opt| {
+        let start_job = opt.is_none();
+        let s = opt.get_or_insert_with(TimerState::new);
+        let id = s.timer_id();
+        let deadline = Instant::now() + Duration::from_millis(delay_ms);
+        s.insert_sorted(TimerEntry {
+            id,
+            callback: resolve_fn,
+            interval_ms: None,
+            deadline,
+        });
+        (id, start_job)
+    });
+
+    if need_listener {
+        start_timer_task(ctx);
+    }
+
+    Ok(promise.into())
 }
 
 const MAGIC_SET_TIMEOUT: i16 = 0;
