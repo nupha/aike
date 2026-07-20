@@ -289,8 +289,12 @@ pub(crate) fn js_parse_chunk(cx: &mut ScopedContext, cc: CallContext) -> JSResul
     Ok(obj.into())
 }
 
-// JSONL.parseStream(text, opts?) -> async iterable of T.
-// onError "throw": first bad line rejects the iterator; "replace"/"skip" tolerate.
+// JSONL.parseStream(text, opts?) -> { iterator: AsyncIterable<T>, lines: number }.
+// The producer runs on a background thread: create_with_channel uses a bounded
+// channel (cap 1), so sending must NOT happen synchronously inside this call —
+// it would deadlock, because the consumer (for await) only runs later on the JS
+// event loop. With the producer on another thread, each pulled value frees a
+// slot for the next send.
 pub(crate) fn js_parse_stream(cx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let text = cc.arg(0).to_string(cx)?;
     let text_str = text.content().encode_utf8(false).to_string();
@@ -301,7 +305,12 @@ pub(crate) fn js_parse_stream(cx: &mut ScopedContext, cc: CallContext) -> JSResu
         Some(failsafe.to_serde_json(cx)?)
     };
 
-    // D = Result<JsonValue, String>; convert yields the value or rejects on Err.
+    // Non-blank line count, matching parse semantics (cheap up-front scan).
+    let lines = text_str
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .count();
+
     let (iter, tx) = AsyncIterableIterator::create_with_channel::<Result<JsonValue, String>>(
         cx,
         move |ctx2, data| -> Result<Option<JSValue>, i32> {
@@ -313,24 +322,34 @@ pub(crate) fn js_parse_stream(cx: &mut ScopedContext, cc: CallContext) -> JSResu
         },
     )?;
 
-    for line in text_str.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
+    // Produce on a background thread so the bounded channel never blocks the JS
+    // call. Consumer (for await) pulls one value per tick, freeing a slot.
+    std::thread::spawn(move || {
+        for line in text_str.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let parsed: JsonValue = match serde_json::from_str::<JsonValue>(trimmed) {
+                Ok(v) => v,
+                Err(e) => match on_error {
+                    OnError::Replace => failsafe_json.clone().unwrap_or(JsonValue::Null),
+                    OnError::Skip => continue,
+                    OnError::Throw => {
+                        let _ = tx.send(Err(e.to_string()));
+                        return;
+                    }
+                },
+            };
+            if tx.send(Ok(parsed)).is_err() {
+                return; // consumer dropped; nothing more to send
+            }
         }
-        let parsed: JsonValue = match serde_json::from_str::<JsonValue>(trimmed) {
-            Ok(v) => v,
-            Err(e) => match on_error {
-                OnError::Replace => failsafe_json.clone().unwrap_or(JsonValue::Null),
-                OnError::Skip => continue,
-                OnError::Throw => {
-                    let _ = tx.send(Err(e.to_string()));
-                    return Ok(JSValue::from(iter));
-                }
-            },
-        };
-        let _ = tx.send(Ok(parsed));
-    }
-    drop(tx);
-    Ok(JSValue::from(iter))
+    });
+
+    let mut obj = cx.create_base_object()?;
+    let iter_val: JSValue = iter.into();
+    obj.define_property_value_str(cx, "iterator", iter_val, 0)?;
+    obj.define_property_value_str(cx, "lines", JSValue::from(lines as f64), 0)?;
+    Ok(obj.into())
 }

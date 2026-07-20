@@ -314,47 +314,10 @@ async function testRemove() {
 }
 
 // ---------------------------------------------------------------------------
-// fs.readJSONL / writeJSONL / appendJSONL / countLines / countNonEmptyLines
-// (read/write/jsonl share the native fns with the `jsonl` module)
+// fs line counting
 // ---------------------------------------------------------------------------
-async function testJsonlAndCount() {
-  console.log("\n=== JSONL + line counting (fs) ===");
-  const p = "../tmp/jsonl_fs_" + Date.now() + ".jsonl";
-  await fs.remove(p).catch(() => {});
-
-  // appendJSONL + readJSONL
-  await fs.appendJSONL(p, { id: 1 }, { id: 2 });
-  const a = await fs.readJSONL(p);
-  check(
-    "fs.appendJSONL + readJSONL",
-    a.length === 2 && a[0].id === 1 && a[1].id === 2,
-    "len=" + a.length,
-  );
-
-  // appendJSONL again (append mode)
-  await fs.appendJSONL(p, { id: 3 });
-  const a2 = await fs.readJSONL(p);
-  check(
-    "fs.appendJSONL appends",
-    a2.length === 3 && a2[2].id === 3,
-    "len=" + a2.length,
-  );
-
-  // writeJSONL truncates
-  await fs.writeJSONL(p, { x: 10 }, { x: 20 });
-  const w = await fs.readJSONL(p);
-  check(
-    "fs.writeJSONL truncates",
-    w.length === 2 && w[0].x === 10,
-    "len=" + w.length,
-  );
-
-  // writeJSONL no args clears
-  await fs.writeJSONL(p);
-  const w0 = await fs.readJSONL(p);
-  check("fs.writeJSONL() clears file", w0.length === 0, "len=" + w0.length);
-
-  // countLines / countNonEmptyLines
+async function testLineCounting() {
+  console.log("\n=== Line counting (fs) ===");
   const c = "../tmp/jsonl_count_" + Date.now() + ".txt";
   await fs.writeText(c, "line1\nline2\n\nline3\n   \nline5\n");
   const all = await fs.countLines(c);
@@ -403,31 +366,6 @@ async function testSandbox() {
     check("outside sandbox blocked", true, e.message);
   }
 
-  // JSONL entry points must also respect the sandbox boundary.
-  for (const [name, fn] of [
-    ["readJSONL", () => fs.readJSONL(SAMPLE_JSON_FILE)],
-    ["appendJSONL", () => fs.appendJSONL(SAMPLE_JSON_FILE, { a: 1 })],
-    ["writeJSONL", () => fs.writeJSONL(SAMPLE_JSON_FILE, { a: 1 })],
-  ]) {
-    try {
-      await fn();
-      check(`${name} outside sandbox blocked`, false, "expected error to be thrown");
-    } catch (e) {
-      check(`${name} outside sandbox blocked`, true, e.message);
-    }
-  }
-
-  // Inside-sandbox JSONL operations still work.
-  const SB_JSONL = "../tmp/sandbox_test.jsonl";
-  await fs.remove(SB_JSONL).catch(() => {});
-  await fs.writeJSONL(SB_JSONL, { k: 1 });
-  const sbRead = await fs.readJSONL(SB_JSONL);
-  check(
-    "JSONL ops inside sandbox work",
-    sbRead.length === 1 && sbRead[0].k === 1,
-    "len=" + sbRead.length,
-  );
-
   fs.setSandbox(null);
   check("getSandbox null after clear", fs.getSandbox() === null);
 
@@ -454,7 +392,7 @@ await testAsyncIterator();
 await testExists();
 await testMakeDirRemoveDir();
 await testRemove();
-await testJsonlAndCount();
+await testLineCounting();
 await testSandbox();
 
 // Summary

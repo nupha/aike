@@ -14,9 +14,6 @@ use zuqe::{
 use crate::{
     aike::{JSFileHandle, make_stats},
     helpers::canonicalize_path,
-    jsonl::funcs::{
-        read_jsonl_with_path, write_jsonl_with_path, JSONL_WRITE_APPEND, JSONL_WRITE_REWRITE,
-    },
 };
 
 thread_local! {
@@ -916,26 +913,6 @@ fn js_count_lines(cx: &mut ScopedContext, cc: CallContext) -> JSResult {
     Ok(promise.into())
 }
 
-// fs.readJSONL — sandbox enforced, then delegate.
-fn js_fs_read_jsonl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let v = cc.arg(0).to_string(ctx)?;
-    let path = resolve_safe_path(&v.content().encode_utf8(false).to_string()).map_err(|e| {
-        ctx.throw_internal_error(&e);
-        -1
-    })?;
-    read_jsonl_with_path(ctx, cc, path)
-}
-
-// fs.appendJSONL / fs.writeJSONL — sandbox enforced (magic = append/rewrite).
-fn js_fs_write_jsonl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let v = cc.arg(0).to_string(ctx)?;
-    let path = resolve_safe_path(&v.content().encode_utf8(false).to_string()).map_err(|e| {
-        ctx.throw_internal_error(&e);
-        -1
-    })?;
-    write_jsonl_with_path(ctx, cc, path)
-}
-
 const MOD_FS_ENTRIES: &[FieldDef] = &[
     FieldDef::FUNC("getSandbox", 0, js_fs_get_restrict, BOUNDARY_SANDBOX as _),
     FieldDef::FUNC("setSandbox", 1, js_fs_set_restrict, BOUNDARY_SANDBOX as _),
@@ -945,9 +922,6 @@ const MOD_FS_ENTRIES: &[FieldDef] = &[
     FieldDef::FUNC("readBytes", 1, js_fs_readBytes, 0),
     FieldDef::FUNC("writeText", 2, js_fs_writeText, 0),
     FieldDef::FUNC("writeJSON", 2, js_fs_writeJSON, 0),
-    FieldDef::FUNC("readJSONL", 1, js_fs_read_jsonl, 0),
-    FieldDef::FUNC("appendJSONL", 1, js_fs_write_jsonl, JSONL_WRITE_APPEND as i16),
-    FieldDef::FUNC("writeJSONL", 1, js_fs_write_jsonl, JSONL_WRITE_REWRITE as i16),
     FieldDef::FUNC("countLines", 1, js_count_lines, FS_COUNT_ALL as i16),
     FieldDef::FUNC("countNonEmptyLines", 1, js_count_lines, FS_COUNT_NON_EMPTY as i16),
     FieldDef::FUNC("writeBytes", 2, js_fs_writeBytes, 0),
