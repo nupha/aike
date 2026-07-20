@@ -12,13 +12,13 @@ const JSONL_MOD_ENTRIES: &[FieldDef] = &[
     FieldDef::FUNC(
         "append",
         1,
-        funcs::js_write_to_file,
+        funcs::js_write_jsonl,
         funcs::JSONL_WRITE_APPEND as i16,
     ),
     FieldDef::FUNC(
         "write",
         1,
-        funcs::js_write_to_file,
+        funcs::js_write_jsonl,
         funcs::JSONL_WRITE_REWRITE as i16,
     ),
     FieldDef::FUNC("parseChunk", 1, funcs::js_parse_chunk, 0),

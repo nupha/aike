@@ -3,10 +3,7 @@ use std::path::PathBuf;
 use serde_json::Value as JsonValue;
 use zuqe::{
     Array, CallContext, JSResult, JSValue, PollSender, ScopedContext,
-    builtins::{
-        iterator::AsyncIterableIterator,
-        promise::Promise,
-    },
+    builtins::{iterator::AsyncIterableIterator, promise::Promise},
 };
 
 // magic const: 0 = append, 1 = rewrite/truncate
@@ -125,10 +122,12 @@ pub(crate) fn js_stringify(cx: &mut ScopedContext, cc: CallContext) -> JSResult 
             }
             s
         }
-        other => serde_json::to_string(other).map_err(|e| {
-            cx.throw_syntax_error(&format!("JSONL stringify failed: {}", e));
-            -1
-        })? + "\n",
+        other => {
+            serde_json::to_string(other).map_err(|e| {
+                cx.throw_syntax_error(&format!("JSONL stringify failed: {}", e));
+                -1
+            })? + "\n"
+        }
     };
     // out is already a valid JSON string; wrap and convert to JS string.
     let json_str = JsonValue::String(out);
@@ -238,7 +237,8 @@ fn write_jsonl_impl(
                 for line in &lines {
                     content.push_str(line);
                 }
-                tokio::fs::write(&path, content).await?;
+                // atomic replace, so readers never see a torn jsonl.
+                crate::fs::write_file_atomic(&path, content.as_bytes()).await?;
             }
             Ok::<(), std::io::Error>(())
         }
@@ -251,7 +251,7 @@ fn write_jsonl_impl(
 }
 
 // JSONL.append / JSONL.write — magic selects mode. No sandbox.
-pub(crate) fn js_write_to_file(cx: &mut ScopedContext, cc: CallContext) -> JSResult {
+pub(crate) fn js_write_jsonl(cx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let path_val = cc.arg(0).to_string(cx)?;
     let path = PathBuf::from(path_val.content().encode_utf8(false).to_string());
     let append = cc.magic() == JSONL_WRITE_APPEND;
@@ -306,10 +306,7 @@ pub(crate) fn js_parse_stream(cx: &mut ScopedContext, cc: CallContext) -> JSResu
     };
 
     // Non-blank line count, matching parse semantics (cheap up-front scan).
-    let lines = text_str
-        .lines()
-        .filter(|l| !l.trim().is_empty())
-        .count();
+    let lines = text_str.lines().filter(|l| !l.trim().is_empty()).count();
 
     let (iter, tx) = AsyncIterableIterator::create_with_channel::<Result<JsonValue, String>>(
         cx,

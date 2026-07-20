@@ -319,11 +319,10 @@ fn js_fs_writeText(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let data_str = data.content().encode_utf8(false).to_string();
 
     let (promise, tx) = make_void_promise(ctx)?;
-
     tokio::spawn(async move {
         let _ = PollSender::from(tx)
             .send_async(
-                tokio::fs::write(&path, data_str.as_bytes())
+                write_file_atomic(&path, data_str.as_bytes())
                     .await
                     .map_err(|e| e.to_string()),
             )
@@ -331,6 +330,60 @@ fn js_fs_writeText(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     });
 
     Ok(promise.into())
+}
+
+// Write `data` to `path` atomically: write to a sibling temp file then
+// atomically replace the target. A crash mid-write leaves the original file
+// intact (or a stale `.tmp` that the next write replaces), so readers never
+// see a torn file. The actual replace is platform-specific (see atomic_replace).
+// Exposed as `pub(crate)` so other modules (e.g. jsonl) reuse the same atomic
+// write instead of rolling their own non-atomic truncate.
+pub(crate) async fn write_file_atomic(path: &Path, data: &[u8]) -> std::io::Result<()> {
+    let tmp = path.with_extension(match path.extension().and_then(|e| e.to_str()) {
+        Some(ext) => format!("{ext}.tmp"),
+        None => "tmp".to_string(),
+    });
+    tokio::fs::write(&tmp, data).await?;
+    atomic_replace(&tmp, path).await
+}
+
+// Atomically replace `dst` with `src` (both on the same filesystem).
+#[cfg(not(windows))]
+async fn atomic_replace(tmp: &Path, dst: &Path) -> std::io::Result<()> {
+    // POSIX rename() atomically overwrites an existing destination.
+    tokio::fs::rename(tmp, dst).await
+}
+
+#[cfg(windows)]
+async fn atomic_replace(tmp: &Path, dst: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+    };
+    use windows_sys::core::PCWSTR;
+
+    // MoveFileExW with MOVEFILE_REPLACE_EXISTING is the atomic replace on
+    // Windows (std::fs::rename refuses to replace an existing file). The
+    // WRITE_THROUGH flag makes the replace durable before it returns.
+    let to_wide = |p: &Path| -> Vec<u16> {
+        p.as_os_str().encode_wide().chain(std::iter::once(0)).collect()
+    };
+    let tmp_w = to_wide(tmp);
+    let dst_w = to_wide(dst);
+    let ok = tokio::task::spawn_blocking(move || unsafe {
+        MoveFileExW(
+            PCWSTR(tmp_w.as_ptr()),
+            PCWSTR(dst_w.as_ptr()),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        ) != 0
+    })
+    .await
+    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+    if ok {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -368,12 +421,9 @@ fn js_fs_writeJSON(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let (promise, tx) = make_void_promise(ctx)?;
 
     tokio::spawn(async move {
+        let res = write_file_atomic(&path, json_str.as_bytes()).await;
         let _ = PollSender::from(tx)
-            .send_async(
-                tokio::fs::write(&path, json_str.as_bytes())
-                    .await
-                    .map_err(|e| e.to_string()),
-            )
+            .send_async(res.map_err(|e| e.to_string()))
             .await;
     });
 
@@ -392,11 +442,10 @@ fn js_fs_writeBytes(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let bytes = get_bytes_from_arg(ctx, &mut cc.arg(1))?;
 
     let (promise, tx) = make_void_promise(ctx)?;
-
     tokio::spawn(async move {
         let _ = PollSender::from(tx)
             .send_async(
-                tokio::fs::write(&path, &bytes)
+                write_file_atomic(&path, &bytes)
                     .await
                     .map_err(|e| e.to_string()),
             )
@@ -524,7 +573,7 @@ fn js_fs_write(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         tokio::spawn(async move {
             let _ = PollSender::from(tx)
                 .send_async(
-                    tokio::fs::write(&path, content.as_bytes())
+                    write_file_atomic(&path, content.as_bytes())
                         .await
                         .map_err(|e| e.to_string()),
                 )
@@ -541,7 +590,7 @@ fn js_fs_write(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             tokio::spawn(async move {
                 let _ = PollSender::from(tx)
                     .send_async(
-                        tokio::fs::write(&path, &bytes)
+                        write_file_atomic(&path, &bytes)
                             .await
                             .map_err(|e| e.to_string()),
                     )
@@ -923,7 +972,12 @@ const MOD_FS_ENTRIES: &[FieldDef] = &[
     FieldDef::FUNC("writeText", 2, js_fs_writeText, 0),
     FieldDef::FUNC("writeJSON", 2, js_fs_writeJSON, 0),
     FieldDef::FUNC("countLines", 1, js_count_lines, FS_COUNT_ALL as i16),
-    FieldDef::FUNC("countNonEmptyLines", 1, js_count_lines, FS_COUNT_NON_EMPTY as i16),
+    FieldDef::FUNC(
+        "countNonEmptyLines",
+        1,
+        js_count_lines,
+        FS_COUNT_NON_EMPTY as i16,
+    ),
     FieldDef::FUNC("writeBytes", 2, js_fs_writeBytes, 0),
     FieldDef::FUNC("appendText", 2, js_fs_appendText, 0),
     FieldDef::FUNC("write", 2, js_fs_write, 0),
