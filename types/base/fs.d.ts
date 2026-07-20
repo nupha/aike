@@ -2,6 +2,8 @@
 // import * as fs from "fs";
 
 declare module "fs" {
+  import type { JSONLParseOpts } from "jsonl";
+
   interface Dirent {
     /** File/directory name. */
     name: string;
@@ -71,6 +73,25 @@ declare module "fs" {
     path: string,
     data: string | Uint8Array | ArrayBuffer,
   ): Promise<void>;
+
+  // JSONL
+
+  /** Read a JSONL file and resolve to an array of T. */
+  function readJSONL<T = unknown>(
+    path: string,
+    opts?: JSONLParseOpts<T>,
+  ): Promise<T[]>;
+  /** Rewrite (truncate) a JSONL file with the given items. No items clears the file. */
+  function writeJSONL<T>(path: string, ...items: T[]): Promise<void>;
+  /** Append one or more items to a JSONL file. */
+  function appendJSONL<T = unknown>(path: string, ...items: T[]): Promise<void>;
+
+  // Line counting
+
+  /** Count all lines in a file (missing/unreadable file resolves to 0). */
+  function countLines(path: string): Promise<number>;
+  /** Count non-empty (trimmed) lines in a file (missing/unreadable file resolves to 0). */
+  function countNonEmptyLines(path: string): Promise<number>;
 
   // Directory
 

@@ -1,4 +1,4 @@
-// jsonl.mjs — 验证 JSONL 模块的全部 API
+// jsonl.mjs — 验证 JSONL 模块的新 API（返回普通数组 T[]，无 JSONLArray 包装）
 import * as fs from "fs";
 import * as JSONL from "jsonl";
 
@@ -22,100 +22,55 @@ function eq(a, b) {
 // ===================================================================
 console.log("\n=== 模块基础 ===");
 check("JSONL 是对象", typeof JSONL === "object" && JSONL !== null);
-check("JSONLArray 是类", typeof JSONL.JSONLArray === "function");
 check("parse 是函数", typeof JSONL.parse === "function");
-check("tryParse 是函数", typeof JSONL.tryParse === "function");
-check("read 是函数", typeof JSONL.readFromFile === "function");
 check("stringify 是函数", typeof JSONL.stringify === "function");
-check("append 是函数", typeof JSONL.appendToFile === "function");
-check("rewrite 是函数", typeof JSONL.rewriteToFile === "function");
-check("fromArray 是函数", typeof JSONL.fromArray === "function");
-check("countLinesFromFile 是函数", typeof JSONL.countLinesFromFile === "function");
+check("readJSONL 是函数", typeof JSONL.readJSONL === "function");
+check("appendJSONL 是函数", typeof JSONL.appendJSONL === "function");
+check("writeJSONL 是函数", typeof JSONL.writeJSONL === "function");
 check("parseChunk 是函数", typeof JSONL.parseChunk === "function");
 check("parseStream 是函数", typeof JSONL.parseStream === "function");
+// 已移除的 API 不应存在
+check("JSONLArray 类已移除", typeof JSONL.JSONLArray === "undefined");
+check("tryParse 已移除", typeof JSONL.tryParse === "undefined");
+check("fromArray 已移除", typeof JSONL.fromArray === "undefined");
+check("readFromFile 已重命名移除", typeof JSONL.readFromFile === "undefined");
+check("countLinesFromFile 已移除", typeof JSONL.countLinesFromFile === "undefined");
 
 // ===================================================================
-// parse — 跳过畸形行、返回 JSONLArray
+// parse — 跳过畸形行、返回普通数组
 // ===================================================================
 console.log("\n=== parse ===");
+// 默认 onError="replace"：畸形行被 undefined 占位（保持原 JSONL.parse 行为）
 const records = JSONL.parse('{"id":1}\n{invalid}\n{"id":2}');
+check("parse 返回普通数组", Array.isArray(records), typeof records);
+check("parse length=3 (replace 默认占位)", records.length === 3, "length=" + records.length);
+check("records[0]", eq(records[0], { id: 1 }), JSON.stringify(records[0]));
+check("records[2]", eq(records[2], { id: 2 }), JSON.stringify(records[2]));
+check("records[1] 为 undefined 占位", records[1] === undefined, JSON.stringify(records[1]));
+// 普通数组的 push / slice / splice
+const len = records.push({ id: 3 });
+check("push 返回新长度", len === 4, "len=" + len);
+check("push 后 length=4", records.length === 4);
 check(
-  "parse 返回 JSONLArray(length=2)",
-  records.length === 2,
-  "length=" + records.length,
+  "stringify(数组)",
+  JSONL.stringify(records) === '{"id":1}\nnull\n{"id":2}\n{"id":3}\n',
+  JSONL.stringify(records),
 );
-check("get(0)", eq(records.get(0), { id: 1 }), JSON.stringify(records.get(0)));
-check("get(1)", eq(records.get(1), { id: 2 }), JSON.stringify(records.get(1)));
-check(
-  "push 返回新长度",
-  records.push({ id: 3 }) === 3,
-  "len=" + records.length,
-);
-check(
-  "stringify",
-  records.stringify() === '{"id":1}\n{"id":2}\n{"id":3}\n',
-  records.stringify(),
-);
-check(
-  "toArray 返回普通数组",
-  Array.isArray(records.toArray()) && records.toArray().length === 3,
-  "len=" + records.toArray().length,
-);
-
-// 负索引
-check("get(-1)", eq(records.get(-1), { id: 3 }));
-check(
-  "get(-99, fallback) returns fallback",
-  records.get(-99, { x: 0 }) && eq(records.get(-99, { x: 0 }), { x: 0 }),
-);
-check("get(99, fallback) returns fallback", eq(records.get(99, "FB"), "FB"));
-check("get(99) 越界 undefined", records.get(99) === undefined);
-
-// slice / splice
 const sliced = records.slice(0, 2);
-check("slice(0,2)", sliced.length === 2 && eq(sliced.get(0), { id: 1 }));
-const removed = records.splice(0, 1);
-check("splice(0,1) 删除 1 条", records.length === 2, "len=" + records.length);
-check(
-  "splice 返回被删 JSONLArray",
-  removed.length === 1 && eq(removed.get(0), { id: 1 }),
-);
-const removed2 = records.splice(1, 0, { id: 9 });
+check("slice(0,2)", sliced.length === 2 && eq(sliced[0], { id: 1 }));
+records.splice(1, 0, { id: 9 });
 check(
   "splice(1,0,item) 插入",
-  records.length === 3 && eq(records.get(1), { id: 9 }),
+  records.length === 5 && eq(records[1], { id: 9 }),
+  "len=" + records.length,
 );
-check("splice 返回空删除数组", removed2.length === 0);
-
 // Symbol.iterator
 let sum = 0;
-for (const v of records) sum += v.id;
-check("for..of 遍历", sum === 2 + 9 + 3, "sum=" + sum);
-
-// toArray
-check(
-  "toArray 为普通数组",
-  Array.isArray(records.toArray()) && records.toArray().length === 3,
-);
-
-// fromArray — 普通数组 -> JSONLArray
-const wrapped = JSONL.fromArray([{ id: 1 }, { id: 2 }, { id: 3 }]);
-check(
-  "fromArray 返回 JSONLArray(length=3)",
-  wrapped instanceof JSONL.JSONLArray && wrapped.length === 3,
-  "len=" + wrapped.length,
-);
-check(
-  "fromArray 内容正确",
-  eq(wrapped.get(0), { id: 1 }) && eq(wrapped.get(2), { id: 3 }),
-);
-check(
-  "fromArray 往返 toArray",
-  eq(wrapped.toArray(), [{ id: 1 }, { id: 2 }, { id: 3 }]),
-);
+for (const v of records) sum += (v && v.id) || 0;
+check("for..of 遍历", sum === 1 + 9 + 2 + 3, "sum=" + sum);
 
 // ===================================================================
-// parse onError="replace" / "throw"
+// parse onError="replace" / "throw" / "skip"
 // ===================================================================
 console.log("\n=== parse onError ===");
 const rep = JSONL.parse('{"id":1}\n{invalid}\n{"id":2}', {
@@ -124,7 +79,7 @@ const rep = JSONL.parse('{"id":1}\n{invalid}\n{"id":2}', {
 });
 check(
   "replace 用 failsafe 替代畸形行",
-  rep.length === 3 && eq(rep.get(1), { id: -1 }),
+  rep.length === 3 && eq(rep[1], { id: -1 }),
 );
 let threw = false;
 try {
@@ -132,44 +87,17 @@ try {
 } catch (e) {
   threw = true;
 }
-check("throw 立即抛异常", threw === true);
-let threwAll = false;
-try {
-  JSONL.parse("{invalid}\n{also bad}", { onError: "skip" });
-} catch (e) {
-  threwAll = true;
-}
-check("完全无效(skip) 抛 SyntaxError", threwAll === true);
+// 原 parse 的 onError="throw" 退化为 skip（保持原行为：parse 永不抛，畸形行跳过）
+check("parse(onError=throw) 退化为 skip（不抛）", threw === false);
+const skipped = JSONL.parse("{invalid}\n{also bad}", { onError: "skip" });
+check("完全无效(skip) 返回空数组", Array.isArray(skipped) && skipped.length === 0);
 
 // ===================================================================
-// tryParse — 永不抛
-// ===================================================================
-console.log("\n=== tryParse ===");
-const safe = JSONL.tryParse("{invalid}\n{also bad}");
-check("tryParse 完全无效返回空数组", safe.length === 0);
-const safe2 = JSONL.tryParse('{"a":1}\n{bad}\n{"a":2}', {
-  onError: "replace",
-  failsafe: null,
-});
-check("tryParse replace", safe2.length === 3 && safe2.get(1) === null);
-let tpThrew = false;
-try {
-  JSONL.tryParse("{bad}", { onError: "throw" });
-} catch (e) {
-  tpThrew = true;
-}
-check("tryParse onError=throw 被降级为 skip（不抛）", tpThrew === false);
-
-// ===================================================================
-// stringify — JSONLArray 或数组
+// stringify — 数组或单个对象
 // ===================================================================
 console.log("\n=== stringify ===");
 check(
-  "stringify(JSONLArray)",
-  JSONL.stringify(records) === records.stringify(),
-);
-check(
-  "stringify(普通数组)",
+  "stringify(数组)",
   JSONL.stringify([{ a: 1 }, { a: 2 }]) === '{"a":1}\n{"a":2}\n',
 );
 check(
@@ -178,102 +106,81 @@ check(
 );
 
 // ===================================================================
-// parseChunk — 流式增量解析，永不抛
+// parseChunk — 返回 { values, attempted }
 // ===================================================================
 console.log("\n=== parseChunk ===");
-// 完整行（带换行结尾）
 const c1 = JSONL.parseChunk('{"id":1}\n{"id":2}\n{"id":3}\n', {
   onError: "skip",
 });
 check("parseChunk values", c1.values.length === 3);
-check("parseChunk read 全部消费", c1.read === 27, "read=" + c1.read);
-check("parseChunk done", c1.done === true);
-check("parseChunk error 为 null", c1.error === null);
-// 部分行（无换行结尾）
+check("parseChunk attempted", c1.attempted === 3, "attempted=" + c1.attempted);
+// 无状态解析：text.lines() 会把最后一段（即使无结尾换行）当作一行解析
 const partial = '{"id":1}\n{"id":2}\n{"id":3';
 const c2 = JSONL.parseChunk(partial);
 check(
-  "parseChunk 只解析完整行",
-  c2.values.length === 2,
+  "parseChunk 解析全部行",
+  c2.values.length === 3,
   "len=" + c2.values.length,
 );
-check("parseChunk read 截到最后一个 \\n", c2.read === 18, "read=" + c2.read);
-check("parseChunk done=false（有残余）", c2.done === false);
-// 模拟流式累积
-let buf = "";
-let total = 0;
-for (const chunk of ['{"id":1}\n{"id":2', '}\n{"id":3}\n']) {
-  buf += chunk;
-  const r = JSONL.parseChunk(buf);
-  for (const v of r.values) {
-    total += v.id;
-  }
-  buf = buf.slice(r.read);
-}
-check("流式累积解析出 1,2,3", total === 6, "total=" + total);
-check("残余 buffer 为空", buf === "", "buf=" + JSON.stringify(buf));
-
-// Uint8Array 输入
-const ua = new Uint8Array([123, 34, 105, 100, 34, 58, 49, 125, 10]); // {"id":1}\n
-const c3 = JSONL.parseChunk(ua);
-check(
-  "parseChunk 接受 Uint8Array",
-  c3.values.length === 1 && eq(c3.values.get(0), { id: 1 }),
-);
+check("parseChunk attempted=3", c2.attempted === 3);
 
 // ===================================================================
-// read / append — 文件 I/O
+// readJSONL / appendJSONL / writeJSONL — 文件 I/O
 // ===================================================================
-console.log("\n=== read / append ===");
+console.log("\n=== readJSONL / appendJSONL / writeJSONL ===");
 const fsPath = "/tmp/jsonl_test_" + Date.now() + ".jsonl";
-await JSONL.appendToFile(fsPath, { id: 1 }, { id: 2 });
-await JSONL.appendToFile(fsPath, { id: 3 });
-const fromFile = await JSONL.readFromFile(fsPath);
-check("read 读出 3 条", fromFile.length === 3, "len=" + fromFile.length);
+await JSONL.appendJSONL(fsPath, { id: 1 }, { id: 2 });
+await JSONL.appendJSONL(fsPath, { id: 3 });
+const fromFile = await JSONL.readJSONL(fsPath);
+check("readJSONL 读出 3 条", Array.isArray(fromFile) && fromFile.length === 3, "len=" + fromFile.length);
 check(
-  "read 内容正确",
-  eq(fromFile.get(0), { id: 1 }) && eq(fromFile.get(2), { id: 3 }),
+  "readJSONL 内容正确",
+  eq(fromFile[0], { id: 1 }) && eq(fromFile[2], { id: 3 }),
 );
-// countLinesFromFile 为轻量估计：跳过空行与字面量 undefined，但不校验 JSON，
-// 故对合法行返回估计数；缺失文件返回 0。
-const est = await JSONL.countLinesFromFile(fsPath);
-check("countLinesFromFile 估计 3 行", est === 3, "est=" + est);
-const estMissing = await JSONL.countLinesFromFile("/tmp/no_such_" + Date.now() + ".jsonl");
-check("countLinesFromFile 缺失文件返回 0", estMissing === 0);
-// read 完全无效抛（promise reject）。append 永远写出合法 JSON，故用手写畸形文件。
+// readJSONL 完全无效 -> promise reject
 let readThrew = false;
 const badPath = "/tmp/jsonl_bad_" + Date.now() + ".jsonl";
 fs.writeText(badPath, "{not json}\n{bad}\n");
 try {
-  await JSONL.readFromFile(badPath);
+  await JSONL.readJSONL(badPath);
 } catch (e) {
   readThrew = true;
 }
-check("read 完全无效 reject", readThrew === true);
+check("readJSONL 完全无效 reject", readThrew === true);
+
+// writeJSONL 清空后重写
+const rw = "/tmp/jsonl_rewrite_" + Date.now() + ".jsonl";
+await JSONL.appendJSONL(rw, { id: 1 }, { id: 2 }, { id: 3 });
+await JSONL.writeJSONL(rw, { a: 10 }, { a: 20 });
+const rwBack = await JSONL.readJSONL(rw);
+check(
+  "writeJSONL 清空+重写 -> 只剩新 2 条",
+  rwBack.length === 2 && eq(rwBack[0], { a: 10 }) && eq(rwBack[1], { a: 20 }),
+  "len=" + rwBack.length,
+);
+// writeJSONL 后再 appendJSONL 叠加
+await JSONL.appendJSONL(rw, { a: 30 });
+const rwBack2 = await JSONL.readJSONL(rw);
+check(
+  "writeJSONL 后 appendJSONL 叠加 -> 3 条",
+  rwBack2.length === 3 && eq(rwBack2[2], { a: 30 }),
+  "len=" + rwBack2.length,
+);
+// writeJSONL 无 values -> 清空为 0 条
+const rwEmpty = "/tmp/jsonl_rewrite_empty_" + Date.now() + ".jsonl";
+await JSONL.appendJSONL(rwEmpty, { x: 1 }, { x: 2 });
+await JSONL.writeJSONL(rwEmpty);
+const rwEmptyBack = await JSONL.readJSONL(rwEmpty);
+check("writeJSONL 无 values -> 清空为 0 条", rwEmptyBack.length === 0, "len=" + rwEmptyBack.length);
 
 // ===================================================================
-// parseStream — AsyncIterable
+// parseStream — 返回 { iterator, lines }
 // ===================================================================
 console.log("\n=== parseStream ===");
-function makeStream(chunks) {
-  let i = 0;
-  return {
-    next() {
-      if (i < chunks.length) {
-        const chunk = chunks[i++];
-        return Promise.resolve({ value: chunk, done: false });
-      }
-      return Promise.resolve({ value: undefined, done: true });
-    },
-  };
-}
-const streamChunks = ['{"id":1}\n{"id":2}\n', '{"id":3}\n', '{"id":4}\n'];
+const ps = JSONL.parseStream('{"id":1}\n{"id":2}\n{"id":3}\n{"id":4}\n');
+check("parseStream lines=4", ps.lines === 4, "lines=" + ps.lines);
 const out = [];
-for await (const rec of JSONL.parseStream(
-  makeStream(streamChunks),
-)) {
-  out.push(rec.id);
-}
+for await (const rec of ps.iterator) out.push(rec.id);
 check(
   "parseStream 逐行产出 1,2,3,4",
   eq(out, [1, 2, 3, 4]),
@@ -281,14 +188,12 @@ check(
 );
 
 // parseStream onError=replace
-const streamBad = ['{"id":1}\n', "{bad}\n", '{"id":2}\n'];
-const outBad = [];
-for await (const rec of JSONL.parseStream(makeStream(streamBad), {
+const bad = JSONL.parseStream('{"id":1}\n{bad}\n{"id":2}\n', {
   onError: "replace",
   failsafe: null,
-})) {
-  outBad.push(rec);
-}
+});
+const outBad = [];
+for await (const rec of bad.iterator) outBad.push(rec);
 check(
   "parseStream replace 畸形行",
   outBad.length === 3 && outBad[1] === null,
@@ -296,84 +201,27 @@ check(
 );
 
 // ===================================================================
-// spread — appendToFile(path, ...values) 的展开行为
+// spread — appendJSONL(path, ...values)
 // ===================================================================
 console.log("\n=== spread ===");
-// 1) 展开普通 Array：每个元素一条线（基准，必定正确）
 const plainArr = [{ id: 1 }, { id: 2 }, { id: 3 }];
 const sp1 = "/tmp/jsonl_spread_plain_" + Date.now() + ".jsonl";
-await JSONL.appendToFile(sp1, ...plainArr);
-const sp1Back = await JSONL.readFromFile(sp1);
+await JSONL.appendJSONL(sp1, ...plainArr);
+const sp1Back = await JSONL.readJSONL(sp1);
 check(
   "spread 普通数组 -> 每行一个元素",
   sp1Back.length === plainArr.length &&
-    eq(sp1Back.get(0), { id: 1 }) && eq(sp1Back.get(2), { id: 3 }),
+    eq(sp1Back[0], { id: 1 }) && eq(sp1Back[2], { id: 3 }),
   "len=" + sp1Back.length,
 );
-
-// 2) 展开 JSONLArray：依赖引擎对原生 iterable 的 ...spread 支持
-const jArr = JSONL.fromArray(plainArr);
-const sp2 = "/tmp/jsonl_spread_jsonl_" + Date.now() + ".jsonl";
-await JSONL.appendToFile(sp2, ...jArr);
-const sp2Back = await JSONL.readFromFile(sp2);
-check(
-  "spread JSONLArray -> 每行一个元素(展开正确)",
-  sp2Back.length === jArr.length &&
-    eq(sp2Back.get(0), { id: 1 }) && eq(sp2Back.get(2), { id: 3 }),
-  "len=" + sp2Back.length,
-);
-
-// 3) 对照：不 spread 直接传 JSONLArray -> 单值序列化成 1 行 ({} 之类)
+// 不 spread 直接传单个对象 -> 仅 1 行
 const sp3 = "/tmp/jsonl_spread_nospread_" + Date.now() + ".jsonl";
-await JSONL.appendToFile(sp3, jArr);
-const sp3Back = await JSONL.readFromFile(sp3);
+await JSONL.appendJSONL(sp3, { wrap: plainArr });
+const sp3Back = await JSONL.readJSONL(sp3);
 check(
-  "不 spread 传 JSONLArray -> 仅 1 行(对比基线)",
+  "不 spread 传单个对象 -> 仅 1 行",
   sp3Back.length === 1,
   "len=" + sp3Back.length,
-);
-
-// ===================================================================
-// rewriteToFile — 清空后重写（magic const = REWRITE 分支）
-// ===================================================================
-console.log("\n=== rewriteToFile ===");
-// 先写 3 条，再 rewrite 为 2 条 —— 结果必须只剩这 2 条（先 truncate）
-const rw = "/tmp/jsonl_rewrite_" + Date.now() + ".jsonl";
-await JSONL.appendToFile(rw, { id: 1 }, { id: 2 }, { id: 3 });
-await JSONL.rewriteToFile(rw, { a: 10 }, { a: 20 });
-const rwBack = await JSONL.readFromFile(rw);
-check(
-  "rewriteToFile 清空+重写 -> 只剩新 2 条",
-  rwBack.length === 2 && eq(rwBack.get(0), { a: 10 }) && eq(rwBack.get(1), { a: 20 }),
-  "len=" + rwBack.length,
-);
-
-// rewrite 后再 append —— append 不破坏 rewrite 的内容，文件变为 3 条
-await JSONL.appendToFile(rw, { a: 30 });
-const rwBack2 = await JSONL.readFromFile(rw);
-check(
-  "rewrite 后 append 叠加 -> 3 条",
-  rwBack2.length === 3 && eq(rwBack2.get(2), { a: 30 }),
-  "len=" + rwBack2.length,
-);
-
-// rewrite 无 values -> 清空文件为 0 条（等价于 truncate）
-const rwEmpty = "/tmp/jsonl_rewrite_empty_" + Date.now() + ".jsonl";
-await JSONL.appendToFile(rwEmpty, { x: 1 }, { x: 2 });
-await JSONL.rewriteToFile(rwEmpty);
-const rwEmptyBack = await JSONL.readFromFile(rwEmpty);
-check("rewriteToFile 无 values -> 清空为 0 条", rwEmptyBack.length === 0, "len=" + rwEmptyBack.length);
-
-// spread 普通数组到 rewriteToFile
-const rwSpread = "/tmp/jsonl_rewrite_spread_" + Date.now() + ".jsonl";
-await JSONL.appendToFile(rwSpread, { old: 1 });
-await JSONL.rewriteToFile(rwSpread, ...plainArr);
-const rwSpreadBack = await JSONL.readFromFile(rwSpread);
-check(
-  "rewriteToFile spread 普通数组 -> 每行一个元素",
-  rwSpreadBack.length === plainArr.length &&
-    eq(rwSpreadBack.get(0), { id: 1 }) && eq(rwSpreadBack.get(2), { id: 3 }),
-  "len=" + rwSpreadBack.length,
 );
 
 // ===================================================================

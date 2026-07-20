@@ -1,100 +1,40 @@
-// SPDX-License-Identifier: Apache-2.0
-// SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
-
 declare module "jsonl" {
-  /**
-   * A JSONL array: an ordered list of JS objects, one JSON object per line.
-   * Operates on parsed JS values (not raw text).
-   */
-  export class JSONLArray<T = unknown> {
-    constructor(values?: readonly T[]);
-
-    /** Number of elements. */
-    readonly length: number;
-
-    /** Get element at `i` (negative = from end); returns fallback if absent. */
-    get(i: number, fallback?: T): T | undefined;
-
-    /** Append values, return new length. */
-    push(...values: T[]): number;
-
-    /** Remove/insert elements; returns removed as a new JSONLArray. */
-    splice(start: number, deleteCount?: number, ...items: T[]): JSONLArray<T>;
-
-    /** Shallow slice, returns a new JSONLArray. */
-    slice(start?: number, end?: number): JSONLArray<T>;
-
-    /** Iterate elements. */
-    [Symbol.iterator](): IterableIterator<T>;
-
-    /** Serialize to a JSONL string. */
-    stringify(): string;
-
-    /** Return a plain array copy. */
-    toArray(): T[];
-  }
-
-  export interface JSONLParseOpts<T> {
-    /** "skip" (default) | "throw" | "replace". */
-    onError?: "skip" | "throw" | "replace";
-    /** Replacement value when onError=="replace". */
+  // Options for tolerant parsing.
+  interface JSONLParseOpts<T> {
+    onError?: "replace" | "skip" | "throw";
     failsafe?: T;
   }
 
-  /** Parse full JSONL text into a JSONLArray. */
+  /** Parse a full JSONL string into an array of T. */
   export function parse<T = unknown>(
     text: string,
     opts?: JSONLParseOpts<T>,
-  ): JSONLArray<T>;
+  ): T[];
 
-  /** Parse JSONL text; never throws (bad lines skipped/replaced). */
-  export function tryParse<T = unknown>(
+  /** Serialize an array (or single object) of T into a JSONL string (one element per line). */
+  export function stringify(data: unknown[] | unknown): string;
+
+  /** Read a JSONL file and resolve to an array of T. */
+  export function read<T = unknown>(
+    path: string,
+    opts?: JSONLParseOpts<T>,
+  ): Promise<T[]>;
+
+  /** Append one or more items to a JSONL file. */
+  export function append<T>(path: string, ...items: T[]): Promise<void>;
+
+  /** Rewrite (truncate) a JSONL file with the given items. No items clears the file. */
+  export function write(path: string, ...items: unknown[]): Promise<void>;
+
+  /** Parse a chunk of JSONL, returning { values: T[], attempted: number }. */
+  export function parseChunk<T = unknown>(
     text: string,
     opts?: JSONLParseOpts<T>,
-  ): JSONLArray<T>;
+  ): { values: T[]; attempted: number };
 
-  /** Wrap a plain JS array into a JSONLArray (elements copied). */
-  export function fromArray<T = unknown>(arr: readonly T[]): JSONLArray<T>;
-
-  /** Read + parse a file; returns Promise<JSONLArray>. */
-  export function readFromFile<T = unknown>(
-    path: string,
-    opts?: JSONLParseOpts<T>,
-  ): Promise<JSONLArray<T>>;
-
-  /** Append values to a file (one line each).
-   *  Each argument is serialized as one JSONL line. Pass individual values,
-   *  or spread a plain array / JSONLArray with `...arr` so its elements each
-   *  become a line. */
-  export function appendToFile<T = unknown>(
-    path: string,
-    ...values: T[]
-  ): Promise<void>;
-
-  /** Clear the file, then write `values` as JSONL lines (full rewrite).
-   *  Each argument is one line. Pass individual values, or spread a plain
-   *  array / JSONLArray with `...arr`. With no values, truncates to empty. */
-  export function rewriteToFile<T = unknown>(
-    path: string,
-    ...values: T[]
-  ): Promise<void>;
-
-  /** Parse a complete chunk: returns { values, read, done, error }. */
-  export function parseChunk<T = unknown>(
-    input: string | ArrayBuffer | Uint8Array,
-    opts?: JSONLParseOpts<T>,
-  ): { values: JSONLArray<T>; read: number; done: boolean; error: unknown };
-
-  /** Async-iterable parse of a stream (aike fetch body / FileHandle). */
+  /** Stream-parse a JSONL string, returning { iterator: AsyncIterable<T>, lines: number }. */
   export function parseStream<T = unknown>(
-    stream: AsyncIterable<string | ArrayBuffer | Uint8Array>,
+    text: string,
     opts?: JSONLParseOpts<T>,
-  ): AsyncIterable<T>;
-
-  /** Serialize a JSONLArray or array to a JSONL string. */
-  export function stringify(data: JSONLArray | unknown[]): string;
-
-  /** Estimate the number of JSONL lines in a file (skip blanks + literal `undefined`).
-   *  Lightweight: does NOT validate JSON, so actual parsed count may be fewer. */
-  export function countLinesFromFile(file: string): Promise<number>;
+  ): { iterator: AsyncIterable<T>; lines: number };
 }
