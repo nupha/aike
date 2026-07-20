@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
 use std::{
-    cell::{Cell, RefCell},
+    cell::RefCell,
     collections::HashMap,
     io::Write,
     sync::{
@@ -18,7 +18,8 @@ use crossbeam::channel::{Receiver, Sender};
 use linkme::distributed_slice;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use zuqe::{
-    CallContext, ClassID, FieldDef, JSResult, JSValue, Object, PollSender, Runtime, ScopedContext,
+    CallContext, ClassCtorDef, ClassID, FieldDef, JSResult, JSValue, Object, PollSender, Runtime,
+    ScopedContext,
     builtins::{iterator::AsyncIterableIterator, promise::Promise, typed_array::TypedArray},
     def_native_object,
     gc_lite::{GcTrace, GcTraceCtx},
@@ -1248,7 +1249,14 @@ def_native_object!(
     JSFileHandle,
     IoPayload,
     FILE_HANDLE_PROTO,
-    None
+    Some(ClassCtorDef::new(
+        |ctx, _| {
+            ctx.throw_internal_error("can't instantiate with new");
+            Err(-1)
+        },
+        0,
+        false
+    ))
 );
 
 impl JSFileHandle {
