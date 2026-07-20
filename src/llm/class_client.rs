@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-use std::{cell::Cell, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 
 use futures_util::StreamExt;
 use linkme::distributed_slice;
@@ -303,7 +303,6 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
     let client = get_client(ctx, this)?;
     let is_stream = cc.magic() == MAGIC_CHAT_STREAM;
 
-    // Single object argument
     let opts_obj = cc.arg(0).as_object().copied().ok_or_else(|| {
         ctx.throw_type_error("chat() requires an options object");
         -1

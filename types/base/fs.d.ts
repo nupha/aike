@@ -43,7 +43,7 @@ declare module "fs" {
   /** Read a file as a UTF-8 string. */
   function readText(path: string): Promise<string>;
   /** Read and parse a JSON file. */
-  function readJSON(path: string): Promise<any>;
+  function readJSON<T = unknown>(path: string): Promise<T>;
   /** Read a file as binary data (Uint8Array). */
   function readBytes(path: string): Promise<Uint8Array>;
   /** Check if a file or directory exists. */

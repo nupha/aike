@@ -98,17 +98,13 @@ declare function request(
   options?: RequestOptions,
 ): Promise<HttpResponse>;
 
-// ---------------------------------------------------------------------------
-// EventEmitter
-// ---------------------------------------------------------------------------
-
 declare class EventEmitter {
-  addListener(event: string, listener: (...args: any[]) => void): this;
-  on(event: string, listener: (...args: any[]) => void): this;
-  once(event: string, listener: (...args: any[]) => void): this;
-  removeListener(event: string, listener: (...args: any[]) => void): this;
-  off(event: string, listener: (...args: any[]) => void): this;
-  emit(event: string, ...args: any[]): boolean;
+  addListener(event: string, listener: (...args: unknown[]) => void): this;
+  on(event: string, listener: (...args: unknown[]) => void): this;
+  once(event: string, listener: (...args: unknown[]) => void): this;
+  removeListener(event: string, listener: (...args: unknown[]) => void): this;
+  off(event: string, listener: (...args: unknown[]) => void): this;
+  emit(event: string, ...args: unknown[]): boolean;
   removeAllListeners(event?: string): this;
   listeners(event: string): Function[];
   listenerCount(event: string): number;
@@ -299,10 +295,7 @@ declare class AbortController {
 // ---------------------------------------------------------------------------
 
 /** A header name/value pair. */
-type HeadersInit =
-  | Headers
-  | Record<string, string>
-  | Array<[string, string]>;
+type HeadersInit = Headers | Record<string, string> | Array<[string, string]>;
 
 /** Request/response body: a string or a binary buffer. */
 type BodyInit = string | ArrayBufferView | ArrayBuffer;
@@ -422,7 +415,10 @@ declare class Request {
  * `request()` global.
  */
 declare class Response {
-  constructor(body?: BodyInit, init?: { status?: number; statusText?: string; headers?: HeadersInit });
+  constructor(
+    body?: BodyInit,
+    init?: { status?: number; statusText?: string; headers?: HeadersInit },
+  );
   /** Response type: "default" | "basic" | "error" | "opaqueredirect". */
   readonly type: string;
   /** Response URL. */
@@ -479,4 +475,7 @@ declare class Response {
  * @param input - A `Request` object or a URL string.
  * @param init - Optional `RequestInit`.
  */
-declare function fetch(input: RequestInfo, init?: RequestInit): Promise<Response>;
+declare function fetch(
+  input: RequestInfo,
+  init?: RequestInit,
+): Promise<Response>;
