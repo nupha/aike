@@ -7,7 +7,7 @@ use std::{
 };
 
 use zuqe::{
-    Array, CallContext, FieldDef, JSResult, JSValue, PollSender, ScopedContext,
+    Array, CallContext, FieldDef, JSResult, JSValue, NativeObject, PollSender, ScopedContext,
     builtins::{promise::Promise, typed_array::TypedArray},
 };
 
@@ -358,7 +358,7 @@ async fn atomic_replace(tmp: &Path, dst: &Path) -> std::io::Result<()> {
 async fn atomic_replace(tmp: &Path, dst: &Path) -> std::io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Storage::FileSystem::{
-        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
     };
     use windows_sys::core::PCWSTR;
 
@@ -366,7 +366,10 @@ async fn atomic_replace(tmp: &Path, dst: &Path) -> std::io::Result<()> {
     // Windows (std::fs::rename refuses to replace an existing file). The
     // WRITE_THROUGH flag makes the replace durable before it returns.
     let to_wide = |p: &Path| -> Vec<u16> {
-        p.as_os_str().encode_wide().chain(std::iter::once(0)).collect()
+        p.as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect()
     };
     let tmp_w = to_wide(tmp);
     let dst_w = to_wide(dst);
@@ -963,6 +966,11 @@ fn js_count_lines(cx: &mut ScopedContext, cc: CallContext) -> JSResult {
 }
 
 const MOD_FS_ENTRIES: &[FieldDef] = &[
+    FieldDef::CLASS(
+        JSFileHandle::CLASS_NAME,
+        JSFileHandle::class_id,
+        zuqe::JS_PROP_ENUMERABLE,
+    ),
     FieldDef::FUNC("getSandbox", 0, js_fs_get_restrict, BOUNDARY_SANDBOX as _),
     FieldDef::FUNC("setSandbox", 1, js_fs_set_restrict, BOUNDARY_SANDBOX as _),
     FieldDef::FUNC("open", 2, js_fs_open, 0),

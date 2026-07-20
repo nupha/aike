@@ -1,15 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-//! WHATWG Fetch — `Response` class.
+//! WHATWG Fetch — `HttpResponse` class.
 //!
 //! This is the unified client-response class. The legacy `request()` global
 //! and the new `fetch()` both return it, so the body-once consumption
 //! semantics stay consistent across both APIs. It also exposes the WHATWG
 //! `Response` constructor, `Response.error()` / `Response.redirect()`
 //! statics, `clone()`, and the `Body` mixin.
-
-use std::cell::Cell;
 
 use crossbeam::channel::Receiver;
 use linkme::distributed_slice;
@@ -556,7 +554,7 @@ const RESPONSE_PROTO: &[FieldDef] = &[
 ];
 
 def_native_object!(
-    "Response",
+    "HttpResponse",
     JSResponse,
     ResponsePayload,
     RESPONSE_PROTO,

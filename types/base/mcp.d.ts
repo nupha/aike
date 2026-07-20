@@ -168,49 +168,7 @@ declare module "mcp" {
     instructions?: string;
   }
 
-  /** Simplified argument definition for the DSL format. */
-  export interface McpToolShortArg {
-    /** Human-readable description of this argument. */
-    desc: string;
-    /**
-     * Value type. Defaults to `"string"` when omitted.
-     * - `"string"` — default
-     * - `"integer"` — integer number
-     * - `"boolean"` — true/false
-     * - `"array"` — array; use `items` to specify element type
-     */
-    type?: "string" | "integer" | "boolean" | "array";
-    /** Mark as required. */
-    required?: boolean;
-    /** Enum string values. */
-    enum?: string[];
-    /** Default value when not provided. */
-    default?: any;
-    /**
-     * Schema for array items. Only meaningful when `type="array"`.
-     * @example { type: "integer" } | { type: "string", desc: "Tag name" }
-     */
-    items?: {
-      type: "string" | "integer" | "boolean";
-      desc?: string;
-      enum?: string[];
-    };
-  }
-
-  /** Simplified tool definition consumed by `MCPServerDef.tool`. */
-  export interface McpToolShortDef {
-    /** Human-readable description of what the tool does. */
-    desc: string;
-    /** Handler invoked on `tools/call`. */
-    handler: McpToolHandler;
-    /**
-     * Argument DSL — Rust auto-converts this to a standard JSON Schema
-     * `inputSchema` (type/enum/default/required).
-     */
-    args: Record<string, McpToolShortArg>;
-  }
-
-  /** Metadata of tool defination */
+  /** Metadata of tool definition */
   export interface McpToolMeta {
     name: string;
     description: string;

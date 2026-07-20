@@ -15,6 +15,6 @@ declare module "yaml" {
     parse(text: string): YAMLValue;
 
     /** Serialize a JavaScript value into a YAML string. */
-    stringify(value: YAMLValue, options?: { indent?: number }): string;
+    stringify(value: YAMLValue): string;
   };
 }

@@ -57,35 +57,60 @@ interface RequestOptions {
   timeout?: number;
 }
 
-/** HTTP response returned by the global `request()` function. */
+/**
+ * WHATWG Fetch `HttpResponse` class. Shared by `fetch()` and the legacy
+ * `request()` global.
+ */
 declare class HttpResponse {
-  /** HTTP status code (e.g. 200, 404). */
+  constructor(
+    body?: BodyInit,
+    init?: { status?: number; statusText?: string; headers?: HeadersInit },
+  );
+  /** Response type: "default" | "basic" | "error" | "opaqueredirect". */
+  readonly type: string;
+  /** Response URL. */
+  readonly url: string;
+  /** Whether the request was redirected. */
+  readonly redirected: boolean;
+  /** HTTP status code. */
   readonly status: number;
-  /** Whether the status is in the 2xx range. */
+  /** Whether status is in the 2xx range. */
   readonly ok: boolean;
-  /** HTTP status text (e.g. "OK", "Not Found"). */
+  /** HTTP status text. */
   readonly statusText: string;
-  /** Response Content-Type header value. */
+  /** Aike extension: the Content-Type header value. */
   readonly contentType: string;
-  /** Response Content-Length header value, or null if absent. */
+  /** Aike extension: the Content-Length, or null if absent. */
   readonly contentLength: number | null;
-  /** Response headers as key-value pairs. */
-  readonly headers: Record<string, string>;
-
-  /** Async iterator over response body chunks (Uint8Array). */
-  get body(): AsyncIterableIterator<Uint8Array>;
-
-  /** Read the entire body as a Uint8Array. */
+  /** Response headers. */
+  readonly headers: Headers;
+  /** Whether the body has been consumed. */
+  readonly bodyUsed: boolean;
+  /** Async iterator over response body chunks, or null for null-body responses. */
+  readonly body: AsyncIterableIterator<Uint8Array> | null;
+  /** Read the entire body as bytes. */
   bytes(): Promise<Uint8Array>;
   /**
-   * Read the entire body as a string.
-   * @param convert - Optional conversion for HTML responses: "strip" removes HTML tags, "markdown" converts HTML to Markdown.
+   * Read the entire body as a string. For text/html, an optional mode
+   * converts the body: "strip" removes HTML tags, "markdown" converts to Markdown.
    */
   text(convert?: "strip" | "markdown"): Promise<string>;
   /** Read and parse the entire body as JSON. */
   json(): Promise<any>;
+  /** Read the entire body as an ArrayBuffer. */
+  arrayBuffer(): Promise<ArrayBuffer>;
+  /** Clone the response (fails if the body was already consumed). */
+  clone(): HttpResponse;
   /** Close the response and release underlying resources. */
   close(): void;
+  /** Returns a network-error response (type "error", null body). */
+  static error(): HttpResponse;
+  /**
+   * Returns a redirect response (status 301/302/303/307/308) with a Location header.
+   * @param url - Redirect target.
+   * @param status - Redirect status; defaults to 302.
+   */
+  static redirect(url: string, status?: number): HttpResponse;
 }
 
 /**
@@ -240,6 +265,12 @@ declare class URLSearchParams {
   forEach(
     callback: (value: string, key: string, parent: URLSearchParams) => void,
   ): void;
+  /** Get an iterator over all key-value pairs. */
+  entries(): IterableIterator<[string, string]>;
+  /** Get an iterator over all keys. */
+  keys(): IterableIterator<string>;
+  /** Get an iterator over all values. */
+  values(): IterableIterator<string>;
 }
 
 // ---------------------------------------------------------------------------
@@ -411,63 +442,13 @@ declare class Request {
 }
 
 /**
- * WHATWG Fetch `Response` class. Shared by `fetch()` and the legacy
- * `request()` global.
+ * WHATWG Fetch `Response` — type alias for backward compatibility.
+ * @deprecated Use `HttpResponse` instead.
  */
-declare class Response {
-  constructor(
-    body?: BodyInit,
-    init?: { status?: number; statusText?: string; headers?: HeadersInit },
-  );
-  /** Response type: "default" | "basic" | "error" | "opaqueredirect". */
-  readonly type: string;
-  /** Response URL. */
-  readonly url: string;
-  /** Whether the request was redirected. */
-  readonly redirected: boolean;
-  /** HTTP status code. */
-  readonly status: number;
-  /** Whether status is in the 2xx range. */
-  readonly ok: boolean;
-  /** HTTP status text. */
-  readonly statusText: string;
-  /** Aike extension: the Content-Type header value. */
-  readonly contentType: string;
-  /** Aike extension: the Content-Length, or null if absent. */
-  readonly contentLength: number | null;
-  /** Response headers. */
-  readonly headers: Headers;
-  /** Whether the body has been consumed. */
-  readonly bodyUsed: boolean;
-  /** Async iterator over response body chunks, or null for null-body responses. */
-  readonly body: AsyncIterableIterator<Uint8Array> | null;
-  /** Read the entire body as bytes. */
-  bytes(): Promise<Uint8Array>;
-  /**
-   * Read the entire body as a string. For text/html, an optional mode
-   * converts the body: "strip" removes HTML tags, "markdown" converts to Markdown.
-   */
-  text(convert?: "strip" | "markdown"): Promise<string>;
-  /** Read and parse the entire body as JSON. */
-  json(): Promise<any>;
-  /** Read the entire body as an ArrayBuffer. */
-  arrayBuffer(): Promise<ArrayBuffer>;
-  /** Clone the response (fails if the body was already consumed). */
-  clone(): Response;
-  /** Close the response and release underlying resources. */
-  close(): void;
-  /** Returns a network-error Response (type "error", null body). */
-  static error(): Response;
-  /**
-   * Returns a redirect Response (status 301/302/303/307/308) with a Location header.
-   * @param url - Redirect target.
-   * @param status - Redirect status; defaults to 302.
-   */
-  static redirect(url: string, status?: number): Response;
-}
+type Response = HttpResponse;
 
 /**
- * Fetch a resource. Resolves to a `Response` once response headers arrive.
+ * Fetch a resource. Resolves to an `HttpResponse` once response headers arrive.
  *
  * If the request is aborted via `init.signal`, the returned Promise rejects
  * with a `TypeError` whose `name` is "AbortError".
@@ -478,4 +459,4 @@ declare class Response {
 declare function fetch(
   input: RequestInfo,
   init?: RequestInit,
-): Promise<Response>;
+): Promise<HttpResponse>;

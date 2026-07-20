@@ -1,7 +1,7 @@
 // Type declarations for Aike JS runtime — Aike global object
 
 // ---------------------------------------------------------------------------
-// StdioHandle / FileHandle  —  used by Aike.stdin/stdout/stderr and fs.open()
+// StdioHandle  —  used by Aike.stdin/stdout/stderr and spawn()
 // ---------------------------------------------------------------------------
 
 interface FileStat {
@@ -46,42 +46,6 @@ interface StdioHandle {
    * Flush write end — no-op for pipes and standard streams.
    */
   flush(): void;
-  /** Close this I/O handle. */
-  close(): void;
-  /**
-   * Register a callback for incoming data (streaming mode).
-   * Pass null to unregister.
-   */
-  onData(callback: ((data: Uint8Array) => void) | null): void;
-  /** Async iterator over data chunks. */
-  [Symbol.asyncIterator](): AsyncIterableIterator<Uint8Array>;
-}
-
-/**
- * I/O handle for files and pipe read ends (child stdout/stderr).
- * Obtained via fs.open() or spawn().
- */
-interface FileHandle {
-  /** File descriptor number. */
-  readonly fd: number;
-  /** Read all content as a UTF-8 string. */
-  text(): Promise<string>;
-  /** Read and parse all content as JSON. */
-  json(): Promise<any>;
-  /** Read all content as a Uint8Array. */
-  bytes(): Promise<Uint8Array>;
-  /** Read up to `maxCount` bytes. */
-  read(maxCount?: number): Promise<Uint8Array>;
-  /** Get file statistics. */
-  stat(): Promise<FileStat>;
-  /**
-   * Write data asynchronously.
-   */
-  write(data: string | Uint8Array | ArrayBuffer): Promise<void>;
-  /**
-   * Flush buffered data asynchronously.
-   */
-  flush(): Promise<void>;
   /** Close this I/O handle. */
   close(): void;
   /**
@@ -313,7 +277,7 @@ declare namespace Aike {
 
   // --- runtime ---
 
-  /** Operating system platform. Follows Node.js convention: 'win32', 'darwin', 'linux', etc. */
+  /** Operating system platform. ('windows', 'darwin', 'linux', etc.) */
   const platform:
     | "windows"
     | "darwin"

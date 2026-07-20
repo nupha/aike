@@ -15,22 +15,6 @@ declare module "fs" {
     size: number;
   }
 
-  interface FileStat {
-    size: number;
-    createdAt?: string;
-    modifiedAt?: string;
-    accessedAt?: string;
-    isFile: boolean;
-    isDirectory: boolean;
-    isSymbolicLink: boolean;
-    /** Unix file mode (only on Unix). */
-    mode?: number;
-    /** Unix UID (only on Unix). */
-    uid?: number;
-    /** Unix GID (only on Unix). */
-    gid?: number;
-  }
-
   // Sandbox
 
   /** Get the current sandbox path, or null if no sandbox is active. */
@@ -103,6 +87,38 @@ declare module "fs" {
   function remove(path: string): Promise<void>;
 
   // Open
+
+  /**
+   * I/O handle for files and pipe read ends (child stdout/stderr).
+   * Obtained via fs.open() or spawn().
+   */
+  export interface FileHandle {
+    /** File descriptor number. */
+    readonly fd: number;
+    /** Read all content as a UTF-8 string. */
+    text(): Promise<string>;
+    /** Read and parse all content as JSON. */
+    json(): Promise<any>;
+    /** Read all content as a Uint8Array. */
+    bytes(): Promise<Uint8Array>;
+    /** Read up to `maxCount` bytes. */
+    read(maxCount?: number): Promise<Uint8Array>;
+    /** Get file statistics. */
+    stat(): Promise<FileStat>;
+    /** Write data asynchronously. */
+    write(data: string | Uint8Array | ArrayBuffer): Promise<void>;
+    /** Flush buffered data asynchronously. */
+    flush(): Promise<void>;
+    /** Close this I/O handle. */
+    close(): void;
+    /**
+     * Register a callback for incoming data (streaming mode).
+     * Pass null to unregister.
+     */
+    onData(callback: ((data: Uint8Array) => void) | null): void;
+    /** Async iterator over data chunks. */
+    [Symbol.asyncIterator](): AsyncIterableIterator<Uint8Array>;
+  }
 
   /**
    * Open a file and return a FileHandle.

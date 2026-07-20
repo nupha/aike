@@ -22,10 +22,6 @@ declare module "llama" {
     json_schema?: unknown;
   }
 
-  interface StreamOptions {
-    include_usage?: boolean;
-  }
-
   /** Token usage statistics. */
   export interface ChatUsage {
     prompt_tokens: number;
@@ -33,8 +29,8 @@ declare module "llama" {
     total_tokens: number;
   }
 
-  /** Chat completion options (snake_case, matching OpenAI API). */
-  export interface ChatOptions {
+  /** Chat completion request body (snake_case, matching OpenAI API). */
+  export interface ChatRequest {
     messages: ChatMessage[];
     model?: string;
     temperature?: number;
@@ -46,23 +42,7 @@ declare module "llama" {
     parallel_tool_calls?: boolean;
     reasoning_effort?: string;
     response_format?: ResponseFormat;
-    stream_options?: StreamOptions;
-  }
-
-  /** Chat request (camelCase variant, accepted by Client). */
-  export interface ChatRequest {
-    messages: ChatMessage[];
-    model?: string;
-    temperature?: number;
-    topP?: number;
-    maxCompletionTokens?: number;
-    stop?: string | string[];
-    tools?: any[];
-    toolChoice?: string | object;
-    parallelToolCalls?: boolean;
-    reasoningEffort?: string;
-    responseFormat?: ResponseFormat;
-    streamOptions?: StreamOptions;
+    stream_options?: { include_usage?: boolean };
     timeout?: number;
     [key: string]: any;
   }
@@ -117,12 +97,10 @@ declare module "llama" {
 
     responseNormalizer: ((response: any) => any) | null;
 
-    chatOnce(options: ChatOptions | ChatRequest): Promise<ChatResponse>;
-    chat(
-      options: ChatOptions | ChatRequest,
-    ): AsyncIterableIterator<ChatStreamChunk>;
-    responses(options: ChatOptions | ChatRequest): AsyncIterableIterator<any>;
-    responsesOnce(options: ChatOptions | ChatRequest): Promise<any>;
+    chatOnce(options: ChatRequest): Promise<ChatResponse>;
+    chat(options: ChatRequest): AsyncIterableIterator<ChatStreamChunk>;
+    responses(options: ChatRequest): AsyncIterableIterator<any>;
+    responsesOnce(options: ChatRequest): Promise<any>;
     dispose(): void;
   }
 }
