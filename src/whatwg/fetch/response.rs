@@ -554,7 +554,7 @@ const RESPONSE_PROTO: &[FieldDef] = &[
 ];
 
 def_native_object!(
-    "HttpResponse",
+    "Response",
     JSResponse,
     ResponsePayload,
     RESPONSE_PROTO,

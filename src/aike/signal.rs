@@ -34,38 +34,33 @@ static SIGNAL_REFCOUNT: LazyLock<Mutex<HashMap<u32, u32>>> =
 /// Signal name -> number mapping
 pub(crate) fn signal_number(name: &str) -> Option<u32> {
     Some(match name {
-        "SIGHUP" => libc::SIGHUP,
+        // Cross-platform (available on Windows CRT)
         "SIGINT" => libc::SIGINT,
-        "SIGQUIT" => libc::SIGQUIT,
         "SIGILL" => libc::SIGILL,
         "SIGABRT" => libc::SIGABRT,
         "SIGFPE" => libc::SIGFPE,
-        "SIGKILL" => libc::SIGKILL,
         "SIGSEGV" => libc::SIGSEGV,
-        "SIGPIPE" => libc::SIGPIPE,
-        "SIGALRM" => libc::SIGALRM,
         "SIGTERM" => libc::SIGTERM,
-        "SIGBUS" => libc::SIGBUS,
-        "SIGTRAP" => libc::SIGTRAP,
-        "SIGURG" => libc::SIGURG,
-        "SIGSYS" => libc::SIGSYS,
-        "SIGUSR1" => libc::SIGUSR1,
-        "SIGUSR2" => libc::SIGUSR2,
-        "SIGCHLD" => libc::SIGCHLD,
-        "SIGCONT" => libc::SIGCONT,
-        "SIGSTOP" => libc::SIGSTOP,
-        "SIGTSTP" => libc::SIGTSTP,
-        "SIGTTIN" => libc::SIGTTIN,
-        "SIGTTOU" => libc::SIGTTOU,
-        "SIGXCPU" => libc::SIGXCPU,
-        "SIGXFSZ" => libc::SIGXFSZ,
-        "SIGVTALRM" => libc::SIGVTALRM,
-        "SIGPROF" => libc::SIGPROF,
-        "SIGWINCH" => libc::SIGWINCH,
-        "SIGIO" => libc::SIGIO,
+        // Unix-only
+        #[cfg(not(windows))]
+        "SIGHUP" => libc::SIGHUP,
+        #[cfg(not(windows))]
+        "SIGQUIT" => libc::SIGQUIT,
+        #[cfg(not(windows))]
+        "SIGKILL" => libc::SIGKILL,
+        #[cfg(not(windows))]
+        "SIGPIPE" => libc::SIGPIPE,
         #[cfg(not(windows))]
         "SIGALRM" => libc::SIGALRM,
         #[cfg(not(windows))]
+        "SIGBUS" => libc::SIGBUS,
+        #[cfg(not(windows))]
+        "SIGTRAP" => libc::SIGTRAP,
+        #[cfg(not(windows))]
+        "SIGURG" => libc::SIGURG,
+        #[cfg(not(windows))]
+        "SIGSYS" => libc::SIGSYS,
+        #[cfg(not(windows))]
         "SIGUSR1" => libc::SIGUSR1,
         #[cfg(not(windows))]
         "SIGUSR2" => libc::SIGUSR2,
@@ -81,6 +76,18 @@ pub(crate) fn signal_number(name: &str) -> Option<u32> {
         "SIGTTIN" => libc::SIGTTIN,
         #[cfg(not(windows))]
         "SIGTTOU" => libc::SIGTTOU,
+        #[cfg(not(windows))]
+        "SIGXCPU" => libc::SIGXCPU,
+        #[cfg(not(windows))]
+        "SIGXFSZ" => libc::SIGXFSZ,
+        #[cfg(not(windows))]
+        "SIGVTALRM" => libc::SIGVTALRM,
+        #[cfg(not(windows))]
+        "SIGPROF" => libc::SIGPROF,
+        #[cfg(not(windows))]
+        "SIGWINCH" => libc::SIGWINCH,
+        #[cfg(not(windows))]
+        "SIGIO" => libc::SIGIO,
         _ => return None,
     } as u32)
 }
@@ -88,38 +95,33 @@ pub(crate) fn signal_number(name: &str) -> Option<u32> {
 /// Reverse of signal_number: convert a signal number back to its name.
 pub(crate) fn signal_name(sig: u32) -> Option<&'static str> {
     Some(match sig as i32 {
-        n if n == libc::SIGHUP => "SIGHUP",
+        // Cross-platform (available on Windows CRT)
         n if n == libc::SIGINT => "SIGINT",
-        n if n == libc::SIGQUIT => "SIGQUIT",
         n if n == libc::SIGILL => "SIGILL",
         n if n == libc::SIGABRT => "SIGABRT",
         n if n == libc::SIGFPE => "SIGFPE",
-        n if n == libc::SIGKILL => "SIGKILL",
         n if n == libc::SIGSEGV => "SIGSEGV",
-        n if n == libc::SIGPIPE => "SIGPIPE",
-        n if n == libc::SIGALRM => "SIGALRM",
         n if n == libc::SIGTERM => "SIGTERM",
-        n if n == libc::SIGBUS => "SIGBUS",
-        n if n == libc::SIGTRAP => "SIGTRAP",
-        n if n == libc::SIGURG => "SIGURG",
-        n if n == libc::SIGSYS => "SIGSYS",
-        n if n == libc::SIGUSR1 => "SIGUSR1",
-        n if n == libc::SIGUSR2 => "SIGUSR2",
-        n if n == libc::SIGCHLD => "SIGCHLD",
-        n if n == libc::SIGCONT => "SIGCONT",
-        n if n == libc::SIGSTOP => "SIGSTOP",
-        n if n == libc::SIGTSTP => "SIGTSTP",
-        n if n == libc::SIGTTIN => "SIGTTIN",
-        n if n == libc::SIGTTOU => "SIGTTOU",
-        n if n == libc::SIGXCPU => "SIGXCPU",
-        n if n == libc::SIGXFSZ => "SIGXFSZ",
-        n if n == libc::SIGVTALRM => "SIGVTALRM",
-        n if n == libc::SIGPROF => "SIGPROF",
-        n if n == libc::SIGWINCH => "SIGWINCH",
-        n if n == libc::SIGIO => "SIGIO",
+        // Unix-only
+        #[cfg(not(windows))]
+        n if n == libc::SIGHUP => "SIGHUP",
+        #[cfg(not(windows))]
+        n if n == libc::SIGQUIT => "SIGQUIT",
+        #[cfg(not(windows))]
+        n if n == libc::SIGKILL => "SIGKILL",
+        #[cfg(not(windows))]
+        n if n == libc::SIGPIPE => "SIGPIPE",
         #[cfg(not(windows))]
         n if n == libc::SIGALRM => "SIGALRM",
         #[cfg(not(windows))]
+        n if n == libc::SIGBUS => "SIGBUS",
+        #[cfg(not(windows))]
+        n if n == libc::SIGTRAP => "SIGTRAP",
+        #[cfg(not(windows))]
+        n if n == libc::SIGURG => "SIGURG",
+        #[cfg(not(windows))]
+        n if n == libc::SIGSYS => "SIGSYS",
+        #[cfg(not(windows))]
         n if n == libc::SIGUSR1 => "SIGUSR1",
         #[cfg(not(windows))]
         n if n == libc::SIGUSR2 => "SIGUSR2",
@@ -135,6 +137,18 @@ pub(crate) fn signal_name(sig: u32) -> Option<&'static str> {
         n if n == libc::SIGTTIN => "SIGTTIN",
         #[cfg(not(windows))]
         n if n == libc::SIGTTOU => "SIGTTOU",
+        #[cfg(not(windows))]
+        n if n == libc::SIGXCPU => "SIGXCPU",
+        #[cfg(not(windows))]
+        n if n == libc::SIGXFSZ => "SIGXFSZ",
+        #[cfg(not(windows))]
+        n if n == libc::SIGVTALRM => "SIGVTALRM",
+        #[cfg(not(windows))]
+        n if n == libc::SIGPROF => "SIGPROF",
+        #[cfg(not(windows))]
+        n if n == libc::SIGWINCH => "SIGWINCH",
+        #[cfg(not(windows))]
+        n if n == libc::SIGIO => "SIGIO",
         _ => return None,
     })
 }
@@ -212,23 +226,16 @@ fn start_signal_microtask(ctx: &mut ScopedContext, rx: channel::Receiver<u32>) {
 pub(super) fn js_signals(ctx: &mut ScopedContext) -> Result<JSValue, i32> {
     let mut obj = ctx.create_base_object()?;
 
-    // Cross-platform signals (POSIX-mandated, available on all supported platforms)
+    // Cross-platform signals (available on Windows CRT)
     obj.install_fields(
         ctx,
         &[
-            FieldDef::INT32("SIGHUP", libc::SIGHUP, JS_PROP_ENUMERABLE),
             FieldDef::INT32("SIGINT", libc::SIGINT, JS_PROP_ENUMERABLE),
-            FieldDef::INT32("SIGQUIT", libc::SIGQUIT, JS_PROP_ENUMERABLE),
             FieldDef::INT32("SIGILL", libc::SIGILL, JS_PROP_ENUMERABLE),
             FieldDef::INT32("SIGABRT", libc::SIGABRT, JS_PROP_ENUMERABLE),
             FieldDef::INT32("SIGFPE", libc::SIGFPE, JS_PROP_ENUMERABLE),
-            FieldDef::INT32("SIGKILL", libc::SIGKILL, JS_PROP_ENUMERABLE),
             FieldDef::INT32("SIGSEGV", libc::SIGSEGV, JS_PROP_ENUMERABLE),
             FieldDef::INT32("SIGTERM", libc::SIGTERM, JS_PROP_ENUMERABLE),
-            FieldDef::INT32("SIGBUS", libc::SIGBUS, JS_PROP_ENUMERABLE),
-            FieldDef::INT32("SIGTRAP", libc::SIGTRAP, JS_PROP_ENUMERABLE),
-            FieldDef::INT32("SIGURG", libc::SIGURG, JS_PROP_ENUMERABLE),
-            FieldDef::INT32("SIGSYS", libc::SIGSYS, JS_PROP_ENUMERABLE),
         ],
     )?;
 
@@ -237,8 +244,15 @@ pub(super) fn js_signals(ctx: &mut ScopedContext) -> Result<JSValue, i32> {
     obj.install_fields(
         ctx,
         &[
+            FieldDef::INT32("SIGHUP", libc::SIGHUP, JS_PROP_ENUMERABLE),
+            FieldDef::INT32("SIGQUIT", libc::SIGQUIT, JS_PROP_ENUMERABLE),
+            FieldDef::INT32("SIGKILL", libc::SIGKILL, JS_PROP_ENUMERABLE),
             FieldDef::INT32("SIGPIPE", libc::SIGPIPE, JS_PROP_ENUMERABLE),
             FieldDef::INT32("SIGALRM", libc::SIGALRM, JS_PROP_ENUMERABLE),
+            FieldDef::INT32("SIGBUS", libc::SIGBUS, JS_PROP_ENUMERABLE),
+            FieldDef::INT32("SIGTRAP", libc::SIGTRAP, JS_PROP_ENUMERABLE),
+            FieldDef::INT32("SIGURG", libc::SIGURG, JS_PROP_ENUMERABLE),
+            FieldDef::INT32("SIGSYS", libc::SIGSYS, JS_PROP_ENUMERABLE),
             FieldDef::INT32("SIGUSR1", libc::SIGUSR1, JS_PROP_ENUMERABLE),
             FieldDef::INT32("SIGUSR2", libc::SIGUSR2, JS_PROP_ENUMERABLE),
             FieldDef::INT32("SIGCHLD", libc::SIGCHLD, JS_PROP_ENUMERABLE),
@@ -268,7 +282,15 @@ pub(super) fn js_signals(ctx: &mut ScopedContext) -> Result<JSValue, i32> {
 /// Signals the OS forbids catching or ignoring (POSIX-mandated). Installing a
 /// handler for them is a silent no-op, so we reject with a hint instead.
 fn is_untrappable(sig: u32) -> bool {
-    sig == libc::SIGKILL as u32 || sig == libc::SIGSTOP as u32
+    #[cfg(not(windows))]
+    {
+        sig == libc::SIGKILL as u32 || sig == libc::SIGSTOP as u32
+    }
+    #[cfg(windows)]
+    {
+        let _ = sig;
+        false
+    }
 }
 
 pub(crate) fn register_signal_handler(

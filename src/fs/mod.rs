@@ -360,7 +360,6 @@ async fn atomic_replace(tmp: &Path, dst: &Path) -> std::io::Result<()> {
     use windows_sys::Win32::Storage::FileSystem::{
         MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
     };
-    use windows_sys::core::PCWSTR;
 
     // MoveFileExW with MOVEFILE_REPLACE_EXISTING is the atomic replace on
     // Windows (std::fs::rename refuses to replace an existing file). The
@@ -373,20 +372,28 @@ async fn atomic_replace(tmp: &Path, dst: &Path) -> std::io::Result<()> {
     };
     let tmp_w = to_wide(tmp);
     let dst_w = to_wide(dst);
-    let ok = tokio::task::spawn_blocking(move || unsafe {
-        MoveFileExW(
-            PCWSTR(tmp_w.as_ptr()),
-            PCWSTR(dst_w.as_ptr()),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        ) != 0
+    tokio::task::spawn_blocking(move || -> Result<(), std::io::Error> {
+        let ret = unsafe {
+            MoveFileExW(
+                tmp_w.as_ptr(),
+                dst_w.as_ptr(),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+            )
+        };
+        if ret != 0 {
+            Ok(())
+        } else {
+            // Must call last_os_error() on THIS thread
+            // (spawn_blocking thread), because GetLastError()
+            // is thread-local. After .await we'd be on a
+            // different tokio worker thread and the error
+            // would be lost.
+            Err(std::io::Error::last_os_error())
+        }
     })
     .await
-    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
-    if ok {
-        Ok(())
-    } else {
-        Err(std::io::Error::last_os_error())
-    }
+    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?
+    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("rename: {e}")))
 }
 
 // ---------------------------------------------------------------------------

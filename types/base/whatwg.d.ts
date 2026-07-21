@@ -58,10 +58,10 @@ interface RequestOptions {
 }
 
 /**
- * WHATWG Fetch `HttpResponse` class. Shared by `fetch()` and the legacy
+ * WHATWG Fetch `Response` class. Shared by `fetch()` and the legacy
  * `request()` global.
  */
-declare class HttpResponse {
+declare class Response {
   constructor(
     body?: BodyInit,
     init?: { status?: number; statusText?: string; headers?: HeadersInit },
@@ -100,17 +100,17 @@ declare class HttpResponse {
   /** Read the entire body as an ArrayBuffer. */
   arrayBuffer(): Promise<ArrayBuffer>;
   /** Clone the response (fails if the body was already consumed). */
-  clone(): HttpResponse;
+  clone(): Response;
   /** Close the response and release underlying resources. */
   close(): void;
   /** Returns a network-error response (type "error", null body). */
-  static error(): HttpResponse;
+  static error(): Response;
   /**
    * Returns a redirect response (status 301/302/303/307/308) with a Location header.
    * @param url - Redirect target.
    * @param status - Redirect status; defaults to 302.
    */
-  static redirect(url: string, status?: number): HttpResponse;
+  static redirect(url: string, status?: number): Response;
 }
 
 /**
@@ -121,7 +121,7 @@ declare class HttpResponse {
 declare function request(
   url: string,
   options?: RequestOptions,
-): Promise<HttpResponse>;
+): Promise<Response>;
 
 declare class EventEmitter {
   addListener(event: string, listener: (...args: unknown[]) => void): this;
@@ -442,13 +442,7 @@ declare class Request {
 }
 
 /**
- * WHATWG Fetch `Response` — type alias for backward compatibility.
- * @deprecated Use `HttpResponse` instead.
- */
-type Response = HttpResponse;
-
-/**
- * Fetch a resource. Resolves to an `HttpResponse` once response headers arrive.
+ * Fetch a resource. Resolves to a `Response` once response headers arrive.
  *
  * If the request is aborted via `init.signal`, the returned Promise rejects
  * with a `TypeError` whose `name` is "AbortError".
@@ -459,4 +453,4 @@ type Response = HttpResponse;
 declare function fetch(
   input: RequestInfo,
   init?: RequestInit,
-): Promise<HttpResponse>;
+): Promise<Response>;
