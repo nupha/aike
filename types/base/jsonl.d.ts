@@ -1,40 +1,56 @@
 declare module "jsonl" {
   // Options for tolerant parsing.
-  interface JSONLParseOpts<T> {
-    onError?: "replace" | "skip" | "throw";
-    failsafe?: T;
+  interface JSONLParseOpts {
+    onError?: "null" | "skip" | "throw";
   }
-
-  /** Parse a full JSONL string into an array of T. */
-  export function parse<T = unknown>(
-    text: string,
-    opts?: JSONLParseOpts<T>,
-  ): T[];
 
   /** Serialize an array (or single object) of T into a JSONL string (one element per line). */
   export function stringify(data: unknown[] | unknown): string;
 
-  /** Read a JSONL file and resolve to an array of T. */
+  // --- Conditional return type on onError ---
+
+  // onError = "null" (or default) → T | null
+  export function parse<T = unknown>(
+    text: string,
+    opts?: JSONLParseOpts & { onError?: "null" },
+  ): (T | null)[];
+
+  // onError = "skip" | "throw" → T
+  export function parse<T = unknown>(
+    text: string,
+    opts: JSONLParseOpts & { onError: "skip" | "throw" },
+  ): T[];
+
   export function read<T = unknown>(
     path: string,
-    opts?: JSONLParseOpts<T>,
+    opts?: JSONLParseOpts & { onError?: "null" },
+  ): Promise<(T | null)[]>;
+  export function read<T = unknown>(
+    path: string,
+    opts: JSONLParseOpts & { onError: "skip" | "throw" },
   ): Promise<T[]>;
+
+  export function parseChunk<T = unknown>(
+    text: string,
+    opts?: JSONLParseOpts & { onError?: "null" },
+  ): { values: (T | null)[]; attempted: number };
+  export function parseChunk<T = unknown>(
+    text: string,
+    opts: JSONLParseOpts & { onError: "skip" | "throw" },
+  ): { values: T[]; attempted: number };
+
+  export function parseStream<T = unknown>(
+    text: string,
+    opts?: JSONLParseOpts & { onError?: "null" },
+  ): { iterator: AsyncIterable<T | null>; lines: number };
+  export function parseStream<T = unknown>(
+    text: string,
+    opts: JSONLParseOpts & { onError: "skip" | "throw" },
+  ): { iterator: AsyncIterable<T>; lines: number };
 
   /** Append one or more items to a JSONL file. */
   export function append<T>(path: string, ...items: T[]): Promise<void>;
 
   /** Rewrite (truncate) a JSONL file with the given items. No items clears the file. */
   export function write(path: string, ...items: unknown[]): Promise<void>;
-
-  /** Parse a chunk of JSONL, returning { values: T[], attempted: number }. */
-  export function parseChunk<T = unknown>(
-    text: string,
-    opts?: JSONLParseOpts<T>,
-  ): { values: T[]; attempted: number };
-
-  /** Stream-parse a JSONL string, returning { iterator: AsyncIterable<T>, lines: number }. */
-  export function parseStream<T = unknown>(
-    text: string,
-    opts?: JSONLParseOpts<T>,
-  ): { iterator: AsyncIterable<T>; lines: number };
 }

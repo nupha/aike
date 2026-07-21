@@ -14,7 +14,19 @@ function check(label, condition, detail) {
 }
 
 // --- Config ---
-const SAMPLE_JSON_FILE = "../models/tinyllama/tokenizer.json";
+const SAMPLE_JSON_FILE = "test_sample.json";
+
+// --- Setup: ensure sample file and temp dir exist ---
+const TmpDir = "../tmp";
+if (!(await fs.exists(TmpDir))) {
+  await fs.makeDir(TmpDir, { recursive: true });
+}
+if (!(await fs.exists(SAMPLE_JSON_FILE))) {
+  await fs.writeText(
+    SAMPLE_JSON_FILE,
+    '{"x":1,"y":2,"z":3,"nested":{"key":"value"},"padding":"ensureFileLargerThan64Bytes"}'
+  );
+}
 
 // ---------------------------------------------------------------------------
 // FileHandle: open + text()
@@ -248,7 +260,7 @@ async function testMakeDirRemoveDir() {
   const NESTED = BASE + "/nested";
 
   // Clean leftovers
-  await fs.removeDir(BASE).catch(() => {});
+  await fs.removeDir(BASE).catch(() => { });
 
   // makeDir non-recursive
   await fs.makeDir(BASE);
@@ -292,13 +304,13 @@ async function testMakeDirRemoveDir() {
 
   // removeDir recursive: removes a non-empty directory tree
   const RT = "../tmp/test_removeDir_recursive";
-  await fs.removeDir(RT, { recursive: true }).catch(() => {});
+  await fs.removeDir(RT, { recursive: true }).catch(() => { });
   await fs.makeDir(RT + "/deep", { recursive: true });
   await fs.writeText(RT + "/deep/leaf.txt", "x");
   await fs.writeText(RT + "/top.txt", "y");
   await fs.removeDir(RT, { recursive: true });
   check("removeDir recursive removes non-empty tree", !(await fs.exists(RT)));
-  await fs.removeDir(RT, { recursive: true }).catch(() => {});
+  await fs.removeDir(RT, { recursive: true }).catch(() => { });
 }
 
 // ---------------------------------------------------------------------------
@@ -307,7 +319,7 @@ async function testMakeDirRemoveDir() {
 async function testRemove() {
   console.log("\n=== remove() ===");
   const FILE = "../tmp/test_remove.txt";
-  await fs.remove(FILE).catch(() => {});
+  await fs.remove(FILE).catch(() => { });
   await fs.writeText(FILE, "to be removed");
   check("file exists before remove", await fs.exists(FILE));
   await fs.remove(FILE);
@@ -388,22 +400,54 @@ async function testSandbox() {
 }
 
 // ---------------------------------------------------------------------------
+// Edge-case: open non-existent file
+// ---------------------------------------------------------------------------
+async function testOpenNonexistent() {
+  console.log("\n=== open non-existent ===");
+  await fs
+    .open("___does_not_exist___", "r")
+    .then(() => check("open non-existent rejects", false, "expected error"))
+    .catch(() => check("open non-existent rejects", true));
+}
+
+// ---------------------------------------------------------------------------
+// Edge-case: write / append / readText on a fresh path
+// ---------------------------------------------------------------------------
+async function testWriteNewPath() {
+  console.log("\n=== write & read fresh path ===");
+  const f = "../tmp/test_fresh_" + Date.now() + ".txt";
+  // Should create and write
+  await fs.writeText(f, "fresh write");
+  check("writeText created file", await fs.exists(f));
+  const content = await fs.readText(f);
+  check("readText after write", content === "fresh write", `got ${JSON.stringify(content)}`);
+  // append
+  await fs.appendText(f, " + appended");
+  const appended = await fs.readText(f);
+  check("appendText works", appended === "fresh write + appended", `got ${JSON.stringify(appended)}`);
+  // cleanup
+  await fs.remove(f);
+  check("removed after test", !(await fs.exists(f)));
+}
+
+// ---------------------------------------------------------------------------
 // Run all
 // ---------------------------------------------------------------------------
-await testOpenAndText();
-await testOpenAndBytes();
-await testReadAll();
-await testReadN();
-await testWriteStringRoundtrip();
-await testWriteBinaryRoundtrip();
-await testStat();
-await testOnData();
-await testAsyncIterator();
-await testExists();
-await testMakeDirRemoveDir();
-await testRemove();
-await testLineCounting();
-await testSandbox();
+const tests = [
+  testOpenAndText, testOpenAndBytes, testReadAll, testReadN,
+  testWriteStringRoundtrip, testWriteBinaryRoundtrip, testStat,
+  testOnData, testAsyncIterator, testExists,
+  testMakeDirRemoveDir, testRemove, testLineCounting, testSandbox,
+  testOpenNonexistent, testWriteNewPath,
+];
+for (const t of tests) {
+  try {
+    await t();
+  } catch (e) {
+    console.log(`  ❌ ${t.name} threw:`, e?.message ?? String(e));
+    fail++;
+  }
+}
 
 // Summary
 console.log(`\n${"=".repeat(40)}`);

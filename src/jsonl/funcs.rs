@@ -12,7 +12,7 @@ pub(crate) const JSONL_WRITE_REWRITE: i32 = 1;
 
 #[derive(Clone, Copy, PartialEq)]
 enum OnError {
-    Replace,
+    Null,
     Skip,
     Throw,
 }
@@ -20,33 +20,29 @@ enum OnError {
 // "throw" degrades to "skip": parse never throws.
 fn on_error_from_str(s: &str) -> OnError {
     match s {
-        "replace" => OnError::Replace,
+        "null" => OnError::Null,
         "skip" => OnError::Skip,
         "throw" => OnError::Throw,
-        _ => OnError::Replace,
+        _ => OnError::Null,
     }
 }
 
-fn extract_opts(cx: &mut ScopedContext, arg: JSValue) -> Result<(OnError, JSValue), i32> {
+fn extract_opts(cx: &mut ScopedContext, arg: JSValue) -> Result<OnError, i32> {
     if arg.is_undefined() {
-        return Ok((OnError::Replace, JSValue::UNDEFINED));
+        return Ok(OnError::Null);
     }
     let obj = match arg.to_object() {
         Some(o) => o,
-        None => return Ok((OnError::Replace, JSValue::UNDEFINED)),
+        None => return Ok(OnError::Null),
     };
     let on_error = match obj.get_property_str(cx, "onError") {
         Ok(v) if !v.is_undefined() => match v.to_string(cx) {
             Ok(s) => on_error_from_str(&s.content().encode_utf8(false).to_string()),
-            Err(_) => OnError::Replace,
+            Err(_) => OnError::Null,
         },
-        _ => OnError::Replace,
+        _ => OnError::Null,
     };
-    let failsafe = match obj.get_property_str(cx, "failsafe") {
-        Ok(v) => v,
-        Err(_) => JSValue::UNDEFINED,
-    };
-    Ok((on_error, failsafe))
+    Ok(on_error)
 }
 
 // Each line: trim, skip blank, parse, tolerate bad line per onError.
@@ -54,7 +50,6 @@ fn parse_jsonl(
     cx: &mut ScopedContext,
     text: &str,
     on_error: OnError,
-    failsafe_json: Option<JsonValue>,
 ) -> Result<(Vec<JSValue>, usize), i32> {
     let mut values: Vec<JSValue> = Vec::new();
     let mut attempted: usize = 0;
@@ -67,7 +62,7 @@ fn parse_jsonl(
         let parsed: JsonValue = match serde_json::from_str::<JsonValue>(trimmed) {
             Ok(v) => v,
             Err(_) => match on_error {
-                OnError::Replace => failsafe_json.clone().unwrap_or(JsonValue::Null),
+                OnError::Null => JsonValue::Null,
                 OnError::Skip => continue,
                 OnError::Throw => continue,
             },
@@ -95,14 +90,9 @@ fn jsonl_stringify(cx: &mut ScopedContext, arg: JSValue) -> Result<String, i32> 
 pub(crate) fn js_parse(cx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let text = cc.arg(0).to_string(cx)?;
     let content = text.content().encode_utf8(false).to_string();
-    let (on_error, failsafe) = extract_opts(cx, cc.arg(1))?;
-    let failsafe_json = if failsafe.is_undefined() {
-        None
-    } else {
-        Some(failsafe.to_serde_json(cx)?)
-    };
+    let on_error = extract_opts(cx, cc.arg(1))?;
     let (values, _attempted) =
-        parse_jsonl(cx, &content, on_error, failsafe_json).map_err(|code| code)?;
+        parse_jsonl(cx, &content, on_error).map_err(|code| code)?;
     Array::from_values(cx, values).map(JSValue::from)
 }
 
@@ -139,7 +129,6 @@ fn read_jsonl_impl(
     cx: &mut ScopedContext,
     path: PathBuf,
     on_error: OnError,
-    failsafe_json: Option<JsonValue>,
 ) -> JSResult {
     let (promise, tx) =
         Promise::create_with_channel::<Result<String, String>>(cx, move |cx2, data| -> JSResult {
@@ -151,7 +140,7 @@ fn read_jsonl_impl(
                 }
             };
             let (values, _attempted) =
-                parse_jsonl(cx2, &text, on_error, failsafe_json).map_err(|code| code)?;
+                parse_jsonl(cx2, &text, on_error).map_err(|code| code)?;
             Array::from_values(cx2, values).map(JSValue::from)
         })?;
 
@@ -169,13 +158,8 @@ fn read_jsonl_impl(
 pub(crate) fn js_read_jsonl(cx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let path_val = cc.arg(0).to_string(cx)?;
     let path = PathBuf::from(path_val.content().encode_utf8(false).to_string());
-    let (on_error, failsafe) = extract_opts(cx, cc.arg(1))?;
-    let failsafe_json = if failsafe.is_undefined() {
-        None
-    } else {
-        Some(failsafe.to_serde_json(cx)?)
-    };
-    read_jsonl_impl(cx, path, on_error, failsafe_json)
+    let on_error = extract_opts(cx, cc.arg(1))?;
+    read_jsonl_impl(cx, path, on_error)
 }
 
 // fs.readJSONL — caller already applied sandbox to `path`.
@@ -184,13 +168,8 @@ pub(crate) fn read_jsonl_with_path(
     cc: CallContext,
     path: PathBuf,
 ) -> JSResult {
-    let (on_error, failsafe) = extract_opts(cx, cc.arg(1))?;
-    let failsafe_json = if failsafe.is_undefined() {
-        None
-    } else {
-        Some(failsafe.to_serde_json(cx)?)
-    };
-    read_jsonl_impl(cx, path, on_error, failsafe_json)
+    let on_error = extract_opts(cx, cc.arg(1))?;
+    read_jsonl_impl(cx, path, on_error)
 }
 
 fn build_jsonl_lines(cx: &mut ScopedContext, cc: CallContext) -> Result<Vec<String>, i32> {
@@ -274,14 +253,9 @@ pub(crate) fn write_jsonl_with_path(
 pub(crate) fn js_parse_chunk(cx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let text = cc.arg(0).to_string(cx)?;
     let content = text.content().encode_utf8(false).to_string();
-    let (on_error, failsafe) = extract_opts(cx, cc.arg(1))?;
-    let failsafe_json = if failsafe.is_undefined() {
-        None
-    } else {
-        Some(failsafe.to_serde_json(cx)?)
-    };
+    let on_error = extract_opts(cx, cc.arg(1))?;
     let (values, attempted) =
-        parse_jsonl(cx, &content, on_error, failsafe_json).map_err(|code| code)?;
+        parse_jsonl(cx, &content, on_error).map_err(|code| code)?;
     let mut obj = cx.create_base_object()?;
     let arr = Array::from_values(cx, values)?;
     obj.define_property_value_str(cx, "values", arr.into(), 0)?;
@@ -298,12 +272,7 @@ pub(crate) fn js_parse_chunk(cx: &mut ScopedContext, cc: CallContext) -> JSResul
 pub(crate) fn js_parse_stream(cx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let text = cc.arg(0).to_string(cx)?;
     let text_str = text.content().encode_utf8(false).to_string();
-    let (on_error, failsafe) = extract_opts(cx, cc.arg(1))?;
-    let failsafe_json = if failsafe.is_undefined() {
-        None
-    } else {
-        Some(failsafe.to_serde_json(cx)?)
-    };
+    let on_error = extract_opts(cx, cc.arg(1))?;
 
     // Non-blank line count, matching parse semantics (cheap up-front scan).
     let lines = text_str.lines().filter(|l| !l.trim().is_empty()).count();
@@ -330,7 +299,7 @@ pub(crate) fn js_parse_stream(cx: &mut ScopedContext, cc: CallContext) -> JSResu
             let parsed: JsonValue = match serde_json::from_str::<JsonValue>(trimmed) {
                 Ok(v) => v,
                 Err(e) => match on_error {
-                    OnError::Replace => failsafe_json.clone().unwrap_or(JsonValue::Null),
+                    OnError::Null => JsonValue::Null,
                     OnError::Skip => continue,
                     OnError::Throw => {
                         let _ = tx.send(Err(e.to_string()));
