@@ -21,7 +21,14 @@ const SAMPLE_JSON_FILE = "../models/tinyllama/tokenizer.json";
 // ---------------------------------------------------------------------------
 async function testOpenAndText() {
   console.log("\n=== open + text() ===");
-  const fh = await fs.open(SAMPLE_JSON_FILE, "r");
+  let fh;
+  try {
+    fh = await fs.open(SAMPLE_JSON_FILE, "r");
+  } catch (e) {
+    console.error(e.message);
+    throw e;
+  }
+
   check("fd is number", typeof fh.fd === "number" && fh.fd > 0, `got ${fh.fd}`);
   const text = await fh.text();
   check("text length > 0", text.length > 0, `got ${text.length}`);
@@ -327,7 +334,10 @@ async function testLineCounting() {
 
   // countLines / countNonEmptyLines on missing file resolve to 0 (no reject)
   const missing = "../tmp/jsonl_missing_" + Date.now() + ".jsonl";
-  check("fs.countLines missing file resolves 0", (await fs.countLines(missing)) === 0);
+  check(
+    "fs.countLines missing file resolves 0",
+    (await fs.countLines(missing)) === 0,
+  );
   check(
     "fs.countNonEmptyLines missing file resolves 0",
     (await fs.countNonEmptyLines(missing)) === 0,
