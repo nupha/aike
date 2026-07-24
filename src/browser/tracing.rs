@@ -9,7 +9,6 @@
 
 use std::time::Duration;
 
-use serde_json::Value;
 use tokio::sync::broadcast;
 use zuqe::{
     CallContext, JSResult, JSValue, ScopedContext,
@@ -53,7 +52,7 @@ pub(crate) fn js_page_start_tracing(ctx: &mut ScopedContext, cc: CallContext) ->
             "options": "simplifyNames",
         });
         if !categories.is_empty() {
-            params["categories"] = Value::String(categories);
+            params["categories"] = serde_json::Value::String(categories);
         }
         let rx = client.send("Tracing.start", Some(params), Some(&session_id));
         let result = rx.await.unwrap_or(Err("channel closed".into()));
@@ -83,7 +82,7 @@ pub(crate) fn js_page_stop_tracing(ctx: &mut ScopedContext, cc: CallContext) -> 
                 -1
             })?;
             cx.create_string_from_utf8(text.into_bytes())
-                .map(JSValue::from)
+                .map(JSValue::make_string)
         })?;
 
     tokio::spawn(async move {

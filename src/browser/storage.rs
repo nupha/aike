@@ -6,7 +6,6 @@
 //! `clearData` (clear cache/storage for an origin) and
 //! `getStorageKeyForFrame` (resolve a frame's storage key).
 
-use serde_json::Value;
 use zuqe::{
     CallContext, JSResult, JSValue, ScopedContext,
     builtins::promise::{Promise, PromiseResultSlot},
@@ -55,17 +54,18 @@ pub(crate) fn js_page_get_storage_key_for_frame(
     let client = payload.client.clone();
     let session_id = payload.session_id.clone();
 
-    let result_slot = PromiseResultSlot::<Result<Value, String>>::new();
+    let result_slot = PromiseResultSlot::<Result<serde_json::Value, String>>::new();
     let promise =
         Promise::create_with_result_slot(ctx, result_slot.clone(), |cx, val| -> JSResult {
             let val = val.map_err(|e| {
                 cx.throw_internal_error(&e);
                 -1
             })?;
+
             // Return the storageKey string directly for ergonomics.
             if let Some(k) = val.get("storageKey").and_then(|v| v.as_str()) {
                 cx.create_string_from_utf8(k.as_bytes().to_vec())
-                    .map(JSValue::from)
+                    .map(JSValue::make_string)
             } else {
                 Ok(JSValue::NULL)
             }

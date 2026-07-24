@@ -97,24 +97,20 @@ fn get_response_payload_mut<'a>(
     ctx: &mut ScopedContext,
     val: &'a mut JSValue,
 ) -> Result<&'a mut ResponsePayload, i32> {
-    val.as_native_object_mut::<JSResponse>()
-        .and_then(|o| o.payload_mut())
-        .ok_or_else(|| {
-            ctx.throw_type_error("not an http response object");
-            -1
-        })
+    JSResponse::payload_mut_of(val).ok_or_else(|| {
+        ctx.throw_type_error("not an http response object");
+        -1
+    })
 }
 
 fn get_response_payload<'a>(
     ctx: &mut ScopedContext,
     val: &'a JSValue,
 ) -> Result<&'a ResponsePayload, i32> {
-    val.as_native_object::<JSResponse>()
-        .and_then(|o| o.payload())
-        .ok_or_else(|| {
-            ctx.throw_type_error("not an http response object");
-            -1
-        })
+    JSResponse::payload_of(val).ok_or_else(|| {
+        ctx.throw_type_error("not an http response object");
+        -1
+    })
 }
 
 /// Build an opaque-redirect `Response` (used for `redirect: "manual"`).
@@ -305,7 +301,7 @@ pub(crate) fn register_response_statics(
     global: &mut Object,
 ) -> Result<(), i32> {
     let ctor_val = global.get_property_str(ctx, "Response")?;
-    let JSValue::Object(mut ctor) = ctor_val else {
+    let Some(mut ctor) = ctor_val.as_object() else {
         return Ok(());
     };
 
@@ -347,25 +343,21 @@ fn js_response_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let p = get_response_payload(ctx, &this)?;
 
     match kind {
-        RESPONSE_GET_TYPE => {
-            let s = ctx.create_string_from_utf8(p.resp_type.as_bytes().to_vec())?;
-            Ok(s.into())
-        }
-        RESPONSE_GET_URL => {
-            let s = ctx.create_string_from_utf8(p.url.as_bytes().to_vec())?;
-            Ok(s.into())
-        }
-        RESPONSE_GET_REDIRECTED => Ok(JSValue::Bool(p.redirected)),
+        RESPONSE_GET_TYPE => ctx
+            .create_string_from_utf8(p.resp_type.as_bytes().to_vec())
+            .map(JSValue::make_string),
+        RESPONSE_GET_URL => ctx
+            .create_string_from_utf8(p.url.as_bytes().to_vec())
+            .map(JSValue::make_string),
+        RESPONSE_GET_REDIRECTED => Ok(JSValue::from(p.redirected)),
         RESPONSE_GET_STATUS => Ok(JSValue::from(p.status as i32)),
-        RESPONSE_GET_OK => Ok(JSValue::Bool(p.status >= 200 && p.status < 300)),
-        RESPONSE_GET_STATUS_TEXT => {
-            let s = ctx.create_string_from_utf8(p.status_text.as_bytes().to_vec())?;
-            Ok(s.into())
-        }
-        RESPONSE_GET_CONTENT_TYPE => {
-            let s = ctx.create_string_from_utf8(p.content_type.as_bytes().to_vec())?;
-            Ok(s.into())
-        }
+        RESPONSE_GET_OK => Ok(JSValue::from(p.status >= 200 && p.status < 300)),
+        RESPONSE_GET_STATUS_TEXT => ctx
+            .create_string_from_utf8(p.status_text.as_bytes().to_vec())
+            .map(JSValue::make_string),
+        RESPONSE_GET_CONTENT_TYPE => ctx
+            .create_string_from_utf8(p.content_type.as_bytes().to_vec())
+            .map(JSValue::make_string),
         RESPONSE_GET_CONTENT_LENGTH => Ok(p
             .content_length
             .map(|v| JSValue::from(v as f64))
@@ -380,7 +372,7 @@ fn js_response_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             )?;
             Ok(headers.into())
         }
-        RESPONSE_GET_BODY_USED => Ok(JSValue::Bool(p.body_consumed)),
+        RESPONSE_GET_BODY_USED => Ok(JSValue::from(p.body_consumed)),
         _ => {
             ctx.throw_type_error("unknown Response getter");
             Err(-1)

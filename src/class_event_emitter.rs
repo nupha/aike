@@ -1,10 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-use std::{
-    cell::{Cell, RefCell},
-    collections::HashMap,
-};
+use std::{cell::RefCell, collections::HashMap};
 
 use linkme::distributed_slice;
 use zuqe::{
@@ -34,12 +31,10 @@ impl EmitterPayload {
 }
 
 fn get_emitter<'a>(ctx: &mut ScopedContext, val: &'a JSValue) -> Result<&'a EmitterPayload, i32> {
-    val.as_native_object::<JSEventEmitter>()
-        .and_then(|o| o.payload())
-        .ok_or_else(|| {
-            ctx.throw_internal_error("not an EventEmitter instance");
-            -1
-        })
+    JSEventEmitter::payload_of(val).ok_or_else(|| {
+        ctx.throw_internal_error("not an EventEmitter instance");
+        -1
+    })
 }
 
 /// Convert event name string to a name owned String.
@@ -64,7 +59,7 @@ fn js_add_listener(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let is_once = cc.magic() == 1;
     let this = cc.this();
 
-    let listener = cc.arg(1).into_callable(ctx)?;
+    let listener = cc.arg(1).ensure_callable(ctx)?;
     let name = event_name(ctx, &cc.arg(0))?;
 
     // Signal events must use Aike.onSignal instead
@@ -94,7 +89,7 @@ fn js_remove_listener(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let data = get_emitter(ctx, &this)?;
 
     let name = event_name(ctx, &cc.arg(0))?;
-    if let Ok(listener) = cc.arg(1).into_object(ctx) {
+    if let Ok(listener) = cc.arg(1).ensure_object(ctx) {
         // Regular event: remove from per-instance listeners map.
         let mut listeners = data.listeners.borrow_mut();
         if let Some(list) = listeners.get_mut(&name) {
@@ -144,9 +139,9 @@ fn js_emit(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             emitter.listeners.borrow_mut().insert(name, lst);
         }
 
-        Ok(JSValue::Bool(true))
+        Ok(JSValue::TRUE)
     } else {
-        Ok(JSValue::Bool(false))
+        Ok(JSValue::FALSE)
     }
 }
 
@@ -202,7 +197,7 @@ fn js_event_names(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     for (idx, key) in data.listeners.borrow().keys().enumerate() {
         let s = ctx.create_string_from_utf8(key.as_bytes().to_vec())?;
-        arr.define_property_value_u32(ctx, idx as _, s.into(), JS_PROP_C_W_E)?;
+        arr.define_property_value_u32(ctx, idx as _, JSValue::make_string(s), JS_PROP_C_W_E)?;
     }
 
     Ok(arr.into())

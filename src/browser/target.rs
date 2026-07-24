@@ -6,13 +6,12 @@
 //! `listPages` / `getTargets` / `newContext` / `disposeContext`.
 //! Underlying CDP: `Target.*`.
 
-use serde_json::Value;
 use zuqe::{
     CallContext, JSResult, JSValue, ScopedContext,
     builtins::promise::{Promise, PromiseResultSlot},
 };
 
-use crate::browser::{class_browser::get_browser_payload, class_page::js_from_json_value};
+use crate::browser::class_browser::get_browser_payload;
 
 /// `browser.getTargets()` — `Target.getTargets`. Returns the raw target list.
 pub(crate) fn js_browser_get_targets(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -20,14 +19,14 @@ pub(crate) fn js_browser_get_targets(ctx: &mut ScopedContext, cc: CallContext) -
     let payload = get_browser_payload(ctx, &this)?;
     let client = payload.client.clone();
 
-    let result_slot = PromiseResultSlot::<Result<Value, String>>::new();
+    let result_slot = PromiseResultSlot::<Result<serde_json::Value, String>>::new();
     let promise =
         Promise::create_with_result_slot(ctx, result_slot.clone(), |cx, val| -> JSResult {
             let val = val.map_err(|e| {
                 cx.throw_internal_error(&e);
                 -1
             })?;
-            js_from_json_value(cx, &val)
+            JSValue::from_serde_json(cx, &val)
         })?;
 
     tokio::spawn(async move {
@@ -46,14 +45,14 @@ pub(crate) fn js_browser_list_pages(ctx: &mut ScopedContext, cc: CallContext) ->
     let payload = get_browser_payload(ctx, &this)?;
     let client = payload.client.clone();
 
-    let result_slot = PromiseResultSlot::<Result<Value, String>>::new();
+    let result_slot = PromiseResultSlot::<Result<serde_json::Value, String>>::new();
     let promise =
         Promise::create_with_result_slot(ctx, result_slot.clone(), |cx, val| -> JSResult {
             let val = val.map_err(|e| {
                 cx.throw_internal_error(&e);
                 -1
             })?;
-            js_from_json_value(cx, &val)
+            JSValue::from_serde_json(cx, &val)
         })?;
 
     tokio::spawn(async move {
@@ -71,7 +70,7 @@ pub(crate) fn js_browser_list_pages(ctx: &mut ScopedContext, cc: CallContext) ->
                             .collect::<Vec<_>>()
                     })
                     .unwrap_or_default();
-                result_slot.commit(Ok(Value::Array(pages))).ok();
+                result_slot.commit(Ok(serde_json::Value::Array(pages))).ok();
             }
             Err(e) => {
                 result_slot.commit(Err(e)).ok();
@@ -97,7 +96,7 @@ pub(crate) fn js_browser_new_context(ctx: &mut ScopedContext, cc: CallContext) -
                 -1
             })?;
             cx.create_string_from_utf8(id.into_bytes())
-                .map(JSValue::from)
+                .map(JSValue::make_string)
         })?;
 
     tokio::spawn(async move {

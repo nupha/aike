@@ -9,8 +9,6 @@
 //! - `convert_html(html, mode)`           — shared utility for `HttpResponse.text()`
 //! - `Document` / `Element`               — internal classes (used via module API)
 
-use std::cell::Cell;
-
 use ego_tree::NodeId;
 use linkme::distributed_slice;
 use mdka::html_to_markdown;
@@ -194,7 +192,7 @@ pub(crate) fn js_html2markdown(ctx: &mut ScopedContext, cc: CallContext) -> JSRe
     let html_str = arg_str(ctx, &cc, 0)?;
     let md = html_to_markdown(&html_str);
     ctx.create_string_from_utf8(md.into_bytes())
-        .map(JSValue::from)
+        .map(JSValue::make_string)
 }
 
 // ---------------------------------------------------------------------------
@@ -207,12 +205,10 @@ pub(crate) struct HtmlDocumentPayload {
 
 /// `this`-access helper for Document.
 fn get_doc<'a>(ctx: &mut ScopedContext, val: &'a JSValue) -> Result<&'a HtmlDocumentPayload, i32> {
-    val.as_native_object::<HtmlDocument>()
-        .and_then(|o| o.payload())
-        .ok_or_else(|| {
-            ctx.throw_type_error("not a Document instance");
-            -1
-        })
+    HtmlDocument::payload_of(val).ok_or_else(|| {
+        ctx.throw_type_error("not a Document instance");
+        -1
+    })
 }
 
 fn js_document_query_selector_all(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -274,12 +270,10 @@ pub(crate) struct ElementPayload {
 
 /// `this`-access helper for Element.
 fn get_element<'a>(ctx: &mut ScopedContext, val: &'a JSValue) -> Result<&'a ElementPayload, i32> {
-    val.as_native_object::<HtmlElement>()
-        .and_then(|o| o.payload())
-        .ok_or_else(|| {
-            ctx.throw_type_error("not an Element instance");
-            -1
-        })
+    HtmlElement::payload_of(val).ok_or_else(|| {
+        ctx.throw_type_error("not an Element instance");
+        -1
+    })
 }
 
 // -- getters --
@@ -291,7 +285,7 @@ fn js_element_tag_name(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         .map(|r| r.value().name.local.as_ref().to_string())
         .unwrap_or_default();
     ctx.create_string_from_utf8(tag.into_bytes())
-        .map(JSValue::from)
+        .map(JSValue::make_string)
 }
 
 fn js_element_text_content(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -301,7 +295,7 @@ fn js_element_text_content(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
         .map(|r| r.text().collect::<String>())
         .unwrap_or_default();
     ctx.create_string_from_utf8(text.into_bytes())
-        .map(JSValue::from)
+        .map(JSValue::make_string)
 }
 
 fn js_element_children(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -344,7 +338,7 @@ fn js_element_get_attribute(ctx: &mut ScopedContext, cc: CallContext) -> JSResul
     match val {
         Some(s) => ctx
             .create_string_from_utf8(s.into_bytes())
-            .map(JSValue::from),
+            .map(JSValue::make_string),
         None => Ok(JSValue::NULL),
     }
 }

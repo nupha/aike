@@ -5,7 +5,6 @@
 //!
 //! `highlight` / `hideHighlight` — debug highlight of a DOM node.
 
-use serde_json::Value;
 use zuqe::{
     CallContext, JSResult, JSValue, ScopedContext,
     builtins::promise::{Promise, PromiseResultSlot},
@@ -17,7 +16,7 @@ use crate::browser::{
 };
 
 /// Default highlight config: a translucent blue content box plus borders.
-fn default_highlight_config() -> Value {
+fn default_highlight_config() -> serde_json::Value {
     serde_json::json!({
         "showInfo": true,
         "contentColor": { "r": 111, "g": 168, "b": 220, "a": 0.5 },

@@ -42,7 +42,7 @@ fn arg_to_string(ctx: &mut ScopedContext, cc: &CallContext, idx: usize) -> Resul
 /// Helper: create a JS string from a Rust &str.
 fn js_str(ctx: &mut ScopedContext, s: &str) -> Result<JSValue, i32> {
     ctx.create_string_from_utf8(s.as_bytes().to_vec())
-        .map(JSValue::from)
+        .map(JSValue::make_string)
 }
 
 // magic constants for js_path_extract
@@ -204,13 +204,13 @@ fn js_path_parse(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 // ---------------------------------------------------------------------------
 fn js_path_format(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut obj = cc.arg(0).clone();
-    let obj_ref = obj.as_object_mut().ok_or_else(|| {
+    let mut obj_ref = obj.as_object().ok_or_else(|| {
         ctx.throw_type_error("path.format: argument must be an object");
         -1
     })?;
 
     // Read fields (treat undefined/null as empty string)
-    let read_str = |ctx: &mut ScopedContext, obj: &mut zuqe::Object, key: &str| -> String {
+    let read_str = |ctx: &mut ScopedContext, obj: zuqe::Object, key: &str| -> String {
         obj.get_property_str(ctx, key)
             .ok()
             .filter(|v| !v.is_undefined_or_null())
@@ -271,7 +271,7 @@ fn js_path_inspect(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             let s = result.to_string_lossy();
             js_str(ctx, if s.is_empty() { "." } else { &s })
         }
-        INSPECT_IS_ABSOLUTE => Ok(JSValue::Bool(path.is_absolute())),
+        INSPECT_IS_ABSOLUTE => Ok(JSValue::from(path.is_absolute())),
         _ => unreachable!(),
     }
 }
@@ -328,7 +328,7 @@ const MOD_PATH_ENTRIES: &[FieldDef] = &[
         "sep",
         |cx| {
             cx.create_string_from_utf8(std::path::MAIN_SEPARATOR_STR.as_bytes().to_vec())
-                .map(JSValue::from)
+                .map(JSValue::make_string)
         },
         JS_PROP_ENUMERABLE,
     ),
@@ -338,7 +338,7 @@ const MOD_PATH_ENTRIES: &[FieldDef] = &[
         |cx| {
             let d = if cfg!(windows) { ";" } else { ":" };
             cx.create_string_from_utf8(d.as_bytes().to_vec())
-                .map(JSValue::from)
+                .map(JSValue::make_string)
         },
         JS_PROP_ENUMERABLE,
     ),

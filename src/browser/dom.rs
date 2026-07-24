@@ -6,20 +6,16 @@
 //! `querySelector` / `querySelectorAll` / `getAttribute` / `focus` /
 //! `getBoxModel` / `remove` / `click` / `type`. Underlying CDP: `DOM.*`.
 //!
-//! Shared Page plumbing (`get_page_payload`, `js_from_json_value`,
-//! `send_page_void_cmd`, prop getters) lives in `class_page.rs`.
+//! Shared Page plumbing (`get_page_payload`, `send_page_void_cmd`, prop
+//! getters) lives in `class_page.rs`. JSON→JS conversion uses zuqe's
+//! `JSValue::from_serde_json`.
 
-use serde_json::Value;
 use zuqe::{
     CallContext, JSResult, JSValue, ScopedContext,
     builtins::promise::{Promise, PromiseResultSlot},
 };
 
-use crate::browser::{
-    cdp::CdpClient,
-    cdp_input,
-    class_page::{get_page_payload, js_from_json_value},
-};
+use crate::browser::{cdp::CdpClient, cdp_input, class_page::get_page_payload};
 
 /// Enable the DOM domain and resolve a CSS selector to a `nodeId`.
 /// The context node is the document root obtained via `DOM.getDocument`.
@@ -164,18 +160,18 @@ pub(crate) fn js_page_get_attribute(ctx: &mut ScopedContext, cc: CallContext) ->
     let client = payload.client.clone();
     let session_id = payload.session_id.clone();
 
-    let result_slot = PromiseResultSlot::<Result<Value, String>>::new();
+    let result_slot = PromiseResultSlot::<Result<serde_json::Value, String>>::new();
     let promise =
         Promise::create_with_result_slot(ctx, result_slot.clone(), |cx, val| -> JSResult {
             let val = val.map_err(|e| {
                 cx.throw_internal_error(&e);
                 -1
             })?;
-            js_from_json_value(cx, &val)
+            JSValue::from_serde_json(cx, &val)
         })?;
 
     tokio::spawn(async move {
-        let r: Result<Value, String> = async {
+        let r: Result<serde_json::Value, String> = async {
             let node_id = resolve_selector(&client, &session_id, &selector).await?;
             let a = client
                 .send(
@@ -198,7 +194,7 @@ pub(crate) fn js_page_get_attribute(ctx: &mut ScopedContext, cc: CallContext) ->
                 }
                 i += 2;
             }
-            Ok(Value::Null)
+            Ok(serde_json::Value::Null)
         }
         .await;
         result_slot.commit(r).ok();
@@ -261,18 +257,18 @@ pub(crate) fn js_page_get_box_model(ctx: &mut ScopedContext, cc: CallContext) ->
     let client = payload.client.clone();
     let session_id = payload.session_id.clone();
 
-    let result_slot = PromiseResultSlot::<Result<Value, String>>::new();
+    let result_slot = PromiseResultSlot::<Result<serde_json::Value, String>>::new();
     let promise =
         Promise::create_with_result_slot(ctx, result_slot.clone(), |cx, val| -> JSResult {
             let val = val.map_err(|e| {
                 cx.throw_internal_error(&e);
                 -1
             })?;
-            js_from_json_value(cx, &val)
+            JSValue::from_serde_json(cx, &val)
         })?;
 
     tokio::spawn(async move {
-        let r: Result<Value, String> = async {
+        let r: Result<serde_json::Value, String> = async {
             let node_id = resolve_selector(&client, &session_id, &selector).await?;
             let m = client
                 .send(
@@ -282,7 +278,7 @@ pub(crate) fn js_page_get_box_model(ctx: &mut ScopedContext, cc: CallContext) ->
                 )
                 .await
                 .unwrap_or(Err("channel closed".into()))?;
-            Ok(m.get("model").cloned().unwrap_or(Value::Null))
+            Ok(m.get("model").cloned().unwrap_or(serde_json::Value::Null))
         }
         .await;
         result_slot.commit(r).ok();
@@ -467,7 +463,7 @@ pub(crate) fn js_page_get_node_value(ctx: &mut ScopedContext, cc: CallContext) -
                 -1
             })?;
             cx.create_string_from_utf8(html.into_bytes())
-                .map(JSValue::from)
+                .map(JSValue::make_string)
         })?;
 
     tokio::spawn(async move {

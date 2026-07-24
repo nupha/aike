@@ -31,10 +31,10 @@ fn extract_opts(cx: &mut ScopedContext, arg: JSValue) -> Result<OnError, i32> {
     if arg.is_undefined() {
         return Ok(OnError::Null);
     }
-    let obj = match arg.to_object() {
-        Some(o) => o,
-        None => return Ok(OnError::Null),
+    let Some(obj) = arg.as_object() else {
+        return Ok(OnError::Null);
     };
+
     let on_error = match obj.get_property_str(cx, "onError") {
         Ok(v) if !v.is_undefined() => match v.to_string(cx) {
             Ok(s) => on_error_from_str(&s.content().encode_utf8(false).to_string()),
@@ -91,8 +91,7 @@ pub(crate) fn js_parse(cx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let text = cc.arg(0).to_string(cx)?;
     let content = text.content().encode_utf8(false).to_string();
     let on_error = extract_opts(cx, cc.arg(1))?;
-    let (values, _attempted) =
-        parse_jsonl(cx, &content, on_error).map_err(|code| code)?;
+    let (values, _attempted) = parse_jsonl(cx, &content, on_error).map_err(|code| code)?;
     Array::from_values(cx, values).map(JSValue::from)
 }
 
@@ -125,11 +124,7 @@ pub(crate) fn js_stringify(cx: &mut ScopedContext, cc: CallContext) -> JSResult 
 }
 
 // path pre-resolved (caller decides sandbox). Reads file -> T[].
-fn read_jsonl_impl(
-    cx: &mut ScopedContext,
-    path: PathBuf,
-    on_error: OnError,
-) -> JSResult {
+fn read_jsonl_impl(cx: &mut ScopedContext, path: PathBuf, on_error: OnError) -> JSResult {
     let (promise, tx) =
         Promise::create_with_channel::<Result<String, String>>(cx, move |cx2, data| -> JSResult {
             let text = match data {
@@ -139,8 +134,7 @@ fn read_jsonl_impl(
                     return Err(-1);
                 }
             };
-            let (values, _attempted) =
-                parse_jsonl(cx2, &text, on_error).map_err(|code| code)?;
+            let (values, _attempted) = parse_jsonl(cx2, &text, on_error).map_err(|code| code)?;
             Array::from_values(cx2, values).map(JSValue::from)
         })?;
 
@@ -254,8 +248,7 @@ pub(crate) fn js_parse_chunk(cx: &mut ScopedContext, cc: CallContext) -> JSResul
     let text = cc.arg(0).to_string(cx)?;
     let content = text.content().encode_utf8(false).to_string();
     let on_error = extract_opts(cx, cc.arg(1))?;
-    let (values, attempted) =
-        parse_jsonl(cx, &content, on_error).map_err(|code| code)?;
+    let (values, attempted) = parse_jsonl(cx, &content, on_error).map_err(|code| code)?;
     let mut obj = cx.create_base_object()?;
     let arr = Array::from_values(cx, values)?;
     obj.define_property_value_str(cx, "values", arr.into(), 0)?;

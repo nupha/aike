@@ -97,7 +97,7 @@ fn js_constructor(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
 
 /// StdioMcp.define(config) — static factory taking a single config object.
 fn js_stdio_define(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let Some(cfg) = cc.arg(0).as_object().copied() else {
+    let Some(cfg) = cc.arg(0).as_object() else {
         ctx.throw_type_error("StdioMcp.define(config) — config must be an object");
         return Err(-1);
     };
@@ -119,7 +119,7 @@ fn js_stdio_define(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         .ok()
         .filter(|v| !v.is_undefined())
     {
-        if let Some(o) = v.as_object().copied() {
+        if let Some(o) = v.as_object() {
             command_env = parse_env_object(ctx, o)?;
         }
     }
@@ -132,7 +132,7 @@ fn js_stdio_define(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         .filter(|v| !v.is_undefined())
     {
         command_args = if v.as_object().map_or(false, |o| o.is_callable()) {
-            CommandArgs::Func(v.into_callable(ctx)?)
+            CommandArgs::Func(v.ensure_callable(ctx)?)
         } else {
             let arr = Array::try_from(v)?;
             let len = arr.get_length_prop(ctx)? as usize;
@@ -157,7 +157,7 @@ fn js_stdio_define(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         .ok()
         .filter(|v| !v.is_undefined())
     {
-        before_run = Some(v.into_callable(ctx)?);
+        before_run = Some(v.ensure_callable(ctx)?);
     }
 
     // extraFiles — string[].
@@ -167,7 +167,7 @@ fn js_stdio_define(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         .ok()
         .filter(|v| !v.is_undefined())
     {
-        if let Some(arr) = v.as_object().copied() {
+        if let Some(arr) = v.as_object() {
             let len = arr
                 .get_property_str(ctx, "length")
                 .and_then(|l| l.to_number(ctx))
@@ -297,7 +297,7 @@ fn js_spawn_resolve(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let p = get_payload(ctx, &this)?;
 
     // ns arg — the agent's McpCtx (Record<string,string>); default to {}.
-    let nsobj = match cc.arg(0).as_object().copied() {
+    let nsobj = match cc.arg(0).as_object() {
         Some(o) => o,
         None => ctx.create_base_object()?,
     };
@@ -545,7 +545,7 @@ fn parse_env_object(
             .to_string();
 
         let val = if v.as_object().map_or(false, |o| o.is_callable()) {
-            EnvVal::Func(v.into_callable(ctx)?)
+            EnvVal::Func(v.ensure_callable(ctx)?)
         } else {
             let s = v.to_string(ctx)?.content().encode_utf8(false).to_string();
             EnvVal::Text(s)

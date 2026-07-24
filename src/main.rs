@@ -476,7 +476,7 @@ async fn main() -> ExitCode {
             },
             EvalFlags::empty(),
         )
-        .map(|v| v.as_object_Promise().copied());
+        .map(|v| v.as_object_Promise());
 
     let res = match r {
         Ok(Some(p)) => match p.into_future(&mut ctx.root_scope()) {
@@ -500,8 +500,8 @@ async fn main() -> ExitCode {
                 }
                 // value 'e' is in cx0 (top-level scope), it won't be gc collected.
                 // we should remove it from protection manually.
-                if let Some(n) = e.gc_node_ptr() {
-                    ctx.root_scope().remove_local(n);
+                if let Some(n) = e.gc_node() {
+                    ctx.root_scope().remove_local(n.into());
                 }
                 1
             }
@@ -634,7 +634,7 @@ fn js_module_loader(
             && attrs
                 .get_property_str(ctx, "type")
                 .map(|v| {
-                    v.as_string()
+                    v.as_string(true)
                         .is_some_and(|s| s.content().encode_utf8(false).as_ref() == "json")
                 })
                 .unwrap_or(false);

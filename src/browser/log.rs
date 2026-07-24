@@ -9,13 +9,12 @@
 use std::sync::{LazyLock, Mutex};
 
 use crossbeam::channel;
-use serde_json::Value;
 use zuqe::{CallContext, JSResult, JSValue, ScopedContext};
 
-use crate::browser::class_page::{get_page_payload, js_from_json_value, send_page_void_cmd};
+use crate::browser::class_page::{get_page_payload, send_page_void_cmd};
 
 /// Per-session ring buffer of console/log entries.
-static LOG_BUFFER: LazyLock<Mutex<std::collections::HashMap<String, Vec<Value>>>> =
+static LOG_BUFFER: LazyLock<Mutex<std::collections::HashMap<String, Vec<serde_json::Value>>>> =
     LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
 
 /// `page.onLog(callback)` — enable `Log` and invoke `callback(entry)` for each
@@ -35,7 +34,7 @@ pub(crate) fn js_page_on_log(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
 
     let _ = send_page_void_cmd(ctx, &cc, "Log.enable", None);
 
-    let (tx, rx) = channel::unbounded::<Value>();
+    let (tx, rx) = channel::unbounded::<serde_json::Value>();
     let client_ev = client.clone();
     let session_ev = session_id.clone();
     tokio::spawn(async move {
@@ -75,11 +74,14 @@ pub(crate) fn js_page_on_log(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
                 .get("sessionId")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string());
-            let params = msg.get("params").cloned().unwrap_or(Value::Null);
+            let params = msg
+                .get("params")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
             let cb =
                 CONSOLE_CALLBACK.with(|m| sess.as_ref().and_then(|s| m.borrow().get(s).cloned()));
             if let (Some(cb), Some(_sess)) = (cb, sess) {
-                let obj = js_from_json_value(cx, &params).unwrap_or(JSValue::UNDEFINED);
+                let obj = JSValue::from_serde_json(cx, &params).unwrap_or(JSValue::UNDEFINED);
                 let _ = cb.call(cx, JSValue::UNDEFINED, &[obj]);
             }
             true
@@ -104,7 +106,7 @@ pub(crate) fn js_page_get_console_messages(ctx: &mut ScopedContext, cc: CallCont
     let payload = get_page_payload(ctx, &this)?;
     let session_id = payload.session_id.clone();
 
-    let mut messages: Vec<Value> = Vec::new();
+    let mut messages: Vec<serde_json::Value> = Vec::new();
     if let Ok(mut guard) = LOG_BUFFER.lock() {
         if let Some(buf) = guard.get_mut(&session_id) {
             messages = std::mem::take(buf);
@@ -116,5 +118,6 @@ pub(crate) fn js_page_get_console_messages(ctx: &mut ScopedContext, cc: CallCont
             guard.insert(session_id, messages.clone());
         }
     }
-    js_from_json_value(ctx, &Value::Array(messages))
+
+    JSValue::from_serde_json(ctx, &serde_json::Value::Array(messages))
 }

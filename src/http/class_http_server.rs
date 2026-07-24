@@ -161,24 +161,20 @@ fn get_server_payload<'a>(
     ctx: &mut ScopedContext,
     val: &'a JSValue,
 ) -> Result<&'a HttpServerPayload, i32> {
-    val.as_native_object::<JSHttpServer>()
-        .and_then(|o| o.payload())
-        .ok_or_else(|| {
-            ctx.throw_type_error("expect HttpServer instance");
-            -1
-        })
+    JSHttpServer::payload_of(val).ok_or_else(|| {
+        ctx.throw_type_error("expect HttpServer instance");
+        -1
+    })
 }
 
 pub(crate) fn get_server_payload_mut<'a>(
     ctx: &mut ScopedContext,
     val: &'a mut JSValue,
 ) -> Result<&'a mut HttpServerPayload, i32> {
-    val.as_native_object_mut::<JSHttpServer>()
-        .and_then(|o| o.payload_mut())
-        .ok_or_else(|| {
-            ctx.throw_type_error("expect HttpServer instance");
-            -1
-        })
+    JSHttpServer::payload_mut_of(val).ok_or_else(|| {
+        ctx.throw_type_error("expect HttpServer instance");
+        -1
+    })
 }
 
 fn js_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -216,18 +212,17 @@ fn js_openai(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     // Validate engine argument
     let mut v = cc.arg(0);
-    let engine = match v.as_native_object_mut::<JSEngine>() {
-        Some(e) => match e.take_payload() {
+    let engine = if v.as_native_object::<JSEngine>().is_some() {
+        match JSEngine::take_payload_of(&mut v) {
             Some(payload) => *payload,
             None => {
                 ctx.throw_type_error("Engine object has already been detached");
                 return Err(-1);
             }
-        },
-        None => {
-            ctx.throw_type_error("engine must be an Engine instance");
-            return Err(-1);
         }
+    } else {
+        ctx.throw_type_error("engine must be an Engine instance");
+        return Err(-1);
     };
 
     // Validate mountPath argument
@@ -271,7 +266,7 @@ fn js_route_add(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     };
     let path_str = cc.arg(0).to_string(ctx)?;
     let path = path_str.content().encode_utf8(false).to_string();
-    let handler = cc.arg(1).into_callable(ctx)?;
+    let handler = cc.arg(1).ensure_callable(ctx)?;
 
     let p = get_server_payload_mut(ctx, &mut this)?;
     if let Err(e) = p.add_js_route(method, path, handler) {
@@ -306,7 +301,7 @@ fn js_mcp(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     };
 
     // arg(1): an HttpMcp instance.
-    let mut http_obj = cc.arg(1).as_object().copied().ok_or_else(|| {
+    let mut http_obj = cc.arg(1).as_object().ok_or_else(|| {
         ctx.throw_type_error("mcp() expects an HttpMcp instance");
         -1
     })?;
@@ -314,14 +309,9 @@ fn js_mcp(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     // Validate it is an HttpMcp with an Http transport, then assign the
     // mount path the server owns (not baked into the HttpMcp at define time).
     {
-        let h = http_obj
-            .as_native_object_mut::<JSHttpMcp>()
-            .ok_or_else(|| {
-                ctx.throw_type_error("mcp() expects an HttpMcp instance");
-                -1
-            })?;
-        let p = h.payload_mut().ok_or_else(|| {
-            ctx.throw_type_error("invalid HttpMcp instance");
+        let mut http_val = JSValue::from(http_obj);
+        let p = JSHttpMcp::payload_mut_of(&mut http_val).ok_or_else(|| {
+            ctx.throw_type_error("mcp() expects an HttpMcp instance");
             -1
         })?;
         match &mut *p.transport.borrow_mut() {
@@ -369,7 +359,7 @@ fn js_remove_route(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             ctx.throw_type_error(e);
             -1
         })
-        .map(JSValue::Bool)
+        .map(JSValue::from)
 }
 
 /// Convert Express-style `:param` path segments to axum-style `{param}`.
@@ -777,13 +767,11 @@ fn js_listen(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             let mut mcp_update_rxs: Vec<channel::Receiver<Vec<Object>>> = Vec::new();
             for (i, obj) in data.mcp_endpoints.iter_mut().enumerate() {
                 // Read the payload (immutable) to build the route + handler table.
-                let p = obj
-                    .as_native_object::<JSHttpMcp>()
-                    .and_then(|o| o.payload())
-                    .ok_or_else(|| {
-                        ctx.throw_type_error("invalid HttpMcp endpoint");
-                        -1
-                    })?;
+                let obj_val = JSValue::from(*obj);
+                let p = JSHttpMcp::payload_of(&obj_val).ok_or_else(|| {
+                    ctx.throw_type_error("invalid HttpMcp endpoint");
+                    -1
+                })?;
 
                 // Build axum route via rmcp's StreamableHttpService
                 let mcp_axum_router = build_axum_mcp_route(p, js_tx.clone(), i);
@@ -796,13 +784,11 @@ fn js_listen(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 let (utx, urx) = channel::unbounded::<Vec<Object>>();
 
                 // Backfill the update sender into the payload (mcp-service.md §6).
-                if let Some(h) = obj.as_native_object_mut::<JSHttpMcp>() {
-                    if let Some(p_mut) = h.payload_mut() {
-                        if let McpTransport::Http { update_tx, .. } =
-                            &mut *p_mut.transport.borrow_mut()
-                        {
-                            *update_tx = Some(utx);
-                        }
+                let mut ov = JSValue::from(*obj);
+                if let Some(p_mut) = JSHttpMcp::payload_mut_of(&mut ov) {
+                    if let McpTransport::Http { update_tx, .. } = &mut *p_mut.transport.borrow_mut()
+                    {
+                        *update_tx = Some(utx);
                     }
                 }
 
@@ -1187,7 +1173,7 @@ fn js_route_ws(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         .content()
         .encode_utf8(false)
         .to_string();
-    let handler = cc.arg(1).into_callable(ctx)?;
+    let handler = cc.arg(1).ensure_callable(ctx)?;
     let p = get_server_payload_mut(ctx, &mut this)?;
     if p.frozen {
         ctx.throw_type_error("cannot add ws route while server is running");
@@ -1251,11 +1237,9 @@ fn js_publish(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     };
 
     for id in ids {
-        if let Some(mut obj) = p.stream_registry.borrow().get(&id).cloned() {
-            if let Some(ws) = obj
-                .as_native_object_mut::<JSWebSocketStream>()
-                .and_then(|o| o.payload_mut())
-            {
+        if let Some(obj) = p.stream_registry.borrow().get(&id).cloned() {
+            let mut ov = JSValue::from(obj);
+            if let Some(ws) = JSWebSocketStream::payload_mut_of(&mut ov) {
                 if let Some(tx) = &ws.sink.tx {
                     let _ = tx.try_send(msg.clone());
                 }

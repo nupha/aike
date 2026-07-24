@@ -350,12 +350,10 @@ fn get_mcp_bridge_payload<'a>(
     ctx: &mut ScopedContext,
     val: &'a mut JSValue,
 ) -> Result<&'a mut McpBridgePayload, i32> {
-    val.as_native_object_mut::<JSMcpBridge>()
-        .and_then(|o| o.payload_mut())
-        .ok_or_else(|| {
-            ctx.throw_internal_error("McpBridge was detached");
-            -1
-        })
+    JSMcpBridge::payload_mut_of(val).ok_or_else(|| {
+        ctx.throw_internal_error("McpBridge was detached");
+        -1
+    })
 }
 
 const MCP_BRIDGE_PROTO: &[FieldDef] = &[];

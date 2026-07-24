@@ -5,17 +5,17 @@
 //! (`page.evaluate` / `page.getOuterHTML` / `page.waitForSelector` /
 //! `page.enableRuntime`). The underlying CDP commands are `Runtime.*`.
 //!
-//! Shared Page plumbing (`get_page_payload`, `js_from_json_value`,
-//! `send_page_void_cmd`) lives in `class_page.rs` and is imported here.
+//! Shared Page plumbing (`get_page_payload`, `send_page_void_cmd`) lives in
+//! `class_page.rs` and is imported here. JSON→JS conversion uses zuqe's
+//! `JSValue::from_serde_json`.
 
 use crossbeam::channel;
-use serde_json::Value;
 use zuqe::{
     CallContext, JSResult, JSValue, ScopedContext,
     builtins::promise::{Promise, PromiseResultSlot},
 };
 
-use crate::browser::class_page::{get_page_payload, js_from_json_value, send_page_void_cmd};
+use crate::browser::class_page::{get_page_payload, send_page_void_cmd};
 
 /// `page.evaluate(jsCode)`
 pub(crate) fn js_page_evaluate(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -30,7 +30,7 @@ pub(crate) fn js_page_evaluate(ctx: &mut ScopedContext, cc: CallContext) -> JSRe
     let client = payload.client.clone();
     let session_id = payload.session_id.clone();
 
-    let result_slot = PromiseResultSlot::<Result<Value, String>>::new();
+    let result_slot = PromiseResultSlot::<Result<serde_json::Value, String>>::new();
     let promise =
         Promise::create_with_result_slot(ctx, result_slot.clone(), |cx, payload| -> JSResult {
             let val = payload.map_err(|e| {
@@ -49,19 +49,15 @@ pub(crate) fn js_page_evaluate(ctx: &mut ScopedContext, cc: CallContext) -> JSRe
 
             if let Some(result) = val.get("result") {
                 if let Some(value) = result.get("value") {
-                    return js_from_json_value(cx, value);
+                    return JSValue::from_serde_json(cx, value);
                 }
                 if result.get("objectId").is_some()
                     && let Some(desc) = result.get("description").and_then(|v| v.as_str())
                 {
-                    return cx
-                        .create_string_from_utf8(desc.as_bytes().to_vec())
-                        .map(JSValue::from);
+                    return cx.create_string_from_str(desc).map(JSValue::make_string);
                 }
                 if let Some(desc) = result.get("description").and_then(|v| v.as_str()) {
-                    return cx
-                        .create_string_from_utf8(desc.as_bytes().to_vec())
-                        .map(JSValue::from);
+                    return cx.create_string_from_str(desc).map(JSValue::make_string);
                 }
             }
 
@@ -100,7 +96,7 @@ pub(crate) fn js_page_get_outer_html(ctx: &mut ScopedContext, cc: CallContext) -
                 -1
             })?;
             cx.create_string_from_utf8(html.into_bytes())
-                .map(JSValue::from)
+                .map(JSValue::make_string)
         })?;
 
     tokio::spawn(async move {
@@ -215,23 +211,8 @@ pub(crate) fn js_page_enable_runtime(ctx: &mut ScopedContext, cc: CallContext) -
 }
 
 // ---------------------------------------------------------------------------
-// Runtime domain — P0/P1
+// Runtime domain
 // ---------------------------------------------------------------------------
-
-/// Shallow JSValue -> serde_json::Value (string/number/bool/null).
-fn js_value_to_json(ctx: &mut ScopedContext, v: &JSValue) -> Value {
-    if let Some(s) = v.as_string() {
-        Value::String(s.content().encode_utf8(false).to_string())
-    } else if let Some(n) = v.to_number(ctx).ok() {
-        Value::from(n.to_f64())
-    } else if v.is_bool() {
-        Value::Bool(v.to_bool().unwrap_or(false))
-    } else if v.is_null() || v.is_undefined() {
-        Value::Null
-    } else {
-        Value::Null
-    }
-}
 
 /// `page.callFunctionOn(objectId, fn, args?)` — `Runtime.callFunctionOn`.
 pub(crate) fn js_page_call_function_on(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -251,7 +232,7 @@ pub(crate) fn js_page_call_function_on(ctx: &mut ScopedContext, cc: CallContext)
         && let Some(arr) = cc.arg(2).as_object_Array()
     {
         for item in arr.payload().values() {
-            call_args.push(serde_json::json!({ "value": js_value_to_json(ctx, &item) }));
+            call_args.push(serde_json::json!({ "value": item.to_serde_json_primitive(ctx) }));
         }
     }
 
@@ -260,14 +241,14 @@ pub(crate) fn js_page_call_function_on(ctx: &mut ScopedContext, cc: CallContext)
     let client = payload.client.clone();
     let session_id = payload.session_id.clone();
 
-    let result_slot = PromiseResultSlot::<Result<Value, String>>::new();
+    let result_slot = PromiseResultSlot::<Result<serde_json::Value, String>>::new();
     let promise =
         Promise::create_with_result_slot(ctx, result_slot.clone(), |cx, val| -> JSResult {
             let val = val.map_err(|e| {
                 cx.throw_internal_error(&e);
                 -1
             })?;
-            js_from_json_value(cx, &val)
+            JSValue::from_serde_json(cx, &val)
         })?;
 
     tokio::spawn(async move {
@@ -293,7 +274,7 @@ pub(crate) fn js_page_call_function_on(ctx: &mut ScopedContext, cc: CallContext)
                         .get("result")
                         .and_then(|x| x.get("value"))
                         .cloned()
-                        .unwrap_or(Value::Null);
+                        .unwrap_or(serde_json::Value::Null);
                     result_slot.commit(Ok(r)).ok();
                 }
             }
@@ -320,14 +301,14 @@ pub(crate) fn js_page_get_properties(ctx: &mut ScopedContext, cc: CallContext) -
     let client = payload.client.clone();
     let session_id = payload.session_id.clone();
 
-    let result_slot = PromiseResultSlot::<Result<Value, String>>::new();
+    let result_slot = PromiseResultSlot::<Result<serde_json::Value, String>>::new();
     let promise =
         Promise::create_with_result_slot(ctx, result_slot.clone(), |cx, val| -> JSResult {
             let val = val.map_err(|e| {
                 cx.throw_internal_error(&e);
                 -1
             })?;
-            js_from_json_value(cx, &val)
+            JSValue::from_serde_json(cx, &val)
         })?;
 
     tokio::spawn(async move {
@@ -374,21 +355,21 @@ pub(crate) fn js_page_get_properties(ctx: &mut ScopedContext, cc: CallContext) -
                         Some(&session_id),
                     )
                     .await
-                    .unwrap_or(Ok(Value::Null));
+                    .unwrap_or(Ok(serde_json::Value::Null));
                 match r {
                     Ok(j) => j
                         .get("result")
                         .and_then(|x| x.get("value"))
                         .cloned()
-                        .unwrap_or(Value::Null),
-                    Err(_) => Value::Null,
+                        .unwrap_or(serde_json::Value::Null),
+                    Err(_) => serde_json::Value::Null,
                 }
             } else {
-                Value::Null
+                serde_json::Value::Null
             };
             map.insert(name.to_string(), resolved);
         }
-        result_slot.commit(Ok(Value::Object(map))).ok();
+        result_slot.commit(Ok(serde_json::Value::Object(map))).ok();
     });
 
     Ok(promise.into())
@@ -408,14 +389,14 @@ pub(crate) fn js_page_evaluate_handle(ctx: &mut ScopedContext, cc: CallContext) 
     let client = payload.client.clone();
     let session_id = payload.session_id.clone();
 
-    let result_slot = PromiseResultSlot::<Result<Value, String>>::new();
+    let result_slot = PromiseResultSlot::<Result<serde_json::Value, String>>::new();
     let promise =
         Promise::create_with_result_slot(ctx, result_slot.clone(), |cx, val| -> JSResult {
             let val = val.map_err(|e| {
                 cx.throw_internal_error(&e);
                 -1
             })?;
-            js_from_json_value(cx, &val)
+            JSValue::from_serde_json(cx, &val)
         })?;
 
     tokio::spawn(async move {
@@ -506,11 +487,15 @@ pub(crate) fn js_page_on_console(ctx: &mut ScopedContext, cc: CallContext) -> JS
                 .get("sessionId")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string());
-            let params = msg.get("params").cloned().unwrap_or(Value::Null);
+            let params = msg
+                .get("params")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
             let cb =
                 CONSOLE_CALLBACK.with(|m| sess.as_ref().and_then(|s| m.borrow().get(s).cloned()));
+
             if let (Some(cb), Some(_sess)) = (cb, sess) {
-                let obj = js_from_json_value(cx, &params).unwrap_or(JSValue::UNDEFINED);
+                let obj = JSValue::from_serde_json(cx, &params).unwrap_or(JSValue::UNDEFINED);
                 let _ = cb.call(cx, JSValue::UNDEFINED, &[obj]);
             }
             true

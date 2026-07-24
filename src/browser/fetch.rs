@@ -11,14 +11,11 @@ use std::cell::RefCell;
 
 use base64::Engine as _;
 use crossbeam::channel;
-use serde_json::Value;
 use zuqe::{CallContext, JS_PROP_C_W_E, JSResult, JSValue, ScopedContext};
 
 use crate::browser::{
     cdp_network,
-    class_page::{
-        get_number_prop, get_page_payload, get_str_prop, js_from_json_value, send_page_void_cmd,
-    },
+    class_page::{get_number_prop, get_page_payload, get_str_prop, send_page_void_cmd},
 };
 
 // ---------------------------------------------------------------------------
@@ -88,9 +85,14 @@ pub(crate) fn js_page_set_request_interception(
                     .get("sessionId")
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string());
-                let params = msg.get("params").cloned().unwrap_or(Value::Null);
+                let params = msg
+                    .get("params")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null);
+
                 let cb =
                     FETCH_CALLBACK.with(|m| sess.as_ref().and_then(|s| m.borrow().get(s).cloned()));
+
                 if let (Some(cb), Some(_sess)) = (cb, sess) {
                     let mut obj = cx.create_base_object().ok();
                     if let Some(o) = obj.as_mut() {
@@ -99,13 +101,14 @@ pub(crate) fn js_page_set_request_interception(
                                 let _ = o.define_property_value_str(
                                     cx,
                                     "requestId",
-                                    s.into(),
+                                    JSValue::make_string(s),
                                     JS_PROP_C_W_E,
                                 );
                             }
                         }
                         if let Some(req) = params.get("request") {
-                            let req_val = js_from_json_value(cx, req).unwrap_or(JSValue::UNDEFINED);
+                            let req_val =
+                                JSValue::from_serde_json(cx, req).unwrap_or(JSValue::UNDEFINED);
                             let _ =
                                 o.define_property_value_str(cx, "request", req_val, JS_PROP_C_W_E);
                         }
@@ -115,7 +118,7 @@ pub(crate) fn js_page_set_request_interception(
                                     let _ = o.define_property_value_str(
                                         cx,
                                         key,
-                                        s.into(),
+                                        JSValue::make_string(s),
                                         JS_PROP_C_W_E,
                                     );
                                 }
@@ -126,6 +129,7 @@ pub(crate) fn js_page_set_request_interception(
                         let _ = cb.call(cx, JSValue::UNDEFINED, &[o.into()]);
                     }
                 }
+
                 let _ = session_for_poller;
                 true
             },
@@ -161,22 +165,22 @@ pub(crate) fn js_page_continue_request(ctx: &mut ScopedContext, cc: CallContext)
     if cc.length() > 1
         && let Some(obj) = cc.arg(1).as_object()
     {
-        if let Some(u) = get_str_prop(ctx, &obj, "url") {
-            params["url"] = Value::String(u);
+        if let Some(u) = get_str_prop(ctx, obj, "url") {
+            params["url"] = serde_json::Value::String(u);
         }
-        if let Some(m) = get_str_prop(ctx, &obj, "method") {
-            params["method"] = Value::String(m);
+        if let Some(m) = get_str_prop(ctx, obj, "method") {
+            params["method"] = serde_json::Value::String(m);
         }
-        if let Some(mut h) = obj
+        if let Some(h) = obj
             .get_property_str(ctx, "headers")
             .ok()
             .filter(|v| !v.is_undefined())
-            .and_then(|v| v.as_object().cloned())
+            .and_then(|v| v.as_object())
         {
-            params["headers"] = js_obj_to_json(ctx, &mut h);
+            params["headers"] = h.to_serde_json(ctx).unwrap_or_default();
         }
-        if let Some(p) = get_str_prop(ctx, &obj, "postData") {
-            params["postData"] = Value::String(p);
+        if let Some(p) = get_str_prop(ctx, obj, "postData") {
+            params["postData"] = serde_json::Value::String(p);
         }
     }
 
@@ -192,7 +196,7 @@ pub(crate) fn js_page_abort_request(ctx: &mut ScopedContext, cc: CallContext) ->
         .unwrap_or_default();
     let reason = if cc.length() > 1 {
         if let Some(obj) = cc.arg(1).as_object() {
-            get_str_prop(ctx, &obj, "reason").unwrap_or_else(|| "Failed".to_string())
+            get_str_prop(ctx, obj, "reason").unwrap_or_else(|| "Failed".to_string())
         } else {
             cc.arg(1)
                 .to_string(ctx)
@@ -223,28 +227,28 @@ pub(crate) fn js_page_respond_request(ctx: &mut ScopedContext, cc: CallContext) 
         .unwrap_or_default();
 
     let this = cc.this();
-    let _payload = get_page_payload(ctx, &this)?;
+    let _ = get_page_payload(ctx, &this)?;
 
     let mut params = serde_json::json!({ "requestId": req_id });
     if cc.length() > 1
         && let Some(obj) = cc.arg(1).as_object()
     {
-        if let Some(code) = get_number_prop(ctx, &obj, "status") {
+        if let Some(code) = get_number_prop(ctx, obj, "status") {
             params["responseCode"] = serde_json::json!(code as i32);
         }
-        if let Some(mut h) = obj
+        if let Some(h) = obj
             .get_property_str(ctx, "headers")
             .ok()
             .filter(|v| !v.is_undefined())
-            .and_then(|v| v.as_object().cloned())
+            .and_then(|v| v.as_object())
         {
-            params["responseHeaders"] = js_obj_to_json(ctx, &mut h);
+            params["responseHeaders"] = h.to_serde_json(ctx).unwrap_or_default();
         }
-        if let Some(body) = get_str_prop(ctx, &obj, "body") {
+        if let Some(body) = get_str_prop(ctx, obj, "body") {
             let b64 = base64::engine::general_purpose::STANDARD.encode(body.as_bytes());
-            params["body"] = Value::String(b64);
+            params["body"] = serde_json::Value::String(b64);
         }
-        if let Some(ct) = get_str_prop(ctx, &obj, "contentType") {
+        if let Some(ct) = get_str_prop(ctx, obj, "contentType") {
             if params.get("responseHeaders").is_none() {
                 params["responseHeaders"] =
                     serde_json::json!([{ "name": "Content-Type", "value": ct }]);
@@ -265,37 +269,4 @@ pub(crate) fn js_page_on_request_paused(ctx: &mut ScopedContext, cc: CallContext
         m.borrow_mut().insert(session_id, callback);
     });
     Ok(JSValue::UNDEFINED)
-}
-
-/// Convert a zuqe plain object to a `serde_json::Value` (shallow:
-/// string/number/bool props).
-fn js_obj_to_json(ctx: &mut ScopedContext, obj: &mut zuqe::Object) -> Value {
-    let mut map = serde_json::Map::new();
-    let flags = zuqe::JS_GPN_ENUM_ONLY | zuqe::JS_GPN_STR_OR_INT_MASK;
-    if let Ok(keys) = obj.get_own_property_names(ctx, flags) {
-        for pk in keys.iter() {
-            let v = match obj.get_property(ctx, pk.atom) {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
-            let key = pk
-                .atom
-                .to_value(ctx)
-                .ok()
-                .and_then(|v| v.to_string(ctx).ok())
-                .map(|s| s.content().encode_utf8(false).to_string())
-                .unwrap_or_default();
-            if let Some(s) = v.as_string() {
-                map.insert(
-                    key,
-                    Value::String(s.content().encode_utf8(false).to_string()),
-                );
-            } else if let Some(n) = v.to_number(ctx).ok() {
-                map.insert(key, Value::from(n.to_f64()));
-            } else if v.is_bool() {
-                map.insert(key, Value::Bool(v.to_bool().unwrap_or(false)));
-            }
-        }
-    }
-    Value::Object(map)
 }

@@ -144,7 +144,7 @@ fn make_void_promise(
 /// Takes &mut JSValue because payload_mut requires mutable access to ArrayBuffer.
 fn get_bytes_from_arg(ctx: &mut ScopedContext, arg: &mut JSValue) -> Result<Vec<u8>, i32> {
     // Try ArrayBuffer
-    if let Some(ab) = arg.as_object_ArrayBuffer_mut() {
+    if let Some(mut ab) = arg.as_object_ArrayBuffer() {
         let buf = ab.payload_mut();
         let mut bytes = Vec::new();
         buf.with_bytes_mut(|b| {
@@ -156,7 +156,7 @@ fn get_bytes_from_arg(ctx: &mut ScopedContext, arg: &mut JSValue) -> Result<Vec<
     // Try TypedArray: access .buffer property to get underlying ArrayBuffer
     if arg.as_object_TypedArray().is_some() {
         let mut buf_val = arg.get_property_str(ctx, "buffer")?;
-        if let Some(ab) = buf_val.as_object_ArrayBuffer_mut() {
+        if let Some(mut ab) = buf_val.as_object_ArrayBuffer() {
             let buf = ab.payload_mut();
             let mut bytes = Vec::new();
             buf.with_bytes_mut(|b| {
@@ -181,7 +181,7 @@ fn js_fs_get_restrict(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         Some(p) => {
             let s = p.to_string_lossy();
             ctx.create_string_from_utf8(s.as_bytes().to_vec())
-                .map(JSValue::from)
+                .map(JSValue::make_string)
         }
         None => Ok(JSValue::NULL),
     }
@@ -225,7 +225,7 @@ fn js_fs_readText(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 -1
             })?;
             cx.create_string_from_utf8(text.into_bytes())
-                .map(JSValue::from)
+                .map(JSValue::make_string)
         })?;
 
     tokio::spawn(async move {
@@ -576,7 +576,7 @@ fn js_fs_write(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     })?;
 
     // string data
-    if let Some(s) = cc.arg(1).as_string() {
+    if let Some(s) = cc.arg(1).as_string(true) {
         let content = s.content().encode_utf8(false).to_string();
         let (promise, tx) = make_void_promise(ctx)?;
 
@@ -672,24 +672,29 @@ fn make_dirent_obj(ctx: &mut ScopedContext, d: &DirentData) -> Result<JSValue, i
     let mut obj = ctx.create_base_object()?;
 
     let name_s = ctx.create_string_from_utf8(d.name.as_bytes().to_vec())?;
-    obj.define_property_value_str(ctx, "name", name_s.into(), zuqe::JS_PROP_ENUMERABLE)?;
+    obj.define_property_value_str(
+        ctx,
+        "name",
+        JSValue::make_string(name_s),
+        zuqe::JS_PROP_ENUMERABLE,
+    )?;
 
     obj.define_property_value_str(
         ctx,
         "isFile",
-        JSValue::Bool(d.is_file),
+        JSValue::from(d.is_file),
         zuqe::JS_PROP_ENUMERABLE,
     )?;
     obj.define_property_value_str(
         ctx,
         "isDirectory",
-        JSValue::Bool(d.is_dir),
+        JSValue::from(d.is_dir),
         zuqe::JS_PROP_ENUMERABLE,
     )?;
     obj.define_property_value_str(
         ctx,
         "isSymbolicLink",
-        JSValue::Bool(d.is_symlink),
+        JSValue::from(d.is_symlink),
         zuqe::JS_PROP_ENUMERABLE,
     )?;
 
@@ -778,7 +783,7 @@ fn js_fs_exists(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 cx.throw_internal_error(&e);
                 -1
             })?;
-            Ok(JSValue::Bool(exists))
+            Ok(JSValue::from(exists))
         })?;
 
     tokio::spawn(async move {

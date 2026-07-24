@@ -166,7 +166,7 @@ fn js_engine_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
     let this = cc.this();
     let engine = get_engine(ctx, &this)?;
 
-    let opts_obj = cc.arg(0).as_object().copied().ok_or_else(|| {
+    let opts_obj = cc.arg(0).as_object().ok_or_else(|| {
         ctx.throw_type_error("options must be object");
         -1
     })?;
@@ -451,7 +451,7 @@ fn js_engine_responses(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let engine = get_engine(ctx, &this)?;
     let is_stream = cc.magic() == MAGIC_RESPONSES_STREAM;
 
-    let opts = cc.arg(0).as_object().copied().ok_or_else(|| {
+    let opts = cc.arg(0).as_object().ok_or_else(|| {
         ctx.throw_type_error("responses() requires an options object");
         -1
     })?;
@@ -687,7 +687,7 @@ fn js_engine_responses(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 fn js_engine_parseReasoning(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let engine = get_engine(ctx, &this)?;
-    Ok(JSValue::Bool(engine.lock().unwrap().parse_reasoning()))
+    Ok(JSValue::from(engine.lock().unwrap().parse_reasoning()))
 }
 
 fn js_engine_setParseReasoning(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -699,10 +699,8 @@ fn js_engine_setParseReasoning(ctx: &mut ScopedContext, cc: CallContext) -> JSRe
 }
 
 fn js_engine_dispose(_: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let _ = cc
-        .this()
-        .as_native_object_mut::<JSEngine>()
-        .and_then(|ob| ob.take_payload());
+    let mut this = cc.this();
+    let _ = JSEngine::take_payload_of(&mut this);
 
     Ok(JSValue::UNDEFINED)
 }

@@ -30,7 +30,7 @@ pub(super) fn js_spawn(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         && let Some(arr) = cc.arg(1).as_object_Array()
     {
         for v in arr.payload().values() {
-            if let Some(s) = v.as_string() {
+            if let Some(s) = v.as_string(true) {
                 args.push(s.content().encode_utf8(false).to_string());
             }
         }
@@ -49,7 +49,7 @@ pub(super) fn js_spawn(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     // arg 2 (optional): options object
     if cc.length() > 2
-        && let Some(opts) = cc.arg(2).as_object().copied()
+        && let Some(opts) = cc.arg(2).as_object()
     {
         cwd = get_str_prop(ctx, &opts, "cwd");
 
@@ -64,7 +64,7 @@ pub(super) fn js_spawn(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 .get_property_str(ctx, "input")
                 .unwrap_or(JSValue::UNDEFINED);
             if !input_val.is_undefined_or_null() {
-                if let Some(s) = input_val.as_string() {
+                if let Some(s) = input_val.as_string(true) {
                     input_data = Some(s.content().encode_utf8(false).into_owned().into_bytes());
                 } else if let Some(obj) = input_val.as_object() {
                     let payload = obj.payload();
@@ -196,7 +196,7 @@ fn spawn_sync(
     let ta_err = TypedArray::create_from_vec_u8(ctx, stderr_buf)?;
     let signal_str = signal_code.map_or(Ok(JSValue::NULL), |sig| {
         ctx.create_string_from_str(signal_name(sig as u32).unwrap_or("UNKNOWN"))
-            .map(JSValue::from)
+            .map(JSValue::make_string)
     })?;
 
     result.define_property_value_str(ctx, "pid", JSValue::from(pid), JS_PROP_C_W_E)?;
@@ -212,7 +212,7 @@ fn spawn_sync(
     result.define_property_value_str(
         ctx,
         "success",
-        JSValue::Bool(exit_code == Some(0) && signal_code.is_none()),
+        JSValue::from(exit_code == Some(0) && signal_code.is_none()),
         JS_PROP_C_W_E,
     )?;
 
@@ -287,7 +287,7 @@ fn spawn_async(ctx: &mut ScopedContext, mut child: tokio::process::Child, pid: i
             match data {
                 Ok(Some(name)) => cx
                     .create_string_from_utf8(name.into_bytes())
-                    .map(JSValue::from),
+                    .map(JSValue::make_string),
                 Ok(None) => Ok(JSValue::NULL),
                 Err(e) => {
                     cx.throw_internal_error(&e);
@@ -300,7 +300,7 @@ fn spawn_async(ctx: &mut ScopedContext, mut child: tokio::process::Child, pid: i
     // Build result object with Promises
     let mut result = ctx.create_base_object()?;
 
-    result.define_property_value_str(ctx, "pid", JSValue::Int(pid), JS_PROP_ENUMERABLE)?;
+    result.define_property_value_str(ctx, "pid", JSValue::from(pid), JS_PROP_ENUMERABLE)?;
     result.define_property_value_str(ctx, "stdin", stdin_val, JS_PROP_C_W_E)?;
     result.define_property_value_str(ctx, "stdout", stdout_val, JS_PROP_C_W_E)?;
     result.define_property_value_str(ctx, "stderr", stderr_val, JS_PROP_C_W_E)?;
@@ -345,12 +345,12 @@ fn spawn_async(ctx: &mut ScopedContext, mut child: tokio::process::Child, pid: i
 fn js_child_kill(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let pid = pid_from_this(ctx, &cc);
     if pid <= 0 {
-        return Ok(JSValue::Bool(false));
+        return Ok(JSValue::FALSE);
     }
 
     let sig = if cc.length() > 0 && !cc.arg(0).is_undefined() {
         let arg = cc.arg(0);
-        if let Some(s) = arg.as_string() {
+        if let Some(s) = arg.as_string(true) {
             let name = s.content().encode_utf8(false);
             crate::aike::signal::signal_number(&name)
                 .map(|n| n as i32)
@@ -363,7 +363,7 @@ fn js_child_kill(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     };
 
     let ret = unsafe { libc::kill(pid, sig) };
-    Ok(JSValue::Bool(ret == 0))
+    Ok(JSValue::from(ret == 0))
 }
 
 /// Windows equivalent: kill process by pid (ignores signal arg).
@@ -371,9 +371,9 @@ fn js_child_kill(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 fn js_child_kill(_ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let pid = pid_from_this(_ctx, &cc);
     if pid <= 0 {
-        return Ok(JSValue::Bool(false));
+        return Ok(JSValue::FALSE);
     }
-    Ok(JSValue::Bool(unsafe { terminate_process(pid) }))
+    Ok(JSValue::from(unsafe { terminate_process(pid) }))
 }
 #[cfg(windows)]
 unsafe fn terminate_process(pid: i32) -> bool {
@@ -395,10 +395,10 @@ unsafe fn terminate_process(pid: i32) -> bool {
 fn js_child_isRunning(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let pid = pid_from_this(ctx, &cc);
     if pid <= 0 {
-        return Ok(JSValue::Bool(false));
+        return Ok(JSValue::FALSE);
     }
     let running = unsafe { libc::kill(pid, 0) == 0 };
-    Ok(JSValue::Bool(running))
+    Ok(JSValue::from(running))
 }
 
 /// isRunning() — Windows: check if process is alive via WaitForSingleObject.
@@ -406,7 +406,7 @@ fn js_child_isRunning(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 fn js_child_isRunning(_ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let pid = pid_from_this(_ctx, &cc);
     if pid <= 0 {
-        return Ok(JSValue::Bool(false));
+        return Ok(JSValue::FALSE);
     }
     unsafe {
         use windows_sys::Win32::Foundation::{CloseHandle, WAIT_TIMEOUT};
@@ -416,12 +416,12 @@ fn js_child_isRunning(_ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
         let handle = OpenProcess(PROCESS_QUERY_INFORMATION, 0, pid as u32);
         if handle.is_null() {
-            return Ok(JSValue::Bool(false));
+            return Ok(JSValue::FALSE);
         }
         let status = WaitForSingleObject(handle, 0);
         CloseHandle(handle);
         // WAIT_TIMEOUT = process still running
-        Ok(JSValue::Bool(status == WAIT_TIMEOUT))
+        Ok(JSValue::from(status == WAIT_TIMEOUT))
     }
 }
 
@@ -437,7 +437,7 @@ fn pid_from_this(ctx: &mut ScopedContext, cc: &CallContext) -> i32 {
 /// Extract a string property from an options object; returns None if missing.
 fn get_str_prop(ctx: &mut ScopedContext, obj: &Object, key: &str) -> Option<String> {
     let v = obj.get_property_str(ctx, key).ok()?;
-    let s = v.as_string()?;
+    let s = v.as_string(true)?;
     Some(s.content().encode_utf8(false).to_string())
 }
 
@@ -450,7 +450,7 @@ fn parse_env_obj(
     if v.is_undefined_or_null() {
         return Ok(None);
     }
-    let Some(mut env_obj) = v.as_object().copied() else {
+    let Some(mut env_obj) = v.as_object() else {
         return Ok(None);
     };
 
@@ -462,7 +462,7 @@ fn parse_env_obj(
         let key = key_r.encode_utf8(false).to_string();
 
         let val = env_obj.get_property(ctx, pk.atom)?;
-        if let Some(s) = val.as_string() {
+        if let Some(s) = val.as_string(true) {
             map.insert(key, s.content().encode_utf8(false).to_string());
         }
     }

@@ -120,7 +120,7 @@ pub(crate) fn js_browser_handle_certificate_error(
                             let _ = o.define_property_value_str(
                                 cx,
                                 "errorType",
-                                s.into(),
+                                JSValue::make_string(s),
                                 JS_PROP_C_W_E,
                             );
                         }
@@ -130,11 +130,12 @@ pub(crate) fn js_browser_handle_certificate_error(
                             let _ = o.define_property_value_str(
                                 cx,
                                 "requestURL",
-                                s.into(),
+                                JSValue::make_string(s),
                                 JS_PROP_C_W_E,
                             );
                         }
                     }
+
                     // Attach the accept(bool) method.
                     let accept_fn = cx
                         .create_native_function(
@@ -144,10 +145,12 @@ pub(crate) fn js_browser_handle_certificate_error(
                             CERT_ACCEPT_MAGIC,
                         )
                         .ok();
+
                     if let Some(f) = accept_fn {
                         let _ = o.define_property_value_str(cx, "accept", f.into(), JS_PROP_C_W_E);
                     }
                 }
+
                 if let Some(o) = obj {
                     let _ = cb.call(cx, JSValue::UNDEFINED, &[o.into()]);
                 }

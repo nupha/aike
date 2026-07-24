@@ -6,7 +6,7 @@
 //! Both classes are backed by the `url` crate for spec-compliant parsing.
 //! `URL.searchParams` returns a `URLSearchParams` that shares state via `Rc<RefCell<url::Url>>`.
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::rc::Rc;
 
 use linkme::distributed_slice;
@@ -30,12 +30,10 @@ pub(crate) struct UrlPayload {
 }
 
 fn get_url<'a>(ctx: &mut ScopedContext, val: &'a JSValue) -> Result<&'a UrlPayload, i32> {
-    val.as_native_object::<JSURL>()
-        .and_then(|o| o.payload())
-        .ok_or_else(|| {
-            ctx.throw_internal_error("not a URL instance");
-            -1
-        })
+    JSURL::payload_of(val).ok_or_else(|| {
+        ctx.throw_internal_error("not a URL instance");
+        -1
+    })
 }
 
 // -- Constructor -----------------------------------------------------------
@@ -85,8 +83,8 @@ fn js_url_href_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let url = get_url(ctx, &this)?;
     let s = url.shared.borrow().as_str().to_string();
-    let js = ctx.create_string_from_utf8(s.into_bytes())?;
-    Ok(js.into())
+    ctx.create_string_from_utf8(s.into_bytes())
+        .map(JSValue::make_string)
 }
 
 fn js_url_href_setter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -119,7 +117,7 @@ fn js_url_origin_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         }
     };
     let js = ctx.create_string_from_utf8(origin.into_bytes())?;
-    Ok(js.into())
+    Ok(JSValue::make_string(js))
 }
 
 fn js_url_protocol_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -127,8 +125,8 @@ fn js_url_protocol_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
     let url = get_url(ctx, &this)?;
     let u = url.shared.borrow();
     let s = format!("{}:", u.scheme());
-    let js = ctx.create_string_from_utf8(s.into_bytes())?;
-    Ok(js.into())
+    ctx.create_string_from_utf8(s.into_bytes())
+        .map(JSValue::make_string)
 }
 
 fn js_url_protocol_setter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -147,8 +145,8 @@ fn js_url_username_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
     let url = get_url(ctx, &this)?;
     let u = url.shared.borrow();
     let s = u.username().to_string();
-    let js = ctx.create_string_from_utf8(s.into_bytes())?;
-    Ok(js.into())
+    ctx.create_string_from_utf8(s.into_bytes())
+        .map(JSValue::make_string)
 }
 
 fn js_url_username_setter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -166,8 +164,8 @@ fn js_url_password_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
     let url = get_url(ctx, &this)?;
     let u = url.shared.borrow();
     let s = u.password().unwrap_or("").to_string();
-    let js = ctx.create_string_from_utf8(s.into_bytes())?;
-    Ok(js.into())
+    ctx.create_string_from_utf8(s.into_bytes())
+        .map(JSValue::make_string)
 }
 
 fn js_url_password_setter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -189,8 +187,8 @@ fn js_url_host_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         (Some(host), None) => host.to_string(),
         _ => String::new(),
     };
-    let js = ctx.create_string_from_utf8(s.into_bytes())?;
-    Ok(js.into())
+    ctx.create_string_from_utf8(s.into_bytes())
+        .map(JSValue::make_string)
 }
 
 fn js_url_host_setter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -208,8 +206,8 @@ fn js_url_hostname_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
     let url = get_url(ctx, &this)?;
     let u = url.shared.borrow();
     let s = u.host_str().unwrap_or("").to_string();
-    let js = ctx.create_string_from_utf8(s.into_bytes())?;
-    Ok(js.into())
+    ctx.create_string_from_utf8(s.into_bytes())
+        .map(JSValue::make_string)
 }
 
 fn js_url_hostname_setter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -230,8 +228,8 @@ fn js_url_port_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         Some(port) => port.to_string(),
         None => String::new(),
     };
-    let js = ctx.create_string_from_utf8(s.into_bytes())?;
-    Ok(js.into())
+    ctx.create_string_from_utf8(s.into_bytes())
+        .map(JSValue::make_string)
 }
 
 fn js_url_port_setter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -253,8 +251,8 @@ fn js_url_pathname_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
     let url = get_url(ctx, &this)?;
     let u = url.shared.borrow();
     let s = u.path().to_string();
-    let js = ctx.create_string_from_utf8(s.into_bytes())?;
-    Ok(js.into())
+    ctx.create_string_from_utf8(s.into_bytes())
+        .map(JSValue::make_string)
 }
 
 fn js_url_pathname_setter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -275,8 +273,8 @@ fn js_url_search_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         Some(q) if !q.is_empty() => format!("?{}", q),
         _ => String::new(),
     };
-    let js = ctx.create_string_from_utf8(s.into_bytes())?;
-    Ok(js.into())
+    ctx.create_string_from_utf8(s.into_bytes())
+        .map(JSValue::make_string)
 }
 
 fn js_url_search_setter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -302,8 +300,8 @@ fn js_url_hash_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         Some(f) if !f.is_empty() => format!("#{}", f),
         _ => String::new(),
     };
-    let js = ctx.create_string_from_utf8(s.into_bytes())?;
-    Ok(js.into())
+    ctx.create_string_from_utf8(s.into_bytes())
+        .map(JSValue::make_string)
 }
 
 fn js_url_hash_setter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -362,12 +360,10 @@ struct SearchParamsPayload {
 }
 
 fn get_sp<'a>(ctx: &mut ScopedContext, val: &'a JSValue) -> Result<&'a SearchParamsPayload, i32> {
-    val.as_native_object::<JSURLSearchParams>()
-        .and_then(|o| o.payload())
-        .ok_or_else(|| {
-            ctx.throw_internal_error("not a URLSearchParams instance");
-            -1
-        })
+    JSURLSearchParams::payload_of(val).ok_or_else(|| {
+        ctx.throw_internal_error("not a URLSearchParams instance");
+        -1
+    })
 }
 
 /// Get current query string from shared URL or standalone.
@@ -399,42 +395,38 @@ fn js_sp_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let query = if cc.length() == 0 {
         String::new()
     } else {
-        let arg = &cc.arg(0);
-        match arg {
-            JSValue::String(s) => {
-                let text = s.content().encode_utf8(false).to_string();
-                text.strip_prefix('?').unwrap_or(&text).to_string()
+        let arg = cc.arg(0);
+        if let Some(s) = arg.as_string(true) {
+            let text = s.content().encode_utf8(false).to_string();
+            text.strip_prefix('?').unwrap_or(&text).to_string()
+        } else if let Some(obj_ref) = arg.as_object() {
+            let mut o = obj_ref.clone();
+            let pks = o.get_own_property_names(
+                ctx,
+                zuqe::JS_GPN_ENUM_ONLY | zuqe::JS_GPN_STR_OR_INT_MASK,
+            )?;
+            let mut pairs: Vec<(String, String)> = Vec::new();
+            for pk in pks.iter() {
+                let key_v = pk.atom.to_value(ctx)?;
+                let key_r = key_v.to_string(ctx)?;
+                let k = key_r.content().encode_utf8(false).to_string();
+                let val = o.get_property(ctx, pk.atom)?;
+                let v = val.to_string(ctx)?.content().encode_utf8(false).to_string();
+                let encoded_k =
+                    url::form_urlencoded::byte_serialize(k.as_bytes()).collect::<String>();
+                let encoded_v =
+                    url::form_urlencoded::byte_serialize(v.as_bytes()).collect::<String>();
+                pairs.push((encoded_k, encoded_v));
             }
-            JSValue::Object(obj_ref) => {
-                let mut o = obj_ref.clone();
-                let pks = o.get_own_property_names(
-                    ctx,
-                    zuqe::JS_GPN_ENUM_ONLY | zuqe::JS_GPN_STR_OR_INT_MASK,
-                )?;
-                let mut pairs: Vec<(String, String)> = Vec::new();
-                for pk in pks.iter() {
-                    let key_v = pk.atom.to_value(ctx)?;
-                    let key_r = key_v.to_string(ctx)?;
-                    let k = key_r.content().encode_utf8(false).to_string();
-                    let val = o.get_property(ctx, pk.atom)?;
-                    let v = val.to_string(ctx)?.content().encode_utf8(false).to_string();
-                    let encoded_k =
-                        url::form_urlencoded::byte_serialize(k.as_bytes()).collect::<String>();
-                    let encoded_v =
-                        url::form_urlencoded::byte_serialize(v.as_bytes()).collect::<String>();
-                    pairs.push((encoded_k, encoded_v));
-                }
-                pairs.sort_by(|a, b| a.0.cmp(&b.0));
-                pairs
-                    .iter()
-                    .map(|(k, v)| format!("{}={}", k, v))
-                    .collect::<Vec<_>>()
-                    .join("&")
-            }
-            _ => {
-                ctx.throw_type_error("URLSearchParams init must be string or object");
-                return Err(-1);
-            }
+            pairs.sort_by(|a, b| a.0.cmp(&b.0));
+            pairs
+                .iter()
+                .map(|(k, v)| format!("{}={}", k, v))
+                .collect::<Vec<_>>()
+                .join("&")
+        } else {
+            ctx.throw_type_error("URLSearchParams init must be string or object");
+            return Err(-1);
         }
     };
 
@@ -497,8 +489,9 @@ fn js_sp_get(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let query = sp_get_query(sp);
     for (k, v) in url::form_urlencoded::parse(query.as_bytes()) {
         if k.to_string() == n {
-            let s = ctx.create_string_from_utf8(v.as_bytes().to_vec())?;
-            return Ok(s.into());
+            return ctx
+                .create_string_from_utf8(v.as_bytes().to_vec())
+                .map(JSValue::make_string);
         }
     }
 
@@ -516,7 +509,7 @@ fn js_sp_get_all(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         .filter(|(k, _)| k.to_string() == n)
         .map(|(_, v)| {
             let s = ctx.create_string_from_utf8(v.as_bytes().to_vec()).unwrap();
-            JSValue::String(s)
+            JSValue::make_string(s)
         })
         .collect();
 
@@ -533,7 +526,7 @@ fn js_sp_has(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let query = sp_get_query(sp);
     let found = url::form_urlencoded::parse(query.as_bytes()).any(|(k, _)| k.to_string() == n);
 
-    Ok(JSValue::Bool(found))
+    Ok(JSValue::from(found))
 }
 
 fn js_sp_set(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -601,8 +594,8 @@ fn js_sp_to_string(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let sp = get_sp(ctx, &this)?;
     let query = sp_get_query(sp);
-    let s = ctx.create_string_from_utf8(query.into_bytes())?;
-    Ok(s.into())
+    ctx.create_string_from_utf8(query.into_bytes())
+        .map(JSValue::make_string)
 }
 
 fn js_sp_for_each(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -613,12 +606,12 @@ fn js_sp_for_each(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         return Err(-1);
     }
 
-    let cb = cc.arg(0).into_callable(ctx)?;
+    let cb = cc.arg(0).ensure_callable(ctx)?;
     let query = sp_get_query(sp);
 
     for (k, v) in url::form_urlencoded::parse(query.as_bytes()) {
-        let val_js = JSValue::String(ctx.create_string_from_utf8(v.as_bytes().to_vec())?);
-        let key_js = JSValue::String(ctx.create_string_from_utf8(k.as_bytes().to_vec())?);
+        let val_js = JSValue::make_string(ctx.create_string_from_utf8(v.as_bytes().to_vec())?);
+        let key_js = JSValue::make_string(ctx.create_string_from_utf8(k.as_bytes().to_vec())?);
         if cb
             .call(ctx, JSValue::UNDEFINED, &[val_js, key_js, this])
             .is_err()

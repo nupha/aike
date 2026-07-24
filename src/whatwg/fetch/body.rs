@@ -65,7 +65,7 @@ pub(super) fn drain_body(
                         None => s.into_owned(),
                     };
                     cx.create_string_from_utf8(out.into_bytes())
-                        .map(JSValue::from)
+                        .map(JSValue::make_string)
                 }
                 BODY_AS_JSON => {
                     let val: serde_json::Value = serde_json::from_slice(&buf).map_err(|e| {
@@ -139,7 +139,7 @@ pub(super) fn make_body_async_iterator(ctx: &mut ScopedContext, rx: Receiver<Vec
 fn js_stream_cancel(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let ret = this.get_property_str(ctx, "return")?;
-    let cb = ret.into_callable(ctx)?;
+    let cb = ret.ensure_callable(ctx)?;
     cb.call(ctx, this, &[])?;
     Ok(JSValue::UNDEFINED)
 }

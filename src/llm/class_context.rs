@@ -97,10 +97,7 @@ fn take_llm_ctx(
     ctx: &mut ScopedContext,
     mut this: JSValue,
 ) -> Result<Option<(LlamaContext, JSValue)>, i32> {
-    if let Some(llm_ctx) = this
-        .as_native_object_mut::<JSLlmContext>()
-        .and_then(|o| o.take_payload())
-    {
+    if let Some(llm_ctx) = JSLlmContext::take_payload_of(&mut this) {
         let lc = llm_ctx.lock().unwrap().take();
         debug_assert!(lc.is_some());
 
@@ -117,12 +114,7 @@ fn js_context_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
 
     if cc.magic() == PROP_IS_DISPOSED {
-        return Ok(this
-            .as_native_object::<JSLlmContext>()
-            .unwrap()
-            .payload()
-            .is_none()
-            .into());
+        return Ok(JSLlmContext::payload_of(this).is_none().into());
     }
 
     let llm_ctx = get_llm_ctx(ctx, this)?;
@@ -413,7 +405,7 @@ fn js_context_createEngine(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
         if v.is_undefined() || v.is_null() {
             None
         } else {
-            Some(v.as_object().copied().ok_or_else(|| {
+            Some(v.as_object().ok_or_else(|| {
                 ctx.throw_type_error("engineOptions must be object");
                 -1
             })?)

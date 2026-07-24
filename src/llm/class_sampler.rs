@@ -47,7 +47,7 @@ pub fn js_model_createSamplerChain(ctx: &mut ScopedContext, cc: CallContext) -> 
             if let Some(o) = v.as_object() {
                 let kind = o
                     .get_property_str(ctx, "kind")?
-                    .as_string()
+                    .as_string(true)
                     .map(|s| s.content().encode_utf8(false).to_string())
                     .ok_or_else(|| {
                         ctx.throw_type_error("invalid sampler kind");

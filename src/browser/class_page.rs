@@ -3,13 +3,12 @@
 
 //! Page class — the main browser tab/page abstraction.
 
-use std::{cell::Cell, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 
 use linkme::distributed_slice;
-use serde_json::Value;
 use tokio::sync::{Mutex as AsyncMutex, broadcast};
 use zuqe::{
-    Array, CallContext, ClassID, FieldDef, JSResult, JSValue, Object, Runtime, ScopedContext,
+    CallContext, ClassID, FieldDef, JSResult, JSValue, Object, Runtime, ScopedContext,
     builtins::promise::{Promise, PromiseResultSlot},
     builtins::typed_array::TypedArray,
     def_native_object,
@@ -27,7 +26,7 @@ use crate::{
 #[derive(Clone)]
 pub(crate) struct PageNetworkState {
     pub(crate) capture_handle: Arc<AsyncMutex<Option<tokio::task::JoinHandle<()>>>>,
-    pub(crate) captured_requests: Arc<AsyncMutex<Vec<Value>>>,
+    pub(crate) captured_requests: Arc<AsyncMutex<Vec<serde_json::Value>>>,
 }
 
 impl PageNetworkState {
@@ -301,12 +300,10 @@ pub(crate) fn get_page_payload<'a>(
     ctx: &mut ScopedContext,
     val: &'a JSValue,
 ) -> Result<&'a PagePayload, i32> {
-    val.as_native_object::<JSPage>()
-        .and_then(|o| o.payload())
-        .ok_or_else(|| {
-            ctx.throw_type_error("not a Page instance");
-            -1
-        })
+    JSPage::payload_of(val).ok_or_else(|| {
+        ctx.throw_type_error("not a Page instance");
+        -1
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -317,7 +314,7 @@ pub(crate) fn send_page_void_cmd(
     ctx: &mut ScopedContext,
     cc: &CallContext,
     method: &'static str,
-    params: Option<Value>,
+    params: Option<serde_json::Value>,
 ) -> JSResult {
     let this = cc.this();
     let payload = get_page_payload(ctx, &this)?;
@@ -350,13 +347,13 @@ pub(crate) fn send_page_void_cmd(
 // Utility helpers
 // ---------------------------------------------------------------------------
 
-pub(crate) fn get_str_prop(ctx: &mut ScopedContext, obj: &Object, key: &str) -> Option<String> {
+pub(crate) fn get_str_prop(ctx: &mut ScopedContext, obj: Object, key: &str) -> Option<String> {
     let v = obj.get_property_str(ctx, key).ok()?;
-    let s = v.as_string()?;
+    let s = v.as_string(true)?;
     Some(s.content().encode_utf8(false).to_string())
 }
 
-pub(crate) fn get_number_prop(ctx: &mut ScopedContext, obj: &Object, key: &str) -> Option<f64> {
+pub(crate) fn get_number_prop(ctx: &mut ScopedContext, obj: Object, key: &str) -> Option<f64> {
     let v = obj.get_property_str(ctx, key).ok()?;
     if v.is_undefined() || v.is_null() {
         return None;
@@ -364,50 +361,12 @@ pub(crate) fn get_number_prop(ctx: &mut ScopedContext, obj: &Object, key: &str) 
     v.to_number(ctx).ok().map(|n| n.to_f64())
 }
 
-pub(crate) fn get_bool_prop(ctx: &mut ScopedContext, obj: &Object, key: &str) -> Option<bool> {
+pub(crate) fn get_bool_prop(ctx: &mut ScopedContext, obj: Object, key: &str) -> Option<bool> {
     let v = obj.get_property_str(ctx, key).ok()?;
     if v.is_undefined() || v.is_null() {
         return None;
     }
     Some(v.to_bool().unwrap_or(false))
-}
-
-/// Convert a `serde_json::Value` to a JS value.
-pub(crate) fn js_from_json_value(ctx: &mut ScopedContext, val: &Value) -> JSResult {
-    match val {
-        Value::Null => Ok(JSValue::NULL),
-        Value::Bool(b) => Ok(JSValue::Bool(*b)),
-        Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                Ok(JSValue::from(i))
-            } else if let Some(f) = n.as_f64() {
-                Ok(JSValue::from(f))
-            } else {
-                Ok(JSValue::from(0))
-            }
-        }
-        Value::String(s) => ctx
-            .create_string_from_utf8(s.as_bytes().to_vec())
-            .map(JSValue::from),
-        Value::Array(arr) => {
-            let mut items = Vec::with_capacity(arr.len());
-            for item in arr {
-                match js_from_json_value(ctx, item) {
-                    Ok(v) => items.push(v),
-                    Err(_) => items.push(JSValue::NULL),
-                }
-            }
-            Array::from_values(ctx, items).map(JSValue::from)
-        }
-        Value::Object(map) => {
-            let mut obj = ctx.create_base_object()?;
-            for (k, v) in map {
-                let js_v = js_from_json_value(ctx, v)?;
-                obj.define_property_value_str(ctx, k, js_v, zuqe::JS_PROP_C_W_E)?;
-            }
-            Ok(obj.into())
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -612,7 +571,7 @@ fn js_page_handle_dialog(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     tokio::spawn(async move {
         let mut params = serde_json::json!({ "accept": accept });
         if let Some(text) = prompt_text {
-            params["promptText"] = Value::String(text);
+            params["promptText"] = serde_json::Value::String(text);
         }
         let rx = client.send(
             "Page.handleJavaScriptDialog",
@@ -637,7 +596,7 @@ fn js_page_print_to_pdf(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         && let Some(opts) = cc.arg(0).as_object()
     {
         if let Some(v) = get_bool_prop(ctx, opts, "landscape") {
-            params["landscape"] = Value::Bool(v);
+            params["landscape"] = serde_json::Value::Bool(v);
         }
         if let Some(v) = get_number_prop(ctx, opts, "paperWidth") {
             params["paperWidth"] = serde_json::json!(v);
@@ -646,7 +605,7 @@ fn js_page_print_to_pdf(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             params["paperHeight"] = serde_json::json!(v);
         }
         if let Some(v) = get_bool_prop(ctx, opts, "printBackground") {
-            params["printBackground"] = Value::Bool(v);
+            params["printBackground"] = serde_json::Value::Bool(v);
         }
     }
 
@@ -700,14 +659,14 @@ fn js_page_get_layout_metrics(ctx: &mut ScopedContext, cc: CallContext) -> JSRes
     let client = payload.client.clone();
     let session_id = payload.session_id.clone();
 
-    let result_slot = PromiseResultSlot::<Result<Value, String>>::new();
+    let result_slot = PromiseResultSlot::<Result<serde_json::Value, String>>::new();
     let promise =
         Promise::create_with_result_slot(ctx, result_slot.clone(), |cx, payload| -> JSResult {
             let val = payload.map_err(|e| {
                 cx.throw_internal_error(&e);
                 -1
             })?;
-            js_from_json_value(cx, &val)
+            JSValue::from_serde_json(cx, &val)
         })?;
 
     tokio::spawn(async move {
@@ -740,7 +699,7 @@ fn js_page_add_init_script(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
                 -1
             })?;
             cx.create_string_from_utf8(id.into_bytes())
-                .map(JSValue::from)
+                .map(JSValue::make_string)
         })?;
 
     tokio::spawn(async move {
@@ -775,14 +734,14 @@ fn js_page_get_frame_tree(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
     let client = payload.client.clone();
     let session_id = payload.session_id.clone();
 
-    let result_slot = PromiseResultSlot::<Result<Value, String>>::new();
+    let result_slot = PromiseResultSlot::<Result<serde_json::Value, String>>::new();
     let promise =
         Promise::create_with_result_slot(ctx, result_slot.clone(), |cx, payload| -> JSResult {
             let val = payload.map_err(|e| {
                 cx.throw_internal_error(&e);
                 -1
             })?;
-            js_from_json_value(cx, &val)
+            JSValue::from_serde_json(cx, &val)
         })?;
 
     tokio::spawn(async move {
@@ -867,7 +826,7 @@ fn js_page_reload(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         && let Some(opts) = cc.arg(0).as_object()
     {
         if let Some(v) = get_bool_prop(ctx, opts, "ignoreCache") {
-            params["ignoreCache"] = Value::Bool(v);
+            params["ignoreCache"] = serde_json::Value::Bool(v);
         }
     }
     send_page_void_cmd(ctx, &cc, "Page.reload", Some(params))
@@ -960,14 +919,14 @@ fn js_page_get_navigation_history(ctx: &mut ScopedContext, cc: CallContext) -> J
     let client = payload.client.clone();
     let session_id = payload.session_id.clone();
 
-    let result_slot = PromiseResultSlot::<Result<Value, String>>::new();
+    let result_slot = PromiseResultSlot::<Result<serde_json::Value, String>>::new();
     let promise =
         Promise::create_with_result_slot(ctx, result_slot.clone(), |cx, payload| -> JSResult {
             let val = payload.map_err(|e| {
                 cx.throw_internal_error(&e);
                 -1
             })?;
-            js_from_json_value(cx, &val)
+            JSValue::from_serde_json(cx, &val)
         })?;
 
     tokio::spawn(async move {
@@ -991,7 +950,7 @@ fn js_page_capture_snapshot(ctx: &mut ScopedContext, cc: CallContext) -> JSResul
         && let Some(opts) = cc.arg(0).as_object()
     {
         if let Some(f) = get_str_prop(ctx, opts, "format") {
-            params["format"] = Value::String(f);
+            params["format"] = serde_json::Value::String(f);
         }
     }
 
@@ -1008,7 +967,7 @@ fn js_page_capture_snapshot(ctx: &mut ScopedContext, cc: CallContext) -> JSResul
                 -1
             })?;
             cx.create_string_from_utf8(data.into_bytes())
-                .map(JSValue::from)
+                .map(JSValue::make_string)
         })?;
 
     tokio::spawn(async move {
@@ -1073,7 +1032,7 @@ fn js_page_upload_file(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         && let Some(arr) = cc.arg(1).as_object_Array()
     {
         for v in arr.payload().values() {
-            if let Some(s) = v.as_string() {
+            if let Some(s) = v.as_string(true) {
                 file_paths.push(s.content().encode_utf8(false).to_string());
             }
         }

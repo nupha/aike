@@ -225,7 +225,7 @@ fn start_timer_task(ctx: &mut ScopedContext) {
 // ---------------------------------------------------------------------------
 
 fn register_timer(ctx: &mut ScopedContext, cc: CallContext, is_interval: bool) -> JSResult {
-    let callback = cc.arg(0).into_callable(ctx)?;
+    let callback = cc.arg(0).ensure_callable(ctx)?;
     let delay_ms = if cc.length() >= 2 {
         cc.arg(1).to_number(ctx)?.to_i32().max(0) as u64
     } else {
@@ -296,7 +296,7 @@ pub(crate) fn js_sleep(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     // Build the Promise and grab its native resolve function. The resolve fn is
     // callable, so it can serve directly as the timer callback.
     let (promise, resolving) = Promise::create(ctx)?;
-    let resolve_fn = resolving[0].into_callable(ctx)?;
+    let resolve_fn = resolving[0].ensure_callable(ctx)?;
 
     let (_id, need_listener) = TIMER_STATE.with_borrow_mut(|opt| {
         let start_job = opt.is_none();

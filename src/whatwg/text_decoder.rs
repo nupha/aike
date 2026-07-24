@@ -62,12 +62,10 @@ fn get_decoder<'a>(
     ctx: &mut ScopedContext,
     val: &'a JSValue,
 ) -> Result<&'a TextDecoderPayload, i32> {
-    val.as_native_object::<JSTextDecoder>()
-        .and_then(|o| o.payload())
-        .ok_or_else(|| {
-            ctx.throw_internal_error("not a TextDecoder instance");
-            -1
-        })
+    JSTextDecoder::payload_of(val).ok_or_else(|| {
+        ctx.throw_internal_error("not a TextDecoder instance");
+        -1
+    })
 }
 
 fn js_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -356,28 +354,50 @@ fn js_text_decoder_decode(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
             }
         }
 
-        match cc.arg(0) {
-            s @ JSValue::String(_) => {
-                return Ok(s);
-            }
-            JSValue::Object(o) => {
-                ob.replace(o);
-                let p = ob.as_ref().map(|o| o.payload()).unwrap();
+        let a = cc.arg(0);
+        if a.is_string() {
+            return Ok(a);
+        }
 
-                if let Some(ab) = p.array_buffer() {
-                    ab.bytes() // &[u8] borrowing from the JS object
-                } else if let Some(ta) = p.typed_array() {
-                    ta.bytes()
-                } else {
-                    ctx.throw_type_error("Input must be an ArrayBuffer or TypedArray");
-                    return Err(-1);
-                }
-            }
-            _ => {
-                ctx.throw_type_error("Input must be TypedArray, ArrayBuffer or Object");
+        if let Some(o) = a.as_object() {
+            ob.replace(o);
+            let p = ob.as_ref().map(|o| o.payload()).unwrap();
+
+            if let Some(ab) = p.array_buffer() {
+                ab.bytes() // &[u8] borrowing from the JS object
+            } else if let Some(ta) = p.typed_array() {
+                ta.bytes()
+            } else {
+                ctx.throw_type_error("Input must be an ArrayBuffer or TypedArray");
                 return Err(-1);
             }
+        } else {
+            ctx.throw_type_error("Input must be TypedArray, ArrayBuffer or Object");
+            return Err(-1);
         }
+
+        // match cc.arg(0) {
+        //     s @ JSValue::String(_) => {
+        //         return Ok(s);
+        //     }
+        //     JSValue::Object(o) => {
+        //         ob.replace(o);
+        //         let p = ob.as_ref().map(|o| o.payload()).unwrap();
+
+        //         if let Some(ab) = p.array_buffer() {
+        //             ab.bytes() // &[u8] borrowing from the JS object
+        //         } else if let Some(ta) = p.typed_array() {
+        //             ta.bytes()
+        //         } else {
+        //             ctx.throw_type_error("Input must be an ArrayBuffer or TypedArray");
+        //             return Err(-1);
+        //         }
+        //     }
+        //     _ => {
+        //         ctx.throw_type_error("Input must be TypedArray, ArrayBuffer or Object");
+        //         return Err(-1);
+        //     }
+        // }
     };
 
     let pending_old = std::mem::take(&mut *decoder.pending.borrow_mut());
@@ -403,7 +423,7 @@ fn js_text_decoder_decode(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
     }
 
     ctx.create_string_from_utf8(result.into_bytes())
-        .map(JSValue::String)
+        .map(JSValue::make_string)
         .map_err(|_| {
             ctx.throw_internal_error("Failed to create output string");
             -1
@@ -417,20 +437,20 @@ fn js_text_decoder_decode(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
 fn js_text_decoder_encoding_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let decoder = get_decoder(ctx, &this)?;
-    let s = ctx.create_string_from_utf8(decoder.encoding.label().as_bytes().to_vec())?;
-    Ok(s.into())
+    ctx.create_string_from_str(decoder.encoding.label())
+        .map(JSValue::make_string)
 }
 
 fn js_text_decoder_fatal_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let decoder = get_decoder(ctx, &this)?;
-    Ok(JSValue::Bool(decoder.fatal))
+    Ok(JSValue::from(decoder.fatal))
 }
 
 fn js_text_decoder_ignore_bom_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let decoder = get_decoder(ctx, &this)?;
-    Ok(JSValue::Bool(decoder.ignore_bom))
+    Ok(JSValue::from(decoder.ignore_bom))
 }
 
 // ---------------------------------------------------------------------------

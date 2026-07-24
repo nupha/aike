@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
 use std::{
-    cell::{Cell, RefCell},
+    cell::RefCell,
     collections::HashMap,
     str::FromStr,
     sync::{
@@ -181,7 +181,7 @@ fn add_cron_notifier(ctx: &mut ScopedContext) {
                                         job_obj.define_property_value_str(
                                             cx,
                                             "nextRun",
-                                            s.into(),
+                                            JSValue::make_string(s),
                                             JS_PROP_C_W_E,
                                         )
                                     });
@@ -191,7 +191,7 @@ fn add_cron_notifier(ctx: &mut ScopedContext) {
                             let _ = job_obj.define_property_value_str(
                                 cx,
                                 "active",
-                                JSValue::Bool(false),
+                                JSValue::FALSE,
                                 JS_PROP_C_W_E,
                             );
                         }
@@ -228,12 +228,10 @@ impl CronJobPayload {
 }
 
 fn get_cron_job<'a>(ctx: &mut ScopedContext, val: &'a JSValue) -> Result<&'a CronJobPayload, i32> {
-    val.as_native_object::<JSCronJob>()
-        .and_then(|o| o.payload())
-        .ok_or_else(|| {
-            ctx.throw_internal_error("not a CronJob instance");
-            -1
-        })
+    JSCronJob::payload_of(val).ok_or_else(|| {
+        ctx.throw_internal_error("not a CronJob instance");
+        -1
+    })
 }
 
 /// Prototype method: job.cancel()
@@ -258,8 +256,8 @@ fn js_cron_job_cancel(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     });
 
     // Update active property on the JS object
-    if let Some(mut obj) = cc.this().as_object().cloned() {
-        let _ = obj.define_property_value_str(ctx, "active", JSValue::Bool(false), JS_PROP_C_W_E);
+    if let Some(mut obj) = cc.this().as_object() {
+        let _ = obj.define_property_value_str(ctx, "active", JSValue::FALSE, JS_PROP_C_W_E);
     }
 
     Ok(JSValue::UNDEFINED)
@@ -288,13 +286,13 @@ pub(super) fn js_schedule(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
     let pattern_str = pattern.content().encode_utf8(false).to_string();
 
     // arg 1: callback function
-    let callback = cc.arg(1).into_callable(ctx)?;
+    let callback = cc.arg(1).ensure_callable(ctx)?;
 
     // arg 2 (optional): options { name?: string }
     let name: Option<String> = if cc.length() > 2 {
         cc.arg(2).as_object().and_then(|opts| {
             let v = opts.get_property_str(ctx, "name").ok()?;
-            let s = v.as_string()?;
+            let s = v.as_string(true)?;
             Some(s.content().encode_utf8(false).to_string())
         })
     } else {
@@ -319,18 +317,22 @@ pub(super) fn js_schedule(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
 
     // Compute nextRun
     let next_run_val: JSValue = match format_next_run(&schedule) {
-        Some(iso) => ctx.create_string_from_utf8(iso.into_bytes())?.into(),
+        Some(iso) => ctx
+            .create_string_from_utf8(iso.into_bytes())
+            .map(JSValue::make_string)?,
         None => JSValue::NULL,
     };
 
     // Pre-create string values to avoid double-borrow of ctx
     let name_val: JSValue = match &name {
-        Some(n) => ctx.create_string_from_utf8(n.clone().into_bytes())?.into(),
+        Some(n) => ctx
+            .create_string_from_utf8(n.clone().into_bytes())
+            .map(JSValue::make_string)?,
         None => JSValue::NULL,
     };
     let pattern_val = ctx
-        .create_string_from_utf8(pattern_str.clone().into_bytes())?
-        .into();
+        .create_string_from_utf8(pattern_str.clone().into_bytes())
+        .map(JSValue::make_string)?;
 
     // Create native JSCronJob instance
     let job_instance = JSCronJob::new_instance(
@@ -357,7 +359,7 @@ pub(super) fn js_schedule(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
     job_obj.define_property_value_str(ctx, "name", name_val, JS_PROP_C_W_E)?;
     job_obj.define_property_value_str(ctx, "pattern", pattern_val, JS_PROP_C_W_E)?;
     job_obj.define_property_value_str(ctx, "nextRun", next_run_val, JS_PROP_C_W_E)?;
-    job_obj.define_property_value_str(ctx, "active", JSValue::Bool(true), JS_PROP_C_W_E)?;
+    job_obj.define_property_value_str(ctx, "active", JSValue::TRUE, JS_PROP_C_W_E)?;
 
     // Store entry
     CRON_STATE.with_borrow_mut(|opt| {

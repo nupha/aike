@@ -47,7 +47,7 @@ fn throw_abort_error(cx: &mut ScopedContext) -> JSResult {
     err.define_property_value_str(
         cx,
         "name",
-        name.into(),
+        JSValue::make_string(name),
         zuqe::JS_PROP_WRITABLE | zuqe::JS_PROP_CONFIGURABLE,
     )?;
     cx.throw(Exception::Error(err.into()));
@@ -81,10 +81,7 @@ pub(crate) fn js_fetch(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut signal_val: Option<JSValue> = None;
 
     // Inherit from a Request input.
-    if let Some(p) = input
-        .as_native_object::<JSRequest>()
-        .and_then(|o| o.payload())
-    {
+    if let Some(p) = JSRequest::payload_of(&input) {
         url_str = p.url.clone();
         method = p.method.clone();
         header_list = p.headers.clone();
@@ -153,7 +150,7 @@ pub(crate) fn js_fetch(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 }
             }
 
-            let mut read_str = |o: &Object, key: &str| -> Option<String> {
+            let mut read_str = |o: Object, key: &str| -> Option<String> {
                 let v = o.get_property_str(ctx, key).ok()?;
                 if v.is_undefined() {
                     None

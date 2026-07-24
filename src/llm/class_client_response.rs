@@ -25,7 +25,7 @@ pub(super) fn parse_responses_input(
     ctx: &mut ScopedContext,
     val: &JSValue,
 ) -> Result<InputParam, i32> {
-    if let Some(s) = val.as_string() {
+    if let Some(s) = val.as_string(true) {
         return Ok(InputParam::Text(s.content().encode_utf8(false).to_string()));
     };
 
@@ -33,14 +33,14 @@ pub(super) fn parse_responses_input(
         let mut items = Vec::with_capacity(arr.payload().len());
 
         for item in arr.payload().values() {
-            let obj = item.as_object().copied().ok_or_else(|| {
+            let obj = item.as_object().ok_or_else(|| {
                 ctx.throw_type_error("input[] item must be object");
                 -1
             })?;
 
             let role_val = obj.get_property_str(ctx, "role")?;
             let role_str = role_val
-                .as_string()
+                .as_string(true)
                 .map(|s| s.content().encode_utf8(false).to_string())
                 .ok_or_else(|| {
                     ctx.throw_type_error("input[].role must be string");
@@ -60,7 +60,7 @@ pub(super) fn parse_responses_input(
             let content_val = obj.get_property_str(ctx, "content")?;
             let content = if content_val.is_undefined_or_null() {
                 String::new()
-            } else if let Some(s) = content_val.as_string() {
+            } else if let Some(s) = content_val.as_string(true) {
                 s.content().encode_utf8(false).to_string()
             } else {
                 content_val
@@ -120,7 +120,7 @@ pub(super) fn js_client_responses(ctx: &mut ScopedContext, cc: CallContext) -> J
     let client_arc = get_client(ctx, this)?;
     let is_stream = cc.magic() == MAGIC_RESPONSES_STREAM;
 
-    let opts = cc.arg(0).as_object().copied().ok_or_else(|| {
+    let opts = cc.arg(0).as_object().ok_or_else(|| {
         ctx.throw_type_error("responses() requires an options object");
         -1
     })?;
@@ -129,7 +129,7 @@ pub(super) fn js_client_responses(ctx: &mut ScopedContext, cc: CallContext) -> J
     let input = parse_responses_input(ctx, &input_val)?;
 
     let model_val = opts.get_property_str(ctx, "model")?;
-    let model = if let Some(s) = model_val.as_string() {
+    let model = if let Some(s) = model_val.as_string(true) {
         s.content().encode_utf8(false).to_string()
     } else {
         client_arc.model_name.clone()
@@ -139,7 +139,7 @@ pub(super) fn js_client_responses(ctx: &mut ScopedContext, cc: CallContext) -> J
     req_builder.input(input).model(&model);
 
     let instructions_val = opts.get_property_str(ctx, "instructions")?;
-    if let Some(s) = instructions_val.as_string() {
+    if let Some(s) = instructions_val.as_string(true) {
         req_builder.instructions(s.content().encode_utf8(false).to_string());
     }
 
@@ -209,7 +209,7 @@ pub(super) fn js_client_responses(ctx: &mut ScopedContext, cc: CallContext) -> J
     }
 
     let user_val = opts.get_property_str(ctx, "user")?;
-    if let Some(s) = user_val.as_string() {
+    if let Some(s) = user_val.as_string(true) {
         req_builder.safety_identifier(s.content().encode_utf8(false).to_string());
     }
 

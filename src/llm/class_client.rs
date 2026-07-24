@@ -92,14 +92,14 @@ fn js_client_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     let v = cc.arg(0);
     if !v.is_undefined() {
-        let opts_obj = v.as_object().copied().ok_or_else(|| {
+        let opts_obj = v.as_object().ok_or_else(|| {
             ctx.throw_type_error("requires options object");
             -1
         })?;
 
         let base_url_val = opts_obj.get_property_str(ctx, "baseUrl")?;
         if !base_url_val.is_undefined()
-            && let Some(s) = base_url_val.as_string()
+            && let Some(s) = base_url_val.as_string(true)
         {
             base_url = s.content().encode_utf8(false).to_string()
         }
@@ -107,7 +107,7 @@ fn js_client_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         let key_val = opts_obj.get_property_str(ctx, "apiKey")?;
         if !key_val.is_undefined()
             && let Some(s) = key_val
-                .as_string()
+                .as_string(true)
                 .map(|s| s.content().encode_utf8(false).to_string())
         {
             api_key = s
@@ -116,7 +116,7 @@ fn js_client_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         let model_val = opts_obj.get_property_str(ctx, "model")?;
         if !model_val.is_undefined()
             && let Some(s) = model_val
-                .as_string()
+                .as_string(true)
                 .map(|s| s.content().encode_utf8(false).to_string())
         {
             model = s;
@@ -142,19 +142,16 @@ fn js_client_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         }
 
         // extra_body
-        match opts_obj.get_property_str(ctx, "extraBody")? {
-            JSValue::UNDEFINED => {}
-            JSValue::NULL => {
-                extra_body = serde_json::Value::Null;
-            }
-            JSValue::Object(o) => {
-                extra_body = o.to_serde_json(ctx)?;
-            }
-            _ => {
-                ctx.throw_type_error("extraBody must be one of undefined, null or object");
-                return Err(-1);
-            }
-        };
+        let v = opts_obj.get_property_str(ctx, "extraBody")?;
+        if let Some(o) = v.as_object() {
+            extra_body = o.to_serde_json(ctx)?;
+        } else if v.is_null() {
+            extra_body = serde_json::Value::Null;
+        } else if !v.is_undefined() {
+            ctx.throw_type_error("extraBody must be one of undefined, null or object");
+            return Err(-1);
+        }
+
         debug_assert!(extra_body.is_null() || extra_body.is_object());
     }
 
@@ -303,7 +300,7 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
     let client = get_client(ctx, this)?;
     let is_stream = cc.magic() == MAGIC_CHAT_STREAM;
 
-    let opts_obj = cc.arg(0).as_object().copied().ok_or_else(|| {
+    let opts_obj = cc.arg(0).as_object().ok_or_else(|| {
         ctx.throw_type_error("chat() requires an options object");
         -1
     })?;
@@ -680,12 +677,12 @@ fn js_client_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     match cc.magic() {
         PROP_MODEL => ctx
             .create_string_from_str(&client.model_name)
-            .map(JSValue::String),
+            .map(JSValue::make_string),
         PROP_BASE_URL => ctx
             .create_string_from_str(&client.base_url)
-            .map(JSValue::String),
-        PROP_BUFFERED_TOOL_CALL => Ok(JSValue::Bool(client.buffered_tool_call)),
-        PROP_MAX_TOKENS => Ok(JSValue::Int(client.max_tokens as i32)),
+            .map(JSValue::make_string),
+        PROP_BUFFERED_TOOL_CALL => Ok(JSValue::from(client.buffered_tool_call)),
+        PROP_MAX_TOKENS => Ok(JSValue::from(client.max_tokens as i32)),
         PROP_EXTRA_BODY => {
             if client.extra_body.is_null() {
                 Ok(JSValue::NULL)
@@ -693,7 +690,7 @@ fn js_client_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 JSValue::from_serde_json(ctx, &client.extra_body)
             }
         }
-        PROP_TIMEOUT => Ok(JSValue::Int(client.timeout.as_secs() as i32)),
+        PROP_TIMEOUT => Ok(JSValue::from(client.timeout.as_secs() as i32)),
         _ => Ok(JSValue::UNDEFINED),
     }
 }
@@ -715,17 +712,15 @@ fn js_client_set_normalizer(ctx: &mut ScopedContext, cc: CallContext) -> JSResul
         ctx.throw_internal_error("responseNormalizer must be a function or null");
         return Err(-1);
     }
-    if let Some(obj) = this.as_object_mut() {
+    if let Some(mut obj) = this.as_object() {
         obj.set_property_str(ctx, INNER_PROP_RESPONSE_NORMALIZER, val)?;
     }
     Ok(JSValue::UNDEFINED)
 }
 
 fn js_client_dispose(_: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let _ = cc
-        .this()
-        .as_native_object_mut::<JSLlmClient>()
-        .and_then(|ob| ob.take_payload());
+    let mut this = cc.this();
+    let _ = JSLlmClient::take_payload_of(&mut this);
 
     Ok(JSValue::UNDEFINED)
 }

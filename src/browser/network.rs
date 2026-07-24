@@ -10,7 +10,6 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
-use serde_json::Value;
 use zuqe::{
     Array, CallContext, JSResult, JSValue, ScopedContext,
     builtins::promise::{Promise, PromiseResultSlot},
@@ -18,13 +17,11 @@ use zuqe::{
 
 use crate::browser::{
     cdp_network,
-    class_page::{
-        get_bool_prop, get_page_payload, get_str_prop, js_from_json_value, send_page_void_cmd,
-    },
+    class_page::{get_bool_prop, get_page_payload, get_str_prop, send_page_void_cmd},
 };
 
 /// Convert a CDP cookie JSON value to a JS object.
-fn cookie_to_js(ctx: &mut ScopedContext, c: &Value) -> Result<JSValue, i32> {
+fn cookie_to_js(ctx: &mut ScopedContext, c: &serde_json::Value) -> Result<JSValue, i32> {
     let mut obj = ctx.create_base_object()?;
     let props = [
         ("name", c.get("name").and_then(|v| v.as_str())),
@@ -35,19 +32,19 @@ fn cookie_to_js(ctx: &mut ScopedContext, c: &Value) -> Result<JSValue, i32> {
     for (key, val) in &props {
         if let Some(s) = val {
             let js_s = ctx.create_string_from_utf8(s.as_bytes().to_vec())?;
-            obj.define_property_value_str(ctx, key, js_s.into(), zuqe::JS_PROP_C_W_E)?;
+            obj.define_property_value_str(ctx, key, JSValue::make_string(js_s), zuqe::JS_PROP_C_W_E)?;
         }
     }
     if let Some(http_only) = c.get("httpOnly").and_then(|v| v.as_bool()) {
         obj.define_property_value_str(
             ctx,
             "httpOnly",
-            JSValue::Bool(http_only),
+            JSValue::from(http_only),
             zuqe::JS_PROP_C_W_E,
         )?;
     }
     if let Some(secure) = c.get("secure").and_then(|v| v.as_bool()) {
-        obj.define_property_value_str(ctx, "secure", JSValue::Bool(secure), zuqe::JS_PROP_C_W_E)?;
+        obj.define_property_value_str(ctx, "secure", JSValue::from(secure), zuqe::JS_PROP_C_W_E)?;
     }
     Ok(obj.into())
 }
@@ -63,7 +60,7 @@ pub(crate) fn js_page_get_cookies(ctx: &mut ScopedContext, cc: CallContext) -> J
     let client = payload.client.clone();
     let session_id = payload.session_id.clone();
 
-    let result_slot = PromiseResultSlot::<Result<Vec<Value>, String>>::new();
+    let result_slot = PromiseResultSlot::<Result<Vec<serde_json::Value>, String>>::new();
     let promise =
         Promise::create_with_result_slot(ctx, result_slot.clone(), |cx, payload| -> JSResult {
             let cookies = payload.map_err(|e| {
@@ -103,23 +100,23 @@ pub(crate) fn js_page_get_cookies(ctx: &mut ScopedContext, cc: CallContext) -> J
 
 /// `page.setCookie(cookie)`
 pub(crate) fn js_page_set_cookie(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let cookie_obj = cc.arg(0).as_object().copied().ok_or_else(|| {
+    let cookie_obj = cc.arg(0).as_object().ok_or_else(|| {
         ctx.throw_type_error("setCookie requires an object argument");
         -1
     })?;
 
     let mut params = serde_json::Map::new();
-    if let Some(name) = get_str_prop(ctx, &cookie_obj, "name") {
-        params.insert("name".into(), Value::String(name));
+    if let Some(name) = get_str_prop(ctx, cookie_obj, "name") {
+        params.insert("name".into(), serde_json::Value::String(name));
     }
-    if let Some(value) = get_str_prop(ctx, &cookie_obj, "value") {
-        params.insert("value".into(), Value::String(value));
+    if let Some(value) = get_str_prop(ctx, cookie_obj, "value") {
+        params.insert("value".into(), serde_json::Value::String(value));
     }
-    if let Some(domain) = get_str_prop(ctx, &cookie_obj, "domain") {
-        params.insert("domain".into(), Value::String(domain));
+    if let Some(domain) = get_str_prop(ctx, cookie_obj, "domain") {
+        params.insert("domain".into(), serde_json::Value::String(domain));
     }
-    if let Some(path) = get_str_prop(ctx, &cookie_obj, "path") {
-        params.insert("path".into(), Value::String(path));
+    if let Some(path) = get_str_prop(ctx, cookie_obj, "path") {
+        params.insert("path".into(), serde_json::Value::String(path));
     }
 
     let this = cc.this();
@@ -140,7 +137,7 @@ pub(crate) fn js_page_set_cookie(ctx: &mut ScopedContext, cc: CallContext) -> JS
     tokio::spawn(async move {
         // Network.enable is a prerequisite for Network.setCookie
         let _ = cdp_network::enable_network(&client, &session_id).await;
-        let rx = cdp_network::set_cookie(&client, &session_id, Value::Object(params));
+        let rx = cdp_network::set_cookie(&client, &session_id, serde_json::Value::Object(params));
         let result = rx.await.unwrap_or(Err("channel closed".into()));
         match result {
             Ok(_) => result_slot.commit(Ok(())).ok(),
@@ -156,7 +153,7 @@ pub(crate) fn js_page_set_cookie(ctx: &mut ScopedContext, cc: CallContext) -> JS
 // ---------------------------------------------------------------------------
 
 /// Convert a zuqe plain object to a `serde_json::Value` (shallow).
-fn net_obj_to_json(ctx: &mut ScopedContext, obj: &mut zuqe::Object) -> Value {
+fn net_obj_to_json(ctx: &mut ScopedContext, obj: &mut zuqe::Object) -> serde_json::Value {
     let mut map = serde_json::Map::new();
     let flags = zuqe::JS_GPN_ENUM_ONLY | zuqe::JS_GPN_STR_OR_INT_MASK;
     if let Ok(keys) = obj.get_own_property_names(ctx, flags) {
@@ -172,19 +169,19 @@ fn net_obj_to_json(ctx: &mut ScopedContext, obj: &mut zuqe::Object) -> Value {
                 .and_then(|v| v.to_string(ctx).ok())
                 .map(|s| s.content().encode_utf8(false).to_string())
                 .unwrap_or_default();
-            if let Some(s) = v.as_string() {
+            if let Some(s) = v.as_string(true) {
                 map.insert(
                     key,
-                    Value::String(s.content().encode_utf8(false).to_string()),
+                    serde_json::Value::String(s.content().encode_utf8(false).to_string()),
                 );
             } else if let Some(n) = v.to_number(ctx).ok() {
-                map.insert(key, Value::from(n.to_f64()));
+                map.insert(key, serde_json::Value::from(n.to_f64()));
             } else if v.is_bool() {
-                map.insert(key, Value::Bool(v.to_bool().unwrap_or(false)));
+                map.insert(key, serde_json::Value::Bool(v.to_bool().unwrap_or(false)));
             }
         }
     }
-    Value::Object(map)
+    serde_json::Value::Object(map)
 }
 
 /// `page.setUserAgent(userAgent)` — `Network.setUserAgentOverride`.
@@ -210,7 +207,7 @@ pub(crate) fn js_page_set_extra_http_headers(ctx: &mut ScopedContext, cc: CallCo
     {
         let mut obj = obj.clone();
         let v = net_obj_to_json(ctx, &mut obj);
-        if let Value::Object(m) = v {
+        if let serde_json::Value::Object(m) = v {
             headers = m;
         }
     }
@@ -258,28 +255,29 @@ pub(crate) fn js_page_set_cookies(ctx: &mut ScopedContext, cc: CallContext) -> J
         for item in arr.payload().values() {
             if let Some(obj) = item.as_object() {
                 let mut c = serde_json::Map::new();
-                if let Some(name) = get_str_prop(ctx, &obj, "name") {
-                    c.insert("name".into(), Value::String(name));
+                if let Some(name) = get_str_prop(ctx, obj, "name") {
+                    c.insert("name".into(), serde_json::Value::String(name));
                 }
-                if let Some(value) = get_str_prop(ctx, &obj, "value") {
-                    c.insert("value".into(), Value::String(value));
+                if let Some(value) = get_str_prop(ctx, obj, "value") {
+                    c.insert("value".into(), serde_json::Value::String(value));
                 }
-                if let Some(domain) = get_str_prop(ctx, &obj, "domain") {
-                    c.insert("domain".into(), Value::String(domain));
+                if let Some(domain) = get_str_prop(ctx, obj, "domain") {
+                    c.insert("domain".into(), serde_json::Value::String(domain));
                 }
-                if let Some(path) = get_str_prop(ctx, &obj, "path") {
-                    c.insert("path".into(), Value::String(path));
+                if let Some(path) = get_str_prop(ctx, obj, "path") {
+                    c.insert("path".into(), serde_json::Value::String(path));
                 }
-                if let Some(secure) = get_bool_prop(ctx, &obj, "secure") {
-                    c.insert("secure".into(), Value::Bool(secure));
+                if let Some(secure) = get_bool_prop(ctx, obj, "secure") {
+                    c.insert("secure".into(), serde_json::Value::Bool(secure));
                 }
-                if let Some(http_only) = get_bool_prop(ctx, &obj, "httpOnly") {
-                    c.insert("httpOnly".into(), Value::Bool(http_only));
+                if let Some(http_only) = get_bool_prop(ctx, obj, "httpOnly") {
+                    c.insert("httpOnly".into(), serde_json::Value::Bool(http_only));
                 }
-                cookies.push(Value::Object(c));
+                cookies.push(serde_json::Value::Object(c));
             }
         }
     }
+
     send_page_void_cmd(
         ctx,
         &cc,
@@ -302,7 +300,7 @@ pub(crate) fn js_page_delete_cookie(ctx: &mut ScopedContext, cc: CallContext) ->
         .unwrap_or_default();
     let mut params = serde_json::json!({ "name": name });
     if !url.is_empty() {
-        params["url"] = Value::String(url);
+        params["url"] = serde_json::Value::String(url);
     }
     send_page_void_cmd(ctx, &cc, "Network.deleteCookies", Some(params))
 }
@@ -330,14 +328,14 @@ pub(crate) fn js_page_get_response_body(ctx: &mut ScopedContext, cc: CallContext
     let client = payload.client.clone();
     let session_id = payload.session_id.clone();
 
-    let result_slot = PromiseResultSlot::<Result<Value, String>>::new();
+    let result_slot = PromiseResultSlot::<Result<serde_json::Value, String>>::new();
     let promise =
         Promise::create_with_result_slot(ctx, result_slot.clone(), |cx, payload| -> JSResult {
             let val = payload.map_err(|e| {
                 cx.throw_internal_error(&e);
                 -1
             })?;
-            js_from_json_value(cx, &val)
+            JSValue::from_serde_json(cx, &val)
         })?;
 
     tokio::spawn(async move {
@@ -457,13 +455,13 @@ pub(crate) fn js_page_get_captured_requests(ctx: &mut ScopedContext, cc: CallCon
     let network = payload.network.clone();
 
     // Clone the captured requests synchronously
-    let requests: Vec<Value> = if let Ok(guard) = network.captured_requests.try_lock() {
+    let requests: Vec<serde_json::Value> = if let Ok(guard) = network.captured_requests.try_lock() {
         guard.clone()
     } else {
         Vec::new()
     };
 
-    js_from_json_value(ctx, &Value::Array(requests))
+    JSValue::from_serde_json(ctx, &serde_json::Value::Array(requests))
 }
 
 /// `page.getRequestPostData(requestId)` → POST body (string) via
@@ -489,7 +487,7 @@ pub(crate) fn js_page_get_request_post_data(ctx: &mut ScopedContext, cc: CallCon
                 -1
             })?;
             cx.create_string_from_utf8(body.into_bytes())
-                .map(JSValue::from)
+                .map(JSValue::make_string)
         })?;
 
     tokio::spawn(async move {

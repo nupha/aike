@@ -16,7 +16,7 @@ use super::class_mcp::{
 const FIELD_MOUNT_PATH: i16 = 12;
 
 fn js_http_define(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let Some(cfg) = cc.arg(0).as_object().copied() else {
+    let Some(cfg) = cc.arg(0).as_object() else {
         ctx.throw_type_error("HttpMcp.define(config) — config must be an object");
         return Err(-1);
     };

@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-use std::cell::Cell;
-
 use linkme::distributed_slice;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
@@ -120,7 +118,7 @@ fn js_res_setHeaders(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     // Collect headers from object first (before borrowing payload)
     let headers = if cc.length() > 0 {
-        if let Some(mut obj) = cc.arg(0).as_object().cloned() {
+        if let Some(mut obj) = cc.arg(0).as_object() {
             let pks = obj
                 .get_own_property_names(ctx, zuqe::JS_GPN_ENUM_ONLY | zuqe::JS_GPN_STR_OR_INT_MASK)
                 .ok();
@@ -324,12 +322,10 @@ pub(crate) fn get_sse_payload<'a>(
     ctx: &mut ScopedContext,
     val: &'a mut JSValue,
 ) -> Result<&'a mut HttpResponseSsePayload, i32> {
-    val.as_native_object_mut::<JSHttpResponseSse>()
-        .and_then(|o| o.payload_mut())
-        .ok_or_else(|| {
-            ctx.throw_type_error("not an HttpResponseSse instance");
-            -1
-        })
+    JSHttpResponseSse::payload_mut_of(val).ok_or_else(|| {
+        ctx.throw_type_error("not an HttpResponseSse instance");
+        -1
+    })
 }
 
 /// Append SSE-default headers if not already set by the user.

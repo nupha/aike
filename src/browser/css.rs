@@ -6,14 +6,13 @@
 //! `getComputedStyle` / `getMatchedStyles` — read computed / matched CSS for a
 //! node resolved from a selector.
 
-use serde_json::Value;
 use zuqe::{
-    CallContext, JSResult, ScopedContext,
+    CallContext, JSResult, JSValue, ScopedContext,
     builtins::promise::{Promise, PromiseResultSlot},
 };
 
 use crate::browser::{
-    class_page::{get_page_payload, js_from_json_value},
+    class_page::{get_page_payload},
     dom,
 };
 
@@ -31,18 +30,18 @@ pub(crate) fn js_page_get_computed_style(ctx: &mut ScopedContext, cc: CallContex
     let client = payload.client.clone();
     let session_id = payload.session_id.clone();
 
-    let result_slot = PromiseResultSlot::<Result<Value, String>>::new();
+    let result_slot = PromiseResultSlot::<Result<serde_json::Value, String>>::new();
     let promise =
         Promise::create_with_result_slot(ctx, result_slot.clone(), |cx, val| -> JSResult {
             let val = val.map_err(|e| {
                 cx.throw_internal_error(&e);
                 -1
             })?;
-            js_from_json_value(cx, &val)
+            JSValue::from_serde_json(cx, &val)
         })?;
 
     tokio::spawn(async move {
-        let r: Result<Value, String> = async {
+        let r: Result<serde_json::Value, String> = async {
             let node_id = dom::resolve_selector(&client, &session_id, &selector).await?;
             let _ = client.send("CSS.enable", None, Some(&session_id)).await;
             let m = client
@@ -67,7 +66,7 @@ pub(crate) fn js_page_get_computed_style(ctx: &mut ScopedContext, cc: CallContex
                     map.insert(name.to_string(), value.clone());
                 }
             }
-            Ok(Value::Object(map))
+            Ok(serde_json::Value::Object(map))
         }
         .await;
         result_slot.commit(r).ok();
@@ -90,18 +89,18 @@ pub(crate) fn js_page_get_matched_styles(ctx: &mut ScopedContext, cc: CallContex
     let client = payload.client.clone();
     let session_id = payload.session_id.clone();
 
-    let result_slot = PromiseResultSlot::<Result<Value, String>>::new();
+    let result_slot = PromiseResultSlot::<Result<serde_json::Value, String>>::new();
     let promise =
         Promise::create_with_result_slot(ctx, result_slot.clone(), |cx, val| -> JSResult {
             let val = val.map_err(|e| {
                 cx.throw_internal_error(&e);
                 -1
             })?;
-            js_from_json_value(cx, &val)
+            JSValue::from_serde_json(cx, &val)
         })?;
 
     tokio::spawn(async move {
-        let r: Result<Value, String> = async {
+        let r: Result<serde_json::Value, String> = async {
             let node_id = dom::resolve_selector(&client, &session_id, &selector).await?;
             let _ = client.send("CSS.enable", None, Some(&session_id)).await;
             let m = client

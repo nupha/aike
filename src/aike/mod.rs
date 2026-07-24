@@ -31,7 +31,7 @@ pub fn init_aike(
     // execPath — the aike runtime executable path
     {
         let s = ctx.create_string_from_utf8(exec_path.as_bytes().to_vec())?;
-        ns.define_property_value_str(ctx, "execPath", s.into(), JS_PROP_ENUMERABLE)?;
+        ns.define_property_value_str(ctx, "execPath", JSValue::make_string(s), JS_PROP_ENUMERABLE)?;
     }
 
     // argv / execArgv require runtime data — build JS arrays dynamically
@@ -39,7 +39,7 @@ pub fn init_aike(
         let mut elems: Vec<JSValue> = Vec::with_capacity(argv.len());
         for a in argv {
             let s = ctx.create_string_from_utf8(a.as_bytes().to_vec())?;
-            elems.push(s.into());
+            elems.push(JSValue::make_string(s));
         }
         let arr = Array::from_values(ctx, elems)?;
         ns.define_property_value_str(ctx, "argv", arr.into(), JS_PROP_ENUMERABLE)?;
@@ -48,7 +48,7 @@ pub fn init_aike(
         let mut elems: Vec<JSValue> = Vec::with_capacity(exec_argv.len());
         for a in exec_argv {
             let s = ctx.create_string_from_utf8(a.as_bytes().to_vec())?;
-            elems.push(s.into());
+            elems.push(JSValue::make_string(s));
         }
         let arr = Array::from_values(ctx, elems)?;
         ns.define_property_value_str(ctx, "execArgv", arr.into(), JS_PROP_ENUMERABLE)?;
@@ -64,7 +64,7 @@ pub fn init_aike(
                 let mut env_obj = cx.create_base_object()?;
                 for (key, value) in std::env::vars() {
                     let v = cx.create_string_from_utf8(value.as_bytes().to_vec())?;
-                    env_obj.set_property_str(cx, &key, v.into())?;
+                    env_obj.set_property_str(cx, &key, JSValue::make_string(v))?;
                 }
                 Ok(env_obj.into())
             },

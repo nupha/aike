@@ -1,10 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-//! WHATWG Fetch — `Request` class.
-
-use std::cell::Cell;
-
 use linkme::distributed_slice;
 use zuqe::{
     CallContext, ClassCtorDef, ClassID, FieldDef, JSResult, JSValue, Runtime, ScopedContext,
@@ -44,24 +40,20 @@ fn get_request_payload_mut<'a>(
     ctx: &mut ScopedContext,
     val: &'a mut JSValue,
 ) -> Result<&'a mut RequestPayload, i32> {
-    val.as_native_object_mut::<JSRequest>()
-        .and_then(|o| o.payload_mut())
-        .ok_or_else(|| {
-            ctx.throw_type_error("not a Request instance");
-            -1
-        })
+    JSRequest::payload_mut_of(val).ok_or_else(|| {
+        ctx.throw_type_error("not a Request instance");
+        -1
+    })
 }
 
 fn get_request_payload<'a>(
     ctx: &mut ScopedContext,
     val: &'a JSValue,
 ) -> Result<&'a RequestPayload, i32> {
-    val.as_native_object::<JSRequest>()
-        .and_then(|o| o.payload())
-        .ok_or_else(|| {
-            ctx.throw_type_error("not a Request instance");
-            -1
-        })
+    JSRequest::payload_of(val).ok_or_else(|| {
+        ctx.throw_type_error("not a Request instance");
+        -1
+    })
 }
 
 fn js_request_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -76,10 +68,7 @@ fn js_request_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
     let mut signal: Option<JSValue> = None;
 
     // Inherit from a Request input.
-    if let Some(p) = input
-        .as_native_object::<JSRequest>()
-        .and_then(|o| o.payload())
-    {
+    if let Some(p) = JSRequest::payload_of(&input) {
         url_str = p.url.clone();
         method = p.method.clone();
         header_list = p.headers.clone();
@@ -159,7 +148,7 @@ fn js_request_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
     if cc.length() > 1 {
         let init = cc.arg(1);
         if let Some(o) = init.as_object() {
-            let mut str_field = |o: &zuqe::Object, name: &str, default: &str| -> String {
+            let mut str_field = |o: zuqe::Object, name: &str, default: &str| -> String {
                 // safe defaulting helper (ignores errors)
                 match o.get_property_str(ctx, name) {
                     Ok(v) if !v.is_undefined() => v
@@ -196,8 +185,8 @@ macro_rules! req_str_getter {
         fn $name(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             let this = cc.this();
             let p = get_request_payload(ctx, &this)?;
-            let s = ctx.create_string_from_utf8(p.$field.as_bytes().to_vec())?;
-            Ok(s.into())
+            ctx.create_string_from_utf8(p.$field.as_bytes().to_vec())
+                .map(JSValue::make_string)
         }
     };
 }
@@ -216,7 +205,7 @@ req_str_getter!(js_req_integrity, integrity);
 fn js_req_keepalive_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let p = get_request_payload(ctx, &this)?;
-    Ok(JSValue::Bool(p.keepalive))
+    Ok(JSValue::from(p.keepalive))
 }
 
 fn js_req_signal_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -241,7 +230,7 @@ fn js_req_headers_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 fn js_req_body_used_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let p = get_request_payload(ctx, &this)?;
-    Ok(JSValue::Bool(p.body_consumed))
+    Ok(JSValue::from(p.body_consumed))
 }
 
 fn js_req_body(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {

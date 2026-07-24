@@ -3,7 +3,6 @@
 
 //! CDP Network domain helpers — request/response body, cookie.
 
-use serde_json::Value;
 use tokio::sync::oneshot;
 
 use crate::browser::cdp::CdpClient;
@@ -14,7 +13,7 @@ pub(crate) fn get_response_body(
     client: &CdpClient,
     session_id: &str,
     request_id: &str,
-) -> oneshot::Receiver<Result<Value, String>> {
+) -> oneshot::Receiver<Result<serde_json::Value, String>> {
     client.send(
         "Network.getResponseBody",
         Some(serde_json::json!({ "requestId": request_id })),
@@ -26,7 +25,7 @@ pub(crate) fn get_response_body(
 pub(crate) fn enable_network(
     client: &CdpClient,
     session_id: &str,
-) -> oneshot::Receiver<Result<Value, String>> {
+) -> oneshot::Receiver<Result<serde_json::Value, String>> {
     client.send("Network.enable", None, Some(session_id))
 }
 
@@ -34,7 +33,7 @@ pub(crate) fn enable_network(
 pub(crate) fn get_all_cookies(
     client: &CdpClient,
     session_id: &str,
-) -> oneshot::Receiver<Result<Value, String>> {
+) -> oneshot::Receiver<Result<serde_json::Value, String>> {
     client.send("Network.getAllCookies", None, Some(session_id))
 }
 
@@ -42,7 +41,7 @@ pub(crate) fn get_all_cookies(
 pub(crate) fn set_cookie(
     client: &CdpClient,
     session_id: &str,
-    params: Value,
-) -> oneshot::Receiver<Result<Value, String>> {
+    params: serde_json::Value,
+) -> oneshot::Receiver<Result<serde_json::Value, String>> {
     client.send("Network.setCookie", Some(params), Some(session_id))
 }

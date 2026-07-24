@@ -39,7 +39,7 @@ fn js_yaml_stringify(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     })?;
 
     ctx.create_string_from_utf8(yaml_str.into_bytes())
-        .map(JSValue::from)
+        .map(JSValue::make_string)
 }
 
 const YAML_FUNCS: &[FieldDef] = &[

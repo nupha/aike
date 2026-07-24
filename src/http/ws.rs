@@ -102,12 +102,10 @@ pub(crate) fn get_ws_payload<'a>(
     ctx: &mut ScopedContext,
     val: &'a mut JSValue,
 ) -> Result<&'a mut WsStreamPayload, i32> {
-    val.as_native_object_mut::<JSWebSocketStream>()
-        .and_then(|o| o.payload_mut())
-        .ok_or_else(|| {
-            ctx.throw_type_error("not a WebSocketStream instance");
-            -1
-        })
+    JSWebSocketStream::payload_mut_of(val).ok_or_else(|| {
+        ctx.throw_type_error("not a WebSocketStream instance");
+        -1
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -192,9 +190,9 @@ impl AsyncIteratorFetcher for WsReadFetcher {
         let mut g = self.rx.borrow_mut();
         match g.as_ref() {
             Some(rx) => match rx.try_recv() {
-                Ok(s) => Ok(IterFetchStatus::Value(
-                    cx.create_string_from_str(&s)?.into(),
-                )),
+                Ok(s) => Ok(IterFetchStatus::Value(JSValue::make_string(
+                    cx.create_string_from_str(&s)?,
+                ))),
                 Err(TryRecvError::Empty) => Ok(IterFetchStatus::Wait),
                 Err(TryRecvError::Disconnected) => {
                     g.take();
@@ -319,7 +317,7 @@ pub(crate) fn dispatch_ws_data(
                     Ok(s) => s,
                     Err(_) => return,
                 };
-                let _ = cb.call(cx, ov, &[s.into()]);
+                let _ = cb.call(cx, ov, &[JSValue::make_string(s)]);
             } else if let Some(tx) = &p.read_tx {
                 // pull mode: forward to the async iterator's channel
                 let _ = tx.try_send(msg);
@@ -406,7 +404,7 @@ fn js_ws_ping(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
 fn js_ws_on_message(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut this = cc.this();
-    let cb = cc.arg(0).into_callable(ctx)?;
+    let cb = cc.arg(0).ensure_callable(ctx)?;
     let p = get_ws_payload(ctx, &mut this)?;
     p.on_message = Some(cb);
     Ok(this)
@@ -414,7 +412,7 @@ fn js_ws_on_message(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
 fn js_ws_on_open(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut this = cc.this();
-    let cb = cc.arg(0).into_callable(ctx)?;
+    let cb = cc.arg(0).ensure_callable(ctx)?;
     let p = get_ws_payload(ctx, &mut this)?;
     p.on_open = Some(cb);
     Ok(this)
@@ -422,7 +420,7 @@ fn js_ws_on_open(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
 fn js_ws_on_close(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut this = cc.this();
-    let cb = cc.arg(0).into_callable(ctx)?;
+    let cb = cc.arg(0).ensure_callable(ctx)?;
     let p = get_ws_payload(ctx, &mut this)?;
     p.on_close = Some(cb);
     Ok(this)
@@ -430,7 +428,7 @@ fn js_ws_on_close(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
 fn js_ws_on_error(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut this = cc.this();
-    let cb = cc.arg(0).into_callable(ctx)?;
+    let cb = cc.arg(0).ensure_callable(ctx)?;
     let p = get_ws_payload(ctx, &mut this)?;
     p.on_error = Some(cb);
     Ok(this)
@@ -438,7 +436,7 @@ fn js_ws_on_error(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
 fn js_ws_on_drain(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut this = cc.this();
-    let cb = cc.arg(0).into_callable(ctx)?;
+    let cb = cc.arg(0).ensure_callable(ctx)?;
     let p = get_ws_payload(ctx, &mut this)?;
     p.sink.on_drain = Some(cb);
     Ok(this)
@@ -480,7 +478,7 @@ fn js_ws_remote_address(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut this = cc.this();
     let p = get_ws_payload(ctx, &mut this)?;
     let s = ctx.create_string_from_str(&p.remote_address)?;
-    Ok(s.into())
+    Ok(JSValue::make_string(s))
 }
 
 fn js_ws_id(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {

@@ -102,7 +102,7 @@ fn normalize_model_params_for_runtime(params: &mut llama::llama_model_params) {
 }
 
 fn parse_split_mode(ctx: &mut ScopedContext, val: &JSValue) -> Result<SplitMode, i32> {
-    if let Some(s) = val.as_string() {
+    if let Some(s) = val.as_string(true) {
         return s
             .content()
             .encode_utf8(false)
@@ -136,7 +136,7 @@ fn parse_model_options(ctx: &mut ScopedContext, cc: &CallContext) -> Result<Mode
 
     let v = opts.get_property_str(ctx, "gpuLayers")?;
     if !v.is_undefined() {
-        if let Some(s) = v.as_string().and_then(|s| s.ascii()) {
+        if let Some(s) = v.as_string(true).and_then(|s| s.ascii()) {
             match s {
                 b"auto" => out.gpu_layers = -1,
                 b"all" => out.gpu_layers = -2,
@@ -285,12 +285,10 @@ pub(super) fn get_llama_model<'a>(
     ctx: &mut ScopedContext,
     val: &'a JSValue,
 ) -> Result<&'a LlamaModel, i32> {
-    val.as_native_object::<JSLlmModel>()
-        .and_then(|ob| ob.payload())
-        .ok_or_else(|| {
-            ctx.throw_type_error("invalid Model object");
-            -1
-        })
+    JSLlmModel::payload_of(val).ok_or_else(|| {
+        ctx.throw_type_error("invalid Model object");
+        -1
+    })
 
     // JSLlamaModel::try_from(val)
     //     .unwrap()
@@ -393,7 +391,7 @@ fn js_model_isEog(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let model = get_llama_model(ctx, &this)?;
     let token = cc.arg(0).to_number(ctx)?.to_i32();
-    Ok(JSValue::Bool(model.is_eog(token)))
+    Ok(JSValue::from(model.is_eog(token)))
 }
 
 pub(super) fn default_context_params() -> llama::llama_context_params {
@@ -480,7 +478,7 @@ pub(super) fn parse_context_params(
         // --- Attention ---
         let v = opts.get_property_str(ctx, "attentionType")?;
         if !v.is_undefined() {
-            let t = if let Some(s) = v.as_string() {
+            let t = if let Some(s) = v.as_string(true) {
                 s.content()
                     .encode_utf8(false)
                     .as_ref()
@@ -500,7 +498,7 @@ pub(super) fn parse_context_params(
 
         let v = opts.get_property_str(ctx, "flashAttention")?;
         if !v.is_undefined() {
-            let t = if let Some(s) = v.as_string() {
+            let t = if let Some(s) = v.as_string(true) {
                 s.content()
                     .encode_utf8(false)
                     .as_ref()
@@ -524,7 +522,7 @@ pub(super) fn parse_context_params(
         // --- Pooling & Embeddings ---
         let v = opts.get_property_str(ctx, "poolingType")?;
         if !v.is_undefined() {
-            let t = if let Some(s) = v.as_string() {
+            let t = if let Some(s) = v.as_string(true) {
                 s.content()
                     .encode_utf8(false)
                     .as_ref()
@@ -557,7 +555,7 @@ pub(super) fn parse_context_params(
 
             let v = rope.get_property_str(ctx, "scalingType")?;
             if !v.is_undefined() {
-                let t = if let Some(s) = v.as_string() {
+                let t = if let Some(s) = v.as_string(true) {
                     s.content()
                         .encode_utf8(false)
                         .as_ref()
@@ -848,7 +846,7 @@ fn js_model_renderTemplate(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
 
         let role_v = obj.get_property_str(ctx, "role")?;
         let role = role_v
-            .as_string()
+            .as_string(true)
             .map(|x| x.content().encode_utf8(false).to_string())
             .ok_or_else(|| {
                 ctx.throw_type_error("messages[].role must be string");
@@ -858,7 +856,7 @@ fn js_model_renderTemplate(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
         let content_v = obj.get_property_str(ctx, "content")?;
         let content = if content_v.is_undefined() || content_v.is_null() {
             String::new()
-        } else if let Some(s) = content_v.as_string() {
+        } else if let Some(s) = content_v.as_string(true) {
             s.content().encode_utf8(false).to_string()
         } else {
             content_v
@@ -890,7 +888,7 @@ fn js_model_renderTemplate(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
             scope.json_stringify(opts.into(), JSValue::UNDEFINED, JSValue::UNDEFINED)
         })?;
 
-        if let Some(json_str) = json.as_string()
+        if let Some(json_str) = json.as_string(true)
             && let Ok(serde_json::Value::Object(mut map)) = serde_json::from_str::<serde_json::Value>(
                 json_str.content().encode_utf8(false).as_ref(),
             )
@@ -980,7 +978,8 @@ fn js_model_renderTemplate(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
 }
 
 fn js_model_dispose(_: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let _ = JSLlmModel::try_from(cc.this()).unwrap().take_payload();
+    let mut this = cc.this();
+    let _ = JSLlmModel::take_payload_of(&mut this);
     Ok(JSValue::UNDEFINED)
 }
 

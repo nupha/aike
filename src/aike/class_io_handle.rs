@@ -261,8 +261,7 @@ fn spawn_locked_read<M: tokio::io::AsyncRead + Unpin + Send + 'static>(
 }
 
 fn get_io<'a>(ctx: &mut ScopedContext, val: &'a JSValue) -> Result<&'a IoPayload, i32> {
-    val.as_native_object::<JSStdioHandle>()
-        .and_then(|o| o.payload())
+    JSStdioHandle::payload_of(val)
         .or_else(|| JSFileHandle::payload_from(val))
         .ok_or_else(|| {
             ctx.throw_internal_error("invalid IoHandle instance");
@@ -290,7 +289,7 @@ fn js_fh_onData(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         });
         return Ok(JSValue::UNDEFINED);
     }
-    let callback = arg.into_callable(ctx)?;
+    let callback = arg.ensure_callable(ctx)?;
 
     // Initialize state if needed
     let need_microtask = ON_DATA_STATE.with_borrow(|opt| opt.is_none());
@@ -363,7 +362,7 @@ fn js_fh_text(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 -1
             })?;
             cx.create_string_from_utf8(text.into_bytes())
-                .map(JSValue::from)
+                .map(JSValue::make_string)
         })?;
 
     match desc {
@@ -707,9 +706,11 @@ fn js_fh_writeAll(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let arg = cc.arg(0);
 
     // Extract bytes: TypedArray, ArrayBuffer or String
-    let data: Vec<u8> = if let Some(s) = arg.as_string() {
+    let data: Vec<u8> = if let Some(s) = arg.as_string(true) {
         s.content().encode_utf8(false).into_owned().into_bytes()
-    } else if let Some(p) = arg.as_object().map(|o| o.payload()) {
+    } else if let Some(o) = arg.as_object() {
+        let p = o.payload();
+
         if let Some(ta) = p.typed_array() {
             ta.bytes().to_vec()
         } else if let Some(ab) = p.array_buffer() {
@@ -732,13 +733,13 @@ fn js_fh_writeAll(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             let mut out = std::io::stdout().lock();
             let ok = out.write_all(&data).is_ok();
             let _ = out.flush();
-            Ok(JSValue::Bool(ok))
+            Ok(JSValue::from(ok))
         }
         IoPayload::Stderr => {
             let mut out = std::io::stderr().lock();
             let ok = out.write_all(&data).is_ok();
             let _ = out.flush();
-            Ok(JSValue::Bool(ok))
+            Ok(JSValue::from(ok))
         }
         IoPayload::PipeWrite(fd) => {
             // Pipe write(2) is a synchronous memcpy to kernel buffer
@@ -761,7 +762,7 @@ fn js_fh_writeAll(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 Ok(())
             })()
             .is_ok();
-            Ok(JSValue::Bool(ok))
+            Ok(JSValue::from(ok))
         }
         IoPayload::PipeRead(..) => {
             ctx.throw_type_error("cannot write to pipe reader");
@@ -838,11 +839,10 @@ fn js_fh_flush(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
 /// close() — drop the io
 fn js_fh_close(_: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let val = cc.this();
-    if let Ok(mut o) = JSStdioHandle::try_from(val) {
-        o.take_payload();
-    } else if let Ok(mut o) = JSFileHandle::try_from(val) {
-        o.take_payload();
+    let mut val = cc.this();
+    // Detach whichever concrete handle type this is (both share IoPayload).
+    if JSStdioHandle::take_payload_of(&mut val).is_none() {
+        JSFileHandle::take_payload_of(&mut val);
     }
     Ok(JSValue::UNDEFINED)
 }
@@ -899,19 +899,19 @@ pub(crate) fn make_stats(
     obj.define_property_value_str(
         ctx,
         "isFile",
-        JSValue::Bool(meta.is_file()),
+        JSValue::from(meta.is_file()),
         zuqe::JS_PROP_ENUMERABLE,
     )?;
     obj.define_property_value_str(
         ctx,
         "isDirectory",
-        JSValue::Bool(meta.is_dir()),
+        JSValue::from(meta.is_dir()),
         zuqe::JS_PROP_ENUMERABLE,
     )?;
     obj.define_property_value_str(
         ctx,
         "isSymbolicLink",
-        JSValue::Bool(meta.is_symlink()),
+        JSValue::from(meta.is_symlink()),
         zuqe::JS_PROP_ENUMERABLE,
     )?;
 
@@ -944,7 +944,7 @@ pub(crate) fn make_stats(
 fn js_fh_fd(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let desc = get_io(ctx, &this)?;
-    Ok(JSValue::Int(desc.as_virt_fd()))
+    Ok(JSValue::from(desc.as_virt_fd()))
 }
 
 // ---------------------------------------------------------------------------
@@ -1080,9 +1080,10 @@ fn js_fh_writeSync(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let desc = get_io(ctx, &this)?;
 
     let arg = cc.arg(0);
-    let data: Vec<u8> = if let Some(s) = arg.as_string() {
+    let data: Vec<u8> = if let Some(s) = arg.as_string(true) {
         s.content().encode_utf8(false).into_owned().into_bytes()
-    } else if let Some(p) = arg.as_object().map(|o| o.payload()) {
+    } else if let Some(o) = arg.as_object() {
+        let p = o.payload();
         if let Some(ta) = p.typed_array() {
             ta.bytes().to_vec()
         } else if let Some(ab) = p.array_buffer() {
@@ -1105,13 +1106,13 @@ fn js_fh_writeSync(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             let mut out = std::io::stdout().lock();
             let ok = out.write_all(&data).is_ok();
             let _ = out.flush();
-            Ok(JSValue::Bool(ok))
+            Ok(JSValue::from(ok))
         }
         IoPayload::Stderr => {
             let mut out = std::io::stderr().lock();
             let ok = out.write_all(&data).is_ok();
             let _ = out.flush();
-            Ok(JSValue::Bool(ok))
+            Ok(JSValue::from(ok))
         }
         IoPayload::PipeWrite(fd) => {
             let ok = (|| -> std::io::Result<()> {
@@ -1132,7 +1133,7 @@ fn js_fh_writeSync(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 Ok(())
             })()
             .is_ok();
-            Ok(JSValue::Bool(ok))
+            Ok(JSValue::from(ok))
         }
         _ => {
             ctx.throw_type_error("cannot write to this handle");
@@ -1285,8 +1286,7 @@ impl JSFileHandle {
     }
 
     fn payload_from(val: &JSValue) -> Option<&IoPayload> {
-        val.as_native_object::<JSFileHandle>()
-            .and_then(|o| o.payload())
+        JSFileHandle::payload_of(val)
     }
 }
 

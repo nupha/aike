@@ -6,8 +6,6 @@
 //! `HeaderList` is the single source of truth for HTTP headers, reused by
 //! the client `Response`, the `Request`, and (via helpers) the server side.
 
-use std::cell::Cell;
-
 use linkme::distributed_slice;
 use zuqe::{
     Array, CallContext, ClassCtorDef, ClassID, FieldDef, JSResult, JSValue, Runtime, ScopedContext,
@@ -119,24 +117,20 @@ pub(crate) struct HeadersPayload {
 }
 
 fn get_headers<'a>(ctx: &mut ScopedContext, val: &'a JSValue) -> Result<&'a HeadersPayload, i32> {
-    val.as_native_object::<JSHeaders>()
-        .and_then(|o| o.payload())
-        .ok_or_else(|| {
-            ctx.throw_type_error("not a Headers instance");
-            -1
-        })
+    JSHeaders::payload_of(val).ok_or_else(|| {
+        ctx.throw_type_error("not a Headers instance");
+        -1
+    })
 }
 
 fn get_headers_mut<'a>(
     ctx: &mut ScopedContext,
     val: &'a mut JSValue,
 ) -> Result<&'a mut HeadersPayload, i32> {
-    val.as_native_object_mut::<JSHeaders>()
-        .and_then(|o| o.payload_mut())
-        .ok_or_else(|| {
-            ctx.throw_type_error("not a Headers instance");
-            -1
-        })
+    JSHeaders::payload_mut_of(val).ok_or_else(|| {
+        ctx.throw_type_error("not a Headers instance");
+        -1
+    })
 }
 
 /// Build a `HeaderList` from a JS init: a Headers instance, an array of
@@ -145,17 +139,14 @@ pub(crate) fn header_list_from_js(
     ctx: &mut ScopedContext,
     val: &mut JSValue,
 ) -> Result<HeaderList, i32> {
-    if let Some(h) = val
-        .as_native_object::<JSHeaders>()
-        .and_then(|o| o.payload())
-    {
+    if let Some(h) = JSHeaders::payload_of(val) {
         return Ok(h.list.clone());
     }
     let mut list = HeaderList::new();
     if val.is_undefined_or_null() {
         return Ok(list);
     }
-    if let Some(obj) = val.as_object_mut() {
+    if let Some(mut obj) = val.as_object() {
         let pks =
             obj.get_own_property_names(ctx, zuqe::JS_GPN_ENUM_ONLY | zuqe::JS_GPN_STR_OR_INT_MASK)?;
         for pk in pks.iter() {
@@ -251,6 +242,7 @@ fn js_headers_delete(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 fn js_headers_get(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let h = get_headers(ctx, &this)?;
+
     let name = cc
         .arg(0)
         .to_string(ctx)?
@@ -258,11 +250,11 @@ fn js_headers_get(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         .encode_utf8(false)
         .to_string();
     check_header_name(ctx, &name)?;
+
     match h.list.get(&name) {
-        Some(v) => {
-            let s = ctx.create_string_from_utf8(v.into_bytes())?;
-            Ok(s.into())
-        }
+        Some(v) => ctx
+            .create_string_from_utf8(v.into_bytes())
+            .map(JSValue::make_string),
         None => Ok(JSValue::NULL),
     }
 }
@@ -277,7 +269,7 @@ fn js_headers_has(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         .encode_utf8(false)
         .to_string();
     check_header_name(ctx, &name)?;
-    Ok(JSValue::Bool(h.list.has(&name)))
+    Ok(JSValue::from(h.list.has(&name)))
 }
 
 fn js_headers_set(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -311,7 +303,7 @@ fn js_headers_keys(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         .iter()
         .map(|(k, _)| {
             ctx.create_string_from_utf8(k.as_bytes().to_vec())
-                .map(JSValue::from)
+                .map(JSValue::make_string)
         })
         .collect::<Result<Vec<_>, _>>()?;
     Array::from_values(ctx, names).map(JSValue::from)
@@ -326,7 +318,7 @@ fn js_headers_values(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         .iter()
         .map(|(_, v)| {
             ctx.create_string_from_utf8(v.as_bytes().to_vec())
-                .map(JSValue::from)
+                .map(JSValue::make_string)
         })
         .collect::<Result<Vec<_>, _>>()?;
     Array::from_values(ctx, vals).map(JSValue::from)
@@ -339,7 +331,13 @@ fn js_headers_entries(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     for (k, v) in h.list.entries() {
         let k_js = ctx.create_string_from_utf8(k.as_bytes().to_vec())?;
         let v_js = ctx.create_string_from_utf8(v.as_bytes().to_vec())?;
-        pairs.push(Array::from_values(ctx, vec![k_js.into(), v_js.into()])?.into());
+        pairs.push(
+            Array::from_values(
+                ctx,
+                vec![JSValue::make_string(k_js), JSValue::make_string(v_js)],
+            )?
+            .into(),
+        );
     }
     Array::from_values(ctx, pairs).map(JSValue::from)
 }
@@ -351,7 +349,7 @@ fn js_headers_for_each(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         ctx.throw_type_error("forEach requires a callback");
         return Err(-1);
     }
-    let cb = cc.arg(0).into_callable(ctx)?;
+    let cb = cc.arg(0).ensure_callable(ctx)?;
     let this_arg = if cc.length() > 1 {
         cc.arg(1)
     } else {
@@ -360,7 +358,11 @@ fn js_headers_for_each(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     for (k, v) in h.list.entries() {
         let k_js = ctx.create_string_from_utf8(k.as_bytes().to_vec())?;
         let v_js = ctx.create_string_from_utf8(v.as_bytes().to_vec())?;
-        cb.call(ctx, this_arg, &[v_js.into(), k_js.into(), this])?;
+        cb.call(
+            ctx,
+            this_arg,
+            &[JSValue::make_string(v_js), JSValue::make_string(k_js), this],
+        )?;
     }
     Ok(JSValue::UNDEFINED)
 }
@@ -374,12 +376,15 @@ fn js_headers_iterator(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     for (k, v) in h.list.entries() {
         let k_js = ctx.create_string_from_utf8(k.as_bytes().to_vec())?;
         let v_js = ctx.create_string_from_utf8(v.as_bytes().to_vec())?;
-        let pair = Array::from_values(ctx, vec![k_js.into(), v_js.into()])?;
+        let pair = Array::from_values(
+            ctx,
+            vec![JSValue::make_string(k_js), JSValue::make_string(v_js)],
+        )?;
         entries.push(pair.into());
     }
     let arr = Array::from_values(ctx, entries)?;
     let iter_fn = arr.get_property_str(ctx, "[Symbol.iterator]")?;
-    let cb = iter_fn.into_callable(ctx)?;
+    let cb = iter_fn.ensure_callable(ctx)?;
     cb.call(ctx, arr.into(), &[])
 }
 

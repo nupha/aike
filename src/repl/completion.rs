@@ -372,9 +372,10 @@ pub(crate) fn js_compute_completions(scope: &mut zuqe::ScopedContext<'_>, req: C
     let mut obj = ctx_obj;
 
     for _ in 0..10 {
-        let Some(o) = obj.as_object_mut() else {
+        let Some(mut o) = obj.as_object() else {
             break;
         };
+
         let pks = match o.get_own_property_names(scope, 1) {
             Ok(p) => p,
             Err(_) => break,

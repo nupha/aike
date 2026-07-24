@@ -41,12 +41,13 @@ pub(crate) fn js_page_set_media_features(ctx: &mut ScopedContext, cc: CallContex
     {
         for item in arr.payload().values() {
             if let Some(obj) = item.as_object() {
-                let name = get_str_prop(ctx, &obj, "name").unwrap_or_default();
-                let value = get_str_prop(ctx, &obj, "value").unwrap_or_default();
+                let name = get_str_prop(ctx, obj, "name").unwrap_or_default();
+                let value = get_str_prop(ctx, obj, "value").unwrap_or_default();
                 features.push(serde_json::json!({ "name": name, "value": value }));
             }
         }
     }
+
     send_page_void_cmd(
         ctx,
         &cc,

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-use std::{cell::Cell, collections::HashMap};
+use std::collections::HashMap;
 
 use linkme::distributed_slice;
 use zuqe::{
@@ -26,24 +26,20 @@ fn get_req_payload<'a>(
     ctx: &mut ScopedContext,
     val: &'a JSValue,
 ) -> Result<&'a HttpRequestPayload, i32> {
-    val.as_native_object::<JSHttpRequest>()
-        .and_then(|o| o.payload())
-        .ok_or_else(|| {
-            ctx.throw_type_error("not an HttpRequest instance");
-            -1
-        })
+    JSHttpRequest::payload_of(val).ok_or_else(|| {
+        ctx.throw_type_error("not an HttpRequest instance");
+        -1
+    })
 }
 
 fn get_req_payload_mut<'a>(
     ctx: &mut ScopedContext,
     val: &'a mut JSValue,
 ) -> Result<&'a mut HttpRequestPayload, i32> {
-    val.as_native_object_mut::<JSHttpRequest>()
-        .and_then(|o| o.payload_mut())
-        .ok_or_else(|| {
-            ctx.throw_type_error("not an HttpRequest instance");
-            -1
-        })
+    JSHttpRequest::payload_mut_of(val).ok_or_else(|| {
+        ctx.throw_type_error("not an HttpRequest instance");
+        -1
+    })
 }
 
 fn js_req_method(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -51,8 +47,8 @@ fn js_req_method(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         let this = cc.this();
         get_req_payload(ctx, &this)?.method
     };
-    let s = ctx.create_string_from_str(method.as_str())?;
-    Ok(s.into())
+    ctx.create_string_from_str(method.as_str())
+        .map(JSValue::make_string)
 }
 
 fn js_req_path(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -61,8 +57,7 @@ fn js_req_path(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         let p = get_req_payload(ctx, &this)?;
         p.path.as_bytes().to_vec()
     };
-    let s = ctx.create_string_from_utf8(path)?;
-    Ok(s.into())
+    ctx.create_string_from_utf8(path).map(JSValue::make_string)
 }
 
 fn js_req_params(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -74,7 +69,7 @@ fn js_req_params(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut obj = ctx.create_base_object()?;
     for (k, v) in &params {
         let val = ctx.create_string_from_utf8(v.as_bytes().to_vec())?;
-        obj.set_property_str(ctx, k, val.into())?;
+        obj.set_property_str(ctx, k, JSValue::make_string(val))?;
     }
     Ok(obj.into())
 }
@@ -88,7 +83,7 @@ fn js_req_query(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut obj = ctx.create_base_object()?;
     for (k, v) in &query {
         let val = ctx.create_string_from_utf8(v.as_bytes().to_vec())?;
-        obj.set_property_str(ctx, k, val.into())?;
+        obj.set_property_str(ctx, k, JSValue::make_string(val))?;
     }
     Ok(obj.into())
 }
@@ -102,7 +97,7 @@ fn js_req_headers(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut obj = ctx.create_base_object()?;
     for (k, v) in &headers {
         let val = ctx.create_string_from_utf8(v.as_bytes().to_vec())?;
-        obj.set_property_str(ctx, k, val.into())?;
+        obj.set_property_str(ctx, k, JSValue::make_string(val))?;
     }
     Ok(obj.into())
 }
@@ -127,8 +122,7 @@ fn js_req_text(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         .body
         .take()
         .unwrap_or_default();
-    let s = ctx.create_string_from_utf8(body)?;
-    Ok(s.into())
+    ctx.create_string_from_utf8(body).map(JSValue::make_string)
 }
 
 fn js_req_bytes(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {

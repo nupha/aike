@@ -6,10 +6,9 @@
 //! Holds the CDP `CdpClient` (browser-level, no session) and the handle to the
 //! spawned Chrome child process. All `Browser.*` methods are defined here.
 
-use std::{cell::Cell, sync::Arc};
+use std::sync::Arc;
 
 use linkme::distributed_slice;
-use serde_json::Value;
 use zuqe::{
     CallContext, ClassCtorDef, ClassID, FieldDef, JS_PROP_C_W_E, JSResult, JSValue, Runtime,
     ScopedContext,
@@ -21,10 +20,7 @@ use crate::{
     USER_CLASS_DEFS,
     browser::{
         cdp, chrome,
-        class_page::{
-            JSPage, PageNetworkState, PagePayload, get_number_prop, get_str_prop,
-            js_from_json_value,
-        },
+        class_page::{JSPage, PageNetworkState, PagePayload, get_number_prop, get_str_prop},
     },
 };
 
@@ -169,12 +165,10 @@ pub(crate) fn get_browser_payload<'a>(
     ctx: &mut ScopedContext,
     val: &'a JSValue,
 ) -> Result<&'a BrowserPayload, i32> {
-    val.as_native_object::<JSBrowser>()
-        .and_then(|o| o.payload())
-        .ok_or_else(|| {
-            ctx.throw_type_error("not a Browser instance");
-            -1
-        })
+    JSBrowser::payload_of(val).ok_or_else(|| {
+        ctx.throw_type_error("not a Browser instance");
+        -1
+    })
 }
 
 /// Shared helper: void-returning CDP command sent at the Browser level
@@ -183,7 +177,7 @@ pub(crate) fn send_browser_void_cmd(
     ctx: &mut ScopedContext,
     cc: &CallContext,
     method: &'static str,
-    params: Option<Value>,
+    params: Option<serde_json::Value>,
 ) -> JSResult {
     let this = cc.this();
     let payload = get_browser_payload(ctx, &this)?;
@@ -223,13 +217,13 @@ fn js_browser_new_page(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut url = "about:blank".to_string();
     let mut context_id: Option<String> = None;
     if cc.length() > 0 {
-        if let Some(s) = cc.arg(0).as_string() {
+        if let Some(s) = cc.arg(0).as_string(true) {
             url = s.content().encode_utf8(false).to_string();
         } else if let Some(obj) = cc.arg(0).as_object() {
-            if let Some(u) = get_str_prop(ctx, &obj, "url") {
+            if let Some(u) = get_str_prop(ctx, obj, "url") {
                 url = u;
             }
-            context_id = get_str_prop(ctx, &obj, "contextId");
+            context_id = get_str_prop(ctx, obj, "contextId");
         }
     }
 
@@ -256,7 +250,12 @@ fn js_browser_new_page(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
             // Set targetId readonly property
             let js_id = cx.create_string_from_utf8(target_id.into_bytes())?;
-            page.define_property_value_str(cx, "targetId", js_id.into(), JS_PROP_C_W_E)?;
+            page.define_property_value_str(
+                cx,
+                "targetId",
+                JSValue::make_string(js_id),
+                JS_PROP_C_W_E,
+            )?;
             Ok(page.into())
         },
     )?;
@@ -265,7 +264,7 @@ fn js_browser_new_page(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         // Build Target.createTarget params (optionally scoped to a context).
         let mut params = serde_json::json!({ "url": url });
         if let Some(cid) = context_id {
-            params["browserContextId"] = Value::String(cid);
+            params["browserContextId"] = serde_json::Value::String(cid);
         }
         let rx = client.send("Target.createTarget", Some(params), None);
         let resp = match rx.await {
@@ -362,14 +361,14 @@ fn js_browser_get_version(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
     let payload = get_browser_payload(ctx, &this)?;
     let client = payload.client.clone();
 
-    let result_slot = PromiseResultSlot::<Result<Value, String>>::new();
+    let result_slot = PromiseResultSlot::<Result<serde_json::Value, String>>::new();
     let promise =
         Promise::create_with_result_slot(ctx, result_slot.clone(), |cx, val| -> JSResult {
             let val = val.map_err(|e| {
                 cx.throw_internal_error(&e);
                 -1
             })?;
-            js_from_json_value(cx, &val)
+            JSValue::from_serde_json(cx, &val)
         })?;
 
     tokio::spawn(async move {
@@ -388,7 +387,7 @@ async fn browser_window_id(client: &cdp::CdpClient) -> Result<String, String> {
         Some(serde_json::json!({})),
         None,
     );
-    let resp: Value = rx.await.unwrap_or(Err("channel closed".into()))?;
+    let resp: serde_json::Value = rx.await.unwrap_or(Err("channel closed".into()))?;
     resp.get("windowId")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
@@ -401,19 +400,19 @@ fn js_browser_get_window_bounds(ctx: &mut ScopedContext, cc: CallContext) -> JSR
     let payload = get_browser_payload(ctx, &this)?;
     let client = payload.client.clone();
 
-    let result_slot = PromiseResultSlot::<Result<Value, String>>::new();
+    let result_slot = PromiseResultSlot::<Result<serde_json::Value, String>>::new();
     let promise =
         Promise::create_with_result_slot(ctx, result_slot.clone(), |cx, val| -> JSResult {
             let val = val.map_err(|e| {
                 cx.throw_internal_error(&e);
                 -1
             })?;
-            js_from_json_value(cx, &val)
+            JSValue::from_serde_json(cx, &val)
         })?;
 
     tokio::spawn(async move {
         let wid = browser_window_id(&client).await;
-        let r: Result<Value, String> = match wid {
+        let r: Result<serde_json::Value, String> = match wid {
             Ok(id) => {
                 let rx = client.send(
                     "Browser.getWindowBounds",
@@ -437,20 +436,20 @@ fn js_browser_set_window_bounds(ctx: &mut ScopedContext, cc: CallContext) -> JSR
     if cc.length() > 0
         && let Some(obj) = cc.arg(0).as_object()
     {
-        if let Some(v) = get_number_prop(ctx, &obj, "left") {
-            bounds.insert("left".into(), Value::from(v as i32));
+        if let Some(v) = get_number_prop(ctx, obj, "left") {
+            bounds.insert("left".into(), serde_json::Value::from(v as i32));
         }
-        if let Some(v) = get_number_prop(ctx, &obj, "top") {
-            bounds.insert("top".into(), Value::from(v as i32));
+        if let Some(v) = get_number_prop(ctx, obj, "top") {
+            bounds.insert("top".into(), serde_json::Value::from(v as i32));
         }
-        if let Some(v) = get_number_prop(ctx, &obj, "width") {
-            bounds.insert("width".into(), Value::from(v as i32));
+        if let Some(v) = get_number_prop(ctx, obj, "width") {
+            bounds.insert("width".into(), serde_json::Value::from(v as i32));
         }
-        if let Some(v) = get_number_prop(ctx, &obj, "height") {
-            bounds.insert("height".into(), Value::from(v as i32));
+        if let Some(v) = get_number_prop(ctx, obj, "height") {
+            bounds.insert("height".into(), serde_json::Value::from(v as i32));
         }
-        if let Some(s) = get_str_prop(ctx, &obj, "windowState") {
-            bounds.insert("windowState".into(), Value::String(s));
+        if let Some(s) = get_str_prop(ctx, obj, "windowState") {
+            bounds.insert("windowState".into(), serde_json::Value::String(s));
         }
     }
 
@@ -513,8 +512,8 @@ fn js_browser_is_running(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let payload = get_browser_payload(ctx, &this)?;
     let guard = payload.chrome_child.try_lock();
     match guard {
-        Ok(inner) => Ok(JSValue::Bool(inner.is_some())),
-        Err(_) => Ok(JSValue::Bool(false)),
+        Ok(inner) => Ok(JSValue::from(inner.is_some())),
+        Err(_) => Ok(JSValue::FALSE),
     }
 }
 

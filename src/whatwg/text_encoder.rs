@@ -6,8 +6,6 @@
 //! TextEncoder always encodes to UTF-8.
 //! Per spec: encoding is always "utf-8", no options, no BOM, no streaming.
 
-use std::cell::Cell;
-
 use linkme::distributed_slice;
 use zuqe::{
     CallContext, ClassCtorDef, ClassID, FieldDef, JSResult, JSValue, Runtime, ScopedContext,
@@ -16,25 +14,13 @@ use zuqe::{
 
 use crate::USER_CLASS_DEFS;
 
-// ---------------------------------------------------------------------------
-// TextEncoder opaque payload (stateless — encoding is always utf-8)
-// ---------------------------------------------------------------------------
-
 pub(crate) struct TextEncoderPayload;
-
-// ---------------------------------------------------------------------------
-// Constructor
-// ---------------------------------------------------------------------------
 
 fn js_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let new_target = cc.this();
 
     JSTextEncoder::new_instance(ctx, new_target, TextEncoderPayload).map(JSValue::from)
 }
-
-// ---------------------------------------------------------------------------
-// encode(input?: string): Uint8Array
-// ---------------------------------------------------------------------------
 
 fn js_encode(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let input = if cc.length() > 0 {
@@ -51,10 +37,6 @@ fn js_encode(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     })?;
     Ok(ta.into())
 }
-
-// ---------------------------------------------------------------------------
-// encodeInto(source: string, destination: Uint8Array): { read, written }
-// ---------------------------------------------------------------------------
 
 fn js_encode_into(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     if cc.length() < 2 {
@@ -90,18 +72,10 @@ fn js_encode_into(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     Ok(result.into())
 }
 
-// ---------------------------------------------------------------------------
-// encoding getter — always "utf-8"
-// ---------------------------------------------------------------------------
-
 fn js_encoding_getter(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
-    let s = ctx.create_string_from_utf8(b"utf-8".to_vec())?;
-    Ok(s.into())
+    ctx.create_string_from_utf8(b"utf-8".to_vec())
+        .map(JSValue::make_string)
 }
-
-// ---------------------------------------------------------------------------
-// Class registration
-// ---------------------------------------------------------------------------
 
 const CLASS_TEXT_ENCODER_PROTO: &[FieldDef] = &[
     FieldDef::GETSET("encoding", Some(js_encoding_getter), None, 0),

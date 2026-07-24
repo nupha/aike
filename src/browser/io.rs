@@ -83,7 +83,7 @@ pub(crate) fn js_page_read_stream(ctx: &mut ScopedContext, cc: CallContext) -> J
                 -1
             })?;
             cx.create_string_from_utf8(text.into_bytes())
-                .map(JSValue::from)
+                .map(JSValue::make_string)
         })?;
 
     tokio::spawn(async move {

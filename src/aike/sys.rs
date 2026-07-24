@@ -11,7 +11,7 @@ pub(super) fn js_cwd(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
     match std::env::current_dir() {
         Ok(p) => ctx
             .create_string_from_utf8(p.to_string_lossy().as_bytes().to_vec())
-            .map(JSValue::from),
+            .map(JSValue::make_string),
         Err(e) => {
             ctx.throw_internal_error(&e.to_string());
             Err(-1)
@@ -153,7 +153,7 @@ pub(super) fn js_isatty(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     // Negative fds are never a tty.
     if fd < 0 {
-        return Ok(JSValue::Bool(false));
+        return Ok(JSValue::FALSE);
     }
 
     #[cfg(windows)]
@@ -169,7 +169,7 @@ pub(super) fn js_isatty(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     #[cfg(not(windows))]
     let is_tty = unsafe { libc::isatty(fd) != 0 };
 
-    Ok(JSValue::Bool(is_tty))
+    Ok(JSValue::from(is_tty))
 }
 
 pub(super) fn js_ttyGetWinSize(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -212,8 +212,8 @@ pub(super) fn js_ttyGetWinSize(ctx: &mut ScopedContext, cc: CallContext) -> JSRe
     }
 
     let mut obj = Array::create(ctx)?;
-    obj.define_property_value_u32(ctx, 0, JSValue::Int(w), JS_PROP_C_W_E)?;
-    obj.define_property_value_u32(ctx, 1, JSValue::Int(h), JS_PROP_C_W_E)?;
+    obj.define_property_value_u32(ctx, 0, JSValue::from(w), JS_PROP_C_W_E)?;
+    obj.define_property_value_u32(ctx, 1, JSValue::from(h), JS_PROP_C_W_E)?;
     Ok(obj.into())
 }
 
@@ -292,7 +292,7 @@ pub(super) fn js_homedir(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult 
     match dirs::home_dir() {
         Some(p) => ctx
             .create_string_from_utf8(p.to_string_lossy().as_bytes().to_vec())
-            .map(JSValue::from),
+            .map(JSValue::make_string),
         None => {
             ctx.throw_internal_error("cannot determine home directory");
             Err(-1)

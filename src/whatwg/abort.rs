@@ -6,7 +6,7 @@
 //! Provides `AbortController` and `AbortSignal` for cooperative cancellation
 //! of asynchronous operations, following the WHATWG spec.
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -45,12 +45,10 @@ fn get_signal<'a>(
     ctx: &mut ScopedContext,
     val: &'a JSValue,
 ) -> Result<&'a AbortSignalPayload, i32> {
-    val.as_native_object::<JSAbortSignal>()
-        .and_then(|o| o.payload())
-        .ok_or_else(|| {
-            ctx.throw_internal_error("not an AbortSignal instance");
-            -1
-        })
+    JSAbortSignal::payload_of(val).ok_or_else(|| {
+        ctx.throw_internal_error("not an AbortSignal instance");
+        -1
+    })
 }
 
 fn js_signal_constructor(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
@@ -65,7 +63,7 @@ fn js_signal_constructor(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult 
 fn js_signal_aborted_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let signal = get_signal(ctx, &this)?;
-    Ok(JSValue::Bool(signal.inner.borrow().aborted))
+    Ok(JSValue::from(signal.inner.borrow().aborted))
 }
 
 fn js_signal_reason_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -124,7 +122,7 @@ fn js_signal_static_timeout(ctx: &mut ScopedContext, cc: CallContext) -> JSResul
         aborted: true,
         reason: ctx
             .create_string_from_utf8(b"Timeout".to_vec())
-            .map(JSValue::from)
+            .map(JSValue::make_string)
             .unwrap_or(JSValue::UNDEFINED),
         controller: None,
         notify: Arc::new(Notify::new()),
@@ -149,12 +147,10 @@ fn get_controller<'a>(
     ctx: &mut ScopedContext,
     val: &'a JSValue,
 ) -> Result<&'a AbortControllerPayload, i32> {
-    val.as_native_object::<JSAbortController>()
-        .and_then(|o| o.payload())
-        .ok_or_else(|| {
-            ctx.throw_internal_error("not an AbortController instance");
-            -1
-        })
+    JSAbortController::payload_of(val).ok_or_else(|| {
+        ctx.throw_internal_error("not an AbortController instance");
+        -1
+    })
 }
 
 fn js_controller_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -245,7 +241,7 @@ fn register_abort_signal_statics(ctx: &mut ScopedContext, global: &mut Object) -
 
     // Get the AbortSignal constructor from global
     let ctor_val = global.get_property_str(ctx, "AbortSignal")?;
-    if let JSValue::Object(mut ctor) = ctor_val {
+    if let Some(mut ctor) = ctor_val.as_object() {
         ctor.define_property_value_str(ctx, "abort", abort_fn.into(), zuqe::JS_PROP_C_W_E)?;
     }
 
@@ -258,7 +254,7 @@ fn register_abort_signal_statics(ctx: &mut ScopedContext, global: &mut Object) -
     )?;
 
     let ctor_val = global.get_property_str(ctx, "AbortSignal")?;
-    if let JSValue::Object(mut ctor) = ctor_val {
+    if let Some(mut ctor) = ctor_val.as_object() {
         ctor.define_property_value_str(ctx, "timeout", timeout_fn.into(), zuqe::JS_PROP_C_W_E)?;
     }
 
@@ -304,15 +300,12 @@ impl AbortSignalPayload {
 
 /// Get the abort `Notify` for a JS `AbortSignal` value, if it is one.
 pub(crate) fn signal_notify(val: &JSValue) -> Option<Arc<Notify>> {
-    val.as_native_object::<JSAbortSignal>()
-        .and_then(|o| o.payload())
-        .map(|p| p.notify())
+    JSAbortSignal::payload_of(val).map(|p| p.notify())
 }
 
 /// Whether a JS `AbortSignal` value is already aborted.
 pub(crate) fn signal_is_aborted(val: &JSValue) -> bool {
-    val.as_native_object::<JSAbortSignal>()
-        .and_then(|o| o.payload())
+    JSAbortSignal::payload_of(val)
         .map(|p| p.is_aborted())
         .unwrap_or(false)
 }

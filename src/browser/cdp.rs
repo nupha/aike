@@ -16,7 +16,6 @@ use std::{
 
 use crossbeam::channel::{Receiver, Sender, TryRecvError, unbounded};
 use futures_util::{SinkExt, StreamExt};
-use serde_json::Value;
 use tokio::{
     net::TcpStream,
     sync::{broadcast, oneshot},
@@ -31,14 +30,14 @@ type WsReader = futures_util::stream::SplitStream<WsStream>;
 #[derive(Clone, Debug)]
 pub(crate) struct CdpEvent {
     pub(crate) method: String,
-    pub(crate) params: Value,
+    pub(crate) params: serde_json::Value,
     pub(crate) session_id: Option<String>,
 }
 
 /// A command submitted from JS to the background WebSocket task.
 struct CdpCommand {
     msg: String,
-    resp_tx: oneshot::Sender<Result<Value, String>>,
+    resp_tx: oneshot::Sender<Result<serde_json::Value, String>>,
 }
 
 /// Thread-safe handle to the CDP connection.
@@ -87,7 +86,7 @@ impl CdpClient {
         cmd_rx: Receiver<CdpCommand>,
         event_tx: broadcast::Sender<CdpEvent>,
     ) {
-        let pending: Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>> =
+        let pending: Arc<Mutex<HashMap<u64, oneshot::Sender<Result<serde_json::Value, String>>>>> =
             Arc::new(Mutex::new(HashMap::new()));
 
         let pending_r = pending.clone();
@@ -134,9 +133,9 @@ impl CdpClient {
     async fn send_cmd(
         writer: &Arc<tokio::sync::Mutex<WsWriter>>,
         cmd: CdpCommand,
-        pending: &Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>>,
+        pending: &Arc<Mutex<HashMap<u64, oneshot::Sender<Result<serde_json::Value, String>>>>>,
     ) {
-        let id: u64 = if let Ok(val) = serde_json::from_str::<Value>(&cmd.msg) {
+        let id: u64 = if let Ok(val) = serde_json::from_str::<serde_json::Value>(&cmd.msg) {
             val.get("id").and_then(|v| v.as_u64()).unwrap_or(0)
         } else {
             0
@@ -159,10 +158,10 @@ impl CdpClient {
     /// Parse a received WS text message and dispatch to the matching pending command.
     /// Returns `true` if it was a command response (had "id"), `false` if it was not.
     fn try_dispatch_response(
-        pending: &Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>>,
+        pending: &Arc<Mutex<HashMap<u64, oneshot::Sender<Result<serde_json::Value, String>>>>>,
         text: &str,
     ) -> bool {
-        let Ok(val) = serde_json::from_str::<Value>(text) else {
+        let Ok(val) = serde_json::from_str::<serde_json::Value>(text) else {
             return false;
         };
 
@@ -180,7 +179,7 @@ impl CdpClient {
                     .unwrap_or("CDP error")
                     .to_string())
             } else {
-                Ok(val.get("result").cloned().unwrap_or(Value::Null))
+                Ok(val.get("result").cloned().unwrap_or(serde_json::Value::Null))
             };
             let _ = tx.send(result);
         }
@@ -189,14 +188,14 @@ impl CdpClient {
 
     /// Forward a CDP event (message without "id") to the broadcast channel.
     fn dispatch_event(event_tx: &broadcast::Sender<CdpEvent>, text: &str) {
-        let Ok(val) = serde_json::from_str::<Value>(text) else {
+        let Ok(val) = serde_json::from_str::<serde_json::Value>(text) else {
             return;
         };
         let method = match val.get("method").and_then(|v| v.as_str()) {
             Some(m) => m.to_string(),
             None => return,
         };
-        let params = val.get("params").cloned().unwrap_or(Value::Null);
+        let params = val.get("params").cloned().unwrap_or(serde_json::Value::Null);
         let session_id = val
             .get("sessionId")
             .and_then(|v| v.as_str())
@@ -209,7 +208,7 @@ impl CdpClient {
     }
 
     /// Build a CDP JSON-RPC command message string.
-    fn build_msg(method: &str, params: Option<Value>, session_id: Option<&str>, id: u64) -> String {
+    fn build_msg(method: &str, params: Option<serde_json::Value>, session_id: Option<&str>, id: u64) -> String {
         let mut msg = serde_json::json!({
             "id": id,
             "method": method,
@@ -218,7 +217,7 @@ impl CdpClient {
             msg["params"] = p;
         }
         if let Some(sid) = session_id {
-            msg["sessionId"] = Value::String(sid.to_string());
+            msg["sessionId"] = serde_json::Value::String(sid.to_string());
         }
         serde_json::to_string(&msg).unwrap()
     }
@@ -227,9 +226,9 @@ impl CdpClient {
     pub(crate) fn send(
         &self,
         method: &str,
-        params: Option<Value>,
+        params: Option<serde_json::Value>,
         session_id: Option<&str>,
-    ) -> oneshot::Receiver<Result<Value, String>> {
+    ) -> oneshot::Receiver<Result<serde_json::Value, String>> {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let msg = Self::build_msg(method, params, session_id, id);
         let (tx, rx) = oneshot::channel();

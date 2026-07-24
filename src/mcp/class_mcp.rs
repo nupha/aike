@@ -263,22 +263,19 @@ impl McpServicePayload {
 /// Create a JS string value, taking ownership of `s` so no extra allocation
 /// is needed when the caller already holds a `String`.
 pub(crate) fn js_str(ctx: &mut ScopedContext, s: String) -> JSResult {
-    Ok(ctx.create_string_from_utf8(s.into_bytes())?.into())
+    ctx.create_string_from_utf8(s.into_bytes())
+        .map(JSValue::make_string)
 }
 
 pub(super) fn get_payload<'a>(
     ctx: &mut ScopedContext,
     val: &'a JSValue,
 ) -> Result<&'a McpServicePayload, i32> {
-    if let Some(o) = val.as_native_object::<JSStdioMcp>() {
-        if let Some(p) = o.payload() {
-            return Ok(p);
-        }
+    if let Some(p) = JSStdioMcp::payload_of(val) {
+        return Ok(p);
     }
-    if let Some(o) = val.as_native_object::<JSHttpMcp>() {
-        if let Some(p) = o.payload() {
-            return Ok(p);
-        }
+    if let Some(p) = JSHttpMcp::payload_of(val) {
+        return Ok(p);
     }
     ctx.throw_type_error("not a Mcp server instance");
     Err(-1)
@@ -292,22 +289,16 @@ pub(super) fn get_payload_mut<'a>(
     let is_http = val.as_native_object::<JSHttpMcp>().is_some();
 
     if is_stdio {
-        return val
-            .as_native_object_mut::<JSStdioMcp>()
-            .and_then(|o| o.payload_mut())
-            .ok_or_else(|| {
-                ctx.throw_type_error("not a Mcp server instance");
-                -1
-            });
+        return JSStdioMcp::payload_mut_of(val).ok_or_else(|| {
+            ctx.throw_type_error("not a Mcp server instance");
+            -1
+        });
     }
     if is_http {
-        return val
-            .as_native_object_mut::<JSHttpMcp>()
-            .and_then(|o| o.payload_mut())
-            .ok_or_else(|| {
-                ctx.throw_type_error("not a Mcp server instance");
-                -1
-            });
+        return JSHttpMcp::payload_mut_of(val).ok_or_else(|| {
+            ctx.throw_type_error("not a Mcp server instance");
+            -1
+        });
     }
 
     ctx.throw_type_error("not a Mcp server instance");
@@ -528,7 +519,7 @@ pub(crate) fn build_input_schema_from_args(
                 .get_property_str(ctx, "items")
                 .ok()
                 .filter(|v| !v.is_undefined())
-                .and_then(|v| v.as_object().cloned())
+                .and_then(|v| v.as_object())
             {
                 let item_type = items_obj
                     .get_property_str(ctx, "type")
@@ -635,7 +626,7 @@ pub(crate) fn parse_mcp_define(
     let desc = {
         let v = cfg.get_property_str(ctx, "description")?;
         if !v.is_undefined() {
-            v.as_string()
+            v.as_string(true)
                 .map(|s| s.content().encode_utf8(false).to_string())
         } else {
             None
@@ -692,10 +683,11 @@ pub(crate) fn parse_mcp_tools(
     ctx: &mut ScopedContext,
     tools_val: &JSValue,
 ) -> Result<(Vec<Tool>, HashMap<String, usize>, Vec<Object>), i32> {
-    let Some(o) = tools_val.as_object().copied() else {
+    let Some(o) = tools_val.as_object() else {
         ctx.throw_type_error("tools must be an object");
         return Err(-1);
     };
+
     // Only the object-keyed DSL is supported; arrays are rejected.
     if o.is_array(ctx).map_err(|_| {
         ctx.throw_type_error("tools is_array check failed");
@@ -758,7 +750,7 @@ pub(crate) fn parse_mcp_tools_object(
         // handler (required)
         let handler = tool_obj
             .get_property_str(ctx, "handler")
-            .and_then(|v| v.into_callable(ctx))
+            .and_then(|v| v.ensure_callable(ctx))
             .map_err(|_| {
                 ctx.throw_type_error(&format!("tool '{}' handler must be a function", name));
                 -1
