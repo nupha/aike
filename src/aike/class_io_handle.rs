@@ -708,9 +708,7 @@ fn js_fh_writeAll(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     // Extract bytes: TypedArray, ArrayBuffer or String
     let data: Vec<u8> = if let Some(s) = arg.as_string(true) {
         s.content().encode_utf8(false).into_owned().into_bytes()
-    } else if let Some(o) = arg.as_object() {
-        let p = o.payload();
-
+    } else if let Some(p) = arg.payload() {
         if let Some(ta) = p.typed_array() {
             ta.bytes().to_vec()
         } else if let Some(ab) = p.array_buffer() {
@@ -1082,8 +1080,7 @@ fn js_fh_writeSync(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let arg = cc.arg(0);
     let data: Vec<u8> = if let Some(s) = arg.as_string(true) {
         s.content().encode_utf8(false).into_owned().into_bytes()
-    } else if let Some(o) = arg.as_object() {
-        let p = o.payload();
+    } else if let Some(p) = arg.payload() {
         if let Some(ta) = p.typed_array() {
             ta.bytes().to_vec()
         } else if let Some(ab) = p.array_buffer() {

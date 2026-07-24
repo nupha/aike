@@ -63,11 +63,11 @@ pub(super) fn js_spawn(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             let input_val = opts
                 .get_property_str(ctx, "input")
                 .unwrap_or(JSValue::UNDEFINED);
+
             if !input_val.is_undefined_or_null() {
                 if let Some(s) = input_val.as_string(true) {
                     input_data = Some(s.content().encode_utf8(false).into_owned().into_bytes());
-                } else if let Some(obj) = input_val.as_object() {
-                    let payload = obj.payload();
+                } else if let Some(payload) = input_val.payload() {
                     if let Some(ta) = payload.typed_array() {
                         input_data = Some(ta.bytes().to_vec());
                     } else if let Some(ab) = payload.array_buffer() {
