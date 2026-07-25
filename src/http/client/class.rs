@@ -13,16 +13,14 @@ use zuqe::{
 
 use crate::{
     USER_CLASS_DEFS,
-    http::client::config::{HttpClientConfig, ProtocolMode},
-    http::client::transport::{TransportRequest, TransportResponse, perform_request},
-    whatwg::{
-        abort::{JSAbortSignal, signal_notify},
-        fetch::{
-            body::body_to_bytes,
-            headers::{HeaderList, header_list_from_js},
-            response::build_response_from_transport,
-        },
+    http::client::{
+        body::body_to_bytes,
+        config::{HttpClientConfig, ProtocolMode},
+        headers::{HeaderList, header_list_from_js},
+        response::build_response_from_transport,
+        transport::{TransportRequest, TransportResponse, perform_request},
     },
+    whatwg::abort::{JSAbortSignal, signal_notify},
 };
 
 // ── Payload ────────────────────────────────────────────────────────────────

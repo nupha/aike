@@ -1,11 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-//! WHATWG Fetch — Headers class and shared header list.
-//!
-//! `HeaderList` is the single source of truth for HTTP headers, reused by
-//! the client `Response`, the `Request`, and (via helpers) the server side.
-
 use linkme::distributed_slice;
 use zuqe::{
     Array, CallContext, ClassCtorDef, ClassID, FieldDef, JSResult, JSValue, Runtime, ScopedContext,

@@ -1,13 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-//! Core transport types and the shared `perform_request` function.
-//!
-//! Both the WHATWG `fetch()` and the `HttpClient` class delegate to
-//! `perform_request`, which sends the request via a pre-built
-//! `reqwest::Client` and returns the response metadata plus the still-open
-//! `reqwest::Response` (body is streamed lazily by the JS `Response` class).
-
 use std::time::Duration;
 
 /// Per-request data passed to [`perform_request`].
@@ -44,8 +37,7 @@ pub(crate) async fn perform_request(
     client: &reqwest::Client,
     req: TransportRequest,
 ) -> Result<TransportResponse, String> {
-    let method =
-        reqwest::Method::from_bytes(req.method.as_bytes()).unwrap_or(reqwest::Method::GET);
+    let method = reqwest::Method::from_bytes(req.method.as_bytes()).unwrap_or(reqwest::Method::GET);
     let mut rb = client.request(method, &req.url).timeout(req.timeout);
 
     // referrer → Referer header (unless the caller set one explicitly).
@@ -66,7 +58,10 @@ pub(crate) async fn perform_request(
         rb = rb.body(b);
     }
 
-    let resp = rb.send().await.map_err(|e| format!("request failed: {e}"))?;
+    let resp = rb
+        .send()
+        .await
+        .map_err(|e| format!("request failed: {e}"))?;
     let status = resp.status();
     let content_type = resp
         .headers()

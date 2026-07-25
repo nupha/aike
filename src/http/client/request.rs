@@ -9,16 +9,14 @@ use zuqe::{
 
 use crate::{
     USER_CLASS_DEFS,
-    whatwg::{
-        abort::JSAbortSignal,
-        fetch::{
-            body::{
-                BODY_AS_BYTES, BODY_AS_JSON, BODY_AS_TEXT, body_to_bytes, drain_body,
-                make_body_async_iterator,
-            },
-            headers::{HeaderList, HeadersPayload, JSHeaders, header_list_from_js},
+    http::client::{
+        body::{
+            BODY_AS_BYTES, BODY_AS_JSON, BODY_AS_TEXT, body_to_bytes, drain_body,
+            make_body_async_iterator,
         },
+        headers::{HeaderList, HeadersPayload, JSHeaders, header_list_from_js},
     },
+    whatwg::abort::JSAbortSignal,
 };
 
 pub(crate) struct RequestPayload {

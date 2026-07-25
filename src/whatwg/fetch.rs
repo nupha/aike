@@ -1,18 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-//! WHATWG Fetch API — `fetch()`, `Headers`, `Request`, `Response`.
+//! WHATWG Fetch API — `fetch()` global function.
 //!
-//! All four are implemented here and share the header/body/transport
-//! helpers in this module. The client `Response` is also reused by the
-//! legacy `request()` global.
-
-pub(crate) mod body;
-pub(crate) mod headers;
-pub(crate) mod request;
-pub(crate) mod response;
-
-pub(crate) use request::JSRequest;
+//! This module is a thin wrapper that exposes the `fetch()` global per the
+//! WHATWG spec. All implementation lives in `crate::http::client`.
 
 use std::time::Duration;
 
@@ -21,16 +13,15 @@ use zuqe::{
     ScopedContext,
 };
 
-use crate::http::{TransportRequest, TransportResponse, perform_request};
-
-use super::{
-    abort::{JSAbortSignal, signal_is_aborted, signal_notify},
-    fetch::{
-        body::body_to_bytes,
-        headers::{HeaderList, header_list_from_js},
-        response::{build_opaque_redirect_response, build_response_from_transport},
-    },
+use crate::http::client::{
+    body::body_to_bytes,
+    headers::{HeaderList, JSHeaders, header_list_from_js},
+    request::JSRequest,
+    response::{JSResponse, build_opaque_redirect_response, build_response_from_transport},
+    transport::{TransportRequest, TransportResponse, perform_request},
 };
+
+use super::abort::{JSAbortSignal, signal_is_aborted, signal_notify};
 
 /// Error type carried through the fetch result slot.
 enum FetchError {
@@ -266,9 +257,9 @@ pub(crate) fn js_fetch(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 /// Install the `fetch` global and register all WHATWG classes.
 pub(crate) fn install_fetch(ctx: &mut ScopedContext, mut global: Object) -> Result<(), i32> {
     ctx.use_classes(&[
-        response::JSResponse::class_id(),
-        headers::JSHeaders::class_id(),
-        request::JSRequest::class_id(),
+        JSResponse::class_id(),
+        JSHeaders::class_id(),
+        JSRequest::class_id(),
     ])?;
 
     let func = ctx.create_native_function(Callback::Func(js_fetch), "fetch", 1, 0)?;

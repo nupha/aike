@@ -1,14 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-mod client;
-mod server;
+pub(crate) mod client;
+pub(crate) mod server;
 
 pub(crate) use {
-    client::{
-        JSHttpClient,
-        transport::{TransportRequest, TransportResponse, perform_request},
-    },
+    client::JSHttpClient,
     server::{
         IncomingRequest, JSHttpRequest, JSHttpResponse, JSHttpResponseSse, JSHttpServer,
         JSWebSocketStream,
@@ -69,6 +66,6 @@ pub fn init_mod_http(ctx: &mut ScopedContext) -> Result<(), i32> {
     ])?;
 
     ctx.create_module("http", MOD_HTTP_ENTRIES)?;
-    
+
     Ok(())
 }

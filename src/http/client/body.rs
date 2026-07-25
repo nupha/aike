@@ -1,14 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-//! Shared body consumption helpers for WHATWG Fetch `Body` mixin.
-//!
-//! Both the client `Response` and `Request` reuse these: draining a body
-//! channel into text/json/bytes, and creating an async-iterable stream.
-//! Cancel semantics: dropping the body `Receiver` (via `return()` on the
-//! async iterator, or `response.close()`) stops the producer and releases
-//! the underlying connection — no extra state machine needed.
-
 use std::{
     sync::{Arc, Mutex},
     time::{Duration, Instant},
@@ -43,7 +35,7 @@ const BODY_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Drain a body `Receiver` into a `Promise` resolving to text/json/bytes.
 /// `html_convert` applies only in text mode for `text/html` responses.
-pub(super) fn drain_body(
+pub(crate) fn drain_body(
     ctx: &mut ScopedContext,
     rx: Receiver<Vec<u8>>,
     mode: i32,
@@ -113,7 +105,7 @@ pub(super) fn drain_body(
 
 /// Create an async-iterable body stream from a `Receiver`, attaching a
 /// `cancel()` method that releases the connection (see module docs).
-pub(super) fn make_body_async_iterator(ctx: &mut ScopedContext, rx: Receiver<Vec<u8>>) -> JSResult {
+pub(crate) fn make_body_async_iterator(ctx: &mut ScopedContext, rx: Receiver<Vec<u8>>) -> JSResult {
     let iter = AsyncIterableIterator::create_with_receiver::<Vec<u8>>(
         ctx,
         rx,

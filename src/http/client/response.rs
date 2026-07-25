@@ -1,6 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
+//! Unified `Response` class.
+//!
+//! This is the HTTP client response class shared by `fetch()` and
+//! `HttpClient`. It also exposes the WHATWG `Response` constructor,
+//! `Response.error()` / `Response.redirect()` / `Response.json()`
+//! statics, `clone()`, and the `Body` mixin.
+
 use crossbeam::channel::Receiver;
 use linkme::distributed_slice;
 use zuqe::{
@@ -11,15 +18,16 @@ use zuqe::{
 use crate::{
     USER_CLASS_DEFS,
     html::HtmlConvertMode,
-    http::TransportResponse,
-    whatwg::fetch::{
+    http::client::{
         body::{
             BODY_AS_BYTES, BODY_AS_JSON, BODY_AS_TEXT, body_to_bytes, drain_body,
             make_body_async_iterator,
         },
         headers::{HeaderList, HeadersPayload, JSHeaders, header_list_from_js},
+        transport::TransportResponse,
     },
 };
+
 pub(crate) struct ResponsePayload {
     /// Open network response for lazy body streaming (None once taken).
     resp: Option<reqwest::Response>,
@@ -29,7 +37,7 @@ pub(crate) struct ResponsePayload {
     body_consumed: bool,
     /// Fixed body bytes for constructed (synthetic) responses.
     synthetic_body: Option<Vec<u8>>,
-    // --- WHATWG spec fields ---
+
     resp_type: String,
     url: String,
     redirected: bool,
@@ -213,7 +221,7 @@ fn js_response_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
 }
 
 // ---------------------------------------------------------------------------
-// Statics: Response.error() / Response.redirect()
+// Statics: Response.error() / Response.redirect() / Response.json()
 // ---------------------------------------------------------------------------
 
 fn js_response_static_error(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
@@ -223,7 +231,7 @@ fn js_response_static_error(ctx: &mut ScopedContext, _cc: CallContext) -> JSResu
         ResponsePayload {
             resp: None,
             body_rx: None,
-            body_consumed: true, // body is null for error responses
+            body_consumed: true,
             synthetic_body: None,
             resp_type: "error".to_string(),
             url: String::new(),
@@ -308,13 +316,11 @@ fn js_response_static_json(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
         }
     }
 
-    // Serialize data to JSON.
     let json_str = match cc.arg(0).to_serde_json(ctx) {
         Ok(val) => serde_json::to_string(&val).unwrap_or_else(|_| "null".to_string()),
         Err(_) => "null".to_string(),
     };
 
-    // Set Content-Type if not already set.
     if !header_list.has("content-type") {
         header_list.set("Content-Type", "application/json");
     }
@@ -345,7 +351,6 @@ fn js_response_static_json(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
 // Spec property getters
 // ---------------------------------------------------------------------------
 
-/// Magic constants distinguishing which field the shared `js_response_getter` returns.
 const RESPONSE_GET_TYPE: i16 = 0;
 const RESPONSE_GET_URL: i16 = 1;
 const RESPONSE_GET_REDIRECTED: i16 = 2;
@@ -357,7 +362,6 @@ const RESPONSE_GET_CONTENT_LENGTH: i16 = 7;
 const RESPONSE_GET_HEADERS: i16 = 8;
 const RESPONSE_GET_BODY_USED: i16 = 9;
 
-/// Single getter for all `Response` data properties, dispatched by `cc.magic()`.
 fn js_response_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let kind = cc.magic() as i16;
     let this = cc.this();
@@ -411,7 +415,6 @@ fn js_response_body(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 Err(_) => None,
             }
         } else if matches!(p.resp_type.as_str(), "error" | "opaque" | "opaqueredirect") {
-            // null body
             return Ok(JSValue::NULL);
         } else {
             None
@@ -463,7 +466,6 @@ fn js_response_body_as(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     }
 }
 
-/// `formData()` — not yet supported.
 fn js_response_form_data(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     ctx.throw_type_error("formData() is not supported in this runtime");
     Err(-1)
@@ -485,10 +487,8 @@ fn js_response_clone(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let (cloned, taken_resp) = {
         let p = get_response_payload_mut(ctx, &mut this)?;
         if p.body_consumed {
-            // body already locked — cannot clone
             (None, None)
         } else if p.resp.is_some() {
-            // move the network body to the clone; original loses it
             let resp = p.resp.take();
             (Some(p), resp)
         } else {
@@ -576,7 +576,6 @@ const RESPONSE_PROTO: &[FieldDef] = &[
     FieldDef::FUNC("close", 0, js_response_close, 0),
 ];
 
-/// Static methods on the `Response` constructor (`Response.error`, `.redirect`, `.json`).
 const RESPONSE_STATIC_ENTRIES: &[FieldDef] = &[
     FieldDef::FUNC("error", 0, js_response_static_error, 0),
     FieldDef::FUNC("redirect", 2, js_response_static_redirect, 0),
