@@ -75,6 +75,16 @@ impl HeaderList {
         &self.list
     }
 
+    /// Get all values for a given header name (case-insensitive).
+    pub(crate) fn get_all(&self, name: &str) -> Vec<String> {
+        let lower = name.to_lowercase();
+        self.list
+            .iter()
+            .filter(|(k, _)| k.to_lowercase() == lower)
+            .map(|(_, v)| v.clone())
+            .collect()
+    }
+
     pub(crate) fn to_vec(&self) -> Vec<(String, String)> {
         self.list.clone()
     }
@@ -367,6 +377,22 @@ fn js_headers_for_each(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     Ok(JSValue::UNDEFINED)
 }
 
+/// `getSetCookie()` — returns all `Set-Cookie` header values as an array.
+fn js_headers_get_set_cookie(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let this = cc.this();
+    let h = get_headers(ctx, &this)?;
+    let cookies: Vec<JSValue> = h
+        .list
+        .get_all("set-cookie")
+        .into_iter()
+        .map(|v| {
+            ctx.create_string_from_utf8(v.into_bytes())
+                .map(JSValue::make_string)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Array::from_values(ctx, cookies).map(JSValue::from)
+}
+
 /// `[Symbol.iterator]` — yields `[name, value]` pairs so that
 /// `for (const [k, v] of headers)` works.
 fn js_headers_iterator(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -398,6 +424,7 @@ const HEADERS_PROTO: &[FieldDef] = &[
     FieldDef::FUNC("keys", 0, js_headers_keys, 0),
     FieldDef::FUNC("values", 0, js_headers_values, 0),
     FieldDef::FUNC("entries", 0, js_headers_entries, 0),
+    FieldDef::FUNC("getSetCookie", 0, js_headers_get_set_cookie, 0),
     FieldDef::FUNC("[Symbol.iterator]", 0, js_headers_iterator, 0),
 ];
 

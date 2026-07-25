@@ -12,7 +12,10 @@ use crate::{
     whatwg::{
         abort::JSAbortSignal,
         fetch::{
-            body::{BODY_AS_BYTES, body_to_bytes, drain_body, make_body_async_iterator},
+            body::{
+                BODY_AS_BYTES, BODY_AS_JSON, BODY_AS_TEXT, body_to_bytes, drain_body,
+                make_body_async_iterator,
+            },
             headers::{HeaderList, HeadersPayload, JSHeaders, header_list_from_js},
         },
     },
@@ -256,8 +259,10 @@ fn js_req_body(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     }
 }
 
-/// `bytes()` / `arrayBuffer()` for Request body (rarely used; provided for completeness).
+/// Body read methods for Request (bytes, text, json, arrayBuffer).
 fn js_req_body_as(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let magic = cc.magic();
+
     let mut this = cc.this();
     let rx = {
         let p = get_request_payload_mut(ctx, &mut this)?;
@@ -276,12 +281,18 @@ fn js_req_body_as(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     };
 
     match rx {
-        Some(rx) => drain_body(ctx, rx, BODY_AS_BYTES, None),
+        Some(rx) => drain_body(ctx, rx, magic, None),
         None => {
             ctx.throw_type_error("body already consumed or unavailable");
             Err(-1)
         }
     }
+}
+
+/// `formData()` — not yet supported.
+fn js_req_form_data(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    ctx.throw_type_error("formData() is not supported in this runtime");
+    Err(-1)
 }
 
 fn js_req_clone(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -336,8 +347,12 @@ const REQUEST_PROTO: &[FieldDef] = &[
     FieldDef::GETSET("headers", Some(js_req_headers_getter), None, 0),
     FieldDef::GETSET("bodyUsed", Some(js_req_body_used_getter), None, 0),
     FieldDef::GETSET("body", Some(js_req_body), None, 0),
-    FieldDef::FUNC("bytes", 0, js_req_body_as, 0),
-    FieldDef::FUNC("arrayBuffer", 0, js_req_body_as, 0),
+    FieldDef::FUNC("bytes", 0, js_req_body_as, BODY_AS_BYTES as i16),
+    FieldDef::FUNC("arrayBuffer", 0, js_req_body_as, BODY_AS_BYTES as i16),
+    FieldDef::FUNC("text", 0, js_req_body_as, BODY_AS_TEXT as i16),
+    FieldDef::FUNC("json", 0, js_req_body_as, BODY_AS_JSON as i16),
+    FieldDef::FUNC("blob", 0, js_req_body_as, BODY_AS_BYTES as i16),
+    FieldDef::FUNC("formData", 0, js_req_form_data, 0),
     FieldDef::FUNC("clone", 0, js_req_clone, 0),
 ];
 

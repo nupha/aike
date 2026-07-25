@@ -4,7 +4,21 @@
 //! - `types/base/*.d.ts`          — always included (base types)
 //! - `types/features/llama_cpp/*.d.ts` — only included when feature "llama_cpp" is enabled
 
-use std::{env, fs, path::Path};
+use std::{env, fs, path::Path, io};
+
+/// Recursively collect `.d.ts` files under `dir`.
+fn collect_dts(dir: impl AsRef<Path>, out: &mut Vec<fs::DirEntry>) -> io::Result<()> {
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_dts(&path, out)?;
+        } else if path.to_string_lossy().ends_with(".d.ts") {
+            out.push(entry);
+        }
+    }
+    Ok(())
+}
 
 fn main() {
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
@@ -13,22 +27,19 @@ fn main() {
     // --- Collect base fragments (always included) ---
     let base_dir = types_dir.join("base");
     let mut parts: Vec<(String, String)> = Vec::new();
-    let mut base_entries: Vec<_> = fs::read_dir(&base_dir)
-        .expect("types/base/ directory not found")
-        .filter_map(|e| e.ok())
-        .filter(|e| {
-            let name = e.file_name();
-            let s = name.to_string_lossy();
-            s.ends_with(".d.ts")
-        })
-        .collect();
-    base_entries.sort_by_key(|e| e.file_name());
+    let mut base_entries = Vec::new();
+    collect_dts(base_dir.clone(), &mut base_entries)
+        .expect("failed to scan types/base/");
+    base_entries.sort_by_key(|e| e.path().to_string_lossy().to_string());
     for entry in &base_entries {
         let path = entry.path();
-        let name = entry.file_name().to_string_lossy().to_string();
+        let relative = path.strip_prefix(&base_dir)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .to_string();
         let content = fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()));
-        parts.push((name, content));
+        parts.push((relative, content));
     }
 
     // --- Collect feature-gated fragments ---

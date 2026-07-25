@@ -17,15 +17,20 @@ pub(crate) use request::JSRequest;
 
 use std::time::Duration;
 
-use zuqe::{CallContext, Callback, ErrorKind, Exception, JSResult, JSValue, Object, ScopedContext};
-
-use crate::whatwg::abort::{JSAbortSignal, signal_is_aborted, signal_notify};
-use crate::whatwg::fetch::body::body_to_bytes;
-use crate::whatwg::fetch::headers::{HeaderList, header_list_from_js};
-use crate::whatwg::fetch::response::{
-    build_opaque_redirect_response, build_response_from_transport,
+use zuqe::{
+    CallContext, Callback, ErrorKind, Exception, JSResult, JSValue, NativeObject, Object,
+    ScopedContext,
 };
-use crate::whatwg::fetch::transport::{TransportRequest, TransportResponse, perform_request};
+
+use super::{
+    abort::{JSAbortSignal, signal_is_aborted, signal_notify},
+    fetch::{
+        body::body_to_bytes,
+        headers::{HeaderList, header_list_from_js},
+        response::{build_opaque_redirect_response, build_response_from_transport},
+        transport::{TransportRequest, TransportResponse, perform_request},
+    },
+};
 
 /// Error type carried through the fetch result slot.
 enum FetchError {
@@ -70,14 +75,9 @@ pub(crate) fn js_fetch(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut redirect = String::from("follow");
     let mut timeout = Duration::from_secs(30);
 
-    // RequestInit fields (forwarded to transport; some map to reqwest behavior).
-    let mut mode = String::from("cors");
+    // RequestInit fields used for client config.
     let mut credentials = String::from("same-origin");
-    let mut cache = String::from("default");
     let mut referrer = String::from("about:client");
-    let mut referrer_policy = String::new();
-    let mut integrity = String::new();
-    let mut keepalive = false;
     let mut signal_val: Option<JSValue> = None;
 
     // Inherit from a Request input.
@@ -88,13 +88,8 @@ pub(crate) fn js_fetch(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         redirect = p.redirect.clone();
         signal_val = p.signal.clone();
         body_bytes = p.synthetic_body.clone();
-        mode = p.mode.clone();
         credentials = p.credentials.clone();
-        cache = p.cache.clone();
         referrer = p.referrer.clone();
-        referrer_policy = p.referrer_policy.clone();
-        integrity = p.integrity.clone();
-        keepalive = p.keepalive;
     } else if !input.is_undefined_or_null() {
         let href = input.get_property_str(ctx, "href")?;
         if !href.is_undefined() {
@@ -164,30 +159,11 @@ pub(crate) fn js_fetch(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                     )
                 }
             };
-            if let Some(v) = read_str(o, "mode") {
-                mode = v;
-            }
             if let Some(v) = read_str(o, "credentials") {
                 credentials = v;
             }
-            if let Some(v) = read_str(o, "cache") {
-                cache = v;
-            }
             if let Some(v) = read_str(o, "referrer") {
                 referrer = v;
-            }
-            if let Some(v) = read_str(o, "referrerPolicy") {
-                referrer_policy = v;
-            }
-            if let Some(v) = read_str(o, "integrity") {
-                integrity = v;
-            }
-            let ka = o.get_property_str(ctx, "keepalive")?;
-            if !ka.is_undefined() {
-                keepalive = ka
-                    .to_number(ctx)
-                    .map(|n| n.to_f64() != 0.0)
-                    .unwrap_or(false);
             }
         }
     }
@@ -234,6 +210,23 @@ pub(crate) fn js_fetch(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         return Ok(promise.into());
     }
 
+    // Build a reqwest::Client with redirect policy and cookie jar.
+    let redirect_policy = match redirect.as_str() {
+        "error" | "manual" => reqwest::redirect::Policy::none(),
+        _ => reqwest::redirect::Policy::limited(10),
+    };
+    let mut builder = reqwest::Client::builder().redirect(redirect_policy);
+    if credentials == "include" || credentials == "same-origin" {
+        builder = builder.cookie_store(true);
+    }
+    let client = match builder.build() {
+        Ok(c) => c,
+        Err(e) => {
+            ctx.throw_internal_error(&format!("failed to build HTTP client: {e}"));
+            return Err(-1);
+        }
+    };
+
     let req = TransportRequest {
         method,
         url: url_str.clone(),
@@ -241,20 +234,16 @@ pub(crate) fn js_fetch(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         body: body_bytes,
         timeout,
         redirect: redirect.clone(),
-        credentials,
         referrer,
-        integrity,
-        mode,
-        cache,
-        referrer_policy,
-        keepalive,
     };
-    let rs = result_slot.clone();
 
-    match notify {
+    let rs = result_slot.clone();
+    let notify2 = notify;
+
+    match notify2 {
         Some(n) => {
             tokio::spawn(async move {
-                let fut = perform_request(req);
+                let fut = perform_request(&client, req);
                 tokio::select! {
                     r = fut => { let _ = rs.commit(r.map_err(FetchError::Other)); }
                     _ = n.notified() => { let _ = rs.commit(Err(FetchError::Abort)); }
@@ -263,7 +252,9 @@ pub(crate) fn js_fetch(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         }
         None => {
             tokio::spawn(async move {
-                let r = perform_request(req).await.map_err(FetchError::Other);
+                let r = perform_request(&client, req)
+                    .await
+                    .map_err(FetchError::Other);
                 let _ = rs.commit(r);
             });
         }
@@ -272,10 +263,16 @@ pub(crate) fn js_fetch(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     Ok(promise.into())
 }
 
-/// Install the `fetch` global and `Response` statics.
+/// Install the `fetch` global and register all WHATWG classes.
 pub(crate) fn install_fetch(ctx: &mut ScopedContext, mut global: Object) -> Result<(), i32> {
+    ctx.use_classes(&[
+        response::JSResponse::class_id(),
+        headers::JSHeaders::class_id(),
+        request::JSRequest::class_id(),
+    ])?;
+
     let func = ctx.create_native_function(Callback::Func(js_fetch), "fetch", 1, 0)?;
     global.define_property_value_str(ctx, "fetch", func.into(), zuqe::JS_PROP_C_W_E)?;
-    crate::whatwg::fetch::response::register_response_statics(ctx, &mut global)?;
+
     Ok(())
 }

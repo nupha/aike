@@ -3,6 +3,7 @@
 
 mod class_http_server;
 mod class_request;
+pub(crate) mod client;
 mod outbound_buffer;
 mod response;
 mod server;

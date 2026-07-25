@@ -12,8 +12,8 @@
 use crossbeam::channel::Receiver;
 use linkme::distributed_slice;
 use zuqe::{
-    CallContext, Callback, ClassCtorDef, ClassID, FieldDef, JSResult, JSValue, Object, Runtime,
-    ScopedContext, def_native_object,
+    CallContext, ClassCtorDef, ClassID, FieldDef, JSResult, JSValue, Runtime, ScopedContext,
+    def_native_object,
 };
 
 use crate::{
@@ -295,29 +295,60 @@ fn js_response_static_redirect(ctx: &mut ScopedContext, cc: CallContext) -> JSRe
     .map(JSValue::from)
 }
 
-/// Wire the static methods onto the `Response` constructor on `global`.
-pub(crate) fn register_response_statics(
-    ctx: &mut ScopedContext,
-    global: &mut Object,
-) -> Result<(), i32> {
-    let ctor_val = global.get_property_str(ctx, "Response")?;
-    let Some(mut ctor) = ctor_val.as_object() else {
-        return Ok(());
+/// `Response.json(data, init?)` — creates a JSON response.
+fn js_response_static_json(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let mut status = 200u16;
+    let mut status_text = String::new();
+    let mut header_list = HeaderList::new();
+
+    if cc.length() > 1 {
+        if let Some(o) = cc.arg(1).as_object() {
+            let s = o.get_property_str(ctx, "status")?;
+            if !s.is_undefined() {
+                status = s.to_number(ctx)?.to_i32() as u16;
+            }
+            let st = o.get_property_str(ctx, "statusText")?;
+            if !st.is_undefined() {
+                status_text = st.to_string(ctx)?.content().encode_utf8(false).to_string();
+            }
+            let mut h = o.get_property_str(ctx, "headers")?;
+            if !h.is_undefined_or_null() {
+                header_list = header_list_from_js(ctx, &mut h)?;
+            }
+        }
+    }
+
+    // Serialize data to JSON.
+    let json_str = match cc.arg(0).to_serde_json(ctx) {
+        Ok(val) => serde_json::to_string(&val).unwrap_or_else(|_| "null".to_string()),
+        Err(_) => "null".to_string(),
     };
 
-    let error_fn =
-        ctx.create_native_function(Callback::Func(js_response_static_error), "error", 0, 0)?;
-    ctor.define_property_value_str(ctx, "error", error_fn.into(), zuqe::JS_PROP_C_W_E)?;
+    // Set Content-Type if not already set.
+    if !header_list.has("content-type") {
+        header_list.set("Content-Type", "application/json");
+    }
 
-    let redirect_fn = ctx.create_native_function(
-        Callback::Func(js_response_static_redirect),
-        "redirect",
-        2,
-        0,
-    )?;
-    ctor.define_property_value_str(ctx, "redirect", redirect_fn.into(), zuqe::JS_PROP_C_W_E)?;
-
-    Ok(())
+    let body = json_str.into_bytes();
+    JSResponse::new_instance(
+        ctx,
+        JSValue::UNDEFINED,
+        ResponsePayload {
+            resp: None,
+            body_rx: None,
+            body_consumed: false,
+            synthetic_body: Some(body),
+            resp_type: "default".to_string(),
+            url: String::new(),
+            redirected: false,
+            status,
+            status_text,
+            content_type: "application/json".to_string(),
+            headers: header_list.to_vec(),
+            content_length: None,
+        },
+    )
+    .map(JSValue::from)
 }
 
 // ---------------------------------------------------------------------------
@@ -442,6 +473,12 @@ fn js_response_body_as(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     }
 }
 
+/// `formData()` — not yet supported.
+fn js_response_form_data(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    ctx.throw_type_error("formData() is not supported in this runtime");
+    Err(-1)
+}
+
 fn js_response_close(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut this = cc.this();
     let data = get_response_payload_mut(ctx, &mut this)?;
@@ -541,8 +578,17 @@ const RESPONSE_PROTO: &[FieldDef] = &[
     FieldDef::FUNC("text", 0, js_response_body_as, BODY_AS_TEXT as i16),
     FieldDef::FUNC("json", 0, js_response_body_as, BODY_AS_JSON as i16),
     FieldDef::FUNC("arrayBuffer", 0, js_response_body_as, BODY_AS_BYTES as i16),
+    FieldDef::FUNC("blob", 0, js_response_body_as, BODY_AS_BYTES as i16),
+    FieldDef::FUNC("formData", 0, js_response_form_data, 0),
     FieldDef::FUNC("clone", 0, js_response_clone, 0),
     FieldDef::FUNC("close", 0, js_response_close, 0),
+];
+
+/// Static methods on the `Response` constructor (`Response.error`, `.redirect`, `.json`).
+const RESPONSE_STATIC_ENTRIES: &[FieldDef] = &[
+    FieldDef::FUNC("error", 0, js_response_static_error, 0),
+    FieldDef::FUNC("redirect", 2, js_response_static_redirect, 0),
+    FieldDef::FUNC("json", 2, js_response_static_json, 0),
 ];
 
 def_native_object!(
@@ -550,7 +596,11 @@ def_native_object!(
     JSResponse,
     ResponsePayload,
     RESPONSE_PROTO,
-    Some(ClassCtorDef::new(js_response_constructor, 1, true).expose_to_global())
+    Some(
+        ClassCtorDef::new(js_response_constructor, 1, true)
+            .expose_to_global()
+            .entries(RESPONSE_STATIC_ENTRIES)
+    )
 );
 
 #[distributed_slice(USER_CLASS_DEFS)]

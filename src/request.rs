@@ -1,6 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
+//! Legacy `request()` global (to be removed in a future release).
+//!
+//! Delegates to the shared `perform_request` transport and returns the
+//! unified `Response` class (same as `fetch()`).
+
 use std::time::Duration;
 
 use zuqe::{
@@ -14,10 +19,7 @@ use crate::whatwg::fetch::{
     transport::{TransportResponse, perform_request, request_with_headers},
 };
 
-/// request(url, options?) — returns Promise<Response>
-///
-/// Delegates to the shared `fetch` transport and returns the unified
-/// `Response` class (same as `fetch()`).
+/// `request(url, options?)` — returns `Promise<Response>`
 pub(crate) fn js_request(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let url_str = cc
         .arg(0)
@@ -64,6 +66,19 @@ pub(crate) fn js_request(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         }
     }
 
+    // Build a default reqwest::Client.
+    let client = match reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::limited(10))
+        .cookie_store(true)
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            ctx.throw_internal_error(&format!("failed to build HTTP client: {e}"));
+            return Err(-1);
+        }
+    };
+
     let result_slot = PromiseResultSlot::<Result<TransportResponse, String>>::new();
     let url_clone = url_str.clone();
     let promise =
@@ -83,7 +98,7 @@ pub(crate) fn js_request(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         timeout,
     );
     tokio::spawn(async move {
-        let r = perform_request(req).await;
+        let r = perform_request(&client, req).await;
         let _ = result_slot.commit(r);
     });
 

@@ -324,7 +324,7 @@ fn spawn_async(ctx: &mut ScopedContext, mut child: tokio::process::Child, pid: i
                 let code = status.code().unwrap_or(-1);
                 let _ = tx_exit.send(Ok(code));
                 let sig = get_signal_code(&status)
-                    .and_then(|n| crate::aike::signal::signal_name(n as u32))
+                    .and_then(|n| super::signal::signal_name(n as u32))
                     .map(String::from);
                 let _ = tx_signal.send(Ok(sig));
             }
@@ -352,7 +352,7 @@ fn js_child_kill(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         let arg = cc.arg(0);
         if let Some(s) = arg.as_string(true) {
             let name = s.content().encode_utf8(false);
-            crate::aike::signal::signal_number(&name)
+            super::signal::signal_number(&name)
                 .map(|n| n as i32)
                 .unwrap_or(libc::SIGTERM)
         } else {

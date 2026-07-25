@@ -63,6 +63,7 @@ reqwest = { version = "0.13", default-features = false, features = [
     "gzip",
     "brotli",
     "deflate",
+    "http2",
     "rustls",
     "cookies",
 ] }

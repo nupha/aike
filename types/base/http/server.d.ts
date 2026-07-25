@@ -1,6 +1,8 @@
 declare module "http" {
   import { HttpMcp } from "mcp";
 
+  // ── HTTP server ──────────────────────────────────────────────────
+
   /** Incoming HTTP request passed to route handlers. Cannot be constructed directly. */
   export class HttpServerRequest {
     /** HTTP method (GET, POST, PUT, etc.). */
