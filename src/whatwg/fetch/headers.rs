@@ -16,23 +16,44 @@ use crate::USER_CLASS_DEFS;
 
 /// Case-insensitive header storage. Names keep their original casing; lookups
 /// are case-insensitive per the Fetch/HTTP spec.
+///
+/// `Set-Cookie` values are stored separately because they MUST NOT be
+/// comma-joined per the Fetch/HTTP spec (unlike all other headers).
 #[derive(Clone, Default)]
 pub(crate) struct HeaderList {
     list: Vec<(String, String)>,
+    /// Separate storage for `Set-Cookie` values (never comma-merged).
+    set_cookies: Vec<String>,
 }
 
 impl HeaderList {
     pub(crate) fn new() -> Self {
-        HeaderList { list: Vec::new() }
+        HeaderList {
+            list: Vec::new(),
+            set_cookies: Vec::new(),
+        }
     }
 
     pub(crate) fn from_vec(v: Vec<(String, String)>) -> Self {
-        HeaderList { list: v }
+        let mut h = HeaderList::new();
+        for (name, value) in v {
+            if name.eq_ignore_ascii_case("set-cookie") {
+                h.set_cookies.push(value);
+            } else {
+                h.list.push((name, value));
+            }
+        }
+        h
     }
 
     /// Append a value, combining with any existing same-name (case-insensitive)
-    /// header as a comma-separated list.
+    /// header as a comma-separated list. `Set-Cookie` is an exception — values
+    /// are stored individually and never comma-merged.
     pub(crate) fn append(&mut self, name: &str, value: &str) {
+        if name.eq_ignore_ascii_case("set-cookie") {
+            self.set_cookies.push(value.to_string());
+            return;
+        }
         let lower = name.to_lowercase();
         if let Some(pos) = self
             .list
@@ -47,18 +68,34 @@ impl HeaderList {
     }
 
     /// Set a value, replacing any existing same-name header.
+    /// For `Set-Cookie`, replaces all existing values with a single entry.
     pub(crate) fn set(&mut self, name: &str, value: &str) {
+        if name.eq_ignore_ascii_case("set-cookie") {
+            self.set_cookies.clear();
+            self.set_cookies.push(value.to_string());
+            return;
+        }
         let lower = name.to_lowercase();
         self.list.retain(|(k, _)| k.to_lowercase() != lower);
         self.list.push((name.to_string(), value.to_string()));
     }
 
     pub(crate) fn delete(&mut self, name: &str) {
+        if name.eq_ignore_ascii_case("set-cookie") {
+            self.set_cookies.clear();
+            return;
+        }
         let lower = name.to_lowercase();
         self.list.retain(|(k, _)| k.to_lowercase() != lower);
     }
 
     pub(crate) fn get(&self, name: &str) -> Option<String> {
+        if name.eq_ignore_ascii_case("set-cookie") {
+            if self.set_cookies.is_empty() {
+                return None;
+            }
+            return Some(self.set_cookies.join(", "));
+        }
         let lower = name.to_lowercase();
         self.list
             .iter()
@@ -67,16 +104,26 @@ impl HeaderList {
     }
 
     pub(crate) fn has(&self, name: &str) -> bool {
+        if name.eq_ignore_ascii_case("set-cookie") {
+            return !self.set_cookies.is_empty();
+        }
         let lower = name.to_lowercase();
         self.list.iter().any(|(k, _)| k.to_lowercase() == lower)
     }
 
-    pub(crate) fn entries(&self) -> &[(String, String)] {
-        &self.list
+    pub(crate) fn entries(&self) -> Vec<(String, String)> {
+        let mut out = self.list.clone();
+        for v in &self.set_cookies {
+            out.push(("set-cookie".to_string(), v.clone()));
+        }
+        out
     }
 
     /// Get all values for a given header name (case-insensitive).
     pub(crate) fn get_all(&self, name: &str) -> Vec<String> {
+        if name.eq_ignore_ascii_case("set-cookie") {
+            return self.set_cookies.clone();
+        }
         let lower = name.to_lowercase();
         self.list
             .iter()
@@ -86,7 +133,11 @@ impl HeaderList {
     }
 
     pub(crate) fn to_vec(&self) -> Vec<(String, String)> {
-        self.list.clone()
+        let mut out = self.list.clone();
+        for v in &self.set_cookies {
+            out.push(("set-cookie".to_string(), v.clone()));
+        }
+        out
     }
 }
 

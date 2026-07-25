@@ -471,10 +471,12 @@ fn js_response_form_data(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
 fn js_response_close(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut this = cc.this();
-    let data = get_response_payload_mut(ctx, &mut this)?;
-    let _ = data.body_rx.take();
-    let _ = data.resp.take();
-    let _ = data.synthetic_body.take();
+    let payload = get_response_payload_mut(ctx, &mut this)?;
+
+    let _ = payload.body_rx.take();
+    let _ = payload.resp.take();
+    let _ = payload.synthetic_body.take();
+
     Ok(JSValue::UNDEFINED)
 }
 
