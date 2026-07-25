@@ -1,11 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-//! WHATWG Fetch API — `fetch()` global function.
-//!
-//! This module is a thin wrapper that exposes the `fetch()` global per the
-//! WHATWG spec. All implementation lives in `crate::http::client`.
-
 use std::time::Duration;
 
 use zuqe::{
@@ -256,12 +251,6 @@ pub(crate) fn js_fetch(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
 /// Install the `fetch` global and register all WHATWG classes.
 pub(crate) fn install_fetch(ctx: &mut ScopedContext, mut global: Object) -> Result<(), i32> {
-    ctx.use_classes(&[
-        JSResponse::class_id(),
-        JSHeaders::class_id(),
-        JSRequest::class_id(),
-    ])?;
-
     let func = ctx.create_native_function(Callback::Func(js_fetch), "fetch", 1, 0)?;
     global.define_property_value_str(ctx, "fetch", func.into(), zuqe::JS_PROP_C_W_E)?;
 

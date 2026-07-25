@@ -14,6 +14,12 @@ pub(crate) use {
 
 use zuqe::{FieldDef, NativeObject, ScopedContext};
 
+use crate::http::client::{
+    headers::JSHeaders,
+    request::JSRequest,
+    response::JSResponse,
+};
+
 /// HTTP method enum — shared across submodules.
 #[allow(clippy::upper_case_acronyms)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -58,6 +64,9 @@ const MOD_HTTP_ENTRIES: &[FieldDef] = &[
 pub fn init_mod_http(ctx: &mut ScopedContext) -> Result<(), i32> {
     ctx.use_classes(&[
         JSHttpClient::class_id(),
+        JSResponse::class_id(),
+        JSHeaders::class_id(),
+        JSRequest::class_id(),
         JSHttpServer::class_id(),
         JSHttpRequest::class_id(),
         JSHttpResponse::class_id(),
