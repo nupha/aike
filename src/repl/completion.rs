@@ -1,7 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-use std::{borrow::Cow, sync::Arc, time::Duration};
+use std::{
+    borrow::Cow,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
+    time::Duration,
+};
 
 use rustyline::{
     Context,
@@ -46,6 +53,21 @@ pub(crate) struct CompletionState {
         Arc<tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<CompletionRequest>>>,
     /// Cached hint suffix for the Hinter.
     pub(crate) hint_cache: Arc<parking_lot::Mutex<Option<String>>>,
+    /// Line for which the hint was cached (staleness guard).
+    pub(crate) hint_line: Arc<parking_lot::Mutex<Option<String>>>,
+
+    // -- history navigation state -----------------------------------------
+    /// True while the user is actively scrolling history (started from empty
+    /// input).  Reset when `AikeHelper::hint()` detects a user keystroke.
+    pub(crate) nav_active: Arc<AtomicBool>,
+    /// Incremented by `HistNav` each time it dispatches an unconditional
+    /// navigation command.  Used by `hint()` to distinguish "redraw caused
+    /// by navigation" from "redraw caused by user typing".
+    pub(crate) nav_event: Arc<AtomicU64>,
+    /// Last `nav_event` value consumed by `hint()`.  Set on the first
+    /// `hint()` call after a navigation event; used to detect the SECOND
+    /// `hint()` call (if any) so we don't incorrectly reset `nav_active`.
+    pub(crate) hint_nav_seen: Arc<AtomicU64>,
 }
 
 impl CompletionState {
@@ -55,11 +77,16 @@ impl CompletionState {
             req_tx: tx,
             req_rx: Arc::new(tokio::sync::Mutex::new(rx)),
             hint_cache: Arc::new(parking_lot::Mutex::new(None)),
+            hint_line: Arc::new(parking_lot::Mutex::new(None)),
+            nav_active: Arc::new(AtomicBool::new(false)),
+            nav_event: Arc::new(AtomicU64::new(0)),
+            hint_nav_seen: Arc::new(AtomicU64::new(0)),
         }
     }
 
     pub(crate) fn clear_hint(&self) {
         *self.hint_cache.lock() = None;
+        *self.hint_line.lock() = None;
     }
 }
 
@@ -178,7 +205,23 @@ impl Hinter for AikeHelper {
     type Hint = String;
 
     fn hint(&self, line: &str, pos: usize, _ctx: &Context<'_>) -> Option<String> {
+        // Detect navigation-vs-typing: if nav_event changed since the last
+        // hint() call, the redraw was triggered by a navigation command
+        // (PreviousHistory/NextHistory); otherwise by a user keystroke.
+        let nav = self.completion_state.nav_event.load(Ordering::Acquire);
+        let seen =
+            self.completion_state
+                .hint_nav_seen
+                .swap(nav, Ordering::AcqRel);
+        if nav == seen && self.completion_state.nav_active.load(Ordering::Acquire) {
+            // No new nav event since last hint → user typed.
+            self.completion_state
+                .nav_active
+                .store(false, Ordering::Release);
+        }
+
         if line.is_empty() || pos == 0 {
+            self.completion_state.clear_hint();
             return None;
         }
 
@@ -195,6 +238,7 @@ impl Hinter for AikeHelper {
         match resp_rx.recv_timeout(Duration::from_millis(50)) {
             Ok(resp) => {
                 if resp.candidates.is_empty() {
+                    self.completion_state.clear_hint();
                     return None;
                 }
                 let prefix = &line[resp.start..pos];
@@ -207,14 +251,21 @@ impl Hinter for AikeHelper {
                     prefix,
                 )?;
                 if suffix.is_empty() {
+                    self.completion_state.clear_hint();
                     return None;
                 }
-                // Cache the hint
+                // Cache the hint + the line it was computed for
                 *self.completion_state.hint_cache.lock() = Some(suffix.clone());
+                *self.completion_state.hint_line.lock() = Some(line.to_string());
                 Some(suffix)
             }
             Err(_) => {
-                // Timeout: return cached hint if available
+                // Timeout: only return cached hint if line hasn't changed
+                // (e.g. after history navigation the line changes but the
+                // stale cached hint would be wrong).
+                if self.completion_state.hint_line.lock().as_deref() != Some(line) {
+                    return None;
+                }
                 self.completion_state.hint_cache.lock().clone()
             }
         }

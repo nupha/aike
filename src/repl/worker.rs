@@ -3,13 +3,19 @@
 
 use std::{
     process::ExitCode,
-    sync::{Arc, atomic::Ordering},
+    sync::{
+        Arc,
+        atomic::Ordering::{self, Acquire, Release},
+    },
 };
 
 use rustyline::{
     Cmd, ConditionalEventHandler, Editor, Event, EventContext, EventHandler, KeyCode, KeyEvent,
-    Modifiers, RepeatCount, config::Builder as ConfigBuilder, config::CompletionType,
-    error::ReadlineError, history::FileHistory,
+    Modifiers, RepeatCount,
+    config::Builder as ConfigBuilder,
+    config::{CompletionType, Configurer},
+    error::ReadlineError,
+    history::{FileHistory, History, SearchDirection},
 };
 
 use crate::repl::{
@@ -28,32 +34,67 @@ pub(crate) enum InputCommand {
     Quit,
 }
 
-/// Event handler that clears the hint cache before performing history navigation.
-struct HistoryHandler {
+/// Conditional Up/Down handler: navigates history unconditionally
+/// (PreviousHistory/NextHistory) while the user is flipping through history,
+/// but switches to prefix-filtered search (HistorySearchBackward/Forward)
+/// once the user types on the input.
+///
+/// The transition is detected via a shared `nav_event` counter: each time
+/// we dispatch an unconditional nav command we bump the counter, and the
+/// `Hinter::hint` callback (which fires after every display refresh) uses
+/// the counter to distinguish "redraw from user keystroke" from "redraw
+/// from history navigation".
+struct HistNav {
     completion_state: CompletionState,
-    cmd: Cmd,
+    /// The rustyline command for prefix search (HistorySearchBackward or Forward).
+    search_cmd: Cmd,
 }
 
-impl HistoryHandler {
-    fn new(completion_state: CompletionState, cmd: Cmd) -> Self {
+impl HistNav {
+    fn new(completion_state: CompletionState, search_cmd: Cmd) -> Self {
         Self {
             completion_state,
-            cmd,
+            search_cmd,
         }
     }
 }
 
-impl ConditionalEventHandler for HistoryHandler {
+impl ConditionalEventHandler for HistNav {
     fn handle(
         &self,
         _evt: &Event,
         _n: RepeatCount,
         _positive: bool,
-        _ctx: &EventContext<'_>,
+        ctx: &EventContext<'_>,
     ) -> Option<Cmd> {
         self.completion_state.clear_hint();
-        Some(self.cmd.clone())
+        let line = ctx.line();
+        if line.is_empty() || self.completion_state.nav_active.load(Acquire) {
+            // Empty input, or we're mid-navigation: keep unconditional nav.
+            self.completion_state.nav_active.store(true, Release);
+            self.completion_state.nav_event.fetch_add(1, Release);
+            Some(match self.search_cmd {
+                Cmd::HistorySearchBackward => Cmd::PreviousHistory,
+                Cmd::HistorySearchForward => Cmd::NextHistory,
+                _ => self.search_cmd.clone(),
+            })
+        } else {
+            // Non-empty line and nav_active is false → user typed → prefix search.
+            Some(self.search_cmd.clone())
+        }
     }
+}
+
+/// Check if `line` already exists anywhere in the history (global dedup).
+fn history_contains(hist: &impl History, line: &str) -> bool {
+    for i in 0..hist.len() {
+        if let Ok(Some(result)) = hist.get(i, SearchDirection::Forward) {
+            if result.entry.as_ref() == line {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn process_input_line(
@@ -98,8 +139,11 @@ fn process_input_line(
 pub(crate) async fn run<'c>(mut rt: zuqe::Runtime, mut ctx0: zuqe::Context<'c>) -> ExitCode {
     let completion_state = CompletionState::new();
 
-    // Build rustyline editor
-    let config = ConfigBuilder::new()
+    // Build rustyline editor.  Call set_history_ignore_dups first (it takes
+    // &mut self); then chain consuming builder methods.
+    let mut builder = ConfigBuilder::new();
+    let _ = builder.set_history_ignore_dups(false);
+    let config = builder
         .auto_add_history(false)
         .completion_type(CompletionType::List)
         .build();
@@ -154,20 +198,17 @@ pub(crate) async fn run<'c>(mut rt: zuqe::Runtime, mut ctx0: zuqe::Context<'c>) 
     });
     editor.set_helper(Some(helper));
 
-    // Bind Up/Down to history search by prefix.
-    // HistorySearchBackward/Forward filters history by the current input prefix
-    // (like bash's history-search-backward).
-    // HistoryHandler clears the hint cache before navigation.
+    // Up/Down: empty input → unconditional navigation; non-empty → prefix search.
     editor.bind_sequence(
         KeyEvent(KeyCode::Up, Modifiers::NONE),
-        EventHandler::Conditional(Box::new(HistoryHandler::new(
+        EventHandler::Conditional(Box::new(HistNav::new(
             completion_state.clone(),
             Cmd::HistorySearchBackward,
         ))),
     );
     editor.bind_sequence(
         KeyEvent(KeyCode::Down, Modifiers::NONE),
-        EventHandler::Conditional(Box::new(HistoryHandler::new(
+        EventHandler::Conditional(Box::new(HistNav::new(
             completion_state.clone(),
             Cmd::HistorySearchForward,
         ))),
@@ -223,8 +264,9 @@ pub(crate) async fn run<'c>(mut rt: zuqe::Runtime, mut ctx0: zuqe::Context<'c>) 
                                 let _ =
                                     input_tx.blocking_send(InputCommand::Eval(trimmed.to_string()));
 
-                                // Meta-commands (.exit, .help) should not appear in history.
+                                // Manual global dedup: only add if not already in history.
                                 if !trimmed.starts_with('.')
+                                    && !history_contains(editor.history(), trimmed)
                                     && let Ok(true) = editor.add_history_entry(trimmed)
                                     && let Some(ref path) = history_path
                                 {
@@ -304,5 +346,6 @@ const HELP: &str = "\
 \x1b[33m.help\x1b[0m    Show this help message
 \x1b[33m.exit\x1b[0m    Exit the REPL
 \x1b[33mTab\x1b[0m      Trigger completion
+\x1b[33mUp/Down\x1b[0m  Navigate history (search by current input prefix)
 \x1b[33mCtrl-C\x1b[0m   Cancel current input
 \x1b[33mCtrl-D\x1b[0m   Exit the REPL";
