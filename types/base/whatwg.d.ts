@@ -42,24 +42,8 @@ declare function clearTimeout(timerId: number): void;
 /** Cancel a timer created by setInterval. */
 declare function clearInterval(timerId: number): void;
 
-// ---------------------------------------------------------------------------
-// request()  —  global HTTP client function
-// ---------------------------------------------------------------------------
-
-interface RequestOptions {
-  /** HTTP method (GET, POST, PUT, DELETE, etc.). Default: "GET" */
-  method?: string;
-  /** Request headers as key-value pairs. */
-  headers?: Record<string, string>;
-  /** Request body string. */
-  body?: string;
-  /** Request timeout in seconds. Default: 30 */
-  timeout?: number;
-}
-
 /**
- * WHATWG Fetch `Response` class. Shared by `fetch()` and the legacy
- * `request()` global.
+ * WHATWG Fetch `Response` class.
  */
 declare class Response {
   constructor(
@@ -112,16 +96,6 @@ declare class Response {
    */
   static redirect(url: string, status?: number): Response;
 }
-
-/**
- * Send an HTTP request.
- * @param url - The URL to request.
- * @param options - Optional request configuration.
- */
-declare function request(
-  url: string,
-  options?: RequestOptions,
-): Promise<Response>;
 
 declare class EventEmitter {
   addListener(event: string, listener: (...args: unknown[]) => void): this;

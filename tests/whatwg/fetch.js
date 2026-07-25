@@ -4,7 +4,6 @@
 //   - fetch 构造函数/Headers/Response/Request 同步校验
 //   - 真实网络 fetch() 端到端
 //
-// 遗留 request() 全局测试见 tests/http/request.js
 //
 // 运行：aike tests/whatwg/fetch.js
 // 说明：网络用例在无外网时会以 `skip` 记录，不计入失败。
@@ -202,7 +201,7 @@ function testNetworkFetch() {
 }
 
 // ===================================================================
-// 5b. fetch timeout 选项（非标准，对齐遗留 request()）
+// 5b. fetch timeout 选项（非标准）
 // ===================================================================
 function testFetchTimeout() {
   console.log("\n=== Network fetch() timeout option ===");

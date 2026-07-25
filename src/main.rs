@@ -17,7 +17,6 @@ mod llm;
 mod mcp;
 mod path;
 mod repl;
-mod request;
 mod transpile;
 mod whatwg;
 #[cfg(feature = "llama_cpp")]

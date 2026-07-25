@@ -1,14 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-//! WHATWG Fetch — `HttpResponse` class.
-//!
-//! This is the unified client-response class. The legacy `request()` global
-//! and the new `fetch()` both return it, so the body-once consumption
-//! semantics stay consistent across both APIs. It also exposes the WHATWG
-//! `Response` constructor, `Response.error()` / `Response.redirect()`
-//! statics, `clone()`, and the `Body` mixin.
-
 use crossbeam::channel::Receiver;
 use linkme::distributed_slice;
 use zuqe::{
@@ -19,17 +11,15 @@ use zuqe::{
 use crate::{
     USER_CLASS_DEFS,
     html::HtmlConvertMode,
+    http::TransportResponse,
     whatwg::fetch::{
         body::{
             BODY_AS_BYTES, BODY_AS_JSON, BODY_AS_TEXT, body_to_bytes, drain_body,
             make_body_async_iterator,
         },
         headers::{HeaderList, HeadersPayload, JSHeaders, header_list_from_js},
-        transport::TransportResponse,
     },
 };
-
-/// Payload backing a `Response` instance.
 pub(crate) struct ResponsePayload {
     /// Open network response for lazy body streaming (None once taken).
     resp: Option<reqwest::Response>,

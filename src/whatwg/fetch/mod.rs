@@ -11,7 +11,6 @@ pub(crate) mod body;
 pub(crate) mod headers;
 pub(crate) mod request;
 pub(crate) mod response;
-pub(crate) mod transport;
 
 pub(crate) use request::JSRequest;
 
@@ -22,13 +21,14 @@ use zuqe::{
     ScopedContext,
 };
 
+use crate::http::{TransportRequest, TransportResponse, perform_request};
+
 use super::{
     abort::{JSAbortSignal, signal_is_aborted, signal_notify},
     fetch::{
         body::body_to_bytes,
         headers::{HeaderList, header_list_from_js},
         response::{build_opaque_redirect_response, build_response_from_transport},
-        transport::{TransportRequest, TransportResponse, perform_request},
     },
 };
 
