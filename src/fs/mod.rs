@@ -155,7 +155,7 @@ fn get_bytes_from_arg(ctx: &mut ScopedContext, arg: &mut JSValue) -> Result<Vec<
 
     // Try TypedArray: access .buffer property to get underlying ArrayBuffer
     if arg.as_object_TypedArray().is_some() {
-        let mut buf_val = arg.get_property_str(ctx, "buffer")?;
+        let buf_val = arg.get_property_str(ctx, "buffer")?;
         if let Some(mut ab) = buf_val.as_object_ArrayBuffer() {
             let buf = ab.payload_mut();
             let mut bytes = Vec::new();
