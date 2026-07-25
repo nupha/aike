@@ -712,7 +712,7 @@ function testTimeout() {
 }
 
 // ===================================================================
-// 12. Abort — currently unsupported on HttpClient (use fetch for abort)
+// 12. AbortController — 与 fetch 使用同一路径
 // ===================================================================
 function testAbort() {
   console.log("\n=== HttpClient AbortController ===");
@@ -721,13 +721,16 @@ function testAbort() {
   ac.abort();
   return c
     .get("https://example.com", { signal: ac.signal, timeout: TIMEOUT })
-    .then(() => {
-      console.log("  ⏭️  abort: unsupported (zuqe limitation)");
-      skip++;
-    })
-    .catch(() => {
-      console.log("  ⏭️  abort: caught error");
-      skip++;
+    .then(() =>
+      check("pre-aborted HttpClient rejects", false, "unexpectedly resolved"),
+    )
+    .catch((e) => {
+      check("pre-aborted HttpClient rejects", true);
+      check(
+        "pre-aborted HttpClient abort error name",
+        e.name === "AbortError",
+        `got ${e.name}`,
+      );
     });
 }
 
