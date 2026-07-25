@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
 use std::{
-    cell::{Cell, RefCell},
+    cell::RefCell,
     collections::{HashMap, HashSet},
     sync::{
         Arc,
@@ -47,13 +47,15 @@ use crate::llm::{
 };
 
 use super::{
-    JSWebSocketStream, Method,
+    super::Method,
+    JSWebSocketStream,
     class_request::{HttpRequestPayload, JSHttpRequest},
+    launcher::spawn_http_server,
     outbound_buffer::OUTBOUND_CAP,
     response::{HttpResponseMessage, HttpResponsePayload, JSHttpResponse, get_res_payload},
-    server::spawn_http_server,
     ws::{WsControl, WsStreamEvent, bridge_ws, dispatch_ws_data, dispatch_ws_open},
 };
+
 /// Unified request message sent from axum delegate to the JS server job.
 pub(crate) enum IncomingRequest {
     Http(HttpRequest),
@@ -301,7 +303,7 @@ fn js_mcp(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     };
 
     // arg(1): an HttpMcp instance.
-    let mut http_obj = cc.arg(1).as_object().ok_or_else(|| {
+    let http_obj = cc.arg(1).as_object().ok_or_else(|| {
         ctx.throw_type_error("mcp() expects an HttpMcp instance");
         -1
     })?;

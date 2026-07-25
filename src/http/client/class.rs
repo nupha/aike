@@ -1,15 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-//! `HttpClient` — reusable HTTP client with proxy / TLS / cookie persistence.
-//!
-//! JS usage:
-//! ```js
-//! const c = new HttpClient({ proxy: '...', rejectUnauthorized: true });
-//! const r1 = await c.get('https://api.example.com');
-//! const r2 = await c.post('https://api.example.com', { body: '...' });
-//! ```
-
 use std::time::Duration;
 
 use linkme::distributed_slice;
@@ -17,7 +8,6 @@ use zuqe::{
     ErrorKind, Exception,
     builtins::promise::{Promise, PromiseResultSlot},
     def_native_object,
-    gc_lite::{GcTrace, GcTraceCtx},
     {CallContext, ClassCtorDef, FieldDef, JSResult, JSValue, Object, Runtime, ScopedContext},
 };
 
@@ -41,14 +31,6 @@ pub(crate) struct HttpClientPayload {
     /// Pre-built reqwest::Client (connection pool, TLS, proxy, …).
     client: reqwest::Client,
 }
-
-impl HttpClientPayload {
-    fn gc_trace(&self, _gcx: &mut GcTraceCtx) {
-        // reqwest::Client is not GC-managed.
-    }
-}
-
-// ── Helpers ────────────────────────────────────────────────────────────────
 
 /// Sentinel magic value: read the HTTP method from `opts.method`.
 const METHOD_FROM_OPTS: i16 = -1;
@@ -352,8 +334,7 @@ def_native_object!(
     JSHttpClient,
     HttpClientPayload,
     CLASS_HTTP_CLIENT_PROTO,
-    Some(ClassCtorDef::new(js_constructor, 1, true).expose_to_global()),
-    on_payload_gc: HttpClientPayload::gc_trace
+    Some(ClassCtorDef::new(js_constructor, 1, true))
 );
 
 #[distributed_slice(USER_CLASS_DEFS)]

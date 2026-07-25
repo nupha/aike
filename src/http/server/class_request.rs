@@ -10,7 +10,7 @@ use zuqe::{
 
 use crate::USER_CLASS_DEFS;
 
-use super::Method;
+use super::super::Method;
 
 /// Internal payload for HttpRequest classes.
 pub(super) struct HttpRequestPayload {

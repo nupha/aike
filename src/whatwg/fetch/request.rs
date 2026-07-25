@@ -290,7 +290,7 @@ fn js_req_body_as(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 }
 
 /// `formData()` — not yet supported.
-fn js_req_form_data(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+fn js_req_form_data(ctx: &mut ScopedContext, _: CallContext) -> JSResult {
     ctx.throw_type_error("formData() is not supported in this runtime");
     Err(-1)
 }

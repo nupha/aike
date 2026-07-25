@@ -2,8 +2,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
 use linkme::distributed_slice;
-use tokio::sync::mpsc;
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot};
 use zuqe::{
     CallContext, ClassID, FieldDef, IntOrFloat, JSResult, JSValue, NativeObject, Runtime,
     ScopedContext, def_native_object,

@@ -1,19 +1,18 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-mod class_http_server;
-mod class_request;
-pub(crate) mod client;
-mod outbound_buffer;
-mod response;
+mod client;
 mod server;
-mod ws;
 
 pub(crate) use {
-    class_http_server::{IncomingRequest, JSHttpServer},
-    class_request::JSHttpRequest,
-    response::{JSHttpResponse, JSHttpResponseSse},
-    ws::JSWebSocketStream,
+    client::{
+        JSHttpClient,
+        transport::{TransportRequest, TransportResponse, perform_request},
+    },
+    server::{
+        IncomingRequest, JSHttpRequest, JSHttpResponse, JSHttpResponseSse, JSHttpServer,
+        JSWebSocketStream,
+    },
 };
 
 use zuqe::{FieldDef, NativeObject, ScopedContext};
@@ -46,13 +45,30 @@ impl Method {
     }
 }
 
-const MOD_HTTP_ENTRIES: &[FieldDef] = &[FieldDef::CLASS(
-    JSHttpServer::CLASS_NAME,
-    JSHttpServer::class_id,
-    zuqe::JS_PROP_ENUMERABLE,
-)];
+const MOD_HTTP_ENTRIES: &[FieldDef] = &[
+    FieldDef::CLASS(
+        JSHttpClient::CLASS_NAME,
+        JSHttpClient::class_id,
+        zuqe::JS_PROP_ENUMERABLE,
+    ),
+    FieldDef::CLASS(
+        JSHttpServer::CLASS_NAME,
+        JSHttpServer::class_id,
+        zuqe::JS_PROP_ENUMERABLE,
+    ),
+];
 
 pub fn init_mod_http(ctx: &mut ScopedContext) -> Result<(), i32> {
+    ctx.use_classes(&[
+        JSHttpClient::class_id(),
+        JSHttpServer::class_id(),
+        JSHttpRequest::class_id(),
+        JSHttpResponse::class_id(),
+        JSHttpResponseSse::class_id(),
+        JSWebSocketStream::class_id(),
+    ])?;
+
     ctx.create_module("http", MOD_HTTP_ENTRIES)?;
+    
     Ok(())
 }

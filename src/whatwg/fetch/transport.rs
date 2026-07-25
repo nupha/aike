@@ -3,11 +3,9 @@
 
 use std::time::Duration;
 
-use super::headers::HeaderList;
+pub(crate) use crate::http::{TransportRequest, TransportResponse, perform_request};
 
-pub(crate) use crate::http::client::transport::{
-    TransportRequest, TransportResponse, perform_request,
-};
+use super::headers::HeaderList;
 
 /// Helper used by callers that already hold a `HeaderList`.
 pub(crate) fn request_with_headers(
