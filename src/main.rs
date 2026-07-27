@@ -484,14 +484,19 @@ async fn main() -> ExitCode {
                 colorize_println("out of memory", RedFg);
                 1
             }
+            Exception::TooManyAtoms => {
+                colorize_println("too many atoms", RedFg);
+                1
+            }
+            Exception::TooManyClasses => {
+                colorize_println("too many classes", RedFg);
+                1
+            }
             Exception::No => {
                 #[cfg(debug_assertions)]
                 unreachable!();
                 #[cfg(not(debug_assertions))]
                 0
-            }
-            Exception::TooManyClasses => {
-                unreachable!();
             }
         };
 
@@ -572,7 +577,9 @@ async fn main() -> ExitCode {
             colorize_println("out of memory", RedFg);
             ExitCode::FAILURE
         }
-        ExitStatus::Exception(Exception::No | Exception::TooManyClasses) => {
+        ExitStatus::Exception(
+            Exception::No | Exception::TooManyClasses | Exception::TooManyAtoms,
+        ) => {
             unreachable!();
         }
     }
