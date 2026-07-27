@@ -25,8 +25,8 @@ use crate::{
     html::HtmlConvertMode,
     http::client::{
         body::{
-            BODY_AS_BYTES, BODY_AS_JSON, BODY_AS_TEXT, body_to_bytes, drain_body,
-            make_body_async_iterator,
+            BODY_AS_BYTES, BODY_AS_JSON, BODY_AS_TEXT, BODY_AS_TEXT_CONVERT, body_to_bytes,
+            drain_body, make_body_async_iterator,
         },
         headers::{HeaderList, HeadersPayload, JSHeaders, header_list_from_js},
         transport::TransportResponse,
@@ -510,7 +510,9 @@ fn js_response_body_as(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         let mut this = cc.this();
         let p = get_response_payload_mut(ctx, &mut this)?;
         let is_html = p.content_type.starts_with("text/html");
-        let convert = if magic == BODY_AS_TEXT && is_html && cc.length() > 0 {
+        // The convert arg is only honored via BODY_AS_TEXT_CONVERT, which is
+        // wired on HttpClientResponse.text(); base Response.text() ignores args.
+        let convert = if magic == BODY_AS_TEXT_CONVERT && is_html && cc.length() > 0 {
             let arg0 = cc.arg(0);
             arg0.to_string(ctx)
                 .ok()
@@ -531,7 +533,15 @@ fn js_response_body_as(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     };
 
     match rx {
-        Some(rx) => drain_body(ctx, rx, magic, html_convert),
+        Some(rx) => {
+            // Normalize the convert variant back to plain text mode for draining.
+            let mode = if magic == BODY_AS_TEXT_CONVERT {
+                BODY_AS_TEXT
+            } else {
+                magic
+            };
+            drain_body(ctx, rx, mode, html_convert)
+        }
         None => {
             ctx.throw_type_error("body already consumed or unavailable");
             Err(-1)
@@ -679,6 +689,8 @@ fn js_http_response_constructor(ctx: &mut ScopedContext, _cc: CallContext) -> JS
 
 // Aike enhancements only; everything else is inherited from Response.
 const HTTP_RESPONSE_PROTO: &[FieldDef] = &[
+    // Shadows the base text(): accepts the optional html-convert arg.
+    FieldDef::FUNC("text", 0, js_response_body_as, BODY_AS_TEXT_CONVERT as i16),
     FieldDef::GETSET(
         "contentType",
         Some(js_response_getter),

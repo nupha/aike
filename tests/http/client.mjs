@@ -3,7 +3,7 @@ import { HttpClient, HttpClientResponse, HttpServer } from "http";
 // 🌐 HTTP 客户端测试 — HttpClient / Response / Headers / Request 全量测试
 //
 // fetch() 返回严格 WHATWG 的 Response；HttpClient 返回其增强子类 HttpClientResponse
-// （contentType/contentLength/httpVersion/close）。本文件覆盖：
+// （contentType/contentLength/httpVersion/close/text(convert)）。本文件覆盖：
 //   - HttpClient: 构造、GET/POST/PUT/DELETE/PATCH、request()、超时、重定向、
 //     自定义 header、与 fetch 一致性
 //   - Response: 构造、getter、静态方法（error/redirect/json）、body 消费
@@ -37,6 +37,13 @@ svr.get("/meta", (req, res) => {
 svr.get("/slow", async (req, res) => {
   await new Promise((r) => setTimeout(r, 2000));
   res.end("slow");
+});
+// text(convert) 测试路由：带标题/强调/链接/中文/emoji 的 HTML
+svr.get("/html", (req, res) => {
+  res.setHeader("content-type", "text/html; charset=utf-8");
+  res.end(
+    '<h1>标题</h1><p>Hello <strong>世界</strong> 🌍</p><a href="https://example.com">链接</a>',
+  );
 });
 svr.listen({ host: "127.0.0.1", port: PORT });
 
@@ -937,6 +944,50 @@ function testMetaAndErrors() {
 }
 
 // ===================================================================
+// 19. text(convert) — HttpClientResponse 的 HTML 转换扩展
+// ===================================================================
+function testTextConvert() {
+  console.log("\n=== text(convert) html conversion ===");
+  const client = new HttpClient();
+  const getHtml = () => client.get(`${BASE}/html`, { timeout: TIMEOUT });
+
+  return getHtml()
+    .then((r) => r.text())
+    .then((raw) => {
+      check("text() 返回原始 HTML", raw.includes("<h1>"), raw);
+      return (
+        getHtml()
+          .then((r) => r.text("strip"))
+          .then((s) => {
+            check("strip 移除标签", !s.includes("<"), s);
+            check(
+              "strip 保留中文",
+              s.includes("标题") && s.includes("世界"),
+              s,
+            );
+            check("strip 保留 emoji", s.includes("🌍"), s);
+          })
+          .then(() => getHtml().then((r) => r.text("markdown")))
+          .then((md) => {
+            check("markdown 移除标签", !md.includes("<h1>"), md);
+            check("markdown 保留链接 URL", md.includes("example.com"), md);
+            check(
+              "markdown 保留内容",
+              md.includes("标题") && md.includes("Hello"),
+              md,
+            );
+          })
+          .then(() => getHtml().then((r) => r.text("unknown")))
+          .then((u) => check("未知参数返回原文", u === raw, u))
+          // 非 HTML 响应：convert 不生效
+          .then(() => client.get(`${BASE}/meta`, { timeout: TIMEOUT }))
+          .then((r) => r.text("markdown"))
+          .then((t) => check("text/plain 不转换", t === "hello-meta", t))
+      );
+    });
+}
+
+// ===================================================================
 // 入口
 // ===================================================================
 testHeaders();
@@ -959,6 +1010,7 @@ testRequest()
   .then(() => testTimeout())
   .then(() => testHttpClientResponseBody())
   .then(() => testMetaAndErrors())
+  .then(() => testTextConvert())
   .then(() => testFetchAsSugar())
   .then(() => {
     console.log(`\n=== SUMMARY: pass=${pass} fail=${fail} skip=${skip} ===`);

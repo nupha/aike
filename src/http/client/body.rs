@@ -30,6 +30,9 @@ pub(crate) fn body_to_bytes(ctx: &mut ScopedContext, val: &JSValue) -> Result<Ve
 pub(crate) const BODY_AS_BYTES: i32 = 0;
 pub(crate) const BODY_AS_TEXT: i32 = 1;
 pub(crate) const BODY_AS_JSON: i32 = 2;
+/// Text mode with the optional html-convert arg ("strip" | "markdown").
+/// Only wired on `HttpClientResponse.text()`; base `Response.text()` stays strict.
+pub(crate) const BODY_AS_TEXT_CONVERT: i32 = 3;
 
 const BODY_TIMEOUT: Duration = Duration::from_secs(30);
 
