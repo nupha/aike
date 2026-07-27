@@ -18,7 +18,10 @@ use crate::{
         config::{HttpClientConfig, ProtocolMode},
         headers::{HeaderList, header_list_from_js},
         response::build_response_from_transport,
-        transport::{TransportRequest, TransportResponse, perform_request},
+        transport::{
+            TransportError, TransportRequest, TransportResponse, perform_request,
+            throw_transport_error,
+        },
     },
     whatwg::abort::{JSAbortSignal, signal_notify},
 };
@@ -129,11 +132,9 @@ fn js_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     JSHttpClient::new_instance(ctx, cc.this(), HttpClientPayload { client }).map(JSValue::from)
 }
 
-// ── Error type for async result slot ──────────────────────────────────────
-
 enum RequestError {
     Abort,
-    Other(String),
+    Other(TransportError),
 }
 
 fn throw_abort_error(cx: &mut ScopedContext) -> JSResult {
@@ -178,7 +179,6 @@ fn js_do_request(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut req_headers = HeaderList::new();
     let mut req_body: Option<Vec<u8>> = None;
     let mut timeout = Duration::from_secs(30);
-    let mut redirect = String::from("follow");
     let mut signal_val: Option<JSValue> = None;
 
     if cc.length() > 1 {
@@ -222,10 +222,8 @@ fn js_do_request(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             }
 
             // ── Redirect ──
-            let r = opts.get_property_str(ctx, "redirect")?;
-            if !r.is_undefined() {
-                redirect = r.to_string(ctx)?.content().encode_utf8(false).to_string();
-            }
+            // Not supported per-request: reqwest's redirect policy is
+            // client-level; the client always follows up to 10 redirects.
 
             // ── Signal (AbortController / AbortSignal) ──
             let s = opts.get_property_str(ctx, "signal")?;
@@ -252,7 +250,6 @@ fn js_do_request(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         headers: req_headers.to_vec(),
         body: req_body,
         timeout,
-        redirect,
         referrer: String::from("about:client"),
     };
 
@@ -262,10 +259,7 @@ fn js_do_request(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             let tr = match data {
                 Ok(tr) => tr,
                 Err(RequestError::Abort) => return throw_abort_error(cx),
-                Err(RequestError::Other(msg)) => {
-                    cx.throw_internal_error(&msg);
-                    return Err(-1);
-                }
+                Err(RequestError::Other(te)) => return throw_transport_error(cx, te),
             };
             build_response_from_transport(cx, tr, "basic", &url_for_closure, false)
         })?;

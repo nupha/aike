@@ -13,7 +13,9 @@ use crate::http::client::{
     headers::{HeaderList, JSHeaders, header_list_from_js},
     request::JSRequest,
     response::{JSResponse, build_opaque_redirect_response, build_response_from_transport},
-    transport::{TransportRequest, TransportResponse, perform_request},
+    transport::{
+        TransportError, TransportRequest, TransportResponse, perform_request, throw_transport_error,
+    },
 };
 
 use super::abort::{JSAbortSignal, signal_is_aborted, signal_notify};
@@ -23,7 +25,7 @@ enum FetchError {
     /// Aborted via `AbortSignal` (or pre-aborted signal).
     Abort,
     /// Any other failure (network, redirect, timeout, ...).
-    Other(String),
+    Other(TransportError),
 }
 
 /// Throw a WHATWG-conformant `AbortError` (a `TypeError` whose `name` is
@@ -170,10 +172,7 @@ pub(crate) fn js_fetch(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 Err(e) => {
                     return match e {
                         FetchError::Abort => throw_abort_error(cx),
-                        FetchError::Other(msg) => {
-                            cx.throw_internal_error(&msg);
-                            Err(-1)
-                        }
+                        FetchError::Other(te) => throw_transport_error(cx, te),
                     };
                 }
             };
@@ -219,7 +218,6 @@ pub(crate) fn js_fetch(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         headers: header_list.to_vec(),
         body: body_bytes,
         timeout,
-        redirect: redirect.clone(),
         referrer,
     };
 

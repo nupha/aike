@@ -1,4 +1,4 @@
-import { HttpClient } from "http";
+import { HttpClient, HttpServer } from "http";
 
 // 🌐 HTTP 客户端测试 — HttpClient / Response / Headers / Request 全量测试
 //
@@ -14,6 +14,30 @@ import { HttpClient } from "http";
 // 运行：aike -m tests/http/client.mjs
 
 const TIMEOUT = 10;
+
+// 本地测试服务器：所有网络测试打本地，不依赖外部站点
+// （example.com 等外部站点超时/缺头会导致测试随机失败）
+const PORT = 18123;
+const BASE = `http://127.0.0.1:${PORT}`;
+const svr = new HttpServer();
+svr.get("/", (req, res) => {
+  res.setHeader("content-type", "text/html");
+  res.end("<html><body>hello from local test server</body></html>");
+});
+svr.post("/", (req, res) => res.end("posted"));
+svr.put("/", (req, res) => res.end("put-ok"));
+svr.delete("/", (req, res) => res.end("delete-ok"));
+svr.patch("/", (req, res) => res.end("patch-ok"));
+svr.get("/meta", (req, res) => {
+  res.setHeader("content-type", "text/plain");
+  res.end("hello-meta"); // 10 bytes
+});
+// 慢响应路由：用于 timeout 测试（延迟 2s 应大于测试用的 timeout）
+svr.get("/slow", async (req, res) => {
+  await new Promise((r) => setTimeout(r, 2000));
+  res.end("slow");
+});
+svr.listen({ host: "127.0.0.1", port: PORT });
 
 let pass = 0;
 let fail = 0;
@@ -589,7 +613,7 @@ function testHttpGet() {
   console.log("\n=== HttpClient basic GET ===");
   const client = new HttpClient();
   return client
-    .get("https://example.com", { timeout: TIMEOUT })
+    .get(BASE, { timeout: TIMEOUT })
     .then((r) => {
       check("GET status 200", r.status === 200, `got ${r.status}`);
       check("GET ok", r.ok === true);
@@ -613,7 +637,7 @@ function testHttpPost() {
   console.log("\n=== HttpClient POST with body ===");
   const client = new HttpClient();
   return client
-    .post("https://example.com", {
+    .post(BASE, {
       body: "hello",
       headers: { "Content-Type": "text/plain" },
       timeout: TIMEOUT,
@@ -639,7 +663,7 @@ function testRequestMethod() {
   console.log("\n=== HttpClient.request() ===");
   const client = new HttpClient();
   return client
-    .request("https://example.com", { method: "GET", timeout: TIMEOUT })
+    .request(BASE, { method: "GET", timeout: TIMEOUT })
     .then((r) =>
       check("request() GET status 200", r.status === 200, `got ${r.status}`),
     );
@@ -652,8 +676,8 @@ function testReuse() {
   console.log("\n=== HttpClient reuse ===");
   const client = new HttpClient();
   return client
-    .get("https://example.com", { timeout: TIMEOUT })
-    .then(() => client.get("https://example.com/", { timeout: TIMEOUT }))
+    .get(BASE, { timeout: TIMEOUT })
+    .then(() => client.get(`${BASE}/`, { timeout: TIMEOUT }))
     .then((r) =>
       check("reuse: 2nd request", r.status === 200, `got ${r.status}`),
     );
@@ -666,8 +690,8 @@ function testConsistentWithFetch() {
   console.log("\n=== HttpClient consistent with fetch ===");
   const client = new HttpClient();
   return Promise.all([
-    fetch("https://example.com"),
-    client.get("https://example.com", { timeout: TIMEOUT }),
+    fetch(BASE),
+    client.get(BASE, { timeout: TIMEOUT }),
   ]).then(([fr, cr]) => {
     check(
       "HttpClient & fetch same status",
@@ -700,7 +724,7 @@ function testTimeout() {
   console.log("\n=== HttpClient timeout ===");
   const client = new HttpClient();
   return client
-    .get("https://example.com", { timeout: 0.001 })
+    .get(`${BASE}/slow`, { timeout: 0.5 })
     .then(() => check("timeout: should have thrown", false))
     .catch((e) =>
       check(
@@ -720,7 +744,7 @@ function testAbort() {
   const ac = new AbortController();
   ac.abort();
   return c
-    .get("https://example.com", { signal: ac.signal, timeout: TIMEOUT })
+    .get(BASE, { signal: ac.signal, timeout: TIMEOUT })
     .then(() =>
       check("pre-aborted HttpClient rejects", false, "unexpectedly resolved"),
     )
@@ -741,7 +765,7 @@ function testCustomHeaders() {
   console.log("\n=== HttpClient custom headers ===");
   const client = new HttpClient();
   return client
-    .get("https://example.com", {
+    .get(BASE, {
       headers: { "X-Test": "hello-httpclient" },
       timeout: TIMEOUT,
     })
@@ -755,39 +779,18 @@ function testCustomHeaders() {
 }
 
 // ===================================================================
-// 14. Redirect 选项
+// 14. Redirect 选项（已移除：redirect 为 client 级策略，固定 follow；
+//     legacy 的 redirect 选项被忽略，不报错）
 // ===================================================================
 function testRedirect() {
-  console.log("\n=== HttpClient redirect options ===");
+  console.log("\n=== HttpClient redirect options (legacy, ignored) ===");
   const client = new HttpClient();
 
   return client
-    .get("https://example.com", { redirect: "follow", timeout: TIMEOUT })
-    .then((r) =>
-      check("redirect:follow works", r.status === 200, `got ${r.status}`),
-    )
-    .then(() =>
-      client.get("https://example.com", {
-        redirect: "error",
-        timeout: TIMEOUT,
-      }),
-    )
+    .get(BASE, { redirect: "manual", timeout: TIMEOUT })
     .then((r) =>
       check(
-        "redirect:error works (no redirect)",
-        r.status === 200,
-        `got ${r.status}`,
-      ),
-    )
-    .then(() =>
-      client.get("https://example.com", {
-        redirect: "manual",
-        timeout: TIMEOUT,
-      }),
-    )
-    .then((r) =>
-      check(
-        "redirect:manual works (no redirect)",
+        "legacy redirect option ignored",
         r.status === 200,
         `got ${r.status}`,
       ),
@@ -802,23 +805,21 @@ function testOtherMethods() {
   const client = new HttpClient();
 
   return client
-    .put("https://example.com", {
+    .put(BASE, {
       body: "update",
       headers: { "Content-Type": "text/plain" },
       timeout: TIMEOUT,
     })
     .then((r) =>
-      check("PUT request completed", r.status === 405, `got ${r.status}`),
+      check("PUT request completed", r.status === 200, `got ${r.status}`),
     )
-    .then(() => client.delete("https://example.com", { timeout: TIMEOUT }))
+    .then(() => client.delete(BASE, { timeout: TIMEOUT }))
     .then((r) =>
-      check("DELETE request completed", r.status === 405, `got ${r.status}`),
+      check("DELETE request completed", r.status === 200, `got ${r.status}`),
     )
-    .then(() =>
-      client.patch("https://example.com", { body: "modify", timeout: TIMEOUT }),
-    )
+    .then(() => client.patch(BASE, { body: "modify", timeout: TIMEOUT }))
     .then((r) =>
-      check("PATCH request completed", r.status === 405, `got ${r.status}`),
+      check("PATCH request completed", r.status === 200, `got ${r.status}`),
     );
 }
 
@@ -828,7 +829,7 @@ function testOtherMethods() {
 function testHttpClientResponseBody() {
   console.log("\n=== HttpClient response body consumption ===");
   const client = new HttpClient();
-  return client.get("https://example.com", { timeout: TIMEOUT }).then((r) => {
+  return client.get(BASE, { timeout: TIMEOUT }).then((r) => {
     check("bodyUsed pre", r.bodyUsed === false);
     // text() 后 body 被消费
     return r.text().then((t) => {
@@ -853,7 +854,7 @@ function testFetchAsSugar() {
   console.log("\n=== fetch as syntactic sugar ===");
 
   // fetch 存在且可用
-  const f0 = fetch("https://example.com");
+  const f0 = fetch(BASE);
   check("fetch is function", typeof fetch === "function");
   check(
     "fetch returns promise",
@@ -875,7 +876,7 @@ function testFetchAsSugar() {
     .catch((e) => skipCheck("fetch network", String(e)))
     .then(() => {
       // fetch timeout 选项
-      return fetch("https://example.com", { timeout: 60 })
+      return fetch(BASE, { timeout: 60 })
         .then((r) =>
           check(
             "fetch timeout:60 accepted",
@@ -885,6 +886,64 @@ function testFetchAsSugar() {
         )
         .catch((e) => skipCheck("fetch timeout accepted", String(e)));
     });
+}
+
+// ===================================================================
+// 18. 响应元信息与错误分类（contentLength / httpVersion / error.code）
+// ===================================================================
+function testMetaAndErrors() {
+  console.log("\n=== Response meta & error codes ===");
+  const client = new HttpClient();
+
+  return (
+    client
+      // 共享本地服务器的 /meta 路由：固定 10 字节 body，Content-Length 确定
+      .get(`${BASE}/meta`, { timeout: TIMEOUT })
+      .then((r) => {
+        check(
+          "httpVersion is 1.1",
+          r.httpVersion === "1.1",
+          `got ${r.httpVersion}`,
+        );
+        check(
+          "contentLength === 10",
+          r.contentLength === 10,
+          `got ${r.contentLength}`,
+        );
+        r.close();
+      })
+      .then(() => {
+        // 合成 Response 无网络传输，httpVersion 为 null
+        check(
+          "synthetic httpVersion null",
+          new Response("x").httpVersion === null,
+        );
+      })
+      .then(() =>
+        client
+          .get(`${BASE}/slow`, { timeout: 0.5 })
+          .then(() => check("timeout should reject", false))
+          .catch((e) =>
+            check("error code timeout", e.code === "timeout", `got ${e.code}`),
+          ),
+      )
+      .then(() =>
+        client
+          .get("http://127.0.0.1:9/", { timeout: TIMEOUT })
+          .then(() => check("connect should reject", false))
+          .catch((e) =>
+            check("error code connect", e.code === "connect", `got ${e.code}`),
+          ),
+      )
+      .then(() =>
+        client
+          .get("http://no-such-host.invalid/", { timeout: TIMEOUT })
+          .then(() => check("dns should reject", false))
+          .catch((e) =>
+            check("error code dns", e.code === "dns", `got ${e.code}`),
+          ),
+      )
+  );
 }
 
 // ===================================================================
@@ -909,12 +968,22 @@ testRequest()
   .then(() => testOtherMethods())
   .then(() => testTimeout())
   .then(() => testHttpClientResponseBody())
+  .then(() => testMetaAndErrors())
   .then(() => testFetchAsSugar())
   .then(() => {
     console.log(`\n=== SUMMARY: pass=${pass} fail=${fail} skip=${skip} ===`);
     console.log(fail > 0 ? "RESULT: FAIL" : "RESULT: PASS");
   })
   .catch((e) => {
-    console.log("UNEXPECTED ERROR:", e);
+    // Engine inspect prints bare "Error { }"; show name/message/code explicitly.
+    if (e instanceof Error) {
+      const code = e.code ? ` (code=${e.code})` : "";
+      console.log(`UNEXPECTED ERROR: ${e.name}: ${e.message}${code}`);
+      if (e.stack) console.log(e.stack);
+    } else {
+      console.log("UNEXPECTED ERROR:", e);
+    }
     console.log("RESULT: FAIL");
-  });
+  })
+  // 无论成败都关闭本地测试服务器，保证进程退出
+  .then(() => svr.shutdown());

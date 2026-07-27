@@ -46,6 +46,8 @@ pub(crate) struct ResponsePayload {
     content_type: String,
     headers: Vec<(String, String)>,
     content_length: Option<u64>,
+    /// Negotiated HTTP version ("1.1", "2", …); empty for synthetic responses.
+    http_version: &'static str,
 }
 
 impl ResponsePayload {
@@ -129,6 +131,7 @@ pub(crate) fn build_opaque_redirect_response(ctx: &mut ScopedContext) -> JSResul
             content_type: String::new(),
             headers: Vec::new(),
             content_length: None,
+            http_version: "",
         },
     )
     .map(JSValue::from)
@@ -157,7 +160,8 @@ pub(crate) fn build_response_from_transport(
             status_text: tr.status_text,
             content_type: tr.content_type,
             headers: tr.headers,
-            content_length: None,
+            content_length: tr.content_length,
+            http_version: tr.http_version,
         },
     )?;
     Ok(resp_obj.into())
@@ -215,6 +219,7 @@ fn js_response_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
             content_type: String::new(),
             headers: header_list.to_vec(),
             content_length: None,
+            http_version: "",
         },
     )
     .map(JSValue::from)
@@ -241,6 +246,7 @@ fn js_response_static_error(ctx: &mut ScopedContext, _cc: CallContext) -> JSResu
             content_type: String::new(),
             headers: Vec::new(),
             content_length: None,
+            http_version: "",
         },
     )
     .map(JSValue::from)
@@ -288,6 +294,7 @@ fn js_response_static_redirect(ctx: &mut ScopedContext, cc: CallContext) -> JSRe
             content_type: String::new(),
             headers: list.to_vec(),
             content_length: None,
+            http_version: "",
         },
     )
     .map(JSValue::from)
@@ -342,6 +349,7 @@ fn js_response_static_json(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
             content_type: "application/json".to_string(),
             headers: header_list.to_vec(),
             content_length: None,
+            http_version: "",
         },
     )
     .map(JSValue::from)
@@ -361,6 +369,7 @@ const RESPONSE_GET_CONTENT_TYPE: i16 = 6;
 const RESPONSE_GET_CONTENT_LENGTH: i16 = 7;
 const RESPONSE_GET_HEADERS: i16 = 8;
 const RESPONSE_GET_BODY_USED: i16 = 9;
+const RESPONSE_GET_HTTP_VERSION: i16 = 10;
 
 fn js_response_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let kind = cc.magic() as i16;
@@ -398,6 +407,15 @@ fn js_response_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             Ok(headers.into())
         }
         RESPONSE_GET_BODY_USED => Ok(JSValue::from(p.body_consumed)),
+        RESPONSE_GET_HTTP_VERSION => {
+            // null for synthetic responses (no network transport involved).
+            if p.http_version.is_empty() {
+                Ok(JSValue::NULL)
+            } else {
+                ctx.create_string_from_utf8(p.http_version.as_bytes().to_vec())
+                    .map(JSValue::make_string)
+            }
+        }
         _ => {
             ctx.throw_type_error("unknown Response getter");
             Err(-1)
@@ -515,6 +533,7 @@ fn js_response_clone(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         content_type: src.content_type.clone(),
         headers: src.headers.clone(),
         content_length: src.content_length,
+        http_version: src.http_version,
     };
     JSResponse::new_instance(ctx, cc.this(), payload).map(JSValue::from)
 }
@@ -564,6 +583,12 @@ const RESPONSE_PROTO: &[FieldDef] = &[
         Some(js_response_getter),
         None,
         RESPONSE_GET_BODY_USED,
+    ),
+    FieldDef::GETSET(
+        "httpVersion",
+        Some(js_response_getter),
+        None,
+        RESPONSE_GET_HTTP_VERSION,
     ),
     FieldDef::GETSET("body", Some(js_response_body), None, 0),
     FieldDef::FUNC("bytes", 0, js_response_body_as, BODY_AS_BYTES as i16),

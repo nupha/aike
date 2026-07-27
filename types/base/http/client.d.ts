@@ -4,6 +4,9 @@ declare module "http" {
   /**
    * Reusable HTTP client with proxy, TLS, and cookie persistence.
    *
+   * Network failures reject with an `Error` whose `code` property is one of:
+   * `"timeout"` | `"connect"` | `"dns"` | `"tls"` | `"redirect"` | `"other"`.
+   *
    * ```ts
    * const api = new HttpClient({ proxy: "http://proxy:8080", cookieJar: true });
    * await api.post("https://example.com/login", { body: creds });
@@ -68,8 +71,6 @@ declare module "http" {
     body?: string;
     /** Total request timeout in seconds (default: 30). */
     timeout?: number;
-    /** Redirect behaviour: `"follow"` (default), `"error"`, or `"manual"`. */
-    redirect?: "follow" | "error" | "manual";
     /** AbortSignal — currently unsupported on HttpClient; use `fetch()` for abort. */
     signal?: AbortSignal;
   }

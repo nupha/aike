@@ -66,6 +66,8 @@ declare class Response {
   readonly contentType: string;
   /** Aike extension: the Content-Length, or null if absent. */
   readonly contentLength: number | null;
+  /** Aike extension: negotiated HTTP version ("1.1", "2", …), or null for synthetic responses. */
+  readonly httpVersion: string | null;
   /** Response headers. */
   readonly headers: Headers;
   /** Whether the body has been consumed. */

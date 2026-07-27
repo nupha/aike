@@ -85,7 +85,7 @@ impl HttpClientConfig {
         // --- Proxy ---
         if let Some(ref proxy_url) = self.proxy {
             let mut proxy =
-                reqwest::Proxy::http(proxy_url).map_err(|e| format!("invalid proxy: {e}"))?;
+                reqwest::Proxy::all(proxy_url).map_err(|e| format!("invalid proxy: {e}"))?;
             if let Some(ref no_proxy) = self.no_proxy {
                 proxy = proxy.no_proxy(reqwest::NoProxy::from_string(no_proxy));
             }
