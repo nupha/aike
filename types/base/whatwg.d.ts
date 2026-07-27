@@ -43,7 +43,8 @@ declare function clearTimeout(timerId: number): void;
 declare function clearInterval(timerId: number): void;
 
 /**
- * WHATWG Fetch `Response` class.
+ * WHATWG Fetch `Response` class (strict spec subset, no aike extensions).
+ * `HttpClient` returns the enhanced subclass `HttpClientResponse` (module "http").
  */
 declare class Response {
   constructor(
@@ -62,12 +63,6 @@ declare class Response {
   readonly ok: boolean;
   /** HTTP status text. */
   readonly statusText: string;
-  /** Aike extension: the Content-Type header value. */
-  readonly contentType: string;
-  /** Aike extension: the Content-Length, or null if absent. */
-  readonly contentLength: number | null;
-  /** Aike extension: negotiated HTTP version ("1.1", "2", …), or null for synthetic responses. */
-  readonly httpVersion: string | null;
   /** Response headers. */
   readonly headers: Headers;
   /** Whether the body has been consumed. */
@@ -76,19 +71,14 @@ declare class Response {
   readonly body: AsyncIterableIterator<Uint8Array> | null;
   /** Read the entire body as bytes. */
   bytes(): Promise<Uint8Array>;
-  /**
-   * Read the entire body as a string. For text/html, an optional mode
-   * converts the body: "strip" removes HTML tags, "markdown" converts to Markdown.
-   */
-  text(convert?: "strip" | "markdown"): Promise<string>;
+  /** Read the entire body as a string. */
+  text(): Promise<string>;
   /** Read and parse the entire body as JSON. */
   json(): Promise<any>;
   /** Read the entire body as an ArrayBuffer. */
   arrayBuffer(): Promise<ArrayBuffer>;
   /** Clone the response (fails if the body was already consumed). */
   clone(): Response;
-  /** Close the response and release underlying resources. */
-  close(): void;
   /** Returns a network-error response (type "error", null body). */
   static error(): Response;
   /**
@@ -97,6 +87,11 @@ declare class Response {
    * @param status - Redirect status; defaults to 302.
    */
   static redirect(url: string, status?: number): Response;
+  /** Returns a JSON response with Content-Type: application/json. */
+  static json(
+    data: any,
+    init?: { status?: number; statusText?: string; headers?: HeadersInit },
+  ): Response;
 }
 
 declare class EventEmitter {

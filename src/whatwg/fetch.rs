@@ -3,16 +3,13 @@
 
 use std::time::Duration;
 
-use zuqe::{
-    CallContext, Callback, ErrorKind, Exception, JSResult, JSValue, NativeObject, Object,
-    ScopedContext,
-};
+use zuqe::{CallContext, Callback, ErrorKind, Exception, JSResult, JSValue, Object, ScopedContext};
 
 use crate::http::client::{
     body::body_to_bytes,
-    headers::{HeaderList, JSHeaders, header_list_from_js},
+    headers::{HeaderList, header_list_from_js},
     request::JSRequest,
-    response::{JSResponse, build_opaque_redirect_response, build_response_from_transport},
+    response::{RespType, build_opaque_redirect_response, build_response_from_transport},
     transport::{
         TransportError, TransportRequest, TransportResponse, perform_request, throw_transport_error,
     },
@@ -186,7 +183,7 @@ pub(crate) fn js_fetch(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 }
                 return build_opaque_redirect_response(cx);
             }
-            build_response_from_transport(cx, tr, "basic", &url_clone, false)
+            build_response_from_transport(cx, tr, RespType::Basic, &url_clone, false)
         },
     )?;
 

@@ -17,7 +17,7 @@ use crate::{
         body::body_to_bytes,
         config::{HttpClientConfig, ProtocolMode},
         headers::{HeaderList, header_list_from_js},
-        response::build_response_from_transport,
+        response::{RespType, build_http_response_from_transport},
         transport::{
             TransportError, TransportRequest, TransportResponse, perform_request,
             throw_transport_error,
@@ -261,7 +261,7 @@ fn js_do_request(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 Err(RequestError::Abort) => return throw_abort_error(cx),
                 Err(RequestError::Other(te)) => return throw_transport_error(cx, te),
             };
-            build_response_from_transport(cx, tr, "basic", &url_for_closure, false)
+            build_http_response_from_transport(cx, tr, RespType::Basic, &url_for_closure, false)
         })?;
 
     if already_aborted {

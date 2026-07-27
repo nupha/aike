@@ -17,7 +17,7 @@ use zuqe::{FieldDef, NativeObject, ScopedContext};
 use crate::http::client::{
     headers::JSHeaders,
     request::JSRequest,
-    response::JSResponse,
+    response::{JSHttpClientResponse, JSResponse},
 };
 
 /// HTTP method enum — shared across submodules.
@@ -54,6 +54,12 @@ const MOD_HTTP_ENTRIES: &[FieldDef] = &[
         JSHttpClient::class_id,
         zuqe::JS_PROP_ENUMERABLE,
     ),
+    // Client response subclass ("HttpClientResponse"); exported for instanceof checks.
+    FieldDef::CLASS(
+        JSHttpClientResponse::CLASS_NAME,
+        JSHttpClientResponse::class_id,
+        zuqe::JS_PROP_ENUMERABLE,
+    ),
     FieldDef::CLASS(
         JSHttpServer::CLASS_NAME,
         JSHttpServer::class_id,
@@ -65,6 +71,7 @@ pub fn init_mod_http(ctx: &mut ScopedContext) -> Result<(), i32> {
     ctx.use_classes(&[
         JSHttpClient::class_id(),
         JSResponse::class_id(),
+        JSHttpClientResponse::class_id(),
         JSHeaders::class_id(),
         JSRequest::class_id(),
         JSHttpServer::class_id(),

@@ -335,16 +335,6 @@ function testResponse() {
   check("Response statusText default", typeof r4.statusText === "string");
   check("Response bodyUsed pre", r.bodyUsed === false);
 
-  // Aike 扩展
-  check(
-    "Response contentType string",
-    typeof new Response("x").contentType === "string",
-  );
-  check(
-    "Response contentLength null",
-    new Response("x").contentLength === null,
-  );
-
   // Response.error()
   const err = Response.error();
   check("Response.error type", err.type === "error", `got ${err.type}`);
@@ -435,11 +425,6 @@ function testResponse() {
         }
         check("clone after consumed throws", threw);
       });
-    })
-    .then(() => {
-      const r = new Response("close me");
-      r.close();
-      check("Response.close() no throw", true);
     })
     .then(() => {
       const r = new Response("iterable");

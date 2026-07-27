@@ -1,18 +1,23 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-//! Unified `Response` class.
+//! HTTP response classes.
 //!
-//! This is the HTTP client response class shared by `fetch()` and
-//! `HttpClient`. It also exposes the WHATWG `Response` constructor,
-//! `Response.error()` / `Response.redirect()` / `Response.json()`
-//! statics, `clone()`, and the `Body` mixin.
+//! `Response` is the strict WHATWG class returned by `fetch()`. It exposes
+//! the `Response` constructor, `error()` / `redirect()` / `json()` statics,
+//! and the `Body` mixin.
+//!
+//! `HttpClientResponse` (Rust type `JSHttpClientResponse`) extends `Response` and is
+//! returned by `HttpClient`. It adds aike enhancements: `contentType`,
+//! `contentLength`, `httpVersion`, `close()`. Both classes share
+//! `ResponsePayload` and the same native callbacks; only the ClassID and
+//! prototype differ.
 
 use crossbeam::channel::Receiver;
 use linkme::distributed_slice;
 use zuqe::{
-    CallContext, ClassCtorDef, ClassID, FieldDef, JSResult, JSValue, Runtime, ScopedContext,
-    def_native_object,
+    CallContext, ClassCtorDef, ClassID, FieldDef, JSResult, JSValue, NativeObject, Runtime,
+    ScopedContext, def_native_object,
 };
 
 use crate::{
@@ -28,6 +33,28 @@ use crate::{
     },
 };
 
+/// WHATWG `Response.type` (closed set of values this runtime produces).
+/// `Error` / `OpaqueRedirect` force `body` to null per spec.
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum RespType {
+    Basic,
+    Default,
+    Error,
+    OpaqueRedirect,
+}
+
+impl RespType {
+    /// Spec string exposed via the `type` getter.
+    fn as_str(self) -> &'static str {
+        match self {
+            RespType::Basic => "basic",
+            RespType::Default => "default",
+            RespType::Error => "error",
+            RespType::OpaqueRedirect => "opaqueredirect",
+        }
+    }
+}
+
 pub(crate) struct ResponsePayload {
     /// Open network response for lazy body streaming (None once taken).
     resp: Option<reqwest::Response>,
@@ -38,7 +65,9 @@ pub(crate) struct ResponsePayload {
     /// Fixed body bytes for constructed (synthetic) responses.
     synthetic_body: Option<Vec<u8>>,
 
-    resp_type: String,
+    /// WHATWG `Response.type`; see [`RespType`].
+    resp_type: RespType,
+
     url: String,
     redirected: bool,
     status: u16,
@@ -97,7 +126,13 @@ fn get_response_payload_mut<'a>(
     ctx: &mut ScopedContext,
     val: &'a mut JSValue,
 ) -> Result<&'a mut ResponsePayload, i32> {
-    JSResponse::payload_mut_of(val).ok_or_else(|| {
+    // HttpClientResponse is a subclass with its own ClassID; probe both classes.
+    let p = if JSResponse::payload_of(val).is_some() {
+        JSResponse::payload_mut_of(val)
+    } else {
+        JSHttpClientResponse::payload_mut_of(val)
+    };
+    p.ok_or_else(|| {
         ctx.throw_type_error("not an http response object");
         -1
     })
@@ -107,10 +142,12 @@ fn get_response_payload<'a>(
     ctx: &mut ScopedContext,
     val: &'a JSValue,
 ) -> Result<&'a ResponsePayload, i32> {
-    JSResponse::payload_of(val).ok_or_else(|| {
-        ctx.throw_type_error("not an http response object");
-        -1
-    })
+    JSResponse::payload_of(val)
+        .or_else(|| JSHttpClientResponse::payload_of(val))
+        .ok_or_else(|| {
+            ctx.throw_type_error("not an http response object");
+            -1
+        })
 }
 
 /// Build an opaque-redirect `Response` (used for `redirect: "manual"`).
@@ -123,7 +160,7 @@ pub(crate) fn build_opaque_redirect_response(ctx: &mut ScopedContext) -> JSResul
             body_rx: None,
             body_consumed: true,
             synthetic_body: None,
-            resp_type: "opaqueredirect".to_string(),
+            resp_type: RespType::OpaqueRedirect,
             url: String::new(),
             redirected: false,
             status: 0,
@@ -137,34 +174,52 @@ pub(crate) fn build_opaque_redirect_response(ctx: &mut ScopedContext) -> JSResul
     .map(JSValue::from)
 }
 
-/// Build a `Response` instance from a [`TransportResponse`].
+/// Build the shared payload from a [`TransportResponse`].
+fn transport_payload(
+    tr: TransportResponse,
+    resp_type: RespType,
+    url: &str,
+    redirected: bool,
+) -> ResponsePayload {
+    ResponsePayload {
+        resp: tr.resp,
+        body_rx: None,
+        body_consumed: false,
+        synthetic_body: None,
+        resp_type,
+        url: url.to_string(),
+        redirected,
+        status: tr.status,
+        status_text: tr.status_text,
+        content_type: tr.content_type,
+        headers: tr.headers,
+        content_length: tr.content_length,
+        http_version: tr.http_version,
+    }
+}
+
+/// Build a plain WHATWG `Response` from a [`TransportResponse`] (fetch path).
 pub(crate) fn build_response_from_transport(
     ctx: &mut ScopedContext,
     tr: TransportResponse,
-    resp_type: &str,
+    resp_type: RespType,
     url: &str,
     redirected: bool,
 ) -> JSResult {
-    let resp_obj = JSResponse::new_instance(
-        ctx,
-        JSValue::UNDEFINED,
-        ResponsePayload {
-            resp: tr.resp,
-            body_rx: None,
-            body_consumed: false,
-            synthetic_body: None,
-            resp_type: resp_type.to_string(),
-            url: url.to_string(),
-            redirected,
-            status: tr.status,
-            status_text: tr.status_text,
-            content_type: tr.content_type,
-            headers: tr.headers,
-            content_length: tr.content_length,
-            http_version: tr.http_version,
-        },
-    )?;
-    Ok(resp_obj.into())
+    let payload = transport_payload(tr, resp_type, url, redirected);
+    JSResponse::new_instance(ctx, JSValue::UNDEFINED, payload).map(JSValue::from)
+}
+
+/// Build an enhanced `HttpClientResponse` from a [`TransportResponse`] (HttpClient path).
+pub(crate) fn build_http_response_from_transport(
+    ctx: &mut ScopedContext,
+    tr: TransportResponse,
+    resp_type: RespType,
+    url: &str,
+    redirected: bool,
+) -> JSResult {
+    let payload = transport_payload(tr, resp_type, url, redirected);
+    JSHttpClientResponse::new_instance(ctx, JSValue::UNDEFINED, payload).map(JSValue::from)
 }
 
 // ---------------------------------------------------------------------------
@@ -211,7 +266,7 @@ fn js_response_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
             body_rx: None,
             body_consumed: false,
             synthetic_body: synthetic,
-            resp_type: "default".to_string(),
+            resp_type: RespType::Default,
             url: String::new(),
             redirected: false,
             status,
@@ -238,7 +293,7 @@ fn js_response_static_error(ctx: &mut ScopedContext, _cc: CallContext) -> JSResu
             body_rx: None,
             body_consumed: true,
             synthetic_body: None,
-            resp_type: "error".to_string(),
+            resp_type: RespType::Error,
             url: String::new(),
             redirected: false,
             status: 0,
@@ -286,7 +341,7 @@ fn js_response_static_redirect(ctx: &mut ScopedContext, cc: CallContext) -> JSRe
             body_rx: None,
             body_consumed: true,
             synthetic_body: None,
-            resp_type: "default".to_string(),
+            resp_type: RespType::Default,
             url: String::new(),
             redirected: false,
             status,
@@ -341,7 +396,7 @@ fn js_response_static_json(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
             body_rx: None,
             body_consumed: false,
             synthetic_body: Some(body),
-            resp_type: "default".to_string(),
+            resp_type: RespType::Default,
             url: String::new(),
             redirected: false,
             status,
@@ -378,7 +433,7 @@ fn js_response_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     match kind {
         RESPONSE_GET_TYPE => ctx
-            .create_string_from_utf8(p.resp_type.as_bytes().to_vec())
+            .create_string_from_utf8(p.resp_type.as_str().as_bytes().to_vec())
             .map(JSValue::make_string),
         RESPONSE_GET_URL => ctx
             .create_string_from_utf8(p.url.as_bytes().to_vec())
@@ -432,7 +487,7 @@ fn js_response_body(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 Ok(rx) => Some(rx),
                 Err(_) => None,
             }
-        } else if matches!(p.resp_type.as_str(), "error" | "opaque" | "opaqueredirect") {
+        } else if matches!(p.resp_type, RespType::Error | RespType::OpaqueRedirect) {
             return Ok(JSValue::NULL);
         } else {
             None
@@ -525,7 +580,7 @@ fn js_response_clone(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         body_rx: None,
         body_consumed: false,
         synthetic_body: synthetic,
-        resp_type: src.resp_type.clone(),
+        resp_type: src.resp_type,
         url: src.url.clone(),
         redirected: src.redirected,
         status: src.status,
@@ -535,9 +590,16 @@ fn js_response_clone(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         content_length: src.content_length,
         http_version: src.http_version,
     };
-    JSResponse::new_instance(ctx, cc.this(), payload).map(JSValue::from)
+    // Preserve the concrete class: an HttpClientResponse clone stays HttpClientResponse.
+    let this_ref = cc.this();
+    if JSHttpClientResponse::payload_of(&this_ref).is_some() {
+        JSHttpClientResponse::new_instance(ctx, JSValue::UNDEFINED, payload).map(JSValue::from)
+    } else {
+        JSResponse::new_instance(ctx, cc.this(), payload).map(JSValue::from)
+    }
 }
 
+// Strict WHATWG prototype — no aike extensions here (see HTTP_RESPONSE_PROTO).
 const RESPONSE_PROTO: &[FieldDef] = &[
     FieldDef::GETSET("type", Some(js_response_getter), None, RESPONSE_GET_TYPE),
     FieldDef::GETSET("url", Some(js_response_getter), None, RESPONSE_GET_URL),
@@ -561,18 +623,6 @@ const RESPONSE_PROTO: &[FieldDef] = &[
         RESPONSE_GET_STATUS_TEXT,
     ),
     FieldDef::GETSET(
-        "contentType",
-        Some(js_response_getter),
-        None,
-        RESPONSE_GET_CONTENT_TYPE,
-    ),
-    FieldDef::GETSET(
-        "contentLength",
-        Some(js_response_getter),
-        None,
-        RESPONSE_GET_CONTENT_LENGTH,
-    ),
-    FieldDef::GETSET(
         "headers",
         Some(js_response_getter),
         None,
@@ -584,12 +634,6 @@ const RESPONSE_PROTO: &[FieldDef] = &[
         None,
         RESPONSE_GET_BODY_USED,
     ),
-    FieldDef::GETSET(
-        "httpVersion",
-        Some(js_response_getter),
-        None,
-        RESPONSE_GET_HTTP_VERSION,
-    ),
     FieldDef::GETSET("body", Some(js_response_body), None, 0),
     FieldDef::FUNC("bytes", 0, js_response_body_as, BODY_AS_BYTES as i16),
     FieldDef::FUNC("text", 0, js_response_body_as, BODY_AS_TEXT as i16),
@@ -598,7 +642,6 @@ const RESPONSE_PROTO: &[FieldDef] = &[
     FieldDef::FUNC("blob", 0, js_response_body_as, BODY_AS_BYTES as i16),
     FieldDef::FUNC("formData", 0, js_response_form_data, 0),
     FieldDef::FUNC("clone", 0, js_response_clone, 0),
-    FieldDef::FUNC("close", 0, js_response_close, 0),
 ];
 
 const RESPONSE_STATIC_ENTRIES: &[FieldDef] = &[
@@ -614,12 +657,59 @@ def_native_object!(
     RESPONSE_PROTO,
     Some(
         ClassCtorDef::new(js_response_constructor, 1, true)
-            .expose_to_global()
             .entries(RESPONSE_STATIC_ENTRIES)
+            .expose_to_global()
     )
 );
 
 #[distributed_slice(USER_CLASS_DEFS)]
 fn register_class_response(rt: &mut Runtime) -> Result<ClassID, i32> {
     JSResponse::register(rt)
+}
+
+// ---------------------------------------------------------------------------
+// HttpClientResponse — HttpClient-enhanced subclass of Response
+// ---------------------------------------------------------------------------
+
+fn js_http_response_constructor(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
+    // Instances are only produced by HttpClient requests.
+    ctx.throw_type_error("HttpClientResponse is not constructable; use HttpClient");
+    Err(-1)
+}
+
+// Aike enhancements only; everything else is inherited from Response.
+const HTTP_RESPONSE_PROTO: &[FieldDef] = &[
+    FieldDef::GETSET(
+        "contentType",
+        Some(js_response_getter),
+        None,
+        RESPONSE_GET_CONTENT_TYPE,
+    ),
+    FieldDef::GETSET(
+        "contentLength",
+        Some(js_response_getter),
+        None,
+        RESPONSE_GET_CONTENT_LENGTH,
+    ),
+    FieldDef::GETSET(
+        "httpVersion",
+        Some(js_response_getter),
+        None,
+        RESPONSE_GET_HTTP_VERSION,
+    ),
+    FieldDef::FUNC("close", 0, js_response_close, 0),
+];
+
+def_native_object!(
+    "HttpClientResponse",
+    JSHttpClientResponse,
+    ResponsePayload,
+    HTTP_RESPONSE_PROTO,
+    Some(ClassCtorDef::new(js_http_response_constructor, 0, false)),
+    extends: JSResponse::class_id
+);
+
+#[distributed_slice(USER_CLASS_DEFS)]
+fn register_class_client_response(rt: &mut Runtime) -> Result<ClassID, i32> {
+    JSHttpClientResponse::register(rt)
 }

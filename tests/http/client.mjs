@@ -1,8 +1,9 @@
-import { HttpClient, HttpServer } from "http";
+import { HttpClient, HttpClientResponse, HttpServer } from "http";
 
 // 🌐 HTTP 客户端测试 — HttpClient / Response / Headers / Request 全量测试
 //
-// fetch() 是 HttpClient 的语法糖，返回相同的 Response 类。本文件覆盖：
+// fetch() 返回严格 WHATWG 的 Response；HttpClient 返回其增强子类 HttpClientResponse
+// （contentType/contentLength/httpVersion/close）。本文件覆盖：
 //   - HttpClient: 构造、GET/POST/PUT/DELETE/PATCH、request()、超时、重定向、
 //     自定义 header、与 fetch 一致性
 //   - Response: 构造、getter、静态方法（error/redirect/json）、body 消费
@@ -209,15 +210,14 @@ function testResponseSync() {
   check("Response ok (404)", r4.ok === false);
   check("Response statusText default", typeof r4.statusText === "string");
 
-  // Aike 扩展 getter
-  check(
-    "Response contentType string",
-    typeof new Response("x").contentType === "string",
-  );
-  check(
-    "Response contentLength null",
-    new Response("x").contentLength === null,
-  );
+  // HttpClientResponse 不可直接构造
+  let ctorThrew = false;
+  try {
+    new HttpClientResponse();
+  } catch (e) {
+    ctorThrew = true;
+  }
+  check("new HttpClientResponse() throws", ctorThrew);
 
   // Response.error()
   const err = Response.error();
@@ -361,12 +361,6 @@ function testResponseBody() {
           threw = true;
         }
         check("Response.formData throws", threw);
-      })
-      // Response.close()
-      .then(() => {
-        const r = new Response("close me");
-        r.close();
-        check("Response.close() no throw", true);
       })
       // Response.body async iteration
       .then(() => {
@@ -624,6 +618,9 @@ function testHttpGet() {
       );
       check("GET has url", typeof r.url === "string" && r.url.length > 0);
       check("GET contentType", typeof r.contentType === "string");
+      check("GET returns HttpClientResponse", r instanceof HttpClientResponse);
+      check("HttpClientResponse is a Response", r instanceof Response);
+      check("HttpClientResponse has close()", typeof r.close === "function");
       check("GET has headers", r.headers.get("content-type") !== null);
       return r.text();
     })
@@ -911,13 +908,6 @@ function testMetaAndErrors() {
           `got ${r.contentLength}`,
         );
         r.close();
-      })
-      .then(() => {
-        // 合成 Response 无网络传输，httpVersion 为 null
-        check(
-          "synthetic httpVersion null",
-          new Response("x").httpVersion === null,
-        );
       })
       .then(() =>
         client
