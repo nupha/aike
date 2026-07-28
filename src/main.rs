@@ -12,6 +12,7 @@ mod global;
 mod helpers;
 mod html;
 mod http;
+mod inspect_value;
 mod jsonl;
 mod llm;
 mod mcp;

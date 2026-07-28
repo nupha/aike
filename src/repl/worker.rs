@@ -114,10 +114,8 @@ fn process_input_line(
                 zuqe::EvalFlags::empty(),
             ) {
                 Ok(val) => {
-                    let result = val
-                        .inspect(&mut ctx.root_scope())
-                        .unwrap_or_else(|_| "<fail to display>".to_string());
-                    print_output(result.into());
+                    let t = crate::inspect_value::js_inspect(&mut ctx.root_scope(), val);
+                    print_output(t.into());
                 }
                 Err(_) => {
                     let t = ctx.take_exception().to_text(&mut ctx.root_scope());

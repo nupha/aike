@@ -6,6 +6,7 @@ use std::{cell::RefCell, collections::HashMap, time::Instant};
 use zuqe::{CallContext, EvalFlags, EvalType, FieldDef, JSResult, JSValue, Object, ScopedContext};
 
 use crate::color::{Color, colorize};
+use crate::inspect_value::js_inspect;
 
 thread_local! {
     static GROUP_INDENT: RefCell<usize> = const { RefCell::new(0) };
@@ -39,7 +40,7 @@ fn js_console_print(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             out.push_str(&colorize(" ", clr()));
         }
         let arg = cc.arg(i);
-        out.push_str(&colorize(&arg.inspect(ctx)?, clr()));
+        out.push_str(&colorize(&js_inspect(ctx, arg), clr()));
     }
 
     if magic == 4 {
@@ -63,7 +64,7 @@ fn js_console_assert(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         out.push_str(&colorize("Assertion failed", Color::RedFg));
         for i in 1..cc.length() {
             out.push_str(&colorize(" ", Color::RedFg));
-            out.push_str(&colorize(&cc.arg(i).inspect(ctx)?, Color::RedFg));
+            out.push_str(&colorize(&js_inspect(ctx, cc.arg(i)), Color::RedFg));
         }
 
         eprintln!("{}", out);
@@ -84,7 +85,7 @@ fn js_console_trace(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         out.push_str(&colorize(":", Color::Reset));
         for i in 0..cc.length() {
             out.push_str(&colorize(" ", Color::Reset));
-            out.push_str(&colorize(cc.arg(i).inspect(ctx)?, Color::Reset));
+            out.push_str(&colorize(js_inspect(ctx, cc.arg(i)), Color::Reset));
         }
     }
     console_println(out);
@@ -120,7 +121,7 @@ fn js_console_dir(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         out.push_str(&colorize("  ", Color::Reset));
     }
     if cc.length() > 0 {
-        out.push_str(&cc.arg(0).inspect(ctx)?);
+        out.push_str(&js_inspect(ctx, cc.arg(0)));
     }
     console_println(out);
     Ok(JSValue::UNDEFINED)
@@ -217,7 +218,7 @@ fn js_console_time_log(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             out.push_str(&colorize(format!("{label}: {ms:.1} ms"), Color::Reset));
             for i in 1..cc.length() {
                 out.push_str(&colorize(" ", Color::Reset));
-                out.push_str(&colorize(&cc.arg(i).inspect(ctx)?, Color::Reset));
+                out.push_str(&colorize(&js_inspect(ctx, cc.arg(i)), Color::Reset));
             }
             console_println(out);
         }
@@ -309,7 +310,7 @@ fn js_console_table(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     }
 
     // Fallback: inspect-print the value
-    console_println(data.inspect(ctx)?);
+    console_println(js_inspect(ctx, data));
     Ok(JSValue::UNDEFINED)
 }
 
