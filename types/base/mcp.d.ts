@@ -63,12 +63,23 @@ declare module "mcp" {
     desc: string;
     /**
      * Value type. Defaults to `"string"` when omitted.
+     * Allowed JSON-Schema types (per JSON Schema Validation 2020-12 §6.1.1):
      * - `"string"` — default
-     * - `"integer"` — integer number
+     * - `"integer"` — integer number (a subtype of `number`, zero fractional part)
+     * - `"number"` — floating-point number (e.g. latitude/longitude)
      * - `"boolean"` — true/false
      * - `"array"` — array; use `items` to specify element type
+     * - `"object"` — nested object
+     * - `"null"` — JSON null
      */
-    type?: "string" | "integer" | "boolean" | "array";
+    type?:
+      | "string"
+      | "integer"
+      | "number"
+      | "boolean"
+      | "array"
+      | "object"
+      | "null";
     /** Mark as required. */
     required?: boolean;
     /** Enum string values. */
@@ -87,7 +98,14 @@ declare module "mcp" {
      */
     items?: {
       /** Element type */
-      type: "string" | "integer" | "boolean";
+      type:
+        | "string"
+        | "integer"
+        | "number"
+        | "boolean"
+        | "array"
+        | "object"
+        | "null";
       /** Description of each element. */
       desc?: string;
       /** Enum values for elements. */
