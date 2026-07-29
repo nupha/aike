@@ -19,6 +19,19 @@ fn console_println(msg: String) {
     crate::repl::print_output(msg.into());
 }
 
+/// Format a value for `console.log`/... output. Top-level strings are printed
+/// raw (no quoting), matching Node's `console.log("hello") === hello`.
+/// Other values fall back to inspect (which quotes nested strings).
+fn console_format_arg(ctx: &mut ScopedContext, val: JSValue) -> String {
+    if val.is_string() {
+        val.as_string(false)
+            .map(|s| s.encode_utf8(false).into_owned())
+            .unwrap_or_default()
+    } else {
+        js_inspect(ctx, val)
+    }
+}
+
 fn js_console_print(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let magic = cc.magic();
     let clr = || match magic {
@@ -40,7 +53,7 @@ fn js_console_print(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             out.push_str(&colorize(" ", clr()));
         }
         let arg = cc.arg(i);
-        out.push_str(&colorize(&js_inspect(ctx, arg), clr()));
+        out.push_str(&colorize(&console_format_arg(ctx, arg), clr()));
     }
 
     if magic == 4 {
