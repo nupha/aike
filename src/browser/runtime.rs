@@ -133,6 +133,7 @@ pub(crate) fn js_page_wait_for_selector(ctx: &mut ScopedContext, cc: CallContext
         .to_string(ctx)
         .map(|s| s.content().encode_utf8(false).to_string())
         .unwrap_or_default();
+
     let timeout_ms: i64 = if cc.length() > 1 {
         let n = cc
             .arg(1)
@@ -160,29 +161,135 @@ pub(crate) fn js_page_wait_for_selector(ctx: &mut ScopedContext, cc: CallContext
         })?;
 
     tokio::spawn(async move {
-        let js_code = format!(
-            "new Promise((resolve, reject) => {{\
-             let el = document.querySelector('{}');\
-             if (el) {{ resolve(true); return; }}\
-             let mo = new MutationObserver(() => {{\
-             if (document.querySelector('{}')) {{\
-             mo.disconnect(); resolve(true);\
-             }}\
-             }});\
-             mo.observe(document.body, {{ childList: true, subtree: true }});\
-             setTimeout(() => {{ mo.disconnect(); reject(new Error('timeout')); }}, {});\
-             }})",
-            selector.replace('\'', "\\'"),
-            selector.replace('\'', "\\'"),
-            timeout_ms
-        );
+        // Retry with a short per-attempt timeout so that, if `navigate` returns
+        // before the new document is ready, the evaluate that ran against a
+        // stale execution context is retried against the fresh one once the
+        // navigation commits.
+        let start = std::time::Instant::now();
+        let overall = std::time::Duration::from_millis(timeout_ms.max(0) as u64);
+        loop {
+            let remaining = overall.saturating_sub(start.elapsed());
+            if remaining.is_zero() {
+                result_slot
+                    .commit(Err("selector not found or timed out".into()))
+                    .ok();
+                return;
+            }
+            let attempt_ms = remaining.as_millis().min(1000) as i64;
 
+            let js_code = format!(
+                "new Promise((resolve, reject) => {{\
+                 let el = document.querySelector('{}');\
+                 if (el) {{ resolve(true); return; }}\
+                 let mo = new MutationObserver(() => {{\
+                 if (document.querySelector('{}')) {{\
+                 mo.disconnect(); resolve(true);\
+                 }}\
+                 }});\
+                 mo.observe(document.body, {{ childList: true, subtree: true }});\
+                 setTimeout(() => {{ mo.disconnect(); reject(new Error('timeout')); }}, {});\
+                 }})",
+                selector.replace('\'', "\\'"),
+                selector.replace('\'', "\\'"),
+                attempt_ms
+            );
+
+            let rx = client.send(
+                "Runtime.evaluate",
+                Some(serde_json::json!({
+                    "expression": js_code,
+                    "awaitPromise": true,
+                })),
+                Some(&session_id),
+            );
+            match rx.await {
+                Ok(Ok(val)) => {
+                    // exceptionDetails (in-page timeout/reject) or a CDP error
+                    // (e.g. stale execution context) → retry against a fresh
+                    // document.
+                    if val.get("exceptionDetails").is_some() || val.get("error").is_some() {
+                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                        continue;
+                    }
+                    result_slot.commit(Ok(())).ok();
+                    return;
+                }
+                Ok(Err(_)) | Err(_) => {
+                    result_slot.commit(Err("channel closed".into())).ok();
+                    return;
+                }
+            }
+        }
+    });
+
+    Ok(promise.into())
+}
+
+/// `page.enableRuntime()`
+pub(crate) fn js_page_enable_runtime(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    send_page_void_cmd(ctx, &cc, "Runtime.enable", None)
+}
+
+/// `page.waitForFunction(expression, timeoutMs?)`
+/// Poll `expression` (any JS) every 100ms until it evaluates truthy or timeout.
+/// Mirrors `page.waitForSelector` but for arbitrary conditions / text.
+pub(crate) fn js_page_wait_for_function(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let expr = cc
+        .arg(0)
+        .to_string(ctx)
+        .map(|s| s.content().encode_utf8(false).to_string())
+        .unwrap_or_default();
+    let timeout_ms: i64 = if cc.length() > 1 {
+        let n = cc
+            .arg(1)
+            .to_number(ctx)
+            .map(|n| n.to_i32())
+            .unwrap_or(30000);
+        n as i64
+    } else {
+        30000
+    };
+
+    let this = cc.this();
+    let payload = get_page_payload(ctx, &this)?;
+    let client = payload.client.clone();
+    let session_id = payload.session_id.clone();
+
+    let result_slot = PromiseResultSlot::<Result<(), String>>::new();
+    let promise =
+        Promise::create_with_result_slot(ctx, result_slot.clone(), |cx, payload| -> JSResult {
+            payload.map_err(|e| {
+                cx.throw_internal_error(&e);
+                -1
+            })?;
+            Ok(JSValue::UNDEFINED)
+        })?;
+
+    tokio::spawn(async move {
+        let mut js = String::from(
+            "new Promise((resolve, reject) => {\
+            const deadline = Date.now() + ",
+        );
+        js.push_str(&timeout_ms.to_string());
+        js.push_str(
+            ";\
+            const tick = () => {\
+                let ok = false;\
+                try { ok = !!(( ",
+        );
+        js.push_str(&expr);
+        js.push_str(
+            " )); } catch (e) { ok = false; }\
+                if (ok) { resolve(true); return; }\
+                if (Date.now() > deadline) { reject(new Error('timeout')); return; }\
+                setTimeout(tick, 100);\
+            };\
+            tick();\
+        })",
+        );
         let rx = client.send(
             "Runtime.evaluate",
-            Some(serde_json::json!({
-                "expression": js_code,
-                "awaitPromise": true,
-            })),
+            Some(serde_json::json!({ "expression": js, "awaitPromise": true })),
             Some(&session_id),
         );
         let result = rx.await.unwrap_or(Err("channel closed".into()));
@@ -190,7 +297,7 @@ pub(crate) fn js_page_wait_for_selector(ctx: &mut ScopedContext, cc: CallContext
             Ok(val) => {
                 if val.get("exceptionDetails").is_some() {
                     result_slot
-                        .commit(Err("selector not found or timed out".into()))
+                        .commit(Err("waitForFunction: condition not met or timed out".into()))
                         .ok();
                 } else {
                     result_slot.commit(Ok(())).ok();
@@ -203,11 +310,6 @@ pub(crate) fn js_page_wait_for_selector(ctx: &mut ScopedContext, cc: CallContext
     });
 
     Ok(promise.into())
-}
-
-/// `page.enableRuntime()`
-pub(crate) fn js_page_enable_runtime(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    send_page_void_cmd(ctx, &cc, "Runtime.enable", None)
 }
 
 // ---------------------------------------------------------------------------

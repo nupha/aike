@@ -442,6 +442,224 @@ pub(crate) fn js_page_type(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
     Ok(promise.into())
 }
 
+/// Build the aria-node JSON array from a raw `Accessibility.getFullAXTree`
+/// result. AX `nodeId`/`parentId` are strings; convert them to numbers so the
+/// JS layer can use `nodeId` directly as a ref id (`eN`). Each node carries a
+/// stable `backendNodeId` (CDP backend node id) used for ref-based click/type.
+fn build_aria_nodes(val: &serde_json::Value) -> String {
+    let ax_nodes = val.get("nodes").and_then(|n| n.as_array());
+    let mut out: Vec<serde_json::Value> = Vec::new();
+    let mut idx_of: std::collections::HashMap<u64, usize> = std::collections::HashMap::new();
+    if let Some(ax_nodes) = ax_nodes {
+        for (i, n) in ax_nodes.iter().enumerate() {
+            let node_id = n
+                .get("nodeId")
+                .and_then(|v| v.as_str())
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(0);
+            idx_of.insert(node_id, i);
+            let role = n
+                .get("role")
+                .and_then(|v| v.get("value"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let name = n
+                .get("name")
+                .and_then(|v| v.get("value"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let desc = n
+                .get("description")
+                .and_then(|v| v.get("value"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let text = n
+                .get("value")
+                .and_then(|v| v.get("value"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            out.push(serde_json::json!({
+                "nodeId": node_id,
+                "backendNodeId": n.get("backendDOMNodeId").and_then(|v| v.as_u64()).unwrap_or(0),
+                "parentIndex": -1,
+                "contentType": "element",
+                "textValue": text,
+                "attributes": { "role": role, "name": name, "description": desc },
+            }));
+        }
+    }
+    // Resolve parentIndex from parentId (parent node's output index).
+    if let Some(ax_nodes) = val.get("nodes").and_then(|n| n.as_array()) {
+        for (i, n) in ax_nodes.iter().enumerate() {
+            let parent_idx = n
+                .get("parentId")
+                .and_then(|v| v.as_str())
+                .and_then(|s| s.parse::<u64>().ok())
+                .and_then(|p| idx_of.get(&p).copied())
+                .map(|x| x as i64)
+                .unwrap_or(-1i64);
+            out[i]["parentIndex"] = serde_json::json!(parent_idx);
+        }
+    }
+    serde_json::to_string(&out).unwrap_or_else(|_| "[]".to_string())
+}
+
+/// `page.ariaSnapshot()` — builds an aria/accessibility tree via
+/// `Accessibility.getFullAXTree`. It yields `role`, `name` and a stable
+/// `backendDOMNodeId` per node. Returns a JSON string: an array of aria
+/// nodes, each carrying `nodeId` (its ref, e.g. `e12`) and a stable
+/// `backendNodeId` (survives DOM mutations).
+pub(crate) fn js_page_aria_snapshot(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let this = cc.this();
+    let payload = get_page_payload(ctx, &this)?;
+    let client = payload.client.clone();
+    let session_id = payload.session_id.clone();
+
+    let result_slot = PromiseResultSlot::<Result<String, String>>::new();
+    let promise =
+        Promise::create_with_result_slot(ctx, result_slot.clone(), |cx, payload| -> JSResult {
+            let data = payload.map_err(|e| {
+                cx.throw_internal_error(&e);
+                -1
+            })?;
+            cx.create_string_from_utf8(data.into_bytes())
+                .map(JSValue::make_string)
+        })?;
+
+    tokio::spawn(async move {
+        // Accessibility.getFullAXTree yields role/name and a stable
+        // backendDOMNodeId (the ref target) per node.
+        let _ = client
+            .send("Accessibility.enable", None, Some(&session_id))
+            .await;
+        let result = client
+            .send("Accessibility.getFullAXTree", None, Some(&session_id))
+            .await
+            .unwrap_or(Err("channel closed".into()));
+        match result {
+            Ok(val) => {
+                let data = build_aria_nodes(&val);
+                result_slot.commit(Ok(data)).ok();
+            }
+            Err(e) => {
+                result_slot.commit(Err(e)).ok();
+            }
+        };
+    });
+
+    Ok(promise.into())
+}
+
+/// `page.clickBackendNode(backendNodeId)` — click the element identified by its
+/// CDP backend node id (stable ref from `ariaSnapshot`), without re-querying DOM.
+pub(crate) fn js_page_click_backend_node(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let backend_node_id = cc
+        .arg(0)
+        .to_number(ctx)
+        .map(|n| n.to_f64() as u64)
+        .unwrap_or(0);
+
+    let this = cc.this();
+    let payload = get_page_payload(ctx, &this)?;
+    let client = payload.client.clone();
+    let session_id = payload.session_id.clone();
+
+    let result_slot = PromiseResultSlot::<Result<(), String>>::new();
+    let promise =
+        Promise::create_with_result_slot(ctx, result_slot.clone(), |cx, payload| -> JSResult {
+            payload.map_err(|e| {
+                cx.throw_internal_error(&e);
+                -1
+            })?;
+            Ok(JSValue::UNDEFINED)
+        })?;
+
+    tokio::spawn(async move {
+        let r: Result<(), String> = async {
+            // Enable DOM (idempotent) so backendNodeId resolves to a box model.
+            let _ = client.send("DOM.enable", None, Some(&session_id)).await;
+            let m = client
+                .send(
+                    "DOM.getBoxModel",
+                    Some(serde_json::json!({ "backendNodeId": backend_node_id })),
+                    Some(&session_id),
+                )
+                .await
+                .unwrap_or(Err("channel closed".into()))?;
+            let quad = m
+                .get("model")
+                .and_then(|mo| mo.get("content"))
+                .and_then(|v| v.as_array())
+                .ok_or_else(|| "no box model content".to_string())?;
+            let xs: Vec<f64> = quad.iter().step_by(2).filter_map(|v| v.as_f64()).collect();
+            let ys: Vec<f64> = quad
+                .iter()
+                .skip(1)
+                .step_by(2)
+                .filter_map(|v| v.as_f64())
+                .collect();
+            if xs.len() < 2 || ys.len() < 2 {
+                return Err("malformed box model".to_string());
+            }
+            let cx = (xs[0] + xs[2.min(xs.len() - 1)]) / 2.0;
+            let cy = (ys[0] + ys[2.min(ys.len() - 1)]) / 2.0;
+            cdp_input::mouse_click(&client, &session_id, cx, cy, "left", 1).await
+        }
+        .await;
+        result_slot.commit(r).ok();
+    });
+    Ok(promise.into())
+}
+
+/// `page.typeBackendNode(backendNodeId, text)` — focus the element by backend node id,
+/// then insert text (CJK/Unicode safe). Mirrors `page.type` but via a stable ref.
+pub(crate) fn js_page_type_backend_node(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let backend_node_id = cc
+        .arg(0)
+        .to_number(ctx)
+        .map(|n| n.to_f64() as u64)
+        .unwrap_or(0);
+    let text = cc
+        .arg(1)
+        .to_string(ctx)
+        .map(|s| s.content().encode_utf8(false).to_string())
+        .unwrap_or_default();
+
+    let this = cc.this();
+    let payload = get_page_payload(ctx, &this)?;
+    let client = payload.client.clone();
+    let session_id = payload.session_id.clone();
+
+    let result_slot = PromiseResultSlot::<Result<(), String>>::new();
+    let promise =
+        Promise::create_with_result_slot(ctx, result_slot.clone(), |cx, payload| -> JSResult {
+            payload.map_err(|e| {
+                cx.throw_internal_error(&e);
+                -1
+            })?;
+            Ok(JSValue::UNDEFINED)
+        })?;
+
+    tokio::spawn(async move {
+        let r: Result<(), String> = async {
+            // Enable DOM (idempotent) so backendNodeId resolves for DOM.focus.
+            let _ = client.send("DOM.enable", None, Some(&session_id)).await;
+            client
+                .send(
+                    "DOM.focus",
+                    Some(serde_json::json!({ "backendNodeId": backend_node_id })),
+                    Some(&session_id),
+                )
+                .await
+                .unwrap_or(Err("channel closed".into()))?;
+            cdp_input::insert_text(&client, &session_id, &text).await
+        }
+        .await;
+        result_slot.commit(r).ok();
+    });
+    Ok(promise.into())
+}
+
 /// `page.getNodeValue(selector)` → outerHTML (string) of the single matched node.
 pub(crate) fn js_page_get_node_value(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let selector = cc

@@ -175,6 +175,61 @@ async function testSecurityDomain(browser) {
   // Note: `fired` depends on a live insecure-TLS navigation; left unasserted.
 }
 
+// --- Tab-level tests merged from tests/test_browser.js ---
+
+async function testNewTab(browser) {
+  console.log("\n=== Browser.newPage() ===");
+  const tab = await browser.newPage();
+  check("Tab object", typeof tab === "object" && tab !== null);
+  check(
+    "targetId is string",
+    typeof tab.targetId === "string" && tab.targetId.length > 0,
+  );
+  await tab.close();
+}
+
+async function testBasicAPI(browser) {
+  console.log("\n=== Basic API (newPage + navigate + getOuterHTML flow) ===");
+  const tab = await browser.newPage();
+  await tab.navigate("data:text/html,<h1 id='h'>hello</h1>");
+  await tab.waitForSelector("#h", 5000);
+  const html = await tab.getOuterHTML();
+  check("full flow works", html.includes("hello"), "got: " + html.slice(0, 50));
+  await tab.close();
+}
+
+async function testMultipleTabs(browser) {
+  console.log("\n=== Multiple tabs ===");
+  const tab1 = await browser.newPage();
+  const tab2 = await browser.newPage();
+
+  check(
+    "unique targetIds",
+    tab1.targetId !== tab2.targetId,
+    tab1.targetId + " vs " + tab2.targetId,
+  );
+
+  // Each tab has an independent JS world.
+  await tab1.navigate("data:text/html,<script>window._v=1;</script>");
+  await tab2.navigate("data:text/html,<script>window._v=2;</script>");
+  await tab1.waitForSelector("body", 5000);
+  await tab2.waitForSelector("body", 5000);
+  check("tab1 evaluate", (await tab1.evaluate("window._v")) === 1);
+  check("tab2 evaluate", (await tab2.evaluate("window._v")) === 2);
+
+  await tab1.close();
+  await tab2.close();
+}
+
+async function testCustomPort() {
+  console.log("\n=== launch() with custom port ===");
+  // Use a non-default port so it does not collide with the main instance.
+  const b2 = await Browser.launch({ headless: true, port: 9366 });
+  check("custom port works", b2.isRunning === true);
+  await b2.close();
+  check("custom port close() resolved", true);
+}
+
 async function main() {
   let browser;
   try {
@@ -191,7 +246,15 @@ async function main() {
   // One page so listPages/getTargets exercise a real target.
   const page = await browser.newPage();
 
-  const tests = [testBrowserDomain, testTargetDomain, testSecurityDomain];
+  const tests = [
+    testBrowserDomain,
+    testTargetDomain,
+    testSecurityDomain,
+    testNewTab,
+    testBasicAPI,
+    testMultipleTabs,
+    testCustomPort,
+  ];
   for (const fn of tests) {
     try {
       await fn(browser);

@@ -61,8 +61,11 @@ async function testNavigationHistory(page) {
   }
   const h2 = await page.getNavigationHistory();
   check("back() landed on PAGE_A", titleB === "A", "title=" + titleB);
-  check("back() decreased currentIndex", h2.currentIndex < before,
-    "before=" + before + " after=" + h2.currentIndex);
+  check(
+    "back() decreased currentIndex",
+    h2.currentIndex < before,
+    "before=" + before + " after=" + h2.currentIndex,
+  );
 
   await page.forward();
   let titleF = null;
@@ -74,8 +77,67 @@ async function testNavigationHistory(page) {
   }
   const h3 = await page.getNavigationHistory();
   check("forward() landed on PAGE_B", titleF === "B", "title=" + titleF);
-  check("forward() increased currentIndex", h3.currentIndex > h2.currentIndex,
-    "before=" + h2.currentIndex + " after=" + h3.currentIndex);
+  check(
+    "forward() increased currentIndex",
+    h3.currentIndex > h2.currentIndex,
+    "before=" + h2.currentIndex + " after=" + h3.currentIndex,
+  );
+}
+
+// --- Merged from tests/test_browser.js ---
+
+async function testNavigate(page) {
+  console.log("\n=== page.navigate() ===");
+  await page.navigate(PAGE_A);
+  await page.waitForSelector("#a", 5000);
+  const title = await page.evaluate("document.title");
+  check("navigated to test page", title === "A", "got: " + title);
+}
+
+async function testWaitForNavigation(page) {
+  console.log("\n=== page.waitForNavigation() native CDP event ===");
+  // Subscribe BEFORE navigating (Playwright order) — the load event fires
+  // during navigation, so a late subscriber would miss it and time out.
+  const nav1 = page.waitForNavigation(10000);
+  await page.navigate(PAGE_A);
+  await nav1;
+  check("waitForNavigation on first load", true);
+
+  const nav2 = page.waitForNavigation(10000);
+  await page.navigate(PAGE_B);
+  await nav2;
+  check("waitForNavigation on second navigation", true);
+
+  const text = await page.evaluate("document.body.innerText");
+  check("page content loaded", text.includes("Page B"), "got: " + text);
+}
+
+async function testAddInitScript(page) {
+  console.log("\n=== page.addInitScript() ===");
+  // Inject a script that sets a global before any page JS runs.
+  const scriptId = await page.addInitScript(
+    "window.__injectedByTest = 'injected';",
+  );
+  check(
+    "addInitScript returns identifier",
+    typeof scriptId === "string" && scriptId.length > 0,
+  );
+
+  const nav = page.waitForNavigation(10000);
+  await page.navigate(
+    "data:text/html,<script>window.__pageVar = window.__injectedByTest;</script>",
+  );
+  await nav;
+
+  const injected = await page.evaluate("window.__injectedByTest");
+  check("injected script ran", injected === "injected", "got: " + injected);
+
+  const pageVar = await page.evaluate("window.__pageVar");
+  check(
+    "page can read injected var",
+    pageVar === "injected",
+    "got: " + pageVar,
+  );
 }
 
 async function main() {
@@ -92,15 +154,27 @@ async function main() {
   check("Browser launched", browser.isRunning === true);
   const page = await browser.newPage();
 
-  try {
-    await testNavigationHistory(page);
-  } catch (e) {
-    console.log("  [FAIL] testNavigationHistory threw: " + (e && (e.message || e)));
-    fail++;
+  const tests = [
+    testNavigate,
+    testNavigationHistory,
+    testWaitForNavigation,
+    testAddInitScript,
+  ];
+  for (const fn of tests) {
+    try {
+      await fn(page);
+    } catch (e) {
+      console.log("  [FAIL] " + fn.name + " threw: " + (e && (e.message || e)));
+      fail++;
+    }
   }
 
-  try { await page.close(); } catch (e) {}
-  try { await browser.close(); } catch (e) {}
+  try {
+    await page.close();
+  } catch (e) {}
+  try {
+    await browser.close();
+  } catch (e) {}
 
   console.log("\n" + "=".repeat(50));
   console.log("pass: " + pass + ", fail: " + fail);

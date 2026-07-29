@@ -78,8 +78,11 @@ async function testGetProperties(page) {
   const props2 = await page.getProperties(h2.objectId);
   check(
     "getProperties handles strings and arrays",
-    props2 && props2.name === "x" &&
-      Array.isArray(props2.list) && props2.list[0] === 10 && props2.list[1] === 20,
+    props2 &&
+      props2.name === "x" &&
+      Array.isArray(props2.list) &&
+      props2.list[0] === 10 &&
+      props2.list[1] === 20,
     "props2=" + JSON.stringify(props2),
   );
 }
@@ -138,10 +141,51 @@ async function testOnConsole(page) {
   );
   check(
     "onConsole entry carries the logged args",
-    fired && msg && Array.isArray(msg.args) && msg.args[0] &&
-      msg.args[0].value === "aike-console-test" && msg.args[1].value === 42,
+    fired &&
+      msg &&
+      Array.isArray(msg.args) &&
+      msg.args[0] &&
+      msg.args[0].value === "aike-console-test" &&
+      msg.args[1].value === 42,
     "msg=" + JSON.stringify(msg),
   );
+}
+
+// --- Merged from tests/test_browser.js ---
+
+async function testEvaluate(page) {
+  console.log("\n=== page.evaluate() value round-trips ===");
+  await page.navigate(
+    "data:text/html," +
+      encodeURIComponent(
+        "<body><script>window._testVar = 42;" +
+          "function greet(n) { return 'Hello, ' + n + '!'; }</script></body>",
+      ),
+  );
+  await page.waitForSelector("body", 5000);
+
+  check("number", (await page.evaluate("42")) === 42);
+  check("string", (await page.evaluate("'hello'")) === "hello");
+  check("bool true", (await page.evaluate("true")) === true);
+  check("null", (await page.evaluate("null")) === null);
+  check("array", JSON.stringify(await page.evaluate("[1,2,3]")) === "[1,2,3]");
+
+  const obj = await page.evaluate("({a:1,b:'two'})");
+  check("object a", obj.a === 1, "got: " + obj.a);
+  check("object b", obj.b === "two", "got: " + obj.b);
+
+  check("existing var", (await page.evaluate("window._testVar")) === 42);
+  check(
+    "function call",
+    (await page.evaluate("greet('World')")) === "Hello, World!",
+  );
+}
+
+async function testEnableRuntime(page) {
+  console.log("\n=== page.enableRuntime() ===");
+  // enableRuntime enables the Runtime domain; must resolve without error.
+  await page.enableRuntime();
+  check("enableRuntime resolves", true);
 }
 
 async function main() {
@@ -158,7 +202,14 @@ async function main() {
   check("Browser launched", browser.isRunning === true);
   const page = await browser.newPage();
 
-  const tests = [testEvaluateHandle, testGetProperties, testCallFunctionOn, testOnConsole];
+  const tests = [
+    testEvaluate,
+    testEvaluateHandle,
+    testGetProperties,
+    testCallFunctionOn,
+    testOnConsole,
+    testEnableRuntime,
+  ];
   for (const fn of tests) {
     try {
       await fn(page);
@@ -168,8 +219,12 @@ async function main() {
     }
   }
 
-  try { await page.close(); } catch (e) {}
-  try { await browser.close(); } catch (e) {}
+  try {
+    await page.close();
+  } catch (e) {}
+  try {
+    await browser.close();
+  } catch (e) {}
 
   console.log("\n" + "=".repeat(50));
   console.log("pass: " + pass + ", fail: " + fail);

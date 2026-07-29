@@ -62,6 +62,12 @@ const PAGE_PROTO: &[FieldDef] = &[
         super::runtime::js_page_wait_for_selector,
         0,
     ),
+    FieldDef::FUNC(
+        "waitForFunction",
+        2,
+        super::runtime::js_page_wait_for_function,
+        0,
+    ),
     FieldDef::FUNC("evaluate", 1, super::runtime::js_page_evaluate, 0),
     FieldDef::FUNC("getOuterHTML", 0, super::runtime::js_page_get_outer_html, 0),
     FieldDef::FUNC("captureScreenshot", 1, js_page_capture_screenshot, 0),
@@ -114,6 +120,9 @@ const PAGE_PROTO: &[FieldDef] = &[
     // Input domain
     FieldDef::FUNC("mouseClick", 4, input::js_page_mouse_click, 0),
     FieldDef::FUNC("mouseMove", 2, input::js_page_mouse_move, 0),
+    FieldDef::FUNC("mouseDown", 3, input::js_page_mouse_down, 0),
+    FieldDef::FUNC("mouseUp", 3, input::js_page_mouse_up, 0),
+    FieldDef::FUNC("dragAndDrop", 2, input::js_page_drag_and_drop, 0),
     FieldDef::FUNC("keyPress", 2, input::js_page_key_press, 0),
     FieldDef::FUNC("insertText", 1, input::js_page_insert_text, 0),
     // DOM domain
@@ -131,6 +140,19 @@ const PAGE_PROTO: &[FieldDef] = &[
     FieldDef::FUNC("getNodeValue", 1, super::dom::js_page_get_node_value, 0),
     FieldDef::FUNC("click", 1, super::dom::js_page_click, 0),
     FieldDef::FUNC("type", 2, super::dom::js_page_type, 0),
+    FieldDef::FUNC("ariaSnapshot", 0, super::dom::js_page_aria_snapshot, 0),
+    FieldDef::FUNC(
+        "clickBackendNode",
+        1,
+        super::dom::js_page_click_backend_node,
+        0,
+    ),
+    FieldDef::FUNC(
+        "typeBackendNode",
+        2,
+        super::dom::js_page_type_backend_node,
+        0,
+    ),
     // Emulation domain
     FieldDef::FUNC(
         "setGeolocation",
@@ -388,10 +410,24 @@ fn js_page_navigate(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     )
 }
 
-/// `page.captureScreenshot(options?)`
+/// `page.captureScreenshot(options?)` — mirrors CDP `Page.captureScreenshot`.
+///
+/// Options:
+/// - `format`: "png" (default) | "jpeg"
+/// - `quality`: 1-100, JPEG only
+/// - `clip`: `{ x, y, width, height, scale? }` — capture a sub-region (CSS px)
+/// - `fullPage`: true → capture the whole scrollable page
+///   (sugar for CDP `captureBeyondViewport`)
+/// - `captureBeyondViewport`: explicit CDP flag
+/// - `fromSurface`: capture from the surface (default true)
+/// - `optimizeForSpeed`: skip encoding optimizations for speed
 fn js_page_capture_screenshot(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut format = "png".to_string();
     let mut quality = None::<i32>;
+    let mut clip = None::<serde_json::Value>;
+    let mut capture_beyond_viewport = None::<bool>;
+    let mut from_surface = None::<bool>;
+    let mut optimize_for_speed = None::<bool>;
 
     if cc.length() > 0
         && let Some(opts) = cc.arg(0).as_object()
@@ -401,6 +437,38 @@ fn js_page_capture_screenshot(ctx: &mut ScopedContext, cc: CallContext) -> JSRes
         }
         if let Some(q) = get_number_prop(ctx, opts, "quality") {
             quality = Some(q as i32);
+        }
+        // clip: { x, y, width, height, scale? } (all CSS px)
+        if let Ok(clip_val) = opts.get_property_str(ctx, "clip") {
+            if let Some(clip_obj) = clip_val.as_object() {
+                if let (Some(x), Some(y), Some(w), Some(h)) = (
+                    get_number_prop(ctx, clip_obj, "x"),
+                    get_number_prop(ctx, clip_obj, "y"),
+                    get_number_prop(ctx, clip_obj, "width"),
+                    get_number_prop(ctx, clip_obj, "height"),
+                ) {
+                    let mut c = serde_json::json!({
+                        "x": x, "y": y, "width": w, "height": h
+                    });
+                    if let Some(s) = get_number_prop(ctx, clip_obj, "scale") {
+                        c["scale"] = serde_json::json!(s);
+                    }
+                    clip = Some(c);
+                }
+            }
+        }
+        // fullPage is sugar for captureBeyondViewport
+        if let Some(fp) = get_bool_prop(ctx, opts, "fullPage") {
+            capture_beyond_viewport = Some(fp);
+        }
+        if let Some(b) = get_bool_prop(ctx, opts, "captureBeyondViewport") {
+            capture_beyond_viewport = Some(b);
+        }
+        if let Some(b) = get_bool_prop(ctx, opts, "fromSurface") {
+            from_surface = Some(b);
+        }
+        if let Some(b) = get_bool_prop(ctx, opts, "optimizeForSpeed") {
+            optimize_for_speed = Some(b);
         }
     }
 
@@ -423,6 +491,18 @@ fn js_page_capture_screenshot(ctx: &mut ScopedContext, cc: CallContext) -> JSRes
         let mut params = serde_json::json!({ "format": format });
         if let Some(q) = quality {
             params["quality"] = serde_json::json!(q);
+        }
+        if let Some(c) = clip {
+            params["clip"] = c;
+        }
+        if let Some(b) = capture_beyond_viewport {
+            params["captureBeyondViewport"] = serde_json::json!(b);
+        }
+        if let Some(b) = from_surface {
+            params["fromSurface"] = serde_json::json!(b);
+        }
+        if let Some(b) = optimize_for_speed {
+            params["optimizeForSpeed"] = serde_json::json!(b);
         }
         let rx = client.send("Page.captureScreenshot", Some(params), Some(&session_id));
         let result = rx.await.unwrap_or(Err("channel closed".into()));

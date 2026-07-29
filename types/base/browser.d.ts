@@ -31,7 +31,9 @@ declare module "browser" {
      * Create a new tab (page).
      * @param urlOrOpts - URL string, or `{ url?, contextId? }`.
      */
-    newPage(urlOrOpts?: string | { url?: string; contextId?: string }): Promise<Page>;
+    newPage(
+      urlOrOpts?: string | { url?: string; contextId?: string },
+    ): Promise<Page>;
 
     /** Close the browser and release all resources. */
     close(): Promise<void>;
@@ -66,10 +68,14 @@ declare module "browser" {
 
     // ---- Target domain ----
     /** List page-type targets `[{ targetId, url, title, type }, ...]`. */
-    listPages(): Promise<Array<{ targetId: string; url: string; title: string; type: string }>>;
+    listPages(): Promise<
+      Array<{ targetId: string; url: string; title: string; type: string }>
+    >;
 
     /** List all targets `[{ targetId, url, title, type, ... }, ...]`. */
-    getTargets(): Promise<Array<{ targetId: string; url: string; title: string; type: string }>>;
+    getTargets(): Promise<
+      Array<{ targetId: string; url: string; title: string; type: string }>
+    >;
 
     /** Create a browser context. Returns the new context id (string). */
     newContext(): Promise<string>;
@@ -99,7 +105,10 @@ declare module "browser" {
     navigate(url: string): Promise<void>;
 
     /** Reload the page. */
-    reload(options?: { ignoreCache?: boolean; scriptToEvaluateOnLoad?: string }): Promise<void>;
+    reload(options?: {
+      ignoreCache?: boolean;
+      scriptToEvaluateOnLoad?: string;
+    }): Promise<void>;
 
     /** Stop the current page load. */
     stopLoading(): Promise<void>;
@@ -124,6 +133,12 @@ declare module "browser" {
     waitForSelector(selector: string, timeoutMs?: number): Promise<void>;
 
     /**
+     * Poll a JS `expression` until it evaluates truthy or `timeoutMs` elapses.
+     * Use for waiting on text/conditions that `waitForSelector` cannot express.
+     */
+    waitForFunction(expression: string, timeoutMs?: number): Promise<void>;
+
+    /**
      * Wait for the page to finish navigating / fully load.
      * @param timeoutMs - Timeout in milliseconds. Default: 30000.
      */
@@ -144,7 +159,18 @@ declare module "browser" {
     setContent(html: string): Promise<void>;
 
     /** Capture an accessibility / MHTML-style snapshot of the page. */
-    captureSnapshot(options?: { format?: string; markUnchanged?: boolean }): Promise<string>;
+    captureSnapshot(options?: {
+      format?: string;
+      markUnchanged?: boolean;
+    }): Promise<string>;
+
+    /**
+     * Accessibility (aria) snapshot of the page — Playwright-style, ref-based tree.
+     * Returns a JSON string: an array of aria nodes, each with `nodeId` (its ref,
+     * e.g. `e12`) and a stable `backendNodeId`. Pass `backendNodeId` to
+     * `clickBackendNode` / `typeBackendNode`.
+     */
+    ariaSnapshot(): Promise<string>;
 
     /** Layout metrics (content size, viewports, etc.). */
     getLayoutMetrics(): Promise<{
@@ -190,7 +216,11 @@ declare module "browser" {
      * @param args - Optional call arguments (JSON-serializable).
      * @returns The JSON-serialized return value.
      */
-    callFunctionOn(objectId: string, functionDeclaration: string, args?: any[]): Promise<any>;
+    callFunctionOn(
+      objectId: string,
+      functionDeclaration: string,
+      args?: any[],
+    ): Promise<any>;
 
     /**
      * Register a callback invoked for every `Runtime.consoleAPICalled` event
@@ -211,10 +241,16 @@ declare module "browser" {
     setViewport(width: number, height: number): Promise<void>;
 
     /** Override geolocation. */
-    setGeolocation(latitude: number, longitude: number, accuracy?: number): Promise<void>;
+    setGeolocation(
+      latitude: number,
+      longitude: number,
+      accuracy?: number,
+    ): Promise<void>;
 
     /** Override supported media features (e.g. `[{ name: "prefers-color-scheme", value: "dark" }]`). */
-    setMediaFeatures(features: Array<{ name: string; value: string }>): Promise<void>;
+    setMediaFeatures(
+      features: Array<{ name: string; value: string }>,
+    ): Promise<void>;
 
     /** Override the timezone (IANA name, e.g. "Asia/Shanghai"). */
     setTimezone(timezoneId: string): Promise<void>;
@@ -279,21 +315,51 @@ declare module "browser" {
     /** Click the first element matching the selector. */
     click(selector: string): Promise<void>;
 
+    /** Drag from the center of `sourceSelector` to the center of `targetSelector`. */
+    dragAndDrop(sourceSelector: string, targetSelector: string): Promise<void>;
+
     /** Type text into the first element matching the selector. */
     type(selector: string, text: string): Promise<void>;
+
+    /**
+     * Click an element by its CDP backend node id (from `ariaSnapshot`).
+     * More robust to DOM changes than a CSS selector.
+     */
+    clickBackendNode(backendNodeId: number): Promise<void>;
+
+    /**
+     * Focus an element by its CDP backend node id (from `ariaSnapshot`), then
+     * type text into it. CJK/Unicode safe.
+     */
+    typeBackendNode(backendNodeId: number, text: string): Promise<void>;
 
     // ---- Input ----
     /**
      * Click at pixel coordinates (x, y).
      * Performs mousePressed + mouseReleased via native CDP Input.dispatchMouseEvent.
      */
-    mouseClick(x: number, y: number, options?: MouseClickOptions): Promise<void>;
+    mouseClick(
+      x: number,
+      y: number,
+      options?: MouseClickOptions,
+    ): Promise<void>;
 
     /**
      * Move mouse to pixel coordinates (x, y).
      * Uses native CDP Input.dispatchMouseEvent (mouseMoved).
      */
     mouseMove(x: number, y: number): Promise<void>;
+
+    /**
+     * Dispatch `mousePressed` at (x, y) without releasing.
+     * Pair with `mouseUp` to perform drag or press/hold gestures.
+     */
+    mouseDown(x: number, y: number, options?: MouseClickOptions): Promise<void>;
+
+    /**
+     * Dispatch `mouseReleased` at (x, y).
+     */
+    mouseUp(x: number, y: number, options?: MouseClickOptions): Promise<void>;
 
     /**
      * Simulate pressing a key (keyDown → char → keyUp).
@@ -362,7 +428,9 @@ declare module "browser" {
      * Requires Network domain to be enabled (see startNetworkCapture).
      * @returns `{ body: string, base64Encoded: boolean }`
      */
-    getResponseBody(requestId: string): Promise<{ body: string; base64Encoded: boolean }>;
+    getResponseBody(
+      requestId: string,
+    ): Promise<{ body: string; base64Encoded: boolean }>;
 
     /**
      * Get the POST body of a request by its (Network-domain) request ID.
@@ -440,8 +508,22 @@ declare module "browser" {
     format?: "png" | "jpeg";
     /** Image quality (1-100, JPEG only). Default: 80 */
     quality?: number;
-    /** Capture full page (scrollable content). Default: false */
+    /** Capture a sub-region instead of the whole viewport (CSS px). */
+    clip?: {
+      x: number;
+      y: number;
+      width: number;
+      height: number;
+      scale?: number;
+    };
+    /** Capture the full scrollable page (maps to CDP `captureBeyondViewport`). */
     fullPage?: boolean;
+    /** Explicit CDP `captureBeyondViewport` flag. */
+    captureBeyondViewport?: boolean;
+    /** Capture from the surface (default true). */
+    fromSurface?: boolean;
+    /** Skip encoding optimizations for speed. */
+    optimizeForSpeed?: boolean;
   }
 
   /** A single browser cookie. */

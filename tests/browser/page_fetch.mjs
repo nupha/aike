@@ -48,10 +48,14 @@ async function bodyText(page) {
 // Navigate (interception catches it) and poll the resulting document body.
 async function navigateBody(page, url) {
   await page.navigate(url);
-  return await poll(async () => {
-    const v = await bodyText(page);
-    return v && v.length ? v : "";
-  }, 40, 100);
+  return await poll(
+    async () => {
+      const v = await bodyText(page);
+      return v && v.length ? v : "";
+    },
+    40,
+    100,
+  );
 }
 
 async function testRespond(page) {
@@ -68,8 +72,11 @@ async function testRespond(page) {
   await page.setRequestInterception(true);
   const body = await navigateBody(page, "http://localhost:1/x");
   check("onRequestPaused fired", paused >= 1, "paused=" + paused);
-  check("respondRequest fulfills navigation with mocked body",
-    body === "mocked", "body=" + JSON.stringify(body));
+  check(
+    "respondRequest fulfills navigation with mocked body",
+    body === "mocked",
+    "body=" + JSON.stringify(body),
+  );
   await page.setRequestInterception(false);
 }
 
@@ -84,8 +91,11 @@ async function testContinue(page) {
   // continueRequest lets it reach the network; offline it fails -> no "mocked".
   const body = await navigateBody(page, "http://localhost:1/y");
   check("onRequestPaused fired", paused >= 1, "paused=" + paused);
-  check("continueRequest passes request through (no mocked body)",
-    body.indexOf("mocked") < 0, "body=" + JSON.stringify(body));
+  check(
+    "continueRequest passes request through (no mocked body)",
+    body.indexOf("mocked") < 0,
+    "body=" + JSON.stringify(body),
+  );
   await page.setRequestInterception(false);
 }
 
@@ -99,17 +109,96 @@ async function testAbort(page) {
   await page.setRequestInterception(true);
   const body = await navigateBody(page, "http://localhost:1/z");
   check("onRequestPaused fired", paused >= 1, "paused=" + paused);
-  check("abortRequest blocks the request (no mocked body)",
-    body.indexOf("mocked") < 0, "body=" + JSON.stringify(body));
+  check(
+    "abortRequest blocks the request (no mocked body)",
+    body.indexOf("mocked") < 0,
+    "body=" + JSON.stringify(body),
+  );
   await page.setRequestInterception(false);
 }
 
+// --- Network capture tests merged from tests/test_browser.js ---
+
+async function testNetworkCapture(page) {
+  console.log("\n=== Network: startNetworkCapture / getCapturedRequests ===");
+  await page.startNetworkCapture();
+  check("startNetworkCapture resolves", true);
+
+  await page.navigate("data:text/html,<p id='nc'>capture</p>");
+  await page.waitForSelector("#nc", 5000);
+
+  // Network events are delivered async; poll until at least one arrives.
+  const requests = await poll(async () => {
+    const r = await page.getCapturedRequests();
+    return r.length > 0 ? r : null;
+  });
+  check(
+    "captured at least one network event",
+    requests && requests.length > 0,
+    "got " + (requests ? requests.length : 0) + " events",
+  );
+  if (requests && requests.length > 0) {
+    check(
+      "captured event has method",
+      typeof requests[0].method === "string" &&
+        requests[0].method.startsWith("Network."),
+      "got: " + requests[0].method,
+    );
+    check("captured event has params", typeof requests[0].params === "object");
+  }
+
+  await page.stopNetworkCapture();
+  check("stopNetworkCapture resolves", true);
+
+  await page.clearCapturedRequests();
+  const cleared = await page.getCapturedRequests();
+  check("cleared requests", cleared.length === 0, "got " + cleared.length);
+}
+
+async function testGetResponseBody(page) {
+  console.log("\n=== Network: getResponseBody ===");
+  await page.startNetworkCapture();
+  await page.navigate("data:text/html,<p id='rb'>body</p>");
+  await page.waitForSelector("#rb", 5000);
+
+  const requests = await poll(async () => {
+    const r = await page.getCapturedRequests();
+    return r.some((x) => x.params && x.params.requestId) ? r : null;
+  });
+  let requestId = null;
+  for (const r of requests || []) {
+    if (r.params && r.params.requestId) {
+      requestId = r.params.requestId;
+      break;
+    }
+  }
+
+  if (requestId) {
+    try {
+      const body = await page.getResponseBody(requestId);
+      check("getResponseBody returns object", typeof body === "object");
+      check("getResponseBody has body field", typeof body.body === "string");
+      check(
+        "getResponseBody has base64Encoded",
+        typeof body.base64Encoded === "boolean",
+      );
+    } catch (e) {
+      // On data: URIs, Network.getResponseBody may not support the request.
+      check("getResponseBody handled gracefully", true);
+    }
+  } else {
+    check("captured request with requestId", requestId !== null);
+  }
+
+  await page.stopNetworkCapture();
+}
+
 async function main() {
-  // Watchdog: never let the suite hang the tool — force-exit after 25s.
+  // Watchdog: never let the suite hang the tool — force-exit after 60s.
   setTimeout(() => {
-    console.log("  [WATCHDOG] forcing exit after 25s (a step likely hung)");
+    console.log("  [WATCHDOG] forcing exit after 60s (a step likely hung)");
     Aike.exit(1);
-  }, 25000);
+  }, 60000);
 
   let browser;
   try {
@@ -124,7 +213,15 @@ async function main() {
   check("Browser launched", browser.isRunning === true);
   const page = await browser.newPage();
 
-  const tests = [testRespond, testContinue, testAbort];
+  // Network capture tests run first — interception tests leave the page on a
+  // failed navigation, which is harmless but noisier to capture.
+  const tests = [
+    testNetworkCapture,
+    testGetResponseBody,
+    testRespond,
+    testContinue,
+    testAbort,
+  ];
   for (const fn of tests) {
     try {
       await fn(page);
@@ -134,8 +231,12 @@ async function main() {
     }
   }
 
-  try { await page.close(); } catch (e) {}
-  try { await browser.close(); } catch (e) {}
+  try {
+    await page.close();
+  } catch (e) {}
+  try {
+    await browser.close();
+  } catch (e) {}
 
   console.log("\n" + "=".repeat(50));
   console.log("pass: " + pass + ", fail: " + fail);

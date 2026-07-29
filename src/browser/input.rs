@@ -12,9 +12,41 @@ use zuqe::{
 };
 
 use crate::browser::{
+    cdp::CdpClient,
     cdp_input,
     class_page::{get_page_payload, send_page_void_cmd},
+    dom::resolve_selector,
 };
+
+/// Resolve a selector to its on-screen center via `DOM.getBoxModel`.
+async fn box_center(
+    client: &CdpClient,
+    session_id: &str,
+    selector: &str,
+) -> Result<(f64, f64), String> {
+    let node_id = resolve_selector(client, session_id, selector).await?;
+    let m = client
+        .send(
+            "DOM.getBoxModel",
+            Some(serde_json::json!({ "nodeId": node_id })),
+            Some(session_id),
+        )
+        .await
+        .unwrap_or(Err("channel closed".into()))?;
+    let quad = m
+        .get("model")
+        .and_then(|mo| mo.get("content"))
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| "no box model content".to_string())?;
+    let xs: Vec<f64> = quad.iter().step_by(2).filter_map(|v| v.as_f64()).collect();
+    let ys: Vec<f64> = quad.iter().skip(1).step_by(2).filter_map(|v| v.as_f64()).collect();
+    if xs.is_empty() || ys.is_empty() {
+        return Err("empty box model".into());
+    }
+    let x = xs.iter().sum::<f64>() / xs.len() as f64;
+    let y = ys.iter().sum::<f64>() / ys.len() as f64;
+    Ok((x, y))
+}
 
 /// `page.mouseClick(x, y, options?)`
 /// Clicks at pixel coordinates (x, y).
@@ -153,6 +185,148 @@ pub(crate) fn js_page_key_press(ctx: &mut ScopedContext, cc: CallContext) -> JSR
             Ok(()) => result_slot.commit(Ok(())).ok(),
             Err(e) => result_slot.commit(Err(e)).ok(),
         };
+    });
+
+    Ok(promise.into())
+}
+
+/// `page.mouseDown(x, y, options?)`
+/// Dispatch `mousePressed` at pixel coordinates without releasing.
+/// `options.button` — "left" (default), "middle", "right"
+/// `options.clickCount` — 1 (default) or 2 (double)
+pub(crate) fn js_page_mouse_down(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let x = cc.arg(0).to_number(ctx).map(|n| n.to_f64()).unwrap_or(0.0);
+    let y = cc.arg(1).to_number(ctx).map(|n| n.to_f64()).unwrap_or(0.0);
+
+    let mut button = "left".to_string();
+    let mut click_count = 1i32;
+    if cc.length() > 2
+        && let Some(opts) = cc.arg(2).as_object()
+    {
+        if let Some(b) = crate::browser::class_page::get_str_prop(ctx, opts, "button") {
+            button = b;
+        }
+        if let Some(c) = crate::browser::class_page::get_number_prop(ctx, opts, "clickCount") {
+            click_count = c as i32;
+        }
+    }
+
+    let this = cc.this();
+    let payload = get_page_payload(ctx, &this)?;
+    let client = payload.client.clone();
+    let session_id = payload.session_id.clone();
+
+    let result_slot = PromiseResultSlot::<Result<(), String>>::new();
+    let promise =
+        Promise::create_with_result_slot(ctx, result_slot.clone(), |cx, payload| -> JSResult {
+            payload.map_err(|e| {
+                cx.throw_internal_error(&e);
+                -1
+            })?;
+            Ok(JSValue::UNDEFINED)
+        })?;
+
+    tokio::spawn(async move {
+        let result = cdp_input::mouse_down(&client, &session_id, x, y, &button, click_count).await;
+        match result {
+            Ok(()) => result_slot.commit(Ok(())).ok(),
+            Err(e) => result_slot.commit(Err(e)).ok(),
+        }
+    });
+
+    Ok(promise.into())
+}
+
+/// `page.mouseUp(x, y, options?)`
+/// Dispatch `mouseReleased` at pixel coordinates (release a `mouseDown`).
+pub(crate) fn js_page_mouse_up(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let x = cc.arg(0).to_number(ctx).map(|n| n.to_f64()).unwrap_or(0.0);
+    let y = cc.arg(1).to_number(ctx).map(|n| n.to_f64()).unwrap_or(0.0);
+
+    let mut button = "left".to_string();
+    let mut click_count = 1i32;
+    if cc.length() > 2
+        && let Some(opts) = cc.arg(2).as_object()
+    {
+        if let Some(b) = crate::browser::class_page::get_str_prop(ctx, opts, "button") {
+            button = b;
+        }
+        if let Some(c) = crate::browser::class_page::get_number_prop(ctx, opts, "clickCount") {
+            click_count = c as i32;
+        }
+    }
+
+    let this = cc.this();
+    let payload = get_page_payload(ctx, &this)?;
+    let client = payload.client.clone();
+    let session_id = payload.session_id.clone();
+
+    let result_slot = PromiseResultSlot::<Result<(), String>>::new();
+    let promise =
+        Promise::create_with_result_slot(ctx, result_slot.clone(), |cx, payload| -> JSResult {
+            payload.map_err(|e| {
+                cx.throw_internal_error(&e);
+                -1
+            })?;
+            Ok(JSValue::UNDEFINED)
+        })?;
+
+    tokio::spawn(async move {
+        let result = cdp_input::mouse_up(&client, &session_id, x, y, &button, click_count).await;
+        match result {
+            Ok(()) => result_slot.commit(Ok(())).ok(),
+            Err(e) => result_slot.commit(Err(e)).ok(),
+        }
+    });
+
+    Ok(promise.into())
+}
+
+/// `page.dragAndDrop(sourceSelector, targetSelector)`
+/// Drag from the center of `sourceSelector` to the center of `targetSelector`.
+pub(crate) fn js_page_drag_and_drop(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let source = cc
+        .arg(0)
+        .to_string(ctx)
+        .map(|s| s.content().encode_utf8(false).to_string())
+        .unwrap_or_default();
+    let target = cc
+        .arg(1)
+        .to_string(ctx)
+        .map(|s| s.content().encode_utf8(false).to_string())
+        .unwrap_or_default();
+
+    let this = cc.this();
+    let payload = get_page_payload(ctx, &this)?;
+    let client = payload.client.clone();
+    let session_id = payload.session_id.clone();
+
+    let result_slot = PromiseResultSlot::<Result<(), String>>::new();
+    let promise =
+        Promise::create_with_result_slot(ctx, result_slot.clone(), |cx, payload| -> JSResult {
+            payload.map_err(|e| {
+                cx.throw_internal_error(&e);
+                -1
+            })?;
+            Ok(JSValue::UNDEFINED)
+        })?;
+
+    tokio::spawn(async move {
+        let result = async {
+            let (sx, sy) = box_center(&client, &session_id, &source).await?;
+            let (tx, ty) = box_center(&client, &session_id, &target).await?;
+            cdp_input::mouse_move(&client, &session_id, sx, sy).await?;
+            cdp_input::mouse_down(&client, &session_id, sx, sy, "left", 1).await?;
+            cdp_input::mouse_move(&client, &session_id, (sx + tx) / 2.0, (sy + ty) / 2.0).await?;
+            cdp_input::mouse_move(&client, &session_id, tx, ty).await?;
+            cdp_input::mouse_up(&client, &session_id, tx, ty, "left", 1).await?;
+            Ok::<(), String>(())
+        }
+        .await;
+        match result {
+            Ok(()) => result_slot.commit(Ok(())).ok(),
+            Err(e) => result_slot.commit(Err(e)).ok(),
+        }
     });
 
     Ok(promise.into())
