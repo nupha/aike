@@ -78,10 +78,8 @@ fn parse_jsonl(
 // One JSON value -> one compact JSON line.
 fn jsonl_stringify(cx: &mut ScopedContext, arg: JSValue) -> Result<String, i32> {
     let json = arg.to_serde_json(cx)?;
-    let mut s = serde_json::to_string(&json).map_err(|e| {
-        cx.throw_syntax_error(&format!("JSONL stringify failed: {}", e));
-        -1
-    })?;
+    let mut s = serde_json::to_string(&json)
+        .map_err(|e| cx.throw_syntax_error(&format!("JSONL stringify failed: {}", e)))?;
     s.push('\n');
     Ok(s)
 }
@@ -104,18 +102,16 @@ pub(crate) fn js_stringify(cx: &mut ScopedContext, cc: CallContext) -> JSResult 
             let mut s = String::new();
             for item in arr {
                 s.push_str(&serde_json::to_string(item).map_err(|e| {
-                    cx.throw_syntax_error(&format!("JSONL stringify failed: {}", e));
-                    -1
+                    cx.throw_syntax_error(&format!("JSONL stringify failed: {}", e))
                 })?);
                 s.push('\n');
             }
             s
         }
         other => {
-            serde_json::to_string(other).map_err(|e| {
-                cx.throw_syntax_error(&format!("JSONL stringify failed: {}", e));
-                -1
-            })? + "\n"
+            serde_json::to_string(other)
+                .map_err(|e| cx.throw_syntax_error(&format!("JSONL stringify failed: {}", e)))?
+                + "\n"
         }
     };
     // out is already a valid JSON string; wrap and convert to JS string.
@@ -130,8 +126,7 @@ fn read_jsonl_impl(cx: &mut ScopedContext, path: PathBuf, on_error: OnError) -> 
             let text = match data {
                 Ok(t) => t,
                 Err(e) => {
-                    cx2.throw_internal_error(&e);
-                    return Err(-1);
+                    return Err(cx2.throw_internal_error(&e));
                 }
             };
             let (values, _attempted) = parse_jsonl(cx2, &text, on_error).map_err(|code| code)?;
@@ -185,11 +180,8 @@ fn write_jsonl_impl(
     lines: Vec<String>,
 ) -> JSResult {
     let (promise, tx) =
-        Promise::create_with_channel::<Result<(), String>>(cx, |_cx, data| -> JSResult {
-            data.map_err(|e| {
-                _cx.throw_internal_error(&e);
-                -1
-            })?;
+        Promise::create_with_channel::<Result<(), String>>(cx, |cx2, data| -> JSResult {
+            data.map_err(|e| cx2.throw_internal_error(&e))?;
             Ok(JSValue::UNDEFINED)
         })?;
 
@@ -273,10 +265,7 @@ pub(crate) fn js_parse_stream(cx: &mut ScopedContext, cc: CallContext) -> JSResu
     let (iter, tx) = AsyncIterableIterator::create_with_channel::<Result<JsonValue, String>>(
         cx,
         move |ctx2, data| -> Result<Option<JSValue>, i32> {
-            let v = data.map_err(|e| {
-                ctx2.throw_internal_error(&e);
-                -1
-            })?;
+            let v = data.map_err(|e| ctx2.throw_internal_error(&e))?;
             Ok(Some(JSValue::from_serde_json(ctx2, &v)?))
         },
     )?;

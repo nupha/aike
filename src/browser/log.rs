@@ -9,7 +9,10 @@
 use std::sync::{LazyLock, Mutex};
 
 use crossbeam::channel;
-use zuqe::{CallContext, JSResult, JSValue, ScopedContext};
+use zuqe::{
+    CallContext, JSResult, JSValue, Object, ScopedContext,
+    gc_lite::{GcTrace, GcTraceCtx},
+};
 
 use crate::browser::class_page::{get_page_payload, send_page_void_cmd};
 
@@ -26,11 +29,15 @@ pub(crate) fn js_page_on_log(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
     let client = payload.client.clone();
     let session_id = payload.session_id.clone();
 
-    let callback = cc.arg(0).clone();
-    // Store callback in a thread-local keyed by session.
-    CONSOLE_CALLBACK.with(|m| {
-        m.borrow_mut().insert(session_id.clone(), callback);
-    });
+    // Store callback in a thread-local keyed by session. The callback is held
+    // as a traced `Object` so the GC keeps the JS function alive while it lives
+    // in this native-side map; otherwise the node gets freed and the poller
+    // below crashes later with a dangling (dtype != Object) pointer.
+    if let Some(callback) = cc.arg(0).as_object() {
+        CONSOLE_CALLBACK.with(|m| {
+            m.borrow_mut().insert(session_id.clone(), callback);
+        });
+    }
 
     let _ = send_page_void_cmd(ctx, &cc, "Log.enable", None);
 
@@ -94,8 +101,20 @@ pub(crate) fn js_page_on_log(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
 }
 
 thread_local! {
-    static CONSOLE_CALLBACK: std::cell::RefCell<std::collections::HashMap<String, JSValue>> =
+    static CONSOLE_CALLBACK: std::cell::RefCell<std::collections::HashMap<String, Object>> =
         std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// Keep the console-log subscriber callbacks alive across GC cycles.
+///
+/// The callbacks live in a native-side thread-local map that the GC cannot
+/// see, so they must be explicitly traced here (registered in `main.rs`).
+pub(crate) fn gc_trace_browser(gcx: &mut GcTraceCtx) {
+    CONSOLE_CALLBACK.with(|m| {
+        for cb in m.borrow().values() {
+            cb.trace(gcx);
+        }
+    });
 }
 
 /// `page.getConsoleMessages(clear?)` — return the buffered console/log entries

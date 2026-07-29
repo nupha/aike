@@ -111,10 +111,7 @@ pub(crate) fn js_browser_launch(ctx: &mut ScopedContext, cc: CallContext) -> JSR
     let result_slot = PromiseResultSlot::<Result<LaunchData, String>>::new();
     let promise =
         Promise::create_with_result_slot(ctx, result_slot.clone(), |cx, payload| -> JSResult {
-            let data = payload.map_err(|e| {
-                cx.throw_internal_error(&e);
-                -1
-            })?;
+            let data = payload.map_err(|e| cx.throw_internal_error(&e))?;
 
             let obj = JSBrowser::new_instance(
                 cx,
@@ -165,10 +162,7 @@ pub(crate) fn get_browser_payload<'a>(
     ctx: &mut ScopedContext,
     val: &'a JSValue,
 ) -> Result<&'a BrowserPayload, i32> {
-    JSBrowser::payload_of(val).ok_or_else(|| {
-        ctx.throw_type_error("not a Browser instance");
-        -1
-    })
+    JSBrowser::payload_of(val).ok_or_else(|| ctx.throw_type_error("not a Browser instance"))
 }
 
 /// Shared helper: void-returning CDP command sent at the Browser level
@@ -186,10 +180,7 @@ pub(crate) fn send_browser_void_cmd(
     let result_slot = PromiseResultSlot::<Result<(), String>>::new();
     let promise =
         Promise::create_with_result_slot(ctx, result_slot.clone(), |cx, payload| -> JSResult {
-            payload.map_err(|e| {
-                cx.throw_internal_error(&e);
-                -1
-            })?;
+            payload.map_err(|e| cx.throw_internal_error(&e))?;
             Ok(JSValue::UNDEFINED)
         })?;
 
@@ -232,10 +223,7 @@ fn js_browser_new_page(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         ctx,
         result_slot.clone(),
         move |cx, payload| -> JSResult {
-            let (target_id, session_id) = payload.map_err(|e| {
-                cx.throw_internal_error(&e);
-                -1
-            })?;
+            let (target_id, session_id) = payload.map_err(|e| cx.throw_internal_error(&e))?;
 
             let mut page = JSPage::new_instance(
                 cx,
@@ -331,10 +319,7 @@ fn js_browser_close(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let result_slot = PromiseResultSlot::<Result<(), String>>::new();
     let promise =
         Promise::create_with_result_slot(ctx, result_slot.clone(), |cx, payload| -> JSResult {
-            payload.map_err(|e| {
-                cx.throw_internal_error(&e);
-                -1
-            })?;
+            payload.map_err(|e| cx.throw_internal_error(&e))?;
             Ok(JSValue::UNDEFINED)
         })?;
 
@@ -364,10 +349,7 @@ fn js_browser_get_version(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
     let result_slot = PromiseResultSlot::<Result<serde_json::Value, String>>::new();
     let promise =
         Promise::create_with_result_slot(ctx, result_slot.clone(), |cx, val| -> JSResult {
-            let val = val.map_err(|e| {
-                cx.throw_internal_error(&e);
-                -1
-            })?;
+            let val = val.map_err(|e| cx.throw_internal_error(&e))?;
             JSValue::from_serde_json(cx, &val)
         })?;
 
@@ -403,10 +385,7 @@ fn js_browser_get_window_bounds(ctx: &mut ScopedContext, cc: CallContext) -> JSR
     let result_slot = PromiseResultSlot::<Result<serde_json::Value, String>>::new();
     let promise =
         Promise::create_with_result_slot(ctx, result_slot.clone(), |cx, val| -> JSResult {
-            let val = val.map_err(|e| {
-                cx.throw_internal_error(&e);
-                -1
-            })?;
+            let val = val.map_err(|e| cx.throw_internal_error(&e))?;
             JSValue::from_serde_json(cx, &val)
         })?;
 
@@ -460,10 +439,7 @@ fn js_browser_set_window_bounds(ctx: &mut ScopedContext, cc: CallContext) -> JSR
     let result_slot = PromiseResultSlot::<Result<(), String>>::new();
     let promise =
         Promise::create_with_result_slot(ctx, result_slot.clone(), |cx, payload| -> JSResult {
-            payload.map_err(|e| {
-                cx.throw_internal_error(&e);
-                -1
-            })?;
+            payload.map_err(|e| cx.throw_internal_error(&e))?;
             Ok(JSValue::UNDEFINED)
         })?;
 
@@ -519,10 +495,9 @@ fn js_browser_is_running(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
 const BROWSER_CTOR: ClassCtorDef = ClassCtorDef::new(
     |ctx: &mut ScopedContext, _cc: CallContext| {
-        ctx.throw_type_error(
+        Err(ctx.throw_type_error(
             "Browser cannot be constructed directly; use Browser.launch() to start a browser",
-        );
-        Err(-1)
+        ))
     },
     0,
     false,

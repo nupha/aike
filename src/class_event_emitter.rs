@@ -31,10 +31,8 @@ impl EmitterPayload {
 }
 
 fn get_emitter<'a>(ctx: &mut ScopedContext, val: &'a JSValue) -> Result<&'a EmitterPayload, i32> {
-    JSEventEmitter::payload_of(val).ok_or_else(|| {
-        ctx.throw_internal_error("not an EventEmitter instance");
-        -1
-    })
+    JSEventEmitter::payload_of(val)
+        .ok_or_else(|| ctx.throw_internal_error("not an EventEmitter instance"))
 }
 
 /// Convert event name string to a name owned String.
@@ -64,10 +62,9 @@ fn js_add_listener(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     // Signal events must use Aike.onSignal instead
     if signal_number(&name).is_some() {
-        ctx.throw_type_error(&format!(
+        return Err(ctx.throw_type_error(&format!(
             "cannot listen for signal '{name}' on EventEmitter; use Aike.onSignal() instead"
-        ));
-        return Err(-1);
+        )));
     }
 
     let emitter = get_emitter(ctx, &this)?;
@@ -110,10 +107,9 @@ fn js_emit(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     let name = event_name(ctx, &cc.arg(0))?;
     if signal_number(&name).is_some() {
-        ctx.throw_type_error(&format!(
+        return Err(ctx.throw_type_error(&format!(
             "cannot emit system signal '{name}' via EventEmitter; use Aike.onSignal() instead"
-        ));
-        return Err(-1);
+        )));
     }
 
     let callbacks = emitter.listeners.borrow_mut().remove(&name);

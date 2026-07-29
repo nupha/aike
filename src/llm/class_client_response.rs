@@ -33,27 +33,22 @@ pub(super) fn parse_responses_input(
         let mut items = Vec::with_capacity(arr.payload().len());
 
         for item in arr.payload().values() {
-            let obj = item.as_object().ok_or_else(|| {
-                ctx.throw_type_error("input[] item must be object");
-                -1
-            })?;
+            let obj = item
+                .as_object()
+                .ok_or_else(|| ctx.throw_type_error("input[] item must be object"))?;
 
             let role_val = obj.get_property_str(ctx, "role")?;
             let role_str = role_val
                 .as_string(true)
                 .map(|s| s.content().encode_utf8(false).to_string())
-                .ok_or_else(|| {
-                    ctx.throw_type_error("input[].role must be string");
-                    -1
-                })?;
+                .ok_or_else(|| ctx.throw_type_error("input[].role must be string"))?;
             let role = match role_str.as_str() {
                 "user" => Role::User,
                 "assistant" => Role::Assistant,
                 "system" => Role::System,
                 "developer" => Role::Developer,
                 _ => {
-                    ctx.throw_type_error(&format!("unsupported role: {role_str}"));
-                    return Err(-1);
+                    return Err(ctx.throw_type_error(&format!("unsupported role: {role_str}")));
                 }
             };
 
@@ -81,37 +76,29 @@ pub(super) fn parse_responses_input(
         return Ok(InputParam::Items(items));
     }
 
-    ctx.throw_type_error("input must be a string or an array");
-    Err(-1)
+    Err(ctx.throw_type_error("input must be a string or an array"))
 }
 
 pub(super) fn parse_responses_reasoning(
     ctx: &mut ScopedContext,
     val: &JSValue,
 ) -> Result<Reasoning, i32> {
-    let json_val = val.to_serde_json(ctx).map_err(|_| {
-        ctx.throw_type_error("failed to serialize reasoning");
-        -1
-    })?;
-    serde_json::from_value::<Reasoning>(json_val).map_err(|e| {
-        ctx.throw_type_error(&format!("invalid reasoning: {e}"));
-        -1
-    })
+    let json_val = val
+        .to_serde_json(ctx)
+        .map_err(|_| ctx.throw_type_error("failed to serialize reasoning"))?;
+    serde_json::from_value::<Reasoning>(json_val)
+        .map_err(|e| ctx.throw_type_error(&format!("invalid reasoning: {e}")))
 }
 
 fn response_to_js(ctx: &mut ScopedContext, resp: &Response) -> JSResult {
-    let val = serde_json::to_value(resp).map_err(|e| {
-        ctx.throw_internal_error(&format!("serialize response failed: {e}"));
-        -1
-    })?;
+    let val = serde_json::to_value(resp)
+        .map_err(|e| ctx.throw_internal_error(&format!("serialize response failed: {e}")))?;
     JSValue::from_serde_json(ctx, &val)
 }
 
 fn stream_event_to_js(ctx: &mut ScopedContext, event: &ResponseStreamEvent) -> JSResult {
-    let val = serde_json::to_value(event).map_err(|e| {
-        ctx.throw_internal_error(&format!("serialize stream event failed: {e}"));
-        -1
-    })?;
+    let val = serde_json::to_value(event)
+        .map_err(|e| ctx.throw_internal_error(&format!("serialize stream event failed: {e}")))?;
     JSValue::from_serde_json(ctx, &val)
 }
 
@@ -120,10 +107,10 @@ pub(super) fn js_client_responses(ctx: &mut ScopedContext, cc: CallContext) -> J
     let client_arc = get_client(ctx, this)?;
     let is_stream = cc.magic() == MAGIC_RESPONSES_STREAM;
 
-    let opts = cc.arg(0).as_object().ok_or_else(|| {
-        ctx.throw_type_error("responses() requires an options object");
-        -1
-    })?;
+    let opts = cc
+        .arg(0)
+        .as_object()
+        .ok_or_else(|| ctx.throw_type_error("responses() requires an options object"))?;
 
     let input_val = opts.get_property_str(ctx, "input")?;
     let input = parse_responses_input(ctx, &input_val)?;
@@ -166,15 +153,12 @@ pub(super) fn js_client_responses(ctx: &mut ScopedContext, cc: CallContext) -> J
 
     let tools_val = opts.get_property_str(ctx, "tools")?;
     if !tools_val.is_undefined() {
-        let tools: Vec<async_openai::types::responses::Tool> =
-            serde_json::from_value(tools_val.to_serde_json(ctx).map_err(|_| {
-                ctx.throw_type_error("failed to serialize tools");
-                -1
-            })?)
-            .map_err(|e| {
-                ctx.throw_type_error(&format!("invalid tools: {e}"));
-                -1
-            })?;
+        let tools: Vec<async_openai::types::responses::Tool> = serde_json::from_value(
+            tools_val
+                .to_serde_json(ctx)
+                .map_err(|_| ctx.throw_type_error("failed to serialize tools"))?,
+        )
+        .map_err(|e| ctx.throw_type_error(&format!("invalid tools: {e}")))?;
         if !tools.is_empty() {
             req_builder.tools(tools);
         }
@@ -182,29 +166,22 @@ pub(super) fn js_client_responses(ctx: &mut ScopedContext, cc: CallContext) -> J
 
     let tool_choice_val = opts.get_property_str(ctx, "toolChoice")?;
     if !tool_choice_val.is_undefined() {
-        let json_val = tool_choice_val.to_serde_json(ctx).map_err(|_| {
-            ctx.throw_type_error("failed to serialize tool_choice");
-            -1
-        })?;
+        let json_val = tool_choice_val
+            .to_serde_json(ctx)
+            .map_err(|_| ctx.throw_type_error("failed to serialize tool_choice"))?;
         let tool_choice: async_openai::types::responses::ToolChoiceParam =
-            serde_json::from_value(json_val).map_err(|e| {
-                ctx.throw_type_error(&format!("invalid tool_choice: {e}"));
-                -1
-            })?;
+            serde_json::from_value(json_val)
+                .map_err(|e| ctx.throw_type_error(&format!("invalid tool_choice: {e}")))?;
         req_builder.tool_choice(tool_choice);
     }
 
     let metadata_val = opts.get_property_str(ctx, "metadata")?;
     if !metadata_val.is_undefined() {
-        let json_val = metadata_val.to_serde_json(ctx).map_err(|_| {
-            ctx.throw_type_error("failed to serialize metadata");
-            -1
-        })?;
+        let json_val = metadata_val
+            .to_serde_json(ctx)
+            .map_err(|_| ctx.throw_type_error("failed to serialize metadata"))?;
         let metadata: std::collections::HashMap<String, String> = serde_json::from_value(json_val)
-            .map_err(|e| {
-                ctx.throw_type_error(&format!("invalid metadata: {e}"));
-                -1
-            })?;
+            .map_err(|e| ctx.throw_type_error(&format!("invalid metadata: {e}")))?;
         req_builder.metadata(metadata);
     }
 
@@ -213,10 +190,9 @@ pub(super) fn js_client_responses(ctx: &mut ScopedContext, cc: CallContext) -> J
         req_builder.safety_identifier(s.content().encode_utf8(false).to_string());
     }
 
-    let req = req_builder.build().map_err(|e| {
-        ctx.throw_internal_error(&format!("failed to build request: {e}"));
-        -1
-    })?;
+    let req = req_builder
+        .build()
+        .map_err(|e| ctx.throw_internal_error(&format!("failed to build request: {e}")))?;
 
     let base_url = client_arc.base_url.clone();
     let api_key = client_arc.api_key.clone();
@@ -294,10 +270,7 @@ pub(super) fn js_client_responses(ctx: &mut ScopedContext, cc: CallContext) -> J
                 match msg {
                     ResponsesReply::Event(event) => stream_event_to_js(cx, &event).map(Some),
                     ResponsesReply::Done => Ok(None),
-                    ResponsesReply::Error(e) => {
-                        cx.throw_internal_error(&e);
-                        Err(-1)
-                    }
+                    ResponsesReply::Error(e) => Err(cx.throw_internal_error(&e)),
                 }
             },
         )
@@ -308,10 +281,7 @@ pub(super) fn js_client_responses(ctx: &mut ScopedContext, cc: CallContext) -> J
             Promise::create_with_result_slot(ctx, result_slot.clone(), |cx, result| -> JSResult {
                 match result {
                     Ok(resp) => response_to_js(cx, &resp),
-                    Err(e) => {
-                        cx.throw_internal_error(&e);
-                        Err(-1)
-                    }
+                    Err(e) => Err(cx.throw_internal_error(&e)),
                 }
             })?;
 

@@ -4,8 +4,8 @@
 use linkme::distributed_slice;
 use tokio::sync::{mpsc, oneshot};
 use zuqe::{
-    CallContext, ClassID, FieldDef, IntOrFloat, JSResult, JSValue, NativeObject, Runtime,
-    ScopedContext, def_native_object,
+    CallContext, ClassID, FieldDef, IntOrFloat, JSResult, JSValue, Runtime, ScopedContext,
+    def_native_object,
     gc_lite::{GcTrace, GcTraceCtx},
 };
 
@@ -56,30 +56,23 @@ impl HttpResponsePayload {
     }
 }
 
-pub(crate) fn get_res_payload<'a>(
-    ctx: &'a mut ScopedContext,
-    val: &JSValue,
+pub(super) fn get_res_payload_mut<'a>(
+    ctx: &mut ScopedContext,
+    val: &'a mut JSValue,
 ) -> Result<&'a mut HttpResponsePayload, i32> {
-    let payload = val
-        .retrive_object_payload(ctx, JSHttpResponse::class_id())?
-        .other()
-        .unwrap();
-    let opaque = payload.opaque();
-    if opaque.is_null() {
-        ctx.throw_internal_error("HttpResponse was detached");
-        Err(-1)
-    } else {
-        let p = unsafe { &mut *opaque.cast::<HttpResponsePayload>() };
+    if let Some(p) = JSHttpResponse::payload_mut_of(val) {
         if p.switched {
-            ctx.throw_type_error("response already switched to SSE");
-            return Err(-1);
+            Err(ctx.throw_type_error("response already switched to SSE"))
+        } else {
+            Ok(p)
         }
-        Ok(p)
+    } else {
+        Err(ctx.throw_internal_error("HttpResponse was detached"))
     }
 }
 
 fn js_res_status(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let this = cc.this();
+    let mut this = cc.this();
     let code_raw = if cc.length() > 0 {
         cc.arg(0).to_number(ctx).ok().and_then(|n| match n {
             IntOrFloat::Int64(v) => Some(v as u16),
@@ -88,7 +81,7 @@ fn js_res_status(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     } else {
         None
     };
-    let data = get_res_payload(ctx, &this)?;
+    let data = get_res_payload_mut(ctx, &mut this)?;
     if let Some(c) = code_raw {
         data.status = c;
     }
@@ -96,7 +89,7 @@ fn js_res_status(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 }
 
 fn js_res_setHeader(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let this = cc.this();
+    let mut this = cc.this();
     let (key, val) = if cc.length() >= 2 {
         let k = cc.arg(0).to_string(ctx)?;
         let v = cc.arg(1).to_string(ctx)?;
@@ -107,13 +100,13 @@ fn js_res_setHeader(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     } else {
         return Ok(this);
     };
-    let data = get_res_payload(ctx, &this)?;
+    let data = get_res_payload_mut(ctx, &mut this)?;
     data.headers.push((key, val));
     Ok(this)
 }
 
 fn js_res_setHeaders(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let this = cc.this();
+    let mut this = cc.this();
 
     // Collect headers from object first (before borrowing payload)
     let headers = if cc.length() > 0 {
@@ -148,7 +141,7 @@ fn js_res_setHeaders(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     };
 
     // Now borrow payload and extend headers
-    let data = get_res_payload(ctx, &this)?;
+    let data = get_res_payload_mut(ctx, &mut this)?;
     data.headers.extend(headers);
     Ok(this)
 }
@@ -159,7 +152,7 @@ const FINISH_SEND_STATUS: i32 = 2;
 const FINISH_REDIRECT: i32 = 3;
 
 fn js_res_finish(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let this = cc.this();
+    let mut this = cc.this();
     let magic = cc.magic();
 
     let body_str;
@@ -187,8 +180,9 @@ fn js_res_finish(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 let result = match stringify.call(ctx, json_val, &[cc.arg(0)]) {
                     Ok(r) => r,
                     Err(_) => {
-                        ctx.throw_type_error("JSON.stringify failed on the provided value");
-                        return Err(-1);
+                        return Err(
+                            ctx.throw_type_error("JSON.stringify failed on the provided value")
+                        );
                     }
                 };
                 result
@@ -242,7 +236,7 @@ fn js_res_finish(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         _ => unreachable!(),
     }
 
-    let data = get_res_payload(ctx, &this)?;
+    let data = get_res_payload_mut(ctx, &mut this)?;
     if data.ended {
         return Ok(JSValue::UNDEFINED);
     }
@@ -321,10 +315,8 @@ pub(crate) fn get_sse_payload<'a>(
     ctx: &mut ScopedContext,
     val: &'a mut JSValue,
 ) -> Result<&'a mut HttpResponseSsePayload, i32> {
-    JSHttpResponseSse::payload_mut_of(val).ok_or_else(|| {
-        ctx.throw_type_error("not an HttpResponseSse instance");
-        -1
-    })
+    JSHttpResponseSse::payload_mut_of(val)
+        .ok_or_else(|| ctx.throw_type_error("not an HttpResponseSse instance"))
 }
 
 /// Append SSE-default headers if not already set by the user.
@@ -351,12 +343,11 @@ fn ensure_sse_headers(headers: &mut Vec<(String, String)>) {
 
 /// `res.sse()` — open an SSE streaming response and return an `HttpResponseSse`.
 fn js_res_sse(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let this = cc.this();
-    let data = get_res_payload(ctx, &this)?;
+    let mut this = cc.this();
+    let data = get_res_payload_mut(ctx, &mut this)?;
     // Already switched → error.
     if data.response_tx.is_none() {
-        ctx.throw_type_error("response already switched to SSE");
-        return Err(-1);
+        return Err(ctx.throw_type_error("response already switched to SSE"));
     }
 
     let mut headers = std::mem::take(&mut data.headers);

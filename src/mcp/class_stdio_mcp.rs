@@ -91,15 +91,14 @@ pub(crate) fn gc_trace_stdio_state(gcx: &mut GcTraceCtx) {
 /// created via the static `StdioMcp.define(name, tools, options)`. Calling it
 /// with `new` (or as a plain function) throws a TypeError.
 fn js_constructor(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
-    ctx.throw_type_error("StdioMcp cannot be constructed with `new`; use StdioMcp.define(config)");
-    Err(-1)
+    Err(ctx
+        .throw_type_error("StdioMcp cannot be constructed with `new`; use StdioMcp.define(config)"))
 }
 
 /// StdioMcp.define(config) — static factory taking a single config object.
 fn js_stdio_define(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let Some(cfg) = cc.arg(0).as_object() else {
-        ctx.throw_type_error("StdioMcp.define(config) — config must be an object");
-        return Err(-1);
+        return Err(ctx.throw_type_error("StdioMcp.define(config) — config must be an object"));
     };
 
     // command — allow undefined/string.
@@ -344,17 +343,15 @@ fn js_spawn_resolve(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
 fn start_stdio_server(ctx: &mut ScopedContext, p: &McpServicePayload) -> Result<Promise, i32> {
     if MCP_STDIO_STATE.get().is_some() {
-        ctx.throw_internal_error(
+        return Err(ctx.throw_internal_error(
             "Has running stdio mcp server — it can only be started once per process.",
-        );
-        return Err(-1);
+        ));
     }
 
     // Route all console.log output to stderr to keep stdout clean for MCP protocol.
     // Refuse if stdio is already captured by another (concurrent) server.
     if let Err(msg) = crate::repl::caupture_stdio(true) {
-        ctx.throw_type_error(msg.as_str());
-        return Err(-1);
+        return Err(ctx.throw_type_error(msg.as_str()));
     }
 
     // Read compiled JS handlers produced at define() time.

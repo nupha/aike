@@ -12,10 +12,8 @@ fn js_yaml_parse(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         return Ok(JSValue::UNDEFINED);
     }
 
-    let val: serde_json::Value = serde_yaml::from_str(&text).map_err(|e| {
-        ctx.throw_syntax_error(&format!("YAML parse error: {e}"));
-        -1
-    })?;
+    let val: serde_json::Value = serde_yaml::from_str(&text)
+        .map_err(|e| ctx.throw_syntax_error(&format!("YAML parse error: {e}")))?;
 
     JSValue::from_serde_json(ctx, &val)
 }
@@ -24,19 +22,15 @@ fn js_yaml_parse(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 fn js_yaml_stringify(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let arg = cc.arg(0);
     if arg.is_undefined() || arg.is_callable() {
-        ctx.throw_type_error("YAML.stringify: cannot serialize this value");
-        return Err(-1);
+        return Err(ctx.throw_type_error("YAML.stringify: cannot serialize this value"));
     }
 
-    let val = arg.to_serde_json(ctx).map_err(|_| {
-        ctx.throw_type_error("YAML.stringify: cannot serialize value");
-        -1
-    })?;
+    let val = arg
+        .to_serde_json(ctx)
+        .map_err(|_| ctx.throw_type_error("YAML.stringify: cannot serialize value"))?;
 
-    let yaml_str = serde_yaml::to_string(&val).map_err(|e| {
-        ctx.throw_internal_error(&format!("YAML stringify error: {e}"));
-        -1
-    })?;
+    let yaml_str = serde_yaml::to_string(&val)
+        .map_err(|e| ctx.throw_internal_error(&format!("YAML stringify error: {e}")))?;
 
     ctx.create_string_from_utf8(yaml_str.into_bytes())
         .map(JSValue::make_string)

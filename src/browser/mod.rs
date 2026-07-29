@@ -22,6 +22,7 @@ mod storage;
 mod target;
 mod tracing;
 
+pub(crate) use log::gc_trace_browser;
 pub use {class_browser::JSBrowser, class_page::JSPage};
 
 use zuqe::{FieldDef, NativeObject, ScopedContext};

@@ -47,10 +47,7 @@ pub(crate) fn drain_body(
     let result_slot = PromiseResultSlot::<Result<Vec<u8>, String>>::new();
     let promise =
         Promise::create_with_result_slot(ctx, result_slot.clone(), move |cx, data| -> JSResult {
-            let buf = data.map_err(|e| {
-                cx.throw_internal_error(&e);
-                -1
-            })?;
+            let buf = data.map_err(|e| cx.throw_internal_error(&e))?;
             match mode {
                 BODY_AS_BYTES => TypedArray::create_from_vec_u8(cx, buf).map(JSValue::from),
                 BODY_AS_TEXT => {
@@ -63,10 +60,8 @@ pub(crate) fn drain_body(
                         .map(JSValue::make_string)
                 }
                 BODY_AS_JSON => {
-                    let val: serde_json::Value = serde_json::from_slice(&buf).map_err(|e| {
-                        cx.throw_internal_error(&e.to_string());
-                        -1
-                    })?;
+                    let val: serde_json::Value = serde_json::from_slice(&buf)
+                        .map_err(|e| cx.throw_internal_error(&e.to_string()))?;
                     JSValue::from_serde_json(cx, &val)
                 }
                 _ => unreachable!(),
@@ -118,10 +113,7 @@ pub(crate) fn make_body_async_iterator(ctx: &mut ScopedContext, rx: Receiver<Vec
                 .map(Some)
         },
     )
-    .map_err(|_| {
-        ctx.throw_internal_error("failed to create body stream");
-        -1
-    })?;
+    .map_err(|_| ctx.throw_internal_error("failed to create body stream"))?;
 
     let mut iter_val: JSValue = iter.into();
     let cancel_fn = ctx.create_native_function(Callback::Func(js_stream_cancel), "cancel", 1, 0)?;

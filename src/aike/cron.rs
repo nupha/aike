@@ -228,10 +228,7 @@ impl CronJobPayload {
 }
 
 fn get_cron_job<'a>(ctx: &mut ScopedContext, val: &'a JSValue) -> Result<&'a CronJobPayload, i32> {
-    JSCronJob::payload_of(val).ok_or_else(|| {
-        ctx.throw_internal_error("not a CronJob instance");
-        -1
-    })
+    JSCronJob::payload_of(val).ok_or_else(|| ctx.throw_internal_error("not a CronJob instance"))
 }
 
 /// Prototype method: job.cancel()
@@ -302,8 +299,7 @@ pub(super) fn js_schedule(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
     // Parse cron expression
     let normalized = normalize_cron_expr(&pattern_str);
     let schedule = Schedule::from_str(&normalized).map_err(|e| {
-        ctx.throw_internal_error(&format!("invalid cron expression '{}': {}", pattern_str, e));
-        -1
+        ctx.throw_internal_error(&format!("invalid cron expression '{}': {}", pattern_str, e))
     })?;
 
     // Initialize state if needed
@@ -350,10 +346,7 @@ pub(super) fn js_schedule(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
     // Set data properties on the instance
     let mut job_obj = job_val
         .as_object()
-        .ok_or_else(|| {
-            ctx.throw_internal_error("failed to create CronJob object");
-            -1
-        })?
+        .ok_or_else(|| ctx.throw_internal_error("failed to create CronJob object"))?
         .clone();
     job_obj.define_property_value_str(ctx, "id", JSValue::from(id as i32), JS_PROP_C_W_E)?;
     job_obj.define_property_value_str(ctx, "name", name_val, JS_PROP_C_W_E)?;

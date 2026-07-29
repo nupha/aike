@@ -32,7 +32,12 @@ fn cookie_to_js(ctx: &mut ScopedContext, c: &serde_json::Value) -> Result<JSValu
     for (key, val) in &props {
         if let Some(s) = val {
             let js_s = ctx.create_string_from_utf8(s.as_bytes().to_vec())?;
-            obj.define_property_value_str(ctx, key, JSValue::make_string(js_s), zuqe::JS_PROP_C_W_E)?;
+            obj.define_property_value_str(
+                ctx,
+                key,
+                JSValue::make_string(js_s),
+                zuqe::JS_PROP_C_W_E,
+            )?;
         }
     }
     if let Some(http_only) = c.get("httpOnly").and_then(|v| v.as_bool()) {
@@ -63,10 +68,7 @@ pub(crate) fn js_page_get_cookies(ctx: &mut ScopedContext, cc: CallContext) -> J
     let result_slot = PromiseResultSlot::<Result<Vec<serde_json::Value>, String>>::new();
     let promise =
         Promise::create_with_result_slot(ctx, result_slot.clone(), |cx, payload| -> JSResult {
-            let cookies = payload.map_err(|e| {
-                cx.throw_internal_error(&e);
-                -1
-            })?;
+            let cookies = payload.map_err(|e| cx.throw_internal_error(&e))?;
 
             let mut js_cookies: Vec<JSValue> = Vec::with_capacity(cookies.len());
             for c in &cookies {
@@ -100,10 +102,10 @@ pub(crate) fn js_page_get_cookies(ctx: &mut ScopedContext, cc: CallContext) -> J
 
 /// `page.setCookie(cookie)`
 pub(crate) fn js_page_set_cookie(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let cookie_obj = cc.arg(0).as_object().ok_or_else(|| {
-        ctx.throw_type_error("setCookie requires an object argument");
-        -1
-    })?;
+    let cookie_obj = cc
+        .arg(0)
+        .as_object()
+        .ok_or_else(|| ctx.throw_type_error("setCookie requires an object argument"))?;
 
     let mut params = serde_json::Map::new();
     if let Some(name) = get_str_prop(ctx, cookie_obj, "name") {
@@ -127,10 +129,7 @@ pub(crate) fn js_page_set_cookie(ctx: &mut ScopedContext, cc: CallContext) -> JS
     let result_slot = PromiseResultSlot::<Result<(), String>>::new();
     let promise =
         Promise::create_with_result_slot(ctx, result_slot.clone(), |cx, payload| -> JSResult {
-            payload.map_err(|e| {
-                cx.throw_internal_error(&e);
-                -1
-            })?;
+            payload.map_err(|e| cx.throw_internal_error(&e))?;
             Ok(JSValue::UNDEFINED)
         })?;
 
@@ -331,10 +330,7 @@ pub(crate) fn js_page_get_response_body(ctx: &mut ScopedContext, cc: CallContext
     let result_slot = PromiseResultSlot::<Result<serde_json::Value, String>>::new();
     let promise =
         Promise::create_with_result_slot(ctx, result_slot.clone(), |cx, payload| -> JSResult {
-            let val = payload.map_err(|e| {
-                cx.throw_internal_error(&e);
-                -1
-            })?;
+            let val = payload.map_err(|e| cx.throw_internal_error(&e))?;
             JSValue::from_serde_json(cx, &val)
         })?;
 
@@ -360,10 +356,7 @@ pub(crate) fn js_page_start_network_capture(ctx: &mut ScopedContext, cc: CallCon
     let result_slot = PromiseResultSlot::<Result<(), String>>::new();
     let promise =
         Promise::create_with_result_slot(ctx, result_slot.clone(), |cx, payload| -> JSResult {
-            payload.map_err(|e| {
-                cx.throw_internal_error(&e);
-                -1
-            })?;
+            payload.map_err(|e| cx.throw_internal_error(&e))?;
             Ok(JSValue::UNDEFINED)
         })?;
 
@@ -428,10 +421,7 @@ pub(crate) fn js_page_stop_network_capture(ctx: &mut ScopedContext, cc: CallCont
     let result_slot = PromiseResultSlot::<Result<(), String>>::new();
     let promise =
         Promise::create_with_result_slot(ctx, result_slot.clone(), |cx, payload| -> JSResult {
-            payload.map_err(|e| {
-                cx.throw_internal_error(&e);
-                -1
-            })?;
+            payload.map_err(|e| cx.throw_internal_error(&e))?;
             Ok(JSValue::UNDEFINED)
         })?;
 
@@ -482,10 +472,7 @@ pub(crate) fn js_page_get_request_post_data(ctx: &mut ScopedContext, cc: CallCon
     let result_slot = PromiseResultSlot::<Result<String, String>>::new();
     let promise =
         Promise::create_with_result_slot(ctx, result_slot.clone(), |cx, body| -> JSResult {
-            let body = body.map_err(|e| {
-                cx.throw_internal_error(&e);
-                -1
-            })?;
+            let body = body.map_err(|e| cx.throw_internal_error(&e))?;
             cx.create_string_from_utf8(body.into_bytes())
                 .map(JSValue::make_string)
         })?;

@@ -110,15 +110,13 @@ fn parse_split_mode(ctx: &mut ScopedContext, val: &JSValue) -> Result<SplitMode,
             .parse::<SplitMode>()
             .ok()
             .ok_or_else(|| {
-                ctx.throw_type_error("splitMode must be one of: none | layer | row | tensor");
-                -1
+                ctx.throw_type_error("splitMode must be one of: none | layer | row | tensor")
             });
     }
 
     let n = val.to_number(ctx)?.to_i32();
     SplitMode::from_i32(n).ok_or_else(|| {
-        ctx.throw_type_error("splitMode must be 0..3 or none/layer/row/tensor");
-        -1
+        ctx.throw_type_error("splitMode must be 0..3 or none/layer/row/tensor") 
     })
 }
 
@@ -130,8 +128,7 @@ fn parse_model_options(ctx: &mut ScopedContext, cc: &CallContext) -> Result<Mode
     }
 
     let opts = cc.arg(1).as_object().copied().ok_or_else(|| {
-        ctx.throw_type_error("model options must be object");
-        -1
+        ctx.throw_type_error("model options must be object")
     })?;
 
     let v = opts.get_property_str(ctx, "gpuLayers")?;
@@ -141,8 +138,7 @@ fn parse_model_options(ctx: &mut ScopedContext, cc: &CallContext) -> Result<Mode
                 b"auto" => out.gpu_layers = -1,
                 b"all" => out.gpu_layers = -2,
                 _ => {
-                    ctx.throw_type_error("invalid gpuLayers");
-                    return Err(-1);
+                    return Err(ctx.throw_type_error("invalid gpuLayers"));
                 }
             }
         } else {
@@ -428,8 +424,7 @@ pub(super) fn parse_context_params(
         if !v.is_undefined() {
             let n = v.to_number(ctx)?.to_i32();
             if n <= 0 {
-                ctx.throw_type_error("batchSize must be greater than 0");
-                return Err(-1);
+                return Err(ctx.throw_type_error("batchSize must be greater than 0"));
             }
             ctx_params.n_batch = n as _;
         }
@@ -438,8 +433,7 @@ pub(super) fn parse_context_params(
         if !v.is_undefined() {
             let n = v.to_number(ctx)?.to_i32();
             if n <= 0 {
-                ctx.throw_type_error("ubatchSize must be greater than 0");
-                return Err(-1);
+                return Err(ctx.throw_type_error("ubatchSize must be greater than 0"));
             }
             ctx_params.n_ubatch = n as _;
         }
@@ -448,8 +442,7 @@ pub(super) fn parse_context_params(
         if !v.is_undefined() {
             let n = v.to_number(ctx)?.to_i32();
             if n <= 0 {
-                ctx.throw_type_error("sequences must be greater than 0");
-                return Err(-1);
+                return Err(ctx.throw_type_error("sequences must be greater than 0"));
             }
             ctx_params.n_seq_max = n as _;
         }
@@ -459,8 +452,7 @@ pub(super) fn parse_context_params(
         if !v.is_undefined() {
             let n = v.to_number(ctx)?.to_i32();
             if n <= 0 {
-                ctx.throw_type_error("threads must be greater than 0");
-                return Err(-1);
+                return Err(ctx.throw_type_error("threads must be greater than 0"));
             }
             ctx_params.n_threads = n;
         }
@@ -469,8 +461,7 @@ pub(super) fn parse_context_params(
         if !v.is_undefined() {
             let n = v.to_number(ctx)?.to_i32();
             if n <= 0 {
-                ctx.throw_type_error("threadsBatch must be greater than 0");
-                return Err(-1);
+                return Err(ctx.throw_type_error("threadsBatch must be greater than 0"));
             }
             ctx_params.n_threads_batch = n;
         }
@@ -490,8 +481,7 @@ pub(super) fn parse_context_params(
             .ok_or_else(|| {
                 ctx.throw_type_error(
                     "attentionType must be one of: unspecified | causal | non-causal",
-                );
-                -1
+                )
             })?;
             ctx_params.attention_type = t as _;
         }
@@ -508,8 +498,7 @@ pub(super) fn parse_context_params(
                 FlashAttentionType::from_i32(v.to_number(ctx)?.to_i32())
             }
             .ok_or_else(|| {
-                ctx.throw_type_error("flashAttention must be one of: auto | disabled | enabled");
-                -1
+                ctx.throw_type_error("flashAttention must be one of: auto | disabled | enabled")
             })?;
             ctx_params.flash_attn_type = t as _;
         }
@@ -534,8 +523,7 @@ pub(super) fn parse_context_params(
             .ok_or_else(|| {
                 ctx.throw_type_error(
                     "poolingType must be one of: unspecified | none | mean | cls | last | rank",
-                );
-                -1
+                ) 
             })?;
             ctx_params.pooling_type = t as _;
         }
@@ -549,8 +537,7 @@ pub(super) fn parse_context_params(
         let rope_val = opts.get_property_str(ctx, "rope")?;
         if !rope_val.is_undefined() {
             let rope = rope_val.as_object().ok_or_else(|| {
-                ctx.throw_type_error("rope should be an object");
-                -1
+                ctx.throw_type_error("rope should be an object") 
             })?;
 
             let v = rope.get_property_str(ctx, "scalingType")?;
@@ -567,8 +554,7 @@ pub(super) fn parse_context_params(
                 .ok_or_else(|| {
                     ctx.throw_type_error(
                         "rope.scalingType must be one of: unspecified | none | linear | yarn | longrope",
-                    );
-                    -1
+                    ) 
                 })?;
                 ctx_params.rope_scaling_type = t as _;
             }
@@ -618,8 +604,7 @@ pub(super) fn parse_context_params(
         let cache_val = opts.get_property_str(ctx, "cache")?;
         if !cache_val.is_undefined() {
             let cache = cache_val.as_object().ok_or_else(|| {
-                ctx.throw_type_error("cache should be an object");
-                -1
+                ctx.throw_type_error("cache should be an object") 
             })?;
 
             let v = cache.get_property_str(ctx, "k")?;
@@ -630,8 +615,7 @@ pub(super) fn parse_context_params(
                     .encode_utf8(false)
                     .parse::<KVCacheType>()
                     .map_err(|e| {
-                        ctx.throw_type_error(&e);
-                        -1
+                        ctx.throw_type_error(&e) 
                     })?;
                 ctx_params.type_k = t as _;
             }
@@ -644,8 +628,7 @@ pub(super) fn parse_context_params(
                     .encode_utf8(false)
                     .parse::<KVCacheType>()
                     .map_err(|e| {
-                        ctx.throw_type_error(&e);
-                        -1
+                        ctx.throw_type_error(&e) 
                     })?;
                 ctx_params.type_v = t as _;
             }
@@ -723,8 +706,7 @@ fn js_model_tokenize(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let tokens = llm_model.tokenize(
         CString::new(text.content().encode_utf8(false).as_ref())
             .map_err(|_| {
-                ctx.throw_internal_error("invalid text");
-                -1
+                ctx.throw_internal_error("invalid text") 
             })?
             .as_c_str(),
         false,
@@ -785,8 +767,7 @@ fn js_model_getMeta(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let model = get_llama_model(ctx, &this)?;
     let key = cc.arg(0).to_string(ctx)?;
     let key = CString::new(key.content().encode_utf8(false).as_ref()).map_err(|_| {
-        ctx.throw_type_error("invalid meta key");
-        -1
+        ctx.throw_type_error("invalid meta key") 
     })?;
 
     if let Some(val) = model.meta_val_str(key.as_c_str()) {
@@ -833,15 +814,13 @@ fn js_model_renderTemplate(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
     let model = get_llama_model(ctx, &this)?;
 
     let msgs_arr = cc.arg(0).as_object_Array().copied().ok_or_else(|| {
-        ctx.throw_type_error("messages must be array");
-        -1
+        ctx.throw_type_error("messages must be array") 
     })?;
 
     let mut messages: Vec<JinjaMessage> = Vec::with_capacity(msgs_arr.payload().len());
     for item in msgs_arr.payload().values() {
         let obj = item.as_object().copied().ok_or_else(|| {
-            ctx.throw_type_error("messages[] item must be object");
-            -1
+            ctx.throw_type_error("messages[] item must be object") 
         })?;
 
         let role_v = obj.get_property_str(ctx, "role")?;
@@ -849,8 +828,7 @@ fn js_model_renderTemplate(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
             .as_string(true)
             .map(|x| x.content().encode_utf8(false).to_string())
             .ok_or_else(|| {
-                ctx.throw_type_error("messages[].role must be string");
-                -1
+                ctx.throw_type_error("messages[].role must be string") 
             })?;
 
         let content_v = obj.get_property_str(ctx, "content")?;
@@ -880,8 +858,7 @@ fn js_model_renderTemplate(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
     let val = cc.arg(1);
     if !val.is_undefined() {
         let opts = val.as_object().copied().ok_or_else(|| {
-            ctx.throw_type_error("options must be object");
-            -1
+            ctx.throw_type_error("options must be object") 
         })?;
 
         let json = ctx.with_new_scope(|scope| {
@@ -903,10 +880,9 @@ fn js_model_renderTemplate(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
                 match m.remove(key) {
                     Some(serde_json::Value::Bool(b)) => Ok(b),
                     Some(_) => {
-                        ctx.throw_type_error(&format!(
+                        Err(ctx.throw_type_error(&format!(
                             "renderTemplate options.{key} must be boolean"
-                        ));
-                        Err(-1)
+                        )) )
                     }
                     None => Ok(default),
                 }
@@ -921,10 +897,9 @@ fn js_model_renderTemplate(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
                 match m.remove(key) {
                     Some(serde_json::Value::String(s)) => Ok(s),
                     Some(_) => {
-                        ctx.throw_type_error(&format!(
+                        Err(ctx.throw_type_error(&format!(
                             "renderTemplate options.{key} must be string"
-                        ));
-                        Err(-1)
+                        )))
                     }
                     None => Ok(default),
                 }
@@ -1034,8 +1009,7 @@ fn js_model_load(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         ctx,
         |cx, payload: Result<(LlamaModel, String), String>| -> JSResult {
             let (model, file_name) = payload.map_err(|e| {
-                cx.throw_internal_error(&e);
-                -1
+                cx.throw_internal_error(&e)
             })?;
             let mut obj = JSLlmModel::new_instance(cx, JSValue::UNDEFINED, model)?;
             let path = cx

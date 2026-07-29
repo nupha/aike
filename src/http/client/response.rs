@@ -132,10 +132,7 @@ fn get_response_payload_mut<'a>(
     } else {
         JSHttpClientResponse::payload_mut_of(val)
     };
-    p.ok_or_else(|| {
-        ctx.throw_type_error("not an http response object");
-        -1
-    })
+    p.ok_or_else(|| ctx.throw_type_error("not an http response object"))
 }
 
 fn get_response_payload<'a>(
@@ -144,10 +141,7 @@ fn get_response_payload<'a>(
 ) -> Result<&'a ResponsePayload, i32> {
     JSResponse::payload_of(val)
         .or_else(|| JSHttpClientResponse::payload_of(val))
-        .ok_or_else(|| {
-            ctx.throw_type_error("not an http response object");
-            -1
-        })
+        .ok_or_else(|| ctx.throw_type_error("not an http response object"))
 }
 
 /// Build an opaque-redirect `Response` (used for `redirect: "manual"`).
@@ -309,8 +303,7 @@ fn js_response_static_error(ctx: &mut ScopedContext, _cc: CallContext) -> JSResu
 
 fn js_response_static_redirect(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     if cc.length() < 1 {
-        ctx.throw_type_error("Response.redirect requires a url");
-        return Err(-1);
+        return Err(ctx.throw_type_error("Response.redirect requires a url"));
     }
     let url = cc
         .arg(0)
@@ -322,8 +315,9 @@ fn js_response_static_redirect(ctx: &mut ScopedContext, cc: CallContext) -> JSRe
     let status = if cc.length() > 1 {
         let s = cc.arg(1).to_number(ctx)?.to_i32();
         if ![301, 302, 303, 307, 308].contains(&s) {
-            ctx.throw_range_error("Response.redirect status must be 301, 302, 303, 307 or 308");
-            return Err(-1);
+            return Err(
+                ctx.throw_range_error("Response.redirect status must be 301, 302, 303, 307 or 308")
+            );
         }
         s as u16
     } else {
@@ -471,10 +465,7 @@ fn js_response_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                     .map(JSValue::make_string)
             }
         }
-        _ => {
-            ctx.throw_type_error("unknown Response getter");
-            Err(-1)
-        }
+        _ => Err(ctx.throw_type_error("unknown Response getter")),
     }
 }
 
@@ -496,10 +487,7 @@ fn js_response_body(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     match rx {
         Some(rx) => make_body_async_iterator(ctx, rx),
-        None => {
-            ctx.throw_type_error("body already consumed");
-            Err(-1)
-        }
+        None => Err(ctx.throw_type_error("body already consumed")),
     }
 }
 
@@ -542,16 +530,12 @@ fn js_response_body_as(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             };
             drain_body(ctx, rx, mode, html_convert)
         }
-        None => {
-            ctx.throw_type_error("body already consumed or unavailable");
-            Err(-1)
-        }
+        None => Err(ctx.throw_type_error("body already consumed or unavailable")),
     }
 }
 
-fn js_response_form_data(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    ctx.throw_type_error("formData() is not supported in this runtime");
-    Err(-1)
+fn js_response_form_data(ctx: &mut ScopedContext, _: CallContext) -> JSResult {
+    Err(ctx.throw_type_error("formData() is not supported in this runtime"))
 }
 
 fn js_response_close(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -580,8 +564,9 @@ fn js_response_clone(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     };
 
     let Some(src) = cloned else {
-        ctx.throw_type_error("Cannot clone a Response whose body has already been used");
-        return Err(-1);
+        return Err(
+            ctx.throw_type_error("Cannot clone a Response whose body has already been used")
+        );
     };
 
     let synthetic = src.synthetic_body.clone();
@@ -683,8 +668,7 @@ fn register_class_response(rt: &mut Runtime) -> Result<ClassID, i32> {
 
 fn js_http_response_constructor(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
     // Instances are only produced by HttpClient requests.
-    ctx.throw_type_error("HttpClientResponse is not constructable; use HttpClient");
-    Err(-1)
+    Err(ctx.throw_type_error("HttpClientResponse is not constructable; use HttpClient"))
 }
 
 // Aike enhancements only; everything else is inherited from Response.

@@ -78,10 +78,7 @@ pub(crate) fn js_page_read_stream(ctx: &mut ScopedContext, cc: CallContext) -> J
     let result_slot = PromiseResultSlot::<Result<String, String>>::new();
     let promise =
         Promise::create_with_result_slot(ctx, result_slot.clone(), |cx, text| -> JSResult {
-            let text = text.map_err(|e| {
-                cx.throw_internal_error(&e);
-                -1
-            })?;
+            let text = text.map_err(|e| cx.throw_internal_error(&e))?;
             cx.create_string_from_utf8(text.into_bytes())
                 .map(JSValue::make_string)
         })?;

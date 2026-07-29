@@ -26,20 +26,16 @@ fn get_req_payload<'a>(
     ctx: &mut ScopedContext,
     val: &'a JSValue,
 ) -> Result<&'a HttpRequestPayload, i32> {
-    JSHttpRequest::payload_of(val).ok_or_else(|| {
-        ctx.throw_type_error("not an HttpRequest instance");
-        -1
-    })
+    JSHttpRequest::payload_of(val)
+        .ok_or_else(|| ctx.throw_type_error("not an HttpRequest instance"))
 }
 
 fn get_req_payload_mut<'a>(
     ctx: &mut ScopedContext,
     val: &'a mut JSValue,
 ) -> Result<&'a mut HttpRequestPayload, i32> {
-    JSHttpRequest::payload_mut_of(val).ok_or_else(|| {
-        ctx.throw_type_error("not an HttpRequest instance");
-        -1
-    })
+    JSHttpRequest::payload_mut_of(val)
+        .ok_or_else(|| ctx.throw_type_error("not an HttpRequest instance"))
 }
 
 fn js_req_method(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -110,10 +106,8 @@ fn js_req_json(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     if body.is_empty() {
         return Ok(JSValue::UNDEFINED);
     }
-    let value: serde_json::Value = serde_json::from_slice(&body).map_err(|e| {
-        ctx.throw_type_error(&format!("invalid JSON body: {e}"));
-        -1
-    })?;
+    let value: serde_json::Value = serde_json::from_slice(&body)
+        .map_err(|e| ctx.throw_type_error(&format!("invalid JSON body: {e}")))?;
     JSValue::from_serde_json(ctx, &value)
 }
 

@@ -205,10 +205,7 @@ pub(crate) struct HtmlDocumentPayload {
 
 /// `this`-access helper for Document.
 fn get_doc<'a>(ctx: &mut ScopedContext, val: &'a JSValue) -> Result<&'a HtmlDocumentPayload, i32> {
-    HtmlDocument::payload_of(val).ok_or_else(|| {
-        ctx.throw_type_error("not a Document instance");
-        -1
-    })
+    HtmlDocument::payload_of(val).ok_or_else(|| ctx.throw_type_error("not a Document instance"))
 }
 
 fn js_document_query_selector_all(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -216,10 +213,8 @@ fn js_document_query_selector_all(ctx: &mut ScopedContext, cc: CallContext) -> J
     let doc = get_doc(ctx, &this)?;
     let selector_str = arg_str(ctx, &cc, 0)?;
 
-    let selector = Selector::parse(&selector_str).map_err(|_| {
-        ctx.throw_internal_error("invalid CSS selector");
-        -1
-    })?;
+    let selector = Selector::parse(&selector_str)
+        .map_err(|_| ctx.throw_internal_error("invalid CSS selector"))?;
 
     let mut results: Vec<JSValue> = Vec::new();
     for el_ref in doc.html.select(&selector) {
@@ -270,10 +265,7 @@ pub(crate) struct ElementPayload {
 
 /// `this`-access helper for Element.
 fn get_element<'a>(ctx: &mut ScopedContext, val: &'a JSValue) -> Result<&'a ElementPayload, i32> {
-    HtmlElement::payload_of(val).ok_or_else(|| {
-        ctx.throw_type_error("not an Element instance");
-        -1
-    })
+    HtmlElement::payload_of(val).ok_or_else(|| ctx.throw_type_error("not an Element instance"))
 }
 
 // -- getters --
@@ -302,10 +294,11 @@ fn js_element_children(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let el = get_element(ctx, &this)?;
 
-    let node_ref = el.html.tree.get(el.node_id).ok_or_else(|| {
-        ctx.throw_internal_error("element node not found in tree");
-        -1
-    })?;
+    let node_ref = el
+        .html
+        .tree
+        .get(el.node_id)
+        .ok_or_else(|| ctx.throw_internal_error("element node not found in tree"))?;
 
     let mut results: Vec<JSValue> = Vec::new();
     for child in node_ref.children() {
@@ -348,15 +341,11 @@ fn js_element_query_selector(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
     let el = get_element(ctx, &this)?;
     let selector_str = arg_str(ctx, &cc, 0)?;
 
-    let selector = Selector::parse(&selector_str).map_err(|_| {
-        ctx.throw_internal_error("invalid CSS selector");
-        -1
-    })?;
+    let selector = Selector::parse(&selector_str)
+        .map_err(|_| ctx.throw_internal_error("invalid CSS selector"))?;
 
-    let el_ref = get_element_ref(&el.html, el.node_id).ok_or_else(|| {
-        ctx.throw_internal_error("element not found in tree");
-        -1
-    })?;
+    let el_ref = get_element_ref(&el.html, el.node_id)
+        .ok_or_else(|| ctx.throw_internal_error("element not found in tree"))?;
 
     if let Some(child_ref) = el_ref.select(&selector).next() {
         if let Some(child_id) = find_node_id(&el.html, &child_ref) {
@@ -380,15 +369,11 @@ fn js_element_query_selector_all(ctx: &mut ScopedContext, cc: CallContext) -> JS
     let el = get_element(ctx, &this)?;
     let selector_str = arg_str(ctx, &cc, 0)?;
 
-    let selector = Selector::parse(&selector_str).map_err(|_| {
-        ctx.throw_internal_error("invalid CSS selector");
-        -1
-    })?;
+    let selector = Selector::parse(&selector_str)
+        .map_err(|_| ctx.throw_internal_error("invalid CSS selector"))?;
 
-    let el_ref = get_element_ref(&el.html, el.node_id).ok_or_else(|| {
-        ctx.throw_internal_error("element not found in tree");
-        -1
-    })?;
+    let el_ref = get_element_ref(&el.html, el.node_id)
+        .ok_or_else(|| ctx.throw_internal_error("element not found in tree"))?;
 
     let mut results: Vec<JSValue> = Vec::new();
     for child_ref in el_ref.select(&selector) {

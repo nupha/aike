@@ -62,10 +62,8 @@ fn get_decoder<'a>(
     ctx: &mut ScopedContext,
     val: &'a JSValue,
 ) -> Result<&'a TextDecoderPayload, i32> {
-    JSTextDecoder::payload_of(val).ok_or_else(|| {
-        ctx.throw_internal_error("not a TextDecoder instance");
-        -1
-    })
+    JSTextDecoder::payload_of(val)
+        .ok_or_else(|| ctx.throw_internal_error("not a TextDecoder instance"))
 }
 
 fn js_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -75,10 +73,8 @@ fn js_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let encoding = if cc.length() > 0 {
         let enc_str = cc.arg(0).to_string(ctx)?;
         let enc_name = enc_str.content().encode_utf8(false).to_string();
-        Encoding::from_str(&enc_name).ok_or_else(|| {
-            ctx.throw_range_error(&format!("Unsupported encoding: {}", enc_name));
-            -1
-        })?
+        Encoding::from_str(&enc_name)
+            .ok_or_else(|| ctx.throw_range_error(&format!("Unsupported encoding: {}", enc_name)))?
     } else {
         Encoding::Utf8
     };
@@ -100,8 +96,7 @@ fn js_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 }
             }
             None => {
-                ctx.throw_type_error("Options must be an object");
-                return Err(-1);
+                return Err(ctx.throw_type_error("Options must be an object"));
             }
         }
     }
@@ -368,12 +363,10 @@ fn js_text_decoder_decode(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
             } else if let Some(ta) = p.typed_array() {
                 ta.bytes()
             } else {
-                ctx.throw_type_error("Input must be an ArrayBuffer or TypedArray");
-                return Err(-1);
+                return Err(ctx.throw_type_error("Input must be an ArrayBuffer or TypedArray"));
             }
         } else {
-            ctx.throw_type_error("Input must be TypedArray, ArrayBuffer or Object");
-            return Err(-1);
+            return Err(ctx.throw_type_error("Input must be TypedArray, ArrayBuffer or Object"));
         }
 
         // match cc.arg(0) {
@@ -404,18 +397,14 @@ fn js_text_decoder_decode(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
 
     let (result, pending_new) = if pending_old.is_empty() {
         // Fast path: no pending bytes → pass &[u8] directly, zero allocation.
-        process_decoded(decoder, input_slice, call_fatal, stream).map_err(|e| {
-            ctx.throw_type_error(&e);
-            -1
-        })?
+        process_decoded(decoder, input_slice, call_fatal, stream)
+            .map_err(|e| ctx.throw_type_error(&e))?
     } else {
         // Slow path:  has pending  → merge into Vec (pending already allocated).
         let mut combined = pending_old;
         combined.extend_from_slice(input_slice);
-        process_decoded(decoder, &combined, call_fatal, stream).map_err(|e| {
-            ctx.throw_type_error(&e);
-            -1
-        })?
+        process_decoded(decoder, &combined, call_fatal, stream)
+            .map_err(|e| ctx.throw_type_error(&e))?
     };
 
     if stream {
@@ -424,10 +413,7 @@ fn js_text_decoder_decode(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
 
     ctx.create_string_from_utf8(result.into_bytes())
         .map(JSValue::make_string)
-        .map_err(|_| {
-            ctx.throw_internal_error("Failed to create output string");
-            -1
-        })
+        .map_err(|_| ctx.throw_internal_error("Failed to create output string"))
 }
 
 // ---------------------------------------------------------------------------

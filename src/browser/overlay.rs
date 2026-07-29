@@ -45,10 +45,7 @@ pub(crate) fn js_page_highlight(ctx: &mut ScopedContext, cc: CallContext) -> JSR
     let result_slot = PromiseResultSlot::<Result<(), String>>::new();
     let promise =
         Promise::create_with_result_slot(ctx, result_slot.clone(), |cx, payload| -> JSResult {
-            payload.map_err(|e| {
-                cx.throw_internal_error(&e);
-                -1
-            })?;
+            payload.map_err(|e| cx.throw_internal_error(&e))?;
             Ok(JSValue::UNDEFINED)
         })?;
 

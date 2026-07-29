@@ -37,10 +37,7 @@ pub(crate) fn js_page_start_tracing(ctx: &mut ScopedContext, cc: CallContext) ->
     let result_slot = PromiseResultSlot::<Result<(), String>>::new();
     let promise =
         Promise::create_with_result_slot(ctx, result_slot.clone(), |cx, payload| -> JSResult {
-            payload.map_err(|e| {
-                cx.throw_internal_error(&e);
-                -1
-            })?;
+            payload.map_err(|e| cx.throw_internal_error(&e))?;
             Ok(JSValue::UNDEFINED)
         })?;
 
@@ -77,10 +74,7 @@ pub(crate) fn js_page_stop_tracing(ctx: &mut ScopedContext, cc: CallContext) -> 
     let result_slot = PromiseResultSlot::<Result<String, String>>::new();
     let promise =
         Promise::create_with_result_slot(ctx, result_slot.clone(), |cx, text| -> JSResult {
-            let text = text.map_err(|e| {
-                cx.throw_internal_error(&e);
-                -1
-            })?;
+            let text = text.map_err(|e| cx.throw_internal_error(&e))?;
             cx.create_string_from_utf8(text.into_bytes())
                 .map(JSValue::make_string)
         })?;

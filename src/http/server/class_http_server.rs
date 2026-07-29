@@ -52,7 +52,7 @@ use super::{
     class_request::{HttpRequestPayload, JSHttpRequest},
     launcher::spawn_http_server,
     outbound_buffer::OUTBOUND_CAP,
-    response::{HttpResponseMessage, HttpResponsePayload, JSHttpResponse, get_res_payload},
+    response::{HttpResponseMessage, HttpResponsePayload, JSHttpResponse, get_res_payload_mut},
     ws::{WsControl, WsStreamEvent, bridge_ws, dispatch_ws_data, dispatch_ws_open},
 };
 
@@ -163,20 +163,15 @@ fn get_server_payload<'a>(
     ctx: &mut ScopedContext,
     val: &'a JSValue,
 ) -> Result<&'a HttpServerPayload, i32> {
-    JSHttpServer::payload_of(val).ok_or_else(|| {
-        ctx.throw_type_error("expect HttpServer instance");
-        -1
-    })
+    JSHttpServer::payload_of(val).ok_or_else(|| ctx.throw_type_error("expect HttpServer instance"))
 }
 
 pub(crate) fn get_server_payload_mut<'a>(
     ctx: &mut ScopedContext,
     val: &'a mut JSValue,
 ) -> Result<&'a mut HttpServerPayload, i32> {
-    JSHttpServer::payload_mut_of(val).ok_or_else(|| {
-        ctx.throw_type_error("expect HttpServer instance");
-        -1
-    })
+    JSHttpServer::payload_mut_of(val)
+        .ok_or_else(|| ctx.throw_type_error("expect HttpServer instance"))
 }
 
 fn js_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -218,33 +213,29 @@ fn js_openai(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         match JSEngine::take_payload_of(&mut v) {
             Some(payload) => *payload,
             None => {
-                ctx.throw_type_error("Engine object has already been detached");
-                return Err(-1);
+                return Err(ctx.throw_type_error("Engine object has already been detached"));
             }
         }
     } else {
-        ctx.throw_type_error("engine must be an Engine instance");
-        return Err(-1);
+        return Err(ctx.throw_type_error("engine must be an Engine instance"));
     };
 
     // Validate mountPath argument
     let mount_path = {
-        let s = cc.arg(1).to_string(ctx).map_err(|_| {
-            ctx.throw_type_error("mountPath must be a string");
-            -1
-        })?;
+        let s = cc
+            .arg(1)
+            .to_string(ctx)
+            .map_err(|_| ctx.throw_type_error("mountPath must be a string"))?;
         let text = s.content().encode_utf8(false).to_string();
         if !text.starts_with('/') {
-            ctx.throw_type_error("mountPath must start with '/'");
-            return Err(-1);
+            return Err(ctx.throw_type_error("mountPath must start with '/'"));
         }
         text
     };
 
     let p = get_server_payload_mut(ctx, &mut this)?;
     if p.frozen {
-        ctx.throw_type_error("cannot call openai() after listen()");
-        return Err(-1);
+        return Err(ctx.throw_type_error("cannot call openai() after listen()"));
     }
     p.openai = Some((engine, mount_path));
 
@@ -262,8 +253,7 @@ fn js_route_add(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         5 => Method::HEAD,
         6 => Method::OPTIONS,
         _ => {
-            ctx.throw_internal_error("unknown method magic");
-            return Err(-1);
+            return Err(ctx.throw_internal_error("unknown method magic"));
         }
     };
     let path_str = cc.arg(0).to_string(ctx)?;
@@ -272,8 +262,7 @@ fn js_route_add(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     let p = get_server_payload_mut(ctx, &mut this)?;
     if let Err(e) = p.add_js_route(method, path, handler) {
-        ctx.throw_type_error(e);
-        return Err(-1);
+        return Err(ctx.throw_type_error(e));
     }
     Ok(this)
 }
@@ -290,47 +279,42 @@ fn js_mcp(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     // arg(0): mountPath — the URL the endpoint is mounted at (must start with '/').
     let mount_path = {
-        let s = cc.arg(0).to_string(ctx).map_err(|_| {
-            ctx.throw_type_error("mcp() mountPath must be a string");
-            -1
-        })?;
+        let s = cc
+            .arg(0)
+            .to_string(ctx)
+            .map_err(|_| ctx.throw_type_error("mcp() mountPath must be a string"))?;
         let s = s.content().encode_utf8(false).to_string();
         if !s.starts_with('/') {
-            ctx.throw_type_error("mcp() mountPath must start with '/'");
-            return Err(-1);
+            return Err(ctx.throw_type_error("mcp() mountPath must start with '/'"));
         }
         s
     };
 
     // arg(1): an HttpMcp instance.
-    let http_obj = cc.arg(1).as_object().ok_or_else(|| {
-        ctx.throw_type_error("mcp() expects an HttpMcp instance");
-        -1
-    })?;
+    let http_obj = cc
+        .arg(1)
+        .as_object()
+        .ok_or_else(|| ctx.throw_type_error("mcp() expects an HttpMcp instance"))?;
 
     // Validate it is an HttpMcp with an Http transport, then assign the
     // mount path the server owns (not baked into the HttpMcp at define time).
     {
         let mut http_val = JSValue::from(http_obj);
-        let p = JSHttpMcp::payload_mut_of(&mut http_val).ok_or_else(|| {
-            ctx.throw_type_error("mcp() expects an HttpMcp instance");
-            -1
-        })?;
+        let p = JSHttpMcp::payload_mut_of(&mut http_val)
+            .ok_or_else(|| ctx.throw_type_error("mcp() expects an HttpMcp instance"))?;
         match &mut *p.transport.borrow_mut() {
             McpTransport::Http { mount_path: mp, .. } => {
                 *mp = mount_path;
             }
             _ => {
-                ctx.throw_type_error("mcp() expects an Http (not stdio) Mcp server");
-                return Err(-1);
+                return Err(ctx.throw_type_error("mcp() expects an Http (not stdio) Mcp server"));
             }
         }
     }
 
     let p = get_server_payload_mut(ctx, &mut this)?;
     if p.frozen {
-        ctx.throw_type_error("cannot add mcp after listen()");
-        return Err(-1);
+        return Err(ctx.throw_type_error("cannot add mcp after listen()"));
     }
 
     p.mcp_endpoints.push(http_obj);
@@ -348,8 +332,7 @@ fn js_remove_route(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         "HEAD" => Method::HEAD,
         "OPTIONS" => Method::OPTIONS,
         _ => {
-            ctx.throw_type_error("unknown HTTP method");
-            return Err(-1);
+            return Err(ctx.throw_type_error("unknown HTTP method"));
         }
     };
     let path_str = cc.arg(1).to_string(ctx)?;
@@ -357,10 +340,7 @@ fn js_remove_route(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     get_server_payload_mut(ctx, &mut this)?
         .remove_route(method, &path)
-        .map_err(|e| {
-            ctx.throw_type_error(e);
-            -1
-        })
+        .map_err(|e| ctx.throw_type_error(e))
         .map(JSValue::from)
 }
 
@@ -645,8 +625,8 @@ fn js_handler_then(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         }
     }
 
-    let res_val = cc.data(0);
-    let p = match get_res_payload(ctx, &res_val) {
+    let mut res_val = cc.data(0);
+    let p = match get_res_payload_mut(ctx, &mut res_val) {
         Ok(p) => p,
         Err(_) => return Ok(JSValue::UNDEFINED),
     };
@@ -664,8 +644,7 @@ fn js_listen(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     // Check if already running
     if get_server_payload(ctx, &this)?.shutdown_tx.is_some() {
-        ctx.throw_type_error("http server already running");
-        return Err(-1);
+        return Err(ctx.throw_type_error("http server already running"));
     }
 
     // Parse options
@@ -687,8 +666,7 @@ fn js_listen(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 host = s.content().encode_utf8(false).to_string();
             }
         } else {
-            ctx.throw_type_error_not_an_object();
-            return Err(-1);
+            return Err(ctx.throw_type_error_not_an_object());
         }
     }
 
@@ -747,8 +725,7 @@ fn js_listen(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 let (axum_path, handler) =
                     delegate_js_route(*method, path.clone(), i, js_tx.clone());
                 if let Err(e) = validate_axum_path(&axum_path) {
-                    ctx.throw_type_error(&e);
-                    return Err(-1);
+                    return Err(ctx.throw_type_error(&e));
                 }
                 router = router.route(&axum_path, handler);
             }
@@ -758,8 +735,7 @@ fn js_listen(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             for (i, (path, _)) in data.ws_routes.iter().enumerate() {
                 let (axum_path, handler) = delegate_ws_route(path.clone(), i, js_tx.clone());
                 if let Err(e) = validate_axum_path(&axum_path) {
-                    ctx.throw_type_error(&e);
-                    return Err(-1);
+                    return Err(ctx.throw_type_error(&e));
                 }
                 router = router.route(&axum_path, handler);
             }
@@ -770,10 +746,8 @@ fn js_listen(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             for (i, obj) in data.mcp_endpoints.iter_mut().enumerate() {
                 // Read the payload (immutable) to build the route + handler table.
                 let obj_val = JSValue::from(*obj);
-                let p = JSHttpMcp::payload_of(&obj_val).ok_or_else(|| {
-                    ctx.throw_type_error("invalid HttpMcp endpoint");
-                    -1
-                })?;
+                let p = JSHttpMcp::payload_of(&obj_val)
+                    .ok_or_else(|| ctx.throw_type_error("invalid HttpMcp endpoint"))?;
 
                 // Build axum route via rmcp's StreamableHttpService
                 let mcp_axum_router = build_axum_mcp_route(p, js_tx.clone(), i);
@@ -812,8 +786,7 @@ fn js_listen(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let handle = match spawn_http_server(router, host, port) {
         Ok(h) => h,
         Err(e) => {
-            ctx.throw_internal_error(&e);
-            return Err(-1);
+            return Err(ctx.throw_internal_error(&e));
         }
     };
 
@@ -859,10 +832,9 @@ fn js_listen(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     });
 
     // Create handle object with exit (readonly Promise) and shutdown()
-    let mut handle_obj = ctx.create_base_object().map_err(|_| {
-        ctx.throw_internal_error("failed to create handle object");
-        -1
-    })?;
+    let mut handle_obj = ctx
+        .create_base_object()
+        .map_err(|_| ctx.throw_internal_error("failed to create handle object"))?;
 
     // Define a hidden reference to the HttpServer on the exit promise.
     // This keeps the server alive as long as the promise is referenced
@@ -987,7 +959,7 @@ fn dispatch_http_request(cx: &mut ScopedContext, incoming: HttpRequest, handler_
         Err(_) => return,
     };
 
-    let res_val: JSValue = match JSHttpResponse::new_instance(
+    let mut res_val: JSValue = match JSHttpResponse::new_instance(
         cx,
         JSValue::UNDEFINED,
         HttpResponsePayload {
@@ -1000,12 +972,14 @@ fn dispatch_http_request(cx: &mut ScopedContext, incoming: HttpRequest, handler_
         },
     ) {
         Ok(v) => v.into(),
-        Err(_) => return,
+        Err(_) => {
+            return;
+        }
     };
 
     // Call JS handler
     match handler.call(cx, JSValue::UNDEFINED, &[req_val, res_val]) {
-        Ok(val) => {
+        Ok(mut val) => {
             if let Ok(mut promise) = Promise::try_from(val) {
                 // Async handler — attach then/catch
                 let ok_fn = match cx.create_native_function_with_data(
@@ -1030,7 +1004,7 @@ fn dispatch_http_request(cx: &mut ScopedContext, incoming: HttpRequest, handler_
                 };
 
                 if promise.then(cx, ok_fn, fail_fn).is_err() {
-                    if let Ok(p) = get_res_payload(cx, &val) {
+                    if let Ok(p) = get_res_payload_mut(cx, &mut val) {
                         p.status = 500;
                         p.body = Some(String::from("Internal Server Error"));
                         p.send_response();
@@ -1038,7 +1012,7 @@ fn dispatch_http_request(cx: &mut ScopedContext, incoming: HttpRequest, handler_
                 }
             } else {
                 // Sync handler
-                if let Ok(p) = get_res_payload(cx, &res_val)
+                if let Ok(p) = get_res_payload_mut(cx, &mut res_val)
                     && !p.ended
                 {
                     p.status = 204;
@@ -1052,7 +1026,7 @@ fn dispatch_http_request(cx: &mut ScopedContext, incoming: HttpRequest, handler_
             if !msg.message.is_empty() {
                 eprintln!("{}", msg.message);
             }
-            if let Ok(p) = get_res_payload(cx, &res_val)
+            if let Ok(p) = get_res_payload_mut(cx, &mut res_val)
                 && !p.ended
             {
                 p.status = 500;
@@ -1178,8 +1152,7 @@ fn js_route_ws(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let handler = cc.arg(1).ensure_callable(ctx)?;
     let p = get_server_payload_mut(ctx, &mut this)?;
     if p.frozen {
-        ctx.throw_type_error("cannot add ws route while server is running");
-        return Err(-1);
+        return Err(ctx.throw_type_error("cannot add ws route while server is running"));
     }
     p.ws_routes.push((path, handler));
     Ok(this)
@@ -1195,9 +1168,9 @@ fn js_static_files(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         .encode_utf8(false)
         .to_string();
     if !mount.starts_with('/') {
-        ctx.throw_type_error("mountPath must start with '/'");
-        return Err(-1);
+        return Err(ctx.throw_type_error("mountPath must start with '/'"));
     }
+
     let dir = cc
         .arg(1)
         .to_string(ctx)?
@@ -1206,9 +1179,9 @@ fn js_static_files(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         .to_string();
     let p = get_server_payload_mut(ctx, &mut this)?;
     if p.frozen {
-        ctx.throw_type_error("cannot add static dir while server is running");
-        return Err(-1);
+        return Err(ctx.throw_type_error("cannot add static dir while server is running"));
     }
+
     p.static_dirs.push((mount, dir));
     Ok(this)
 }

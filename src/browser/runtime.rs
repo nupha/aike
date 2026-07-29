@@ -33,18 +33,14 @@ pub(crate) fn js_page_evaluate(ctx: &mut ScopedContext, cc: CallContext) -> JSRe
     let result_slot = PromiseResultSlot::<Result<serde_json::Value, String>>::new();
     let promise =
         Promise::create_with_result_slot(ctx, result_slot.clone(), |cx, payload| -> JSResult {
-            let val = payload.map_err(|e| {
-                cx.throw_internal_error(&e);
-                -1
-            })?;
+            let val = payload.map_err(|e| cx.throw_internal_error(&e))?;
 
             if let Some(exception) = val.get("exceptionDetails") {
                 let text = exception
                     .get("text")
                     .and_then(|v| v.as_str())
                     .unwrap_or("JS exception");
-                cx.throw_internal_error(text);
-                return Err(-1);
+                return Err(cx.throw_internal_error(text));
             }
 
             if let Some(result) = val.get("result") {
@@ -91,10 +87,7 @@ pub(crate) fn js_page_get_outer_html(ctx: &mut ScopedContext, cc: CallContext) -
     let result_slot = PromiseResultSlot::<Result<String, String>>::new();
     let promise =
         Promise::create_with_result_slot(ctx, result_slot.clone(), |cx, payload| -> JSResult {
-            let html = payload.map_err(|e| {
-                cx.throw_internal_error(&e);
-                -1
-            })?;
+            let html = payload.map_err(|e| cx.throw_internal_error(&e))?;
             cx.create_string_from_utf8(html.into_bytes())
                 .map(JSValue::make_string)
         })?;
@@ -153,10 +146,7 @@ pub(crate) fn js_page_wait_for_selector(ctx: &mut ScopedContext, cc: CallContext
     let result_slot = PromiseResultSlot::<Result<(), String>>::new();
     let promise =
         Promise::create_with_result_slot(ctx, result_slot.clone(), |cx, payload| -> JSResult {
-            payload.map_err(|e| {
-                cx.throw_internal_error(&e);
-                -1
-            })?;
+            payload.map_err(|e| cx.throw_internal_error(&e))?;
             Ok(JSValue::UNDEFINED)
         })?;
 
@@ -258,10 +248,7 @@ pub(crate) fn js_page_wait_for_function(ctx: &mut ScopedContext, cc: CallContext
     let result_slot = PromiseResultSlot::<Result<(), String>>::new();
     let promise =
         Promise::create_with_result_slot(ctx, result_slot.clone(), |cx, payload| -> JSResult {
-            payload.map_err(|e| {
-                cx.throw_internal_error(&e);
-                -1
-            })?;
+            payload.map_err(|e| cx.throw_internal_error(&e))?;
             Ok(JSValue::UNDEFINED)
         })?;
 
@@ -346,10 +333,7 @@ pub(crate) fn js_page_call_function_on(ctx: &mut ScopedContext, cc: CallContext)
     let result_slot = PromiseResultSlot::<Result<serde_json::Value, String>>::new();
     let promise =
         Promise::create_with_result_slot(ctx, result_slot.clone(), |cx, val| -> JSResult {
-            let val = val.map_err(|e| {
-                cx.throw_internal_error(&e);
-                -1
-            })?;
+            let val = val.map_err(|e| cx.throw_internal_error(&e))?;
             JSValue::from_serde_json(cx, &val)
         })?;
 
@@ -406,10 +390,7 @@ pub(crate) fn js_page_get_properties(ctx: &mut ScopedContext, cc: CallContext) -
     let result_slot = PromiseResultSlot::<Result<serde_json::Value, String>>::new();
     let promise =
         Promise::create_with_result_slot(ctx, result_slot.clone(), |cx, val| -> JSResult {
-            let val = val.map_err(|e| {
-                cx.throw_internal_error(&e);
-                -1
-            })?;
+            let val = val.map_err(|e| cx.throw_internal_error(&e))?;
             JSValue::from_serde_json(cx, &val)
         })?;
 
@@ -494,10 +475,7 @@ pub(crate) fn js_page_evaluate_handle(ctx: &mut ScopedContext, cc: CallContext) 
     let result_slot = PromiseResultSlot::<Result<serde_json::Value, String>>::new();
     let promise =
         Promise::create_with_result_slot(ctx, result_slot.clone(), |cx, val| -> JSResult {
-            let val = val.map_err(|e| {
-                cx.throw_internal_error(&e);
-                -1
-            })?;
+            let val = val.map_err(|e| cx.throw_internal_error(&e))?;
             JSValue::from_serde_json(cx, &val)
         })?;
 

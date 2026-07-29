@@ -168,17 +168,15 @@ impl McpServicePayload {
     /// Each `Tool` is `#[derive(Serialize)]`, so it is converted via serde_json
     /// rather than hand-built.
     pub(crate) fn make_schemas_json(&self, ctx: &mut ScopedContext) -> Result<Array, i32> {
-        let guard = self.schemas.read().map_err(|e| {
-            ctx.throw_internal_error(&format!("schema lock poisoned: {}", e));
-            -1
-        })?;
+        let guard = self
+            .schemas
+            .read()
+            .map_err(|e| ctx.throw_internal_error(&format!("schema lock poisoned: {}", e)))?;
 
         let mut lst = Vec::with_capacity(guard.tools.len());
         for tool in guard.tools.iter() {
-            let val = serde_json::to_value(tool).map_err(|e| {
-                ctx.throw_internal_error(&format!("tool serialize failed: {}", e));
-                -1
-            })?;
+            let val = serde_json::to_value(tool)
+                .map_err(|e| ctx.throw_internal_error(&format!("tool serialize failed: {}", e)))?;
             let meta = JSValue::from_serde_json(ctx, &val).unwrap_or_else(|_| {
                 ctx.create_base_object()
                     .map(|o| o.into())
@@ -277,8 +275,7 @@ pub(super) fn get_payload<'a>(
     if let Some(p) = JSHttpMcp::payload_of(val) {
         return Ok(p);
     }
-    ctx.throw_type_error("not a Mcp server instance");
-    Err(-1)
+    Err(ctx.throw_type_error("not a Mcp server instance"))
 }
 
 pub(super) fn get_payload_mut<'a>(
@@ -289,20 +286,15 @@ pub(super) fn get_payload_mut<'a>(
     let is_http = val.as_native_object::<JSHttpMcp>().is_some();
 
     if is_stdio {
-        return JSStdioMcp::payload_mut_of(val).ok_or_else(|| {
-            ctx.throw_type_error("not a Mcp server instance");
-            -1
-        });
+        return JSStdioMcp::payload_mut_of(val)
+            .ok_or_else(|| ctx.throw_type_error("not a Mcp server instance"));
     }
     if is_http {
-        return JSHttpMcp::payload_mut_of(val).ok_or_else(|| {
-            ctx.throw_type_error("not a Mcp server instance");
-            -1
-        });
+        return JSHttpMcp::payload_mut_of(val)
+            .ok_or_else(|| ctx.throw_type_error("not a Mcp server instance"));
     }
 
-    ctx.throw_type_error("not a Mcp server instance");
-    Err(-1)
+    Err(ctx.throw_type_error("not a Mcp server instance"))
 }
 
 fn js_tools_list(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -316,10 +308,8 @@ fn js_initialize_info(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let p = get_payload(ctx, &this)?;
 
     let info = p.make_server_info();
-    let val = serde_json::to_value(info).map_err(|e| {
-        ctx.throw_internal_error(&format!("server info serialize failed: {}", e));
-        -1
-    })?;
+    let val = serde_json::to_value(info)
+        .map_err(|e| ctx.throw_internal_error(&format!("server info serialize failed: {}", e)))?;
     JSValue::from_serde_json(ctx, &val)
 }
 
@@ -406,10 +396,9 @@ fn js_update_tools(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 }
 
 fn js_base_constructor(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
-    ctx.throw_type_error(
+    Err(ctx.throw_type_error(
         "BaseMcp is abstract and cannot be constructed directly; use StdioMcp.define / HttpMcp.define",
-    );
-    Err(-1)
+    ) )
 }
 
 const BASE_MCP_PROTO: &[FieldDef] = &[
@@ -609,17 +598,16 @@ pub(crate) fn parse_mcp_define(
     // name — required.
     let name_val = cfg.get_property_str(ctx, "name")?;
     if name_val.is_undefined() {
-        ctx.throw_type_error("Mcp.define: `name` is required");
-        return Err(-1);
+        return Err(ctx.throw_type_error("Mcp.define: `name` is required"));
     }
+
     let name = name_val
         .to_string(ctx)?
         .content()
         .encode_utf8(false)
         .to_string();
     if name.is_empty() {
-        ctx.throw_type_error("Mcp.define: `name` must not be empty");
-        return Err(-1);
+        return Err(ctx.throw_type_error("Mcp.define: `name` must not be empty"));
     }
 
     // description
@@ -637,8 +625,7 @@ pub(crate) fn parse_mcp_define(
     // tools — required
     let tools_val = cfg.get_property_str(ctx, "tools")?;
     if tools_val.as_object().is_none() {
-        ctx.throw_type_error("Mcp.define: `tools` must be an object");
-        return Err(-1);
+        return Err(ctx.throw_type_error("Mcp.define: `tools` must be an object"));
     }
 
     let mut payload = McpServicePayload::new(name, desc, transport);
@@ -684,17 +671,14 @@ pub(crate) fn parse_mcp_tools(
     tools_val: &JSValue,
 ) -> Result<(Vec<Tool>, HashMap<String, usize>, Vec<Object>), i32> {
     let Some(o) = tools_val.as_object() else {
-        ctx.throw_type_error("tools must be an object");
-        return Err(-1);
+        return Err(ctx.throw_type_error("tools must be an object"));
     };
 
     // Only the object-keyed DSL is supported; arrays are rejected.
-    if o.is_array(ctx).map_err(|_| {
-        ctx.throw_type_error("tools is_array check failed");
-        -1
-    })? {
-        ctx.throw_type_error("tools must be an object, not an array");
-        return Err(-1);
+    if o.is_array(ctx)
+        .map_err(|_| ctx.throw_type_error("tools is_array check failed"))?
+    {
+        return Err(ctx.throw_type_error("tools must be an object, not an array"));
     }
 
     parse_mcp_tools_object(ctx, o)
@@ -720,10 +704,7 @@ pub(crate) fn parse_mcp_tools_object(
             .to_value(ctx)
             .and_then(|v| v.to_string(ctx))
             .map(|s| s.content().encode_utf8(false).to_string())
-            .map_err(|_| {
-                ctx.throw_type_error("tool name must be a string");
-                -1
-            })?;
+            .map_err(|_| ctx.throw_type_error("tool name must be a string"))?;
 
         if name.is_empty() {
             continue;
@@ -732,10 +713,7 @@ pub(crate) fn parse_mcp_tools_object(
         let tool_obj = tools_obj
             .get_property(ctx, pk.atom)?
             .as_object()
-            .ok_or_else(|| {
-                ctx.throw_type_error(&format!("tool '{}' must be an object", name));
-                -1
-            })?
+            .ok_or_else(|| ctx.throw_type_error(&format!("tool '{}' must be an object", name)))?
             .clone();
 
         // desc → description
@@ -752,8 +730,7 @@ pub(crate) fn parse_mcp_tools_object(
             .get_property_str(ctx, "handler")
             .and_then(|v| v.ensure_callable(ctx))
             .map_err(|_| {
-                ctx.throw_type_error(&format!("tool '{}' handler must be a function", name));
-                -1
+                ctx.throw_type_error(&format!("tool '{}' handler must be a function", name))
             })?;
 
         // Build inputSchema from args DSL (only mode for object-keyed format)

@@ -322,10 +322,7 @@ pub(crate) fn get_page_payload<'a>(
     ctx: &mut ScopedContext,
     val: &'a JSValue,
 ) -> Result<&'a PagePayload, i32> {
-    JSPage::payload_of(val).ok_or_else(|| {
-        ctx.throw_type_error("not a Page instance");
-        -1
-    })
+    JSPage::payload_of(val).ok_or_else(|| ctx.throw_type_error("not a Page instance"))
 }
 
 // ---------------------------------------------------------------------------
@@ -346,10 +343,7 @@ pub(crate) fn send_page_void_cmd(
     let result_slot = PromiseResultSlot::<Result<(), String>>::new();
     let promise =
         Promise::create_with_result_slot(ctx, result_slot.clone(), |cx, payload| -> JSResult {
-            payload.map_err(|e| {
-                cx.throw_internal_error(&e);
-                -1
-            })?;
+            payload.map_err(|e| cx.throw_internal_error(&e))?;
             Ok(JSValue::UNDEFINED)
         })?;
 
@@ -480,10 +474,7 @@ fn js_page_capture_screenshot(ctx: &mut ScopedContext, cc: CallContext) -> JSRes
     let result_slot = PromiseResultSlot::<Result<Vec<u8>, String>>::new();
     let promise =
         Promise::create_with_result_slot(ctx, result_slot.clone(), |cx, payload| -> JSResult {
-            let data = payload.map_err(|e| {
-                cx.throw_internal_error(&e);
-                -1
-            })?;
+            let data = payload.map_err(|e| cx.throw_internal_error(&e))?;
             TypedArray::create_from_vec_u8(cx, data).map(JSValue::from)
         })?;
 
@@ -576,10 +567,7 @@ fn js_page_wait_for_navigation(ctx: &mut ScopedContext, cc: CallContext) -> JSRe
     let result_slot = PromiseResultSlot::<Result<(), String>>::new();
     let promise =
         Promise::create_with_result_slot(ctx, result_slot.clone(), |cx, payload| -> JSResult {
-            payload.map_err(|e| {
-                cx.throw_internal_error(&e);
-                -1
-            })?;
+            payload.map_err(|e| cx.throw_internal_error(&e))?;
             Ok(JSValue::UNDEFINED)
         })?;
 
@@ -641,10 +629,7 @@ fn js_page_handle_dialog(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let result_slot = PromiseResultSlot::<Result<(), String>>::new();
     let promise =
         Promise::create_with_result_slot(ctx, result_slot.clone(), |cx, payload| -> JSResult {
-            payload.map_err(|e| {
-                cx.throw_internal_error(&e);
-                -1
-            })?;
+            payload.map_err(|e| cx.throw_internal_error(&e))?;
             Ok(JSValue::UNDEFINED)
         })?;
 
@@ -697,10 +682,7 @@ fn js_page_print_to_pdf(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let result_slot = PromiseResultSlot::<Result<Vec<u8>, String>>::new();
     let promise =
         Promise::create_with_result_slot(ctx, result_slot.clone(), |cx, payload| -> JSResult {
-            let data = payload.map_err(|e| {
-                cx.throw_internal_error(&e);
-                -1
-            })?;
+            let data = payload.map_err(|e| cx.throw_internal_error(&e))?;
             TypedArray::create_from_vec_u8(cx, data).map(JSValue::from)
         })?;
 
@@ -742,10 +724,7 @@ fn js_page_get_layout_metrics(ctx: &mut ScopedContext, cc: CallContext) -> JSRes
     let result_slot = PromiseResultSlot::<Result<serde_json::Value, String>>::new();
     let promise =
         Promise::create_with_result_slot(ctx, result_slot.clone(), |cx, payload| -> JSResult {
-            let val = payload.map_err(|e| {
-                cx.throw_internal_error(&e);
-                -1
-            })?;
+            let val = payload.map_err(|e| cx.throw_internal_error(&e))?;
             JSValue::from_serde_json(cx, &val)
         })?;
 
@@ -774,10 +753,7 @@ fn js_page_add_init_script(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
     let result_slot = PromiseResultSlot::<Result<String, String>>::new();
     let promise =
         Promise::create_with_result_slot(ctx, result_slot.clone(), |cx, payload| -> JSResult {
-            let id = payload.map_err(|e| {
-                cx.throw_internal_error(&e);
-                -1
-            })?;
+            let id = payload.map_err(|e| cx.throw_internal_error(&e))?;
             cx.create_string_from_utf8(id.into_bytes())
                 .map(JSValue::make_string)
         })?;
@@ -817,10 +793,7 @@ fn js_page_get_frame_tree(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
     let result_slot = PromiseResultSlot::<Result<serde_json::Value, String>>::new();
     let promise =
         Promise::create_with_result_slot(ctx, result_slot.clone(), |cx, payload| -> JSResult {
-            let val = payload.map_err(|e| {
-                cx.throw_internal_error(&e);
-                -1
-            })?;
+            let val = payload.map_err(|e| cx.throw_internal_error(&e))?;
             JSValue::from_serde_json(cx, &val)
         })?;
 
@@ -853,10 +826,7 @@ fn js_page_set_content(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let result_slot = PromiseResultSlot::<Result<(), String>>::new();
     let promise =
         Promise::create_with_result_slot(ctx, result_slot.clone(), |cx, payload| -> JSResult {
-            payload.map_err(|e| {
-                cx.throw_internal_error(&e);
-                -1
-            })?;
+            payload.map_err(|e| cx.throw_internal_error(&e))?;
             Ok(JSValue::UNDEFINED)
         })?;
 
@@ -938,10 +908,7 @@ fn navigate_history(ctx: &mut ScopedContext, cc: &CallContext, delta: i64) -> JS
     let result_slot = PromiseResultSlot::<Result<(), String>>::new();
     let promise =
         Promise::create_with_result_slot(ctx, result_slot.clone(), |cx, payload| -> JSResult {
-            payload.map_err(|e| {
-                cx.throw_internal_error(&e);
-                -1
-            })?;
+            payload.map_err(|e| cx.throw_internal_error(&e))?;
             Ok(JSValue::UNDEFINED)
         })?;
 
@@ -1002,10 +969,7 @@ fn js_page_get_navigation_history(ctx: &mut ScopedContext, cc: CallContext) -> J
     let result_slot = PromiseResultSlot::<Result<serde_json::Value, String>>::new();
     let promise =
         Promise::create_with_result_slot(ctx, result_slot.clone(), |cx, payload| -> JSResult {
-            let val = payload.map_err(|e| {
-                cx.throw_internal_error(&e);
-                -1
-            })?;
+            let val = payload.map_err(|e| cx.throw_internal_error(&e))?;
             JSValue::from_serde_json(cx, &val)
         })?;
 
@@ -1042,10 +1006,7 @@ fn js_page_capture_snapshot(ctx: &mut ScopedContext, cc: CallContext) -> JSResul
     let result_slot = PromiseResultSlot::<Result<String, String>>::new();
     let promise =
         Promise::create_with_result_slot(ctx, result_slot.clone(), |cx, payload| -> JSResult {
-            let data = payload.map_err(|e| {
-                cx.throw_internal_error(&e);
-                -1
-            })?;
+            let data = payload.map_err(|e| cx.throw_internal_error(&e))?;
             cx.create_string_from_utf8(data.into_bytes())
                 .map(JSValue::make_string)
         })?;
@@ -1126,10 +1087,7 @@ fn js_page_upload_file(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let result_slot = PromiseResultSlot::<Result<(), String>>::new();
     let promise =
         Promise::create_with_result_slot(ctx, result_slot.clone(), |cx, payload| -> JSResult {
-            payload.map_err(|e| {
-                cx.throw_internal_error(&e);
-                -1
-            })?;
+            payload.map_err(|e| cx.throw_internal_error(&e))?;
             Ok(JSValue::UNDEFINED)
         })?;
 
@@ -1191,10 +1149,7 @@ fn js_page_close(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let result_slot = PromiseResultSlot::<Result<(), String>>::new();
     let promise =
         Promise::create_with_result_slot(ctx, result_slot.clone(), |cx, payload| -> JSResult {
-            payload.map_err(|e| {
-                cx.throw_internal_error(&e);
-                -1
-            })?;
+            payload.map_err(|e| cx.throw_internal_error(&e))?;
             Ok(JSValue::UNDEFINED)
         })?;
 

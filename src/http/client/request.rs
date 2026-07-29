@@ -41,20 +41,14 @@ fn get_request_payload_mut<'a>(
     ctx: &mut ScopedContext,
     val: &'a mut JSValue,
 ) -> Result<&'a mut RequestPayload, i32> {
-    JSRequest::payload_mut_of(val).ok_or_else(|| {
-        ctx.throw_type_error("not a Request instance");
-        -1
-    })
+    JSRequest::payload_mut_of(val).ok_or_else(|| ctx.throw_type_error("not a Request instance"))
 }
 
 fn get_request_payload<'a>(
     ctx: &mut ScopedContext,
     val: &'a JSValue,
 ) -> Result<&'a RequestPayload, i32> {
-    JSRequest::payload_of(val).ok_or_else(|| {
-        ctx.throw_type_error("not a Request instance");
-        -1
-    })
+    JSRequest::payload_of(val).ok_or_else(|| ctx.throw_type_error("not a Request instance"))
 }
 
 fn js_request_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -280,17 +274,13 @@ fn js_req_body_as(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     match rx {
         Some(rx) => drain_body(ctx, rx, magic, None),
-        None => {
-            ctx.throw_type_error("body already consumed or unavailable");
-            Err(-1)
-        }
+        None => Err(ctx.throw_type_error("body already consumed or unavailable")),
     }
 }
 
 /// `formData()` — not yet supported.
 fn js_req_form_data(ctx: &mut ScopedContext, _: CallContext) -> JSResult {
-    ctx.throw_type_error("formData() is not supported in this runtime");
-    Err(-1)
+    Err(ctx.throw_type_error("formData() is not supported in this runtime"))
 }
 
 fn js_req_clone(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -300,8 +290,7 @@ fn js_req_clone(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         if p.body_consumed { None } else { Some(p) }
     };
     let Some(src) = cloned else {
-        ctx.throw_type_error("Cannot clone a Request whose body has already been used");
-        return Err(-1);
+        return Err(ctx.throw_type_error("Cannot clone a Request whose body has already been used"));
     };
 
     let synthetic = src.synthetic_body.clone();

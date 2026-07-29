@@ -124,10 +124,9 @@ fn js_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         }
     }
 
-    let client = cfg.build_http_client().map_err(|e| {
-        ctx.throw_type_error(&format!("HttpClient config error: {e}"));
-        -1
-    })?;
+    let client = cfg
+        .build_http_client()
+        .map_err(|e| ctx.throw_type_error(&format!("HttpClient config error: {e}")))?;
 
     JSHttpClient::new_instance(ctx, cc.this(), HttpClientPayload { client }).map(JSValue::from)
 }
@@ -158,10 +157,8 @@ fn throw_abort_error(cx: &mut ScopedContext) -> JSResult {
 
 fn js_do_request(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
-    let payload = JSHttpClient::payload_of(&this).ok_or_else(|| {
-        ctx.throw_internal_error("not an HttpClient instance");
-        -1
-    })?;
+    let payload = JSHttpClient::payload_of(&this)
+        .ok_or_else(|| ctx.throw_internal_error("not an HttpClient instance"))?;
     let client = payload.client.clone();
 
     // Parse URL.
@@ -258,8 +255,12 @@ fn js_do_request(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         Promise::create_with_result_slot(ctx, result_slot.clone(), move |cx, data| -> JSResult {
             let tr = match data {
                 Ok(tr) => tr,
-                Err(RequestError::Abort) => return throw_abort_error(cx),
-                Err(RequestError::Other(te)) => return throw_transport_error(cx, te),
+                Err(RequestError::Abort) => {
+                    return throw_abort_error(cx);
+                }
+                Err(RequestError::Other(te)) => {
+                    return throw_transport_error(cx, te);
+                }
             };
             build_http_response_from_transport(cx, tr, RespType::Basic, &url_for_closure, false)
         })?;

@@ -98,14 +98,12 @@ impl WsStreamPayload {
     }
 }
 
-pub(crate) fn get_ws_payload<'a>(
+pub(crate) fn get_ws_payload_mut<'a>(
     ctx: &mut ScopedContext,
     val: &'a mut JSValue,
 ) -> Result<&'a mut WsStreamPayload, i32> {
-    JSWebSocketStream::payload_mut_of(val).ok_or_else(|| {
-        ctx.throw_type_error("not a WebSocketStream instance");
-        -1
-    })
+    JSWebSocketStream::payload_mut_of(val)
+        .ok_or_else(|| ctx.throw_type_error("not a WebSocketStream instance"))
 }
 
 // ---------------------------------------------------------------------------
@@ -276,7 +274,7 @@ pub(crate) fn dispatch_ws_open(
     // Fire on_open now (after the handler's synchronous setup completed).
     {
         let mut ov = obj_val;
-        if let Ok(p) = get_ws_payload(cx, &mut ov) {
+        if let Ok(p) = get_ws_payload_mut(cx, &mut ov) {
             if let Some(cb) = p.on_open.clone() {
                 let _ = cb.call(cx, ov, &[]);
             }
@@ -307,7 +305,7 @@ pub(crate) fn dispatch_ws_data(
 
     match event {
         WsStreamEvent::Message(msg) => {
-            let p = match get_ws_payload(cx, &mut ov) {
+            let p = match get_ws_payload_mut(cx, &mut ov) {
                 Ok(p) => p,
                 Err(_) => return,
             };
@@ -325,7 +323,7 @@ pub(crate) fn dispatch_ws_data(
         }
         WsStreamEvent::Close => {
             {
-                let p = match get_ws_payload(cx, &mut ov) {
+                let p = match get_ws_payload_mut(cx, &mut ov) {
                     Ok(p) => p,
                     Err(_) => return,
                 };
@@ -350,7 +348,7 @@ pub(crate) fn dispatch_ws_data(
 
 fn js_ws_asyncIterator(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut this = cc.this();
-    let p = get_ws_payload(ctx, &mut this)?;
+    let p = get_ws_payload_mut(ctx, &mut this)?;
     if p.closed.load(Ordering::Acquire) || p.read_rx.is_none() {
         // Already closed or already consumed — return an empty iterator.
         let iter = AsyncIterableIterator::create_with_receiver::<String>(
@@ -376,7 +374,7 @@ fn js_ws_write(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let frame = cc.arg(0).to_string(ctx)?;
     let frame = frame.content().encode_utf8(false).to_string();
     let mut this = cc.this();
-    let p = get_ws_payload(ctx, &mut this)?;
+    let p = get_ws_payload_mut(ctx, &mut this)?;
     if p.closed.load(Ordering::Acquire) {
         return Ok(JSValue::UNDEFINED);
     }
@@ -386,7 +384,7 @@ fn js_ws_write(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
 fn js_ws_close(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut this = cc.this();
-    let p = get_ws_payload(ctx, &mut this)?;
+    let p = get_ws_payload_mut(ctx, &mut this)?;
     if !p.closed.swap(true, Ordering::AcqRel) {
         p.ready_state.set(3);
         p.read_tx = None;
@@ -397,7 +395,7 @@ fn js_ws_close(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
 fn js_ws_ping(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut this = cc.this();
-    let p = get_ws_payload(ctx, &mut this)?;
+    let p = get_ws_payload_mut(ctx, &mut this)?;
     let _ = p.control_tx.try_send(WsControl::Ping);
     Ok(JSValue::UNDEFINED)
 }
@@ -405,7 +403,7 @@ fn js_ws_ping(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 fn js_ws_on_message(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut this = cc.this();
     let cb = cc.arg(0).ensure_callable(ctx)?;
-    let p = get_ws_payload(ctx, &mut this)?;
+    let p = get_ws_payload_mut(ctx, &mut this)?;
     p.on_message = Some(cb);
     Ok(this)
 }
@@ -413,7 +411,7 @@ fn js_ws_on_message(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 fn js_ws_on_open(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut this = cc.this();
     let cb = cc.arg(0).ensure_callable(ctx)?;
-    let p = get_ws_payload(ctx, &mut this)?;
+    let p = get_ws_payload_mut(ctx, &mut this)?;
     p.on_open = Some(cb);
     Ok(this)
 }
@@ -421,7 +419,7 @@ fn js_ws_on_open(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 fn js_ws_on_close(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut this = cc.this();
     let cb = cc.arg(0).ensure_callable(ctx)?;
-    let p = get_ws_payload(ctx, &mut this)?;
+    let p = get_ws_payload_mut(ctx, &mut this)?;
     p.on_close = Some(cb);
     Ok(this)
 }
@@ -429,7 +427,7 @@ fn js_ws_on_close(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 fn js_ws_on_error(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut this = cc.this();
     let cb = cc.arg(0).ensure_callable(ctx)?;
-    let p = get_ws_payload(ctx, &mut this)?;
+    let p = get_ws_payload_mut(ctx, &mut this)?;
     p.on_error = Some(cb);
     Ok(this)
 }
@@ -437,7 +435,7 @@ fn js_ws_on_error(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 fn js_ws_on_drain(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut this = cc.this();
     let cb = cc.arg(0).ensure_callable(ctx)?;
-    let p = get_ws_payload(ctx, &mut this)?;
+    let p = get_ws_payload_mut(ctx, &mut this)?;
     p.sink.on_drain = Some(cb);
     Ok(this)
 }
@@ -450,7 +448,7 @@ fn js_ws_subscribe(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         .content()
         .encode_utf8(false)
         .to_string();
-    let p = get_ws_payload(ctx, &mut this)?;
+    let p = get_ws_payload_mut(ctx, &mut this)?;
     p.topics.insert(topic);
     Ok(this)
 }
@@ -463,27 +461,27 @@ fn js_ws_unsubscribe(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         .content()
         .encode_utf8(false)
         .to_string();
-    let p = get_ws_payload(ctx, &mut this)?;
+    let p = get_ws_payload_mut(ctx, &mut this)?;
     p.topics.remove(&topic);
     Ok(this)
 }
 
 fn js_ws_ready_state(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut this = cc.this();
-    let p = get_ws_payload(ctx, &mut this)?;
+    let p = get_ws_payload_mut(ctx, &mut this)?;
     Ok(JSValue::from(p.ready_state.get() as u32))
 }
 
 fn js_ws_remote_address(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut this = cc.this();
-    let p = get_ws_payload(ctx, &mut this)?;
+    let p = get_ws_payload_mut(ctx, &mut this)?;
     let s = ctx.create_string_from_str(&p.remote_address)?;
     Ok(JSValue::make_string(s))
 }
 
 fn js_ws_id(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut this = cc.this();
-    let p = get_ws_payload(ctx, &mut this)?;
+    let p = get_ws_payload_mut(ctx, &mut this)?;
     Ok(JSValue::from(p.id as f64))
 }
 

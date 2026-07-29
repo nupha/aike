@@ -154,16 +154,14 @@ fn is_valid_header_value(value: &str) -> bool {
 
 fn check_header_name(ctx: &mut ScopedContext, name: &str) -> JSResult {
     if !is_valid_header_name(name) {
-        ctx.throw_type_error(&format!("Invalid header name: {}", name));
-        return Err(-1);
+        return Err(ctx.throw_type_error(&format!("Invalid header name: {}", name)));
     }
     Ok(JSValue::UNDEFINED)
 }
 
 fn check_header_value(ctx: &mut ScopedContext, value: &str) -> JSResult {
     if !is_valid_header_value(value) {
-        ctx.throw_type_error("Invalid header value");
-        return Err(-1);
+        return Err(ctx.throw_type_error("Invalid header value"));
     }
     Ok(JSValue::UNDEFINED)
 }
@@ -173,20 +171,14 @@ pub(crate) struct HeadersPayload {
 }
 
 fn get_headers<'a>(ctx: &mut ScopedContext, val: &'a JSValue) -> Result<&'a HeadersPayload, i32> {
-    JSHeaders::payload_of(val).ok_or_else(|| {
-        ctx.throw_type_error("not a Headers instance");
-        -1
-    })
+    JSHeaders::payload_of(val).ok_or_else(|| ctx.throw_type_error("not a Headers instance"))
 }
 
 fn get_headers_mut<'a>(
     ctx: &mut ScopedContext,
     val: &'a mut JSValue,
 ) -> Result<&'a mut HeadersPayload, i32> {
-    JSHeaders::payload_mut_of(val).ok_or_else(|| {
-        ctx.throw_type_error("not a Headers instance");
-        -1
-    })
+    JSHeaders::payload_mut_of(val).ok_or_else(|| ctx.throw_type_error("not a Headers instance"))
 }
 
 /// Build a `HeaderList` from a JS init: a Headers instance, an array of
@@ -243,8 +235,7 @@ pub(crate) fn header_list_from_js(
         }
         Ok(list)
     } else {
-        ctx.throw_type_error("invalid Headers init");
-        Err(-1)
+        Err(ctx.throw_type_error("invalid Headers init"))
     }
 }
 
@@ -402,8 +393,7 @@ fn js_headers_for_each(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let h = get_headers(ctx, &this)?;
     if cc.length() == 0 {
-        ctx.throw_type_error("forEach requires a callback");
-        return Err(-1);
+        return Err(ctx.throw_type_error("forEach requires a callback"));
     }
     let cb = cc.arg(0).ensure_callable(ctx)?;
     let this_arg = if cc.length() > 1 {

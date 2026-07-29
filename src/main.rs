@@ -41,7 +41,7 @@ use crate::llm::{JSEngine, JSLlmContext, JSLlmModel, JSSamplerChain};
 
 use crate::{
     aike::{JSCronJob, JSFileHandle, JSStdioHandle, gc_trace_cron, gc_trace_io},
-    browser::{JSBrowser, JSPage, init_mod_browser},
+    browser::{JSBrowser, JSPage, gc_trace_browser, init_mod_browser},
     class_event_emitter::JSEventEmitter,
     fs::init_mod_fs,
     global::setup_globals,
@@ -319,6 +319,7 @@ async fn main() -> ExitCode {
         gc_trace_cron(gcx);
         gc_trace_io(gcx);
         gc_trace_stdio_state(gcx);
+        gc_trace_browser(gcx);
     });
 
     // register native classes
@@ -593,14 +594,10 @@ fn js_module_loader(
     _: *mut std::ffi::c_void,
 ) -> Result<ModuleDef, i32> {
     // Convert URL back to absolute path for filesystem access.
-    let file_path = match zuqe::url_to_abspath(file_name) {
-        Some(p) => p,
-        None => {
-            ctx.throw_reference_error(&format!(
-                "could not load module '{file_name}': not a file:// URL"
-            ));
-            return Err(-1);
-        }
+    let Some(file_path) =  zuqe::url_to_abspath(file_name) else {
+        return Err(ctx.throw_reference_error(&format!(
+            "could not load module '{file_name}': not a file:// URL"
+        )));
     };
 
     let file_path_str = file_path.to_string_lossy().to_string();
@@ -609,8 +606,7 @@ fn js_module_loader(
         || file_path_str.ends_with(".so")
         || file_path_str.ends_with(".dll")
     {
-        ctx.throw_internal_error("dynamic library loading not implemented");
-        Err(-1)
+        Err(ctx.throw_internal_error("dynamic library loading not implemented"))
     } else {
         // Check for import attributes: type: "json"
         let is_json = attrs.is_object()
@@ -627,8 +623,9 @@ fn js_module_loader(
         let (buf, resolved_name) = match resolved {
             Ok((b, n)) => (b, n),
             Err(e) => {
-                ctx.throw_reference_error(&format!("could not load module '{file_name}'. {e}"));
-                return Err(-1);
+                return Err(
+                    ctx.throw_reference_error(&format!("could not load module '{file_name}'. {e}"))
+                );
             }
         };
 
@@ -648,10 +645,9 @@ fn js_module_loader(
                 match transpile::transpile(&source) {
                     Ok(result) => result.code.into_bytes(),
                     Err(e) => {
-                        ctx.throw_syntax_error(&format!(
+                        return Err(ctx.throw_syntax_error(&format!(
                             "failed to transpile module '{resolved_name}': {e}"
-                        ));
-                        return Err(-1);
+                        )));
                     }
                 }
             } else {

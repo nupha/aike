@@ -11,10 +11,7 @@ use zuqe::{
     builtins::promise::{Promise, PromiseResultSlot},
 };
 
-use crate::browser::{
-    class_page::{get_page_payload},
-    dom,
-};
+use crate::browser::{class_page::get_page_payload, dom};
 
 /// `page.getComputedStyle(selector)` — `CSS.getComputedStyleForNode`.
 /// Returns a plain object mapping each CSS property name to its computed value.
@@ -33,10 +30,7 @@ pub(crate) fn js_page_get_computed_style(ctx: &mut ScopedContext, cc: CallContex
     let result_slot = PromiseResultSlot::<Result<serde_json::Value, String>>::new();
     let promise =
         Promise::create_with_result_slot(ctx, result_slot.clone(), |cx, val| -> JSResult {
-            let val = val.map_err(|e| {
-                cx.throw_internal_error(&e);
-                -1
-            })?;
+            let val = val.map_err(|e| cx.throw_internal_error(&e))?;
             JSValue::from_serde_json(cx, &val)
         })?;
 
@@ -92,10 +86,7 @@ pub(crate) fn js_page_get_matched_styles(ctx: &mut ScopedContext, cc: CallContex
     let result_slot = PromiseResultSlot::<Result<serde_json::Value, String>>::new();
     let promise =
         Promise::create_with_result_slot(ctx, result_slot.clone(), |cx, val| -> JSResult {
-            let val = val.map_err(|e| {
-                cx.throw_internal_error(&e);
-                -1
-            })?;
+            let val = val.map_err(|e| cx.throw_internal_error(&e))?;
             JSValue::from_serde_json(cx, &val)
         })?;
 

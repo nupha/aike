@@ -22,10 +22,7 @@ pub(crate) fn js_browser_get_targets(ctx: &mut ScopedContext, cc: CallContext) -
     let result_slot = PromiseResultSlot::<Result<serde_json::Value, String>>::new();
     let promise =
         Promise::create_with_result_slot(ctx, result_slot.clone(), |cx, val| -> JSResult {
-            let val = val.map_err(|e| {
-                cx.throw_internal_error(&e);
-                -1
-            })?;
+            let val = val.map_err(|e| cx.throw_internal_error(&e))?;
             JSValue::from_serde_json(cx, &val)
         })?;
 
@@ -48,10 +45,7 @@ pub(crate) fn js_browser_list_pages(ctx: &mut ScopedContext, cc: CallContext) ->
     let result_slot = PromiseResultSlot::<Result<serde_json::Value, String>>::new();
     let promise =
         Promise::create_with_result_slot(ctx, result_slot.clone(), |cx, val| -> JSResult {
-            let val = val.map_err(|e| {
-                cx.throw_internal_error(&e);
-                -1
-            })?;
+            let val = val.map_err(|e| cx.throw_internal_error(&e))?;
             JSValue::from_serde_json(cx, &val)
         })?;
 
@@ -91,10 +85,7 @@ pub(crate) fn js_browser_new_context(ctx: &mut ScopedContext, cc: CallContext) -
     let result_slot = PromiseResultSlot::<Result<String, String>>::new();
     let promise =
         Promise::create_with_result_slot(ctx, result_slot.clone(), |cx, id| -> JSResult {
-            let id = id.map_err(|e| {
-                cx.throw_internal_error(&e);
-                -1
-            })?;
+            let id = id.map_err(|e| cx.throw_internal_error(&e))?;
             cx.create_string_from_utf8(id.into_bytes())
                 .map(JSValue::make_string)
         })?;
@@ -135,10 +126,7 @@ pub(crate) fn js_browser_dispose_context(ctx: &mut ScopedContext, cc: CallContex
     let result_slot = PromiseResultSlot::<Result<(), String>>::new();
     let promise =
         Promise::create_with_result_slot(ctx, result_slot.clone(), |cx, payload| -> JSResult {
-            payload.map_err(|e| {
-                cx.throw_internal_error(&e);
-                -1
-            })?;
+            payload.map_err(|e| cx.throw_internal_error(&e))?;
             Ok(JSValue::UNDEFINED)
         })?;
 

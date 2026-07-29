@@ -30,10 +30,7 @@ pub(crate) struct UrlPayload {
 }
 
 fn get_url<'a>(ctx: &mut ScopedContext, val: &'a JSValue) -> Result<&'a UrlPayload, i32> {
-    JSURL::payload_of(val).ok_or_else(|| {
-        ctx.throw_internal_error("not a URL instance");
-        -1
-    })
+    JSURL::payload_of(val).ok_or_else(|| ctx.throw_internal_error("not a URL instance"))
 }
 
 // -- Constructor -----------------------------------------------------------
@@ -41,8 +38,7 @@ fn get_url<'a>(ctx: &mut ScopedContext, val: &'a JSValue) -> Result<&'a UrlPaylo
 fn js_url_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let new_target = cc.this();
     if cc.length() < 1 {
-        ctx.throw_type_error("Failed to construct 'URL': 1 argument required");
-        return Err(-1);
+        return Err(ctx.throw_type_error("Failed to construct 'URL': 1 argument required"));
     }
 
     let url_str = cc.arg(0).to_string(ctx)?;
@@ -51,19 +47,13 @@ fn js_url_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let parsed = if cc.length() >= 2 {
         let base_str = cc.arg(1).to_string(ctx)?;
         let base_text = base_str.content().encode_utf8(false).to_string();
-        let base = Url::parse(&base_text).map_err(|_| {
-            ctx.throw_type_error("Failed to construct 'URL': Invalid base URL");
-            -1
-        })?;
-        base.join(&url_text).map_err(|_| {
-            ctx.throw_type_error("Failed to construct 'URL': Invalid URL");
-            -1
-        })
+        let base = Url::parse(&base_text)
+            .map_err(|_| ctx.throw_type_error("Failed to construct 'URL': Invalid base URL"))?;
+        base.join(&url_text)
+            .map_err(|_| ctx.throw_type_error("Failed to construct 'URL': Invalid URL"))
     } else {
-        Url::parse(&url_text).map_err(|_| {
-            ctx.throw_type_error("Failed to construct 'URL': Invalid URL");
-            -1
-        })
+        Url::parse(&url_text)
+            .map_err(|_| ctx.throw_type_error("Failed to construct 'URL': Invalid URL"))
     }?;
 
     JSURL::new_instance(
@@ -92,10 +82,8 @@ fn js_url_href_setter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let url = get_url(ctx, &this)?;
     let val = cc.arg(0).to_string(ctx)?;
     let text = val.content().encode_utf8(false).to_string();
-    let new_url = Url::parse(&text).map_err(|_| {
-        ctx.throw_type_error("Failed to set 'href': Invalid URL");
-        -1
-    })?;
+    let new_url =
+        Url::parse(&text).map_err(|_| ctx.throw_type_error("Failed to set 'href': Invalid URL"))?;
     *url.shared.borrow_mut() = new_url;
     // Invalidate cached searchParams on href change
     *url.search_params.borrow_mut() = None;
@@ -360,10 +348,8 @@ struct SearchParamsPayload {
 }
 
 fn get_sp<'a>(ctx: &mut ScopedContext, val: &'a JSValue) -> Result<&'a SearchParamsPayload, i32> {
-    JSURLSearchParams::payload_of(val).ok_or_else(|| {
-        ctx.throw_internal_error("not a URLSearchParams instance");
-        -1
-    })
+    JSURLSearchParams::payload_of(val)
+        .ok_or_else(|| ctx.throw_internal_error("not a URLSearchParams instance"))
 }
 
 /// Get current query string from shared URL or standalone.
@@ -425,8 +411,7 @@ fn js_sp_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 .collect::<Vec<_>>()
                 .join("&")
         } else {
-            ctx.throw_type_error("URLSearchParams init must be string or object");
-            return Err(-1);
+            return Err(ctx.throw_type_error("URLSearchParams init must be string or object"));
         }
     };
 
@@ -602,8 +587,7 @@ fn js_sp_for_each(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let sp = get_sp(ctx, &this)?;
     if cc.length() == 0 {
-        ctx.throw_type_error("forEach requires a callback");
-        return Err(-1);
+        return Err(ctx.throw_type_error("forEach requires a callback"));
     }
 
     let cb = cc.arg(0).ensure_callable(ctx)?;
@@ -624,18 +608,15 @@ fn js_sp_for_each(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 }
 
 fn js_sp_entries(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
-    ctx.throw_type_error("URLSearchParams.entries() not yet implemented");
-    Err(-1)
+    Err(ctx.throw_type_error("URLSearchParams.entries() not yet implemented"))
 }
 
 fn js_sp_keys(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
-    ctx.throw_type_error("URLSearchParams.keys() not yet implemented");
-    Err(-1)
+    Err(ctx.throw_type_error("URLSearchParams.keys() not yet implemented"))
 }
 
 fn js_sp_values(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
-    ctx.throw_type_error("URLSearchParams.values() not yet implemented");
-    Err(-1)
+    Err(ctx.throw_type_error("URLSearchParams.values() not yet implemented"))
 }
 
 // ===========================================================================

@@ -253,8 +253,7 @@ declare module "mcp" {
   export interface StdioMcpConfig extends BaseMcpConfig {
     /** Process command to spawn (defaults to the current aike binary). */
     command?: string;
-    /** Environment passed to the spawned process. Function values receive the
-     *  caller's ns context (e.g. MCP_AGENT_WORKSPACE); returning undefined skips the var. */
+    /** Environment passed to the spawned process. returning undefined skips the var. */
     env?: Record<
       string,
       string | ((ns: Record<string, string>) => string | undefined)

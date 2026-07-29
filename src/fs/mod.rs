@@ -132,10 +132,7 @@ fn make_void_promise(
     i32,
 > {
     Promise::create_with_channel::<Result<(), String>>(ctx, |cx, payload| -> JSResult {
-        payload.map_err(|e| {
-            cx.throw_internal_error(&e);
-            -1
-        })?;
+        payload.map_err(|e| cx.throw_internal_error(&e))?;
         Ok(JSValue::UNDEFINED)
     })
 }
@@ -166,8 +163,7 @@ fn get_bytes_from_arg(ctx: &mut ScopedContext, arg: &mut JSValue) -> Result<Vec<
         }
     }
 
-    ctx.throw_type_error("expect Uint8Array or ArrayBuffer");
-    Err(-1)
+    Err(ctx.throw_type_error("expect Uint8Array or ArrayBuffer"))
 }
 
 const BOUNDARY_SANDBOX: i32 = 0;
@@ -200,10 +196,7 @@ fn js_fs_set_restrict(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         BOUNDARY_SANDBOX => set_sandbox(path.as_deref()),
         _ => unreachable!(),
     }
-    .map_err(|e| {
-        ctx.throw_internal_error(&e);
-        -1
-    })?;
+    .map_err(|e| ctx.throw_internal_error(&e))?;
 
     Ok(JSValue::UNDEFINED)
 }
@@ -213,17 +206,12 @@ fn js_fs_set_restrict(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 // ---------------------------------------------------------------------------
 fn js_fs_readText(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let v = cc.arg(0).to_string(ctx)?;
-    let path = resolve_safe_path(&v.content().encode_utf8(false).to_string()).map_err(|e| {
-        ctx.throw_internal_error(&e);
-        -1
-    })?;
+    let path = resolve_safe_path(&v.content().encode_utf8(false).to_string())
+        .map_err(|e| ctx.throw_internal_error(&e))?;
 
     let (promise, tx) =
         Promise::create_with_channel::<Result<String, String>>(ctx, |cx, payload| -> JSResult {
-            let text = payload.map_err(|e| {
-                cx.throw_internal_error(&e);
-                -1
-            })?;
+            let text = payload.map_err(|e| cx.throw_internal_error(&e))?;
             cx.create_string_from_utf8(text.into_bytes())
                 .map(JSValue::make_string)
         })?;
@@ -246,18 +234,13 @@ fn js_fs_readText(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 // ---------------------------------------------------------------------------
 fn js_fs_readJSON(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let v = cc.arg(0).to_string(ctx)?;
-    let path = resolve_safe_path(&v.content().encode_utf8(false).to_string()).map_err(|e| {
-        ctx.throw_internal_error(&e);
-        -1
-    })?;
+    let path = resolve_safe_path(&v.content().encode_utf8(false).to_string())
+        .map_err(|e| ctx.throw_internal_error(&e))?;
 
     let (promise, tx) = Promise::create_with_channel::<Result<serde_json::Value, String>>(
         ctx,
         |cx, payload| -> JSResult {
-            let val = payload.map_err(|e| {
-                cx.throw_internal_error(&e);
-                -1
-            })?;
+            let val = payload.map_err(|e| cx.throw_internal_error(&e))?;
             JSValue::from_serde_json(cx, &val)
         },
     )?;
@@ -283,17 +266,12 @@ fn js_fs_readJSON(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 // ---------------------------------------------------------------------------
 fn js_fs_readBytes(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let v = cc.arg(0).to_string(ctx)?;
-    let path = resolve_safe_path(&v.content().encode_utf8(false).to_string()).map_err(|e| {
-        ctx.throw_internal_error(&e);
-        -1
-    })?;
+    let path = resolve_safe_path(&v.content().encode_utf8(false).to_string())
+        .map_err(|e| ctx.throw_internal_error(&e))?;
 
     let (promise, tx) =
         Promise::create_with_channel::<Result<Vec<u8>, String>>(ctx, |cx, payload| -> JSResult {
-            let bytes = payload.map_err(|e| {
-                cx.throw_internal_error(&e);
-                -1
-            })?;
+            let bytes = payload.map_err(|e| cx.throw_internal_error(&e))?;
             TypedArray::create_from_vec_u8(cx, bytes).map(JSValue::from)
         })?;
 
@@ -311,10 +289,8 @@ fn js_fs_readBytes(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 // ---------------------------------------------------------------------------
 fn js_fs_writeText(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let v = cc.arg(0).to_string(ctx)?;
-    let path = resolve_safe_path(&v.content().encode_utf8(false)).map_err(|e| {
-        ctx.throw_internal_error(&e);
-        -1
-    })?;
+    let path = resolve_safe_path(&v.content().encode_utf8(false))
+        .map_err(|e| ctx.throw_internal_error(&e))?;
     let data = cc.arg(1).to_string(ctx)?;
     let data_str = data.content().encode_utf8(false).to_string();
 
@@ -401,14 +377,12 @@ async fn atomic_replace(tmp: &Path, dst: &Path) -> std::io::Result<()> {
 // ---------------------------------------------------------------------------
 fn js_fs_writeJSON(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let v = cc.arg(0).to_string(ctx)?;
-    let path = resolve_safe_path(&v.content().encode_utf8(false).to_string()).map_err(|e| {
-        ctx.throw_internal_error(&e);
-        -1
-    })?;
-    let val = cc.arg(1).to_serde_json(ctx).map_err(|_| {
-        ctx.throw_type_error("failed to serialize value to JSON");
-        -1
-    })?;
+    let path = resolve_safe_path(&v.content().encode_utf8(false).to_string())
+        .map_err(|e| ctx.throw_internal_error(&e))?;
+    let val = cc
+        .arg(1)
+        .to_serde_json(ctx)
+        .map_err(|_| ctx.throw_type_error("failed to serialize value to JSON"))?;
 
     let space = if cc.length() > 2 && !cc.arg(2).is_undefined() {
         Some(cc.arg(2).to_number(ctx)?.to_i32() as usize)
@@ -417,15 +391,9 @@ fn js_fs_writeJSON(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     };
 
     let json_str = if let Some(_n) = space {
-        serde_json::to_string_pretty(&val).map_err(|e| {
-            ctx.throw_internal_error(&format!("{e}"));
-            -1
-        })?
+        serde_json::to_string_pretty(&val).map_err(|e| ctx.throw_internal_error(&format!("{e}")))?
     } else {
-        serde_json::to_string(&val).map_err(|e| {
-            ctx.throw_internal_error(&format!("{e}"));
-            -1
-        })?
+        serde_json::to_string(&val).map_err(|e| ctx.throw_internal_error(&format!("{e}")))?
     };
 
     let (promise, tx) = make_void_promise(ctx)?;
@@ -445,10 +413,8 @@ fn js_fs_writeJSON(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 // ---------------------------------------------------------------------------
 fn js_fs_writeBytes(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let v = cc.arg(0).to_string(ctx)?;
-    let path = resolve_safe_path(&v.content().encode_utf8(false).to_string()).map_err(|e| {
-        ctx.throw_internal_error(&e);
-        -1
-    })?;
+    let path = resolve_safe_path(&v.content().encode_utf8(false).to_string())
+        .map_err(|e| ctx.throw_internal_error(&e))?;
     let bytes = get_bytes_from_arg(ctx, &mut cc.arg(1))?;
 
     let (promise, tx) = make_void_promise(ctx)?;
@@ -470,10 +436,8 @@ fn js_fs_writeBytes(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 // ---------------------------------------------------------------------------
 fn js_fs_appendText(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let v = cc.arg(0).to_string(ctx)?;
-    let path = resolve_safe_path(&v.content().encode_utf8(false).to_string()).map_err(|e| {
-        ctx.throw_internal_error(&e);
-        -1
-    })?;
+    let path = resolve_safe_path(&v.content().encode_utf8(false).to_string())
+        .map_err(|e| ctx.throw_internal_error(&e))?;
     let data = cc.arg(1).to_string(ctx)?;
     let data_str = data.content().encode_utf8(false).to_string();
 
@@ -506,10 +470,8 @@ fn js_fs_appendText(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 // ---------------------------------------------------------------------------
 fn js_fs_open(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let v = cc.arg(0).to_string(ctx)?;
-    let path = resolve_safe_path(&v.content().encode_utf8(false).to_string()).map_err(|e| {
-        ctx.throw_internal_error(&e);
-        -1
-    })?;
+    let path = resolve_safe_path(&v.content().encode_utf8(false).to_string())
+        .map_err(|e| ctx.throw_internal_error(&e))?;
 
     // Parse flags: default 'r'
     let flags = if cc.length() > 1 && !cc.arg(1).is_undefined() {
@@ -522,10 +484,7 @@ fn js_fs_open(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let (promise, tx) = Promise::create_with_channel::<Result<tokio::fs::File, String>>(
         ctx,
         move |cx, payload| -> JSResult {
-            let file = payload.map_err(|e| {
-                cx.throw_internal_error(&e);
-                -1
-            })?;
+            let file = payload.map_err(|e| cx.throw_internal_error(&e))?;
             JSFileHandle::new_instance_file(cx, JSValue::UNDEFINED, file).map(JSValue::from)
         },
     )?;
@@ -570,10 +529,8 @@ fn js_fs_open(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 // ---------------------------------------------------------------------------
 fn js_fs_write(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let v = cc.arg(0).to_string(ctx)?;
-    let path = resolve_safe_path(&v.content().encode_utf8(false).to_string()).map_err(|e| {
-        ctx.throw_internal_error(&e);
-        -1
-    })?;
+    let path = resolve_safe_path(&v.content().encode_utf8(false).to_string())
+        .map_err(|e| ctx.throw_internal_error(&e))?;
 
     // string data
     if let Some(s) = cc.arg(1).as_string(true) {
@@ -608,10 +565,7 @@ fn js_fs_write(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             });
             return Ok(promise.into());
         }
-        Err(_) => {
-            ctx.throw_type_error("unsupported data type for write");
-            Err(-1)
-        }
+        Err(_) => Err(ctx.throw_type_error("unsupported data type for write")),
     }
 }
 
@@ -620,10 +574,8 @@ fn js_fs_write(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 // ---------------------------------------------------------------------------
 fn js_fs_ensureDir(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let v = cc.arg(0).to_string(ctx)?;
-    let path = resolve_safe_path(v.content().encode_utf8(false).as_ref()).map_err(|e| {
-        ctx.throw_internal_error(&e);
-        -1
-    })?;
+    let path = resolve_safe_path(v.content().encode_utf8(false).as_ref())
+        .map_err(|e| ctx.throw_internal_error(&e))?;
 
     // Parse optional options object: ensureDir(path, { recursive?: boolean })
     let opts = cc.arg(1);
@@ -631,8 +583,7 @@ fn js_fs_ensureDir(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         if opts.is_object() {
             opts.get_property_str(ctx, "recursive")?.to_bool()?
         } else {
-            ctx.throw_type_error("options must be an object");
-            return Err(-1);
+            return Err(ctx.throw_type_error("options must be an object"));
         }
     } else {
         true
@@ -709,18 +660,13 @@ fn make_dirent_obj(ctx: &mut ScopedContext, d: &DirentData) -> Result<JSValue, i
 // ---------------------------------------------------------------------------
 fn js_fs_readDir(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let v = cc.arg(0).to_string(ctx)?;
-    let path = resolve_safe_path(&v.content().encode_utf8(false).to_string()).map_err(|e| {
-        ctx.throw_internal_error(&e);
-        -1
-    })?;
+    let path = resolve_safe_path(&v.content().encode_utf8(false).to_string())
+        .map_err(|e| ctx.throw_internal_error(&e))?;
 
     let (promise, tx) = Promise::create_with_channel::<Result<Vec<DirentData>, String>>(
         ctx,
         |cx, payload| -> JSResult {
-            let entries = payload.map_err(|e| {
-                cx.throw_internal_error(&e);
-                -1
-            })?;
+            let entries = payload.map_err(|e| cx.throw_internal_error(&e))?;
 
             let mut arr = Vec::<JSValue>::with_capacity(entries.len());
             for d in &entries {
@@ -772,17 +718,12 @@ fn js_fs_readDir(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 // ---------------------------------------------------------------------------
 fn js_fs_exists(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let v = cc.arg(0).to_string(ctx)?;
-    let path = resolve_safe_path(&v.content().encode_utf8(false).to_string()).map_err(|e| {
-        ctx.throw_internal_error(&e);
-        -1
-    })?;
+    let path = resolve_safe_path(&v.content().encode_utf8(false).to_string())
+        .map_err(|e| ctx.throw_internal_error(&e))?;
 
     let (promise, tx) =
         Promise::create_with_channel::<Result<bool, String>>(ctx, |cx, payload| -> JSResult {
-            let exists = payload.map_err(|e| {
-                cx.throw_internal_error(&e);
-                -1
-            })?;
+            let exists = payload.map_err(|e| cx.throw_internal_error(&e))?;
             Ok(JSValue::from(exists))
         })?;
 
@@ -806,10 +747,8 @@ fn js_fs_exists(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 // ---------------------------------------------------------------------------
 fn js_fs_makeDir(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let v = cc.arg(0).to_string(ctx)?;
-    let path = resolve_safe_path(&v.content().encode_utf8(false).to_string()).map_err(|e| {
-        ctx.throw_internal_error(&e);
-        -1
-    })?;
+    let path = resolve_safe_path(&v.content().encode_utf8(false).to_string())
+        .map_err(|e| ctx.throw_internal_error(&e))?;
 
     // Parse optional options: makeDir(path, { recursive?: boolean })
     let recursive = if cc.length() > 1 {
@@ -850,10 +789,8 @@ fn js_fs_makeDir(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 // ---------------------------------------------------------------------------
 fn js_fs_removeDir(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let v = cc.arg(0).to_string(ctx)?;
-    let path = resolve_safe_path(&v.content().encode_utf8(false).to_string()).map_err(|e| {
-        ctx.throw_internal_error(&e);
-        -1
-    })?;
+    let path = resolve_safe_path(&v.content().encode_utf8(false).to_string())
+        .map_err(|e| ctx.throw_internal_error(&e))?;
 
     // Parse optional options: removeDir(path, { recursive?: boolean })
     let opts = cc.arg(1);
@@ -861,8 +798,7 @@ fn js_fs_removeDir(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         if opts.is_object() {
             opts.get_property_str(ctx, "recursive")?.to_bool()?
         } else {
-            ctx.throw_type_error("options must be an object");
-            return Err(-1);
+            return Err(ctx.throw_type_error("options must be an object"));
         }
     } else {
         false
@@ -891,10 +827,8 @@ fn js_fs_removeDir(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 // ---------------------------------------------------------------------------
 fn js_fs_remove(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let v = cc.arg(0).to_string(ctx)?;
-    let path = resolve_safe_path(&v.content().encode_utf8(false).to_string()).map_err(|e| {
-        ctx.throw_internal_error(&e);
-        -1
-    })?;
+    let path = resolve_safe_path(&v.content().encode_utf8(false).to_string())
+        .map_err(|e| ctx.throw_internal_error(&e))?;
 
     let (promise, tx) = make_void_promise(ctx)?;
 
@@ -913,18 +847,13 @@ fn js_fs_remove(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
 fn js_fs_stat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let v = cc.arg(0).to_string(ctx)?;
-    let path = resolve_safe_path(&v.content().encode_utf8(false).to_string()).map_err(|e| {
-        ctx.throw_internal_error(&e);
-        -1
-    })?;
+    let path = resolve_safe_path(&v.content().encode_utf8(false).to_string())
+        .map_err(|e| ctx.throw_internal_error(&e))?;
 
     let (promise, tx) = Promise::create_with_channel::<Result<std::fs::Metadata, String>>(
         ctx,
         |cx, payload| -> JSResult {
-            let meta = payload.map_err(|e| {
-                cx.throw_internal_error(&e);
-                -1
-            })?;
+            let meta = payload.map_err(|e| cx.throw_internal_error(&e))?;
             make_stats(cx, &meta)
         },
     )?;
@@ -946,10 +875,8 @@ const FS_COUNT_NON_EMPTY: i32 = 1;
 /// rejecting the promise.
 fn js_count_lines(cx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let v = cc.arg(0).to_string(cx)?;
-    let path = resolve_safe_path(&v.content().encode_utf8(false).to_string()).map_err(|e| {
-        cx.throw_internal_error(&e);
-        -1
-    })?;
+    let path = resolve_safe_path(&v.content().encode_utf8(false).to_string())
+        .map_err(|e| cx.throw_internal_error(&e))?;
     let non_empty = cc.magic() == FS_COUNT_NON_EMPTY;
 
     let (promise, tx) =

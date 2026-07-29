@@ -299,8 +299,7 @@ pub(crate) fn register_signal_handler(
     handler: JSValue,
 ) -> JSResult {
     let Some(sig_num) = signal_number(sig_name) else {
-        ctx.throw_type_error(&format!("unknown signal: {sig_name}"));
-        return Err(-1);
+        return Err(ctx.throw_type_error(&format!("unknown signal: {sig_name}")));
     };
 
     // SIGKILL / SIGSTOP cannot be trapped by the OS; a handler would never

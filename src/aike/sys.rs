@@ -12,10 +12,7 @@ pub(super) fn js_cwd(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
         Ok(p) => ctx
             .create_string_from_utf8(p.to_string_lossy().as_bytes().to_vec())
             .map(JSValue::make_string),
-        Err(e) => {
-            ctx.throw_internal_error(&e.to_string());
-            Err(-1)
-        }
+        Err(e) => Err(ctx.throw_internal_error(&e.to_string())),
     }
 }
 
@@ -224,8 +221,9 @@ pub(super) fn js_ttySetRaw(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
     unsafe {
         let mut tty: libc::termios = std::mem::zeroed();
         if libc::tcgetattr(fd, &mut tty) != 0 {
-            ctx.throw_type_error(&format!("cannot set raw mode on fd {}: not a terminal", fd));
-            return Err(-1);
+            return Err(
+                ctx.throw_type_error(&format!("cannot set raw mode on fd {}: not a terminal", fd))
+            );
         }
 
         // Save original terminal state (once, first successful call only).
@@ -293,9 +291,6 @@ pub(super) fn js_homedir(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult 
         Some(p) => ctx
             .create_string_from_utf8(p.to_string_lossy().as_bytes().to_vec())
             .map(JSValue::make_string),
-        None => {
-            ctx.throw_internal_error("cannot determine home directory");
-            Err(-1)
-        }
+        None => Err(ctx.throw_internal_error("cannot determine home directory")),
     }
 }

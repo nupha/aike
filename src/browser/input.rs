@@ -39,7 +39,12 @@ async fn box_center(
         .and_then(|v| v.as_array())
         .ok_or_else(|| "no box model content".to_string())?;
     let xs: Vec<f64> = quad.iter().step_by(2).filter_map(|v| v.as_f64()).collect();
-    let ys: Vec<f64> = quad.iter().skip(1).step_by(2).filter_map(|v| v.as_f64()).collect();
+    let ys: Vec<f64> = quad
+        .iter()
+        .skip(1)
+        .step_by(2)
+        .filter_map(|v| v.as_f64())
+        .collect();
     if xs.is_empty() || ys.is_empty() {
         return Err("empty box model".into());
     }
@@ -77,10 +82,7 @@ pub(crate) fn js_page_mouse_click(ctx: &mut ScopedContext, cc: CallContext) -> J
     let result_slot = PromiseResultSlot::<Result<(), String>>::new();
     let promise =
         Promise::create_with_result_slot(ctx, result_slot.clone(), |cx, payload| -> JSResult {
-            payload.map_err(|e| {
-                cx.throw_internal_error(&e);
-                -1
-            })?;
+            payload.map_err(|e| cx.throw_internal_error(&e))?;
             Ok(JSValue::UNDEFINED)
         })?;
 
@@ -108,10 +110,7 @@ pub(crate) fn js_page_mouse_move(ctx: &mut ScopedContext, cc: CallContext) -> JS
     let result_slot = PromiseResultSlot::<Result<(), String>>::new();
     let promise =
         Promise::create_with_result_slot(ctx, result_slot.clone(), |cx, payload| -> JSResult {
-            payload.map_err(|e| {
-                cx.throw_internal_error(&e);
-                -1
-            })?;
+            payload.map_err(|e| cx.throw_internal_error(&e))?;
             Ok(JSValue::UNDEFINED)
         })?;
 
@@ -156,10 +155,7 @@ pub(crate) fn js_page_key_press(ctx: &mut ScopedContext, cc: CallContext) -> JSR
     let result_slot = PromiseResultSlot::<Result<(), String>>::new();
     let promise =
         Promise::create_with_result_slot(ctx, result_slot.clone(), |cx, payload| -> JSResult {
-            payload.map_err(|e| {
-                cx.throw_internal_error(&e);
-                -1
-            })?;
+            payload.map_err(|e| cx.throw_internal_error(&e))?;
             Ok(JSValue::UNDEFINED)
         })?;
 
@@ -219,10 +215,7 @@ pub(crate) fn js_page_mouse_down(ctx: &mut ScopedContext, cc: CallContext) -> JS
     let result_slot = PromiseResultSlot::<Result<(), String>>::new();
     let promise =
         Promise::create_with_result_slot(ctx, result_slot.clone(), |cx, payload| -> JSResult {
-            payload.map_err(|e| {
-                cx.throw_internal_error(&e);
-                -1
-            })?;
+            payload.map_err(|e| cx.throw_internal_error(&e))?;
             Ok(JSValue::UNDEFINED)
         })?;
 
@@ -264,10 +257,7 @@ pub(crate) fn js_page_mouse_up(ctx: &mut ScopedContext, cc: CallContext) -> JSRe
     let result_slot = PromiseResultSlot::<Result<(), String>>::new();
     let promise =
         Promise::create_with_result_slot(ctx, result_slot.clone(), |cx, payload| -> JSResult {
-            payload.map_err(|e| {
-                cx.throw_internal_error(&e);
-                -1
-            })?;
+            payload.map_err(|e| cx.throw_internal_error(&e))?;
             Ok(JSValue::UNDEFINED)
         })?;
 
@@ -304,10 +294,7 @@ pub(crate) fn js_page_drag_and_drop(ctx: &mut ScopedContext, cc: CallContext) ->
     let result_slot = PromiseResultSlot::<Result<(), String>>::new();
     let promise =
         Promise::create_with_result_slot(ctx, result_slot.clone(), |cx, payload| -> JSResult {
-            payload.map_err(|e| {
-                cx.throw_internal_error(&e);
-                -1
-            })?;
+            payload.map_err(|e| cx.throw_internal_error(&e))?;
             Ok(JSValue::UNDEFINED)
         })?;
 

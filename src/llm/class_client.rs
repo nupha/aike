@@ -48,8 +48,7 @@ pub(crate) fn get_client(ctx: &mut ScopedContext, val: JSValue) -> Result<Arc<Cl
     if let Some(c) = ob.payload() {
         Ok(c.clone())
     } else {
-        ctx.throw_type_error("Client was detached");
-        Err(-1)
+        Err(ctx.throw_type_error("Client was detached"))
     }
 }
 
@@ -92,10 +91,9 @@ fn js_client_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     let v = cc.arg(0);
     if !v.is_undefined() {
-        let opts_obj = v.as_object().ok_or_else(|| {
-            ctx.throw_type_error("requires options object");
-            -1
-        })?;
+        let opts_obj = v
+            .as_object()
+            .ok_or_else(|| ctx.throw_type_error("requires options object"))?;
 
         let base_url_val = opts_obj.get_property_str(ctx, "baseUrl")?;
         if !base_url_val.is_undefined()
@@ -128,8 +126,7 @@ fn js_client_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             if n >= 0 {
                 max_tokens = n;
             } else {
-                ctx.throw_type_error("invalid maxTokens");
-                return Err(-1);
+                return Err(ctx.throw_type_error("invalid maxTokens"));
             }
         }
 
@@ -148,8 +145,7 @@ fn js_client_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         } else if v.is_null() {
             extra_body = serde_json::Value::Null;
         } else if !v.is_undefined() {
-            ctx.throw_type_error("extraBody must be one of undefined, null or object");
-            return Err(-1);
+            return Err(ctx.throw_type_error("extraBody must be one of undefined, null or object"));
         }
 
         debug_assert!(extra_body.is_null() || extra_body.is_object());
@@ -300,10 +296,10 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
     let client = get_client(ctx, this)?;
     let is_stream = cc.magic() == MAGIC_CHAT_STREAM;
 
-    let opts_obj = cc.arg(0).as_object().ok_or_else(|| {
-        ctx.throw_type_error("chat() requires an options object");
-        -1
-    })?;
+    let opts_obj = cc
+        .arg(0)
+        .as_object()
+        .ok_or_else(|| ctx.throw_type_error("chat() requires an options object"))?;
 
     // Convert JS options to raw JSON, preserving all fields (including extension
     // fields like reasoning_content) that async-openai typed structs would drop.
@@ -349,8 +345,7 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
                     req.insert("extra_body".to_string(), serde_json::Value::Object(merged));
                 }
             } else {
-                ctx.throw_type_error("expect object: extraBody");
-                return Err(-1);
+                return Err(ctx.throw_type_error("expect object: extraBody"));
             }
         } else if client.extra_body.is_object() {
             req.insert("extra_body".to_string(), client.extra_body.clone());
@@ -572,10 +567,7 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
                         Ok(Some(val))
                     }
                     ChatReply::Done => Ok(None),
-                    ChatReply::Error(e) => {
-                        cx.throw_internal_error(&e);
-                        Err(-1)
-                    }
+                    ChatReply::Error(e) => Err(cx.throw_internal_error(&e)),
                 }
             },
         )
@@ -598,10 +590,7 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
                         };
                         Ok(val)
                     }
-                    Err(e) => {
-                        cx.throw_internal_error(&e);
-                        Err(-1)
-                    }
+                    Err(e) => Err(cx.throw_internal_error(&e)),
                 }
             },
         )?;
@@ -706,11 +695,10 @@ fn js_client_get_normalizer(ctx: &mut ScopedContext, cc: CallContext) -> JSResul
 }
 
 fn js_client_set_normalizer(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let mut this = cc.this();
+    let this = cc.this();
     let val = cc.arg(0);
     if !val.is_null() && !val.is_callable() {
-        ctx.throw_internal_error("responseNormalizer must be a function or null");
-        return Err(-1);
+        return Err(ctx.throw_internal_error("responseNormalizer must be a function or null"));
     }
     if let Some(mut obj) = this.as_object() {
         obj.set_property_str(ctx, INNER_PROP_RESPONSE_NORMALIZER, val)?;

@@ -45,19 +45,16 @@ fn get_signal<'a>(
     ctx: &mut ScopedContext,
     val: &'a JSValue,
 ) -> Result<&'a AbortSignalPayload, i32> {
-    JSAbortSignal::payload_of(val).ok_or_else(|| {
-        ctx.throw_internal_error("not an AbortSignal instance");
-        -1
-    })
+    JSAbortSignal::payload_of(val)
+        .ok_or_else(|| ctx.throw_internal_error("not an AbortSignal instance"))
 }
 
 fn js_signal_constructor(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
     // Per spec: AbortSignal constructor is not directly callable from JS.
     // Users obtain signals via AbortController.signal or static methods.
-    ctx.throw_type_error(
+    Err(ctx.throw_type_error(
         "Illegal constructor: use AbortController or AbortSignal.abort()/timeout()",
-    );
-    Err(-1)
+    ))
 }
 
 fn js_signal_aborted_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -82,8 +79,7 @@ fn js_signal_throw_if_aborted(ctx: &mut ScopedContext, cc: CallContext) -> JSRes
     let signal = get_signal(ctx, &this)?;
     let inner = signal.inner.borrow();
     if inner.aborted {
-        ctx.throw_type_error("Signal has been aborted");
-        Err(-1)
+        Err(ctx.throw_type_error("Signal has been aborted"))
     } else {
         Ok(JSValue::UNDEFINED)
     }
@@ -147,10 +143,8 @@ fn get_controller<'a>(
     ctx: &mut ScopedContext,
     val: &'a JSValue,
 ) -> Result<&'a AbortControllerPayload, i32> {
-    JSAbortController::payload_of(val).ok_or_else(|| {
-        ctx.throw_internal_error("not an AbortController instance");
-        -1
-    })
+    JSAbortController::payload_of(val)
+        .ok_or_else(|| ctx.throw_internal_error("not an AbortController instance"))
 }
 
 fn js_controller_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {

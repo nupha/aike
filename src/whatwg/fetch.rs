@@ -40,6 +40,7 @@ fn throw_abort_error(cx: &mut ScopedContext) -> JSResult {
         JSValue::make_string(name),
         zuqe::JS_PROP_WRITABLE | zuqe::JS_PROP_CONFIGURABLE,
     )?;
+
     cx.throw(Exception::Error(err.into()));
     Err(-1)
 }
@@ -178,8 +179,9 @@ pub(crate) fn js_fetch(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 && (300..400).contains(&status)
             {
                 if redirect_clone == "error" {
-                    cx.throw_type_error("Failed to fetch: redirect not allowed (mode 'error')");
-                    return Err(-1);
+                    return Err(
+                        cx.throw_type_error("Failed to fetch: redirect not allowed (mode 'error')")
+                    );
                 }
                 return build_opaque_redirect_response(cx);
             }
@@ -204,8 +206,7 @@ pub(crate) fn js_fetch(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let client = match builder.build() {
         Ok(c) => c,
         Err(e) => {
-            ctx.throw_internal_error(&format!("failed to build HTTP client: {e}"));
-            return Err(-1);
+            return Err(ctx.throw_internal_error(&format!("failed to build HTTP client: {e}")));
         }
     };
 

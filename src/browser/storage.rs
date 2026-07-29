@@ -57,10 +57,7 @@ pub(crate) fn js_page_get_storage_key_for_frame(
     let result_slot = PromiseResultSlot::<Result<serde_json::Value, String>>::new();
     let promise =
         Promise::create_with_result_slot(ctx, result_slot.clone(), |cx, val| -> JSResult {
-            let val = val.map_err(|e| {
-                cx.throw_internal_error(&e);
-                -1
-            })?;
+            let val = val.map_err(|e| cx.throw_internal_error(&e))?;
 
             // Return the storageKey string directly for ergonomics.
             if let Some(k) = val.get("storageKey").and_then(|v| v.as_str()) {

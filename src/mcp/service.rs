@@ -13,7 +13,7 @@ use rmcp::{
     handler::server::ServerHandler,
     model::{
         CallToolResult, Content, CustomNotification, Implementation, ListToolsResult,
-        ProtocolVersion, ServerCapabilities, ServerInfo, ServerNotification, Tool,
+        ProtocolVersion, ServerCapabilities, ServerInfo, ServerNotification,
     },
     service::{RequestContext, RoleServer},
     transport::streamable_http_server::{
@@ -350,10 +350,8 @@ fn get_mcp_bridge_payload<'a>(
     ctx: &mut ScopedContext,
     val: &'a mut JSValue,
 ) -> Result<&'a mut McpBridgePayload, i32> {
-    JSMcpBridge::payload_mut_of(val).ok_or_else(|| {
-        ctx.throw_internal_error("McpBridge was detached");
-        -1
-    })
+    JSMcpBridge::payload_mut_of(val)
+        .ok_or_else(|| ctx.throw_internal_error("McpBridge was detached"))
 }
 
 const MCP_BRIDGE_PROTO: &[FieldDef] = &[];
@@ -419,12 +417,26 @@ pub(crate) fn handle_mcp_tool_call(
     // Create a "chunk sender" function that the JS handler can call
     // to emit intermediate SSE events before returning the final result.
     // Usage in JS: await chunkSender({ results: [...], engine: "bing" })
+    //
+    // TEMPORARY HACK (workaround, not a real fix):
+    // `params_val` (the handler's `args`) is carried in the callback data so it
+    // stays rooted until the handler's promise settles. Otherwise a GC cycle
+    // during an `await` inside the handler can free `args` while the async frame
+    // is suspended, leaving a dangling node that blows up later in `to_serde_json`
+    // (as_object_unchecked dtype assertion).
+    //
+    // ROOT CAUSE lives in zuqe, not here: a suspended async continuation (the
+    // state captured across `await`) is NOT kept alive as a GC root, so the
+    // handler's `args` reference dangles once the host-side `handler.call()`
+    // returns and the GC runs. This manual rooting only papers over the symptom
+    // at this specific call site; the engine must root suspended async state
+    // (see memo/gc-async-state-not-rooted.md). TODO: remove once zuqe fixes it.
     let chunk_fn = match cx.create_native_function_with_data(
         Callback::Func(mcp_send_chunk),
         "mcp_send_chunk",
         0,
         1,
-        [bridge_val].into(),
+        [bridge_val, params_val].into(),
     ) {
         Ok(f) => JSValue::from(f),
         Err(_) => {
@@ -441,7 +453,7 @@ pub(crate) fn handle_mcp_tool_call(
                     "",
                     0,
                     0,
-                    [bridge_val].into(),
+                    [bridge_val, params_val].into(),
                 ) {
                     Ok(f) => JSValue::from(f),
                     Err(_) => {
@@ -453,7 +465,7 @@ pub(crate) fn handle_mcp_tool_call(
                     "",
                     1,
                     1,
-                    [bridge_val].into(),
+                    [bridge_val, params_val].into(),
                 ) {
                     Ok(f) => JSValue::from(f),
                     Err(_) => {

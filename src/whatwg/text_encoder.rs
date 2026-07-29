@@ -31,32 +31,26 @@ fn js_encode(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     };
 
     let bytes = input.into_bytes();
-    let ta = TypedArray::create_from_vec_u8(ctx, bytes).map_err(|_| {
-        ctx.throw_internal_error("Failed to create Uint8Array");
-        -1
-    })?;
+    let ta = TypedArray::create_from_vec_u8(ctx, bytes)
+        .map_err(|_| ctx.throw_internal_error("Failed to create Uint8Array"))?;
     Ok(ta.into())
 }
 
 fn js_encode_into(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     if cc.length() < 2 {
-        ctx.throw_type_error("encodeInto requires 2 arguments");
-        return Err(-1);
+        return Err(ctx.throw_type_error("encodeInto requires 2 arguments"));
     }
 
     let source = cc.arg(0).to_string(ctx)?;
     let utf8 = source.content().encode_utf8(false);
 
     let dest_val = cc.arg(1);
-    let dest_obj = dest_val.as_object().ok_or_else(|| {
-        ctx.throw_type_error("destination must be a Uint8Array");
-        -1
-    })?;
+    let dest_obj = dest_val
+        .as_object()
+        .ok_or_else(|| ctx.throw_type_error("destination must be a Uint8Array"))?;
 
-    let mut ta = TypedArray::try_from(dest_obj.clone()).map_err(|_| {
-        ctx.throw_type_error("destination must be a Uint8Array");
-        -1
-    })?;
+    let mut ta = TypedArray::try_from(dest_obj.clone())
+        .map_err(|_| ctx.throw_type_error("destination must be a Uint8Array"))?;
 
     let src = utf8.as_bytes();
     let written = ta.with_bytes_mut(|dest_bytes| {

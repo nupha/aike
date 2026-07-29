@@ -129,10 +129,8 @@ fn js_path_combine(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 }
             }
             if !buf.is_absolute() {
-                let cwd = std::env::current_dir().map_err(|e| {
-                    ctx.throw_internal_error(&e.to_string());
-                    -1
-                })?;
+                let cwd = std::env::current_dir()
+                    .map_err(|e| ctx.throw_internal_error(&e.to_string()))?;
                 buf = cwd.join(&buf);
             }
             buf
@@ -203,11 +201,10 @@ fn js_path_parse(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 // path.format(pathObj)
 // ---------------------------------------------------------------------------
 fn js_path_format(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let mut obj = cc.arg(0).clone();
-    let mut obj_ref = obj.as_object().ok_or_else(|| {
-        ctx.throw_type_error("path.format: argument must be an object");
-        -1
-    })?;
+    let obj = cc.arg(0).clone();
+    let obj_ref = obj
+        .as_object()
+        .ok_or_else(|| ctx.throw_type_error("path.format: argument must be an object"))?;
 
     // Read fields (treat undefined/null as empty string)
     let read_str = |ctx: &mut ScopedContext, obj: zuqe::Object, key: &str| -> String {

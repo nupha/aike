@@ -17,8 +17,7 @@ const FIELD_MOUNT_PATH: i16 = 12;
 
 fn js_http_define(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let Some(cfg) = cc.arg(0).as_object() else {
-        ctx.throw_type_error("HttpMcp.define(config) — config must be an object");
-        return Err(-1);
+        return Err(ctx.throw_type_error("HttpMcp.define(config) — config must be an object"));
     };
 
     let transport = McpTransport::Http {
@@ -32,8 +31,8 @@ fn js_http_define(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 }
 
 fn js_http_constructor(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
-    ctx.throw_type_error("HttpMcp cannot be constructed with `new`; use HttpMcp.define(config)");
-    Err(-1)
+    Err(ctx
+        .throw_type_error("HttpMcp cannot be constructed with `new`; use HttpMcp.define(config)"))
 }
 
 /// http-only getter for `mountPath`.

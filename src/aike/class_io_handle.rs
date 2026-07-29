@@ -263,10 +263,7 @@ fn spawn_locked_read<M: tokio::io::AsyncRead + Unpin + Send + 'static>(
 fn get_io<'a>(ctx: &mut ScopedContext, val: &'a JSValue) -> Result<&'a IoPayload, i32> {
     JSStdioHandle::payload_of(val)
         .or_else(|| JSFileHandle::payload_from(val))
-        .ok_or_else(|| {
-            ctx.throw_internal_error("invalid IoHandle instance");
-            -1
-        })
+        .ok_or_else(|| ctx.throw_internal_error("invalid IoHandle instance"))
 }
 
 fn js_fh_onData(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -276,8 +273,7 @@ fn js_fh_onData(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     // Cannot read from stdout/stderr
     if matches!(desc, IoPayload::Stdout | IoPayload::Stderr) {
-        ctx.throw_type_error("cannot read from stdout/stderr");
-        return Err(-1);
+        return Err(ctx.throw_type_error("cannot read from stdout/stderr"));
     }
 
     let arg = cc.arg(0);
@@ -357,10 +353,7 @@ fn js_fh_text(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     let (promise, tx) =
         Promise::create_with_channel::<Result<String, String>>(ctx, |cx, payload| -> JSResult {
-            let text = payload.map_err(|e| {
-                cx.throw_internal_error(&e);
-                -1
-            })?;
+            let text = payload.map_err(|e| cx.throw_internal_error(&e))?;
             cx.create_string_from_utf8(text.into_bytes())
                 .map(JSValue::make_string)
         })?;
@@ -423,10 +416,7 @@ fn js_fh_json(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let (promise, tx) = Promise::create_with_channel::<Result<serde_json::Value, String>>(
         ctx,
         |cx, payload| -> JSResult {
-            let val = payload.map_err(|e| {
-                cx.throw_internal_error(&e);
-                -1
-            })?;
+            let val = payload.map_err(|e| cx.throw_internal_error(&e))?;
             JSValue::from_serde_json(cx, &val)
         },
     )?;
@@ -501,10 +491,7 @@ fn js_fh_bytes(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     let (promise, tx) =
         Promise::create_with_channel::<Result<Vec<u8>, String>>(ctx, |cx, payload| -> JSResult {
-            let bytes = payload.map_err(|e| {
-                cx.throw_internal_error(&e);
-                -1
-            })?;
+            let bytes = payload.map_err(|e| cx.throw_internal_error(&e))?;
             TypedArray::create_from_vec_u8(cx, bytes).map(JSValue::from)
         })?;
 
@@ -567,10 +554,7 @@ fn js_fh_stat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let (promise, tx) = Promise::create_with_channel::<Result<std::fs::Metadata, String>>(
         ctx,
         |cx, payload| -> JSResult {
-            let meta = payload.map_err(|e| {
-                cx.throw_internal_error(&e);
-                -1
-            })?;
+            let meta = payload.map_err(|e| cx.throw_internal_error(&e))?;
             make_stats(cx, &meta)
         },
     )?;
@@ -610,10 +594,7 @@ fn js_fh_read(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     let (promise, tx) =
         Promise::create_with_channel::<Result<Vec<u8>, String>>(ctx, |cx, payload| -> JSResult {
-            let bytes = payload.map_err(|e| {
-                cx.throw_internal_error(&e);
-                -1
-            })?;
+            let bytes = payload.map_err(|e| cx.throw_internal_error(&e))?;
             TypedArray::create_from_vec_u8(cx, bytes).map(JSValue::from)
         })?;
 
@@ -714,19 +695,14 @@ fn js_fh_writeAll(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         } else if let Some(ab) = p.array_buffer() {
             ab.bytes().to_vec()
         } else {
-            ctx.throw_type_error("expect string, TypedArray or ArrayBuffer argument");
-            return Err(-1);
+            return Err(ctx.throw_type_error("expect string, TypedArray or ArrayBuffer argument"));
         }
     } else {
-        ctx.throw_type_error("expect string, TypedArray or ArrayBuffer argument");
-        return Err(-1);
+        return Err(ctx.throw_type_error("expect string, TypedArray or ArrayBuffer argument"));
     };
 
     match desc {
-        IoPayload::Stdin => {
-            ctx.throw_type_error("cannot write to stdin");
-            Err(-1)
-        }
+        IoPayload::Stdin => Err(ctx.throw_type_error("cannot write to stdin")),
         IoPayload::Stdout => {
             let mut out = std::io::stdout().lock();
             let ok = out.write_all(&data).is_ok();
@@ -762,19 +738,13 @@ fn js_fh_writeAll(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             .is_ok();
             Ok(JSValue::from(ok))
         }
-        IoPayload::PipeRead(..) => {
-            ctx.throw_type_error("cannot write to pipe reader");
-            Err(-1)
-        }
+        IoPayload::PipeRead(..) => Err(ctx.throw_type_error("cannot write to pipe reader")),
         // async
         IoPayload::File(fd, _) => {
             let (promise, tx) = Promise::create_with_channel::<Result<(), String>>(
                 ctx,
                 |cx, payload| -> JSResult {
-                    payload.map_err(|e| {
-                        cx.throw_internal_error(&e);
-                        -1
-                    })?;
+                    payload.map_err(|e| cx.throw_internal_error(&e))?;
                     Ok(JSValue::UNDEFINED)
                 },
             )?;
@@ -817,10 +787,7 @@ fn js_fh_flush(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             let (promise, tx) = Promise::create_with_channel::<Result<(), String>>(
                 ctx,
                 |cx, payload| -> JSResult {
-                    payload.map_err(|e| {
-                        cx.throw_internal_error(&e);
-                        -1
-                    })?;
+                    payload.map_err(|e| cx.throw_internal_error(&e))?;
                     Ok(JSValue::UNDEFINED)
                 },
             )?;
@@ -962,8 +929,7 @@ fn js_fh_asyncIterator(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let desc = get_io(ctx, &this)?;
 
     if matches!(desc, IoPayload::Stdout | IoPayload::Stderr) {
-        ctx.throw_type_error("cannot iterate stdout/stderr");
-        return Err(-1);
+        return Err(ctx.throw_type_error("cannot iterate stdout/stderr"));
     }
 
     let (tx, rx) = crossbeam::channel::bounded::<FileChunk>(8);
@@ -1058,10 +1024,7 @@ fn js_fh_asyncIterator(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                     .map(JSValue::from)
                     .map(Some),
                 FileChunk::Eof => Ok(None),
-                FileChunk::Error(e) => {
-                    cx.throw_internal_error(&e);
-                    Err(-1)
-                }
+                FileChunk::Error(e) => Err(cx.throw_internal_error(&e)),
             }
         },
     )?;
@@ -1086,19 +1049,14 @@ fn js_fh_writeSync(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         } else if let Some(ab) = p.array_buffer() {
             ab.bytes().to_vec()
         } else {
-            ctx.throw_type_error("expect string, TypedArray or ArrayBuffer argument");
-            return Err(-1);
+            return Err(ctx.throw_type_error("expect string, TypedArray or ArrayBuffer argument"));
         }
     } else {
-        ctx.throw_type_error("expect string, TypedArray or ArrayBuffer argument");
-        return Err(-1);
+        return Err(ctx.throw_type_error("expect string, TypedArray or ArrayBuffer argument"));
     };
 
     match desc {
-        IoPayload::Stdin => {
-            ctx.throw_type_error("cannot write to stdin");
-            Err(-1)
-        }
+        IoPayload::Stdin => Err(ctx.throw_type_error("cannot write to stdin")),
         IoPayload::Stdout => {
             let mut out = std::io::stdout().lock();
             let ok = out.write_all(&data).is_ok();
@@ -1132,16 +1090,13 @@ fn js_fh_writeSync(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             .is_ok();
             Ok(JSValue::from(ok))
         }
-        _ => {
-            ctx.throw_type_error("cannot write to this handle");
-            Err(-1)
-        }
+        _ => Err(ctx.throw_type_error("cannot write to this handle")),
     }
 }
 
-fn js_fh_flushSync(_ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+fn js_fh_flushSync(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let val = cc.this();
-    let desc = get_io(_ctx, &val)?;
+    let desc = get_io(ctx, &val)?;
     match desc {
         IoPayload::PipeWrite(..) => {}
         IoPayload::Stdout => {
@@ -1152,8 +1107,7 @@ fn js_fh_flushSync(_ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         }
         IoPayload::Stdin => {}
         _ => {
-            _ctx.throw_type_error("cannot flush this handle");
-            return Err(-1);
+            return Err(ctx.throw_type_error("cannot flush this handle"));
         }
     }
     Ok(JSValue::UNDEFINED)
@@ -1248,10 +1202,7 @@ def_native_object!(
     IoPayload,
     FILE_HANDLE_PROTO,
     Some(ClassCtorDef::new(
-        |ctx, _| {
-            ctx.throw_internal_error("can't instantiate with new");
-            Err(-1)
-        },
+        |ctx, _| { Err(ctx.throw_internal_error("can't instantiate with new")) },
         0,
         false
     ))

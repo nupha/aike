@@ -124,10 +124,9 @@ pub(super) fn js_spawn(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             cmd_obj.envs(env_map);
         }
 
-        let subprocess = cmd_obj.spawn().map_err(|e| {
-            ctx.throw_internal_error(&format!("spawn failed: {e}"));
-            -1
-        })?;
+        let subprocess = cmd_obj
+            .spawn()
+            .map_err(|e| ctx.throw_internal_error(&format!("spawn failed: {e}")))?;
 
         let pid = subprocess.id().map(|id| id as i32).unwrap_or(-1);
         spawn_async(ctx, subprocess, pid)
@@ -146,10 +145,9 @@ pub(super) fn js_spawn(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             cmd_obj.envs(env_map);
         }
 
-        let subprocess = cmd_obj.spawn().map_err(|e| {
-            ctx.throw_internal_error(&format!("spawn failed: {e}"));
-            -1
-        })?;
+        let subprocess = cmd_obj
+            .spawn()
+            .map_err(|e| ctx.throw_internal_error(&format!("spawn failed: {e}")))?;
 
         let pid = subprocess.id() as i32;
         spawn_sync(ctx, subprocess, pid, input_data)
@@ -183,10 +181,9 @@ fn spawn_sync(
     }
 
     // wait sub process exit
-    let exit_status = child.wait().map_err(|e| {
-        ctx.throw_internal_error(&format!("wait failed: {e}"));
-        -1
-    })?;
+    let exit_status = child
+        .wait()
+        .map_err(|e| ctx.throw_internal_error(&format!("wait failed: {e}")))?;
 
     let exit_code = exit_status.code();
     let signal_code = get_signal_code(&exit_status);
@@ -274,10 +271,7 @@ fn spawn_async(ctx: &mut ScopedContext, mut child: tokio::process::Child, pid: i
         Promise::create_with_channel::<Result<i32, String>>(ctx, |cx, data| -> JSResult {
             match data {
                 Ok(code) => Ok(JSValue::from(code)),
-                Err(e) => {
-                    cx.throw_internal_error(&e);
-                    Err(-1)
-                }
+                Err(e) => Err(cx.throw_internal_error(&e)),
             }
         })?;
 
@@ -289,10 +283,7 @@ fn spawn_async(ctx: &mut ScopedContext, mut child: tokio::process::Child, pid: i
                     .create_string_from_utf8(name.into_bytes())
                     .map(JSValue::make_string),
                 Ok(None) => Ok(JSValue::NULL),
-                Err(e) => {
-                    cx.throw_internal_error(&e);
-                    Err(-1)
-                }
+                Err(e) => Err(cx.throw_internal_error(&e)),
             }
         },
     )?;
