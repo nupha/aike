@@ -51,6 +51,7 @@ use crate::{
     llm::JSLlmClient,
     mcp::init_mod_mcp,
     path::init_mod_path,
+    whatwg::stream::gc_trace_pending_read,
     whatwg::timeout::gc_trace_timeout,
     yaml::init_mod_yaml,
 };
@@ -320,6 +321,7 @@ async fn main() -> ExitCode {
         gc_trace_io(gcx);
         gc_trace_stdio_state(gcx);
         gc_trace_browser(gcx);
+        gc_trace_pending_read(gcx);
     });
 
     // register native classes

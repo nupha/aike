@@ -175,8 +175,19 @@ pub(crate) struct ReadableStreamDefaultReaderPayload {
 }
 
 thread_local! {
-    static PENDING_READ: RefCell<Option<(Promise, PromiseResultSlot<JSValue>)>> =
+    static PENDING_READ: RefCell<Option<(Promise, [JSValue; 2])>> =
         const { RefCell::new(None) };
+}
+
+/// Called by the runtime GC to keep PENDING_READ's JSValues alive.
+pub(crate) fn gc_trace_pending_read(gcx: &mut GcTraceCtx) {
+    PENDING_READ.with_borrow(|opt| {
+        if let Some((promise, rr)) = opt.as_ref() {
+            promise.trace(gcx);
+            rr[0].trace(gcx);
+            rr[1].trace(gcx);
+        }
+    });
 }
 
 impl ReadableStreamDefaultReaderPayload {
@@ -198,12 +209,16 @@ const READER_PROTO: &[FieldDef] = &[
     ),
 ];
 
+fn js_reader_constructor(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
+    Err(ctx.throw_type_error("ReadableStreamDefaultReader must be obtained via ReadableStream.getReader()"))
+}
+
 def_native_object!(
     "ReadableStreamDefaultReader",
     JSReadableStreamDefaultReader,
     ReadableStreamDefaultReaderPayload,
     READER_PROTO,
-    None,
+    Some(ClassCtorDef::new(js_reader_constructor, 0, false).expose_to_global()),
     on_payload_gc: ReadableStreamDefaultReaderPayload::gc_trace
 );
 
@@ -263,10 +278,9 @@ fn js_reader_read(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         }
     }
 
-    // No data — create a pending promise.
-    let result_slot = PromiseResultSlot::<JSValue>::new();
-    let promise = Promise::create_with_result_slot(ctx, result_slot.clone(), |_, data| Ok(data))?;
-    PENDING_READ.with(|slot| *slot.borrow_mut() = Some((promise, result_slot)));
+    // No data — create a pending promise. Store resolving functions for later invocation.
+    let (promise, rr) = Promise::create(ctx)?;
+    PENDING_READ.with(|slot| *slot.borrow_mut() = Some((promise, rr)));
 
     if let Some(controller_val) = stream_p.controller {
         let _ = call_controller_pull(ctx, controller_val);
@@ -346,12 +360,16 @@ const CONTROLLER_PROTO: &[FieldDef] = &[
     ),
 ];
 
+fn js_controller_constructor(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
+    Err(ctx.throw_type_error("ReadableStreamDefaultController cannot be constructed directly"))
+}
+
 def_native_object!(
     "ReadableStreamDefaultController",
     JSReadableStreamDefaultController,
     ReadableStreamDefaultControllerPayload,
     CONTROLLER_PROTO,
-    None,
+    Some(ClassCtorDef::new(js_controller_constructor, 0, false).expose_to_global()),
     on_payload_gc: ReadableStreamDefaultControllerPayload::gc_trace
 );
 
@@ -367,11 +385,11 @@ fn js_controller_enqueue(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     let resolved = PENDING_READ.with(|slot| {
         let mut s = slot.borrow_mut();
-        if let Some((_promise, data_slot)) = s.take() {
+        if let Some((_promise, rr)) = s.take() {
             let result = make_iterator_result(ctx, chunk, false);
             match result {
                 Ok(r) => {
-                    let _ = data_slot.commit(r);
+                    let _ = rr[0].call(ctx, JSValue::UNDEFINED, &[r]);
                     true
                 }
                 Err(_) => false,
@@ -399,10 +417,10 @@ fn js_controller_close(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     PENDING_READ.with(|slot| {
         let mut s = slot.borrow_mut();
-        if let Some((_promise, data_slot)) = s.take()
+        if let Some((_promise, rr)) = s.take()
             && let Ok(result) = make_iterator_result(ctx, JSValue::UNDEFINED, true)
         {
-            let _ = data_slot.commit(result);
+            let _ = rr[0].call(ctx, JSValue::UNDEFINED, &[result]);
         }
     });
 
@@ -855,12 +873,16 @@ const WRITER_PROTO: &[FieldDef] = &[
     ),
 ];
 
+fn js_writer_constructor(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
+    Err(ctx.throw_type_error("WritableStreamDefaultWriter must be obtained via WritableStream.getWriter()"))
+}
+
 def_native_object!(
     "WritableStreamDefaultWriter",
     JSWritableStreamDefaultWriter,
     WritableStreamDefaultWriterPayload,
     WRITER_PROTO,
-    None,
+    Some(ClassCtorDef::new(js_writer_constructor, 0, false).expose_to_global()),
     on_payload_gc: WritableStreamDefaultWriterPayload::gc_trace
 );
 
@@ -877,16 +899,64 @@ fn js_writer_write(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     if let Some(stream) = stream_val.as_native_object::<JSWritableStream>()
         && let Some(sp) = stream.payload()
-        && let Some(controller) = sp.controller
-        && let Some(cp) = controller.payload()
-        && let Some(obj) = cp.underlying_sink.as_object()
-        && let Ok(write_fn) = obj.get_property_str(ctx, "write")
-        && write_fn.is_callable()
     {
-        let result = write_fn.call(ctx, cp.underlying_sink, &[chunk, controller.into()])?;
-        if result.is_object() {
-            return Ok(result);
+        // Reject if stream is errored or closed
+        match sp.state {
+            RsState::Errored => {
+                let reason = sp.stored_error;
+                return make_rejected_promise(ctx, reason);
+            }
+            RsState::Closed => {
+                let reason = ctx.create_string_from_utf8(b"Writer is closed".to_vec())
+                    .map(JSValue::make_string)
+                    .unwrap_or(JSValue::UNDEFINED);
+                return make_rejected_promise(ctx, reason);
+            }
+            _ => {}
         }
+
+        if let Some(controller) = sp.controller
+    {
+        let cp = controller
+            .payload()
+            .ok_or_else(|| ctx.throw_internal_error("invalid controller"))?;
+
+        // TransformStream path: use transformer.transform(chunk, transformController)
+        if let Some(tc) = cp.transform_controller
+            && let Some(tcp) = tc.payload()
+            && let Some(obj) = tcp.transformer.as_object()
+        {
+            // Default transform: chunk → readable (pass-through) if no transform fn
+            let has_transform = obj.get_property_str(ctx, "transform")
+                .map(|v| v.is_callable())
+                .unwrap_or(false);
+
+            if has_transform {
+                let transform_fn = obj.get_property_str(ctx, "transform").unwrap();
+                let result = transform_fn.call(ctx, tcp.transformer, &[chunk, JSValue::from(tc)])?;
+                if result.is_object() {
+                    return Ok(result);
+                }
+            } else {
+                // No user-defined transform → pass through: enqueue chunk directly
+                let enqueue_fn = JSValue::from(tcp.readable_controller)
+                    .get_property_str(ctx, "enqueue")?;
+                enqueue_fn.call(ctx, JSValue::from(tcp.readable_controller), &[chunk])?;
+            }
+            return make_resolved_promise(ctx, JSValue::UNDEFINED);
+        }
+
+        // Normal writable path
+        if let Some(obj) = cp.underlying_sink.as_object()
+            && let Ok(write_fn) = obj.get_property_str(ctx, "write")
+            && write_fn.is_callable()
+        {
+            let result = write_fn.call(ctx, cp.underlying_sink, &[chunk, controller.into()])?;
+            if result.is_object() {
+                return Ok(result);
+            }
+        }
+    }
     }
 
     make_resolved_promise(ctx, JSValue::UNDEFINED)
@@ -904,11 +974,44 @@ fn js_writer_close(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     if let Some(sp) = stream_val.payload_mut() {
         if let Some(controller) = sp.controller
             && let Some(cp) = controller.payload()
-            && let Some(obj) = cp.underlying_sink.as_object()
-            && let Ok(close_fn) = obj.get_property_str(ctx, "close")
-            && close_fn.is_callable()
         {
-            let _ = close_fn.call(ctx, cp.underlying_sink, &[]);
+            // TransformStream flush path: call transformer.flush(transformController)
+            if let Some(tc) = cp.transform_controller
+                && let Some(tcp) = tc.payload()
+                && let Some(obj) = tcp.transformer.as_object()
+            {
+                if let Ok(flush_fn) = obj.get_property_str(ctx, "flush")
+                    && flush_fn.is_callable()
+                {
+                    let _ = flush_fn.call(ctx, tcp.transformer, &[JSValue::from(tc)]);
+                }
+
+                // After flush, close the readable side of the transform stream
+                if let Some(rcp) = tcp.readable_controller.payload() {
+                    rcp.close_requested.set(true);
+
+                    PENDING_READ.with(|slot| {
+                        let mut s = slot.borrow_mut();
+                        if let Some((_promise, rr)) = s.take()
+                            && let Ok(result) = make_iterator_result(ctx, JSValue::UNDEFINED, true)
+                        {
+                            let _ = rr[0].call(ctx, JSValue::UNDEFINED, &[result]);
+                        }
+                    });
+
+                    if rcp.queue.borrow().is_empty()
+                        && let Some(mut stream_val) = rcp.stream
+                        && let Some(rsp) = stream_val.payload_mut()
+                    {
+                        rsp.state = RsState::Closed;
+                    }
+                }
+            } else if let Some(obj) = cp.underlying_sink.as_object()
+                && let Ok(close_fn) = obj.get_property_str(ctx, "close")
+                && close_fn.is_callable()
+            {
+                let _ = close_fn.call(ctx, cp.underlying_sink, &[]);
+            }
         }
 
         sp.state = RsState::Closed;
@@ -962,6 +1065,7 @@ fn js_writer_release_lock(_: &mut ScopedContext, cc: CallContext) -> JSResult {
 struct WritableStreamDefaultControllerPayload {
     stream: Option<JSWritableStream>,
     underlying_sink: JSValue,
+    transform_controller: Option<JSTransformStreamDefaultController>,
 }
 
 impl WritableStreamDefaultControllerPayload {
@@ -969,6 +1073,7 @@ impl WritableStreamDefaultControllerPayload {
         Self {
             stream,
             underlying_sink,
+            transform_controller: None,
         }
     }
 
@@ -976,6 +1081,9 @@ impl WritableStreamDefaultControllerPayload {
         self.underlying_sink.trace(gcx);
         if let Some(ref s) = self.stream {
             s.trace(gcx);
+        }
+        if let Some(ref tc) = self.transform_controller {
+            tc.trace(gcx);
         }
     }
 }
@@ -989,12 +1097,16 @@ const WRITABLE_CONTROLLER_PROTO: &[FieldDef] = &[
     ),
 ];
 
+fn js_writable_controller_constructor(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
+    Err(ctx.throw_type_error("WritableStreamDefaultController cannot be constructed directly"))
+}
+
 def_native_object!(
     "WritableStreamDefaultController",
     JSWritableStreamDefaultController,
     WritableStreamDefaultControllerPayload,
     WRITABLE_CONTROLLER_PROTO,
-    None,
+    Some(ClassCtorDef::new(js_writable_controller_constructor, 0, false).expose_to_global()),
     on_payload_gc: WritableStreamDefaultControllerPayload::gc_trace
 );
 
@@ -1054,8 +1166,16 @@ def_native_object!(
 
 fn js_transform_stream_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let new_target = cc.this();
+    let transformer = cc.arg(0);
 
-    // read
+    // Use existing readable/writable instances, or create an empty transformer object.
+    let transformer = if transformer.is_undefined_or_null() {
+        ctx.create_base_object().map(JSValue::from)?
+    } else {
+        transformer
+    };
+
+    // Readable side
     let mut readable =
         JSReadableStream::new_instance(ctx, JSValue::UNDEFINED, ReadableStreamPayload::new())?;
     let rc = JSReadableStreamDefaultController::new_instance(
@@ -1065,26 +1185,62 @@ fn js_transform_stream_constructor(ctx: &mut ScopedContext, cc: CallContext) -> 
     )?;
     readable.payload_mut().unwrap().controller.replace(rc);
 
-    // write
+    // Writable side
     let mut writable =
         JSWritableStream::new_instance(ctx, JSValue::UNDEFINED, WritableStreamPayload::new())?;
+    let wc_payload = WritableStreamDefaultControllerPayload::new(transformer, Some(writable));
     let wcv = JSWritableStreamDefaultController::new_instance(
         ctx,
         JSValue::UNDEFINED,
-        WritableStreamDefaultControllerPayload::new(JSValue::UNDEFINED, Some(writable)),
+        wc_payload,
     )?;
     writable.payload_mut().unwrap().controller.replace(wcv);
 
-    // transform
-    JSTransformStream::new_instance(
+    // Capture rc and writable again after mutable borrow
+    let rc = readable.payload().unwrap().controller.unwrap();
+    let mut wc = writable.payload().unwrap().controller.unwrap();
+    let transformer = if let Some(cp) = wc.payload()
+        { cp.underlying_sink }
+    else { JSValue::UNDEFINED };
+
+    // Transform controller
+    let tc = JSTransformStreamDefaultController::new_instance(
+        ctx,
+        JSValue::UNDEFINED,
+        TransformStreamDefaultControllerPayload::new(rc, writable, transformer),
+    )?;
+
+    // Wire the transform controller into the writable controller
+    if let Some(wcp) = wc.payload_mut() {
+        wcp.transform_controller = Some(tc);
+    }
+
+    // Create the TransformStream instance
+    let instance = JSTransformStream::new_instance(
         ctx,
         new_target,
         TransformStreamPayload {
             readable: Some(readable),
             writable: Some(writable),
         },
-    )
-    .map(JSValue::from)
+    )?;
+
+    // Call transformer.start(transformController) if present
+    if let Some(obj) = transformer.as_object()
+        && let Ok(start_fn) = obj.get_property_str(ctx, "start")
+        && start_fn.is_callable()
+    {
+        // The transform controller is stored on the writable controller — retrieve it
+        let tc = (|| -> Option<JSTransformStreamDefaultController> {
+            let wcp = wc.payload()?;
+            wcp.transform_controller
+        })();
+        if let Some(tc) = tc {
+            let _ = start_fn.call(ctx, transformer, &[JSValue::from(tc)]);
+        }
+    }
+
+    Ok(instance.into())
 }
 
 fn js_transform_stream_readable(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -1105,11 +1261,29 @@ fn js_transform_stream_writable(ctx: &mut ScopedContext, cc: CallContext) -> JSR
 // TransformStreamDefaultController
 // ============================================================================
 
-pub(crate) struct TransformStreamDefaultControllerPayload;
+pub(crate) struct TransformStreamDefaultControllerPayload {
+    readable_controller: JSReadableStreamDefaultController,
+    writable_stream: JSWritableStream,
+    transformer: JSValue,
+}
 
 impl TransformStreamDefaultControllerPayload {
-    fn gc_trace(&self, _gcx: &mut GcTraceCtx) {
-        // No JS objects in payload currently
+    fn new(
+        readable_controller: JSReadableStreamDefaultController,
+        writable_stream: JSWritableStream,
+        transformer: JSValue,
+    ) -> Self {
+        Self {
+            readable_controller,
+            writable_stream,
+            transformer,
+        }
+    }
+
+    fn gc_trace(&self, gcx: &mut GcTraceCtx) {
+        self.readable_controller.trace(gcx);
+        self.writable_stream.trace(gcx);
+        self.transformer.trace(gcx);
     }
 }
 
@@ -1117,6 +1291,7 @@ const TRANSFORM_CONTROLLER_PROTO: &[FieldDef] = &[
     FieldDef::FUNC("enqueue", 1, js_transform_controller_enqueue, 0),
     FieldDef::FUNC("error", 1, js_transform_controller_error, 0),
     FieldDef::FUNC("terminate", 0, js_transform_controller_terminate, 0),
+    FieldDef::GETSET("desiredSize", Some(js_transform_controller_desired_size), None, 0),
     FieldDef::STR(
         "[Symbol.toStringTag]",
         "TransformStreamDefaultController",
@@ -1124,25 +1299,152 @@ const TRANSFORM_CONTROLLER_PROTO: &[FieldDef] = &[
     ),
 ];
 
+fn js_transform_controller_constructor(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
+    Err(ctx.throw_type_error("TransformStreamDefaultController cannot be constructed directly"))
+}
+
 def_native_object!(
     "TransformStreamDefaultController",
     JSTransformStreamDefaultController,
     TransformStreamDefaultControllerPayload,
     TRANSFORM_CONTROLLER_PROTO,
-    None,
+    Some(ClassCtorDef::new(js_transform_controller_constructor, 0, false).expose_to_global()),
     on_payload_gc: TransformStreamDefaultControllerPayload::gc_trace
 );
 
-fn js_transform_controller_enqueue(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
-    Err(ctx.throw_internal_error("TransformStreamDefaultController.enqueue not yet implemented"))
+fn js_transform_controller_enqueue(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let this = cc.this();
+    let chunk = cc.arg(0);
+    let p = JSTransformStreamDefaultController::payload_of(&this)
+        .ok_or_else(|| ctx.throw_type_error("not a TransformStreamDefaultController"))?;
+
+    let rc = p.readable_controller;
+    let rcp = rc.payload()
+        .ok_or_else(|| ctx.throw_internal_error("invalid readable controller"))?;
+
+    if rcp.close_requested.get() {
+        return Err(ctx.throw_type_error("cannot enqueue after close"));
+    }
+
+    let resolved = PENDING_READ.with(|slot| {
+        let mut s = slot.borrow_mut();
+        if let Some((_promise, rr)) = s.take() {
+            let result = make_iterator_result(ctx, chunk, false);
+            match result {
+                Ok(r) => {
+                    let _ = rr[0].call(ctx, JSValue::UNDEFINED, &[r]);
+                    true
+                }
+                Err(_) => false,
+            }
+        } else {
+            false
+        }
+    });
+
+    if !resolved {
+        rcp.queue.borrow_mut().push(QueueEntry { chunk, size: 1.0 });
+        let total = rcp.queue_total_size.get();
+        rcp.queue_total_size.set(total + 1.0);
+    }
+
+    Ok(JSValue::UNDEFINED)
 }
 
-fn js_transform_controller_error(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
-    Err(ctx.throw_internal_error("TransformStreamDefaultController.error not yet implemented"))
+fn js_transform_controller_error(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let this = cc.this();
+    let reason = cc.arg(0);
+    let p = JSTransformStreamDefaultController::payload_of(&this)
+        .ok_or_else(|| ctx.throw_type_error("not a TransformStreamDefaultController"))?;
+
+    // Error the readable side via the readable controller
+    if let Some(rcp) = p.readable_controller.payload()
+    {
+        PENDING_READ.with(|slot| {
+            let mut s = slot.borrow_mut();
+            if let Some((mut promise, _slot)) = s.take() {
+                promise.reject(ctx, reason);
+            }
+        });
+
+        if let Some(mut stream_val) = rcp.stream
+            && let Some(sp) = stream_val.payload_mut()
+        {
+            sp.state = RsState::Errored;
+            sp.stored_error = reason;
+        }
+    }
+
+    // Error the writable side
+    if let Some(wsp) = p.writable_stream.payload() {
+        // Can't mutate through shared ref; error via the writable controller
+        if let Some(wc) = wsp.controller
+            && let Some(wcp) = wc.payload()
+            && let Some(mut ws) = wcp.stream
+            && let Some(wsp_mut) = ws.payload_mut()
+        {
+            wsp_mut.state = RsState::Errored;
+            wsp_mut.stored_error = reason;
+        }
+    }
+
+    Ok(JSValue::UNDEFINED)
 }
 
-fn js_transform_controller_terminate(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
-    Err(ctx.throw_internal_error("TransformStreamDefaultController.terminate not yet implemented"))
+fn js_transform_controller_terminate(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let this = cc.this();
+    let p = JSTransformStreamDefaultController::payload_of(&this)
+        .ok_or_else(|| ctx.throw_type_error("not a TransformStreamDefaultController"))?;
+
+    // Close the readable side
+    if let Some(rcp) = p.readable_controller.payload()
+    {
+        rcp.close_requested.set(true);
+
+        PENDING_READ.with(|slot| {
+            let mut s = slot.borrow_mut();
+            if let Some((_promise, rr)) = s.take()
+                && let Ok(result) = make_iterator_result(ctx, JSValue::UNDEFINED, true)
+            {
+                let _ = rr[0].call(ctx, JSValue::UNDEFINED, &[result]);
+            }
+        });
+
+        if rcp.queue.borrow().is_empty()
+            && let Some(mut stream_val) = rcp.stream
+            && let Some(sp) = stream_val.payload_mut()
+        {
+            sp.state = RsState::Closed;
+        }
+    }
+
+    // Error the writable side
+    let err = ctx.create_string_from_utf8(b"TransformStream terminated".to_vec())
+        .map(JSValue::make_string)
+        .unwrap_or(JSValue::UNDEFINED);
+    if let Some(wsp) = p.writable_stream.payload()
+        && let Some(wc) = wsp.controller
+        && let Some(wcp) = wc.payload()
+        && let Some(mut ws) = wcp.stream
+        && let Some(wsp_mut) = ws.payload_mut()
+    {
+        wsp_mut.state = RsState::Errored;
+        wsp_mut.stored_error = err;
+    }
+
+    Ok(JSValue::UNDEFINED)
+}
+
+fn js_transform_controller_desired_size(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let this = cc.this();
+    let p = JSTransformStreamDefaultController::payload_of(&this)
+        .ok_or_else(|| ctx.throw_type_error("not a TransformStreamDefaultController"))?;
+
+    if let Some(rcp) = p.readable_controller.payload() {
+        let total = rcp.queue_total_size.get();
+        return Ok(JSValue::from(1.0 - total));
+    }
+    Ok(JSValue::from(0.0))
 }
 
 // ============================================================================
