@@ -71,6 +71,7 @@ impl ReadableStreamPayload {
 
 const READABLE_STREAM_PROTO: &[FieldDef] = &[
     FieldDef::GETSET("locked", Some(js_readable_stream_locked), None, 0),
+    FieldDef::GETSET("state", Some(js_readable_stream_state), None, 0),
     FieldDef::FUNC("getReader", 0, js_readable_stream_get_reader, 0),
     FieldDef::FUNC("cancel", 1, js_readable_stream_cancel, 0),
     FieldDef::FUNC("pipeTo", 1, js_readable_stream_pipe_to, 0),
@@ -125,6 +126,21 @@ fn js_readable_stream_locked(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
     Ok(JSValue::from(p.reader.is_some()))
 }
 
+fn js_readable_stream_state(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let this = cc.this();
+    let p = JSReadableStream::payload_of(&this)
+        .ok_or_else(|| ctx.throw_type_error("not a ReadableStream"))?;
+    let s = match p.state {
+        RsState::Readable => "readable",
+        RsState::Closed => "closed",
+        RsState::Errored => "errored",
+    };
+    let sref = ctx
+        .create_string_from_utf8(s.as_bytes().to_vec())
+        .map_err(|_| -1)?;
+    Ok(JSValue::make_string(sref))
+}
+
 fn js_readable_stream_get_reader(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut this = cc.this();
 
@@ -134,11 +150,21 @@ fn js_readable_stream_get_reader(ctx: &mut ScopedContext, cc: CallContext) -> JS
         return Err(ctx.throw_type_error("ReadableStream is already locked"));
     }
 
+    let mut closed_promise = Promise::create(ctx)?.0;
+    if let Some(sp) = JSReadableStream::payload_of(&this) {
+        match sp.state {
+            RsState::Closed => closed_promise.resolve(ctx, JSValue::UNDEFINED),
+            RsState::Errored => closed_promise.reject(ctx, sp.stored_error),
+            RsState::Readable => {}
+        }
+    }
+
     let reader = JSReadableStreamDefaultReader::new_instance(
         ctx,
         JSValue::UNDEFINED,
         ReadableStreamDefaultReaderPayload {
             stream: Some(JSReadableStream::try_from(this)?),
+            closed_promise: Some(closed_promise),
         },
     )?;
     JSReadableStream::payload_mut_of(&mut this).unwrap().reader = Some(reader);
@@ -164,6 +190,7 @@ fn js_readable_stream_async_iterator(ctx: &mut ScopedContext, cc: CallContext) -
 
 pub(crate) struct ReadableStreamDefaultReaderPayload {
     stream: Option<JSReadableStream>,
+    closed_promise: Option<Promise>,
 }
 
 thread_local! {
@@ -198,6 +225,9 @@ impl ReadableStreamDefaultReaderPayload {
         if let Some(ref s) = self.stream {
             s.trace(gcx);
         }
+        if let Some(ref cp) = self.closed_promise {
+            cp.trace(gcx);
+        }
     }
 }
 
@@ -205,6 +235,7 @@ const READER_PROTO: &[FieldDef] = &[
     FieldDef::FUNC("read", 0, js_reader_read, 0),
     FieldDef::FUNC("cancel", 1, js_reader_cancel, 0),
     FieldDef::FUNC("releaseLock", 0, js_reader_release_lock, 0),
+    FieldDef::GETSET("closed", Some(js_reader_closed), None, 0),
     FieldDef::STR(
         "[Symbol.toStringTag]",
         "ReadableStreamDefaultReader",
@@ -316,6 +347,16 @@ fn js_reader_release_lock(_: &mut ScopedContext, cc: CallContext) -> JSResult {
     Ok(JSValue::UNDEFINED)
 }
 
+fn js_reader_closed(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let this = cc.this();
+    let p = JSReadableStreamDefaultReader::payload_of(&this)
+        .ok_or_else(|| ctx.throw_type_error("not a ReadableStream reader"))?;
+    if let Some(cp) = p.closed_promise {
+        return Ok(JSValue::from(cp));
+    }
+    Ok(JSValue::UNDEFINED)
+}
+
 // ============================================================================
 // ReadableStreamDefaultController
 // ============================================================================
@@ -349,6 +390,9 @@ impl ReadableStreamDefaultControllerPayload {
         self.underlying_source.trace(gcx);
         if let Some(ref s) = self.stream {
             s.trace(gcx);
+        }
+        for entry in self.queue.borrow().iter() {
+            entry.chunk.trace(gcx);
         }
     }
 }
@@ -437,6 +481,14 @@ fn js_controller_close(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         && let Some(sp) = stream_val.payload_mut()
     {
         sp.state = RsState::Closed;
+        if let Some(reader_val) = sp.reader {
+            if let Some(rp) = reader_val.payload() {
+                if let Some(cp) = rp.closed_promise {
+                    let mut cp = cp;
+                    cp.resolve(ctx, JSValue::UNDEFINED);
+                }
+            }
+        }
     }
 
     Ok(JSValue::UNDEFINED)
@@ -460,6 +512,14 @@ fn js_controller_error(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     {
         sp.state = RsState::Errored;
         sp.stored_error = e;
+        if let Some(reader_val) = sp.reader {
+            if let Some(rp) = reader_val.payload() {
+                if let Some(cp) = rp.closed_promise {
+                    let mut cp = cp;
+                    cp.reject(ctx, e);
+                }
+            }
+        }
     }
 
     Ok(JSValue::UNDEFINED)
@@ -563,6 +623,14 @@ fn readable_stream_cancel(ctx: &mut ScopedContext, stream: &JSValue, reason: JSV
     {
         p.state = RsState::Closed;
 
+        if let Some(reader_val) = p.reader {
+            if let Some(rp) = reader_val.payload() {
+                if let Some(mut cp) = rp.closed_promise {
+                    cp.resolve(ctx, JSValue::UNDEFINED);
+                }
+            }
+        }
+
         if let Some(controller_val) = p.controller
             && let Some(cp) = controller_val.payload()
         {
@@ -596,6 +664,7 @@ fn create_stream_async_iterator(ctx: &mut ScopedContext, stream_val: &JSValue) -
             JSValue::UNDEFINED,
             ReadableStreamDefaultReaderPayload {
                 stream: Some(JSReadableStream::try_from(*stream_val)?),
+                closed_promise: None,
             },
         )?;
         if let Some(sp) = JSReadableStream::payload_mut_of(&mut this) {
@@ -806,11 +875,19 @@ fn js_writable_stream_get_writer(ctx: &mut ScopedContext, cc: CallContext) -> JS
         return Err(ctx.throw_type_error("WritableStream is already locked"));
     }
 
+    let mut closed_promise = Promise::create(ctx)?.0;
+    match p.state {
+        RsState::Closed => closed_promise.resolve(ctx, JSValue::UNDEFINED),
+        RsState::Errored => closed_promise.reject(ctx, p.stored_error),
+        RsState::Readable => {}
+    }
+
     let writer = JSWritableStreamDefaultWriter::new_instance(
         ctx,
         JSValue::UNDEFINED,
         WritableStreamDefaultWriterPayload {
             stream: Some(JSWritableStream::try_from(this)?),
+            closed_promise: Some(closed_promise),
         },
     )?;
 
@@ -825,6 +902,15 @@ fn js_writable_stream_abort(ctx: &mut ScopedContext, cc: CallContext) -> JSResul
     {
         p.state = RsState::Errored;
         p.stored_error = reason;
+
+        if let Some(writer_val) = p.writer {
+            if let Some(wp) = writer_val.payload() {
+                if let Some(cp) = wp.closed_promise {
+                    let mut cp = cp;
+                    cp.reject(ctx, reason);
+                }
+            }
+        }
 
         if let Some(controller) = p.controller
             && let Some(cp) = controller.payload()
@@ -846,6 +932,14 @@ fn js_writable_stream_close(ctx: &mut ScopedContext, cc: CallContext) -> JSResul
         && let Some(p) = stream.payload_mut()
     {
         p.state = RsState::Closed;
+        if let Some(writer_val) = p.writer {
+            if let Some(wp) = writer_val.payload() {
+                if let Some(cp) = wp.closed_promise {
+                    let mut cp = cp;
+                    cp.resolve(ctx, JSValue::UNDEFINED);
+                }
+            }
+        }
     }
     make_resolved_promise(ctx, JSValue::UNDEFINED)
 }
@@ -856,12 +950,16 @@ fn js_writable_stream_close(ctx: &mut ScopedContext, cc: CallContext) -> JSResul
 
 pub(crate) struct WritableStreamDefaultWriterPayload {
     stream: Option<JSWritableStream>,
+    closed_promise: Option<Promise>,
 }
 
 impl WritableStreamDefaultWriterPayload {
     fn gc_trace(&self, gcx: &mut GcTraceCtx) {
         if let Some(ref s) = self.stream {
             s.trace(gcx);
+        }
+        if let Some(ref cp) = self.closed_promise {
+            cp.trace(gcx);
         }
     }
 }
@@ -871,12 +969,40 @@ const WRITER_PROTO: &[FieldDef] = &[
     FieldDef::FUNC("close", 0, js_writer_close, 0),
     FieldDef::FUNC("abort", 1, js_writer_abort, 0),
     FieldDef::FUNC("releaseLock", 0, js_writer_release_lock, 0),
+    FieldDef::GETSET("closed", Some(js_writer_closed), None, 0),
+    FieldDef::GETSET("desiredSize", Some(js_writer_desired_size), None, 0),
     FieldDef::STR(
         "[Symbol.toStringTag]",
         "WritableStreamDefaultWriter",
         zuqe::JS_PROP_CONFIGURABLE,
     ),
 ];
+
+fn js_writer_closed(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let this = cc.this();
+    let p = JSWritableStreamDefaultWriter::payload_of(&this)
+        .ok_or_else(|| ctx.throw_type_error("not a WritableStream writer"))?;
+    if let Some(cp) = p.closed_promise {
+        return Ok(JSValue::from(cp));
+    }
+    Ok(JSValue::UNDEFINED)
+}
+
+fn js_writer_desired_size(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let this = cc.this();
+    let p = JSWritableStreamDefaultWriter::payload_of(&this)
+        .ok_or_else(|| ctx.throw_type_error("not a WritableStream writer"))?;
+    if let Some(stream_val) = p.stream {
+        if let Some(sp) = stream_val.payload() {
+            if let Some(ctrl) = sp.controller {
+                if let Some(cp) = ctrl.payload() {
+                    return Ok(JSValue::from(cp.high_water_mark));
+                }
+            }
+        }
+    }
+    Ok(JSValue::from(1.0))
+}
 
 fn js_writer_constructor(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
     Err(ctx.throw_type_error(
@@ -1075,6 +1201,7 @@ struct WritableStreamDefaultControllerPayload {
     stream: Option<JSWritableStream>,
     underlying_sink: JSValue,
     transform_controller: Option<JSTransformStreamDefaultController>,
+    high_water_mark: f64,
 }
 
 impl WritableStreamDefaultControllerPayload {
@@ -1083,6 +1210,7 @@ impl WritableStreamDefaultControllerPayload {
             stream,
             underlying_sink,
             transform_controller: None,
+            high_water_mark: 1.0,
         }
     }
 
@@ -1535,8 +1663,11 @@ fn js_count_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
 fn js_byte_length_size(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let chunk = cc.arg(0);
+    if let Some(s) = chunk.as_string(false) {
+        return Ok(JSValue::from(s.len() as f64));
+    }
     if let Ok(arr) = TypedArray::try_from(chunk) {
-        return Ok(JSValue::from(arr.byte_length() as f64));
+        return Ok(JSValue::from(arr.byte_length() as i64));
     }
 
     let len = chunk
@@ -1545,7 +1676,7 @@ fn js_byte_length_size(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         .unwrap_or(JSValue::from(0.0));
 
     Ok(JSValue::from(
-        len.to_number(ctx).unwrap_or(zuqe::IntOrFloat::Float64(0.0)),
+        len.to_number(ctx).unwrap_or(zuqe::IntOrFloat::Int64(0)),
     ))
 }
 
