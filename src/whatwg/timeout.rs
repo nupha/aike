@@ -16,7 +16,8 @@ use std::{
 
 use zuqe::{
     CallContext, Callback, Exception, JS_PROP_C_W_E, JSResult, JSValue, JobState, Object,
-    ScopedContext, builtins::promise::Promise,
+    ScopedContext,
+    builtins::promise::Promise,
     gc_lite::{GcTrace, GcTraceCtx},
 };
 
@@ -189,12 +190,12 @@ fn start_timer_task(ctx: &mut ScopedContext) {
                     // sorted order so `entries[0]` stays the nearest.
                     let new_deadline = Instant::now() + Duration::from_millis(ms);
                     TIMER_STATE.with_borrow_mut(|opt| {
-                        if let Some(s) = opt.as_mut() {
-                            if let Some(pos) = s.entries.iter().position(|e| e.id == id) {
-                                let mut e = s.entries.remove(pos);
-                                e.deadline = new_deadline;
-                                s.insert_sorted(e);
-                            }
+                        if let Some(s) = opt.as_mut()
+                            && let Some(pos) = s.entries.iter().position(|e| e.id == id)
+                        {
+                            let mut e = s.entries.remove(pos);
+                            e.deadline = new_deadline;
+                            s.insert_sorted(e);
                         }
                     });
                 }
@@ -272,10 +273,10 @@ fn clear_timer(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     // fires timers still in `entries`, so a cleared timer is never fired. The
     // rest of the vec stays sorted. No per-timer task needs aborting.
     TIMER_STATE.with_borrow_mut(|opt| {
-        if let Some(s) = opt.as_mut() {
-            if let Some(pos) = s.entries.iter().position(|e| e.id == id) {
-                s.entries.remove(pos);
-            }
+        if let Some(s) = opt.as_mut()
+            && let Some(pos) = s.entries.iter().position(|e| e.id == id)
+        {
+            s.entries.remove(pos);
         }
     });
 
@@ -291,7 +292,11 @@ fn clear_timer(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 /// driven by the event loop and never blocks the thread.
 pub(crate) fn js_sleep(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let ms = cc.arg(0).to_number(ctx)?.to_f64();
-    let delay_ms = if ms.is_nan() || ms < 0.0 { 0 } else { ms as u64 };
+    let delay_ms = if ms.is_nan() || ms < 0.0 {
+        0
+    } else {
+        ms as u64
+    };
 
     // Build the Promise and grab its native resolve function. The resolve fn is
     // callable, so it can serve directly as the timer callback.

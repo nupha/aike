@@ -315,7 +315,7 @@ fn js_url_search_params_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSRe
 
     // Return cached searchParams if already created
     if let Some(sp) = url.search_params.borrow().as_ref() {
-        return Ok(sp.clone().into());
+        return Ok((*sp).into());
     }
 
     let sp = JSURLSearchParams::new_instance(
@@ -326,7 +326,7 @@ fn js_url_search_params_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSRe
             standalone_query: RefCell::new(String::new()),
         },
     )?;
-    *url.search_params.borrow_mut() = Some(sp.as_object().clone());
+    *url.search_params.borrow_mut() = Some(*sp.as_object());
     Ok(sp.into())
 }
 
@@ -385,8 +385,7 @@ fn js_sp_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         if let Some(s) = arg.as_string(true) {
             let text = s.content().encode_utf8(false).to_string();
             text.strip_prefix('?').unwrap_or(&text).to_string()
-        } else if let Some(obj_ref) = arg.as_object() {
-            let mut o = obj_ref.clone();
+        } else if let Some(mut o) = arg.as_object() {
             let pks = o.get_own_property_names(
                 ctx,
                 zuqe::JS_GPN_ENUM_ONLY | zuqe::JS_GPN_STR_OR_INT_MASK,
@@ -457,7 +456,7 @@ fn js_sp_delete(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     let query = sp_get_query(sp);
     let pairs: Vec<String> = url::form_urlencoded::parse(query.as_bytes())
-        .filter(|(k, _)| k.to_string() != n)
+        .filter(|(k, _)| n.eq(k))
         .map(|(k, v)| format!("{}={}", k, v))
         .collect();
     sp_set_query(sp, &pairs.join("&"));
@@ -473,7 +472,7 @@ fn js_sp_get(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     let query = sp_get_query(sp);
     for (k, v) in url::form_urlencoded::parse(query.as_bytes()) {
-        if k.to_string() == n {
+        if k == n {
             return ctx
                 .create_string_from_utf8(v.as_bytes().to_vec())
                 .map(JSValue::make_string);
@@ -491,7 +490,7 @@ fn js_sp_get_all(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     let query = sp_get_query(sp);
     let values: Vec<JSValue> = url::form_urlencoded::parse(query.as_bytes())
-        .filter(|(k, _)| k.to_string() == n)
+        .filter(|(k, _)| n.eq(k))
         .map(|(_, v)| {
             let s = ctx.create_string_from_utf8(v.as_bytes().to_vec()).unwrap();
             JSValue::make_string(s)
@@ -509,7 +508,7 @@ fn js_sp_has(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let n = name.content().encode_utf8(false).to_string();
 
     let query = sp_get_query(sp);
-    let found = url::form_urlencoded::parse(query.as_bytes()).any(|(k, _)| k.to_string() == n);
+    let found = url::form_urlencoded::parse(query.as_bytes()).any(|(k, _)| n.eq(&k));
 
     Ok(JSValue::from(found))
 }

@@ -183,7 +183,7 @@ fn js_controller_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
 fn js_controller_signal_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let controller = get_controller(ctx, &this)?;
-    Ok(controller.signal.clone().into())
+    Ok(controller.signal.into())
 }
 
 fn js_controller_abort(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {

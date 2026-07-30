@@ -7,6 +7,7 @@ use std::{
 };
 
 use crossbeam::channel::{Receiver, TryRecvError};
+
 use zuqe::{
     CallContext, Callback, JSResult, JSValue, JobState, ScopedContext,
     builtins::{
@@ -17,6 +18,14 @@ use zuqe::{
 };
 
 use crate::html::{HtmlConvertMode, convert_html};
+
+/// Source of response body data.
+pub(crate) enum BodySource {
+    /// Streaming from a real network response — poll the channel.
+    Channel(Receiver<Vec<u8>>),
+    /// Entire body is already available as bytes (synthetic response).
+    Synthetic(Vec<u8>),
+}
 
 /// Convert a JS body argument (string or Uint8Array/TypedArray) into bytes.
 pub(crate) fn body_to_bytes(ctx: &mut ScopedContext, val: &JSValue) -> Result<Vec<u8>, i32> {
@@ -36,11 +45,11 @@ pub(crate) const BODY_AS_TEXT_CONVERT: i32 = 3;
 
 const BODY_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Drain a body `Receiver` into a `Promise` resolving to text/json/bytes.
+/// Drain a body source into a `Promise` resolving to text/json/bytes.
 /// `html_convert` applies only in text mode for `text/html` responses.
 pub(crate) fn drain_body(
     ctx: &mut ScopedContext,
-    rx: Receiver<Vec<u8>>,
+    source: BodySource,
     mode: i32,
     html_convert: Option<HtmlConvertMode>,
 ) -> JSResult {
@@ -68,37 +77,45 @@ pub(crate) fn drain_body(
             }
         })?;
 
-    let buf = Arc::new(Mutex::new(Some(Vec::new())));
-    let start = Instant::now();
-    ctx.queue_job(
-        move |_cx| {
-            let mut guard = buf.lock().unwrap();
-            let inner = guard.as_mut().unwrap();
-            match rx.try_recv() {
-                Ok(chunk) => {
-                    inner.extend_from_slice(&chunk);
-                    Ok(JobState::Again)
-                }
-                Err(TryRecvError::Disconnected) => {
-                    let full = guard.take().unwrap();
-                    let _ = result_slot.commit(Ok(full));
-                    Ok(JobState::Done)
-                }
-                Err(TryRecvError::Empty) => {
-                    if start.elapsed() > BODY_TIMEOUT {
-                        guard.take();
-                        let _ = result_slot.commit(Err("body read timeout".into()));
-                        Ok(JobState::Done)
-                    } else {
-                        Ok(JobState::Again)
+    match source {
+        BodySource::Synthetic(buf) => {
+            // Entire body is already available — commit directly, no polling needed.
+            let _ = result_slot.commit(Ok(buf));
+            Ok(promise.into())
+        }
+        BodySource::Channel(rx) => {
+            let buf = Arc::new(Mutex::new(Some(Vec::new())));
+            let start = Instant::now();
+            ctx.queue_job(
+                move |_cx| {
+                    let mut guard = buf.lock().unwrap();
+                    let inner = guard.as_mut().unwrap();
+                    match rx.try_recv() {
+                        Ok(chunk) => {
+                            inner.extend_from_slice(&chunk);
+                            Ok(JobState::Again)
+                        }
+                        Err(TryRecvError::Disconnected) => {
+                            let full = guard.take().unwrap();
+                            let _ = result_slot.commit(Ok(full));
+                            Ok(JobState::Done)
+                        }
+                        Err(TryRecvError::Empty) => {
+                            if start.elapsed() > BODY_TIMEOUT {
+                                guard.take();
+                                let _ = result_slot.commit(Err("body read timeout".into()));
+                                Ok(JobState::Done)
+                            } else {
+                                Ok(JobState::Again)
+                            }
+                        }
                     }
-                }
-            }
-        },
-        (),
-    );
-
-    Ok(promise.into())
+                },
+                (),
+            );
+            Ok(promise.into())
+        }
+    }
 }
 
 /// Create an async-iterable body stream from a `Receiver`, attaching a

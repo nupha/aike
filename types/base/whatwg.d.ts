@@ -67,8 +67,8 @@ declare class Response {
   readonly headers: Headers;
   /** Whether the body has been consumed. */
   readonly bodyUsed: boolean;
-  /** Async iterator over response body chunks, or null for null-body responses. */
-  readonly body: AsyncIterableIterator<Uint8Array> | null;
+  /** ReadableStream over response body chunks, or null for null-body responses. */
+  readonly body: ReadableStream<Uint8Array> | null;
   /** Read the entire body as bytes. */
   bytes(): Promise<Uint8Array>;
   /** Read the entire body as a string. */
@@ -402,8 +402,8 @@ declare class Request {
   readonly headers: Headers;
   /** Whether the body has been consumed. */
   readonly bodyUsed: boolean;
-  /** Async iterator over request body chunks, or null if none. */
-  readonly body: AsyncIterableIterator<Uint8Array> | null;
+  /** ReadableStream over request body chunks, or null if none. */
+  readonly body: ReadableStream<Uint8Array> | null;
   /** Read the body as bytes. */
   bytes(): Promise<Uint8Array>;
   /** Read the body as an ArrayBuffer. */
@@ -425,3 +425,227 @@ declare function fetch(
   input: RequestInfo,
   init?: RequestInit,
 ): Promise<Response>;
+
+// ---------------------------------------------------------------------------
+// ReadableStream
+// ---------------------------------------------------------------------------
+
+/** WhatWG ReadableStream — a source of data that can be read chunk by chunk. */
+declare class ReadableStream<T = any> {
+  constructor(
+    underlyingSource?: UnderlyingSource<T>,
+    strategy?: QueuingStrategy<T>,
+  );
+
+  /** Whether the stream is locked to a reader. */
+  readonly locked: boolean;
+
+  /** Create a reader and lock the stream. */
+  getReader(): ReadableStreamDefaultReader<T>;
+
+  /** Cancel the stream, optionally with a reason. */
+  cancel(reason?: any): Promise<void>;
+
+  /** Pipe the stream through a transform and into a writable destination. */
+  pipeThrough<R>(
+    transform: { readable: ReadableStream<R>; writable: WritableStream<T> },
+    options?: {
+      preventClose?: boolean;
+      preventAbort?: boolean;
+      preventCancel?: boolean;
+    },
+  ): ReadableStream<R>;
+
+  /** Pipe the stream to a writable stream. */
+  pipeTo(
+    dest: WritableStream<T>,
+    options?: {
+      preventClose?: boolean;
+      preventAbort?: boolean;
+      preventCancel?: boolean;
+    },
+  ): Promise<void>;
+
+  /** Async iterator over stream chunks (spans multiple reads). */
+  [Symbol.asyncIterator](): AsyncIterableIterator<T>;
+}
+
+/** Options for constructing a ReadableStream. */
+interface UnderlyingSource<T = any> {
+  start?: (controller: ReadableStreamDefaultController<T>) => void;
+  pull?: (controller: ReadableStreamDefaultController<T>) => void;
+  cancel?: (reason?: any) => void;
+  type?: "bytes";
+  autoAllocateChunkSize?: number;
+}
+
+/** Default reader for a ReadableStream. */
+declare class ReadableStreamDefaultReader<T = any> {
+  /** Lock the stream and create a reader. */
+  private constructor();
+
+  /** Read the next chunk (or signal done). */
+  read(): Promise<ReadableStreamReadResult<T>>;
+
+  /** Cancel the stream. */
+  cancel(reason?: any): Promise<void>;
+
+  /** Release the lock, allowing another reader. */
+  releaseLock(): void;
+}
+
+/** Result of a stream read. */
+interface ReadableStreamReadResult<T> {
+  value: T | undefined;
+  done: boolean;
+}
+
+/** Controller for a ReadableStream (exposed to the underlying source). */
+declare class ReadableStreamDefaultController<T = any> {
+  private constructor();
+
+  /** Enqueue a chunk. */
+  enqueue(chunk: T): void;
+
+  /** Close the stream (no more data). */
+  close(): void;
+
+  /** Signal an error. */
+  error(e?: any): void;
+
+  /** The desired size to fill the internal buffer. */
+  readonly desiredSize: number | null;
+}
+
+// ---------------------------------------------------------------------------
+// WritableStream
+// ---------------------------------------------------------------------------
+
+/** WhatWG WritableStream — a destination for data. */
+declare class WritableStream<T = any> {
+  constructor(
+    underlyingSink?: UnderlyingSink<T>,
+    strategy?: QueuingStrategy<T>,
+  );
+
+  /** Whether the stream is locked to a writer. */
+  readonly locked: boolean;
+
+  /** Create a writer and lock the stream. */
+  getWriter(): WritableStreamDefaultWriter<T>;
+
+  /** Abort the stream with a reason. */
+  abort(reason?: any): Promise<void>;
+
+  /** Close and signal no more writes. */
+  close(): Promise<void>;
+}
+
+/** Options for constructing a WritableStream. */
+interface UnderlyingSink<T = any> {
+  start?: (controller: WritableStreamDefaultController) => void;
+  write?: (chunk: T, controller: WritableStreamDefaultController) => void;
+  close?: () => void;
+  abort?: (reason?: any) => void;
+  type?: "bytes";
+}
+
+/** Default writer for a WritableStream. */
+declare class WritableStreamDefaultWriter<T = any> {
+  private constructor();
+
+  /** Write a chunk. */
+  write(chunk: T): Promise<void>;
+
+  /** Close the writer (and the stream). */
+  close(): Promise<void>;
+
+  /** Abort the stream. */
+  abort(reason?: any): Promise<void>;
+
+  /** Release the lock. */
+  releaseLock(): void;
+
+  /** The desired size to fill the internal buffer. */
+  readonly desiredSize: number | null;
+}
+
+/** Controller for a WritableStream (exposed to the underlying sink). */
+declare class WritableStreamDefaultController {
+  private constructor();
+  error(e?: any): void;
+}
+
+// ---------------------------------------------------------------------------
+// TransformStream
+// ---------------------------------------------------------------------------
+
+/** WhatWG TransformStream — transforms data passing from readable to writable. */
+declare class TransformStream<T = any, R = any> {
+  constructor(
+    transformer?: Transformer<T, R>,
+    writableStrategy?: QueuingStrategy<T>,
+    readableStrategy?: QueuingStrategy<R>,
+  );
+
+  /** The readable side. */
+  readonly readable: ReadableStream<R>;
+  /** The writable side. */
+  readonly writable: WritableStream<T>;
+}
+
+/** Options for constructing a TransformStream. */
+interface Transformer<T = any, R = any> {
+  start?: (controller: TransformStreamDefaultController<R>) => void;
+  transform?: (
+    chunk: T,
+    controller: TransformStreamDefaultController<R>,
+  ) => void;
+  flush?: (controller: TransformStreamDefaultController<R>) => void;
+  cancel?: (reason?: any) => void;
+  readableType?: never;
+  writableType?: never;
+}
+
+/** Controller for a TransformStream. */
+declare class TransformStreamDefaultController<R = any> {
+  private constructor();
+
+  /** Enqueue a chunk to the readable side. */
+  enqueue(chunk: R): void;
+
+  /** Signal an error. */
+  error(reason?: any): void;
+
+  /** Terminate the stream — no more data on readable. */
+  terminate(): void;
+
+  /** The desired size to fill the internal buffer. */
+  readonly desiredSize: number | null;
+}
+
+// ---------------------------------------------------------------------------
+// Queuing strategies
+// ---------------------------------------------------------------------------
+
+/** WhatWG QueuingStrategy — determines how chunks are counted for backpressure. */
+interface QueuingStrategy<T = any> {
+  highWaterMark?: number;
+  size?: (chunk: T) => number;
+}
+
+/** Strategy that sizes chunks by byte length. */
+declare class ByteLengthQueuingStrategy<
+  T extends ArrayBufferView = ArrayBufferView,
+> {
+  constructor(init: { highWaterMark: number });
+  highWaterMark: number;
+  size(chunk: T): number;
+}
+
+/** Strategy that counts each chunk as 1. */
+declare class CountQueuingStrategy {
+  constructor(init: { highWaterMark: number });
+  highWaterMark: number;
+  size(): number;
+}

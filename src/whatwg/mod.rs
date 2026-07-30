@@ -6,6 +6,7 @@
 pub mod abort;
 pub mod console;
 pub mod fetch;
+pub mod stream;
 pub mod text_decoder;
 pub mod text_encoder;
 pub mod timeout;
@@ -22,6 +23,16 @@ pub(crate) fn install_whatwg(ctx: &mut ScopedContext, mut global: Object) -> Res
         text_encoder::JSTextEncoder::class_id(),
         url::JSURL::class_id(),
         url::JSURLSearchParams::class_id(),
+        stream::JSReadableStream::class_id(),
+        stream::JSReadableStreamDefaultReader::class_id(),
+        stream::JSReadableStreamDefaultController::class_id(),
+        stream::JSWritableStream::class_id(),
+        stream::JSWritableStreamDefaultWriter::class_id(),
+        stream::JSWritableStreamDefaultController::class_id(),
+        stream::JSTransformStream::class_id(),
+        stream::JSTransformStreamDefaultController::class_id(),
+        stream::JSByteLengthQueuingStrategy::class_id(),
+        stream::JSCountQueuingStrategy::class_id(),
     ])?;
 
     console::install_console(ctx, &mut global)?;

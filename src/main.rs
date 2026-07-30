@@ -573,7 +573,7 @@ async fn main() -> ExitCode {
         ExitStatus::Interrupted(code) => {
             #[cfg(debug_assertions)]
             log::debug!("Process interrupted with code {:?}", code);
-            ExitCode::from(code)
+            code
         }
         ExitStatus::Exception(Exception::OutOfMemory) => {
             colorize_println("out of memory", RedFg);
@@ -594,7 +594,7 @@ fn js_module_loader(
     _: *mut std::ffi::c_void,
 ) -> Result<ModuleDef, i32> {
     // Convert URL back to absolute path for filesystem access.
-    let Some(file_path) =  zuqe::url_to_abspath(file_name) else {
+    let Some(file_path) = zuqe::url_to_abspath(file_name) else {
         return Err(ctx.throw_reference_error(&format!(
             "could not load module '{file_name}': not a file:// URL"
         )));
@@ -670,10 +670,10 @@ fn read_script(file_name: &str) -> Result<(Vec<u8>, String), String> {
     }
 
     // Try TS/MTS/CTS fallback
-    if let Some(ts_name) = ts_fallback(file_name) {
-        if let Ok(buf) = std::fs::read(&ts_name) {
-            return Ok((buf, ts_name));
-        }
+    if let Some(ts_name) = ts_fallback(file_name)
+        && let Ok(buf) = std::fs::read(&ts_name)
+    {
+        return Ok((buf, ts_name));
     }
 
     // Report original error

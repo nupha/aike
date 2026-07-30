@@ -298,17 +298,20 @@ function testRequest() {
       });
     })
     .then(() => {
-      const r = new Request("http://x", { method: "POST", body: "iter" });
-      const it = r.body;
-      check("Request.body is iterable", it !== null);
+      const r = new Request("http://x", { method: "POST", body: "reader" });
+      const bodyStream = r.body;
+      check(
+        "Request.body is ReadableStream",
+        bodyStream instanceof ReadableStream,
+      );
       let bodyStr = "";
       return (async () => {
-        for await (const chunk of it) {
+        for await (const chunk of bodyStream) {
           bodyStr += String.fromCharCode.apply(null, chunk);
         }
         check(
-          "Request.body async iteration",
-          bodyStr === "iter",
+          "Request.body for await...of",
+          bodyStr === "reader",
           `got "${bodyStr}"`,
         );
       })();
@@ -329,6 +332,19 @@ function testResponse() {
   check("Response ok (201)", r.ok === true);
   check("Response type default", r.type === "default", `got ${r.type}`);
   check("Response headers case-insensitive", r.headers.get("x-test") === "yes");
+
+  let bodyIsRS = false;
+  try {
+    bodyIsRS = r.body instanceof ReadableStream;
+  } catch (e) {
+    console.log("  [DEBUG] body access error:", e.message);
+    console.log("  [DEBUG] bodyUsed before:", r.bodyUsed);
+  }
+  check(
+    "Response.body is ReadableStream",
+    bodyIsRS,
+    `got body instanceof=${bodyIsRS}`,
+  );
 
   const r4 = new Response(null, { status: 404 });
   check("Response ok (404)", r4.ok === false);
@@ -427,16 +443,35 @@ function testResponse() {
       });
     })
     .then(() => {
-      const r = new Response("iterable");
-      const it = r.body;
-      check("Response.body is iterable", it !== null);
+      // body as ReadableStream — getReader + read
+      const r1 = new Response("hello-reader");
+      const reader1 = r1.body.getReader();
+      return reader1.read().then((result) => {
+        check("Response.body reader read() done=false", result.done === false);
+        const str = String.fromCharCode.apply(null, result.value);
+        check(
+          "Response.body reader read() value",
+          str === "hello-reader",
+          `got "${str}"`,
+        );
+        return reader1.read().then((done) => {
+          check(
+            "Response.body reader read() after end done=true",
+            done.done === true,
+          );
+        });
+      });
+    })
+    .then(() => {
+      // body as ReadableStream — for await...of
+      const r2 = new Response("iterable");
       let bodyStr = "";
       return (async () => {
-        for await (const chunk of it) {
+        for await (const chunk of r2.body) {
           bodyStr += String.fromCharCode.apply(null, chunk);
         }
         check(
-          "Response.body async iteration",
+          "Response.body for await...of",
           bodyStr === "iterable",
           `got "${bodyStr}"`,
         );

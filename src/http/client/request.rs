@@ -10,13 +10,13 @@ use zuqe::{
 use crate::{
     USER_CLASS_DEFS,
     http::client::{
-        body::{
-            BODY_AS_BYTES, BODY_AS_JSON, BODY_AS_TEXT, body_to_bytes, drain_body,
-            make_body_async_iterator,
-        },
+        body::{BODY_AS_BYTES, BODY_AS_JSON, BODY_AS_TEXT, BodySource, body_to_bytes, drain_body},
         headers::{HeaderList, HeadersPayload, JSHeaders, header_list_from_js},
     },
-    whatwg::abort::JSAbortSignal,
+    whatwg::{
+        abort::JSAbortSignal,
+        stream::{readable_stream_from_bytes, readable_stream_from_channel},
+    },
 };
 
 pub(crate) struct RequestPayload {
@@ -68,7 +68,7 @@ fn js_request_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
         method = p.method.clone();
         header_list = p.headers.clone();
         redirect = p.redirect.clone();
-        signal = p.signal.clone();
+        signal = p.signal;
         synthetic_body = p.synthetic_body.clone();
     } else if !input.is_undefined_or_null() {
         let href = input.get_property_str(ctx, "href")?;
@@ -113,10 +113,8 @@ fn js_request_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
                 redirect = r.to_string(ctx)?.content().encode_utf8(false).to_string();
             }
             let s = o.get_property_str(ctx, "signal")?;
-            if !s.is_undefined_or_null() {
-                if s.as_native_object::<JSAbortSignal>().is_some() {
-                    signal = Some(s.clone());
-                }
+            if !s.is_undefined_or_null() && s.as_native_object::<JSAbortSignal>().is_some() {
+                signal = Some(s.clone());
             }
         }
     }
@@ -206,7 +204,7 @@ fn js_req_keepalive_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
 fn js_req_signal_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let p = get_request_payload(ctx, &this)?;
-    Ok(p.signal.clone().unwrap_or(JSValue::NULL))
+    Ok(p.signal.unwrap_or(JSValue::NULL))
 }
 
 fn js_req_headers_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -230,23 +228,20 @@ fn js_req_body_used_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
 
 fn js_req_body(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut this = cc.this();
-    let rx = {
+    let source = {
         let p = get_request_payload_mut(ctx, &mut this)?;
         if p.body_consumed {
             None
         } else if let Some(bytes) = p.synthetic_body.take() {
             p.body_consumed = true;
-            let (tx, rx) = crossbeam::channel::unbounded::<Vec<u8>>();
-            tokio::spawn(async move {
-                let _ = tx.send(bytes);
-            });
-            Some(rx)
+            Some(BodySource::Synthetic(bytes))
         } else {
             None
         }
     };
-    match rx {
-        Some(rx) => make_body_async_iterator(ctx, rx),
+    match source {
+        Some(BodySource::Channel(rx)) => readable_stream_from_channel(ctx, rx),
+        Some(BodySource::Synthetic(bytes)) => readable_stream_from_bytes(ctx, bytes),
         None => Ok(JSValue::NULL),
     }
 }
@@ -256,24 +251,20 @@ fn js_req_body_as(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let magic = cc.magic();
 
     let mut this = cc.this();
-    let rx = {
+    let source = {
         let p = get_request_payload_mut(ctx, &mut this)?;
         if p.body_consumed {
             None
         } else if let Some(bytes) = p.synthetic_body.take() {
             p.body_consumed = true;
-            let (tx, rx) = crossbeam::channel::unbounded::<Vec<u8>>();
-            tokio::spawn(async move {
-                let _ = tx.send(bytes);
-            });
-            Some(rx)
+            Some(BodySource::Synthetic(bytes))
         } else {
             None
         }
     };
 
-    match rx {
-        Some(rx) => drain_body(ctx, rx, magic, None),
+    match source {
+        Some(source) => drain_body(ctx, source, magic, None),
         None => Err(ctx.throw_type_error("body already consumed or unavailable")),
     }
 }
@@ -307,7 +298,7 @@ fn js_req_clone(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         redirect: src.redirect.clone(),
         integrity: src.integrity.clone(),
         keepalive: src.keepalive,
-        signal: src.signal.clone(),
+        signal: src.signal,
         synthetic_body: synthetic,
         body_consumed: false,
     };

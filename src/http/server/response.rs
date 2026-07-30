@@ -345,6 +345,7 @@ fn ensure_sse_headers(headers: &mut Vec<(String, String)>) {
 fn js_res_sse(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut this = cc.this();
     let data = get_res_payload_mut(ctx, &mut this)?;
+
     // Already switched → error.
     if data.response_tx.is_none() {
         return Err(ctx.throw_type_error("response already switched to SSE"));

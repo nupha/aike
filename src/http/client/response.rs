@@ -25,12 +25,13 @@ use crate::{
     html::HtmlConvertMode,
     http::client::{
         body::{
-            BODY_AS_BYTES, BODY_AS_JSON, BODY_AS_TEXT, BODY_AS_TEXT_CONVERT, body_to_bytes,
-            drain_body, make_body_async_iterator,
+            BODY_AS_BYTES, BODY_AS_JSON, BODY_AS_TEXT, BODY_AS_TEXT_CONVERT, BodySource,
+            body_to_bytes, drain_body,
         },
         headers::{HeaderList, HeadersPayload, JSHeaders, header_list_from_js},
         transport::TransportResponse,
     },
+    whatwg::stream::{readable_stream_from_bytes, readable_stream_from_channel},
 };
 
 /// WHATWG `Response.type` (closed set of values this runtime produces).
@@ -80,12 +81,13 @@ pub(crate) struct ResponsePayload {
 }
 
 impl ResponsePayload {
-    /// Start body streaming (lazily) and return the `Receiver`.
+    /// Start body streaming (lazily) and return a `BodySource`.
     /// Returns `Err` if the body was already consumed or is unavailable.
-    fn ensure_body_stream(&mut self) -> Result<Receiver<Vec<u8>>, i32> {
+    fn ensure_body_stream(&mut self) -> Result<BodySource, i32> {
         if self.body_consumed {
             return Err(-1);
         }
+
         self.body_consumed = true;
 
         if let Some(resp) = self.resp.take() {
@@ -108,14 +110,9 @@ impl ResponsePayload {
                     }
                 }
             });
-            Ok(self.body_rx.take().unwrap())
+            Ok(BodySource::Channel(self.body_rx.take().unwrap()))
         } else if let Some(bytes) = self.synthetic_body.take() {
-            let (tx, rx) = crossbeam::channel::unbounded::<Vec<u8>>();
-            self.body_rx = Some(rx);
-            tokio::spawn(async move {
-                let _ = tx.send(bytes);
-            });
-            Ok(self.body_rx.take().unwrap())
+            Ok(BodySource::Synthetic(bytes))
         } else {
             Err(-1)
         }
@@ -355,20 +352,22 @@ fn js_response_static_json(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
     let mut status_text = String::new();
     let mut header_list = HeaderList::new();
 
-    if cc.length() > 1 {
-        if let Some(o) = cc.arg(1).as_object() {
-            let s = o.get_property_str(ctx, "status")?;
-            if !s.is_undefined() {
-                status = s.to_number(ctx)?.to_i32() as u16;
-            }
-            let st = o.get_property_str(ctx, "statusText")?;
-            if !st.is_undefined() {
-                status_text = st.to_string(ctx)?.content().encode_utf8(false).to_string();
-            }
-            let mut h = o.get_property_str(ctx, "headers")?;
-            if !h.is_undefined_or_null() {
-                header_list = header_list_from_js(ctx, &mut h)?;
-            }
+    if cc.length() > 1
+        && let Some(o) = cc.arg(1).as_object()
+    {
+        let s = o.get_property_str(ctx, "status")?;
+        if !s.is_undefined() {
+            status = s.to_number(ctx)?.to_i32() as u16;
+        }
+
+        let st = o.get_property_str(ctx, "statusText")?;
+        if !st.is_undefined() {
+            status_text = st.to_string(ctx)?.content().encode_utf8(false).to_string();
+        }
+
+        let mut h = o.get_property_str(ctx, "headers")?;
+        if !h.is_undefined_or_null() {
+            header_list = header_list_from_js(ctx, &mut h)?;
         }
     }
 
@@ -471,11 +470,11 @@ fn js_response_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
 fn js_response_body(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut this = cc.this();
-    let rx = {
+    let source = {
         let p = get_response_payload_mut(ctx, &mut this)?;
         if p.resp.is_some() || p.synthetic_body.is_some() {
             match p.ensure_body_stream() {
-                Ok(rx) => Some(rx),
+                Ok(source) => Some(source),
                 Err(_) => None,
             }
         } else if matches!(p.resp_type, RespType::Error | RespType::OpaqueRedirect) {
@@ -485,8 +484,9 @@ fn js_response_body(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         }
     };
 
-    match rx {
-        Some(rx) => make_body_async_iterator(ctx, rx),
+    match source {
+        Some(BodySource::Channel(rx)) => readable_stream_from_channel(ctx, rx),
+        Some(BodySource::Synthetic(bytes)) => readable_stream_from_bytes(ctx, bytes),
         None => Err(ctx.throw_type_error("body already consumed")),
     }
 }
@@ -494,7 +494,7 @@ fn js_response_body(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 fn js_response_body_as(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let magic = cc.magic();
 
-    let (rx, html_convert) = {
+    let (source, html_convert) = {
         let mut this = cc.this();
         let p = get_response_payload_mut(ctx, &mut this)?;
         let is_html = p.content_type.starts_with("text/html");
@@ -520,15 +520,15 @@ fn js_response_body_as(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         }
     };
 
-    match rx {
-        Some(rx) => {
+    match source {
+        Some(source) => {
             // Normalize the convert variant back to plain text mode for draining.
             let mode = if magic == BODY_AS_TEXT_CONVERT {
                 BODY_AS_TEXT
             } else {
                 magic
             };
-            drain_body(ctx, rx, mode, html_convert)
+            drain_body(ctx, source, mode, html_convert)
         }
         None => Err(ctx.throw_type_error("body already consumed or unavailable")),
     }

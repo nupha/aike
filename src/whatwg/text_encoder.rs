@@ -48,8 +48,7 @@ fn js_encode_into(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let dest_obj = dest_val
         .as_object()
         .ok_or_else(|| ctx.throw_type_error("destination must be a Uint8Array"))?;
-
-    let mut ta = TypedArray::try_from(dest_obj.clone())
+    let mut ta = TypedArray::try_from(dest_obj)
         .map_err(|_| ctx.throw_type_error("destination must be a Uint8Array"))?;
 
     let src = utf8.as_bytes();

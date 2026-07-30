@@ -53,7 +53,7 @@ fn js_console_print(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             out.push_str(&colorize(" ", clr()));
         }
         let arg = cc.arg(i);
-        out.push_str(&colorize(&console_format_arg(ctx, arg), clr()));
+        out.push_str(&colorize(console_format_arg(ctx, arg), clr()));
     }
 
     if magic == 4 {
@@ -77,7 +77,7 @@ fn js_console_assert(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         out.push_str(&colorize("Assertion failed", Color::RedFg));
         for i in 1..cc.length() {
             out.push_str(&colorize(" ", Color::RedFg));
-            out.push_str(&colorize(&js_inspect(ctx, cc.arg(i)), Color::RedFg));
+            out.push_str(&colorize(js_inspect(ctx, cc.arg(i)), Color::RedFg));
         }
 
         eprintln!("{}", out);
@@ -104,7 +104,7 @@ fn js_console_trace(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     console_println(out);
 
     // Append stack trace via JS eval
-    let _ = ctx.with_new_scope(|scope| {
+    ctx.with_new_scope(|scope| {
         if let Ok(stack_val) = scope.eval(
             b"new Error().stack",
             "<console.trace>",
@@ -231,7 +231,7 @@ fn js_console_time_log(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             out.push_str(&colorize(format!("{label}: {ms:.1} ms"), Color::Reset));
             for i in 1..cc.length() {
                 out.push_str(&colorize(" ", Color::Reset));
-                out.push_str(&colorize(&js_inspect(ctx, cc.arg(i)), Color::Reset));
+                out.push_str(&colorize(js_inspect(ctx, cc.arg(i)), Color::Reset));
             }
             console_println(out);
         }
