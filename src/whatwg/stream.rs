@@ -41,10 +41,6 @@ struct QueueEntry {
     size: f64,
 }
 
-// ============================================================================
-// ReadableStream
-// ============================================================================
-
 struct ReadableStreamPayload {
     state: RsState,
     stored_error: JSValue,
@@ -166,10 +162,6 @@ fn js_readable_stream_async_iterator(ctx: &mut ScopedContext, cc: CallContext) -
     create_stream_async_iterator(ctx, &cc.this())
 }
 
-// ============================================================================
-// ReadableStreamDefaultReader
-// ============================================================================
-
 pub(crate) struct ReadableStreamDefaultReaderPayload {
     stream: Option<JSReadableStream>,
 }
@@ -177,15 +169,26 @@ pub(crate) struct ReadableStreamDefaultReaderPayload {
 thread_local! {
     static PENDING_READ: RefCell<Option<(Promise, [JSValue; 2])>> =
         const { RefCell::new(None) };
+
+    static CHANNEL_STREAMS: RefCell<HashMap<u64, (JSReadableStreamDefaultController, Receiver<Vec<u8>>)>> =
+        RefCell::new(HashMap::new());
+
+    static NEXT_STREAM_ID: Cell<u64> = const { Cell::new(1) };
 }
 
 /// Called by the runtime GC to keep PENDING_READ's JSValues alive.
-pub(crate) fn gc_trace_pending_read(gcx: &mut GcTraceCtx) {
+pub(crate) fn gc_trace_stream(gcx: &mut GcTraceCtx) {
     PENDING_READ.with_borrow(|opt| {
         if let Some((promise, rr)) = opt.as_ref() {
             promise.trace(gcx);
             rr[0].trace(gcx);
             rr[1].trace(gcx);
+        }
+    });
+
+    CHANNEL_STREAMS.with_borrow(|map| {
+        for (controller, _) in map.values() {
+            controller.as_object().trace(gcx);
         }
     });
 }
@@ -210,7 +213,9 @@ const READER_PROTO: &[FieldDef] = &[
 ];
 
 fn js_reader_constructor(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
-    Err(ctx.throw_type_error("ReadableStreamDefaultReader must be obtained via ReadableStream.getReader()"))
+    Err(ctx.throw_type_error(
+        "ReadableStreamDefaultReader must be obtained via ReadableStream.getReader()",
+    ))
 }
 
 def_native_object!(
@@ -775,9 +780,9 @@ fn js_writable_stream_constructor(ctx: &mut ScopedContext, cc: CallContext) -> J
 
     if let Some(obj) = underlying_sink.as_object()
         && let Ok(start_fn) = obj.get_property_str(ctx, "start")
-        && let Ok(cb) = start_fn.ensure_callable(ctx)
+        && start_fn.is_callable()
     {
-        let _ = cb.call(ctx, underlying_sink, &[JSValue::from(controller)]);
+        let _ = start_fn.call(ctx, underlying_sink, &[JSValue::from(controller)]);
     }
 
     Ok(stream.into())
@@ -874,7 +879,9 @@ const WRITER_PROTO: &[FieldDef] = &[
 ];
 
 fn js_writer_constructor(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
-    Err(ctx.throw_type_error("WritableStreamDefaultWriter must be obtained via WritableStream.getWriter()"))
+    Err(ctx.throw_type_error(
+        "WritableStreamDefaultWriter must be obtained via WritableStream.getWriter()",
+    ))
 }
 
 def_native_object!(
@@ -907,7 +914,8 @@ fn js_writer_write(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 return make_rejected_promise(ctx, reason);
             }
             RsState::Closed => {
-                let reason = ctx.create_string_from_utf8(b"Writer is closed".to_vec())
+                let reason = ctx
+                    .create_string_from_utf8(b"Writer is closed".to_vec())
                     .map(JSValue::make_string)
                     .unwrap_or(JSValue::UNDEFINED);
                 return make_rejected_promise(ctx, reason);
@@ -915,48 +923,49 @@ fn js_writer_write(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             _ => {}
         }
 
-        if let Some(controller) = sp.controller
-    {
-        let cp = controller
-            .payload()
-            .ok_or_else(|| ctx.throw_internal_error("invalid controller"))?;
+        if let Some(controller) = sp.controller {
+            let cp = controller
+                .payload()
+                .ok_or_else(|| ctx.throw_internal_error("invalid controller"))?;
 
-        // TransformStream path: use transformer.transform(chunk, transformController)
-        if let Some(tc) = cp.transform_controller
-            && let Some(tcp) = tc.payload()
-            && let Some(obj) = tcp.transformer.as_object()
-        {
-            // Default transform: chunk → readable (pass-through) if no transform fn
-            let has_transform = obj.get_property_str(ctx, "transform")
-                .map(|v| v.is_callable())
-                .unwrap_or(false);
+            // TransformStream path: use transformer.transform(chunk, transformController)
+            if let Some(tc) = cp.transform_controller
+                && let Some(tcp) = tc.payload()
+                && let Some(obj) = tcp.transformer.as_object()
+            {
+                // Default transform: chunk → readable (pass-through) if no transform fn
+                let has_transform = obj
+                    .get_property_str(ctx, "transform")
+                    .map(|v| v.is_callable())
+                    .unwrap_or(false);
 
-            if has_transform {
-                let transform_fn = obj.get_property_str(ctx, "transform").unwrap();
-                let result = transform_fn.call(ctx, tcp.transformer, &[chunk, JSValue::from(tc)])?;
+                if has_transform {
+                    let transform_fn = obj.get_property_str(ctx, "transform").unwrap();
+                    let result =
+                        transform_fn.call(ctx, tcp.transformer, &[chunk, JSValue::from(tc)])?;
+                    if result.is_object() {
+                        return Ok(result);
+                    }
+                } else {
+                    // No user-defined transform → pass through: enqueue chunk directly
+                    let enqueue_fn =
+                        JSValue::from(tcp.readable_controller).get_property_str(ctx, "enqueue")?;
+                    enqueue_fn.call(ctx, JSValue::from(tcp.readable_controller), &[chunk])?;
+                }
+                return make_resolved_promise(ctx, JSValue::UNDEFINED);
+            }
+
+            // Normal writable path
+            if let Some(obj) = cp.underlying_sink.as_object()
+                && let Ok(write_fn) = obj.get_property_str(ctx, "write")
+                && write_fn.is_callable()
+            {
+                let result = write_fn.call(ctx, cp.underlying_sink, &[chunk, controller.into()])?;
                 if result.is_object() {
                     return Ok(result);
                 }
-            } else {
-                // No user-defined transform → pass through: enqueue chunk directly
-                let enqueue_fn = JSValue::from(tcp.readable_controller)
-                    .get_property_str(ctx, "enqueue")?;
-                enqueue_fn.call(ctx, JSValue::from(tcp.readable_controller), &[chunk])?;
-            }
-            return make_resolved_promise(ctx, JSValue::UNDEFINED);
-        }
-
-        // Normal writable path
-        if let Some(obj) = cp.underlying_sink.as_object()
-            && let Ok(write_fn) = obj.get_property_str(ctx, "write")
-            && write_fn.is_callable()
-        {
-            let result = write_fn.call(ctx, cp.underlying_sink, &[chunk, controller.into()])?;
-            if result.is_object() {
-                return Ok(result);
             }
         }
-    }
     }
 
     make_resolved_promise(ctx, JSValue::UNDEFINED)
@@ -1189,19 +1198,17 @@ fn js_transform_stream_constructor(ctx: &mut ScopedContext, cc: CallContext) -> 
     let mut writable =
         JSWritableStream::new_instance(ctx, JSValue::UNDEFINED, WritableStreamPayload::new())?;
     let wc_payload = WritableStreamDefaultControllerPayload::new(transformer, Some(writable));
-    let wcv = JSWritableStreamDefaultController::new_instance(
-        ctx,
-        JSValue::UNDEFINED,
-        wc_payload,
-    )?;
+    let wcv = JSWritableStreamDefaultController::new_instance(ctx, JSValue::UNDEFINED, wc_payload)?;
     writable.payload_mut().unwrap().controller.replace(wcv);
 
     // Capture rc and writable again after mutable borrow
     let rc = readable.payload().unwrap().controller.unwrap();
     let mut wc = writable.payload().unwrap().controller.unwrap();
-    let transformer = if let Some(cp) = wc.payload()
-        { cp.underlying_sink }
-    else { JSValue::UNDEFINED };
+    let transformer = if let Some(cp) = wc.payload() {
+        cp.underlying_sink
+    } else {
+        JSValue::UNDEFINED
+    };
 
     // Transform controller
     let tc = JSTransformStreamDefaultController::new_instance(
@@ -1291,7 +1298,12 @@ const TRANSFORM_CONTROLLER_PROTO: &[FieldDef] = &[
     FieldDef::FUNC("enqueue", 1, js_transform_controller_enqueue, 0),
     FieldDef::FUNC("error", 1, js_transform_controller_error, 0),
     FieldDef::FUNC("terminate", 0, js_transform_controller_terminate, 0),
-    FieldDef::GETSET("desiredSize", Some(js_transform_controller_desired_size), None, 0),
+    FieldDef::GETSET(
+        "desiredSize",
+        Some(js_transform_controller_desired_size),
+        None,
+        0,
+    ),
     FieldDef::STR(
         "[Symbol.toStringTag]",
         "TransformStreamDefaultController",
@@ -1319,7 +1331,8 @@ fn js_transform_controller_enqueue(ctx: &mut ScopedContext, cc: CallContext) -> 
         .ok_or_else(|| ctx.throw_type_error("not a TransformStreamDefaultController"))?;
 
     let rc = p.readable_controller;
-    let rcp = rc.payload()
+    let rcp = rc
+        .payload()
         .ok_or_else(|| ctx.throw_internal_error("invalid readable controller"))?;
 
     if rcp.close_requested.get() {
@@ -1358,8 +1371,7 @@ fn js_transform_controller_error(ctx: &mut ScopedContext, cc: CallContext) -> JS
         .ok_or_else(|| ctx.throw_type_error("not a TransformStreamDefaultController"))?;
 
     // Error the readable side via the readable controller
-    if let Some(rcp) = p.readable_controller.payload()
-    {
+    if let Some(rcp) = p.readable_controller.payload() {
         PENDING_READ.with(|slot| {
             let mut s = slot.borrow_mut();
             if let Some((mut promise, _slot)) = s.take() {
@@ -1397,8 +1409,7 @@ fn js_transform_controller_terminate(ctx: &mut ScopedContext, cc: CallContext) -
         .ok_or_else(|| ctx.throw_type_error("not a TransformStreamDefaultController"))?;
 
     // Close the readable side
-    if let Some(rcp) = p.readable_controller.payload()
-    {
+    if let Some(rcp) = p.readable_controller.payload() {
         rcp.close_requested.set(true);
 
         PENDING_READ.with(|slot| {
@@ -1419,7 +1430,8 @@ fn js_transform_controller_terminate(ctx: &mut ScopedContext, cc: CallContext) -
     }
 
     // Error the writable side
-    let err = ctx.create_string_from_utf8(b"TransformStream terminated".to_vec())
+    let err = ctx
+        .create_string_from_utf8(b"TransformStream terminated".to_vec())
         .map(JSValue::make_string)
         .unwrap_or(JSValue::UNDEFINED);
     if let Some(wsp) = p.writable_stream.payload()
@@ -1568,17 +1580,6 @@ fn make_rejected_promise(ctx: &mut ScopedContext, reason: JSValue) -> Result<JSV
     Ok(promise.into())
 }
 
-// ============================================================================
-// Channel-backed ReadableStream
-// ============================================================================
-
-thread_local! {
-    static CHANNEL_STREAMS: RefCell<HashMap<u64, (JSValue, Receiver<Vec<u8>>)>> =
-        RefCell::new(HashMap::new());
-
-    static NEXT_STREAM_ID: Cell<u64> = const { Cell::new(1) };
-}
-
 /// Create a `ReadableStream` backed by a `crossbeam::Receiver<Vec<u8>>`.
 ///
 /// Uses a background microtask (queue_job) to poll the channel and push
@@ -1598,8 +1599,6 @@ pub(crate) fn readable_stream_from_channel(
         JSValue::UNDEFINED,
         ReadableStreamDefaultControllerPayload::new(JSValue::from(source), Some(stream)),
     )?;
-    let controller_val = JSValue::from(controller);
-
     stream.payload_mut().unwrap().controller = Some(controller);
 
     let id = NEXT_STREAM_ID.with(|n| {
@@ -1610,7 +1609,7 @@ pub(crate) fn readable_stream_from_channel(
 
     let was_empty = CHANNEL_STREAMS.with(|map| {
         let empty = map.borrow().is_empty();
-        map.borrow_mut().insert(id, (controller_val, rx));
+        map.borrow_mut().insert(id, (controller, rx));
         empty
     });
 
@@ -1679,7 +1678,7 @@ fn start_channel_stream_poller(ctx: &mut ScopedContext) {
                                 .map(JSValue::make_string)
                                 .map_err(|_| -1)?;
                             let error_fn = controller.get_property_str(cx, "error")?;
-                            let _ = error_fn.call(cx, *controller, &[err]);
+                            let _ = error_fn.call(cx, JSValue::from(*controller), &[err]);
                             Ok(())
                         })();
                         to_remove.push(id);
@@ -1694,14 +1693,18 @@ fn start_channel_stream_poller(ctx: &mut ScopedContext) {
                                         cx.throw_internal_error("TypedArray creation failed")
                                     })?;
                                 let enqueue_fn = controller.get_property_str(cx, "enqueue")?;
-                                let _ = enqueue_fn.call(cx, *controller, &[JSValue::from(ta)]);
+                                let _ = enqueue_fn.call(
+                                    cx,
+                                    JSValue::from(*controller),
+                                    &[JSValue::from(ta)],
+                                );
                                 Ok(())
                             })();
                         }
                         Err(TryRecvError::Disconnected) => {
                             let _ = (|| -> Result<(), i32> {
                                 let close_fn = controller.get_property_str(cx, "close")?;
-                                let _ = close_fn.call(cx, *controller, &[]);
+                                let _ = close_fn.call(cx, JSValue::from(*controller), &[]);
                                 Ok(())
                             })();
                             to_remove.push(id);
