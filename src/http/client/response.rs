@@ -88,13 +88,13 @@ impl ResponsePayload {
             return Err(-1);
         }
 
-        self.body_consumed = true;
-
         if let Some(resp) = self.resp.take() {
             let (tx, rx) = crossbeam::channel::unbounded::<Vec<u8>>();
             self.body_rx = Some(rx);
+
             tokio::spawn(async move {
                 use futures_util::StreamExt;
+
                 let mut stream = resp.bytes_stream();
                 while let Some(chunk) = stream.next().await {
                     match chunk {
@@ -516,7 +516,13 @@ fn js_response_body_as(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         if p.resp.is_none() && p.synthetic_body.is_none() {
             (None, convert)
         } else {
-            (p.ensure_body_stream().ok(), convert)
+            let src = p.ensure_body_stream().ok();
+            // Mark body as consumed only when consuming via text/json/bytes/etc.,
+            // NOT via the .body getter (js_response_body).
+            if src.is_some() {
+                p.body_consumed = true;
+            }
+            (src, convert)
         }
     };
 
