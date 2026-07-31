@@ -14,8 +14,8 @@ use zuqe::{
 use crate::USER_CLASS_DEFS;
 
 use super::{
-    RsState, call_opt_method, make_rejected_promise, make_resolved_promise, reject_pending_read,
-    resolve_pending_read, transform::JSTransformStreamDefaultController,
+    RsState, call_opt_method, make_rejected_promise, make_resolved_promise, resolve_pending_read,
+    settle_stream_state, transform::JSTransformStreamDefaultController,
 };
 
 // ============================================================================
@@ -86,12 +86,7 @@ fn js_writable_stream_constructor(ctx: &mut ScopedContext, cc: CallContext) -> J
 
     stream.payload_mut().unwrap().controller = Some(controller);
 
-    let _ = call_opt_method(
-        ctx,
-        underlying_sink,
-        "start",
-        &[JSValue::from(controller)],
-    );
+    let _ = call_opt_method(ctx, underlying_sink, "start", &[JSValue::from(controller)]);
 
     Ok(stream.into())
 }
@@ -136,51 +131,25 @@ fn js_writable_stream_get_writer(ctx: &mut ScopedContext, cc: CallContext) -> JS
 
 fn js_writable_stream_abort(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let reason = cc.arg(0);
-    if let Some(mut stream) = cc.this().as_native_object::<JSWritableStream>()
-        && let Some(p) = stream.payload_mut()
-    {
-        p.state = RsState::Errored;
-        p.stored_error = reason;
+    if let Some(stream) = cc.this().as_native_object::<JSWritableStream>() {
+        settle_stream_state(ctx, stream.into(), RsState::Errored, Some(reason));
 
-        if let Some(writer_val) = p.writer {
-            if let Some(wp) = writer_val.payload() {
-                if let Some(cp) = wp.closed_promise {
-                    let mut cp = cp;
-                    cp.reject(ctx, reason);
-                }
-            }
-        }
-
-        if let Some(controller) = p.controller
+        if let Some(p) = stream.payload()
+            && let Some(controller) = p.controller
             && let Some(cp) = controller.payload()
         {
             // Clear any pending exception left by previous polling jobs
             // before invoking user callback.
             ctx.rt_mut().clear_exception();
-            let _ = call_opt_method(
-                ctx,
-                cp.underlying_sink,
-                "abort",
-                &[reason],
-            );
+            let _ = call_opt_method(ctx, cp.underlying_sink, "abort", &[reason]);
         }
     }
     make_resolved_promise(ctx, JSValue::UNDEFINED)
 }
 
 fn js_writable_stream_close(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    if let Some(mut stream) = cc.this().as_native_object::<JSWritableStream>()
-        && let Some(p) = stream.payload_mut()
-    {
-        p.state = RsState::Closed;
-        if let Some(writer_val) = p.writer {
-            if let Some(wp) = writer_val.payload() {
-                if let Some(cp) = wp.closed_promise {
-                    let mut cp = cp;
-                    cp.resolve(ctx, JSValue::UNDEFINED);
-                }
-            }
-        }
+    if let Some(stream) = cc.this().as_native_object::<JSWritableStream>() {
+        settle_stream_state(ctx, stream.into(), RsState::Closed, None);
     }
     make_resolved_promise(ctx, JSValue::UNDEFINED)
 }
@@ -191,7 +160,7 @@ fn js_writable_stream_close(ctx: &mut ScopedContext, cc: CallContext) -> JSResul
 
 pub(crate) struct WritableStreamDefaultWriterPayload {
     stream: Option<JSWritableStream>,
-    closed_promise: Option<Promise>,
+    pub(crate) closed_promise: Option<Promise>,
 }
 
 impl WritableStreamDefaultWriterPayload {
@@ -357,12 +326,7 @@ fn js_writer_close(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 && let Some(tcp) = tc.payload()
                 && let Some(_obj) = tcp.transformer.as_object()
             {
-                let _ = call_opt_method(
-                    ctx,
-                    tcp.transformer,
-                    "flush",
-                    &[JSValue::from(tc)],
-                );
+                let _ = call_opt_method(ctx, tcp.transformer, "flush", &[JSValue::from(tc)]);
 
                 // After flush, close the readable side of the transform stream
                 if let Some(rcp) = tcp.readable_controller.payload() {
@@ -395,22 +359,15 @@ fn js_writer_abort(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let p = JSWritableStreamDefaultWriter::payload_of(&this)
         .ok_or_else(|| ctx.throw_type_error("not a WritableStreamDefaultWriter"))?;
 
-    if let Some(mut stream_val) = p.stream
-        && let Some(sp) = stream_val.payload_mut()
-    {
-        sp.state = RsState::Errored;
-        sp.stored_error = reason;
+    if let Some(stream_val) = p.stream {
+        settle_stream_state(ctx, stream_val.into(), RsState::Errored, Some(reason));
 
-        if let Some(controller) = sp.controller
+        if let Some(sp) = stream_val.payload()
+            && let Some(controller) = sp.controller
             && let Some(cp) = controller.payload()
         {
             ctx.rt_mut().clear_exception();
-            let _ = call_opt_method(
-                ctx,
-                cp.underlying_sink,
-                "abort",
-                &[reason],
-            );
+            let _ = call_opt_method(ctx, cp.underlying_sink, "abort", &[reason]);
         }
     }
 

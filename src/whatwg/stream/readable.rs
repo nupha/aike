@@ -30,6 +30,7 @@ use crate::USER_CLASS_DEFS;
 use super::{
     PENDING_READ, QueueEntry, RsState, call_opt_method, make_iterator_result,
     make_rejected_promise, make_resolved_promise, reject_pending_read, resolve_pending_read,
+    settle_stream_state,
 };
 
 pub(crate) struct ReadableStreamPayload {
@@ -181,7 +182,7 @@ fn js_readable_stream_async_iterator(ctx: &mut ScopedContext, cc: CallContext) -
 
 pub(crate) struct ReadableStreamDefaultReaderPayload {
     stream: Option<JSReadableStream>,
-    closed_promise: Option<Promise>,
+    pub(crate) closed_promise: Option<Promise>,
 }
 
 thread_local! {
@@ -442,18 +443,9 @@ fn js_controller_close(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     // If queue still has items, state stays "readable" until last
     // item is consumed by read().
     if p.queue.borrow().is_empty()
-        && let Some(mut stream_val) = p.stream
-        && let Some(sp) = stream_val.payload_mut()
+        && let Some(stream_val) = p.stream
     {
-        sp.state = RsState::Closed;
-        if let Some(reader_val) = sp.reader {
-            if let Some(rp) = reader_val.payload() {
-                if let Some(cp) = rp.closed_promise {
-                    let mut cp = cp;
-                    cp.resolve(ctx, JSValue::UNDEFINED);
-                }
-            }
-        }
+        settle_stream_state(ctx, stream_val.into(), RsState::Closed, None);
     }
 
     Ok(JSValue::UNDEFINED)
@@ -467,19 +459,8 @@ fn js_controller_error(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     reject_pending_read(ctx, e);
 
-    if let Some(mut stream_val) = p.stream
-        && let Some(sp) = stream_val.payload_mut()
-    {
-        sp.state = RsState::Errored;
-        sp.stored_error = e;
-        if let Some(reader_val) = sp.reader {
-            if let Some(rp) = reader_val.payload() {
-                if let Some(cp) = rp.closed_promise {
-                    let mut cp = cp;
-                    cp.reject(ctx, e);
-                }
-            }
-        }
+    if let Some(stream_val) = p.stream {
+        settle_stream_state(ctx, stream_val.into(), RsState::Errored, Some(e));
     }
 
     Ok(JSValue::UNDEFINED)
@@ -578,20 +559,11 @@ fn call_controller_pull(
 // ============================================================================
 
 fn readable_stream_cancel(ctx: &mut ScopedContext, stream: &JSValue, reason: JSValue) -> JSResult {
-    if let Some(mut stream_obj) = stream.as_native_object::<JSReadableStream>()
-        && let Some(p) = stream_obj.payload_mut()
-    {
-        p.state = RsState::Closed;
+    if let Some(stream_obj) = stream.as_native_object::<JSReadableStream>() {
+        settle_stream_state(ctx, (*stream_obj).into(), RsState::Closed, None);
 
-        if let Some(reader_val) = p.reader {
-            if let Some(rp) = reader_val.payload() {
-                if let Some(mut cp) = rp.closed_promise {
-                    cp.resolve(ctx, JSValue::UNDEFINED);
-                }
-            }
-        }
-
-        if let Some(controller_val) = p.controller
+        if let Some(p) = stream_obj.payload()
+            && let Some(controller_val) = p.controller
             && let Some(cp) = controller_val.payload()
         {
             let source = cp.underlying_source;

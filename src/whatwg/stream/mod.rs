@@ -258,6 +258,59 @@ pub(super) fn call_opt_method(
     f.call(ctx, obj, args).map(Some)
 }
 
+/// Set a stream's state (and `stored_error` when errored), then settle the
+/// peer reader/writer's `closed_promise` accordingly.
+///
+/// `reason`: `None` => `closed_promise.resolve(undefined)`; `Some(r)` =>
+/// `closed_promise.reject(r)` and `stream.stored_error = r`.
+///
+/// `stream` must be a `JSReadableStream` or `JSWritableStream` native object.
+/// Taken by value (Copy) and re-derived inside; the caller keeps its own handle.
+pub(super) fn settle_stream_state(
+    ctx: &mut ScopedContext,
+    stream: JSValue,
+    state: RsState,
+    reason: Option<JSValue>,
+) {
+    let mut stream = stream;
+    if let Some(sp) = JSReadableStream::payload_mut_of(&mut stream) {
+        sp.state = state;
+        if let Some(r) = reason {
+            sp.stored_error = r;
+        }
+        notify_peer_closed(ctx, sp.reader.map(JSValue::from), reason);
+    } else if let Some(sp) = JSWritableStream::payload_mut_of(&mut stream) {
+        sp.state = state;
+        if let Some(r) = reason {
+            sp.stored_error = r;
+        }
+        notify_peer_closed(ctx, sp.writer.map(JSValue::from), reason);
+    }
+}
+
+/// Resolve or reject the peer (reader/writer) `closed_promise` if present.
+fn notify_peer_closed(ctx: &mut ScopedContext, peer: Option<JSValue>, reason: Option<JSValue>) {
+    let Some(pv) = peer else { return };
+    let mut settle = |cp: &mut Promise| {
+        if let Some(r) = reason {
+            cp.reject(ctx, r);
+        } else {
+            cp.resolve(ctx, JSValue::UNDEFINED);
+        }
+    };
+    if let Some(rp) = JSReadableStreamDefaultReader::payload_of(&pv) {
+        if let Some(mut cp) = rp.closed_promise {
+            settle(&mut cp);
+        }
+        return;
+    }
+    if let Some(wp) = JSWritableStreamDefaultWriter::payload_of(&pv) {
+        if let Some(mut cp) = wp.closed_promise {
+            settle(&mut cp);
+        }
+    }
+}
+
 // ============================================================================
 // Registration
 // ============================================================================
