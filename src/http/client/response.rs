@@ -559,6 +559,19 @@ fn js_response_body(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         }
     }
 
+    // A response constructed without a body has a null body per spec. This is
+    // distinct from a consumed body, which stays non-null but disturbed.
+    {
+        let p = get_response_payload(ctx, &this)?;
+        if !p.body_consumed
+            && p.resp.is_none()
+            && p.synthetic_body.is_none()
+            && p.stream_body.is_none()
+        {
+            return Ok(JSValue::NULL);
+        }
+    }
+
     // First access (or access after consumption): build/disturb and cache.
     let stream = if get_response_payload_mut(ctx, &mut this)?.body_consumed {
         disturbed_body_stream(ctx)?
