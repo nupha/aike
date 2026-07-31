@@ -15,6 +15,12 @@ use crate::{USER_CLASS_DEFS, aike::signal::signal_number};
 pub(crate) struct EmitterPayload {
     /// event_name -> list of (is_once, callback)
     listeners: RefCell<HashMap<String, Vec<(bool, Object)>>>,
+
+    /// Callbacks currently being dispatched by emit(). Moved out of
+    /// `listeners` and parked here so gc_trace still reaches them while they
+    /// run JS (which may trigger GC). Nested emits append after the current
+    /// range and split their part off before returning, so it stays flat.
+    dispatching: RefCell<Vec<(bool, Object)>>,
 }
 
 impl EmitterPayload {
@@ -25,6 +31,11 @@ impl EmitterPayload {
                 for (_, cb) in list {
                     cb.trace(gcx);
                 }
+            }
+        }
+        if let Ok(list) = self.dispatching.try_borrow() {
+            for (_, cb) in list.iter() {
+                cb.trace(gcx);
             }
         }
     }
@@ -47,6 +58,7 @@ fn js_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         cc.this(),
         EmitterPayload {
             listeners: RefCell::new(HashMap::new()),
+            dispatching: RefCell::new(Vec::new()),
         },
     )
     .map(JSValue::from)
@@ -112,33 +124,50 @@ fn js_emit(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         )));
     }
 
-    let callbacks = emitter.listeners.borrow_mut().remove(&name);
-    if let Some(mut lst) = callbacks {
-        debug_assert!(!lst.is_empty());
+    // Snapshot semantics: take the list out of the map (mutations during
+    // dispatch don't affect the current emit), but park it on `dispatching`
+    // so gc_trace keeps the callbacks alive — a GC inside cb.call() would
+    // otherwise collect them (gc-lite "bad node" panic).
+    let Some(mut lst) = emitter.listeners.borrow_mut().remove(&name) else {
+        return Ok(JSValue::FALSE);
+    };
+    debug_assert!(!lst.is_empty());
 
-        // Collect args (skip eventName)
-        let args = if cc.length() > 1 {
-            &cc.arguments()[1..]
-        } else {
-            &[]
-        };
-
-        lst.retain(|(once, cb)| {
-            if cb.call(ctx, JSValue::UNDEFINED, args).is_err() {
-                ctx.take_exception(); // Ignore listener errors
-            }
-            !*once
-        });
-
-        // put callbacks back into listeners map if there are any
-        if !lst.is_empty() {
-            emitter.listeners.borrow_mut().insert(name, lst);
-        }
-
-        Ok(JSValue::TRUE)
+    // Collect args (skip eventName)
+    let args = if cc.length() > 1 {
+        &cc.arguments()[1..]
     } else {
-        Ok(JSValue::FALSE)
+        &[]
+    };
+
+    // Our range is [start, start+n); nested emits only touch the tail after it.
+    let n = lst.len();
+    let start = {
+        let mut disp = emitter.dispatching.borrow_mut();
+        let start = disp.len();
+        disp.append(&mut lst);
+        start
+    };
+
+    for i in start..start + n {
+        // copy the entry out so no RefCell borrow is held across the call
+        let (_, cb) = emitter.dispatching.borrow()[i].clone();
+        if cb.call(ctx, JSValue::UNDEFINED, args).is_err() {
+            ctx.take_exception(); // Ignore listener errors
+        }
     }
+
+    let mut lst = emitter.dispatching.borrow_mut().split_off(start);
+    // put non-once callbacks back; keep listeners added during dispatch
+    lst.retain(|(once, _)| !*once);
+    if !lst.is_empty() {
+        let mut listeners = emitter.listeners.borrow_mut();
+        let slot = listeners.entry(name).or_default();
+        lst.append(slot); // survivors first, then ones added during dispatch
+        *slot = lst;
+    }
+
+    Ok(JSValue::TRUE)
 }
 
 /// removeAllListeners([event])
@@ -162,17 +191,14 @@ fn js_listeners(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let data = get_emitter(ctx, &this)?;
     let name = event_name(ctx, &cc.arg(0))?;
 
-    let mut arr = Array::create(ctx)?;
-    let mut idx = 0u32;
-
+    let mut lst = Vec::<JSValue>::new();
     if let Some(list) = data.listeners.borrow().get(&name) {
         for (_, cb) in list {
-            arr.define_property_value_u32(ctx, idx, (*cb).into(), JS_PROP_C_W_E)?;
-            idx += 1;
+            lst.push((*cb).into());
         }
     }
 
-    Ok(arr.into())
+    Array::from_values(ctx, lst).map(JSValue::from)
 }
 
 /// listenerCount(event)
@@ -189,14 +215,14 @@ fn js_listener_count(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 fn js_event_names(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let data = get_emitter(ctx, &this)?;
-    let mut arr = Array::create(ctx)?;
 
-    for (idx, key) in data.listeners.borrow().keys().enumerate() {
+    let mut lst = Vec::<JSValue>::new();
+    for key in data.listeners.borrow().keys() {
         let s = ctx.create_string_from_utf8(key.as_bytes().to_vec())?;
-        arr.define_property_value_u32(ctx, idx as _, JSValue::make_string(s), JS_PROP_C_W_E)?;
+        lst.push(JSValue::make_string(s));
     }
 
-    Ok(arr.into())
+    Array::from_values(ctx, lst).map(JSValue::from)
 }
 
 const CLASS_EVENT_EMITTER_PROTO: &[FieldDef] = &[

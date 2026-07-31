@@ -240,7 +240,7 @@ pub(super) fn reject_pending_read(ctx: &mut ScopedContext, reason: JSValue) {
 /// `Atom`, and aike's public API has no `&str -> Atom` constructor
 /// (`Atom::from_str` / `StringImpl::to_atom` are `pub(crate)`), so the
 /// string-based form is the idiomatic aike-level equivalent.
-pub(super) fn call_opt_method(
+pub(crate) fn call_opt_method(
     ctx: &mut ScopedContext,
     obj: JSValue,
     name: &str,

@@ -25,6 +25,7 @@ use linkme::distributed_slice;
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::wrappers::ReceiverStream;
 use tower_http::services::ServeDir;
+use tower_http::set_header::SetResponseHeaderLayer;
 use zuqe::{
     CallContext, Callback, ClassCtorDef, ClassID, FieldDef, IntOrFloat, JSResult, JSValue, Object,
     PollSender, Runtime, ScopedContext,
@@ -691,23 +692,28 @@ fn js_listen(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         }
 
         // --- Static file mounts: served directly by axum, no poller needed ---
+        // `no-cache` forces the browser to revalidate (If-Modified-Since → 304)
+        // on every load, so edited files are picked up without a hard refresh.
+        let no_cache = SetResponseHeaderLayer::if_not_present(
+            axum::http::header::CACHE_CONTROL,
+            axum::http::HeaderValue::from_static("no-cache"),
+        );
         for (mount, dir) in &data.static_dirs {
             let mount = if mount.ends_with('/') {
                 mount.clone()
             } else {
                 format!("{mount}/")
             };
+            let svc = tower::ServiceBuilder::new()
+                .layer(no_cache.clone())
+                .service(ServeDir::new(dir).append_index_html_on_directories(true));
             if mount == "/" {
                 // axum 0.8 forbids nesting at the root; a root mount is the
                 // catch-all for anything not matched by a JS route, so it is a
                 // `fallback_service`. JS `route()`s always take precedence.
-                router = router
-                    .fallback_service(ServeDir::new(dir).append_index_html_on_directories(true));
+                router = router.fallback_service(svc);
             } else {
-                router = router.nest_service(
-                    &mount,
-                    ServeDir::new(dir).append_index_html_on_directories(true),
-                );
+                router = router.nest_service(&mount, svc);
             }
         }
 

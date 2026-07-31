@@ -31,7 +31,7 @@ use crate::{
         headers::{HeaderList, HeadersPayload, JSHeaders, header_list_from_js},
         transport::TransportResponse,
     },
-    whatwg::stream::{readable_stream_from_bytes, readable_stream_from_channel},
+    whatwg::stream::{call_opt_method, readable_stream_from_bytes, readable_stream_from_channel},
 };
 
 /// WHATWG `Response.type` (closed set of values this runtime produces).
@@ -63,6 +63,9 @@ pub(crate) struct ResponsePayload {
     body_rx: Option<Receiver<Vec<u8>>>,
     /// Whether the body has begun consumption (enforces single-use).
     body_consumed: bool,
+    /// Cached `ReadableStream` returned by `response.body` (same instance each
+    /// access; locked once the body is consumed).
+    body_stream: Option<JSValue>,
     /// Fixed body bytes for constructed (synthetic) responses.
     synthetic_body: Option<Vec<u8>>,
 
@@ -110,8 +113,8 @@ impl ResponsePayload {
                     }
                 }
             });
-            Ok(BodySource::Channel(self.body_rx.take().unwrap()))
-        } else if let Some(bytes) = self.synthetic_body.take() {
+            Ok(BodySource::Channel(self.body_rx.clone().unwrap()))
+        } else if let Some(bytes) = self.synthetic_body.clone() {
             Ok(BodySource::Synthetic(bytes))
         } else {
             Err(-1)
@@ -150,6 +153,7 @@ pub(crate) fn build_opaque_redirect_response(ctx: &mut ScopedContext) -> JSResul
             resp: None,
             body_rx: None,
             body_consumed: true,
+            body_stream: None,
             synthetic_body: None,
             resp_type: RespType::OpaqueRedirect,
             url: String::new(),
@@ -176,6 +180,7 @@ fn transport_payload(
         resp: tr.resp,
         body_rx: None,
         body_consumed: false,
+        body_stream: None,
         synthetic_body: None,
         resp_type,
         url: url.to_string(),
@@ -256,6 +261,7 @@ fn js_response_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
             resp: None,
             body_rx: None,
             body_consumed: false,
+            body_stream: None,
             synthetic_body: synthetic,
             resp_type: RespType::Default,
             url: String::new(),
@@ -283,6 +289,7 @@ fn js_response_static_error(ctx: &mut ScopedContext, _cc: CallContext) -> JSResu
             resp: None,
             body_rx: None,
             body_consumed: true,
+            body_stream: None,
             synthetic_body: None,
             resp_type: RespType::Error,
             url: String::new(),
@@ -331,6 +338,7 @@ fn js_response_static_redirect(ctx: &mut ScopedContext, cc: CallContext) -> JSRe
             resp: None,
             body_rx: None,
             body_consumed: true,
+            body_stream: None,
             synthetic_body: None,
             resp_type: RespType::Default,
             url: String::new(),
@@ -388,6 +396,7 @@ fn js_response_static_json(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
             resp: None,
             body_rx: None,
             body_consumed: false,
+            body_stream: None,
             synthetic_body: Some(body),
             resp_type: RespType::Default,
             url: String::new(),
@@ -468,29 +477,57 @@ fn js_response_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     }
 }
 
+/// Build a ReadableStream already locked/disturbed, so any later
+/// getReader() call throws a TypeError. Used as the `body` value once the body
+/// has been consumed (spec: response.body stays non-null, but body.getReader()
+/// must reject).
+fn disturbed_body_stream(ctx: &mut ScopedContext) -> JSResult {
+    let stream = readable_stream_from_bytes(ctx, Vec::new())?;
+    let _ = call_opt_method(ctx, stream, "getReader", &[]);
+    Ok(stream)
+}
+
 fn js_response_body(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut this = cc.this();
-    let source = {
+
+    // error / opaqueredirect have no body per spec.
+    if matches!(
+        get_response_payload_mut(ctx, &mut this)?.resp_type,
+        RespType::Error | RespType::OpaqueRedirect
+    ) {
+        return Ok(JSValue::NULL);
+    }
+
+    // Return the same cached stream instance on every access.
+    {
         let p = get_response_payload_mut(ctx, &mut this)?;
-        if p.resp.is_some() || p.synthetic_body.is_some() {
-            match p.ensure_body_stream() {
-                Ok(source) => Some(source),
-                Err(_) => None,
+        if let Some(s) = p.body_stream {
+            return Ok(s);
+        }
+    }
+
+    // First access (or access after consumption): build/disturb and cache.
+    let stream = if get_response_payload_mut(ctx, &mut this)?.body_consumed {
+        disturbed_body_stream(ctx)?
+    } else {
+        let source = {
+            let p = get_response_payload_mut(ctx, &mut this)?;
+            if p.resp.is_some() || p.synthetic_body.is_some() {
+                p.ensure_body_stream().ok()
+            } else {
+                None
             }
-        } else if matches!(p.resp_type, RespType::Error | RespType::OpaqueRedirect) {
-            return Ok(JSValue::NULL);
-        } else {
-            None
+        };
+        match source {
+            Some(BodySource::Channel(rx)) => readable_stream_from_channel(ctx, rx)?,
+            Some(BodySource::Synthetic(bytes)) => readable_stream_from_bytes(ctx, bytes)?,
+            None => disturbed_body_stream(ctx)?,
         }
     };
 
-    match source {
-        Some(BodySource::Channel(rx)) => readable_stream_from_channel(ctx, rx),
-        Some(BodySource::Synthetic(bytes)) => readable_stream_from_bytes(ctx, bytes),
-        None => Err(ctx.throw_type_error("body already consumed")),
-    }
+    get_response_payload_mut(ctx, &mut this)?.body_stream = Some(stream);
+    Ok(stream)
 }
-
 fn js_response_body_as(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let magic = cc.magic();
 
@@ -521,6 +558,10 @@ fn js_response_body_as(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             // NOT via the .body getter (js_response_body).
             if src.is_some() {
                 p.body_consumed = true;
+                // Lock the cached .body stream (if any) so its getReader() throws.
+                if let Some(s) = p.body_stream {
+                    let _ = call_opt_method(ctx, s, "getReader", &[]);
+                }
             }
             (src, convert)
         }
@@ -580,6 +621,7 @@ fn js_response_clone(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         resp: taken_resp,
         body_rx: None,
         body_consumed: false,
+        body_stream: None,
         synthetic_body: synthetic,
         resp_type: src.resp_type,
         url: src.url.clone(),
