@@ -14,8 +14,8 @@ use zuqe::{
 use crate::USER_CLASS_DEFS;
 
 use super::{
-    PENDING_READ, RsState, make_iterator_result, make_rejected_promise, make_resolved_promise,
-    transform::JSTransformStreamDefaultController,
+    RsState, call_opt_method, make_rejected_promise, make_resolved_promise, reject_pending_read,
+    resolve_pending_read, transform::JSTransformStreamDefaultController,
 };
 
 // ============================================================================
@@ -86,12 +86,12 @@ fn js_writable_stream_constructor(ctx: &mut ScopedContext, cc: CallContext) -> J
 
     stream.payload_mut().unwrap().controller = Some(controller);
 
-    if let Some(obj) = underlying_sink.as_object()
-        && let Ok(start_fn) = obj.get_property_str(ctx, "start")
-        && start_fn.is_callable()
-    {
-        let _ = start_fn.call(ctx, underlying_sink, &[JSValue::from(controller)]);
-    }
+    let _ = call_opt_method(
+        ctx,
+        underlying_sink,
+        "start",
+        &[JSValue::from(controller)],
+    );
 
     Ok(stream.into())
 }
@@ -153,14 +153,16 @@ fn js_writable_stream_abort(ctx: &mut ScopedContext, cc: CallContext) -> JSResul
 
         if let Some(controller) = p.controller
             && let Some(cp) = controller.payload()
-            && let Some(obj) = cp.underlying_sink.as_object()
-            && let Ok(abort_fn) = obj.get_property_str(ctx, "abort")
-            && abort_fn.is_callable()
         {
             // Clear any pending exception left by previous polling jobs
             // before invoking user callback.
             ctx.rt_mut().clear_exception();
-            let _ = abort_fn.call(ctx, cp.underlying_sink, &[reason]);
+            let _ = call_opt_method(
+                ctx,
+                cp.underlying_sink,
+                "abort",
+                &[reason],
+            );
         }
     }
     make_resolved_promise(ctx, JSValue::UNDEFINED)
@@ -321,11 +323,12 @@ fn js_writer_write(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             }
 
             // Normal writable path
-            if let Some(obj) = cp.underlying_sink.as_object()
-                && let Ok(write_fn) = obj.get_property_str(ctx, "write")
-                && write_fn.is_callable()
-            {
-                let result = write_fn.call(ctx, cp.underlying_sink, &[chunk, controller.into()])?;
+            if let Some(result) = call_opt_method(
+                ctx,
+                cp.underlying_sink,
+                "write",
+                &[chunk, controller.into()],
+            )? {
                 if result.is_object() {
                     return Ok(result);
                 }
@@ -352,26 +355,20 @@ fn js_writer_close(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             // TransformStream flush path: call transformer.flush(transformController)
             if let Some(tc) = cp.transform_controller
                 && let Some(tcp) = tc.payload()
-                && let Some(obj) = tcp.transformer.as_object()
+                && let Some(_obj) = tcp.transformer.as_object()
             {
-                if let Ok(flush_fn) = obj.get_property_str(ctx, "flush")
-                    && flush_fn.is_callable()
-                {
-                    let _ = flush_fn.call(ctx, tcp.transformer, &[JSValue::from(tc)]);
-                }
+                let _ = call_opt_method(
+                    ctx,
+                    tcp.transformer,
+                    "flush",
+                    &[JSValue::from(tc)],
+                );
 
                 // After flush, close the readable side of the transform stream
                 if let Some(rcp) = tcp.readable_controller.payload() {
                     rcp.close_requested.set(true);
 
-                    PENDING_READ.with(|slot| {
-                        let mut s = slot.borrow_mut();
-                        if let Some((_promise, rr)) = s.take()
-                            && let Ok(result) = make_iterator_result(ctx, JSValue::UNDEFINED, true)
-                        {
-                            let _ = rr[0].call(ctx, JSValue::UNDEFINED, &[result]);
-                        }
-                    });
+                    resolve_pending_read(ctx, JSValue::UNDEFINED, true);
 
                     if rcp.queue.borrow().is_empty()
                         && let Some(mut stream_val) = rcp.stream
@@ -380,11 +377,8 @@ fn js_writer_close(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                         rsp.state = RsState::Closed;
                     }
                 }
-            } else if let Some(obj) = cp.underlying_sink.as_object()
-                && let Ok(close_fn) = obj.get_property_str(ctx, "close")
-                && close_fn.is_callable()
-            {
-                let _ = close_fn.call(ctx, cp.underlying_sink, &[]);
+            } else {
+                let _ = call_opt_method(ctx, cp.underlying_sink, "close", &[]);
             }
         }
 
@@ -409,12 +403,14 @@ fn js_writer_abort(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
         if let Some(controller) = sp.controller
             && let Some(cp) = controller.payload()
-            && let Some(obj) = cp.underlying_sink.as_object()
-            && let Ok(abort_fn) = obj.get_property_str(ctx, "abort")
-            && abort_fn.is_callable()
         {
             ctx.rt_mut().clear_exception();
-            let _ = abort_fn.call(ctx, cp.underlying_sink, &[reason]);
+            let _ = call_opt_method(
+                ctx,
+                cp.underlying_sink,
+                "abort",
+                &[reason],
+            );
         }
     }
 

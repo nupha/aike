@@ -28,8 +28,8 @@ use zuqe::{
 use crate::USER_CLASS_DEFS;
 
 use super::{
-    PENDING_READ, QueueEntry, RsState, make_iterator_result, make_rejected_promise,
-    make_resolved_promise,
+    PENDING_READ, QueueEntry, RsState, call_opt_method, make_iterator_result,
+    make_rejected_promise, make_resolved_promise, reject_pending_read, resolve_pending_read,
 };
 
 pub(crate) struct ReadableStreamPayload {
@@ -100,12 +100,12 @@ fn js_readable_stream_constructor(ctx: &mut ScopedContext, cc: CallContext) -> J
     let controller = create_readable_stream_controller(ctx, &instance, &underlying_source)?;
     instance.payload_mut().unwrap().controller = Some(controller);
 
-    if let Some(obj) = underlying_source.as_object()
-        && let Ok(start_fn) = obj.get_property_str(ctx, "start")
-        && start_fn.is_callable()
-    {
-        let _ = start_fn.call(ctx, underlying_source, &[JSValue::from(controller)]);
-    }
+    let _ = call_opt_method(
+        ctx,
+        underlying_source,
+        "start",
+        &[JSValue::from(controller)],
+    );
 
     Ok(instance.into())
 }
@@ -436,14 +436,7 @@ fn js_controller_close(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     p.close_requested.set(true);
 
-    PENDING_READ.with(|slot| {
-        let mut s = slot.borrow_mut();
-        if let Some((_promise, rr)) = s.take()
-            && let Ok(result) = make_iterator_result(ctx, JSValue::UNDEFINED, true)
-        {
-            let _ = rr[0].call(ctx, JSValue::UNDEFINED, &[result]);
-        }
-    });
+    resolve_pending_read(ctx, JSValue::UNDEFINED, true);
 
     // Per spec: only transition to closed when queue is empty.
     // If queue still has items, state stays "readable" until last
@@ -472,12 +465,7 @@ fn js_controller_error(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let p = JSReadableStreamDefaultController::payload_of(&this)
         .ok_or_else(|| ctx.throw_type_error("not a ReadableStreamDefaultController"))?;
 
-    PENDING_READ.with(|slot| {
-        let mut s = slot.borrow_mut();
-        if let Some((mut promise, _slot)) = s.take() {
-            promise.reject(ctx, e);
-        }
-    });
+    reject_pending_read(ctx, e);
 
     if let Some(mut stream_val) = p.stream
         && let Some(sp) = stream_val.payload_mut()
@@ -606,13 +594,8 @@ fn readable_stream_cancel(ctx: &mut ScopedContext, stream: &JSValue, reason: JSV
         if let Some(controller_val) = p.controller
             && let Some(cp) = controller_val.payload()
         {
-            let source = &cp.underlying_source;
-            if let Some(obj) = source.as_object()
-                && let Ok(cancel_fn) = obj.get_property_str(ctx, "cancel")
-                && cancel_fn.is_callable()
-            {
-                let _ = cancel_fn.call(ctx, *source, &[reason]);
-            }
+            let source = cp.underlying_source;
+            let _ = call_opt_method(ctx, source, "cancel", &[reason]);
         }
     }
 

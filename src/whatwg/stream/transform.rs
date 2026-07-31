@@ -14,14 +14,15 @@ use zuqe::{
 use crate::USER_CLASS_DEFS;
 
 use super::{
-    PENDING_READ, QueueEntry, RsState, make_iterator_result,
+    QueueEntry, RsState,
     readable::{
-        JSReadableStream, JSReadableStreamDefaultController, ReadableStreamDefaultControllerPayload,
-        ReadableStreamPayload,
+        JSReadableStream, JSReadableStreamDefaultController,
+        ReadableStreamDefaultControllerPayload, ReadableStreamPayload,
     },
+    reject_pending_read, resolve_pending_read,
     writable::{
-        JSWritableStream, JSWritableStreamDefaultController, WritableStreamDefaultControllerPayload,
-        WritableStreamPayload,
+        JSWritableStream, JSWritableStreamDefaultController,
+        WritableStreamDefaultControllerPayload, WritableStreamPayload,
     },
 };
 
@@ -230,21 +231,7 @@ fn js_transform_controller_enqueue(ctx: &mut ScopedContext, cc: CallContext) -> 
         return Err(ctx.throw_type_error("cannot enqueue after close"));
     }
 
-    let resolved = PENDING_READ.with(|slot| {
-        let mut s = slot.borrow_mut();
-        if let Some((_promise, rr)) = s.take() {
-            let result = make_iterator_result(ctx, chunk, false);
-            match result {
-                Ok(r) => {
-                    let _ = rr[0].call(ctx, JSValue::UNDEFINED, &[r]);
-                    true
-                }
-                Err(_) => false,
-            }
-        } else {
-            false
-        }
-    });
+    let resolved = resolve_pending_read(ctx, chunk, false);
 
     if !resolved {
         rcp.queue.borrow_mut().push(QueueEntry { chunk, size: 1.0 });
@@ -263,12 +250,7 @@ fn js_transform_controller_error(ctx: &mut ScopedContext, cc: CallContext) -> JS
 
     // Error the readable side via the readable controller
     if let Some(rcp) = p.readable_controller.payload() {
-        PENDING_READ.with(|slot| {
-            let mut s = slot.borrow_mut();
-            if let Some((mut promise, _slot)) = s.take() {
-                promise.reject(ctx, reason);
-            }
-        });
+        reject_pending_read(ctx, reason);
 
         if let Some(mut stream_val) = rcp.stream
             && let Some(sp) = stream_val.payload_mut()
@@ -303,14 +285,7 @@ fn js_transform_controller_terminate(ctx: &mut ScopedContext, cc: CallContext) -
     if let Some(rcp) = p.readable_controller.payload() {
         rcp.close_requested.set(true);
 
-        PENDING_READ.with(|slot| {
-            let mut s = slot.borrow_mut();
-            if let Some((_promise, rr)) = s.take()
-                && let Ok(result) = make_iterator_result(ctx, JSValue::UNDEFINED, true)
-            {
-                let _ = rr[0].call(ctx, JSValue::UNDEFINED, &[result]);
-            }
-        });
+        resolve_pending_read(ctx, JSValue::UNDEFINED, true);
 
         if rcp.queue.borrow().is_empty()
             && let Some(mut stream_val) = rcp.stream

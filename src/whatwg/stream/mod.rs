@@ -201,6 +201,63 @@ pub(crate) fn make_rejected_promise(
     Ok(promise.into())
 }
 
+/// Resolve the single in-flight `PENDING_READ` with an iterator result
+/// `{value, done}`. Returns true if a pending read was present and resolved.
+pub(super) fn resolve_pending_read(ctx: &mut ScopedContext, value: JSValue, done: bool) -> bool {
+    PENDING_READ.with(|slot| {
+        let mut s = slot.borrow_mut();
+        if let Some((_promise, rr)) = s.take() {
+            if let Ok(result) = make_iterator_result(ctx, value, done) {
+                let _ = rr[0].call(ctx, JSValue::UNDEFINED, &[result]);
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        }
+    })
+}
+
+/// Reject the single in-flight `PENDING_READ`, if any.
+pub(super) fn reject_pending_read(ctx: &mut ScopedContext, reason: JSValue) {
+    PENDING_READ.with(|slot| {
+        let mut s = slot.borrow_mut();
+        if let Some((mut promise, _slot)) = s.take() {
+            promise.reject(ctx, reason);
+        }
+    });
+}
+
+/// Call an optionally-present, callable method `name` on `obj`.
+///
+/// `this` is bound to `obj` (all call sites pass the receiver as `this`).
+/// Returns `Some(call result)` if the method existed and was invoked,
+/// `None` if `obj` is not an object / the property was absent / not callable.
+///
+/// Note: implemented via the public `get_property_str` + `is_callable` API.
+/// zuqe's `Object::invoke_callable`/`invoke_defined` do the same but take an
+/// `Atom`, and aike's public API has no `&str -> Atom` constructor
+/// (`Atom::from_str` / `StringImpl::to_atom` are `pub(crate)`), so the
+/// string-based form is the idiomatic aike-level equivalent.
+pub(super) fn call_opt_method(
+    ctx: &mut ScopedContext,
+    obj: JSValue,
+    name: &str,
+    args: &[JSValue],
+) -> Result<Option<JSValue>, i32> {
+    let Some(o) = obj.as_object() else {
+        return Ok(None);
+    };
+    let Ok(f) = o.get_property_str(ctx, name) else {
+        return Ok(None);
+    };
+    if !f.is_callable() {
+        return Ok(None);
+    }
+    f.call(ctx, obj, args).map(Some)
+}
+
 // ============================================================================
 // Registration
 // ============================================================================
