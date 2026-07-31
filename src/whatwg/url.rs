@@ -340,7 +340,7 @@ fn js_url_to_string(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 // URLSearchParams
 // ===========================================================================
 
-struct SearchParamsPayload {
+pub(crate) struct SearchParamsPayload {
     /// Shared URL state; None when standalone (not tied to a URL).
     shared_url: Option<Rc<RefCell<Url>>>,
     /// Query string (used only when standalone).

@@ -32,8 +32,12 @@ use crate::{
         headers::{HeaderList, HeadersPayload, JSHeaders, header_list_from_js},
         transport::TransportResponse,
     },
-    whatwg::stream::{
-        JSReadableStream, call_opt_method, readable_stream_from_bytes, readable_stream_from_channel,
+    whatwg::{
+        stream::{
+            JSReadableStream, call_opt_method, readable_stream_from_bytes,
+            readable_stream_from_channel,
+        },
+        url::JSURLSearchParams,
     },
 };
 
@@ -251,6 +255,10 @@ fn js_response_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
     let mut status_text = String::new();
     let mut header_list = HeaderList::new();
 
+    // Content-Type extracted from the body itself; an explicit `init.headers`
+    // entry wins over it, so it is only applied after parsing init below.
+    let mut body_content_type: Option<&str> = None;
+
     if cc.length() > 0 {
         let body_arg = cc.arg(0);
         if !body_arg.is_undefined_or_null() {
@@ -258,7 +266,16 @@ fn js_response_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
             // silently produce "[object ReadableStream]".
             match JSReadableStream::try_from(body_arg) {
                 Ok(s) => stream_body = Some(s),
-                Err(_) => synthetic = Some(body_to_bytes(ctx, &body_arg)?),
+                Err(_) => {
+                    // Per fetch spec, a body's source determines a default
+                    // Content-Type. TypedArray/buffer sources have none.
+                    if JSURLSearchParams::payload_of(&body_arg).is_some() {
+                        body_content_type = Some("application/x-www-form-urlencoded;charset=UTF-8");
+                    } else if body_arg.is_string() {
+                        body_content_type = Some("text/plain;charset=UTF-8");
+                    }
+                    synthetic = Some(body_to_bytes(ctx, &body_arg)?);
+                }
             }
         }
     }
@@ -278,6 +295,12 @@ fn js_response_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
                 header_list = header_list_from_js(ctx, &mut h)?;
             }
         }
+    }
+
+    if let Some(ct) = body_content_type
+        && !header_list.has("content-type")
+    {
+        header_list.set("Content-Type", ct);
     }
 
     JSResponse::new_instance(
