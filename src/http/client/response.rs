@@ -259,13 +259,66 @@ fn js_response_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
     // entry wins over it, so it is only applied after parsing init below.
     let mut body_content_type: Option<&str> = None;
 
+    // Init is parsed before the body so that an invalid status rejects even
+    // when the body itself would also be invalid.
+    if cc.length() > 1 {
+        let init = cc.arg(1);
+        if let Some(o) = init.as_object() {
+            let s = o.get_property_str(ctx, "status")?;
+            if !s.is_undefined() {
+                let n = s.to_number(ctx)?.to_i32();
+                if !(200..=599).contains(&n) {
+                    return Err(
+                        ctx.throw_range_error("Failed to construct 'Response': invalid status code")
+                    );
+                }
+                status = n as u16;
+            }
+            let st = o.get_property_str(ctx, "statusText")?;
+            if !st.is_undefined() {
+                let text = st.to_string(ctx)?.content().encode_utf8(false).to_string();
+                // reason-phrase = *( HTAB / SP / VCHAR ); the string is a
+                // sequence of code points, so anything beyond ASCII is invalid.
+                if !text
+                    .chars()
+                    .all(|c| c == '\t' || (' '..='\u{7E}').contains(&c))
+                {
+                    return Err(
+                        ctx.throw_type_error("Failed to construct 'Response': invalid status text")
+                    );
+                }
+                status_text = text;
+            }
+            let mut h = o.get_property_str(ctx, "headers")?;
+            if !h.is_undefined_or_null() {
+                header_list = header_list_from_js(ctx, &mut h)?;
+            }
+        }
+    }
+
     if cc.length() > 0 {
         let body_arg = cc.arg(0);
         if !body_arg.is_undefined_or_null() {
+            // 204/205/304 are null-body statuses and cannot carry a body.
+            if matches!(status, 204 | 205 | 304) {
+                return Err(ctx.throw_type_error(
+                    "Failed to construct 'Response': response with null body status cannot have body",
+                ));
+            }
             // A ReadableStream body must stay a stream; stringifying it would
             // silently produce "[object ReadableStream]".
             match JSReadableStream::try_from(body_arg) {
-                Ok(s) => stream_body = Some(s),
+                Ok(s) => {
+                    // A locked or already-read stream cannot become a body.
+                    if s.payload()
+                        .is_some_and(|p| p.reader.is_some() || p.disturbed)
+                    {
+                        return Err(ctx.throw_type_error(
+                            "Failed to construct 'Response': body stream is locked or disturbed",
+                        ));
+                    }
+                    stream_body = Some(s)
+                }
                 Err(_) => {
                     // Per fetch spec, a body's source determines a default
                     // Content-Type. TypedArray/buffer sources have none.
@@ -279,24 +332,6 @@ fn js_response_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
             }
         }
     }
-    if cc.length() > 1 {
-        let init = cc.arg(1);
-        if let Some(o) = init.as_object() {
-            let s = o.get_property_str(ctx, "status")?;
-            if !s.is_undefined() {
-                status = s.to_number(ctx)?.to_i32() as u16;
-            }
-            let st = o.get_property_str(ctx, "statusText")?;
-            if !st.is_undefined() {
-                status_text = st.to_string(ctx)?.content().encode_utf8(false).to_string();
-            }
-            let mut h = o.get_property_str(ctx, "headers")?;
-            if !h.is_undefined_or_null() {
-                header_list = header_list_from_js(ctx, &mut h)?;
-            }
-        }
-    }
-
     if let Some(ct) = body_content_type
         && !header_list.has("content-type")
     {

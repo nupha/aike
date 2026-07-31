@@ -38,6 +38,9 @@ pub(crate) struct ReadableStreamPayload {
     pub(crate) stored_error: JSValue,
     pub(crate) reader: Option<JSReadableStreamDefaultReader>,
     pub(crate) controller: Option<JSReadableStreamDefaultController>,
+    /// Set once read() is called. Unlike the reader lock this is never
+    /// cleared by releaseLock(), so a used stream stays unusable as a body.
+    pub(crate) disturbed: bool,
 }
 
 impl ReadableStreamPayload {
@@ -47,6 +50,7 @@ impl ReadableStreamPayload {
             stored_error: JSValue::UNDEFINED,
             reader: None,
             controller: None,
+            disturbed: false,
         }
     }
 
@@ -239,6 +243,12 @@ fn js_reader_read(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut stream_val = p
         .stream
         .ok_or_else(|| ctx.throw_type_error("reader released"))?;
+
+    // Mark disturbed before any early return: even a read on a closed or
+    // errored stream counts as consuming it.
+    if let Some(sp) = stream_val.payload_mut() {
+        sp.disturbed = true;
+    }
 
     // Copy to decouple borrow: stream_p borrows sv, leaving stream_val free for mutable access later.
     let sv = stream_val;
