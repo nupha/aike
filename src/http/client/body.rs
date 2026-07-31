@@ -11,7 +11,8 @@ use std::{
 use crossbeam::channel::{Receiver, TryRecvError};
 
 use zuqe::{
-    CallContext, Callback, Exception, JSResult, JSValue, JobGcTrace, JobState, ScopedContext,
+    CallContext, Callback, ErrorKind, Exception, JSResult, JSValue, JobGcTrace, JobState,
+    ScopedContext,
     builtins::{
         iterator::AsyncIterableIterator,
         promise::{Promise, PromiseResultSlot, PromiseState},
@@ -253,12 +254,38 @@ fn drain_readable_stream(
                         let _ = slot.commit(Ok(full));
                         return Ok(JobState::Done);
                     }
-                    if let Ok(value) = result.get_property_str(cx, "value")
-                        && let Ok(mut ta) = TypedArray::try_from(value)
-                    {
-                        let bytes = ta.with_bytes_mut(|b| b.to_vec());
-                        buf.borrow_mut().extend_from_slice(&bytes);
-                    }
+                    let value = match result.get_property_str(cx, "value") {
+                        Ok(v) => v,
+                        // Missing `value` on a non-done chunk — malformed.
+                        _ => {
+                            *raw_err.borrow_mut() = cx
+                                .create_error_object(
+                                    ErrorKind::Type,
+                                    "body chunk is not a Uint8Array",
+                                    false,
+                                )
+                                .map(Into::into);
+                            let _ = slot.commit(Err("body chunk is not a Uint8Array".into()));
+                            return Ok(JobState::Done);
+                        }
+                    };
+
+                    // Per WHATWG fetch, a ReadableStream body must yield
+                    // Uint8Array chunks (see "extract a byte stream"); any other
+                    // chunk type must reject the consume promise with a TypeError.
+                    let Ok(ta) = TypedArray::try_from(value) else {
+                        *raw_err.borrow_mut() = cx
+                            .create_error_object(
+                                ErrorKind::Type,
+                                "body chunk is not a Uint8Array",
+                                false,
+                            )
+                            .map(Into::into);
+                        let _ = slot.commit(Err("body chunk is not a Uint8Array".into()));
+                        return Ok(JobState::Done);
+                    };
+                    ta.with_bytes(|b| buf.borrow_mut().extend_from_slice(b));
+
                     Ok(JobState::Again)
                 }
             }
