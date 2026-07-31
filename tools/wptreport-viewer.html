@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>WPT Report Viewer</title>
+<style>
+  :root { --pass:#1a7f37; --fail:#cf222e; --timeout:#9a6700; --error:#bc4c00; --bg:#f6f8fa; --border:#d0d7de; }
+  * { box-sizing: border-box; }
+  body { font: 14px/1.5 -apple-system, "Segoe UI", sans-serif; margin: 0; color: #1f2328; }
+  header { padding: 16px 24px; border-bottom: 1px solid var(--border); background: #fff; }
+  h1 { font-size: 18px; margin: 0 0 12px; }
+  .controls { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+  .stats { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+  .stat { padding: 4px 12px; border-radius: 20px; font-size: 13px; border: 1px solid var(--border); background: var(--bg); }
+  .stat b { font-size: 15px; }
+  .stat.pass b { color: var(--pass); }
+  .stat.fail b { color: var(--fail); }
+  .stat.timeout b { color: var(--timeout); }
+  .stat.error b { color: var(--error); }
+  main { padding: 16px 24px; }
+  table { border-collapse: collapse; width: 100%; background: #fff; }
+  th, td { border: 1px solid var(--border); padding: 6px 10px; text-align: left; vertical-align: top; font-size: 13px; }
+  th { background: var(--bg); position: sticky; top: 0; }
+  tr:hover { background: #f6f8fa; }
+  .badge { display: inline-block; padding: 1px 8px; border-radius: 10px; color: #fff; font-size: 12px; font-weight: 600; white-space: nowrap; }
+  .badge.PASS { background: var(--pass); }
+  .badge.FAIL { background: var(--fail); }
+  .badge.TIMEOUT { background: var(--timeout); }
+  .badge.ERROR { background: var(--error); }
+  .badge.OK { background: #57606a; }
+  .msg { color: #57606a; white-space: pre-wrap; word-break: break-word; }
+  #drop { border: 2px dashed var(--border); border-radius: 8px; padding: 28px; text-align: center; color: #57606a; }
+  #drop.over { border-color: #0969da; background: #ddf4ff; }
+  .muted { color: #57606a; font-size: 12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>WPT Report Viewer</h1>
+  <div class="controls">
+    <input type="file" id="file" accept=".json">
+    <select id="filter">
+      <option value="ALL">All statuses</option>
+      <option value="FAIL">FAIL only</option>
+      <option value="TIMEOUT">TIMEOUT only</option>
+      <option value="ERROR">ERROR (file-level) only</option>
+      <option value="PASS">PASS only</option>
+    </select>
+    <span class="muted">Load a wptreport JSON produced by <code>aike-wpt.mjs --log-wptreport</code>.</span>
+  </div>
+  <div class="stats" id="stats"></div>
+</header>
+<main>
+  <div id="drop">Drop a .json file here, or click "Choose File" above.</div>
+  <div id="table-wrap" style="display:none"></div>
+</main>
+<script>
+"use strict";
+const $ = s => document.querySelector(s);
+let report = null;
+
+function statusClass(status) { return status; } // PASS/FAIL/TIMEOUT/ERROR/OK are the badge classes
+
+function renderStats() {
+  const files = report.results || [];
+  const sub = [].concat(...files.map(r => r.subtests));
+  const count = arr => arr.filter(x => x.status === "PASS").length;
+  const cnt = (arr, s) => arr.filter(x => x.status === s).length;
+  $("#stats").innerHTML = `
+    <span class="stat">files <b>${files.length}</b> (OK ${cnt(files, "OK")} / ERROR ${cnt(files, "ERROR")})</span>
+    <span class="stat pass">PASS <b>${count(sub)}</b></span>
+    <span class="stat fail">FAIL <b>${cnt(sub, "FAIL")}</b></span>
+    <span class="stat timeout">TIMEOUT <b>${cnt(sub, "TIMEOUT")}</b></span>
+    <span class="stat">tests <b>${sub.length}</b></span>`;
+}
+
+function renderTable() {
+  const filter = $("#filter").value;
+  const rows = [];
+  for (const r of report.results) {
+    if (r.status === "ERROR") {
+      if (filter === "ALL" || filter === "ERROR") {
+        rows.push(`<tr><td><span class="badge ERROR">ERROR</span></td>
+          <td class="msg">${esc(r.test)}</td>
+          <td class="msg">(file load error)</td>
+          <td class="msg">${esc(r.message || "")}</td></tr>`);
+      }
+      continue;
+    }
+    for (const s of r.subtests) {
+      if (filter !== "ALL" && s.status !== filter) continue;
+      rows.push(`<tr><td><span class="badge ${statusClass(s.status)}">${s.status}</span></td>
+        <td class="msg">${esc(r.test)}</td>
+        <td class="msg">${esc(s.name)}</td>
+        <td class="msg">${esc(s.message || "")}</td></tr>`);
+    }
+  }
+  const wrap = $("#table-wrap");
+  wrap.style.display = rows.length ? "block" : "none";
+  if (!rows.length) { wrap.innerHTML = '<p class="muted">No matching results.</p>'; return; }
+  wrap.innerHTML = `<table>
+    <thead><tr><th>Status</th><th>Test</th><th>Subtest</th><th>Message</th></tr></thead>
+    <tbody>${rows.join("")}</tbody></table>`;
+}
+
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, c =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+function loadText(text) {
+  try {
+    report = JSON.parse(text);
+    renderStats();
+    renderTable();
+  } catch (e) {
+    $("#stats").innerHTML = `<span class="stat error">invalid JSON: ${esc(e.message)}</span>`;
+  }
+}
+
+$("#file").addEventListener("change", e => {
+  const f = e.target.files[0];
+  if (!f) return;
+  const reader = new FileReader();
+  reader.onload = ev => loadText(ev.target.result);
+  reader.readAsText(f);
+});
+
+const drop = $("#drop");
+["dragenter", "dragover"].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add("over"); }));
+["dragleave", "drop"].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove("over"); }));
+drop.addEventListener("drop", e => {
+  const f = e.dataTransfer.files[0];
+  if (!f) return;
+  const reader = new FileReader();
+  reader.onload = ev => loadText(ev.target.result);
+  reader.readAsText(f);
+});
+$("#filter").addEventListener("change", renderTable);
+</script>
+</body>
+</html>
