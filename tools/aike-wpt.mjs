@@ -28,7 +28,7 @@
 //     provides the objects they use (URL, TextEncoder, ...).
 
 import * as fs from "fs";
-import { join, basename, dirname } from "path";
+import { basename, dirname, join } from "path";
 
 const G = globalThis;
 
@@ -50,7 +50,11 @@ function fmt(v) {
   if (t === "symbol") return v.toString();
   if (t === "function") return "<function>";
   if (t === "object") {
-    try { return JSON.stringify(v); } catch { return String(v); }
+    try {
+      return JSON.stringify(v);
+    } catch {
+      return String(v);
+    }
   }
   return String(v);
 }
@@ -64,22 +68,49 @@ class AssertionError extends Error {
 
 function assert_(cond, name, description, detail) {
   if (!cond) {
-    throw new AssertionError(`${name}${description ? ": " + description : ""}: ${detail}`);
+    throw new AssertionError(
+      `${name}${description ? ": " + description : ""}: ${detail}`,
+    );
   }
 }
 
 function makeTestRecord(name) {
-  const record = { component: currentComponent, file: currentFile, abs: currentAbsFile, kind: "test", name: String(name), status: "PASS", message: "" };
+  const record = {
+    component: currentComponent,
+    file: currentFile,
+    abs: currentAbsFile,
+    kind: "test",
+    name: String(name),
+    status: "PASS",
+    message: "",
+  };
   results.push(record);
   const cleanups = [];
   const t = {
-    add_cleanup(fn) { cleanups.push(fn); },
+    add_cleanup(fn) {
+      cleanups.push(fn);
+    },
+    step(fn, this_obj, ...args) {
+      return fn.apply(this_obj === undefined ? t : this_obj, args);
+    },
+    step_func(fn, this_obj) {
+      return (...args) => fn.apply(this_obj === undefined ? t : this_obj, args);
+    },
+    // Returns a callback that fails the test if it is ever invoked.
+    unreached_func(description) {
+      return t.step_func(() => {
+        assert_unreached(description);
+      });
+    },
     _run_cleanups() {
       for (const fn of cleanups) {
-        try { fn(); } catch (e) {
+        try {
+          fn();
+        } catch (e) {
           record.status = "FAIL";
           const msg = e instanceof Error ? e.message : String(e);
-          record.message += (record.message ? " | " : "") + `cleanup error: ${msg}`;
+          record.message +=
+            (record.message ? " | " : "") + `cleanup error: ${msg}`;
         }
       }
     },
@@ -102,35 +133,211 @@ function promise_test(func, name) {
   const { record, t } = makeTestRecord(name);
   record.status = "RUNNING";
   let p;
-  try { p = Promise.resolve(func.call(t, t)); }
-  catch (e) { p = Promise.reject(e); }
+  try {
+    p = Promise.resolve(func.call(t, t));
+  } catch (e) {
+    p = Promise.reject(e);
+  }
   p.then(
-    () => { record.status = "PASS"; t._run_cleanups(); },
+    () => {
+      record.status = "PASS";
+      t._run_cleanups();
+    },
     (e) => {
       record.status = "FAIL";
-      record.message = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
+      record.message =
+        e instanceof Error ? `${e.name}: ${e.message}` : String(e);
       t._run_cleanups();
-    }
+    },
   );
 }
 
-function assert_true(actual, description) { assert_(!!actual, "assert_true", description, `expected true got ${fmt(actual)}`); }
-function assert_false(actual, description) { assert_(!actual, "assert_false", description, `expected false got ${fmt(actual)}`); }
-function assert_equals(actual, expected, description) { assert_(Object.is(actual, expected), "assert_equals", description, `expected ${fmt(expected)} but got ${fmt(actual)}`); }
-function assert_not_equals(actual, expected, description) { assert_(!Object.is(actual, expected), "assert_not_equals", description, `disallowed value ${fmt(actual)}`); }
+function assert_true(actual, description) {
+  assert_(
+    !!actual,
+    "assert_true",
+    description,
+    `expected true got ${fmt(actual)}`,
+  );
+}
+function assert_false(actual, description) {
+  assert_(
+    !actual,
+    "assert_false",
+    description,
+    `expected false got ${fmt(actual)}`,
+  );
+}
+function assert_equals(actual, expected, description) {
+  assert_(
+    Object.is(actual, expected),
+    "assert_equals",
+    description,
+    `expected ${fmt(expected)} but got ${fmt(actual)}`,
+  );
+}
+function assert_not_equals(actual, expected, description) {
+  assert_(
+    !Object.is(actual, expected),
+    "assert_not_equals",
+    description,
+    `disallowed value ${fmt(actual)}`,
+  );
+}
 function assert_array_equals(actual, expected, description) {
-  assert_(Array.isArray(actual), "assert_array_equals", description, `expected array but got ${fmt(actual)}`);
-  assert_(actual.length === expected.length, "assert_array_equals", description, `expected length ${expected.length} but got ${actual.length}`);
+  assert_(
+    Array.isArray(actual),
+    "assert_array_equals",
+    description,
+    `expected array but got ${fmt(actual)}`,
+  );
+  assert_(
+    actual.length === expected.length,
+    "assert_array_equals",
+    description,
+    `expected length ${expected.length} but got ${actual.length}`,
+  );
   for (let i = 0; i < expected.length; i++) {
-    assert_(Object.is(actual[i], expected[i]), "assert_array_equals", description, `at index ${i}: expected ${fmt(expected[i])} but got ${fmt(actual[i])}`);
+    assert_(
+      Object.is(actual[i], expected[i]),
+      "assert_array_equals",
+      description,
+      `at index ${i}: expected ${fmt(expected[i])} but got ${fmt(actual[i])}`,
+    );
   }
 }
-function assert_own_property(object, property_name, description) { assert_(object.hasOwnProperty(property_name), "assert_own_property", description, `expected property ${String(property_name)} missing`); }
+function assert_own_property(object, property_name, description) {
+  assert_(
+    object.hasOwnProperty(property_name),
+    "assert_own_property",
+    description,
+    `expected property ${String(property_name)} missing`,
+  );
+}
+function assert_unreached(description) {
+  assert_(false, "assert_unreached", description, "Reached unreachable code");
+}
 function assert_throws_js(constructor, func, description) {
   let threw = null;
-  try { func(); } catch (e) { threw = e; }
-  assert_(threw !== null, "assert_throws_js", description, `expected ${constructor.name} to throw but nothing was thrown`);
-  assert_(threw instanceof constructor, "assert_throws_js", description, `expected ${constructor.name} to throw but got ${fmt(threw)}`);
+  try {
+    func();
+  } catch (e) {
+    threw = e;
+  }
+  assert_(
+    threw !== null,
+    "assert_throws_js",
+    description,
+    `expected ${constructor.name} to throw but nothing was thrown`,
+  );
+  assert_(
+    threw instanceof constructor,
+    "assert_throws_js",
+    description,
+    `expected ${constructor.name} to throw but got ${fmt(threw)}`,
+  );
+}
+// Identity comparison against a specific exception *value* (not a constructor).
+function assert_throws_exactly_impl(
+  exception,
+  func,
+  description,
+  assertion_type,
+) {
+  let threw = null;
+  let didThrow = false;
+  try {
+    func();
+  } catch (e) {
+    threw = e;
+    didThrow = true;
+  }
+  assert_(didThrow, assertion_type, description, "function did not throw");
+  // AssertionError from the inner call must propagate untouched.
+  if (threw instanceof AssertionError) throw threw;
+  assert_(
+    Object.is(threw, exception),
+    assertion_type,
+    description,
+    `threw ${fmt(threw)} but we expected it to throw ${fmt(exception)}`,
+  );
+}
+function assert_throws_exactly(exception, func, description) {
+  assert_throws_exactly_impl(
+    exception,
+    func,
+    description,
+    "assert_throws_exactly",
+  );
+}
+function assert_throws_dom_impl(type, func, description, assertion_type) {
+  let threw = null;
+  let didThrow = false;
+  try {
+    func();
+  } catch (e) {
+    threw = e;
+    didThrow = true;
+  }
+  assert_(didThrow, assertion_type, description, "function did not throw");
+  if (threw instanceof AssertionError) throw threw;
+  assert_(
+    typeof threw === "object" && threw !== null,
+    assertion_type,
+    description,
+    `threw ${fmt(threw)} with type ${typeof threw}, not an object`,
+  );
+  // Match by DOMException-style `name` (numeric legacy codes are not supported).
+  assert_(
+    threw.name === type,
+    assertion_type,
+    description,
+    `threw ${fmt(threw.name)} but we expected ${fmt(type)}`,
+  );
+}
+
+// Assert that `promise` rejects, then check the rejection reason with `check`.
+// Mirrors testharness: a resolved promise fails via test.unreached_func.
+function promise_rejects_with(test, promise, description, check) {
+  return Promise.resolve(promise)
+    .then(test.unreached_func("Should have rejected: " + description))
+    .catch(check);
+}
+function promise_rejects_exactly(test, exception, promise, description) {
+  return promise_rejects_with(test, promise, description, (e) =>
+    assert_throws_exactly_impl(
+      exception,
+      () => {
+        throw e;
+      },
+      description,
+      "promise_rejects_exactly",
+    ),
+  );
+}
+function promise_rejects_js(test, constructor, promise, description) {
+  return promise_rejects_with(test, promise, description, (e) =>
+    assert_throws_js(
+      constructor,
+      () => {
+        throw e;
+      },
+      description,
+    ),
+  );
+}
+// Only the no-constructor form (exception from the current global) is supported.
+function promise_rejects_dom(test, type, promise, description) {
+  return promise_rejects_with(test, promise, description, (e) =>
+    assert_throws_dom_impl(
+      type,
+      () => {
+        throw e;
+      },
+      description,
+      "promise_rejects_dom",
+    ),
+  );
 }
 
 // WPT .any.js tests reference `self`.
@@ -144,6 +351,11 @@ G.assert_not_equals = assert_not_equals;
 G.assert_array_equals = assert_array_equals;
 G.assert_own_property = assert_own_property;
 G.assert_throws_js = assert_throws_js;
+G.assert_unreached = assert_unreached;
+G.assert_throws_exactly = assert_throws_exactly;
+G.promise_rejects_exactly = promise_rejects_exactly;
+G.promise_rejects_js = promise_rejects_js;
+G.promise_rejects_dom = promise_rejects_dom;
 
 // ---------------------------------------------------------------------------
 // META: script= dependency loading
@@ -182,7 +394,9 @@ async function loadScriptDeps(testFile, code) {
     try {
       Aike.evalScript(await fs.readText(abs));
     } catch (e) {
-      throw new Error(`loading META script '${meta.value}': ${e instanceof Error ? e.message : e}`);
+      throw new Error(
+        `loading META script '${meta.value}': ${e instanceof Error ? e.message : e}`,
+      );
     }
   }
 }
@@ -213,13 +427,18 @@ for (let i = 0; i < args.length; i++) {
   if (a === "-r" || a === "--root") root = args[++i];
   else if (a.startsWith("--root=")) root = a.slice("--root=".length);
   else if (a === "-f" || a === "--fail-file") failFile = args[++i];
-  else if (a.startsWith("--fail-file=")) failFile = a.slice("--fail-file=".length);
+  else if (a.startsWith("--fail-file="))
+    failFile = a.slice("--fail-file=".length);
   else if (a === "--log-wptreport") logWptreport = args[++i];
-  else if (a.startsWith("--log-wptreport=")) logWptreport = a.slice("--log-wptreport=".length);
-  else if (a === "-h" || a === "--help") { console.log(USAGE); G.Aike.exit(0); }
-  else components.push(a);
+  else if (a.startsWith("--log-wptreport="))
+    logWptreport = a.slice("--log-wptreport=".length);
+  else if (a === "-h" || a === "--help") {
+    console.log(USAGE);
+    G.Aike.exit(0);
+  } else components.push(a);
 }
-if (logWptreport && !logWptreport.startsWith("/")) logWptreport = join(G.Aike.cwd(), logWptreport);
+if (logWptreport && !logWptreport.startsWith("/"))
+  logWptreport = join(G.Aike.cwd(), logWptreport);
 const timeStart = Date.now() / 1000;
 if (components.length === 0) components.push("console");
 // Normalize to an absolute path: fs.* resolves relative paths against the
@@ -237,8 +456,12 @@ async function resolveTestFiles(comp) {
   const walk = async (dir) => {
     for (const e of await fs.readDir(dir)) {
       const p = join(dir, e.name);
-      if (e.isDirectory) { await walk(p); continue; }
-      if (e.name.endsWith(".any.js") && e.name !== "idlharness.any.js") out.push(p);
+      if (e.isDirectory) {
+        await walk(p);
+        continue;
+      }
+      if (e.name.endsWith(".any.js") && e.name !== "idlharness.any.js")
+        out.push(p);
     }
   };
   await walk(compPath);
@@ -272,7 +495,15 @@ async function runComponent(comp) {
       await loadScriptDeps(file, code);
       await import(file);
     } catch (e) {
-      results.push({ component: comp, file: currentFile, abs: file, kind: "load-error", name: "(file load error)", status: "FAIL", message: String(e) });
+      results.push({
+        component: comp,
+        file: currentFile,
+        abs: file,
+        kind: "load-error",
+        name: "(file load error)",
+        status: "FAIL",
+        message: String(e),
+      });
     }
     fileDurations.set(file, (G.Aike.now() - start) / 1000);
   }
@@ -283,7 +514,10 @@ async function runComponent(comp) {
   let failed = 0;
   const failures = [];
   for (const r of results.slice(before)) {
-    if (r.status === "PASS") { passed++; continue; }
+    if (r.status === "PASS") {
+      passed++;
+      continue;
+    }
     failed++;
     failures.push(r);
   }
@@ -293,7 +527,9 @@ async function runComponent(comp) {
     console.log(`❌ FAIL  [${r.file}] ${r.name}`);
     if (r.message) console.log(`      ${r.message}`);
   }
-  console.log(`Files: ${files.length}  Tests: ${failed + passed}  Passed: ${passed}  Failed: ${failed}  [${status === "FAIL" ? "❌ FAIL" : "PASS"}]`);
+  console.log(
+    `Files: ${files.length}  Tests: ${failed + passed}  Passed: ${passed}  Failed: ${failed}  [${status === "FAIL" ? "❌ FAIL" : "PASS"}]`,
+  );
   return { comp, files: files.length, tests: failed + passed, passed, failed };
 }
 
@@ -301,14 +537,19 @@ const summaries = [];
 let totalFailed = 0;
 for (const comp of components) {
   const s = await runComponent(comp);
-  if (s) { summaries.push(s); totalFailed += s.failed; }
+  if (s) {
+    summaries.push(s);
+    totalFailed += s.failed;
+  }
 }
 
 // FAIL report file.
 if (failFile) {
   const lines = [];
   for (const comp of components) {
-    const compResults = results.filter(r => r.component === comp && r.status !== "PASS");
+    const compResults = results.filter(
+      (r) => r.component === comp && r.status !== "PASS",
+    );
     if (compResults.length === 0) continue;
     lines.push(`=== ${comp} ===`);
     for (const r of compResults) {
@@ -318,18 +559,24 @@ if (failFile) {
     lines.push("");
   }
   const totalTests = results.length;
-  const totalPassed = results.filter(r => r.status === "PASS").length;
+  const totalPassed = results.filter((r) => r.status === "PASS").length;
   lines.push(`=== summary ===`);
-  lines.push(`Components: ${components.length}  Files: ${summaries.reduce((n, s) => n + s.files, 0)}  Tests: ${totalTests}  Passed: ${totalPassed}  Failed: ${totalFailed}`);
+  lines.push(
+    `Components: ${components.length}  Files: ${summaries.reduce((n, s) => n + s.files, 0)}  Tests: ${totalTests}  Passed: ${totalPassed}  Failed: ${totalFailed}`,
+  );
   await fs.writeText(failFile, lines.join("\n") + "\n");
   console.log(`\nFAIL details written to ${failFile}`);
 }
 
 console.log(`\n=== summary ===`);
 for (const s of summaries) {
-  console.log(`${s.comp}: ${s.files} files, ${s.tests} tests, ${s.passed} passed, ${s.failed} failed`);
+  console.log(
+    `${s.comp}: ${s.files} files, ${s.tests} tests, ${s.passed} passed, ${s.failed} failed`,
+  );
 }
-console.log(`Total: ${summaries.reduce((n, s) => n + s.tests, 0)} tests, ${summaries.reduce((n, s) => n + s.failed, 0)} failed`);
+console.log(
+  `Total: ${summaries.reduce((n, s) => n + s.tests, 0)} tests, ${summaries.reduce((n, s) => n + s.failed, 0)} failed`,
+);
 
 // wptreport JSON (format consumed by wpt.fyi), one entry per test file.
 if (logWptreport) {
@@ -340,7 +587,10 @@ if (logWptreport) {
     return "FAIL";
   }
   function wptTestPath(absFile) {
-    const rel = absFile && absFile.startsWith(repoRoot + "/") ? absFile.slice(repoRoot.length) : absFile;
+    const rel =
+      absFile && absFile.startsWith(repoRoot + "/")
+        ? absFile.slice(repoRoot.length)
+        : absFile;
     return rel && rel.startsWith("/") ? rel : "/" + rel;
   }
 
@@ -353,7 +603,7 @@ if (logWptreport) {
 
   const reportResults = [];
   for (const [key, recs] of byFile) {
-    const loadErr = recs.find(r => r.kind === "load-error");
+    const loadErr = recs.find((r) => r.kind === "load-error");
     const entry = {
       test: wptTestPath(key),
       subsuite: "",
@@ -366,7 +616,7 @@ if (logWptreport) {
     if (loadErr) {
       entry.subtests = [];
     } else {
-      entry.subtests = recs.map(r => ({
+      entry.subtests = recs.map((r) => ({
         name: r.name,
         status: wptStatus(r.status),
         expected: "PASS",
@@ -375,7 +625,9 @@ if (logWptreport) {
     }
     reportResults.push(entry);
   }
-  reportResults.sort((a, b) => (a.test < b.test ? -1 : a.test > b.test ? 1 : 0));
+  reportResults.sort((a, b) =>
+    a.test < b.test ? -1 : a.test > b.test ? 1 : 0,
+  );
 
   const report = {
     run_info: { product: "aike", platform: G.Aike.platform },

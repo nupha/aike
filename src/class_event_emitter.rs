@@ -5,8 +5,8 @@ use std::{cell::RefCell, collections::HashMap};
 
 use linkme::distributed_slice;
 use zuqe::{
-    Array, CallContext, ClassCtorDef, ClassID, FieldDef, JS_PROP_C_W_E, JSResult, JSValue, Object,
-    Runtime, ScopedContext, def_native_object, gc_lite::GcTrace,
+    Array, CallContext, ClassCtorDef, ClassID, FieldDef, JSResult, JSValue, Object, Runtime,
+    ScopedContext, def_native_object, gc_lite::GcTrace,
 };
 
 use crate::{USER_CLASS_DEFS, aike::signal::signal_number};
