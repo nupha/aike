@@ -329,7 +329,11 @@ fn js_console_table(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
 /// Create and register the `console` object on globalThis.
 pub(crate) fn install_console(ctx: &mut ScopedContext, global: &mut Object) -> Result<(), i32> {
-    let mut console = ctx.create_base_object()?;
+    // `console` is a namespace object: its methods are own properties, and its
+    // [[Prototype]] is an empty object whose own [[Prototype]] is %ObjectPrototype%.
+    // WPT requires getPrototypeOf(console) to have no own properties.
+    let proto = ctx.create_base_object()?;
+    let mut console = ctx.create_base_object_with_proto(Some(proto))?;
 
     console.install_fields(
         ctx,
@@ -353,10 +357,20 @@ pub(crate) fn install_console(ctx: &mut ScopedContext, global: &mut Object) -> R
             FieldDef::FUNC("groupEnd", 0, js_console_group_end, 0),
             FieldDef::FUNC("clear", 0, js_console_clear, 0),
             FieldDef::FUNC("table", 0, js_console_table, 0),
+            FieldDef::STR(
+                "[Symbol.toStringTag]",
+                "console",
+                zuqe::JS_PROP_CONFIGURABLE,
+            ),
         ],
     )?;
 
-    global.define_property_value_str(ctx, "console", console.into(), zuqe::JS_PROP_C_W_E)?;
+    global.define_property_value_str(
+        ctx,
+        "console",
+        console.into(),
+        zuqe::JS_PROP_CONFIGURABLE | zuqe::JS_PROP_WRITABLE,
+    )?;
 
     Ok(())
 }
