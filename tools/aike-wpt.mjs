@@ -227,16 +227,22 @@ if (components.length === 0) components.push("console");
 repoRoot = root.startsWith("/") ? root : join(G.Aike.cwd(), root);
 
 // Resolve a component argument to a list of .any.js test files.
+// Directories are walked recursively so component args like `fetch` collect
+// tests nested in subdirectories (e.g. fetch/api/basic/*.any.js).
 async function resolveTestFiles(comp) {
   const compPath = comp.startsWith("/") ? comp : join(repoRoot, comp);
   const st = await fs.stat(compPath);
-  if (st.isDirectory) {
-    return (await fs.readDir(compPath))
-      .filter(e => e.isFile && e.name.endsWith(".any.js") && e.name !== "idlharness.any.js")
-      .map(e => join(compPath, e.name))
-      .sort();
-  }
-  return [compPath];
+  if (!st.isDirectory) return [compPath];
+  const out = [];
+  const walk = async (dir) => {
+    for (const e of await fs.readDir(dir)) {
+      const p = join(dir, e.name);
+      if (e.isDirectory) { await walk(p); continue; }
+      if (e.name.endsWith(".any.js") && e.name !== "idlharness.any.js") out.push(p);
+    }
+  };
+  await walk(compPath);
+  return out.sort();
 }
 
 async function runComponent(comp) {
@@ -259,6 +265,7 @@ async function runComponent(comp) {
   for (const file of files) {
     currentFile = basename(file);
     currentAbsFile = file;
+    console.log(`\n=== running ${file} ===`);
     const start = G.Aike.now();
     try {
       const code = await fs.readText(file);

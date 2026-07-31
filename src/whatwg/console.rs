@@ -5,8 +5,10 @@ use std::{cell::RefCell, collections::HashMap, time::Instant};
 
 use zuqe::{CallContext, EvalFlags, EvalType, FieldDef, JSResult, JSValue, Object, ScopedContext};
 
-use crate::color::{Color, colorize};
-use crate::inspect_value::js_inspect;
+use crate::{
+    color::{Color, colorize},
+    inspect_value::js_inspect,
+};
 
 thread_local! {
     static GROUP_INDENT: RefCell<usize> = const { RefCell::new(0) };
