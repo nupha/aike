@@ -274,12 +274,21 @@ pub(super) fn settle_stream_state(
 ) {
     let mut stream = stream;
     if let Some(sp) = JSReadableStream::payload_mut_of(&mut stream) {
+        // A stream can only leave the Readable state once. Re-settling (e.g.
+        // cancel after an error) must not re-settle the peer's closed_promise,
+        // which would violate the Promise contract.
+        if sp.state != RsState::Readable {
+            return;
+        }
         sp.state = state;
         if let Some(r) = reason {
             sp.stored_error = r;
         }
         notify_peer_closed(ctx, sp.reader.map(JSValue::from), reason);
     } else if let Some(sp) = JSWritableStream::payload_mut_of(&mut stream) {
+        if sp.state != RsState::Readable {
+            return;
+        }
         sp.state = state;
         if let Some(r) = reason {
             sp.stored_error = r;
@@ -289,8 +298,16 @@ pub(super) fn settle_stream_state(
 }
 
 /// Resolve or reject the peer (reader/writer) `closed_promise` if present.
+///
+/// The `closed_promise` is taken out (`Option::take`) so it can only be settled
+/// once: settling it twice would violate Promise's contract (a settled promise
+/// must ignore further resolve/reject). Fetch body teardown can call
+/// `settle_stream_state` repeatedly (error then cancel) against the same reader.
 fn notify_peer_closed(ctx: &mut ScopedContext, peer: Option<JSValue>, reason: Option<JSValue>) {
-    let Some(pv) = peer else { return };
+    let Some(mut pv) = peer else {
+        return;
+    };
+
     let mut settle = |cp: &mut Promise| {
         if let Some(r) = reason {
             cp.reject(ctx, r);
@@ -298,14 +315,13 @@ fn notify_peer_closed(ctx: &mut ScopedContext, peer: Option<JSValue>, reason: Op
             cp.resolve(ctx, JSValue::UNDEFINED);
         }
     };
-    if let Some(rp) = JSReadableStreamDefaultReader::payload_of(&pv) {
-        if let Some(mut cp) = rp.closed_promise {
+
+    if let Some(rp) = JSReadableStreamDefaultReader::payload_mut_of(&mut pv) {
+        if let Some(mut cp) = rp.closed_promise.take() {
             settle(&mut cp);
         }
-        return;
-    }
-    if let Some(wp) = JSWritableStreamDefaultWriter::payload_of(&pv) {
-        if let Some(mut cp) = wp.closed_promise {
+    } else if let Some(wp) = JSWritableStreamDefaultWriter::payload_mut_of(&mut pv) {
+        if let Some(mut cp) = wp.closed_promise.take() {
             settle(&mut cp);
         }
     }
