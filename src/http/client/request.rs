@@ -242,6 +242,8 @@ fn js_req_body(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     match source {
         Some(BodySource::Channel(rx)) => readable_stream_from_channel(ctx, rx),
         Some(BodySource::Synthetic(bytes)) => readable_stream_from_bytes(ctx, bytes),
+        // Request bodies are always buffered, never a live stream.
+        Some(BodySource::Stream(s)) => Ok(s.into()),
         None => Ok(JSValue::NULL),
     }
 }

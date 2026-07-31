@@ -18,6 +18,7 @@ use linkme::distributed_slice;
 use zuqe::{
     CallContext, ClassCtorDef, ClassID, FieldDef, JSResult, JSValue, NativeObject, Runtime,
     ScopedContext, def_native_object,
+    gc_lite::{GcTrace, GcTraceCtx},
 };
 
 use crate::{
@@ -31,7 +32,9 @@ use crate::{
         headers::{HeaderList, HeadersPayload, JSHeaders, header_list_from_js},
         transport::TransportResponse,
     },
-    whatwg::stream::{call_opt_method, readable_stream_from_bytes, readable_stream_from_channel},
+    whatwg::stream::{
+        JSReadableStream, call_opt_method, readable_stream_from_bytes, readable_stream_from_channel,
+    },
 };
 
 /// WHATWG `Response.type` (closed set of values this runtime produces).
@@ -68,6 +71,8 @@ pub(crate) struct ResponsePayload {
     body_stream: Option<JSValue>,
     /// Fixed body bytes for constructed (synthetic) responses.
     synthetic_body: Option<Vec<u8>>,
+    /// `ReadableStream` passed to `new Response(stream)`; drained on consumption.
+    stream_body: Option<JSReadableStream>,
 
     /// WHATWG `Response.type`; see [`RespType`].
     resp_type: RespType,
@@ -84,6 +89,16 @@ pub(crate) struct ResponsePayload {
 }
 
 impl ResponsePayload {
+    /// Keep JS-visible stream handles alive across GC while the body is held.
+    fn gc_trace(&self, gcx: &mut GcTraceCtx) {
+        if let Some(ref s) = self.body_stream {
+            s.trace(gcx);
+        }
+        if let Some(s) = self.stream_body {
+            JSValue::from(s).trace(gcx);
+        }
+    }
+
     /// Start body streaming (lazily) and return a `BodySource`.
     /// Returns `Err` if the body was already consumed or is unavailable.
     fn ensure_body_stream(&mut self) -> Result<BodySource, i32> {
@@ -116,6 +131,9 @@ impl ResponsePayload {
             Ok(BodySource::Channel(self.body_rx.clone().unwrap()))
         } else if let Some(bytes) = self.synthetic_body.clone() {
             Ok(BodySource::Synthetic(bytes))
+        } else if let Some(stream) = self.stream_body {
+            // Body given to `new Response(stream)` — drain the stream itself.
+            Ok(BodySource::Stream(stream))
         } else {
             Err(-1)
         }
@@ -155,6 +173,7 @@ pub(crate) fn build_opaque_redirect_response(ctx: &mut ScopedContext) -> JSResul
             body_consumed: true,
             body_stream: None,
             synthetic_body: None,
+            stream_body: None,
             resp_type: RespType::OpaqueRedirect,
             url: String::new(),
             redirected: false,
@@ -182,6 +201,7 @@ fn transport_payload(
         body_consumed: false,
         body_stream: None,
         synthetic_body: None,
+        stream_body: None,
         resp_type,
         url: url.to_string(),
         redirected,
@@ -226,6 +246,7 @@ fn js_response_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
     let new_target = cc.this();
 
     let mut synthetic: Option<Vec<u8>> = None;
+    let mut stream_body: Option<JSReadableStream> = None;
     let mut status = 200u16;
     let mut status_text = String::new();
     let mut header_list = HeaderList::new();
@@ -233,7 +254,12 @@ fn js_response_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
     if cc.length() > 0 {
         let body_arg = cc.arg(0);
         if !body_arg.is_undefined_or_null() {
-            synthetic = Some(body_to_bytes(ctx, &body_arg)?);
+            // A ReadableStream body must stay a stream; stringifying it would
+            // silently produce "[object ReadableStream]".
+            match JSReadableStream::try_from(body_arg) {
+                Ok(s) => stream_body = Some(s),
+                Err(_) => synthetic = Some(body_to_bytes(ctx, &body_arg)?),
+            }
         }
     }
     if cc.length() > 1 {
@@ -263,6 +289,7 @@ fn js_response_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
             body_consumed: false,
             body_stream: None,
             synthetic_body: synthetic,
+            stream_body,
             resp_type: RespType::Default,
             url: String::new(),
             redirected: false,
@@ -291,6 +318,7 @@ fn js_response_static_error(ctx: &mut ScopedContext, _cc: CallContext) -> JSResu
             body_consumed: true,
             body_stream: None,
             synthetic_body: None,
+            stream_body: None,
             resp_type: RespType::Error,
             url: String::new(),
             redirected: false,
@@ -340,6 +368,7 @@ fn js_response_static_redirect(ctx: &mut ScopedContext, cc: CallContext) -> JSRe
             body_consumed: true,
             body_stream: None,
             synthetic_body: None,
+            stream_body: None,
             resp_type: RespType::Default,
             url: String::new(),
             redirected: false,
@@ -398,6 +427,7 @@ fn js_response_static_json(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
             body_consumed: false,
             body_stream: None,
             synthetic_body: Some(body),
+            stream_body: None,
             resp_type: RespType::Default,
             url: String::new(),
             redirected: false,
@@ -510,6 +540,12 @@ fn js_response_body(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let stream = if get_response_payload_mut(ctx, &mut this)?.body_consumed {
         disturbed_body_stream(ctx)?
     } else {
+        // A constructor-supplied stream IS the body — expose it directly.
+        if let Some(s) = get_response_payload_mut(ctx, &mut this)?.stream_body {
+            let s = JSValue::from(s);
+            get_response_payload_mut(ctx, &mut this)?.body_stream = Some(s);
+            return Ok(s);
+        }
         let source = {
             let p = get_response_payload_mut(ctx, &mut this)?;
             if p.resp.is_some() || p.synthetic_body.is_some() {
@@ -521,6 +557,8 @@ fn js_response_body(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         match source {
             Some(BodySource::Channel(rx)) => readable_stream_from_channel(ctx, rx)?,
             Some(BodySource::Synthetic(bytes)) => readable_stream_from_bytes(ctx, bytes)?,
+            // Handled above by the stream_body early return.
+            Some(BodySource::Stream(s)) => s.into(),
             None => disturbed_body_stream(ctx)?,
         }
     };
@@ -528,6 +566,7 @@ fn js_response_body(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     get_response_payload_mut(ctx, &mut this)?.body_stream = Some(stream);
     Ok(stream)
 }
+
 fn js_response_body_as(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let magic = cc.magic();
 
@@ -550,7 +589,7 @@ fn js_response_body_as(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             None
         };
 
-        if p.resp.is_none() && p.synthetic_body.is_none() {
+        if p.resp.is_none() && p.synthetic_body.is_none() && p.stream_body.is_none() {
             (None, convert)
         } else {
             let src = p.ensure_body_stream().ok();
@@ -559,7 +598,13 @@ fn js_response_body_as(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             if src.is_some() {
                 p.body_consumed = true;
                 // Lock the cached .body stream (if any) so its getReader() throws.
-                if let Some(s) = p.body_stream {
+                // Skip when it is the constructor-supplied stream: drain_body
+                // acquires that reader itself.
+                let is_own_stream =
+                    matches!((p.body_stream, p.stream_body), (Some(a), Some(b)) if a == b.into());
+                if let Some(s) = p.body_stream
+                    && !is_own_stream
+                {
                     let _ = call_opt_method(ctx, s, "getReader", &[]);
                 }
             }
@@ -623,6 +668,8 @@ fn js_response_clone(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         body_consumed: false,
         body_stream: None,
         synthetic_body: synthetic,
+        // A stream body cannot be duplicated without teeing; leave it out.
+        stream_body: None,
         resp_type: src.resp_type,
         url: src.url.clone(),
         redirected: src.redirected,
@@ -702,7 +749,8 @@ def_native_object!(
         ClassCtorDef::new(js_response_constructor, 1, true)
             .entries(RESPONSE_STATIC_ENTRIES)
             .expose_to_global()
-    )
+    ),
+    on_payload_gc: ResponsePayload::gc_trace
 );
 
 #[distributed_slice(USER_CLASS_DEFS)]

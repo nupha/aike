@@ -2,6 +2,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
 use std::{
+    cell::RefCell,
+    rc::Rc,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -9,15 +11,19 @@ use std::{
 use crossbeam::channel::{Receiver, TryRecvError};
 
 use zuqe::{
-    CallContext, Callback, JSResult, JSValue, JobState, ScopedContext,
+    CallContext, Callback, Exception, JSResult, JSValue, JobGcTrace, JobState, ScopedContext,
     builtins::{
         iterator::AsyncIterableIterator,
-        promise::{Promise, PromiseResultSlot},
+        promise::{Promise, PromiseResultSlot, PromiseState},
         typed_array::TypedArray,
     },
+    gc_lite::{GcTrace, GcTraceCtx},
 };
 
-use crate::html::{HtmlConvertMode, convert_html};
+use crate::{
+    html::{HtmlConvertMode, convert_html},
+    whatwg::stream::{JSReadableStream, call_opt_method},
+};
 
 /// Source of response body data.
 pub(crate) enum BodySource {
@@ -25,9 +31,13 @@ pub(crate) enum BodySource {
     Channel(Receiver<Vec<u8>>),
     /// Entire body is already available as bytes (synthetic response).
     Synthetic(Vec<u8>),
+    /// A JS `ReadableStream` body — drain by pumping its reader.
+    Stream(JSReadableStream),
 }
 
 /// Convert a JS body argument (string or Uint8Array/TypedArray) into bytes.
+/// A `ReadableStream` body is NOT handled here — it must be kept as a stream by
+/// the caller, otherwise `to_string` would yield "[object ReadableStream]".
 pub(crate) fn body_to_bytes(ctx: &mut ScopedContext, val: &JSValue) -> Result<Vec<u8>, i32> {
     if let Ok(mut ta) = TypedArray::try_from(val.clone()) {
         return Ok(ta.with_bytes_mut(|b| b.to_vec()));
@@ -54,9 +64,19 @@ pub(crate) fn drain_body(
     html_convert: Option<HtmlConvertMode>,
 ) -> JSResult {
     let result_slot = PromiseResultSlot::<Result<Vec<u8>, String>>::new();
+    // Carries a JS rejection value alongside the (Send-only) slot, so a stream
+    // error can be rethrown as the original object rather than a copied string.
+    let raw_err: Rc<RefCell<Option<JSValue>>> = Rc::new(RefCell::new(None));
+    let convert_err = raw_err.clone();
     let promise =
         Promise::create_with_result_slot(ctx, result_slot.clone(), move |cx, data| -> JSResult {
-            let buf = data.map_err(|e| cx.throw_internal_error(&e))?;
+            let buf = data.map_err(|e| match convert_err.borrow_mut().take() {
+                Some(v) => {
+                    cx.throw(Exception::Error(v));
+                    -1
+                }
+                None => cx.throw_internal_error(&e),
+            })?;
             match mode {
                 BODY_AS_BYTES => TypedArray::create_from_vec_u8(cx, buf).map(JSValue::from),
                 BODY_AS_TEXT => {
@@ -81,6 +101,10 @@ pub(crate) fn drain_body(
         BodySource::Synthetic(buf) => {
             // Entire body is already available — commit directly, no polling needed.
             let _ = result_slot.commit(Ok(buf));
+            Ok(promise.into())
+        }
+        BodySource::Stream(stream) => {
+            drain_readable_stream(ctx, stream, result_slot, raw_err)?;
             Ok(promise.into())
         }
         BodySource::Channel(rx) => {
@@ -116,6 +140,132 @@ pub(crate) fn drain_body(
             Ok(promise.into())
         }
     }
+}
+
+/// GC roots for the stream-drain job. The job outlives many event-loop turns,
+/// so every JS value it can touch later must be traced from here, including the
+/// cells it mutates (`pending` read promise, captured error value).
+struct DrainRoots {
+    reader: JSValue,
+    pending: Rc<RefCell<Option<Promise>>>,
+    raw_err: Rc<RefCell<Option<JSValue>>>,
+}
+
+impl JobGcTrace for DrainRoots {
+    fn job_trace_values(&self, gcx: &mut GcTraceCtx) {
+        self.reader.trace(gcx);
+        if let Some(p) = *self.pending.borrow() {
+            JSValue::from(p).trace(gcx);
+        }
+        if let Some(ref v) = *self.raw_err.borrow() {
+            v.trace(gcx);
+        }
+    }
+}
+
+/// Pump a JS `ReadableStream` to completion, committing the concatenated bytes
+/// (or the stream's error) into `slot`.
+///
+/// Runs as a polling job because `reader.read()` returns a promise that may
+/// settle later (e.g. from an async `pull()`); we inspect its state each tick
+/// rather than attaching JS callbacks, which native fn-pointer callbacks
+/// cannot capture state for.
+fn drain_readable_stream(
+    ctx: &mut ScopedContext,
+    stream: JSReadableStream,
+    slot: PromiseResultSlot<Result<Vec<u8>, String>>,
+    raw_err: Rc<RefCell<Option<JSValue>>>,
+) -> Result<(), i32> {
+    let reader = match call_opt_method(ctx, stream.into(), "getReader", &[])? {
+        Some(r) if r.is_object() => r,
+        // Already locked by someone else: surface as a body error.
+        _ => {
+            let _ = slot.commit(Err("body stream is already locked".into()));
+            return Ok(());
+        }
+    };
+
+    let buf = Rc::new(RefCell::new(Vec::<u8>::new()));
+    // Holds the in-flight read() promise between polls.
+    let pending = Rc::new(RefCell::new(None::<Promise>));
+    let start = Instant::now();
+    let roots = DrainRoots {
+        reader,
+        pending: pending.clone(),
+        raw_err: raw_err.clone(),
+    };
+
+    ctx.queue_job(
+        move |cx| {
+            // Start a new read() unless one is already in flight.
+            if pending.borrow().is_none() {
+                let read_fn = reader.get_property_str(cx, "read")?;
+                if !read_fn.is_callable() {
+                    let _ = slot.commit(Err("stream reader has no read()".into()));
+                    return Ok(JobState::Done);
+                }
+                match read_fn.call(cx, reader, &[]) {
+                    Ok(pv) => match Promise::try_from(pv) {
+                        Ok(p) => *pending.borrow_mut() = Some(p),
+                        Err(_) => {
+                            let _ = slot.commit(Err("read() did not return a promise".into()));
+                            return Ok(JobState::Done);
+                        }
+                    },
+                    Err(_) => {
+                        // read() threw synchronously — carry the thrown value
+                        // over so identity is preserved.
+                        if let Exception::Error(v) = cx.take_exception() {
+                            *raw_err.borrow_mut() = Some(v);
+                        }
+                        let _ = slot.commit(Err("stream read failed".into()));
+                        return Ok(JobState::Done);
+                    }
+                }
+            }
+
+            let p = pending.borrow().unwrap();
+            match p.state() {
+                PromiseState::Pending => {
+                    if start.elapsed() > BODY_TIMEOUT {
+                        let _ = slot.commit(Err("body read timeout".into()));
+                        return Ok(JobState::Done);
+                    }
+                    Ok(JobState::Again)
+                }
+                PromiseState::Rejected => {
+                    // Stream errored — hand over the original reason value (not
+                    // a stringified copy) so identity is preserved, as
+                    // `promise_rejects_exactly` and user `catch` blocks expect.
+                    *raw_err.borrow_mut() = Some(p.result());
+                    let _ = slot.commit(Err("stream errored".into()));
+                    Ok(JobState::Done)
+                }
+                PromiseState::Fulfilled => {
+                    *pending.borrow_mut() = None;
+                    let result = p.result();
+                    let done = result
+                        .get_property_str(cx, "done")
+                        .and_then(|d| d.to_bool())
+                        .unwrap_or(false);
+                    if done {
+                        let full = std::mem::take(&mut *buf.borrow_mut());
+                        let _ = slot.commit(Ok(full));
+                        return Ok(JobState::Done);
+                    }
+                    if let Ok(value) = result.get_property_str(cx, "value")
+                        && let Ok(mut ta) = TypedArray::try_from(value)
+                    {
+                        let bytes = ta.with_bytes_mut(|b| b.to_vec());
+                        buf.borrow_mut().extend_from_slice(&bytes);
+                    }
+                    Ok(JobState::Again)
+                }
+            }
+        },
+        roots,
+    );
+    Ok(())
 }
 
 /// Create an async-iterable body stream from a `Receiver`, attaching a

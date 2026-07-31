@@ -118,6 +118,9 @@ function makeTestRecord(name) {
   return { record, t };
 }
 
+// Max wait for outstanding promise_test callbacks to settle, per component.
+const PROMISE_SETTLE_TIMEOUT_MS = 5000;
+
 function test(func, name) {
   const { record, t } = makeTestRecord(name);
   try {
@@ -507,8 +510,15 @@ async function runComponent(comp) {
     }
     fileDurations.set(file, (G.Aike.now() - start) / 1000);
   }
-  // Let any promise_test callbacks settle.
-  await G.Aike.sleep(0);
+  // Let any promise_test callbacks settle. Some bodies (e.g. a ReadableStream
+  // response) need several event-loop turns, so poll until nothing is RUNNING
+  // instead of yielding a fixed number of ticks.
+  const settleDeadline = G.Aike.now() + PROMISE_SETTLE_TIMEOUT_MS;
+  for (;;) {
+    if (!results.slice(before).some((r) => r.status === "RUNNING")) break;
+    if (G.Aike.now() >= settleDeadline) break;
+    await G.Aike.sleep(1);
+  }
 
   let passed = 0;
   let failed = 0;
