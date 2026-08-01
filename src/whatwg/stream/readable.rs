@@ -373,8 +373,10 @@ pub(crate) struct ReadableStreamDefaultReaderPayload {
 }
 
 thread_local! {
-    /// Channel-backed streams being polled: id -> (controller, receiver).
-    pub(super) static CHANNEL_STREAMS: RefCell<HashMap<u64, (JSReadableStreamDefaultController, Receiver<Vec<u8>>)>> =
+    /// Channel-backed streams being polled: id -> (controller, receiver, idle deadline).
+    /// The deadline is per stream and refreshed on every chunk, so a slow but
+    /// live producer is never cut off; only a stalled stream times out.
+    pub(super) static CHANNEL_STREAMS: RefCell<HashMap<u64, (JSReadableStreamDefaultController, Receiver<Vec<u8>>, Instant)>> =
         RefCell::new(HashMap::new());
 
     static NEXT_STREAM_ID: Cell<u64> = const { Cell::new(1) };
@@ -972,7 +974,7 @@ pub(crate) fn readable_stream_from_channel(
 
     let was_empty = CHANNEL_STREAMS.with(|map| {
         let empty = map.borrow().is_empty();
-        map.borrow_mut().insert(id, (controller, rx));
+        map.borrow_mut().insert(id, (controller, rx, Instant::now()));
         empty
     });
 
@@ -1018,38 +1020,22 @@ pub(crate) fn readable_stream_from_bytes(
 }
 
 fn start_channel_stream_poller(ctx: &mut ScopedContext) {
-    let start = Instant::now();
-    const POLLER_TIMEOUT: Duration = Duration::from_secs(10);
-    const MAX_TICKS: u32 = 100_000;
-    let tick_count = Cell::new(0u32);
+    // Idle timeout, applied per stream and refreshed on every received chunk.
+    // A stream is only killed when its own producer goes quiet for this long,
+    // so neither a slow body nor a long-lived sibling stream can starve it.
+    const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(10);
 
     ctx.queue_job(
         move |cx| {
-            let count = tick_count.get();
-            tick_count.set(count + 1);
-            let timed_out = start.elapsed() > POLLER_TIMEOUT || count > MAX_TICKS;
-
             CHANNEL_STREAMS.with(|map| {
                 let mut map = map.borrow_mut();
                 let mut to_remove = Vec::new();
 
-                for (&id, (controller, rx)) in map.iter() {
-                    if timed_out {
-                        let _ = (|| -> Result<(), i32> {
-                            let err = cx
-                                .create_string_from_utf8(b"channel stream timeout".to_vec())
-                                .map(JSValue::make_string)
-                                .map_err(|_| -1)?;
-                            let error_fn = controller.get_property_str(cx, "error")?;
-                            let _ = error_fn.call(cx, JSValue::from(*controller), &[err]);
-                            Ok(())
-                        })();
-                        to_remove.push(id);
-                        continue;
-                    }
-
+                for (&id, (controller, rx, deadline)) in map.iter_mut() {
                     match rx.try_recv() {
                         Ok(data) => {
+                            // Producer is alive: extend this stream's deadline.
+                            *deadline = Instant::now();
                             let _ = (|| -> Result<(), i32> {
                                 let ta =
                                     TypedArray::create_from_vec_u8(cx, data).map_err(|_| {
@@ -1072,7 +1058,21 @@ fn start_channel_stream_poller(ctx: &mut ScopedContext) {
                             })();
                             to_remove.push(id);
                         }
-                        Err(TryRecvError::Empty) => {}
+                        Err(TryRecvError::Empty) => {
+                            if deadline.elapsed() > STREAM_IDLE_TIMEOUT {
+                                let _ = (|| -> Result<(), i32> {
+                                    let err = cx
+                                        .create_string_from_utf8(b"channel stream timeout".to_vec())
+                                        .map(JSValue::make_string)
+                                        .map_err(|_| -1)?;
+                                    let error_fn = controller.get_property_str(cx, "error")?;
+                                    let _ =
+                                        error_fn.call(cx, JSValue::from(*controller), &[err]);
+                                    Ok(())
+                                })();
+                                to_remove.push(id);
+                            }
+                        }
                     }
                 }
 
@@ -1081,7 +1081,7 @@ fn start_channel_stream_poller(ctx: &mut ScopedContext) {
                 }
             });
 
-            if timed_out || CHANNEL_STREAMS.with(|map| map.borrow().is_empty()) {
+            if CHANNEL_STREAMS.with(|map| map.borrow().is_empty()) {
                 Ok(JobState::Done)
             } else {
                 Ok(JobState::Again)

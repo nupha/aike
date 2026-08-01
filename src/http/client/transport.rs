@@ -169,6 +169,28 @@ fn classify(e: &reqwest::Error) -> &'static str {
     "other"
 }
 
+/// Encode a header value as latin-1 bytes.
+///
+/// Fetch validates header values per byte (0x00-0xFF), so a value carrying
+/// e.g. `æ` means the byte 0xE6, not its two-byte UTF-8 encoding. Returns
+/// `None` when the value is plain ASCII (the common case, where the default
+/// `&str` conversion already does the right thing) or when it contains a
+/// non-latin-1 char that cannot be represented.
+fn latin1_header_value(v: &str) -> Option<reqwest::header::HeaderValue> {
+    if v.is_ascii() {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(v.len());
+    for c in v.chars() {
+        let cp = c as u32;
+        if cp > 0xFF {
+            return None;
+        }
+        bytes.push(cp as u8);
+    }
+    reqwest::header::HeaderValue::from_bytes(&bytes).ok()
+}
+
 /// Map `reqwest::Version` to a short version string.
 fn version_str(v: reqwest::Version) -> &'static str {
     match v {
@@ -245,7 +267,14 @@ pub(crate) async fn perform_request(
     }
 
     for (k, v) in &headers {
-        rb = rb.header(k, v);
+        // Header values are byte strings, not text. Fetch validates them as
+        // latin-1, so a char like U+00E6 must go on the wire as the single
+        // byte 0xE6 — sending its UTF-8 encoding would make `http` reject the
+        // header and silently drop it.
+        match latin1_header_value(v) {
+            Some(hv) => rb = rb.header(k, hv),
+            None => rb = rb.header(k, v),
+        }
     }
     if let Some(b) = req.body {
         rb = rb.body(b);
@@ -263,10 +292,16 @@ pub(crate) async fn perform_request(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
         .to_string();
+    // Decode values as latin-1, not UTF-8: a header value is a byte string and
+    // bytes 0x80-0xFF are legal (RFC 7230 obs-text). `to_str()` rejects those,
+    // so using it here would silently drop the whole header.
     let raw_headers: Vec<(String, String)> = resp
         .headers()
         .iter()
-        .filter_map(|(k, v)| v.to_str().ok().map(|vs| (k.to_string(), vs.to_string())))
+        .map(|(k, v)| {
+            let vs = v.as_bytes().iter().map(|&b| b as char).collect::<String>();
+            (k.to_string(), vs)
+        })
         .collect();
     // Fetch spec: multiple identical `Content-Length` headers combine into one;
     // conflicting `Content-Length` values are dropped (treated as absent).

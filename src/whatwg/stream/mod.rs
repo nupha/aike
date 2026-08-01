@@ -27,7 +27,7 @@ pub(crate) use {
 use linkme::distributed_slice;
 use zuqe::{
     CallContext, ClassCtorDef, ClassID, FieldDef, JSResult, JSValue, Runtime, ScopedContext,
-    builtins::{promise::Promise, typed_array::TypedArray},
+    builtins::promise::Promise,
     def_native_object,
     gc_lite::{GcTrace, GcTraceCtx},
 };
@@ -49,17 +49,11 @@ pub(crate) struct QueueEntry {
 /// Called by the runtime GC to keep stream-related JSValues alive.
 pub(crate) fn gc_trace_stream(gcx: &mut GcTraceCtx) {
     readable::CHANNEL_STREAMS.with_borrow(|map| {
-        for (controller, _) in map.values() {
+        for (controller, _, _) in map.values() {
             controller.as_object().trace(gcx);
         }
     });
 }
-
-// ============================================================================
-// QueuingStrategy payload
-// ============================================================================
-
-pub(crate) struct QueuingStrategyPayload;
 
 // ============================================================================
 // ByteLengthQueuingStrategy
@@ -77,7 +71,7 @@ const BYTE_LENGTH_QUEUING_STRATEGY_PROTO: &[FieldDef] = &[
 def_native_object!(
     "ByteLengthQueuingStrategy",
     JSByteLengthQueuingStrategy,
-    QueuingStrategyPayload,
+    (),
     BYTE_LENGTH_QUEUING_STRATEGY_PROTO,
     Some(ClassCtorDef::new(js_byte_length_constructor, 1, false).expose_to_global())
 );
@@ -85,14 +79,32 @@ def_native_object!(
 fn js_byte_length_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let new_target = cc.this();
     let init_val = cc.arg(0);
-    let mut instance =
-        JSByteLengthQueuingStrategy::new_instance(ctx, new_target, QueuingStrategyPayload)?;
-    if let Some(obj) = init_val.as_object()
-        && let Ok(hwm) = obj.get_property_str(ctx, "highWaterMark")
-    {
-        instance.define_property_value_str(ctx, "highWaterMark", hwm, zuqe::JS_PROP_C_W_E)?;
+    let mut instance = JSByteLengthQueuingStrategy::new_instance(ctx, new_target)?;
+    let obj = queuing_strategy_init(ctx, init_val)?;
+    let hwm = obj.get_property_str(ctx, "highWaterMark")?;
+    if hwm.is_undefined() {
+        return Err(ctx.throw_type_error("highWaterMark is required"));
     }
+    let num = hwm.to_number(ctx)?.to_f64();
+    instance.define_property_value_str(
+        ctx,
+        "highWaterMark",
+        JSValue::from(num),
+        zuqe::JS_PROP_C_W_E,
+    )?;
     Ok(instance.into())
+}
+
+/// WebIDL `QueuingStrategy` dict init: must be a (non-null) object.
+/// Returns the init object, or throws TypeError for undefined/null/non-object.
+fn queuing_strategy_init<'a>(
+    ctx: &mut ScopedContext,
+    init_val: JSValue,
+) -> Result<zuqe::Object, i32> {
+    if init_val.is_undefined() || init_val.is_null() || init_val.as_object().is_none() {
+        return Err(ctx.throw_type_error("QueuingStrategy requires an object init"));
+    }
+    Ok(init_val.as_object().unwrap())
 }
 
 // ============================================================================
@@ -100,7 +112,7 @@ fn js_byte_length_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSRes
 // ============================================================================
 
 const COUNT_QUEUING_STRATEGY_PROTO: &[FieldDef] = &[
-    FieldDef::FUNC("size", 1, js_count_size, 0),
+    FieldDef::FUNC("size", 0, js_count_size, 0),
     FieldDef::STR(
         "[Symbol.toStringTag]",
         "CountQueuingStrategy",
@@ -111,7 +123,7 @@ const COUNT_QUEUING_STRATEGY_PROTO: &[FieldDef] = &[
 def_native_object!(
     "CountQueuingStrategy",
     JSCountQueuingStrategy,
-    QueuingStrategyPayload,
+    (),
     COUNT_QUEUING_STRATEGY_PROTO,
     Some(ClassCtorDef::new(js_count_constructor, 1, false).expose_to_global())
 );
@@ -119,33 +131,35 @@ def_native_object!(
 fn js_count_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let new_target = cc.this();
     let init_val = cc.arg(0);
-    let mut instance =
-        JSCountQueuingStrategy::new_instance(ctx, new_target, QueuingStrategyPayload)?;
-    if let Some(obj) = init_val.as_object()
-        && let Ok(hwm) = obj.get_property_str(ctx, "highWaterMark")
-    {
-        instance.define_property_value_str(ctx, "highWaterMark", hwm, zuqe::JS_PROP_C_W_E)?;
+    let mut instance = JSCountQueuingStrategy::new_instance(ctx, new_target)?;
+    let obj = queuing_strategy_init(ctx, init_val)?;
+    let hwm = obj.get_property_str(ctx, "highWaterMark")?;
+    if hwm.is_undefined() {
+        return Err(ctx.throw_type_error("highWaterMark is required"));
     }
+    let num = hwm.to_number(ctx)?.to_f64();
+    instance.define_property_value_str(
+        ctx,
+        "highWaterMark",
+        JSValue::from(num),
+        zuqe::JS_PROP_C_W_E,
+    )?;
     Ok(instance.into())
 }
 
 fn js_byte_length_size(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let chunk = cc.arg(0);
-    if let Some(s) = chunk.as_string(false) {
-        return Ok(JSValue::from(s.len() as f64));
+    if chunk.is_undefined() || chunk.is_null() {
+        return Err(ctx.throw_type_error("chunk is required"));
     }
-    if let Ok(arr) = TypedArray::try_from(chunk) {
-        return Ok(JSValue::from(arr.byte_length() as i64));
+    let Some(obj) = chunk.as_object() else {
+        return Ok(JSValue::UNDEFINED);
+    };
+    let atom = zuqe::Atom::from_static(ctx, "byteLength")?;
+    if !obj.has_property(ctx, atom)? {
+        return Ok(JSValue::UNDEFINED);
     }
-
-    let len = chunk
-        .get_property_str(ctx, "byteLength")
-        .or_else(|_| chunk.get_property_str(ctx, "length"))
-        .unwrap_or(JSValue::from(0.0));
-
-    Ok(JSValue::from(
-        len.to_number(ctx).unwrap_or(zuqe::IntOrFloat::Int64(0)),
-    ))
+    obj.get_property(ctx, atom)
 }
 
 fn js_count_size(_ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {

@@ -272,6 +272,15 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         );
     }
 
+    // Fetch spec: the request URL is serialized "with the exclude fragment
+    // flag set" — the fragment is never sent and never appears in
+    // `response.url`. Parsing also normalizes the URL (e.g. an empty path
+    // becomes "/"). Leave unparsable URLs alone so the transport reports them.
+    if let Ok(mut u) = url::Url::parse(&url_str) {
+        u.set_fragment(None);
+        url_str = u.to_string();
+    }
+
     // Apply RequestInit overrides.
     if !init.is_undefined_or_null() {
         if let Some(o) = init.as_object() {

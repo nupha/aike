@@ -190,6 +190,42 @@ if (wptServerEnabled && wptServer) {
 }
 
 // ---------------------------------------------------------------------------
+// wptserve template substitution
+//
+// Files whose name contains `.sub.` are served by wptserve with `{{...}}`
+// placeholders expanded. We read test files straight off disk, so we must do
+// the same expansion ourselves; otherwise a URL like
+// `http://{{host}}:{{ports[http][0]}}/` reaches fetch() verbatim and fails to
+// parse. Only the placeholders WPT tests actually rely on are supported.
+// ---------------------------------------------------------------------------
+
+// Host/port of the wpt server, derived from the configured base URL so that
+// --wpt-server / $WPT_SERVER_URL stay authoritative.
+function serverHostPort() {
+  try {
+    const u = new URL(wptServer);
+    return {
+      host: u.hostname,
+      port: u.port || (u.protocol === "https:" ? "443" : "80"),
+    };
+  } catch {
+    return { host: "web-platform.test", port: "8000" };
+  }
+}
+
+// Expand the `{{host}}` / `{{ports[scheme][n]}}` placeholders. Unknown
+// placeholders are left untouched so failures stay visible rather than
+// silently turning into a wrong URL.
+function substituteTemplates(code) {
+  const { host, port } = serverHostPort();
+  return code
+    .replace(/\{\{host\}\}/g, host)
+    .replace(/\{\{ports\[(\w+)\]\[(\d+)\]\}\}/g, (m, scheme, idx) =>
+      scheme === "http" && idx === "0" ? port : m,
+    );
+}
+
+// ---------------------------------------------------------------------------
 // META: script= dependency loading
 // ---------------------------------------------------------------------------
 
@@ -387,7 +423,9 @@ async function runOneFile(file) {
   Aike.evalScript(testharnessText);
   registerHarnessCallbacks();
 
-  const code = await fs.readText(file);
+  let code = await fs.readText(file);
+  // wptserve only expands {{...}} for files marked `.sub.`.
+  if (currentFile.includes(".sub.")) code = substituteTemplates(code);
   await loadScriptDeps(file, code);
   Aike.evalScript(code);
 
