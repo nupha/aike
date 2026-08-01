@@ -217,8 +217,11 @@ pub(crate) async fn perform_request(
         let is_head = req.method.eq_ignore_ascii_case("HEAD");
         return Ok(TransportResponse {
             status: 200,
-            // WHATWG fetch: statusText is always the empty string.
-            status_text: String::new(),
+            // Non-network (synthetic) responses such as `data:` URLs get the
+            // default status 200 with statusText "OK" and type "default", per
+            // the WHATWG fetch scheme fetch algorithm. (Network HTTP responses
+            // keep statusText "" — the reason phrase is not exposed to scripts.)
+            status_text: "OK".to_string(),
             headers: vec![("content-type".into(), content_type.clone())],
             content_type,
             content_length: Some(body.len() as u64),
