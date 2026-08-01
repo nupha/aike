@@ -162,7 +162,14 @@ if (wptServerEnabled && wptServer) {
       dir = currentAbsFile.replace(/[^/]*$/, "");
     }
     const testBase = base + "/" + dir.replace(/^\/+/, "");
-    return new URL(url, testBase).href;
+    const out = new URL(url, testBase);
+    // WPT serves the shared `resources/` directory at the checkout root; a
+    // test's relative RESOURCES_DIR (e.g. /fetch/api/resources/) must resolve
+    // to the same canonical file. Normalize any .../resources/inspect-headers.py
+    // to /resources/inspect-headers.py so the static server can answer it.
+    const pm = out.pathname.match(/(.*\/)resources\/inspect-headers\.py$/);
+    if (pm) out.pathname = "/resources/inspect-headers.py";
+    return out.href;
   };
   G.fetch = (input, init) => {
     let url;
@@ -244,6 +251,13 @@ Options:
       --wpt-server <url>  redirect relative fetch() URLs to this static server
                           (default: $WPT_SERVER_URL, else http://localhost:8080).
                           Use --no-wpt-server to disable interception.
+      --global <scopes>   only run .any.js whose META global= set intersects
+                          <scopes> (comma list: window,worker,shadowrealm,
+                          dedicatedworker,sharedworker,serviceworker).
+                          Files with no META global= default to "window".
+      --exclude-global <scopes>  skip .any.js whose META global= set intersects
+                          <scopes>. e.g. --exclude-global window runs only the
+                          non-window (DOM-free) variants.
   -h, --help              show this help
 
 components: directories or .any.js files, resolved against the root
@@ -253,6 +267,8 @@ const args = G.Aike.argv.slice(2);
 root = G.Aike.env.AIKE_WPT_ROOT || G.Aike.cwd();
 let failFile = null;
 let logWptreport = null;
+let globalFilter = null; // Set<string> of allowed scopes (intersection mode)
+let globalExclude = null; // Set<string> of scopes to skip (intersection mode)
 const components = [];
 
 for (let i = 0; i < args.length; i++) {
@@ -269,6 +285,13 @@ for (let i = 0; i < args.length; i++) {
   else if (a.startsWith("--wpt-server="))
     wptServer = a.slice("--wpt-server=".length);
   else if (a === "--no-wpt-server") wptServerEnabled = false;
+  else if (a === "--global") globalFilter = new Set(args[++i].split(","));
+  else if (a.startsWith("--global="))
+    globalFilter = new Set(a.slice("--global=".length).split(","));
+  else if (a === "--exclude-global")
+    globalExclude = new Set(args[++i].split(","));
+  else if (a.startsWith("--exclude-global="))
+    globalExclude = new Set(a.slice("--exclude-global=".length).split(","));
   else if (a === "-h" || a === "--help") {
     console.log(USAGE);
     G.Aike.exit(0);
@@ -400,6 +423,36 @@ async function runOneFile(file) {
   }
 }
 
+// True if two sets share at least one element.
+function hasIntersection(a, b) {
+  for (const x of a) if (b.has(x)) return true;
+  return false;
+}
+
+// Parse a .any.js file's `// META: global=...` declarations from its header.
+// Returns the set of global scopes it targets. A file with no such META line
+// is treated as window-only (the WPT default).
+const globalMetaCache = new Map();
+async function parseGlobalMeta(file) {
+  if (globalMetaCache.has(file)) return globalMetaCache.get(file);
+  const text = await fs.readText(file);
+  const scopes = new Set();
+  // Only scan the leading META block (header lines before the first code).
+  const head = text.split("\n").slice(0, 40);
+  for (const line of head) {
+    const m = line.match(/^\s*\/\/\s*META:\s*global=(.*)$/);
+    if (m) {
+      for (const s of m[1].split(",")) {
+        const scope = s.trim();
+        if (scope) scopes.add(scope);
+      }
+    }
+  }
+  if (scopes.size === 0) scopes.add("window");
+  globalMetaCache.set(file, scopes);
+  return scopes;
+}
+
 // Resolve a component argument to a list of .any.js test files.
 async function resolveTestFiles(comp) {
   const compPath = comp.startsWith("/") ? comp : join(repoRoot, comp);
@@ -413,8 +466,14 @@ async function resolveTestFiles(comp) {
         await walk(p);
         continue;
       }
-      if (e.name.endsWith(".any.js") && e.name !== "idlharness.any.js")
+      if (e.name.endsWith(".any.js") && e.name !== "idlharness.any.js") {
+        if (globalFilter || globalExclude) {
+          const scopes = await parseGlobalMeta(p);
+          if (globalFilter && !hasIntersection(scopes, globalFilter)) continue;
+          if (globalExclude && hasIntersection(scopes, globalExclude)) continue;
+        }
         out.push(p);
+      }
     }
   };
   await walk(compPath);
@@ -432,8 +491,19 @@ async function runComponent(comp) {
   }
   if (files.length === 0) {
     console.log(`=== ${comp} ===`);
-    console.log(`  No .any.js test files found`);
+    const why = globalFilter
+      ? ` matching --global ${[...globalFilter].join(",")}`
+      : globalExclude
+        ? ` not matching --exclude-global ${[...globalExclude].join(",")}`
+        : "";
+    console.log(`  No .any.js test files found${why}`);
     return null;
+  }
+
+  if (globalFilter || globalExclude) {
+    console.log(
+      `=== ${comp} === (global filter active: ${files.length} file(s))`,
+    );
   }
 
   currentComponent = comp;

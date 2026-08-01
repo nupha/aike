@@ -68,6 +68,18 @@ pub(crate) fn js_fetch(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     }
 }
 
+// Inject Fetch-spec default request headers (`Accept`, `Accept-Language`)
+// when the caller did not supply them. Called after RequestInit/Request
+// inheritance is applied, so explicit headers always win.
+fn ensure_default_request_headers(h: &mut HeaderList) {
+    if !h.has("accept") {
+        h.append("Accept", "*/*");
+    }
+    if !h.has("accept-language") {
+        h.append("Accept-Language", "*");
+    }
+}
+
 fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let input = cc.arg(0);
     let init = if cc.length() > 1 {
@@ -246,6 +258,12 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             return Err(ctx.throw_internal_error(&format!("failed to build HTTP client: {e}")));
         }
     };
+
+    // Fetch spec "HTTP defaults": a request carries default `Accept` and
+    // `Accept-Language` headers unless the caller overrides them. reqwest's
+    // own defaults are wiped by `perform_request` (it sets each header
+    // explicitly), so we must supply them here.
+    ensure_default_request_headers(&mut header_list);
 
     let req = TransportRequest {
         method,
