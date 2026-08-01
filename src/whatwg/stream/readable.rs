@@ -121,6 +121,12 @@ pub(crate) fn stream_is_disturbed_or_locked(stream: &JSValue) -> bool {
     JSReadableStream::payload_of(stream).is_some_and(|p| p.disturbed || p.reader.is_some())
 }
 
+/// Whether a stream has been read/cancelled (per fetch spec "disturbed"),
+/// regardless of reader lock state. `getReader()` alone does NOT disturb.
+pub(crate) fn stream_is_disturbed(stream: &JSValue) -> bool {
+    JSReadableStream::payload_of(stream).is_some_and(|p| p.disturbed)
+}
+
 fn js_readable_stream_locked(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let p = JSReadableStream::payload_of(&this)

@@ -35,7 +35,7 @@ use crate::{
     whatwg::{
         stream::{
             JSReadableStream, call_opt_method, make_rejected_promise, readable_stream_from_bytes,
-            readable_stream_from_channel, stream_is_disturbed_or_locked,
+            readable_stream_from_channel, stream_is_disturbed, stream_is_disturbed_or_locked,
         },
         url::JSURLSearchParams,
     },
@@ -604,7 +604,19 @@ fn js_response_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             get_response_payload_mut(ctx, &mut this)?.headers_obj = Some(hv);
             Ok(hv)
         }
-        RESPONSE_GET_BODY_USED => Ok(JSValue::from(p.body_consumed)),
+        RESPONSE_GET_BODY_USED => {
+            // Per fetch spec, bodyUsed is true if the body has been consumed OR
+            // its underlying stream is disturbed/locked. For a Response built
+            // from a ReadableStream, reading the *original* stream directly
+            // (via its own reader) must also mark bodyUsed.
+            Ok(JSValue::from(
+                p.body_consumed
+                    || p.stream_body
+                        .map(JSValue::from)
+                        .or(p.body_stream)
+                        .is_some_and(|s| stream_is_disturbed(&s)),
+            ))
+        }
         RESPONSE_GET_HTTP_VERSION => {
             // null for synthetic responses (no network transport involved).
             if p.http_version.is_empty() {
