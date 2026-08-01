@@ -9,12 +9,12 @@ use std::{
 };
 
 use crossbeam::channel::{Receiver, TryRecvError};
-
 use zuqe::{
     CallContext, Callback, ErrorKind, Exception, JSResult, JSValue, JobGcTrace, JobState,
     ScopedContext,
     builtins::{
         iterator::AsyncIterableIterator,
+        json::JSON,
         promise::{Promise, PromiseResultSlot, PromiseState},
         typed_array::TypedArray,
     },
@@ -90,9 +90,15 @@ pub(crate) fn drain_body(
                         .map(JSValue::make_string)
                 }
                 BODY_AS_JSON => {
-                    let val: serde_json::Value = serde_json::from_slice(&buf)
-                        .map_err(|e| cx.throw_internal_error(&e.to_string()))?;
-                    JSValue::from_serde_json(cx, &val)
+                    // WHATWG: JSON parse = UTF-8 decode the bytes, then run the
+                    // JS JSON parse algorithm. That throws a `SyntaxError` on
+                    // invalid input (e.g. UTF-16) and uses the engine's own
+                    // duplicate-key / key-order semantics — so we must call the
+                    // JS `JSON.parse`, not serde_json. "UTF-8 decode" also
+                    // strips a leading BOM, which JSON.parse itself rejects.
+                    let bytes = buf.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(&buf);
+                    let text = String::from_utf8_lossy(bytes);
+                    JSON::parse(cx, &text)
                 }
                 _ => unreachable!(),
             }

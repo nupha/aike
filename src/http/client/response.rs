@@ -240,7 +240,7 @@ fn transport_payload(
         body_rx: None,
         body_consumed: false,
         cached_body: None,
-        synthetic_body: None,
+        synthetic_body: tr.synthetic_body,
         ctor_stream: None,
         resp_type,
         url: url.to_string(),

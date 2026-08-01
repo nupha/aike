@@ -3,6 +3,7 @@
 
 use std::time::Duration;
 
+use base64::Engine;
 use zuqe::{ErrorKind, Exception, JSResult, JSValue, ScopedContext};
 
 /// Per-request data passed to [`perform_request`].
@@ -31,6 +32,73 @@ pub(crate) struct TransportResponse {
     /// Negotiated HTTP version: "0.9" | "1.0" | "1.1" | "2" | "3".
     pub http_version: &'static str,
     pub resp: Option<reqwest::Response>,
+    /// Pre-decoded body for non-network responses (e.g. `data:` URLs).
+    pub synthetic_body: Option<Vec<u8>>,
+}
+
+/// Decode a `data:` URL (RFC 2397) into body bytes and a media type.
+/// Returns `(content_type, body)`. Decoding failures produce an error
+/// description string rather than panicking.
+fn decode_data_url(url: &str) -> Result<(String, Vec<u8>), String> {
+    // Strip the "data:" prefix (already validated by caller).
+    let rest = &url["data:".len()..];
+    // Split mediatype from data at the first comma.
+    let (meta, data) = match rest.find(',') {
+        Some(i) => (&rest[..i], &rest[i + 1..]),
+        None => return Err("data: URL has no comma separator".into()),
+    };
+    let is_base64 = meta.to_ascii_lowercase().ends_with(";base64");
+    let media_type = if is_base64 {
+        &meta[..meta.len() - ";base64".len()]
+    } else {
+        meta
+    };
+    let content_type = if media_type.is_empty() {
+        "text/plain;charset=US-ASCII".to_string()
+    } else {
+        media_type.to_string()
+    };
+    // Payload is percent-decoded unless base64.
+    let bytes = if is_base64 {
+        let trimmed: String = data.chars().filter(|c| !c.is_whitespace()).collect();
+        base64::engine::general_purpose::STANDARD
+            .decode(trimmed)
+            .map_err(|e| format!("invalid base64 in data: URL: {e}"))?
+    } else {
+        percent_decode(data.as_bytes())
+    };
+    Ok((content_type, bytes))
+}
+
+/// Percent-decode a `data:`-URL payload (so the body carries the raw octets,
+/// e.g. `%EF%BB%BF` -> UTF-8 BOM bytes). Not a full URI decode: only the
+/// escapes matter here, and `+` is not special in this context.
+fn percent_decode(input: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(input.len());
+    let mut i = 0;
+    while i < input.len() {
+        match input[i] {
+            b'%' if i + 2 < input.len() => {
+                let hi = (input[i + 1] as char).to_digit(16);
+                let lo = (input[i + 2] as char).to_digit(16);
+                match (hi, lo) {
+                    (Some(h), Some(l)) => {
+                        out.push((h * 16 + l) as u8);
+                        i += 3;
+                    }
+                    _ => {
+                        out.push(input[i]);
+                        i += 1;
+                    }
+                }
+            }
+            b => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    out
 }
 
 /// Transport failure with a machine-readable category.
@@ -106,6 +174,23 @@ pub(crate) async fn perform_request(
     client: &reqwest::Client,
     req: TransportRequest,
 ) -> Result<TransportResponse, TransportError> {
+    // `data:` URLs are not network requests — decode them directly.
+    if req.url.to_ascii_lowercase().starts_with("data:") {
+        let (content_type, body) = decode_data_url(&req.url).map_err(|e| TransportError {
+            code: "other",
+            message: e,
+        })?;
+        return Ok(TransportResponse {
+            status: 200,
+            status_text: "OK".into(),
+            headers: vec![("content-type".into(), content_type.clone())],
+            content_type,
+            content_length: Some(body.len() as u64),
+            http_version: "1.1",
+            resp: None,
+            synthetic_body: Some(body),
+        });
+    }
     let method = reqwest::Method::from_bytes(req.method.as_bytes()).unwrap_or(reqwest::Method::GET);
     let mut rb = client.request(method, &req.url).timeout(req.timeout);
 
@@ -161,5 +246,6 @@ pub(crate) async fn perform_request(
         content_length,
         http_version: version_str(resp.version()),
         resp: Some(resp),
+        synthetic_body: None,
     })
 }
