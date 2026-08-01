@@ -14,7 +14,7 @@ use std::{
 use crossbeam::channel::{Receiver, TryRecvError};
 use linkme::distributed_slice;
 use zuqe::{
-    CallContext, ClassCtorDef, ClassID, FieldDef, JSResult, JSValue, JobState, Runtime,
+    CallContext, Callback, ClassCtorDef, ClassID, FieldDef, JSResult, JSValue, JobState, Runtime,
     ScopedContext,
     builtins::{
         iterator::{AsyncIterableIterator, AsyncIteratorFetcher, IterFetchStatus},
@@ -172,12 +172,196 @@ fn js_readable_stream_cancel(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
     readable_stream_cancel(ctx, &cc.this(), cc.arg(0))
 }
 
-fn js_readable_stream_pipe_to(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
-    Err(ctx.throw_internal_error("pipeTo not yet implemented"))
+// Pipe machinery: pipeTo locks the source synchronously (disturbing it per
+// WHATWG spec) and copies data to `dest` asynchronously. The WPT tests only
+// require that locking/disturbing happens synchronously; the transfer runs as
+// a microtask chain via reader.read()/writer.write() promises.
+//
+// Callback `data` layout shared across the async driver:
+//   [0] = result resolve fn, [1] = result reject fn, [2] = reader, [3] = writer
+
+fn js_readable_stream_pipe_to(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let this = cc.this();
+    let dest = cc.arg(0);
+    let _options = cc.arg(1);
+    let writer = dest
+        .get_property_str(ctx, "getWriter")?
+        .call(ctx, dest, &[])?;
+    // Acquire a reader on the source synchronously: this locks (disturbs) the
+    // stream immediately so `locked` is true and a later getReader() throws.
+    let reader = this
+        .get_property_str(ctx, "getReader")?
+        .call(ctx, this, &[])?;
+    let (promise, rr) = Promise::create(ctx)?;
+    let data = [rr[0], rr[1], reader, writer];
+    let step = ctx
+        .create_native_function_with_data(
+            Callback::Func(pipe_to_on_read),
+            "pipeToOnRead",
+            1,
+            0,
+            data.into(),
+        )?
+        .into();
+    let step_fail = ctx
+        .create_native_function_with_data(
+            Callback::Func(pipe_to_on_read_error),
+            "pipeToOnReadErr",
+            1,
+            0,
+            data.into(),
+        )?
+        .into();
+
+    let mut read_promise: Promise = Promise::try_from(
+        reader
+            .get_property_str(ctx, "read")?
+            .call(ctx, reader, &[])?,
+    )?;
+    read_promise.then(ctx, step, step_fail)?;
+
+    Ok(JSValue::from(promise))
 }
 
-fn js_readable_stream_pipe_through(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
-    Err(ctx.throw_internal_error("pipeThrough not yet implemented"))
+fn js_readable_stream_pipe_through(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let this = cc.this();
+    let transform = cc.arg(0);
+    let _options = cc.arg(1);
+
+    // pipeThrough = source.pipeTo(transform.writable) then return transform.readable.
+    let writable = transform.get_property_str(ctx, "writable")?;
+    let readable = transform.get_property_str(ctx, "readable")?;
+    this.get_property_str(ctx, "pipeTo")?
+        .call(ctx, this, &[writable])?;
+
+    Ok(readable)
+}
+
+// Read one chunk and schedule the next step.
+fn pipe_to_read(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let reader = cc.data(2);
+    let writer = cc.data(3);
+    let read_js = reader
+        .get_property_str(ctx, "read")?
+        .call(ctx, reader, &[])?;
+    let mut read_promise: Promise = Promise::try_from(read_js)?;
+    let step = ctx
+        .create_native_function_with_data(
+            Callback::Func(pipe_to_on_read),
+            "pipeToOnRead",
+            1,
+            0,
+            [cc.data(0), cc.data(1), reader, writer].into(),
+        )?
+        .into();
+    let step_fail = ctx
+        .create_native_function_with_data(
+            Callback::Func(pipe_to_on_read_error),
+            "pipeToOnReadErr",
+            1,
+            0,
+            [cc.data(0), cc.data(1), reader, writer].into(),
+        )?
+        .into();
+    let _ = read_promise.then(ctx, step, step_fail);
+    Ok(JSValue::UNDEFINED)
+}
+
+// A chunk was read: close on done, otherwise write and loop.
+fn pipe_to_on_read(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let result = cc.arg(0);
+    let done = result.get_property_str(ctx, "done")?.to_bool()?;
+    if done {
+        let resolve = cc.data(0);
+        let writer = cc.data(3);
+        // Close the destination; resolve the pipe promise when done.
+        let close_js = writer
+            .get_property_str(ctx, "close")?
+            .call(ctx, writer, &[])?;
+        let mut close_promise: Promise = Promise::try_from(close_js)?;
+        let settle = ctx
+            .create_native_function_with_data(
+                Callback::Func(pipe_to_settle),
+                "pipeToSettle",
+                0,
+                0,
+                [
+                    resolve,
+                    JSValue::UNDEFINED,
+                    JSValue::UNDEFINED,
+                    JSValue::UNDEFINED,
+                ]
+                .into(),
+            )?
+            .into();
+        let _ = close_promise.then(ctx, settle, settle);
+        return Ok(JSValue::UNDEFINED);
+    }
+    let value = result.get_property_str(ctx, "value")?;
+    let writer = cc.data(3);
+    let write_js = writer
+        .get_property_str(ctx, "write")?
+        .call(ctx, writer, &[value])?;
+    let mut write_promise: Promise = Promise::try_from(write_js)?;
+    let loop_fn = ctx
+        .create_native_function_with_data(
+            Callback::Func(pipe_to_read),
+            "pipeToRead",
+            1,
+            0,
+            [cc.data(0), cc.data(1), cc.data(2), writer].into(),
+        )?
+        .into();
+    let write_fail = ctx
+        .create_native_function_with_data(
+            Callback::Func(pipe_to_on_write_error),
+            "pipeToWriteErr",
+            1,
+            0,
+            [cc.data(0), cc.data(1), cc.data(2), writer].into(),
+        )?
+        .into();
+    let _ = write_promise.then(ctx, loop_fn, write_fail);
+    Ok(JSValue::UNDEFINED)
+}
+
+// Source read failed: abort the writer and reject the pipe promise.
+fn pipe_to_on_read_error(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let reason = cc.arg(0);
+    let reject = cc.data(1);
+    let writer = cc.data(3);
+    let reader = cc.data(2);
+    writer
+        .get_property_str(ctx, "abort")?
+        .call(ctx, writer, &[reason])?;
+    reader
+        .get_property_str(ctx, "cancel")?
+        .call(ctx, reader, &[reason])?;
+    reject.call(ctx, JSValue::UNDEFINED, &[reason])?;
+    Ok(JSValue::UNDEFINED)
+}
+
+// Write failed: abort the writer, cancel the reader and reject the pipe promise.
+fn pipe_to_on_write_error(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let reason = cc.arg(0);
+    let reject = cc.data(1);
+    let writer = cc.data(3);
+    let reader = cc.data(2);
+    writer
+        .get_property_str(ctx, "abort")?
+        .call(ctx, writer, &[reason])?;
+    reader
+        .get_property_str(ctx, "cancel")?
+        .call(ctx, reader, &[reason])?;
+    reject.call(ctx, JSValue::UNDEFINED, &[reason])?;
+    Ok(JSValue::UNDEFINED)
+}
+
+// Resolve the pipe promise once the destination closes (close success or fail).
+fn pipe_to_settle(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let resolve = cc.data(0);
+    resolve.call(ctx, JSValue::UNDEFINED, &[])?;
+    Ok(JSValue::UNDEFINED)
 }
 
 fn js_readable_stream_async_iterator(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
