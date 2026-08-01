@@ -80,6 +80,56 @@ fn ensure_default_request_headers(h: &mut HeaderList) {
     }
 }
 
+/// WHATWG "forbidden request-header" names: a `fetch()` must silently drop any
+/// header whose name (case-insensitively) is in this set, or begins with
+/// `Proxy-` / `Sec-`. The browser (or underlying transport) owns these; a
+/// script must not be able to set them. (Set-Cookie is also forbidden as a
+/// request header but Headers does not expose it for sending anyway.)
+fn is_forbidden_request_header(name: &str) -> bool {
+    const FORBIDDEN: &[&str] = &[
+        "accept-charset",
+        "accept-encoding",
+        "access-control-request-headers",
+        "access-control-request-method",
+        "connection",
+        "content-length",
+        "cookie",
+        "cookie2",
+        "date",
+        "dnt",
+        "expect",
+        "host",
+        "keep-alive",
+        "origin",
+        "referer",
+        "te",
+        "trailer",
+        "transfer-encoding",
+        "upgrade",
+        "via",
+    ];
+    let lower = name.to_lowercase();
+    if FORBIDDEN.contains(&lower.as_str()) {
+        return true;
+    }
+    lower.starts_with("proxy-") || lower.starts_with("sec-")
+}
+
+/// Drop all forbidden request headers set by the caller. Called after default
+/// headers are injected (Accept / Accept-Language are not forbidden, so they
+/// survive). The transport layer adds its own Content-Length / Host later.
+fn strip_forbidden_request_headers(h: &mut HeaderList) {
+    let drop: Vec<String> = h
+        .to_vec()
+        .into_iter()
+        .map(|(k, _)| k)
+        .filter(|k| is_forbidden_request_header(k))
+        .collect();
+    for k in drop {
+        h.delete(&k);
+    }
+}
+
 fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let input = cc.arg(0);
     let init = if cc.length() > 1 {
@@ -276,6 +326,8 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     // own defaults are wiped by `perform_request` (it sets each header
     // explicitly), so we must supply them here.
     ensure_default_request_headers(&mut header_list);
+    // WHATWG: silently drop forbidden request headers the caller tried to set.
+    strip_forbidden_request_headers(&mut header_list);
 
     let req = TransportRequest {
         method,

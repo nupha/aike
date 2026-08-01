@@ -10,7 +10,7 @@
 //   -f, --fail-file <path>  write FAIL details to this file
 //       --log-wptreport <path>  write results in wptreport JSON (wpt.fyi format)
 //       --wpt-server <url>  redirect relative fetch() URLs to this static server
-//                           (default: $WPT_SERVER_URL, else http://localhost:8080).
+//                           (default: $WPT_SERVER_URL, else http://web-platform.test:8000).
 //                           Use --no-wpt-server to disable interception.
 //       --no-wpt-server     disable fetch() interception
 //   -h, --help              show this help
@@ -62,7 +62,7 @@ let testharnessText = "";
 // Static wpt server (fixtures fetched at runtime)
 // ---------------------------------------------------------------------------
 
-let wptServer = G.Aike.env.WPT_SERVER_URL || "http://web-platform.test:8000"; //"http://localhost:8080";
+let wptServer = G.Aike.env.WPT_SERVER_URL || "http://web-platform.test:8000";
 let wptServerEnabled = true;
 
 let root = G.Aike.env.AIKE_WPT_ROOT || G.Aike.cwd();
@@ -135,13 +135,12 @@ if (typeof G.structured_clone === "undefined") {
 // ---------------------------------------------------------------------------
 // fetch() interception
 //
-// WPT tests run with no wptserve origin, so a fetch() URL has to be resolved
-// against *something*. We redirect every non-absolute URL to the static wpt
-// server (aike/tools/wpt-server.mjs), which serves the WPT checkout from its
-// root. The base is the server URL joined with the current test file's
-// directory (relative to repoRoot), so paths like "../resources/data.json"
-// and "resources/x" resolve exactly as they would in a browser. Absolute
-// URLs (http(s):, data:, about:, ...) are passed through untouched.
+// WPT tests run against a remote wpt server. A fetch() with a relative (or
+// server-root-relative) URL is resolved against the wpt server base by
+// appending the current test file's directory under the checkout root, so
+// paths like "../resources/data.json" and "resources/x" hit the right file
+// on the server. Absolute URLs (http(s):, data:, about:, ...) are passed
+// through untouched. No per-file special-casing.
 // Controlled by --wpt-server / --no-wpt-server.
 // ---------------------------------------------------------------------------
 
@@ -149,7 +148,7 @@ if (wptServerEnabled && wptServer) {
   const realFetch = G.fetch ? G.fetch.bind(G) : fetch.bind(globalThis);
   const base = wptServer.replace(/\/+$/, "");
   // Resolve `url` (relative or server-root-relative) to an absolute URL on the
-  // static wpt server, mirroring how the browser resolves against the page URL.
+  // wpt server, mirroring how the browser resolves against the page URL.
   const resolve = (url) => {
     // Absolute (with scheme) or protocol-relative: leave as-is.
     if (/^[a-z][a-z0-9+.-]*:/i.test(url)) return url;
@@ -163,14 +162,8 @@ if (wptServerEnabled && wptServer) {
       dir = currentAbsFile.replace(/[^/]*$/, "");
     }
     const testBase = base + "/" + dir.replace(/^\/+/, "");
-    const out = new URL(url, testBase);
-    // WPT serves the shared `resources/` directory at the checkout root; a
-    // test's relative RESOURCES_DIR (e.g. /fetch/api/resources/) must resolve
-    // to the same canonical file. Normalize any .../resources/inspect-headers.py
-    // to /resources/inspect-headers.py so the static server can answer it.
-    const pm = out.pathname.match(/(.*\/)resources\/inspect-headers\.py$/);
-    if (pm) out.pathname = "/resources/inspect-headers.py";
-    return out.href;
+
+    return new URL(url, testBase).href;
   };
   G.fetch = (input, init) => {
     let url;
@@ -189,7 +182,7 @@ if (wptServerEnabled && wptServer) {
       typeof input === "string" ||
       (typeof URL !== "undefined" && input instanceof URL);
     if (isSimple) return realFetch(u, init);
-    // URL changed: re-issue against the static server, rebuilding a Request
+    // URL changed: re-issue against the wpt server, rebuilding a Request
     // (preserving method/headers/body) when the original was one.
     const req = typeof Request !== "undefined" ? new Request(u, input) : u;
     return realFetch(req, init);
@@ -250,7 +243,7 @@ Options:
   -f, --fail-file <path>  write FAIL details to this file
       --log-wptreport <path>  write results in wptreport JSON (wpt.fyi format)
       --wpt-server <url>  redirect relative fetch() URLs to this static server
-                          (default: $WPT_SERVER_URL, else http://localhost:8080).
+                          (default: $WPT_SERVER_URL, else http://web-platform.test:8000).
                           Use --no-wpt-server to disable interception.
       --global <scopes>   only run .any.js whose META global= set intersects
                           <scopes> (comma list: window,worker,shadowrealm,
