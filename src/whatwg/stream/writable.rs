@@ -14,8 +14,8 @@ use zuqe::{
 use crate::USER_CLASS_DEFS;
 
 use super::{
-    RsState, call_opt_method, make_rejected_promise, make_resolved_promise, resolve_pending_read,
-    settle_stream_state, transform::JSTransformStreamDefaultController,
+    RsState, call_opt_method, make_rejected_promise, make_resolved_promise, settle_stream_state,
+    transform::JSTransformStreamDefaultController,
 };
 
 // ============================================================================
@@ -332,7 +332,7 @@ fn js_writer_close(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 if let Some(rcp) = tcp.readable_controller.payload() {
                     rcp.close_requested.set(true);
 
-                    resolve_pending_read(ctx, JSValue::UNDEFINED, true);
+                    rcp.resolve_pending_read(ctx, JSValue::UNDEFINED, true);
 
                     if rcp.queue.borrow().is_empty()
                         && let Some(mut stream_val) = rcp.stream

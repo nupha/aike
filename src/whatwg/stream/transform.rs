@@ -19,7 +19,6 @@ use super::{
         JSReadableStream, JSReadableStreamDefaultController,
         ReadableStreamDefaultControllerPayload, ReadableStreamPayload,
     },
-    reject_pending_read, resolve_pending_read,
     writable::{
         JSWritableStream, JSWritableStreamDefaultController,
         WritableStreamDefaultControllerPayload, WritableStreamPayload,
@@ -231,7 +230,7 @@ fn js_transform_controller_enqueue(ctx: &mut ScopedContext, cc: CallContext) -> 
         return Err(ctx.throw_type_error("cannot enqueue after close"));
     }
 
-    let resolved = resolve_pending_read(ctx, chunk, false);
+    let resolved = rcp.resolve_pending_read(ctx, chunk, false);
 
     if !resolved {
         rcp.queue.borrow_mut().push(QueueEntry { chunk, size: 1.0 });
@@ -250,7 +249,7 @@ fn js_transform_controller_error(ctx: &mut ScopedContext, cc: CallContext) -> JS
 
     // Error the readable side via the readable controller
     if let Some(rcp) = p.readable_controller.payload() {
-        reject_pending_read(ctx, reason);
+        rcp.reject_pending_read(ctx, reason);
 
         if let Some(mut stream_val) = rcp.stream
             && let Some(sp) = stream_val.payload_mut()
@@ -285,7 +284,7 @@ fn js_transform_controller_terminate(ctx: &mut ScopedContext, cc: CallContext) -
     if let Some(rcp) = p.readable_controller.payload() {
         rcp.close_requested.set(true);
 
-        resolve_pending_read(ctx, JSValue::UNDEFINED, true);
+        rcp.resolve_pending_read(ctx, JSValue::UNDEFINED, true);
 
         if rcp.queue.borrow().is_empty()
             && let Some(mut stream_val) = rcp.stream

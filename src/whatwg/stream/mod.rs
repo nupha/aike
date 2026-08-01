@@ -24,8 +24,6 @@ pub(crate) use {
     },
 };
 
-use std::cell::RefCell;
-
 use linkme::distributed_slice;
 use zuqe::{
     CallContext, ClassCtorDef, ClassID, FieldDef, JSResult, JSValue, Runtime, ScopedContext,
@@ -48,22 +46,8 @@ pub(crate) struct QueueEntry {
     pub(crate) size: f64,
 }
 
-thread_local! {
-    /// Single in-flight read slot shared by reader/writer/transform paths.
-    pub(crate) static PENDING_READ: RefCell<Option<(Promise, [JSValue; 2])>> =
-        const { RefCell::new(None) };
-}
-
-/// Called by the runtime GC to keep PENDING_READ's JSValues alive.
+/// Called by the runtime GC to keep stream-related JSValues alive.
 pub(crate) fn gc_trace_stream(gcx: &mut GcTraceCtx) {
-    PENDING_READ.with_borrow(|opt| {
-        if let Some((promise, rr)) = opt.as_ref() {
-            promise.trace(gcx);
-            rr[0].trace(gcx);
-            rr[1].trace(gcx);
-        }
-    });
-
     readable::CHANNEL_STREAMS.with_borrow(|map| {
         for (controller, _) in map.values() {
             controller.as_object().trace(gcx);
@@ -180,6 +164,12 @@ pub(crate) fn make_iterator_result(
     let mut obj = ctx.create_base_object()?;
     obj.define_property_value_str(ctx, "value", value, zuqe::JS_PROP_C_W_E)?;
     obj.define_property_value_str(ctx, "done", JSValue::from(done), zuqe::JS_PROP_C_W_E)?;
+    // The iterator result `{value, done}` is an internal object. An injected
+    // `Object.prototype.then` must not make it look like a thenable when the
+    // reader's read promise is resolved with it (WPT forbids intercepting the
+    // body conversion this way). Shadow `then` with a non-callable own property
+    // so the promise resolution settles with the object directly.
+    obj.define_property_value_str(ctx, "then", JSValue::UNDEFINED, zuqe::JS_PROP_C_W_E)?;
     Ok(JSValue::from(obj))
 }
 
@@ -199,34 +189,6 @@ pub(crate) fn make_rejected_promise(
     let (promise, rr) = Promise::create(ctx)?;
     rr[1].call(ctx, JSValue::UNDEFINED, &[reason])?;
     Ok(promise.into())
-}
-
-/// Resolve the single in-flight `PENDING_READ` with an iterator result
-/// `{value, done}`. Returns true if a pending read was present and resolved.
-pub(super) fn resolve_pending_read(ctx: &mut ScopedContext, value: JSValue, done: bool) -> bool {
-    PENDING_READ.with(|slot| {
-        let mut s = slot.borrow_mut();
-        if let Some((_promise, rr)) = s.take() {
-            if let Ok(result) = make_iterator_result(ctx, value, done) {
-                let _ = rr[0].call(ctx, JSValue::UNDEFINED, &[result]);
-                true
-            } else {
-                false
-            }
-        } else {
-            false
-        }
-    })
-}
-
-/// Reject the single in-flight `PENDING_READ`, if any.
-pub(super) fn reject_pending_read(ctx: &mut ScopedContext, reason: JSValue) {
-    PENDING_READ.with(|slot| {
-        let mut s = slot.borrow_mut();
-        if let Some((mut promise, _slot)) = s.take() {
-            promise.reject(ctx, reason);
-        }
-    });
 }
 
 /// Call an optionally-present, callable method `name` on `obj`.

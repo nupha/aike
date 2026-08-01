@@ -28,9 +28,8 @@ use zuqe::{
 use crate::USER_CLASS_DEFS;
 
 use super::{
-    PENDING_READ, QueueEntry, RsState, call_opt_method, make_iterator_result,
-    make_rejected_promise, make_resolved_promise, reject_pending_read, resolve_pending_read,
-    settle_stream_state,
+    QueueEntry, RsState, call_opt_method, make_iterator_result, make_rejected_promise,
+    make_resolved_promise, settle_stream_state,
 };
 
 pub(crate) struct ReadableStreamPayload {
@@ -479,17 +478,19 @@ fn js_reader_read(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             let result = make_iterator_result(ctx, JSValue::UNDEFINED, true)?;
             return make_resolved_promise(ctx, result);
         }
+
+        // No data in queue — register a pending read on this controller so a
+        // later enqueue()/close()/error() can resolve it. Stored per-controller
+        // (not globally) so concurrent/sequential streams don't steal chunks.
+        let (promise, rr) = Promise::create(ctx)?;
+        cp.pending_read.borrow_mut().replace([rr[0], rr[1]]);
+        let _ = cp.call_controller_pull(ctx);
+        return Ok(promise.into());
     }
 
-    // No data — create a pending promise. Store resolving functions for later invocation.
-    let (promise, rr) = Promise::create(ctx)?;
-    PENDING_READ.with(|slot| *slot.borrow_mut() = Some((promise, rr)));
-
-    if let Some(controller_val) = stream_p.controller {
-        let _ = call_controller_pull(ctx, controller_val);
-    }
-
-    Ok(promise.into())
+    // No controller (e.g. detached) — nothing to read.
+    let result = make_iterator_result(ctx, JSValue::UNDEFINED, true)?;
+    make_resolved_promise(ctx, result)
 }
 
 fn js_reader_cancel(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -537,6 +538,13 @@ pub(crate) struct ReadableStreamDefaultControllerPayload {
     pub(crate) close_requested: Cell<bool>,
     pub(crate) pull_again: Cell<bool>,
     pub(crate) pulling: Cell<bool>,
+    /// The single in-flight read() resolver awaiting data (resolve, reject).
+    /// Stored per-controller (not globally) so concurrent/sequential streams
+    /// do not steal each other's pending chunk.
+    pub(crate) pending_read: Rc<RefCell<Option<[JSValue; 2]>>>,
+    /// Self JS handle, set right after instance creation, used to re-queue
+    /// pull jobs.
+    pub(crate) controller: Option<JSReadableStreamDefaultController>,
 }
 
 impl ReadableStreamDefaultControllerPayload {
@@ -550,6 +558,8 @@ impl ReadableStreamDefaultControllerPayload {
             close_requested: Cell::new(false),
             pull_again: Cell::new(false),
             pulling: Cell::new(false),
+            pending_read: Rc::new(RefCell::new(None)),
+            controller: None,
         }
     }
 
@@ -561,6 +571,97 @@ impl ReadableStreamDefaultControllerPayload {
         for entry in self.queue.borrow().iter() {
             entry.chunk.trace(gcx);
         }
+        if let Some(rr) = self.pending_read.borrow().as_ref() {
+            rr[0].trace(gcx);
+            rr[1].trace(gcx);
+        }
+    }
+
+    /// Resolve the controller's pending read (if any) with an iterator result
+    /// `{value, done}`. Returns true if a pending read was present and resolved.
+    pub(super) fn resolve_pending_read(
+        &self,
+        ctx: &mut ScopedContext,
+        value: JSValue,
+        done: bool,
+    ) -> bool {
+        let rr = self.pending_read.borrow_mut().take();
+        if let Some([resolve, _reject]) = rr {
+            if let Ok(result) = make_iterator_result(ctx, value, done) {
+                let _ = resolve.call(ctx, JSValue::UNDEFINED, &[result]);
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        }
+    }
+
+    /// Reject the controller's pending read, if any.
+    pub(super) fn reject_pending_read(&self, ctx: &mut ScopedContext, reason: JSValue) {
+        let rr = self.pending_read.borrow_mut().take();
+        if let Some([_resolve, reject]) = rr {
+            let _ = reject.call(ctx, JSValue::UNDEFINED, &[reason]);
+        }
+    }
+
+    /// Ask the controller to pull one more chunk (call its underlying source's
+    /// pull, or refill the queue if strategy is undefined).
+    pub(super) fn call_controller_pull(&self, ctx: &mut ScopedContext) -> Result<(), i32> {
+        if self.pulling.get() {
+            self.pull_again.set(true);
+            return Ok(());
+        }
+
+        self.pulling.set(true);
+        self.started.set(true);
+
+        let source = &self.underlying_source;
+        if source.is_undefined() {
+            self.pulling.set(false);
+            return Ok(());
+        }
+
+        let obj = match source.ensure_object(ctx) {
+            Ok(o) => o,
+            Err(_) => {
+                self.pulling.set(false);
+                return Ok(());
+            }
+        };
+
+        let pull_fn = match obj.get_property_str(ctx, "pull") {
+            Ok(v) if v.is_callable() => v,
+            _ => {
+                self.pulling.set(false);
+                return Ok(());
+            }
+        };
+
+        let controller_val = self
+            .controller
+            .ok_or_else(|| ctx.throw_internal_error("invalid controller"))?;
+        let _ = pull_fn.call(ctx, *source, &[JSValue::from(controller_val)]);
+
+        self.pulling.set(false);
+
+        if self.pull_again.get() {
+            self.pull_again.set(false);
+            let ctrl = controller_val;
+            ctx.queue_job(
+                move |cx| {
+                    let p = ctrl
+                        .payload()
+                        .ok_or_else(|| cx.throw_internal_error("invalid controller"))?;
+                    p.call_controller_pull(cx)?;
+                    Ok(JobState::Done)
+                },
+                (),
+            );
+        }
+
+        Ok(())
     }
 }
 
@@ -599,21 +700,7 @@ fn js_controller_enqueue(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         return Err(ctx.throw_type_error("cannot enqueue after close"));
     }
 
-    let resolved = PENDING_READ.with(|slot| {
-        let mut s = slot.borrow_mut();
-        if let Some((_promise, rr)) = s.take() {
-            let result = make_iterator_result(ctx, chunk, false);
-            match result {
-                Ok(r) => {
-                    let _ = rr[0].call(ctx, JSValue::UNDEFINED, &[r]);
-                    true
-                }
-                Err(_) => false,
-            }
-        } else {
-            false
-        }
-    });
+    let resolved = p.resolve_pending_read(ctx, chunk, false);
 
     if !resolved {
         p.queue.borrow_mut().push(QueueEntry { chunk, size: 1.0 });
@@ -631,7 +718,7 @@ fn js_controller_close(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     p.close_requested.set(true);
 
-    resolve_pending_read(ctx, JSValue::UNDEFINED, true);
+    p.resolve_pending_read(ctx, JSValue::UNDEFINED, true);
 
     // Per spec: only transition to closed when queue is empty.
     // If queue still has items, state stays "readable" until last
@@ -651,7 +738,7 @@ fn js_controller_error(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let p = JSReadableStreamDefaultController::payload_of(&this)
         .ok_or_else(|| ctx.throw_type_error("not a ReadableStreamDefaultController"))?;
 
-    reject_pending_read(ctx, e);
+    p.reject_pending_read(ctx, e);
 
     if let Some(stream_val) = p.stream {
         settle_stream_state(ctx, stream_val.into(), RsState::Errored, Some(e));
@@ -677,7 +764,7 @@ fn create_readable_stream_controller(
     stream: &JSReadableStream,
     underlying_source: &JSValue,
 ) -> Result<JSReadableStreamDefaultController, i32> {
-    JSReadableStreamDefaultController::new_instance(
+    let mut controller = JSReadableStreamDefaultController::new_instance(
         ctx,
         JSValue::UNDEFINED,
         ReadableStreamDefaultControllerPayload::new(
@@ -688,64 +775,13 @@ fn create_readable_stream_controller(
             },
             Some(*stream),
         ),
-    )
-}
-
-fn call_controller_pull(
-    ctx: &mut ScopedContext,
-    controller: JSReadableStreamDefaultController,
-) -> Result<(), i32> {
-    let p = controller
-        .payload()
-        .ok_or_else(|| ctx.throw_internal_error("invalid controller"))?;
-
-    if p.pulling.get() {
-        p.pull_again.set(true);
-        return Ok(());
-    }
-
-    p.pulling.set(true);
-    p.started.set(true);
-
-    let source = &p.underlying_source;
-    if source.is_undefined() {
-        p.pulling.set(false);
-        return Ok(());
-    }
-
-    let obj = match source.ensure_object(ctx) {
-        Ok(o) => o,
-        Err(_) => {
-            p.pulling.set(false);
-            return Ok(());
-        }
-    };
-
-    let pull_fn = match obj.get_property_str(ctx, "pull") {
-        Ok(v) if v.is_callable() => v,
-        _ => {
-            p.pulling.set(false);
-            return Ok(());
-        }
-    };
-
-    let _ = pull_fn.call(ctx, *source, &[JSValue::from(controller)]);
-
-    p.pulling.set(false);
-
-    if p.pull_again.get() {
-        p.pull_again.set(false);
-        let ctrl = controller;
-        ctx.queue_job(
-            move |cx| {
-                let _ = call_controller_pull(cx, ctrl);
-                Ok(JobState::Done)
-            },
-            (),
-        );
-    }
-
-    Ok(())
+    )?;
+    let handle = controller;
+    controller
+        .payload_mut()
+        .ok_or_else(|| ctx.throw_internal_error("invalid controller"))?
+        .controller = Some(handle);
+    Ok(controller)
 }
 
 // ============================================================================
@@ -882,12 +918,10 @@ fn create_stream_async_iterator(ctx: &mut ScopedContext, stream_val: &JSValue) -
 
         fn close(&self) {
             self.closed.set(true);
-            // Clear any dangling PENDING_READ and cached promise so the
-            // polling job from the last next() call can terminate cleanly
-            // after the async iterator's return() is invoked.
-            PENDING_READ.with(|slot| {
-                *slot.borrow_mut() = None;
-            });
+            // The polling job checks `closed` and returns Done, so the cached
+            // promise is the only thing that needs clearing. The in-flight read
+            // is stored on the stream's controller (per-controller, not global),
+            // and is released by GC once the iterator is dropped.
             *self.cached_promise.borrow_mut() = None;
         }
     }
