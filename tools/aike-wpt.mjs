@@ -188,8 +188,10 @@ function assert_not_equals(actual, expected, description) {
   );
 }
 function assert_array_equals(actual, expected, description) {
+  // Upstream testharness accepts any array-like (typed arrays, arguments, ...),
+  // not just real Arrays.
   assert_(
-    Array.isArray(actual),
+    actual != null && typeof actual === "object" && typeof actual.length === "number",
     "assert_array_equals",
     description,
     `expected array but got ${fmt(actual)}`,

@@ -452,7 +452,17 @@ fn js_response_static_json(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
     {
         let s = o.get_property_str(ctx, "status")?;
         if !s.is_undefined() {
-            status = s.to_number(ctx)?.to_i32() as u16;
+            let n = s.to_number(ctx)?.to_i32();
+            if !(200..=599).contains(&n) {
+                return Err(ctx.throw_range_error("Response.json: invalid status code"));
+            }
+            // Response.json always has a body, so null-body statuses are invalid.
+            if matches!(n, 204 | 205 | 304) {
+                return Err(ctx.throw_type_error(
+                    "Response.json: response with null body status cannot have body",
+                ));
+            }
+            status = n as u16;
         }
 
         let st = o.get_property_str(ctx, "statusText")?;
@@ -466,10 +476,16 @@ fn js_response_static_json(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
         }
     }
 
-    let json_str = match cc.arg(0).to_serde_json(ctx) {
-        Ok(val) => serde_json::to_string(&val).unwrap_or_else(|_| "null".to_string()),
-        Err(_) => "null".to_string(),
+    // Use the engine's JSON.stringify so spec behavior is inherited: it throws
+    // on circular structures, propagates errors from getters/toJSON, and
+    // escapes lone surrogates as \uXXXX.
+    let json_val = ctx.json_stringify(cc.arg(0), JSValue::UNDEFINED, JSValue::UNDEFINED)?;
+    // stringify returns undefined for non-encodable input (symbol, function);
+    // Response.json requires a body, so that is a TypeError.
+    let Some(s) = json_val.as_string(false) else {
+        return Err(ctx.throw_type_error("Response.json: data is not JSON-serializable"));
     };
+    let json_str = s.content().encode_utf8(false).to_string();
 
     if !header_list.has("content-type") {
         header_list.set("Content-Type", "application/json");
