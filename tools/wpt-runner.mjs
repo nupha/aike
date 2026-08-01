@@ -276,6 +276,7 @@ for (let i = 0; i < args.length; i++) {
 }
 if (logWptreport && !logWptreport.startsWith("/"))
   logWptreport = join(G.Aike.cwd(), logWptreport);
+const timeStart = Date.now() / 1000;
 // Resolve to an absolute path: fs.* resolves relative paths against the
 // process cwd, while import() resolves them against the script's directory.
 repoRoot = root.startsWith("/") ? root : join(G.Aike.cwd(), root);
@@ -523,4 +524,66 @@ for (const s of summaries) {
 console.log(
   `Total: ${summaries.reduce((n, s) => n + s.tests, 0)} tests, ${summaries.reduce((n, s) => n + s.passed, 0)} passed, ${totalFailed} failed`,
 );
+// wptreport JSON (format consumed by wpt.fyi), one entry per test file.
+if (logWptreport) {
+  // Map a test status to the WPT subtest status vocabulary.
+  function wptStatus(status) {
+    if (status === "PASS") return "PASS";
+    if (status === "RUNNING") return "TIMEOUT"; // promise_test never settled
+    return "FAIL";
+  }
+  function wptTestPath(absFile) {
+    const rel =
+      absFile && absFile.startsWith(repoRoot + "/")
+        ? absFile.slice(repoRoot.length)
+        : absFile;
+    return rel && rel.startsWith("/") ? rel : "/" + rel;
+  }
+
+  const byFile = new Map();
+  for (const r of results) {
+    const key = r.abs || r.file;
+    if (!byFile.has(key)) byFile.set(key, []);
+    byFile.get(key).push(r);
+  }
+
+  const reportResults = [];
+  for (const [key, recs] of byFile) {
+    const loadErr = recs.find((r) => r.kind === "load-error");
+    const entry = {
+      test: wptTestPath(key),
+      subsuite: "",
+      status: loadErr ? "ERROR" : "OK",
+      message: loadErr ? loadErr.message : null,
+      duration: fileDurations.get(key) || 0,
+      expected: "OK",
+      subtests: [],
+    };
+    if (loadErr) {
+      entry.subtests = [];
+    } else {
+      entry.subtests = recs.map((r) => ({
+        name: r.name,
+        status: wptStatus(r.status),
+        expected: "PASS",
+        message: r.message || null,
+      }));
+    }
+    reportResults.push(entry);
+  }
+  reportResults.sort((a, b) =>
+    a.test < b.test ? -1 : a.test > b.test ? 1 : 0,
+  );
+
+  const report = {
+    run_info: { product: "aike", platform: G.Aike.platform },
+    time_start: timeStart,
+    time_end: Date.now() / 1000,
+    results: reportResults,
+    subsuites: {},
+  };
+  await fs.writeText(logWptreport, JSON.stringify(report, null, 2) + "\n");
+  console.log(`wptreport written to ${logWptreport}`);
+}
+
 G.Aike.exit(totalFailed > 0 ? 1 : 0);
