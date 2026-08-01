@@ -16,8 +16,8 @@
 use crossbeam::channel::Receiver;
 use linkme::distributed_slice;
 use zuqe::{
-    CallContext, ClassCtorDef, ClassID, FieldDef, JSResult, JSValue, NativeObject, Runtime,
-    ScopedContext, def_native_object,
+    CallContext, ClassCtorDef, ClassID, Exception, FieldDef, JSResult, JSValue, NativeObject,
+    Runtime, ScopedContext, def_native_object,
     gc_lite::{GcTrace, GcTraceCtx},
 };
 
@@ -34,8 +34,8 @@ use crate::{
     },
     whatwg::{
         stream::{
-            JSReadableStream, call_opt_method, readable_stream_from_bytes,
-            readable_stream_from_channel,
+            JSReadableStream, call_opt_method, make_rejected_promise, readable_stream_from_bytes,
+            readable_stream_from_channel, stream_is_disturbed_or_locked,
         },
         url::JSURLSearchParams,
     },
@@ -676,7 +676,16 @@ fn js_response_body_as(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             None
         };
 
-        if p.resp.is_none() && p.synthetic_body.is_none() && p.stream_body.is_none() {
+        // Spec: consuming a body whose stream is already disturbed or locked
+        // must reject with TypeError. The stream may be the constructor-supplied
+        // one or the cached `.body` stream handed out earlier.
+        let unusable = p.body_consumed
+            || [p.stream_body.map(JSValue::from), p.body_stream]
+                .into_iter()
+                .flatten()
+                .any(|v| stream_is_disturbed_or_locked(&v));
+
+        if unusable || (p.resp.is_none() && p.synthetic_body.is_none() && p.stream_body.is_none()) {
             (None, convert)
         } else {
             let src = p.ensure_body_stream().ok();
@@ -709,7 +718,20 @@ fn js_response_body_as(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             };
             drain_body(ctx, source, mode, html_convert)
         }
-        None => Err(ctx.throw_type_error("body already consumed or unavailable")),
+        // Spec: these methods always return a promise; a disturbed/locked or
+        // already-consumed body rejects it rather than throwing synchronously.
+        None => {
+            let _ = ctx.throw_type_error("body already consumed or unavailable");
+            let reason = match ctx.take_exception() {
+                Exception::Error(v) => v,
+                // Non-Error exceptions (OOM, interrupt) must stay fatal.
+                other => {
+                    ctx.throw(other);
+                    return Err(-1);
+                }
+            };
+            make_rejected_promise(ctx, reason)
+        }
     }
 }
 

@@ -115,6 +115,12 @@ fn js_readable_stream_constructor(ctx: &mut ScopedContext, cc: CallContext) -> J
     Ok(instance.into())
 }
 
+/// Whether a stream is unusable as a body per fetch spec: "disturbed or
+/// locked". Used by `Response`/`Request` body consumption to reject early.
+pub(crate) fn stream_is_disturbed_or_locked(stream: &JSValue) -> bool {
+    JSReadableStream::payload_of(stream).is_some_and(|p| p.disturbed || p.reader.is_some())
+}
+
 fn js_readable_stream_locked(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let p = JSReadableStream::payload_of(&this)
@@ -569,7 +575,12 @@ fn call_controller_pull(
 // ============================================================================
 
 fn readable_stream_cancel(ctx: &mut ScopedContext, stream: &JSValue, reason: JSValue) -> JSResult {
-    if let Some(stream_obj) = stream.as_native_object::<JSReadableStream>() {
+    if let Some(mut stream_obj) = stream.as_native_object::<JSReadableStream>() {
+        // Spec: cancel() sets disturbed, so the stream is no longer usable as
+        // a body even though no read() ever happened.
+        if let Some(p) = stream_obj.payload_mut() {
+            p.disturbed = true;
+        }
         settle_stream_state(ctx, (*stream_obj).into(), RsState::Closed, None);
 
         if let Some(p) = stream_obj.payload()

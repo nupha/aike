@@ -17,6 +17,7 @@ pub(crate) use {
     readable::{
         JSReadableStream, JSReadableStreamDefaultController, JSReadableStreamDefaultReader,
         readable_stream_from_bytes, readable_stream_from_channel,
+        stream_is_disturbed_or_locked,
     },
     transform::{JSTransformStream, JSTransformStreamDefaultController},
     writable::{
