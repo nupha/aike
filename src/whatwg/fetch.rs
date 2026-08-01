@@ -131,6 +131,18 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         }
     }
 
+    // Fetch spec: a request URL containing a NUL byte is a network error
+    // (TypeError), not a transport "request failed" error.
+    if url_str.contains('\0') {
+        return throw_transport_error(
+            ctx,
+            TransportError {
+                code: "other",
+                message: "URL contains a null byte".into(),
+            },
+        );
+    }
+
     // Apply RequestInit overrides.
     if !init.is_undefined_or_null() {
         if let Some(o) = init.as_object() {

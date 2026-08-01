@@ -749,13 +749,14 @@ fn js_response_body_as(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         // one or the cached `.body` stream handed out earlier.
         let unusable = p.body_unusable();
 
-        if unusable
-            || (p.resp.is_none()
-                && p.synthetic_body.is_none()
-                && p.ctor_stream.is_none()
-                && p.cached_body.is_none())
-        {
+        if unusable {
             (None, convert)
+        } else if p.resp.is_none() && p.synthetic_body.is_none() && p.ctor_stream.is_none() {
+            // Null-body response (204/205/304, HEAD, or a synthetic response
+            // built without a body that was never accessed as a stream):
+            // consumers resolve to the empty value rather than rejecting.
+            p.body_consumed = true;
+            (Some(BodySource::Synthetic(Vec::new())), convert)
         } else {
             let src = if p.cached_body.is_some() && !p.body_consumed {
                 // The `.body` getter already built the unique ReadableStream.

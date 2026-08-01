@@ -81,7 +81,11 @@ pub(crate) fn drain_body(
             match mode {
                 BODY_AS_BYTES => TypedArray::create_from_vec_u8(cx, buf).map(JSValue::from),
                 BODY_AS_TEXT => {
-                    let s = String::from_utf8_lossy(&buf);
+                    // WHATWG "UTF-8 decode" strips a single leading U+FEFF BOM
+                    // (see decode branch of BODY_AS_JSON above). text() must
+                    // match that, otherwise consumers see a stray BOM char.
+                    let bytes = buf.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(&buf);
+                    let s = String::from_utf8_lossy(bytes);
                     let out = match html_convert {
                         Some(m) => convert_html(&s, m),
                         None => s.into_owned(),

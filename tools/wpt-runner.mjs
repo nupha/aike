@@ -62,8 +62,9 @@ let testharnessText = "";
 // Static wpt server (fixtures fetched at runtime)
 // ---------------------------------------------------------------------------
 
-let wptServer = G.Aike.env.WPT_SERVER_URL || "http://localhost:8080";
+let wptServer = G.Aike.env.WPT_SERVER_URL || "http://web-platform.test:8000"; //"http://localhost:8080";
 let wptServerEnabled = true;
+
 let root = G.Aike.env.AIKE_WPT_ROOT || G.Aike.cwd();
 
 // WPT suite root (also settable via -r). Resolved later in main().

@@ -70,6 +70,39 @@ fn decode_data_url(url: &str) -> Result<(String, Vec<u8>), String> {
     Ok((content_type, bytes))
 }
 
+/// Fetch spec: multiple identical `Content-Length` response headers combine into
+/// a single header; conflicting values are all dropped (treated as absent).
+fn combine_content_length_headers(raw: Vec<(String, String)>) -> Vec<(String, String)> {
+    let values: Vec<&str> = raw
+        .iter()
+        .filter(|(k, _)| k.eq_ignore_ascii_case("content-length"))
+        .map(|(_, v)| v.as_str())
+        .collect();
+    if values.len() <= 1 {
+        return raw;
+    }
+    if values.iter().all(|v| *v == values[0]) {
+        let mut out = Vec::with_capacity(raw.len());
+        let mut merged = false;
+        for (k, v) in raw {
+            if k.eq_ignore_ascii_case("content-length") {
+                if merged {
+                    continue;
+                }
+                out.push((k, v));
+                merged = true;
+            } else {
+                out.push((k, v));
+            }
+        }
+        out
+    } else {
+        raw.into_iter()
+            .filter(|(k, _)| !k.eq_ignore_ascii_case("content-length"))
+            .collect()
+    }
+}
+
 /// Percent-decode a `data:`-URL payload (so the body carries the raw octets,
 /// e.g. `%EF%BB%BF` -> UTF-8 BOM bytes). Not a full URI decode: only the
 /// escapes matter here, and `+` is not special in this context.
@@ -180,15 +213,18 @@ pub(crate) async fn perform_request(
             code: "other",
             message: e,
         })?;
+        // HEAD requests carry no body (fetch spec), even for `data:` URLs.
+        let is_head = req.method.eq_ignore_ascii_case("HEAD");
         return Ok(TransportResponse {
             status: 200,
-            status_text: "OK".into(),
+            // WHATWG fetch: statusText is always the empty string.
+            status_text: String::new(),
             headers: vec![("content-type".into(), content_type.clone())],
             content_type,
             content_length: Some(body.len() as u64),
             http_version: "1.1",
             resp: None,
-            synthetic_body: Some(body),
+            synthetic_body: if is_head { None } else { Some(body) },
         });
     }
     let method = reqwest::Method::from_bytes(req.method.as_bytes()).unwrap_or(reqwest::Method::GET);
@@ -224,12 +260,17 @@ pub(crate) async fn perform_request(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
         .to_string();
-    let headers: Vec<(String, String)> = resp
+    let raw_headers: Vec<(String, String)> = resp
         .headers()
         .iter()
         .filter_map(|(k, v)| v.to_str().ok().map(|vs| (k.to_string(), vs.to_string())))
         .collect();
-    let status_text = status.canonical_reason().unwrap_or("").to_string();
+    // Fetch spec: multiple identical `Content-Length` headers combine into one;
+    // conflicting `Content-Length` values are dropped (treated as absent).
+    let headers = combine_content_length_headers(raw_headers);
+    // WHATWG fetch: the JS-visible `Response.statusText` is always the empty
+    // string; the HTTP reason phrase is intentionally not exposed to scripts.
+    let status_text = String::new();
     // Read Content-Length from the header: resp.content_length() reports the
     // body size hint, which is erased by the auto-decompression wrapper.
     let content_length = resp
@@ -238,7 +279,7 @@ pub(crate) async fn perform_request(
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.parse::<u64>().ok());
 
-    Ok(TransportResponse {
+    let mut tr = TransportResponse {
         status: status.as_u16(),
         status_text,
         headers,
@@ -247,5 +288,14 @@ pub(crate) async fn perform_request(
         http_version: version_str(resp.version()),
         resp: Some(resp),
         synthetic_body: None,
-    })
+    };
+    // WHATWG fetch: 204/205/304 responses and responses to HEAD requests carry
+    // no body, so the JS-visible `Response.body` is null and `text()`/etc.
+    // resolve to the empty string. Drop the underlying transport so body
+    // consumers treat it as a null-body response.
+    if req.method.eq_ignore_ascii_case("HEAD") || matches!(tr.status, 204 | 205 | 304) {
+        tr.resp = None;
+        tr.synthetic_body = None;
+    }
+    Ok(tr)
 }
