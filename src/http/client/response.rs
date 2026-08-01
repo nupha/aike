@@ -29,7 +29,7 @@ use crate::{
             BODY_AS_BYTES, BODY_AS_JSON, BODY_AS_TEXT, BODY_AS_TEXT_CONVERT, BodySource,
             body_to_bytes, drain_body,
         },
-        headers::{HeaderList, HeadersPayload, JSHeaders, header_list_from_js},
+        headers::{Guard, HeaderList, HeadersPayload, JSHeaders, header_list_from_js},
         transport::TransportResponse,
     },
     whatwg::{
@@ -87,6 +87,12 @@ pub(crate) struct ResponsePayload {
     status_text: String,
     content_type: String,
     headers: Vec<(String, String)>,
+    /// Cached `Headers` object returned by the `headers` getter ([SameObject]).
+    headers_obj: Option<JSValue>,
+    /// Guard applied to the exposed `Headers`. Responses built by `fetch()` (or
+    /// `Response.error()`) are immutable; ones built by user code use the
+    /// "response" guard, which is mutable but drops forbidden response headers.
+    headers_guard: Guard,
     content_length: Option<u64>,
     /// Negotiated HTTP version ("1.1", "2", …); empty for synthetic responses.
     http_version: &'static str,
@@ -100,6 +106,9 @@ impl ResponsePayload {
         }
         if let Some(s) = self.stream_body {
             JSValue::from(s).trace(gcx);
+        }
+        if let Some(ref h) = self.headers_obj {
+            h.trace(gcx);
         }
     }
 
@@ -187,6 +196,8 @@ pub(crate) fn build_opaque_redirect_response(ctx: &mut ScopedContext) -> JSResul
             headers: Vec::new(),
             content_length: None,
             http_version: "",
+            headers_obj: None,
+            headers_guard: Guard::Immutable,
         },
     )
     .map(JSValue::from)
@@ -213,6 +224,9 @@ fn transport_payload(
         status_text: tr.status_text,
         content_type: tr.content_type,
         headers: tr.headers,
+        headers_obj: None,
+        // Came off the network: headers are immutable.
+        headers_guard: Guard::Immutable,
         content_length: tr.content_length,
         http_version: tr.http_version,
     }
@@ -268,21 +282,22 @@ fn js_response_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
             if !s.is_undefined() {
                 let n = s.to_number(ctx)?.to_i32();
                 if !(200..=599).contains(&n) {
-                    return Err(
-                        ctx.throw_range_error("Failed to construct 'Response': invalid status code")
-                    );
+                    return Err(ctx
+                        .throw_range_error("Failed to construct 'Response': invalid status code"));
                 }
                 status = n as u16;
             }
             let st = o.get_property_str(ctx, "statusText")?;
             if !st.is_undefined() {
                 let text = st.to_string(ctx)?.content().encode_utf8(false).to_string();
-                // reason-phrase = *( HTAB / SP / VCHAR ); the string is a
-                // sequence of code points, so anything beyond ASCII is invalid.
-                if !text
-                    .chars()
-                    .all(|c| c == '\t' || (' '..='\u{7E}').contains(&c))
-                {
+                // reason-phrase = *( HTAB / SP / VCHAR ), extended to the whole
+                // Latin-1 range (0x80-0xFF) per the fetch spec's ByteString
+                // statusText. 0x7F (DEL) and control chars (<= 0x1F) stay invalid.
+                if !text.chars().all(|c| {
+                    c == '\t'
+                        || (' '..='\u{7E}').contains(&c)
+                        || (c as u32) >= 0x80 && (c as u32) <= 0xFF
+                }) {
                     return Err(
                         ctx.throw_type_error("Failed to construct 'Response': invalid status text")
                     );
@@ -357,6 +372,8 @@ fn js_response_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
             headers: header_list.to_vec(),
             content_length: None,
             http_version: "",
+            headers_obj: None,
+            headers_guard: Guard::Response,
         },
     )
     .map(JSValue::from)
@@ -386,6 +403,8 @@ fn js_response_static_error(ctx: &mut ScopedContext, _cc: CallContext) -> JSResu
             headers: Vec::new(),
             content_length: None,
             http_version: "",
+            headers_obj: None,
+            headers_guard: Guard::Immutable,
         },
     )
     .map(JSValue::from)
@@ -401,6 +420,11 @@ fn js_response_static_redirect(ctx: &mut ScopedContext, cc: CallContext) -> JSRe
         .content()
         .encode_utf8(false)
         .to_string();
+
+    // Per WHATWG fetch, redirect() must reject a non-absolute URL with TypeError.
+    if url::Url::parse(&url).is_err() {
+        return Err(ctx.throw_type_error("Failed to execute 'Response.redirect': invalid url"));
+    }
 
     let status = if cc.length() > 1 {
         let s = cc.arg(1).to_number(ctx)?.to_i32();
@@ -436,6 +460,8 @@ fn js_response_static_redirect(ctx: &mut ScopedContext, cc: CallContext) -> JSRe
             headers: list.to_vec(),
             content_length: None,
             http_version: "",
+            headers_obj: None,
+            headers_guard: Guard::Response,
         },
     )
     .map(JSValue::from)
@@ -511,6 +537,8 @@ fn js_response_static_json(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
             headers: header_list.to_vec(),
             content_length: None,
             http_version: "",
+            headers_obj: None,
+            headers_guard: Guard::Response,
         },
     )
     .map(JSValue::from)
@@ -558,14 +586,23 @@ fn js_response_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             .map(|v| JSValue::from(v as f64))
             .unwrap_or(JSValue::NULL)),
         RESPONSE_GET_HEADERS => {
-            let headers = JSHeaders::new_instance(
-                ctx,
-                JSValue::UNDEFINED,
-                HeadersPayload {
-                    list: HeaderList::from_vec(p.headers.clone()),
-                },
-            )?;
-            Ok(headers.into())
+            // [SameObject]: return the same Headers instance on every access.
+            let mut this = cc.this();
+            if let Some(h) = get_response_payload_mut(ctx, &mut this)?.headers_obj {
+                return Ok(h);
+            }
+            let (list, guard) = {
+                let p = get_response_payload(ctx, &this)?;
+                (HeaderList::from_vec(p.headers.clone()), p.headers_guard)
+            };
+            let payload = match guard {
+                Guard::Response => HeadersPayload::response(list),
+                _ => HeadersPayload::immutable(list),
+            };
+            let headers = JSHeaders::new_instance(ctx, JSValue::UNDEFINED, payload)?;
+            let hv = headers.into();
+            get_response_payload_mut(ctx, &mut this)?.headers_obj = Some(hv);
+            Ok(hv)
         }
         RESPONSE_GET_BODY_USED => Ok(JSValue::from(p.body_consumed)),
         RESPONSE_GET_HTTP_VERSION => {
@@ -803,6 +840,8 @@ fn js_response_clone(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         status_text: src.status_text.clone(),
         content_type: src.content_type.clone(),
         headers: src.headers.clone(),
+        headers_obj: None,
+        headers_guard: src.headers_guard,
         content_length: src.content_length,
         http_version: src.http_version,
     };

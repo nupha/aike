@@ -46,7 +46,28 @@ fn throw_abort_error(cx: &mut ScopedContext) -> JSResult {
 }
 
 /// `fetch(input, init)` → `Promise<Response>`
+///
+/// Per the Fetch spec `fetch()` never throws synchronously: request-construction
+/// failures (bad URL, invalid header, ...) must surface as a rejected promise.
+/// `fetch_impl` does the real work and may throw; here we catch a pending
+/// exception and convert it into a rejection.
 pub(crate) fn js_fetch(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    match fetch_impl(ctx, cc) {
+        Ok(v) => Ok(v),
+        Err(e) => {
+            // Turn the in-flight exception into a rejected promise.
+            let Exception::Error(reason) = ctx.take_exception() else {
+                // Nothing retrievable (e.g. stack overflow): propagate as-is.
+                return Err(e);
+            };
+            let (mut promise, _funcs) = zuqe::builtins::promise::Promise::create(ctx)?;
+            promise.reject(ctx, reason);
+            Ok(promise.into())
+        }
+    }
+}
+
+fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let input = cc.arg(0);
     let init = if cc.length() > 1 {
         cc.arg(1)

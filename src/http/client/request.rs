@@ -210,13 +210,14 @@ fn js_req_signal_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 fn js_req_headers_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let p = get_request_payload(ctx, &this)?;
-    let headers = JSHeaders::new_instance(
-        ctx,
-        JSValue::UNDEFINED,
-        HeadersPayload {
-            list: p.headers.clone(),
-        },
-    )?;
+    let list = p.headers.clone();
+    // A `no-cors` request exposes headers with the "request-no-cors" guard.
+    let payload = if p.mode == "no-cors" {
+        HeadersPayload::no_cors(list)
+    } else {
+        HeadersPayload::new(list)
+    };
+    let headers = JSHeaders::new_instance(ctx, JSValue::UNDEFINED, payload)?;
     Ok(headers.into())
 }
 

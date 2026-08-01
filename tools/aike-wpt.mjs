@@ -130,6 +130,10 @@ function makeTestRecord(name) {
 // Max wait for outstanding promise_test callbacks to settle, per component.
 const PROMISE_SETTLE_TIMEOUT_MS = 5000;
 
+// testharness.js callback registry (add_completion_callback). Invoked after
+// each test finishes, mirroring the WPT harness.
+const completionCallbacks = [];
+
 function test(func, name) {
   const { record, t } = makeTestRecord(name);
   try {
@@ -139,6 +143,7 @@ function test(func, name) {
     record.message = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
   }
   t._run_cleanups();
+  for (const cb of completionCallbacks) cb();
 }
 
 function promise_test(func, name) {
@@ -154,12 +159,14 @@ function promise_test(func, name) {
     () => {
       record.status = "PASS";
       t._run_cleanups();
+      for (const cb of completionCallbacks) cb();
     },
     (e) => {
       record.status = "FAIL";
       record.message =
         e instanceof Error ? `${e.name}: ${e.message}` : String(e);
       t._run_cleanups();
+      for (const cb of completionCallbacks) cb();
     },
   );
 }
@@ -358,8 +365,23 @@ function promise_rejects_dom(test, type, promise, description) {
 
 // WPT .any.js tests reference `self`.
 G.self = G;
+// `.any.js` files run in the "window"-like variant here; GLOBAL lets tests
+// branch on the scope they were loaded into (e.g. isWindow() guards).
+G.GLOBAL = {
+  isWindow: () => true,
+  isWorker: () => false,
+  isShadowRealm: () => false,
+};
+// Harness config hook. We run each file in-process with no timeout handling,
+// so the settings (explicit_done, timeouts, ...) are not meaningful — but the
+// call must exist since tests invoke it at top level.
+G.setup = () => {};
+G.done = () => {};
 G.test = test;
 G.promise_test = promise_test;
+G.add_completion_callback = (cb) => {
+  if (typeof cb === "function") completionCallbacks.push(cb);
+};
 G.assert_true = assert_true;
 G.assert_false = assert_false;
 G.assert_equals = assert_equals;
@@ -418,7 +440,10 @@ if (wptServerEnabled && wptServer) {
       url = input.url;
     else return realFetch(input, init);
     const u = resolve(url);
-    if (typeof input === "string" || (typeof URL !== "undefined" && input instanceof URL))
+    if (
+      typeof input === "string" ||
+      (typeof URL !== "undefined" && input instanceof URL)
+    )
       return realFetch(u, init);
     // URL changed: re-issue against the static server, rebuilding a Request
     // (preserving method/headers/body) when the original was one.
