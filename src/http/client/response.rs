@@ -685,10 +685,27 @@ fn js_response_body_as(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 .flatten()
                 .any(|v| stream_is_disturbed_or_locked(&v));
 
-        if unusable || (p.resp.is_none() && p.synthetic_body.is_none() && p.stream_body.is_none()) {
+        if unusable
+            || (p.resp.is_none()
+                && p.synthetic_body.is_none()
+                && p.stream_body.is_none()
+                && p.body_stream.is_none())
+        {
             (None, convert)
         } else {
-            let src = p.ensure_body_stream().ok();
+            let src = if p.body_stream.is_some() && !p.body_consumed {
+                // The `.body` getter already built the unique ReadableStream.
+                // Per WHATWG fetch, body getters and consumers (text()/json()/
+                // bytes()) must share that one stream; re-running
+                // ensure_body_stream() would take the already-drained `resp`
+                // and lose the body. Reuse the cached stream instance instead.
+                p.body_stream
+                    .take()
+                    .and_then(|s| JSReadableStream::try_from(s).ok())
+                    .map(BodySource::Stream)
+            } else {
+                p.ensure_body_stream().ok()
+            };
             // Mark body as consumed only when consuming via text/json/bytes/etc.,
             // NOT via the .body getter (js_response_body).
             if src.is_some() {

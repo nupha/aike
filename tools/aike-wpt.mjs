@@ -37,6 +37,9 @@ const G = globalThis;
 // can read it without hitting a top-level TDZ.
 let wptServer = G.Aike.env.WPT_SERVER_URL || "http://localhost:8080";
 let wptServerEnabled = true;
+// WPT suite root (also settable via -r / $AIKE_WPT_ROOT). Declared up-front so
+// the fetch() interceptor and repoRoot init can read it without a top-level TDZ.
+let root = G.Aike.env.AIKE_WPT_ROOT || G.Aike.cwd();
 
 // ---------------------------------------------------------------------------
 // Minimal testharness-compatible shim (only what the console tests use)
@@ -373,16 +376,35 @@ G.promise_rejects_dom = promise_rejects_dom;
 // ---------------------------------------------------------------------------
 // fetch() interception
 //
-// WPT tests issue fetch("/fetch/api/...") with a server-root-relative URL.
-// When run on aike there is no wptserve origin to resolve that against, so we
-// redirect such relative URLs to the static wpt server (aike/tools/wpt-server.mjs),
-// which serves the WPT checkout from its root. Absolute URLs are passed through
-// untouched. Controlled by --wpt-server / --no-wpt-server.
+// WPT tests run with no wptserve origin, so a fetch() URL has to be resolved
+// against *something*. We redirect every non-absolute URL to the static wpt
+// server (aike/tools/wpt-server.mjs), which serves the WPT checkout from its
+// root. The base is the server URL joined with the current test file's
+// directory (relative to repoRoot), so paths like "../resources/data.json"
+// and "resources/x" resolve exactly as they would in a browser. Absolute
+// URLs (http(s):, data:, about:, ...) are passed through untouched.
+// Controlled by --wpt-server / --no-wpt-server.
 // ---------------------------------------------------------------------------
 if (wptServerEnabled && wptServer) {
   const realFetch = G.fetch ? G.fetch.bind(G) : fetch.bind(globalThis);
   const base = wptServer.replace(/\/+$/, "");
-  const rewrite = (url) => (url.startsWith("/") ? base + url : url);
+  // Resolve `url` (relative or server-root-relative) to an absolute URL on the
+  // static wpt server, mirroring how the browser resolves against the page URL.
+  const resolve = (url) => {
+    // Absolute (with scheme) or protocol-relative: leave as-is.
+    if (/^[a-z][a-z0-9+.-]*:/i.test(url)) return url;
+    if (url.startsWith("//")) return "http:" + url;
+    // Compute the current test file's dir served by the wpt server.
+    let dir = "";
+    if (currentAbsFile && repoRoot && currentAbsFile.startsWith(repoRoot)) {
+      dir = currentAbsFile.slice(repoRoot.replace(/\/+$/, "").length);
+      dir = dir.replace(/[^/]*$/, ""); // keep up to and including last slash
+    } else if (currentAbsFile) {
+      dir = currentAbsFile.replace(/[^/]*$/, "");
+    }
+    const testBase = base + "/" + dir.replace(/^\/+/, "");
+    return new URL(url, testBase).href;
+  };
   G.fetch = (input, init) => {
     let url;
     if (typeof input === "string") url = input;
@@ -395,8 +417,9 @@ if (wptServerEnabled && wptServer) {
     )
       url = input.url;
     else return realFetch(input, init);
-    const u = rewrite(url);
-    if (u === url) return realFetch(input, init);
+    const u = resolve(url);
+    if (typeof input === "string" || (typeof URL !== "undefined" && input instanceof URL))
+      return realFetch(u, init);
     // URL changed: re-issue against the static server, rebuilding a Request
     // (preserving method/headers/body) when the original was one.
     if (
@@ -473,7 +496,7 @@ components: directories or .any.js files, resolved against the root
             (default: console). Example: console url console/foo.any.js`;
 
 const args = G.Aike.argv.slice(2);
-let root = G.Aike.env.AIKE_WPT_ROOT || G.Aike.cwd();
+root = G.Aike.env.AIKE_WPT_ROOT || G.Aike.cwd();
 let failFile = null;
 let logWptreport = null;
 const components = [];
