@@ -31,7 +31,7 @@ use color::{Color::*, colorize_println};
 use linkme::distributed_slice;
 use zuqe::{
     ClassID, EvalFlags, EvalType, Exception, ExitStatus, JSValue, ModuleDef, NativeObject, Runtime,
-    ScopedContext, builtins::promise::PromiseFuture,
+    ScopedContext,
 };
 
 use crate::{llm::init_mod_llm, mcp::gc_trace_stdio_state};
@@ -442,10 +442,15 @@ async fn main() -> ExitCode {
         return repl::run(rt, ctx).await;
     };
 
-    let mut promise_future: Option<PromiseFuture> = None;
-
-    let r = ctx
-        .eval(
+    // Eval the entry and drive the event loop to completion. For modules this
+    // also observes the top-level evaluation promise, so a rejected top-level
+    // error surfaces as `ExitStatus::Exception` (uncaught, non-zero exit)
+    // instead of being silently dropped. The error is printed uniformly by the
+    // `result` match below. The host only passes the runtime handle; all loop
+    // driving and promise observation is internal to `eval_wait`.
+    let result = ctx
+        .eval_wait(
+            &mut rt,
             script.as_bytes(),
             &entry_url,
             if is_module {
@@ -455,110 +460,7 @@ async fn main() -> ExitCode {
             },
             EvalFlags::empty(),
         )
-        .map(|v| v.as_object_Promise());
-
-    let res = match r {
-        Ok(Some(p)) => match p.into_future(&mut ctx.root_scope()) {
-            Ok(fut) => {
-                promise_future = Some(fut);
-                Ok(())
-            }
-            Err(_) => Err(-1),
-        },
-        Ok(None) => Ok(()),
-        Err(_) => Err(-1),
-    };
-
-    if res.is_err() {
-        let code = match ctx.take_exception() {
-            Exception::Error(e) => {
-                let text = Exception::Error(e).to_text(&mut ctx.root_scope());
-                colorize_println(text.message, GreenFg);
-                if let Some(tb) = text.traceback {
-                    eprintln!("{}", tb);
-                }
-                // value 'e' is in cx0 (top-level scope), it won't be gc collected.
-                // we should remove it from protection manually.
-                if let Some(n) = e.gc_node() {
-                    ctx.root_scope().remove_local(n.into());
-                }
-                1
-            }
-            Exception::OutOfMemory => {
-                colorize_println("out of memory", RedFg);
-                1
-            }
-            Exception::TooManyAtoms => {
-                colorize_println("too many atoms", RedFg);
-                1
-            }
-            Exception::TooManyClasses => {
-                colorize_println("too many classes", RedFg);
-                1
-            }
-            Exception::No => {
-                #[cfg(debug_assertions)]
-                unreachable!();
-                #[cfg(not(debug_assertions))]
-                0
-            }
-        };
-
-        return ExitCode::from(code);
-    }
-
-    // await till all background jobs are finished
-    //
-    // Drive the runtime event loop (`run_async`) together with the script's
-    // top-level promise. Exit as soon as the runtime reports back: `run_async`
-    // returns `Interrupted` once the interrupt flag is set (e.g. via
-    // `Aike.exit`). We must NOT wait for `fut` in that case — `fut` only
-    // resolves after `run_async` ticks it, so if `run_async` has already
-    // returned on interrupt, `fut` can never progress and the process would
-    // hang forever.
-    //
-    // `rt_fut` is polled from a single site at any time (either the `select!`
-    // here, or the `rt_fut.await` after the script promise settles) to avoid
-    // double-polling the same future, which would let one poll consume the
-    // interrupt while the other is left pending.
-    let result = if let Some(fut) = promise_future {
-        let mut rt_fut = std::pin::pin!(rt.run_async());
-        let mut script = Some(fut);
-
-        loop {
-            if let Some(s) = script.take() {
-                tokio::select! {
-                    rt_res = &mut rt_fut => {
-                        break rt_res;
-                    },
-
-                    promise_res = s => {
-                        match promise_res {
-                            Ok(_) => {
-                                // suppress eval result printing
-                            }
-                            Err(reason) => {
-                                // Promise reject
-                                ctx.root_scope().with_new_scope(|cx| {
-                                    let text = Exception::Error(reason).to_text(cx);
-                                    colorize_println(text.message, RedFg);
-                                    if let Some(tb) = text.traceback {
-                                        eprintln!("{}", tb);
-                                    }
-                                });
-                            }
-                        }
-                        // Script settled; drop it and keep driving the runtime
-                        // until it returns (interrupt / drained).
-                    }
-                }
-            } else {
-                break rt_fut.await;
-            }
-        }
-    } else {
-        rt.run_async().await
-    };
+        .await;
 
     match result {
         ExitStatus::Value(_) => ExitCode::SUCCESS,

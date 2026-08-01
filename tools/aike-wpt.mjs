@@ -32,6 +32,12 @@ import { basename, dirname, join } from "path";
 
 const G = globalThis;
 
+// Static wpt server used to serve fixtures that tests fetch() at runtime.
+// Declared up-front so the fetch() interceptor below (and the CLI parser)
+// can read it without hitting a top-level TDZ.
+let wptServer = G.Aike.env.WPT_SERVER_URL || "http://localhost:8080";
+let wptServerEnabled = true;
+
 // ---------------------------------------------------------------------------
 // Minimal testharness-compatible shim (only what the console tests use)
 // ---------------------------------------------------------------------------
@@ -191,7 +197,9 @@ function assert_array_equals(actual, expected, description) {
   // Upstream testharness accepts any array-like (typed arrays, arguments, ...),
   // not just real Arrays.
   assert_(
-    actual != null && typeof actual === "object" && typeof actual.length === "number",
+    actual != null &&
+      typeof actual === "object" &&
+      typeof actual.length === "number",
     "assert_array_equals",
     description,
     `expected array but got ${fmt(actual)}`,
@@ -363,6 +371,45 @@ G.promise_rejects_js = promise_rejects_js;
 G.promise_rejects_dom = promise_rejects_dom;
 
 // ---------------------------------------------------------------------------
+// fetch() interception
+//
+// WPT tests issue fetch("/fetch/api/...") with a server-root-relative URL.
+// When run on aike there is no wptserve origin to resolve that against, so we
+// redirect such relative URLs to the static wpt server (aike/tools/wpt-server.mjs),
+// which serves the WPT checkout from its root. Absolute URLs are passed through
+// untouched. Controlled by --wpt-server / --no-wpt-server.
+// ---------------------------------------------------------------------------
+if (wptServerEnabled && wptServer) {
+  const realFetch = G.fetch ? G.fetch.bind(G) : fetch.bind(globalThis);
+  const base = wptServer.replace(/\/+$/, "");
+  const rewrite = (url) => (url.startsWith("/") ? base + url : url);
+  G.fetch = (input, init) => {
+    let url;
+    if (typeof input === "string") url = input;
+    else if (typeof URL !== "undefined" && input instanceof URL)
+      url = input.href;
+    else if (
+      input &&
+      typeof input === "object" &&
+      typeof input.url === "string"
+    )
+      url = input.url;
+    else return realFetch(input, init);
+    const u = rewrite(url);
+    if (u === url) return realFetch(input, init);
+    // URL changed: re-issue against the static server, rebuilding a Request
+    // (preserving method/headers/body) when the original was one.
+    if (
+      typeof input === "string" ||
+      (typeof URL !== "undefined" && input instanceof URL)
+    )
+      return realFetch(u, init);
+    const req = typeof Request !== "undefined" ? new Request(u, input) : u;
+    return realFetch(req, init);
+  };
+}
+
+// ---------------------------------------------------------------------------
 // META: script= dependency loading
 // ---------------------------------------------------------------------------
 
@@ -416,6 +463,10 @@ Options:
   -r, --root <dir>        WPT suite root (default: $AIKE_WPT_ROOT, else current directory)
   -f, --fail-file <path>  write FAIL details to this file
       --log-wptreport <path>  write results in wptreport JSON (wpt.fyi format)
+      --wpt-server <url>  redirect relative fetch() URLs to this static server
+                          (default: $WPT_SERVER_URL, else http://localhost:8080).
+                          Use --no-wpt-server to disable interception.
+      --no-wpt-server     disable fetch() interception (tests fetch the network directly)
   -h, --help              show this help
 
 components: directories or .any.js files, resolved against the root
@@ -437,6 +488,10 @@ for (let i = 0; i < args.length; i++) {
   else if (a === "--log-wptreport") logWptreport = args[++i];
   else if (a.startsWith("--log-wptreport="))
     logWptreport = a.slice("--log-wptreport=".length);
+  else if (a === "--wpt-server") wptServer = args[++i];
+  else if (a.startsWith("--wpt-server="))
+    wptServer = a.slice("--wpt-server=".length);
+  else if (a === "--no-wpt-server") wptServerEnabled = false;
   else if (a === "-h" || a === "--help") {
     console.log(USAGE);
     G.Aike.exit(0);
