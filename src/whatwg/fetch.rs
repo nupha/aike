@@ -15,7 +15,8 @@ use crate::http::client::{
     },
 };
 
-use super::abort::{JSAbortSignal, signal_is_aborted, signal_notify};
+use super::abort::{JSAbortSignal, signal_is_aborted, signal_notify, signal_set_body};
+use super::stream::JSReadableStream;
 
 /// Error type carried through the fetch result slot.
 enum FetchError {
@@ -79,6 +80,10 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut method = String::from("GET");
     let mut header_list = HeaderList::new();
     let mut body_bytes: Option<Vec<u8>> = None;
+    // A `ReadableStream` body is uploaded as-is (streaming). We must keep the
+    // JS stream alive so that, per the Fetch spec, an abort can cancel it with
+    // the abort reason (see the abort branch below).
+    let mut body_stream: Option<JSValue> = None;
     let mut redirect = String::from("follow");
     let mut timeout = Duration::from_secs(30);
 
@@ -132,7 +137,11 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             }
             let b = o.get_property_str(ctx, "body")?;
             if !b.is_undefined_or_null() {
-                body_bytes = Some(body_to_bytes(ctx, &b)?);
+                if JSReadableStream::payload_of(&b).is_some() {
+                    body_stream = Some(b.clone());
+                } else {
+                    body_bytes = Some(body_to_bytes(ctx, &b)?);
+                }
             }
             let r = o.get_property_str(ctx, "redirect")?;
             if !r.is_undefined() {
@@ -173,6 +182,13 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 referrer = v;
             }
         }
+    }
+
+    // A `ReadableStream` body is canceled with the abort reason when the signal
+    // aborts (Fetch spec). Attach it to the signal; `js_controller_abort` cancels
+    // it synchronously with a live `cx`, avoiding any cross-async JSValue handle.
+    if let (Some(stream), Some(signal)) = (body_stream.as_ref(), signal_val.as_ref()) {
+        signal_set_body(signal, *stream);
     }
 
     let notify = signal_val.as_ref().and_then(|s| signal_notify(s));

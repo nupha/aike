@@ -15,7 +15,7 @@ use tokio::sync::Notify;
 use linkme::distributed_slice;
 use zuqe::{
     CallContext, ClassCtorDef, ClassID, FieldDef, JSResult, JSValue, Object, Runtime,
-    ScopedContext, def_native_object,
+    ScopedContext, def_native_object, gc_lite::{GcTrace, GcTraceCtx},
 };
 
 use crate::USER_CLASS_DEFS;
@@ -31,6 +31,10 @@ struct SignalInner {
     controller: Option<Object>,
     /// Notifies waiters (e.g. an in-flight fetch) when this signal aborts.
     notify: Arc<Notify>,
+    /// A request body (e.g. a `ReadableStream`) that must be canceled with the
+    /// abort reason when this signal aborts, per the Fetch spec. Set by `fetch`
+    /// when it uploads a streaming body. GC-traced via the signal payload.
+    on_abort_body: Option<JSValue>,
 }
 
 // ===========================================================================
@@ -99,6 +103,7 @@ fn js_signal_static_abort(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
         reason,
         controller: None,
         notify: Arc::new(Notify::new()),
+        on_abort_body: None,
     }));
     inner.borrow().notify.notify_waiters();
 
@@ -122,6 +127,7 @@ fn js_signal_static_timeout(ctx: &mut ScopedContext, cc: CallContext) -> JSResul
             .unwrap_or(JSValue::UNDEFINED),
         controller: None,
         notify: Arc::new(Notify::new()),
+        on_abort_body: None,
     }));
     inner.borrow().notify.notify_waiters();
 
@@ -155,6 +161,7 @@ fn js_controller_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
         reason: JSValue::UNDEFINED,
         controller: None,
         notify: Arc::new(Notify::new()),
+        on_abort_body: None,
     }));
 
     let signal = JSAbortSignal::new_instance(
@@ -201,6 +208,15 @@ fn js_controller_abort(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     } else {
         JSValue::UNDEFINED
     };
+    // Per Fetch spec, aborting a request with a streaming body must cancel that
+    // body with the abort reason (so e.g. a ReadableStream body's cancel()
+    // callback runs). The body is a GC-traced JSValue stored on the signal.
+    if let Some(body) = inner.on_abort_body {
+        if let Some(cancel_fn) = body.get_property_str(ctx, "cancel").ok().filter(|v| v.is_callable())
+        {
+            let _ = cancel_fn.call(ctx, body, &[inner.reason]);
+        }
+    }
     inner.notify.notify_waiters();
 
     Ok(JSValue::UNDEFINED)
@@ -221,7 +237,8 @@ def_native_object!(
     JSAbortSignal,
     AbortSignalPayload,
     CLASS_SIGNAL_PROTO,
-    Some(ClassCtorDef::new(js_signal_constructor, 0, true).expose_to_global())
+    Some(ClassCtorDef::new(js_signal_constructor, 0, true).expose_to_global()),
+    on_payload_gc: AbortSignalPayload::gc_trace
 );
 
 // Static methods are registered after class creation,
@@ -290,11 +307,27 @@ impl AbortSignalPayload {
     pub(crate) fn notify(&self) -> Arc<Notify> {
         self.inner.borrow().notify.clone()
     }
+
+    fn gc_trace(&self, gcx: &mut GcTraceCtx) {
+        let inner = self.inner.borrow();
+        inner.reason.trace(gcx);
+        if let Some(ref body) = inner.on_abort_body {
+            body.trace(gcx);
+        }
+    }
 }
 
 /// Get the abort `Notify` for a JS `AbortSignal` value, if it is one.
 pub(crate) fn signal_notify(val: &JSValue) -> Option<Arc<Notify>> {
     JSAbortSignal::payload_of(val).map(|p| p.notify())
+}
+
+/// Attach a request body (e.g. a `ReadableStream`) to a JS `AbortSignal` so that,
+/// when the signal aborts, the body is canceled with the abort reason (Fetch spec).
+pub(crate) fn signal_set_body(val: &JSValue, body: JSValue) {
+    if let Some(p) = JSAbortSignal::payload_of(val) {
+        p.inner.borrow_mut().on_abort_body = Some(body);
+    }
 }
 
 /// Whether a JS `AbortSignal` value is already aborted.
