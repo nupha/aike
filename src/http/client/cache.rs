@@ -13,8 +13,10 @@
 //!   the cached response (status 200) with the 304's headers merged on top, as
 //!   the Fetch spec requires.
 
-use std::collections::HashMap;
-use std::sync::{LazyLock, Mutex};
+use std::{
+    collections::HashMap,
+    sync::{LazyLock, Mutex},
+};
 
 /// A cached successful response.
 struct CacheEntry {
@@ -55,7 +57,11 @@ pub(crate) fn caller_supplied_validator(headers: &[(String, String)]) -> bool {
 
 /// Look up a cached entry for a GET request and, if found, return the
 /// validators so the caller can attach conditional request headers.
-pub(crate) fn lookup_validators(method: &str, url: &str) -> Option<(Option<String>, Option<String>)> {    if method.to_ascii_uppercase() != "GET" {
+pub(crate) fn lookup_validators(
+    method: &str,
+    url: &str,
+) -> Option<(Option<String>, Option<String>)> {
+    if method.to_ascii_uppercase() != "GET" {
         return None;
     }
     let cache = CACHE.lock().unwrap();
@@ -125,7 +131,6 @@ pub(crate) fn store(
             last_modified,
         },
     );
-
 }
 
 /// Merge `update` headers onto a stored entry and rebuild it. Used when the

@@ -7,6 +7,7 @@ use zuqe::{CallContext, Callback, ErrorKind, Exception, JSResult, JSValue, Objec
 
 use crate::http::client::{
     body::body_to_bytes,
+    cache as http_cache,
     headers::{HeaderList, header_list_from_js},
     request::JSRequest,
     response::{RespType, build_opaque_redirect_response, build_response_from_transport},
@@ -15,9 +16,10 @@ use crate::http::client::{
     },
 };
 
-use super::abort::{JSAbortSignal, signal_is_aborted, signal_notify, signal_set_body};
-use super::http_cache;
-use super::stream::JSReadableStream;
+use super::{
+    abort::{JSAbortSignal, signal_is_aborted, signal_notify, signal_set_body},
+    stream::JSReadableStream,
+};
 
 /// Error type carried through the fetch result slot.
 enum FetchError {
@@ -408,13 +410,15 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             }
             // HTTP cache: a `304` we drove via conditional headers becomes the
             // cached response (status 200) with the 304 headers merged on top.
-            if let Some((cached_status, cached_headers, cached_body)) = http_cache::take_not_modified(
-                &method_clone,
-                &url_clone,
-                status,
-                &tr.headers,
-                cache_driven,
-            ) {
+            if let Some((cached_status, cached_headers, cached_body)) =
+                http_cache::take_not_modified(
+                    &method_clone,
+                    &url_clone,
+                    status,
+                    &tr.headers,
+                    cache_driven,
+                )
+            {
                 let cached_tr = TransportResponse {
                     status: cached_status,
                     status_text: "OK".to_string(),
@@ -425,18 +429,18 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                     resp: None,
                     synthetic_body: Some(cached_body),
                 };
-                return build_response_from_transport(cx, cached_tr, RespType::Basic, &url_clone, false);
+                return build_response_from_transport(
+                    cx,
+                    cached_tr,
+                    RespType::Basic,
+                    &url_clone,
+                    false,
+                );
             }
             // Otherwise remember successful validator-bearing GET responses so
             // later requests can revalidate them.
             if method_clone.eq_ignore_ascii_case("GET") && (200..300).contains(&status) {
-                http_cache::store(
-                    &method_clone,
-                    &url_clone,
-                    status,
-                    &tr.headers,
-                    Vec::new(),
-                );
+                http_cache::store(&method_clone, &url_clone, status, &tr.headers, Vec::new());
             }
             build_response_from_transport(cx, tr, RespType::Basic, &url_clone, false)
         },

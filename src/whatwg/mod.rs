@@ -6,7 +6,6 @@
 pub mod abort;
 pub mod console;
 pub mod fetch;
-pub(crate) mod http_cache;
 pub mod stream;
 pub mod text_decoder;
 pub mod text_encoder;
