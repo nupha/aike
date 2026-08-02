@@ -69,6 +69,7 @@ unsafe extern "C" fn silent_invalid_parameter_handler(
     // Swallow the invalid parameter instead of letting ucrt __fastfail.
 }
 
+/// eval script string in global mode
 pub(super) fn js_evalScript(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut stack_barrier = false;
     let mut top_level_await = false;
@@ -119,6 +120,50 @@ pub(super) fn js_evalScript(ctx: &mut ScopedContext, cc: CallContext) -> JSResul
             &filename,
             EvalType::Global,
             flags,
+        )
+    })
+}
+
+/// Evaluate a string as an ES module with an explicit base URL.
+///
+/// Unlike `evalScript` (which runs in script/global mode), this compiles the
+/// code as a module, so `import`/`export` and top-level `await` are allowed and
+/// `import.meta.url` equals `base_url`. Relative `fs`/`fetch` specifiers inside
+/// the module also resolve against `base_url`.
+///
+/// `base_url` must be a valid `file://`, `http://` or `https://` URL and acts
+/// as the module's identity and the base for relative resolution.
+pub(super) fn js_evalModule(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let str = cc.arg(0).to_string(ctx)?;
+    let raw_url = cc.arg(1).to_string(ctx)?;
+    let base_url = raw_url.content().encode_utf8_bytes(true);
+    let base_url = String::from_utf8_lossy(&base_url).into_owned();
+
+    // Validate scheme so relative resolution has a well-defined base.
+    match url::Url::parse(&base_url) {
+        Ok(u) if matches!(u.scheme(), "file" | "http" | "https") => {}
+        Ok(u) => {
+            return Err(ctx.throw_type_error(&format!(
+                "evalModule: unsupported base url scheme '{}' (expected file/http/https)",
+                u.scheme()
+            )));
+        }
+        Err(e) => {
+            return Err(
+                ctx.throw_type_error(&format!("evalModule: invalid base url '{base_url}': {e}"))
+            );
+        }
+    }
+
+    // `base_url` becomes the module name, which backs `import.meta.url` and is
+    // reachable via `ScopedContext::current_module_name` for relative `fs`/`fetch`
+    // resolution (no thread-local stack needed; the engine frame carries it).
+    ctx.with_new_scope(|cx| {
+        cx.eval(
+            str.content().encode_utf8_bytes(true).as_ref(),
+            &base_url,
+            EvalType::Module,
+            EvalFlags::empty(),
         )
     })
 }

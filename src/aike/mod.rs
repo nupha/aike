@@ -2,16 +2,15 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
 mod class_io_handle;
-pub(crate) mod cron;
-pub(crate) mod signal;
+mod cron;
+mod signal;
 mod spawn;
 mod sys;
 
-#[allow(unused_imports)]
-pub(crate) use signal::{register_signal_handler, unregister_signal_handler};
 pub(crate) use {
     class_io_handle::{JSFileHandle, JSStdioHandle, gc_trace_io, make_stats},
     cron::{JSCronJob, gc_trace_cron},
+    signal::{gc_trace_signals, register_signal_handler, signal_number, unregister_signal_handler},
 };
 
 use zuqe::{Array, FieldDef, JS_PROP_ENUMERABLE, JSValue, ScopedContext};
@@ -86,6 +85,7 @@ pub fn init_aike(
             JS_PROP_ENUMERABLE,
         ),
         FieldDef::FUNC("evalScript", 1, sys::js_evalScript, 0),
+        FieldDef::FUNC("evalModule", 2, sys::js_evalModule, 0),
         FieldDef::FUNC("gc", 0, sys::js_gc, 0),
         FieldDef::FUNC("isatty", 1, sys::js_isatty, 0),
         FieldDef::FUNC("ttyGetWinSize", 1, sys::js_ttyGetWinSize, 0),

@@ -9,7 +9,7 @@ use zuqe::{
     ScopedContext, def_native_object, gc_lite::GcTrace,
 };
 
-use crate::{USER_CLASS_DEFS, aike::signal::signal_number};
+use crate::{USER_CLASS_DEFS, aike::signal_number};
 
 #[derive(Debug)]
 pub(crate) struct EmitterPayload {

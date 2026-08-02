@@ -282,6 +282,18 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     if let Ok(mut u) = url::Url::parse(&url_str) {
         u.set_fragment(None);
         url_str = u.to_string();
+    } else if let Some(base) = ctx.current_module_name() {
+        // Relative specifier: resolve against the current module's base URL
+        // (the value behind `import.meta.url`, set by `aike.evalModule`),
+        // mirroring Node/Bun semantics. `None` when not inside a script/module
+        // frame, in which case the specifier stays as-is.
+        if let Ok(base_u) = url::Url::parse(&base) {
+            if let Ok(joined) = base_u.join(&url_str) {
+                let mut u = joined;
+                u.set_fragment(None);
+                url_str = u.to_string();
+            }
+        }
     }
 
     // Apply RequestInit overrides.

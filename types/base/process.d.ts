@@ -204,6 +204,21 @@ declare namespace process {
     },
   ): any;
 
+  /**
+   * Evaluate a JavaScript string as an ES module with an explicit base URL.
+   *
+   * Unlike `evalScript` (script/global mode), the code is compiled as a module,
+   * so `import`/`export` and top-level `await` are allowed and `import.meta.url`
+   * equals `baseUrl`. Relative `fs`/`fetch` specifiers inside the module
+   * resolve against `baseUrl` (Node/Bun `import.meta.url` semantics).
+   *
+   * @param code - JavaScript source code (module).
+   * @param baseUrl - A valid `file://`, `http://` or `https://` URL used as the
+   *   module's identity and the base for relative resolution.
+   * @returns A `Promise` resolving to the module's default/named exports.
+   */
+  function evalModule(code: string, baseUrl: string): Promise<any>;
+
   /** Trigger a manual garbage collection cycle. */
   function gc(): void;
 

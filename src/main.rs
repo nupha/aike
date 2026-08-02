@@ -34,7 +34,7 @@ use zuqe::{
     ScopedContext,
 };
 
-use crate::{llm::init_mod_llm, mcp::gc_trace_stdio_state};
+use crate::{aike::gc_trace_signals, llm::init_mod_llm, mcp::gc_trace_stdio_state};
 
 #[cfg(feature = "llama_cpp")]
 use crate::llm::{JSEngine, JSLlmContext, JSLlmModel, JSSamplerChain};
@@ -315,7 +315,7 @@ async fn main() -> ExitCode {
     rt.set_module_loader(None, js_module_loader, std::ptr::null_mut());
 
     rt.gc_set_trace_handler(|gcx| {
-        aike::signal::gc_trace_zuq_signals(gcx);
+        gc_trace_signals(gcx);
         gc_trace_timeout(gcx);
         gc_trace_cron(gcx);
         gc_trace_io(gcx);

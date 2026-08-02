@@ -191,7 +191,7 @@ fn uninstall_c_handler(sig_num: u32) {
 }
 
 /// GC trace: visit all stored JSValue callbacks so the GC can keep them alive
-pub fn gc_trace_zuq_signals(gcx: &mut GcTraceCtx) {
+pub fn gc_trace_signals(gcx: &mut GcTraceCtx) {
     HANDLER_MAP.with(|map| {
         for cb in map.borrow().values() {
             cb.trace(gcx);
