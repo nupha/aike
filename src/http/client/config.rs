@@ -72,7 +72,17 @@ impl Default for HttpClientConfig {
 
 impl HttpClientConfig {
     /// Build a `reqwest::Client` from the configuration.
+    #[allow(dead_code)]
     pub fn build_http_client(&self) -> Result<reqwest::Client, String> {
+        self.build_http_client_ex(self.danger_accept_invalid_certs)
+    }
+
+    /// Build a `reqwest::Client`, optionally skipping cert validation.
+    ///
+    /// `insecure` overrides `self.danger_accept_invalid_certs`: when true the
+    /// client accepts *any* certificate (test/dev escape hatch for self-signed
+    /// hosts). Validation stays on for every other host.
+    pub fn build_http_client_ex(&self, insecure: bool) -> Result<reqwest::Client, String> {
         let mut builder = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::limited(10))
             .connect_timeout(self.connect_timeout);
@@ -93,12 +103,12 @@ impl HttpClientConfig {
         }
         // reqwest also reads http_proxy / https_proxy env vars by default.
 
-        // --- TLS: skip validation ---
-        if self.danger_accept_invalid_certs {
+        // --- TLS: skip validation (AIKE_TLS_INSECURE_HOSTS) ---
+        if insecure {
             builder = builder.danger_accept_invalid_certs(true);
         }
 
-        // --- TLS: custom CA ---
+        // --- TLS: custom CA (per-instance option, legacy path) ---
         if let Some(ref pem) = self.root_cert_pem {
             let cert = reqwest::Certificate::from_pem(pem.as_bytes())
                 .map_err(|e| format!("invalid CA cert: {e}"))?;
@@ -135,4 +145,37 @@ impl HttpClientConfig {
             .build()
             .map_err(|e| format!("failed to build HTTP client: {e}"))
     }
+}
+
+/// Hosts (either `host` or `host:port`) for which TLS certificate validation
+/// is skipped. Populated once from the `AIKE_TLS_INSECURE_HOSTS` env var.
+///
+/// This is a test/dev escape hatch for self-signed servers (e.g. WPT's
+/// `web-platform.test:8443`). It is matched per-request against the target
+/// URL's host/port, so validation stays on for every other host.
+fn insecure_hosts() -> &'static std::collections::HashSet<String> {
+    use std::sync::OnceLock;
+    static SET: OnceLock<std::collections::HashSet<String>> = OnceLock::new();
+    SET.get_or_init(|| {
+        std::env::var("AIKE_TLS_INSECURE_HOSTS")
+            .unwrap_or_default()
+            .split(',')
+            .map(|s| s.trim().to_ascii_lowercase())
+            .filter(|s| !s.is_empty())
+            .collect()
+    })
+}
+
+/// Returns true if the given host (with optional port) is allow-listed to skip
+/// TLS certificate validation via `AIKE_TLS_INSECURE_HOSTS`.
+pub fn tls_insecure_for_host(host: &str, port: Option<u16>) -> bool {
+    let hosts = insecure_hosts();
+    let host = host.to_ascii_lowercase();
+    if hosts.contains(&host) {
+        return true;
+    }
+    if let Some(p) = port {
+        return hosts.contains(&format!("{host}:{p}"));
+    }
+    false
 }

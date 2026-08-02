@@ -329,6 +329,10 @@ for (let i = 0; i < args.length; i++) {
   else if (a === "-h" || a === "--help") {
     console.log(USAGE);
     G.process.exit(0);
+  } else if (a.startsWith("-")) {
+    console.error(`Unknown option: ${a}`);
+    console.error(USAGE);
+    G.process.exit(2);
   } else components.push(a);
 }
 if (logWptreport && !logWptreport.startsWith("/"))
@@ -597,6 +601,12 @@ for (const comp of components) {
     summaries.push(s);
     totalFailed += s.failed;
   }
+}
+
+// No test files resolved for any component: nothing to run, just exit.
+if (summaries.length === 0) {
+  console.error(`No test files found for components: ${components.join(", ")}`);
+  G.process.exit(2);
 }
 
 // FAIL report file.

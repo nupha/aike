@@ -15,6 +15,7 @@ llama_cpp = ["llama"]
 cuda = ["llama/cuda"]
 metal = ["llama/metal"]
 enable_eval_log = [] # 启用 DeepEval 评估日志采集
+
 default = ["typescript"]
 
 [profile.release]

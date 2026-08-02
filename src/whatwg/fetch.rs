@@ -463,16 +463,20 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         return Ok(promise.into());
     }
 
-    // Build a reqwest::Client with redirect policy and cookie jar.
-    let redirect_policy = match redirect.as_str() {
-        "error" | "manual" => reqwest::redirect::Policy::none(),
-        _ => reqwest::redirect::Policy::limited(10),
-    };
-    let mut builder = reqwest::Client::builder().redirect(redirect_policy);
-    if credentials == "include" || credentials == "same-origin" {
-        builder = builder.cookie_store(true);
-    }
-    let client = match builder.build() {
+    // Per-host TLS escape hatch: skip cert validation only for hosts listed in
+    // AIKE_TLS_INSECURE_HOSTS (self-signed dev/WPT servers). All other hosts
+    // keep strict validation.
+    let insecure = url::Url::parse(&url_str)
+        .ok()
+        .and_then(|u| u.host_str().map(|h| (h.to_string(), u.port())))
+        .map(|(h, p)| crate::http::client::config::tls_insecure_for_host(&h, p))
+        .unwrap_or(false);
+
+    // Per-host TLS escape hatch: `insecure` skips cert validation for this
+    // request's host (AIKE_TLS_INSECURE_HOSTS).
+    let client = match crate::http::client::config::HttpClientConfig::default()
+        .build_http_client_ex(insecure)
+    {
         Ok(c) => c,
         Err(e) => {
             return Err(ctx.throw_internal_error(&format!("failed to build HTTP client: {e}")));

@@ -29,8 +29,35 @@ use crate::{
 // ── Payload ────────────────────────────────────────────────────────────────
 
 pub(crate) struct HttpClientPayload {
-    /// Pre-built reqwest::Client (connection pool, TLS, proxy, …).
-    client: reqwest::Client,
+    cfg: HttpClientConfig,
+    clients: std::sync::RwLock<std::collections::HashMap<bool, reqwest::Client>>,
+}
+
+impl HttpClientPayload {
+    /// Return a client for the given target URL, choosing the insecure bucket
+    /// only when the URL's host is allow-listed via `AIKE_TLS_INSECURE_HOSTS`.
+    fn client_for(&self, url_str: &str) -> reqwest::Client {
+        let insecure = url::Url::parse(url_str)
+            .ok()
+            .and_then(|u| u.host_str().map(|h| (h.to_string(), u.port())))
+            .map(|(h, p)| crate::http::client::config::tls_insecure_for_host(&h, p))
+            .unwrap_or(false);
+
+        if let Some(c) = self.clients.read().unwrap().get(&insecure) {
+            return c.clone();
+        }
+
+        let client = self
+            .cfg
+            .build_http_client_ex(insecure)
+            .expect("failed to build HTTP client");
+        self.clients
+            .write()
+            .unwrap()
+            .insert(insecure, client.clone());
+
+        client
+    }
 }
 
 /// Sentinel magic value: read the HTTP method from `opts.method`.
@@ -124,11 +151,15 @@ fn js_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         }
     }
 
-    let client = cfg
-        .build_http_client()
-        .map_err(|e| ctx.throw_type_error(&format!("HttpClient config error: {e}")))?;
-
-    JSHttpClient::new_instance(ctx, cc.this(), HttpClientPayload { client }).map(JSValue::from)
+    JSHttpClient::new_instance(
+        ctx,
+        cc.this(),
+        HttpClientPayload {
+            cfg,
+            clients: std::sync::RwLock::new(std::collections::HashMap::new()),
+        },
+    )
+    .map(JSValue::from)
 }
 
 enum RequestError {
@@ -159,7 +190,6 @@ fn js_do_request(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let payload = JSHttpClient::payload_of(&this)
         .ok_or_else(|| ctx.throw_internal_error("not an HttpClient instance"))?;
-    let client = payload.client.clone();
 
     // Parse URL.
     let url_str = cc
@@ -249,6 +279,9 @@ fn js_do_request(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         timeout,
         referrer: String::from("about:client"),
     };
+
+    // Choose the client bucket by target host (AIKE_TLS_INSECURE_HOSTS).
+    let client = payload.client_for(&req.url);
 
     let result_slot = PromiseResultSlot::<Result<TransportResponse, RequestError>>::new();
     let promise =
