@@ -234,6 +234,9 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     // RequestInit fields used for client config.
     let mut credentials = String::from("same-origin");
     let mut referrer = String::from("about:client");
+    // Fetch spec default request mode is "cors"; "no-cors" produces an opaque
+    // response for cross-origin fetches.
+    let mut mode = String::from("cors");
     let mut signal_val: Option<JSValue> = None;
 
     // Inherit from a Request input.
@@ -246,6 +249,7 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         body_bytes = p.synthetic_body.clone();
         credentials = p.credentials.clone();
         referrer = p.referrer.clone();
+        mode = p.mode.clone();
     } else if !input.is_undefined_or_null() {
         let href = input.get_property_str(ctx, "href")?;
         if !href.is_undefined() {
@@ -358,6 +362,9 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             if let Some(v) = read_str(o, "referrer") {
                 referrer = v;
             }
+            if let Some(v) = read_str(o, "mode") {
+                mode = v;
+            }
         }
     }
 
@@ -396,6 +403,32 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let url_clone = url_str.clone();
     let redirect_clone = redirect.clone();
     let method_clone = method.clone();
+    let mode_clone = mode.clone();
+
+    // Client origin for same-origin checks. In a browser this is the document's
+    // origin; here we read the `self.location` shim that WPT runners inject (and
+    // Node/Bun WPT runners do the same). When absent, treat as a null origin so
+    // every URL is cross-origin (no-cors then yields an opaque response).
+    let client_origin: Option<String> = ctx
+        .global_obj()
+        .get_property_str(ctx, "self")
+        .ok()
+        .and_then(|selfv| selfv.get_property_str(ctx, "location").ok())
+        .and_then(|loc| loc.get_property_str(ctx, "origin").ok())
+        .and_then(|o| {
+            if o.is_undefined_or_null() {
+                None
+            } else {
+                Some(
+                    o.to_string(ctx)
+                        .ok()?
+                        .content()
+                        .encode_utf8(false)
+                        .to_string(),
+                )
+            }
+        })
+        .filter(|s| !s.is_empty());
     let promise = zuqe::builtins::promise::Promise::create_with_result_slot(
         ctx,
         result_slot.clone(),
@@ -454,7 +487,22 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             if method_clone.eq_ignore_ascii_case("GET") && (200..300).contains(&status) {
                 http_cache::store(&method_clone, &url_clone, status, &tr.headers, Vec::new());
             }
-            build_response_from_transport(cx, tr, RespType::Basic, &url_clone, false)
+            // A `no-cors` request for a cross-origin (or unknown-origin) URL
+            // yields an opaque response per Fetch spec (status 0, type opaque,
+            // null body, CORS-filtered headers). Same-origin stays basic.
+            let is_opaque = mode_clone == "no-cors"
+                && url::Url::parse(&url_clone)
+                    .map(|u| u.origin().ascii_serialization())
+                    .ok()
+                    .map_or(true, |req_origin| {
+                        client_origin.as_deref() != Some(req_origin.as_str())
+                    });
+            let resp_type = if is_opaque {
+                RespType::Opaque
+            } else {
+                RespType::Basic
+            };
+            build_response_from_transport(cx, tr, resp_type, &url_clone, false)
         },
     )?;
 

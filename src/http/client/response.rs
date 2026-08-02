@@ -42,13 +42,14 @@ use crate::{
 };
 
 /// WHATWG `Response.type` (closed set of values this runtime produces).
-/// `Error` / `OpaqueRedirect` force `body` to null per spec.
+/// `Error` / `OpaqueRedirect` / `Opaque` force `body` to null per spec.
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum RespType {
     Basic,
     Default,
     Error,
     OpaqueRedirect,
+    Opaque,
 }
 
 impl RespType {
@@ -59,6 +60,7 @@ impl RespType {
             RespType::Default => "default",
             RespType::Error => "error",
             RespType::OpaqueRedirect => "opaqueredirect",
+            RespType::Opaque => "opaque",
         }
     }
 }
@@ -231,6 +233,60 @@ pub(crate) fn build_opaque_redirect_response(ctx: &mut ScopedContext) -> JSResul
     .map(JSValue::from)
 }
 
+/// CORS-safelisted response headers exposed on an opaque filtered response
+/// (Fetch spec §5.1.1). Non-safelisted headers (e.g. x-is-filtered) are dropped.
+const CORS_SAFELISTED_HEADERS: &[&str] = &[
+    "cache-control",
+    "content-language",
+    "content-length",
+    "content-type",
+    "expires",
+    "last-modified",
+    "pragma",
+];
+
+/// Build an opaque `Response` (used for a cross-origin `no-cors` fetch).
+///
+/// Per Fetch spec, an opaque response has `type="opaque"`, `status=0`,
+/// `statusText=""`, `url=""`, a null body, and a header list filtered down to
+/// the CORS-safelisted set. The real network body is dropped (`resp: None`).
+pub(crate) fn build_opaque_response(ctx: &mut ScopedContext, tr: TransportResponse) -> JSResult {
+    let headers: Vec<(String, String)> = tr
+        .headers
+        .into_iter()
+        .filter(|(k, _)| {
+            CORS_SAFELISTED_HEADERS
+                .iter()
+                .any(|h| h.eq_ignore_ascii_case(k))
+        })
+        .collect();
+
+    JSResponse::new_instance(
+        ctx,
+        JSValue::UNDEFINED,
+        ResponsePayload {
+            resp: None,
+            body_rx: None,
+            body_consumed: true,
+            cached_body: None,
+            synthetic_body: None,
+            ctor_stream: None,
+            resp_type: RespType::Opaque,
+            url: String::new(),
+            redirected: false,
+            status: 0,
+            status_text: String::new(),
+            content_type: String::new(),
+            headers,
+            content_length: None,
+            http_version: "",
+            headers_obj: None,
+            headers_guard: Guard::Immutable,
+        },
+    )
+    .map(JSValue::from)
+}
+
 /// Build the shared payload from a [`TransportResponse`].
 fn transport_payload(
     tr: TransportResponse,
@@ -268,6 +324,11 @@ pub(crate) fn build_response_from_transport(
     url: &str,
     redirected: bool,
 ) -> JSResult {
+    // An opaque response drops the real status/url/body and filters headers to
+    // the CORS-safelisted set (Fetch spec §5.1.1).
+    if resp_type == RespType::Opaque {
+        return build_opaque_response(ctx, tr);
+    }
     let payload = transport_payload(tr, resp_type, url, redirected);
     JSResponse::new_instance(ctx, JSValue::UNDEFINED, payload).map(JSValue::from)
 }
@@ -665,10 +726,10 @@ fn disturbed_empty_stream(ctx: &mut ScopedContext) -> JSResult {
 fn js_response_body(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut this = cc.this();
 
-    // error / opaqueredirect have no body per spec.
+    // error / opaqueredirect / opaque have no body per spec.
     if matches!(
         get_response_payload_mut(ctx, &mut this)?.resp_type,
-        RespType::Error | RespType::OpaqueRedirect
+        RespType::Error | RespType::OpaqueRedirect | RespType::Opaque
     ) {
         return Ok(JSValue::NULL);
     }

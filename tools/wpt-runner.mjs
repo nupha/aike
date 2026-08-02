@@ -670,14 +670,20 @@ for (const s of summaries) {
 console.log(
   `Total: ${summaries.reduce((n, s) => n + s.tests, 0)} tests, ${summaries.reduce((n, s) => n + s.passed, 0)} passed, ${totalFailed} failed`,
 );
+
 // wptreport JSON (format consumed by wpt.fyi), one entry per test file.
 if (logWptreport) {
   // Map a test status to the WPT subtest status vocabulary.
   function wptStatus(status) {
-    if (status === "PASS") return "PASS";
-    if (status === "RUNNING") return "TIMEOUT"; // promise_test never settled
-    return "FAIL";
+    if (status === "PASS") {
+      return "PASS";
+    } else if (status === "RUNNING") {
+      return "TIMEOUT"; // promise_test never settled
+    } else {
+      return "FAIL";
+    }
   }
+
   function wptTestPath(absFile) {
     const rel =
       absFile && absFile.startsWith(repoRoot + "/")
