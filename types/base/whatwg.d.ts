@@ -649,3 +649,50 @@ declare class CountQueuingStrategy {
   highWaterMark: number;
   size(): number;
 }
+
+// ---------------------------------------------------------------------------
+// Blob
+// ---------------------------------------------------------------------------
+
+/** A part accepted by the `Blob` constructor: string, BufferSource, or Blob. */
+type BlobPart = string | ArrayBufferView | ArrayBuffer | Blob;
+
+/** Options for the `Blob` constructor and `Blob.slice()`. */
+interface BlobPropertyBag {
+  /** MIME type; control characters are stripped and the value is lower-cased. */
+  type?: string;
+  /**
+   * Line-ending handling. Only validated (`"transparent"` or `"native"`);
+   * on this runtime both behave identically (no newline translation).
+   */
+  endings?: "transparent" | "native";
+}
+
+/**
+ * WHATWG `Blob`: an immutable, type-tagged bag of bytes.
+ * Slicing shares the underlying buffer without copying.
+ */
+declare class Blob {
+  constructor(blobParts?: BlobPart[], options?: BlobPropertyBag);
+  /** Size of the blob contents in bytes. */
+  readonly size: number;
+  /** Lower-cased MIME type of the blob contents. */
+  readonly type: string;
+  /**
+   * Return a new `Blob` covering the byte range [start, end), sharing the
+   * underlying buffer. Negative indices count from the end; out-of-range
+   * values are clamped.
+   * @param start - Start byte index (default 0).
+   * @param end - End byte index, exclusive (default size).
+   * @param contentType - MIME type for the new blob (default inherited).
+   */
+  slice(start?: number, end?: number, contentType?: string): Blob;
+  /** Read the entire blob as an `ArrayBuffer`. */
+  arrayBuffer(): Promise<ArrayBuffer>;
+  /** Decode the entire blob as UTF-8 text. */
+  text(): Promise<string>;
+  /** Read the entire blob as a `Uint8Array`. */
+  bytes(): Promise<Uint8Array>;
+  /** Return a `ReadableStream` over the blob's bytes. */
+  stream(): ReadableStream<Uint8Array>;
+}
