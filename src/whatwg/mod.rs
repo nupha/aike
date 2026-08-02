@@ -4,6 +4,7 @@
 //! WHATWG standard API implementations for Aike runtime.
 
 pub mod abort;
+pub mod blob;
 pub mod console;
 pub mod fetch;
 pub mod stream;
@@ -33,6 +34,7 @@ pub(crate) fn install_whatwg(ctx: &mut ScopedContext, mut global: Object) -> Res
         stream::JSTransformStreamDefaultController::class_id(),
         stream::JSByteLengthQueuingStrategy::class_id(),
         stream::JSCountQueuingStrategy::class_id(),
+        blob::JSBlob::class_id(),
     ])?;
 
     console::install_console(ctx, &mut global)?;

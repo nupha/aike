@@ -15,6 +15,7 @@ use crate::{
     },
     whatwg::{
         abort::JSAbortSignal,
+        blob::blob_type_of,
         stream::{make_rejected_promise, readable_stream_from_bytes, readable_stream_from_channel},
     },
 };
@@ -106,6 +107,13 @@ fn js_request_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
             }
             let b = o.get_property_str(ctx, "body")?;
             if !b.is_undefined_or_null() {
+                // WHATWG: a Blob body without an explicit Content-Type gets its
+                // type propagated to the Content-Type request header.
+                if let Some(t) = blob_type_of(&b) {
+                    if !t.is_empty() && !header_list.has("content-type") {
+                        header_list.set("Content-Type", &t);
+                    }
+                }
                 synthetic_body = Some(body_to_bytes(ctx, &b)?);
             }
             let r = o.get_property_str(ctx, "redirect")?;
@@ -283,7 +291,7 @@ fn js_req_body_as(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     };
 
     match source {
-        Some(source) => drain_body(ctx, source, magic, None),
+        Some(source) => drain_body(ctx, source, magic, None, String::new()),
         // Spec: these methods always return a promise; an already-consumed body
         // rejects it rather than throwing synchronously.
         None => {

@@ -26,8 +26,8 @@ use crate::{
     html::HtmlConvertMode,
     http::client::{
         body::{
-            BODY_AS_BYTES, BODY_AS_JSON, BODY_AS_TEXT, BODY_AS_TEXT_CONVERT, BodySource,
-            body_to_bytes, drain_body,
+            BODY_AS_BLOB, BODY_AS_BYTES, BODY_AS_JSON, BODY_AS_TEXT, BODY_AS_TEXT_CONVERT,
+            BodySource, body_to_bytes, drain_body,
         },
         headers::{Guard, HeaderList, HeadersPayload, JSHeaders, header_list_from_js},
         transport::TransportResponse,
@@ -788,9 +788,9 @@ fn js_response_body(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
 fn js_response_body_as(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let magic = cc.magic();
+    let mut this = cc.this();
 
     let (source, html_convert) = {
-        let mut this = cc.this();
         let p = get_response_payload_mut(ctx, &mut this)?;
         let is_html = p.content_type.starts_with("text/html");
         // The convert arg is only honored via BODY_AS_TEXT_CONVERT, which is
@@ -853,6 +853,23 @@ fn js_response_body_as(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         }
     };
 
+    // Response.blob() sets the Blob's type to the response's Content-Type with
+    // any parameters (e.g. charset) stripped. Resolve it once before borrowing
+    // `source`, since the payload borrow below lives in a nested scope.
+    let blob_type = {
+        let p = JSHttpClientResponse::payload_of(&this).or_else(|| JSResponse::payload_of(&this));
+        match p {
+            Some(p) => p
+                .content_type
+                .split(';')
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_ascii_lowercase(),
+            None => String::new(),
+        }
+    };
+
     match source {
         Some(source) => {
             // Normalize the convert variant back to plain text mode for draining.
@@ -861,7 +878,7 @@ fn js_response_body_as(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             } else {
                 magic
             };
-            drain_body(ctx, source, mode, html_convert)
+            drain_body(ctx, source, mode, html_convert, blob_type)
         }
         // Spec: these methods always return a promise; a disturbed/locked or
         // already-consumed body rejects it rather than throwing synchronously.
@@ -985,7 +1002,7 @@ const RESPONSE_PROTO: &[FieldDef] = &[
     FieldDef::FUNC("text", 0, js_response_body_as, BODY_AS_TEXT as i16),
     FieldDef::FUNC("json", 0, js_response_body_as, BODY_AS_JSON as i16),
     FieldDef::FUNC("arrayBuffer", 0, js_response_body_as, BODY_AS_BYTES as i16),
-    FieldDef::FUNC("blob", 0, js_response_body_as, BODY_AS_BYTES as i16),
+    FieldDef::FUNC("blob", 0, js_response_body_as, BODY_AS_BLOB as i16),
     FieldDef::FUNC("formData", 0, js_response_form_data, 0),
     FieldDef::FUNC("clone", 0, js_response_clone, 0),
 ];

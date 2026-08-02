@@ -18,6 +18,7 @@ use crate::http::client::{
 
 use super::{
     abort::{JSAbortSignal, signal_is_aborted, signal_notify, signal_set_body},
+    blob::blob_type_of,
     stream::JSReadableStream,
 };
 
@@ -80,6 +81,10 @@ fn ensure_default_request_headers(h: &mut HeaderList) {
     }
     if !h.has("accept-language") {
         h.append("Accept-Language", "*");
+    }
+    // Browsers always send a User-Agent; WPT checks for its presence.
+    if !h.has("user-agent") {
+        h.append("User-Agent", "Mozilla/5.0 (aike)");
     }
 }
 
@@ -321,6 +326,19 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 if JSReadableStream::payload_of(&b).is_some() {
                     body_stream = Some(b.clone());
                 } else {
+                    // Fetch spec: a GET/HEAD request must not carry a body.
+                    if method.eq_ignore_ascii_case("GET") || method.eq_ignore_ascii_case("HEAD") {
+                        return Err(
+                            ctx.throw_type_error("Request with GET/HEAD method cannot have body")
+                        );
+                    }
+                    // WHATWG: a Blob body without an explicit Content-Type gets
+                    // its type propagated to the Content-Type request header.
+                    if let Some(t) = blob_type_of(&b) {
+                        if !t.is_empty() && !header_list.has("content-type") {
+                            header_list.set("Content-Type", &t);
+                        }
+                    }
                     body_bytes = Some(body_to_bytes(ctx, &b)?);
                 }
             }
@@ -429,10 +447,16 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             }
         })
         .filter(|s| !s.is_empty());
+
+    // Clone the client origin for request-header injection; the original is
+    // moved into the response callback closure below.
+    let req_origin = client_origin.clone();
+
     let promise = zuqe::builtins::promise::Promise::create_with_result_slot(
         ctx,
         result_slot.clone(),
         move |cx, data| -> JSResult {
+            let client_origin = client_origin.clone();
             let tr = match data {
                 Ok(tr) => tr,
                 Err(e) => {
@@ -443,8 +467,8 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 }
             };
             let status = tr.status;
-            if (redirect_clone == "error" || redirect_clone == "manual")
-                && (300..400).contains(&status)
+
+            if matches!(redirect_clone.as_str(), "error" | "manual") && (300..400).contains(&status)
             {
                 if redirect_clone == "error" {
                     return Err(
@@ -453,6 +477,7 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 }
                 return build_opaque_redirect_response(cx);
             }
+
             // HTTP cache: a `304` we drove via conditional headers becomes the
             // cached response (status 200) with the 304 headers merged on top.
             if let Some((cached_status, cached_headers, cached_body)) =
@@ -464,19 +489,18 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                     cache_driven,
                 )
             {
-                let cached_tr = TransportResponse {
-                    status: cached_status,
-                    status_text: "OK".to_string(),
-                    headers: cached_headers,
-                    content_type: String::new(),
-                    content_length: Some(cached_body.len() as u64),
-                    http_version: "1.1",
-                    resp: None,
-                    synthetic_body: Some(cached_body),
-                };
                 return build_response_from_transport(
                     cx,
-                    cached_tr,
+                    TransportResponse {
+                        status: cached_status,
+                        status_text: "OK".to_string(),
+                        headers: cached_headers,
+                        content_type: String::new(),
+                        content_length: Some(cached_body.len() as u64),
+                        http_version: "1.1",
+                        resp: None,
+                        synthetic_body: Some(cached_body),
+                    },
                     RespType::Basic,
                     &url_clone,
                     false,
@@ -538,6 +562,19 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     ensure_default_request_headers(&mut header_list);
     // WHATWG: silently drop forbidden request headers the caller tried to set.
     strip_forbidden_request_headers(&mut header_list);
+
+    // `Origin` is a forbidden request header (scripts cannot set it), so it is
+    // added here *after* the forbidden-header strip. Safe/idempotent methods
+    // (`GET`, `HEAD`) do not carry an `Origin` header; any other method does.
+    // The value is the client's origin, or the literal `null` when the client
+    // origin is opaque.
+    if !method.eq_ignore_ascii_case("GET") && !method.eq_ignore_ascii_case("HEAD") {
+        match &req_origin {
+            Some(o) => header_list.set("Origin", o),
+            None => header_list.set("Origin", "null"),
+        }
+    }
+
     // Snapshot after the HTTP-default and forbidden-header passes so the
     // conditional-revalidation headers added below ride on the final list.
     let mut req_headers = header_list.to_vec();
@@ -559,7 +596,6 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     let rs = result_slot.clone();
     let notify2 = notify;
-
     match notify2 {
         Some(n) => {
             tokio::spawn(async move {

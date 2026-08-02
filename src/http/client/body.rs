@@ -23,6 +23,7 @@ use zuqe::{
 
 use crate::{
     html::{HtmlConvertMode, convert_html},
+    whatwg::blob::{blob_bytes_of, blob_from_bytes},
     whatwg::stream::{JSReadableStream, call_opt_method},
 };
 
@@ -43,6 +44,9 @@ pub(crate) enum BodySource {
 /// A `ReadableStream` body is NOT handled here — it must be kept as a stream by
 /// the caller, otherwise `to_string` would yield "[object ReadableStream]".
 pub(crate) fn body_to_bytes(ctx: &mut ScopedContext, val: &JSValue) -> Result<Vec<u8>, i32> {
+    if let Some(bytes) = blob_bytes_of(val) {
+        return Ok(bytes.to_vec());
+    }
     if let Ok(mut ta) = TypedArray::try_from(val.clone()) {
         return Ok(ta.with_bytes_mut(|b| b.to_vec()));
     }
@@ -56,6 +60,8 @@ pub(crate) const BODY_AS_JSON: i32 = 2;
 /// Text mode with the optional html-convert arg ("strip" | "markdown").
 /// Only wired on `HttpClientResponse.text()`; base `Response.text()` stays strict.
 pub(crate) const BODY_AS_TEXT_CONVERT: i32 = 3;
+/// Returns a `Blob` instance (type taken from `blob_type`).
+pub(crate) const BODY_AS_BLOB: i32 = 4;
 
 const BODY_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -66,6 +72,7 @@ pub(crate) fn drain_body(
     source: BodySource,
     mode: i32,
     html_convert: Option<HtmlConvertMode>,
+    blob_type: String,
 ) -> JSResult {
     let result_slot = PromiseResultSlot::<Result<Vec<u8>, String>>::new();
     // Carries a JS rejection value alongside the (Send-only) slot, so a stream
@@ -107,6 +114,7 @@ pub(crate) fn drain_body(
                     let text = String::from_utf8_lossy(bytes);
                     JSON::parse(cx, &text)
                 }
+                BODY_AS_BLOB => blob_from_bytes(cx, buf.into(), blob_type),
                 _ => unreachable!(),
             }
         })?;
