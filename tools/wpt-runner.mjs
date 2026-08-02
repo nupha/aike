@@ -335,6 +335,33 @@ for (let i = 0; i < args.length; i++) {
     G.process.exit(2);
   } else components.push(a);
 }
+
+// WPT .sub.js fixtures (e.g. /common/get-host-info.sub.js) read self.location to
+// derive the server protocol/host/origin at load time. Non-browser shells lack
+// location, so we shim it from the resolved wpt server base URL (matching how
+// Node/Bun WPT runners inject a location shim). Without this, get_host_info()
+// throws "cannot read property of undefined".
+if (wptServerEnabled && wptServer) {
+  try {
+    const u = new URL(wptServer.replace(/\/+$/, ""));
+    const location = {
+      protocol: u.protocol,
+      host: u.host,
+      hostname: u.hostname,
+      port: u.port,
+      pathname: u.pathname || "/",
+      href: u.href,
+      origin: u.origin,
+    };
+    G.location = location;
+    G.self.location = location;
+  } catch (e) {
+    console.error(
+      `# WARNING: failed to shim self.location from ${wptServer}: ${e}`,
+    );
+  }
+}
+
 if (logWptreport && !logWptreport.startsWith("/"))
   logWptreport = join(G.process.cwd(), logWptreport);
 const timeStart = Date.now() / 1000;
