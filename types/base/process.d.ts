@@ -1,7 +1,7 @@
-// Type declarations for Aike JS runtime — Aike global object
+// Type declarations for process global object
 
 // ---------------------------------------------------------------------------
-// StdioHandle  —  used by Aike.stdin/stdout/stderr and spawn()
+// StdioHandle  —  used by process.stdin/stdout/stderr and spawn()
 // ---------------------------------------------------------------------------
 
 interface FileStat {
@@ -22,7 +22,7 @@ interface FileStat {
 
 /**
  * I/O handle for standard streams (stdin, stdout, stderr) and pipe write ends.
- * Obtained via Aike.stdin/stdout/stderr or spawn().
+ * Obtained via process.stdin/stdout/stderr or spawn().
  */
 interface StdioHandle {
   /** File descriptor number. */
@@ -72,10 +72,10 @@ interface CronJob {
   cancel(): void;
 }
 
-/** Alias for SpawnAsyncResult, returned by Aike.spawn(). */
-type ChildProcess = Aike.SpawnAsyncResult;
+/** Alias for SpawnAsyncResult, returned by process.spawn(). */
+type ChildProcess = process.SpawnAsyncResult;
 
-/** Signal names supported by Aike.onSignal(). */
+/** Signal names supported by process.onSignal(). */
 type SignalName =
   | "SIGINT"
   | "SIGABRT"
@@ -96,7 +96,7 @@ type SignalName =
   | "SIGTTIN"
   | "SIGTTOU";
 
-declare namespace Aike {
+declare namespace process {
   // --- proc ---
 
   /** Returns the current working directory as a string. */
@@ -221,7 +221,7 @@ declare namespace Aike {
    * Platform-available signal name → number mapping.
    * On Windows, only SIGINT, SIGABRT, SIGFPE, SIGILL, SIGSEGV, SIGTERM are present.
    * On Unix, all POSIX signals are available (including SIGQUIT, SIGUSR1, etc.).
-   * Check `Aike.signals.SIGUSR1 !== undefined` to detect platform support.
+   * Check `process.signals.SIGUSR1 !== undefined` to detect platform support.
    */
   const signals: {
     SIGINT: number;
@@ -251,7 +251,7 @@ declare namespace Aike {
   function onSignal(
     signal: SignalName,
     handler: (() => void) | null,
-  ): typeof Aike;
+  ): typeof process;
 
   // --- cron ---
 
@@ -295,3 +295,9 @@ declare namespace Aike {
   /** Absolute path to the aike executable. */
   const execPath: string;
 }
+
+/**
+ * @deprecated Use `process` instead. `Aike` is a backward-compatible alias
+ * kept only for existing code and may be removed in a future release.
+ */
+declare var Aike: typeof process;
