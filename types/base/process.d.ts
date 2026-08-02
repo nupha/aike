@@ -190,11 +190,18 @@ declare namespace process {
   /**
    * Evaluate a JavaScript string in the global scope.
    * @param code - JavaScript source code.
-   * @param options - { async?: boolean; backtrace_barrier?: boolean }
+   * @param options - evaluation options:
+   *   - topLevelAwait?: compile the code with top-level `await` support.
+   *   - stackBarrier?: truncate the error stack trace at this eval frame.
+   *   - filename?: filename (or URL) reported in stack traces; defaults to `<evalScript>`.
    */
   function evalScript(
     code: string,
-    options?: { async?: boolean; backtrace_barrier?: boolean },
+    options?: {
+      topLevelAwait?: boolean;
+      stackBarrier?: boolean;
+      filename?: string;
+    },
   ): any;
 
   /** Trigger a manual garbage collection cycle. */

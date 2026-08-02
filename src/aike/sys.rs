@@ -70,16 +70,25 @@ unsafe extern "C" fn silent_invalid_parameter_handler(
 }
 
 pub(super) fn js_evalScript(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let mut backtrace_barrier = false;
-    let mut is_async = false;
+    let mut stack_barrier = false;
+    let mut top_level_await = false;
+    let mut filename = "<evalScript>".to_string();
 
     if cc.length() >= 2 {
         let options_obj = cc.arg(1);
 
-        is_async = options_obj.get_property_str(ctx, "async")?.to_bool()?;
-        backtrace_barrier = options_obj
-            .get_property_str(ctx, "backtrace_barrier")?
+        top_level_await = options_obj
+            .get_property_str(ctx, "topLevelAwait")?
             .to_bool()?;
+        stack_barrier = options_obj
+            .get_property_str(ctx, "stackBarrier")?
+            .to_bool()?;
+        let fn_val = options_obj.get_property_str(ctx, "filename")?;
+        if !fn_val.is_undefined() {
+            filename =
+                String::from_utf8_lossy(&fn_val.to_string(ctx)?.content().encode_utf8_bytes(true))
+                    .into_owned();
+        }
     }
 
     let str = cc.arg(0).to_string(ctx)?;
@@ -97,17 +106,17 @@ pub(super) fn js_evalScript(ctx: &mut ScopedContext, cc: CallContext) -> JSResul
     if lev == 1 { /* interrupt handler is now installed in main() at startup */ }
 
     let mut flags = EvalFlags::empty();
-    if backtrace_barrier {
+    if stack_barrier {
         flags |= EvalFlags::BACKTRACE_BARRIER;
     }
-    if is_async {
+    if top_level_await {
         flags |= EvalFlags::COMPILE_TO_ASYNC;
     }
 
-    ctx.with_new_scope(|scope| {
-        scope.eval(
+    ctx.with_new_scope(|cx| {
+        cx.eval(
             str.content().encode_utf8_bytes(true).as_ref(),
-            "<evalScript>",
+            &filename,
             EvalType::Global,
             flags,
         )
