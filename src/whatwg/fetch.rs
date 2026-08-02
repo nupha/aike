@@ -3,7 +3,10 @@
 
 use std::time::Duration;
 
-use zuqe::{CallContext, Callback, ErrorKind, Exception, JSResult, JSValue, Object, ScopedContext};
+use zuqe::{
+    CallContext, Callback, ErrorKind, Exception, JSResult, JSValue, Object, ScopedContext,
+    builtins::promise::{Promise, PromiseResultSlot},
+};
 
 use crate::http::client::{
     body::body_to_bytes,
@@ -65,7 +68,7 @@ pub(crate) fn js_fetch(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 // Nothing retrievable (e.g. stack overflow): propagate as-is.
                 return Err(e);
             };
-            let (mut promise, _funcs) = zuqe::builtins::promise::Promise::create(ctx)?;
+            let (mut promise, _funcs) = Promise::create(ctx)?;
             promise.reject(ctx, reason);
             Ok(promise.into())
         }
@@ -403,8 +406,7 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     // must keep the response as a real `304`). It is computed inside the
     // response closure (before the 304 handling) from the cached validators.
 
-    let result_slot =
-        zuqe::builtins::promise::PromiseResultSlot::<Result<TransportResponse, FetchError>>::new();
+    let result_slot = PromiseResultSlot::<Result<TransportResponse, FetchError>>::new();
     // Look up cached validators before issuing the request so the conditional
     // headers ride on the outgoing request and the `cache_driven` flag (copied
     // into the response closure below) reflects *our* revalidation.
@@ -427,10 +429,15 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     // origin; here we read the `self.location` shim that WPT runners inject (and
     // Node/Bun WPT runners do the same). When absent, treat as a null origin so
     // every URL is cross-origin (no-cors then yields an opaque response).
+    // Probe `self.location.origin` for same-origin checks. Absence of any link
+    // in the chain is *expected* (null origin), so a failed property read must
+    // not leak a pending runtime exception — we take and discard it. Reading
+    // through `undefined` would also set an exception, so short-circuit early.
     let client_origin: Option<String> = ctx
         .global_obj()
         .get_property_str(ctx, "self")
         .ok()
+        .filter(|selfv| !selfv.is_undefined_or_null())
         .and_then(|selfv| selfv.get_property_str(ctx, "location").ok())
         .and_then(|loc| loc.get_property_str(ctx, "origin").ok())
         .and_then(|o| {
@@ -448,14 +455,17 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         })
         .filter(|s| !s.is_empty());
 
+    // The probing above intentionally tolerates missing properties; clear any
+    // exception it may have left behind so the caller does not observe a stale
+    // pending error.
+    let _ = ctx.take_exception();
+
     // Clone the client origin for request-header injection; the original is
     // moved into the response callback closure below.
     let req_origin = client_origin.clone();
 
-    let promise = zuqe::builtins::promise::Promise::create_with_result_slot(
-        ctx,
-        result_slot.clone(),
-        move |cx, data| -> JSResult {
+    let promise =
+        Promise::create_with_result_slot(ctx, result_slot.clone(), move |cx, data| -> JSResult {
             let client_origin = client_origin.clone();
             let tr = match data {
                 Ok(tr) => tr,
@@ -476,6 +486,34 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                     );
                 }
                 return build_opaque_redirect_response(cx);
+            }
+
+            // Fetch spec: `mode: "same-origin"` requires the request (and every
+            // redirect hop) to stay same-origin; a cross-origin URL is a network
+            // error. reqwest auto-follows redirects, so we check the *final*
+            // response URL (redirect target otherwise hides the violation).
+            if mode_clone == "same-origin" {
+                let final_url = tr
+                    .resp
+                    .as_ref()
+                    .map(|r| r.url().to_string())
+                    .unwrap_or_else(|| url_clone.clone());
+                let req_origin = url::Url::parse(&final_url)
+                    .map(|u| u.origin().ascii_serialization())
+                    .unwrap_or_default();
+                let same = client_origin.as_deref() == Some(req_origin.as_str());
+                if !same {
+                    return throw_transport_error(
+                        cx,
+                        TransportError {
+                            code: "same-origin",
+                            message: format!(
+                                "request failed: mode 'same-origin' requires a same-origin \
+                                 request, but URL is cross-origin: {final_url}"
+                            ),
+                        },
+                    );
+                }
             }
 
             // HTTP cache: a `304` we drove via conditional headers becomes the
@@ -527,8 +565,7 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 RespType::Basic
             };
             build_response_from_transport(cx, tr, resp_type, &url_clone, false)
-        },
-    )?;
+        })?;
 
     if already_aborted {
         let _ = result_slot.commit(Err(FetchError::Abort));
