@@ -9,10 +9,11 @@
 //   -r, --root <dir>        WPT suite root (default: $AIKE_WPT_ROOT, else current directory)
 //   -f, --fail-file <path>  write FAIL details to this file
 //       --log-wptreport <path>  write results in wptreport JSON (wpt.fyi format)
-//       --wpt-server <url>  redirect relative fetch() URLs to this static server
+//       --wpt-server <url>  base URL injected as the evalScript baseUrl, so
+//                           relative fetch()/`fs` specifiers resolve against it
 //                           (default: $WPT_SERVER_URL, else http://web-platform.test:8000).
-//                           Use --no-wpt-server to disable interception.
-//       --no-wpt-server     disable fetch() interception
+//                           Use --no-wpt-server to disable injection.
+//       --no-wpt-server     disable base URL injection (relative URLs fall back to cwd)
 //   -h, --help              show this help
 //
 // `components` are directories or individual .any.js files, resolved against
@@ -133,60 +134,42 @@ if (typeof G.structured_clone === "undefined") {
 }
 
 // ---------------------------------------------------------------------------
-// fetch() interception
+// Base URL injection (replaces per-fetch interception)
 //
-// WPT tests run against a remote wpt server. A fetch() with a relative (or
-// server-root-relative) URL is resolved against the wpt server base by
-// appending the current test file's directory under the checkout root, so
-// paths like "../resources/data.json" and "resources/x" hit the right file
-// on the server. Absolute URLs (http(s):, data:, about:, ...) are passed
-// through untouched. No per-file special-casing.
-// Controlled by --wpt-server / --no-wpt-server.
+// WPT tests run against a remote wpt server. Instead of monkey-patching
+// `fetch`, we pass each test file's wpt-server URL as the `baseUrl` option of
+// `Aike.evalScript`. The engine then uses that baseUrl as the script's base
+// URL (the value behind `import.meta.url`), so relative fetch()/fs specifiers
+// resolve against it automatically — mirroring how the browser resolves against
+// the page URL. Absolute URLs (http(s):, data:, about:, ...) are unaffected.
+//
+// Controlled by --wpt-server / --no-wpt-server: when disabled, no filename is
+// injected and relative URLs resolve against the engine cwd (legacy behavior).
 // ---------------------------------------------------------------------------
 
-if (wptServerEnabled && wptServer) {
-  const realFetch = G.fetch ? G.fetch.bind(G) : fetch.bind(globalThis);
-  const base = wptServer.replace(/\/+$/, "");
-  // Resolve `url` (relative or server-root-relative) to an absolute URL on the
-  // wpt server, mirroring how the browser resolves against the page URL.
-  const resolve = (url) => {
-    // Absolute (with scheme) or protocol-relative: leave as-is.
-    if (/^[a-z][a-z0-9+.-]*:/i.test(url)) return url;
-    if (url.startsWith("//")) return "http:" + url;
-    // Compute the current test file's dir served by the wpt server.
-    let dir = "";
-    if (currentAbsFile && repoRoot && currentAbsFile.startsWith(repoRoot)) {
-      dir = currentAbsFile.slice(repoRoot.replace(/\/+$/, "").length);
-      dir = dir.replace(/[^/]*$/, ""); // keep up to and including last slash
-    } else if (currentAbsFile) {
-      dir = currentAbsFile.replace(/[^/]*$/, "");
-    }
-    const testBase = base + "/" + dir.replace(/^\/+/, "");
+const wptBase =
+  wptServerEnabled && wptServer ? wptServer.replace(/\/+$/, "") : null;
 
-    return new URL(url, testBase).href;
-  };
-  G.fetch = (input, init) => {
-    let url;
-    if (typeof input === "string") url = input;
-    else if (typeof URL !== "undefined" && input instanceof URL)
-      url = input.href;
-    else if (
-      input &&
-      typeof input === "object" &&
-      typeof input.url === "string"
-    )
-      url = input.url;
-    else return realFetch(input, init);
-    const u = resolve(url);
-    const isSimple =
-      typeof input === "string" ||
-      (typeof URL !== "undefined" && input instanceof URL);
-    if (isSimple) return realFetch(u, init);
-    // URL changed: re-issue against the wpt server, rebuilding a Request
-    // (preserving method/headers/body) when the original was one.
-    const req = typeof Request !== "undefined" ? new Request(u, input) : u;
-    return realFetch(req, init);
-  };
+// Map a local checkout path to the wpt-server URL the browser would load it
+// from. e.g. /checkout/console/a.any.js -> http://web-platform.test:8000/console/a.any.js
+// Used as the evalScript filename so relative fetch()/`fs` resolve correctly.
+function fileHttpUrl(absFile) {
+  if (!wptBase) return null;
+  let rel = absFile;
+  if (repoRoot && absFile.startsWith(repoRoot)) {
+    rel = absFile.slice(repoRoot.replace(/\/+$/, "").length);
+  }
+  rel = rel.replace(/^\/+/, "");
+  return wptBase + "/" + rel;
+}
+
+// evalScript options carrying the wpt-server base URL as `baseUrl`, which the
+// engine uses both as the reported script filename and as the base for relative
+// `fs`/`fetch` resolution. Returns undefined when interception is disabled
+// (relative URLs then fall back to the engine cwd, matching legacy behavior).
+function evalOpts(absFile) {
+  const url = fileHttpUrl(absFile);
+  return url ? { baseUrl: url } : undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -259,7 +242,7 @@ async function loadScriptDeps(testFile, code) {
     if (loadedHelpers.has(abs)) continue;
     loadedHelpers.add(abs);
     try {
-      Aike.evalScript(await fs.readText(abs));
+      Aike.evalScript(await fs.readText(abs), evalOpts(abs));
     } catch (e) {
       throw new Error(
         `loading META script '${meta.value}': ${e instanceof Error ? e.message : e}`,
@@ -278,9 +261,10 @@ Options:
   -r, --root <dir>        WPT suite root (default: $AIKE_WPT_ROOT, else current directory)
   -f, --fail-file <path>  write FAIL details to this file
       --log-wptreport <path>  write results in wptreport JSON (wpt.fyi format)
-      --wpt-server <url>  redirect relative fetch() URLs to this static server
+      --wpt-server <url>  base URL injected as the evalScript filename, so
+                          relative fetch()/fs specifiers resolve against it
                           (default: $WPT_SERVER_URL, else http://web-platform.test:8000).
-                          Use --no-wpt-server to disable interception.
+                          Use --no-wpt-server to disable injection.
       --global <scopes>   only run .any.js whose META global= set intersects
                           <scopes> (comma list: window,worker,shadowrealm,
                           dedicatedworker,sharedworker,serviceworker).
@@ -427,7 +411,9 @@ async function runOneFile(file) {
   // wptserve only expands {{...}} for files marked `.sub.`.
   if (currentFile.includes(".sub.")) code = substituteTemplates(code);
   await loadScriptDeps(file, code);
-  Aike.evalScript(code);
+  // Run the test file with its wpt-server URL as the filename, so relative
+  // fetch()/fs paths resolve against the server (no fetch monkey-patch needed).
+  Aike.evalScript(code, evalOpts(file));
 
   // All test()/promise_test() calls in the file have now run synchronously.
   // Now allow completion and drive it: the ShellTestEnvironment hook set

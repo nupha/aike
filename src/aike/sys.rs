@@ -73,7 +73,7 @@ unsafe extern "C" fn silent_invalid_parameter_handler(
 pub(super) fn js_evalScript(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut stack_barrier = false;
     let mut top_level_await = false;
-    let mut filename = "<evalScript>".to_string();
+    let mut base_url = "<evalScript>".to_string();
 
     if cc.length() >= 2 {
         let options_obj = cc.arg(1);
@@ -84,9 +84,9 @@ pub(super) fn js_evalScript(ctx: &mut ScopedContext, cc: CallContext) -> JSResul
         stack_barrier = options_obj
             .get_property_str(ctx, "stackBarrier")?
             .to_bool()?;
-        let fn_val = options_obj.get_property_str(ctx, "filename")?;
+        let fn_val = options_obj.get_property_str(ctx, "baseUrl")?;
         if !fn_val.is_undefined() {
-            filename =
+            base_url =
                 String::from_utf8_lossy(&fn_val.to_string(ctx)?.content().encode_utf8_bytes(true))
                     .into_owned();
         }
@@ -117,7 +117,7 @@ pub(super) fn js_evalScript(ctx: &mut ScopedContext, cc: CallContext) -> JSResul
     ctx.with_new_scope(|cx| {
         cx.eval(
             str.content().encode_utf8_bytes(true).as_ref(),
-            &filename,
+            &base_url,
             EvalType::Global,
             flags,
         )

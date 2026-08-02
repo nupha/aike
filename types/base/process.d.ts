@@ -193,14 +193,15 @@ declare namespace process {
    * @param options - evaluation options:
    *   - topLevelAwait?: compile the code with top-level `await` support.
    *   - stackBarrier?: truncate the error stack trace at this eval frame.
-   *   - filename?: filename (or URL) reported in stack traces; defaults to `<evalScript>`.
+   *   - baseUrl?: filename or URL used as the base for relative `fs`/`fetch`
+   *     resolution and reported in stack traces; defaults to `<evalScript>`.
    */
   function evalScript(
     code: string,
     options?: {
       topLevelAwait?: boolean;
       stackBarrier?: boolean;
-      filename?: string;
+      baseUrl?: string;
     },
   ): any;
 
