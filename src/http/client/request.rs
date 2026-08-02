@@ -3,8 +3,8 @@
 
 use linkme::distributed_slice;
 use zuqe::{
-    CallContext, ClassCtorDef, ClassID, FieldDef, JSResult, JSValue, Runtime, ScopedContext,
-    def_native_object,
+    CallContext, ClassCtorDef, ClassID, Exception, FieldDef, JSResult, JSValue, Runtime,
+    ScopedContext, def_native_object,
 };
 
 use crate::{
@@ -15,7 +15,7 @@ use crate::{
     },
     whatwg::{
         abort::JSAbortSignal,
-        stream::{readable_stream_from_bytes, readable_stream_from_channel},
+        stream::{make_rejected_promise, readable_stream_from_bytes, readable_stream_from_channel},
     },
 };
 
@@ -275,13 +275,28 @@ fn js_req_body_as(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             p.body_consumed = true;
             Some(BodySource::Synthetic(bytes))
         } else {
-            None
+            // Null-body request (e.g. `new Request(url)` with no init body):
+            // consumers resolve to the empty value rather than rejecting.
+            p.body_consumed = true;
+            Some(BodySource::Synthetic(Vec::new()))
         }
     };
 
     match source {
         Some(source) => drain_body(ctx, source, magic, None),
-        None => Err(ctx.throw_type_error("body already consumed or unavailable")),
+        // Spec: these methods always return a promise; an already-consumed body
+        // rejects it rather than throwing synchronously.
+        None => {
+            let _ = ctx.throw_type_error("body already consumed or unavailable");
+            let reason = match ctx.take_exception() {
+                Exception::Error(v) => v,
+                other => {
+                    ctx.throw(other);
+                    return Err(-1);
+                }
+            };
+            make_rejected_promise(ctx, reason)
+        }
     }
 }
 
@@ -291,16 +306,13 @@ fn js_req_form_data(ctx: &mut ScopedContext, _: CallContext) -> JSResult {
 }
 
 fn js_req_clone(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let mut this = cc.this();
-    let cloned = {
-        let p = get_request_payload_mut(ctx, &mut this)?;
-        if p.body_consumed { None } else { Some(p) }
-    };
-    let Some(src) = cloned else {
-        return Err(ctx.throw_type_error("Cannot clone a Request whose body has already been used"));
-    };
+    let this = cc.this();
 
-    let synthetic = src.synthetic_body.clone();
+    let src = get_request_payload(ctx, &this)?;
+    if src.body_consumed {
+        return Err(ctx.throw_type_error("Cannot clone a Request whose body has already been used"));
+    }
+
     let payload = RequestPayload {
         method: src.method.clone(),
         url: src.url.clone(),
@@ -315,10 +327,10 @@ fn js_req_clone(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         integrity: src.integrity.clone(),
         keepalive: src.keepalive,
         signal: src.signal,
-        synthetic_body: synthetic,
+        synthetic_body: src.synthetic_body.clone(),
         body_consumed: false,
     };
-    JSRequest::new_instance(ctx, cc.this(), payload).map(JSValue::from)
+    JSRequest::new_instance(ctx, this, payload).map(JSValue::from)
 }
 
 // ---------------------------------------------------------------------------

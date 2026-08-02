@@ -297,8 +297,8 @@ Options:
 components: directories or .any.js files, resolved against the root
             (none = nothing is tested). Example: console url console/foo.any.js`;
 
-const args = G.Aike.argv.slice(2);
-root = G.Aike.env.AIKE_WPT_ROOT || G.Aike.cwd();
+const args = G.process.argv.slice(2);
+root = G.process.env.AIKE_WPT_ROOT || G.process.cwd();
 let failFile = null;
 let logWptreport = null;
 let globalFilter = null; // Set<string> of allowed scopes (intersection mode)
@@ -341,26 +341,33 @@ for (let i = 0; i < args.length; i++) {
 // location, so we shim it from the resolved wpt server base URL (matching how
 // Node/Bun WPT runners inject a location shim). Without this, get_host_info()
 // throws "cannot read property of undefined".
-if (wptServerEnabled && wptServer) {
+//
+// The pathname must be the *test file's* URL path, not the server root: tests
+// build fixture URLs from it (e.g. fetch/api/basic/integrity.sub.any.js does
+// `dirname(location.pathname) + "../resources/" + "top.txt"`). setLocation() is
+// therefore called again per file, before the file runs.
+function setLocation(url) {
+  if (!wptServerEnabled || !url) return;
   try {
-    const u = new URL(wptServer.replace(/\/+$/, ""));
+    const u = new URL(url);
     const location = {
       protocol: u.protocol,
       host: u.host,
       hostname: u.hostname,
       port: u.port,
       pathname: u.pathname || "/",
+      search: u.search,
       href: u.href,
       origin: u.origin,
     };
     G.location = location;
     G.self.location = location;
   } catch (e) {
-    console.error(
-      `# WARNING: failed to shim self.location from ${wptServer}: ${e}`,
-    );
+    console.error(`# WARNING: failed to shim self.location from ${url}: ${e}`);
   }
 }
+
+setLocation(wptServer && wptServer.replace(/\/+$/, ""));
 
 if (logWptreport && !logWptreport.startsWith("/"))
   logWptreport = join(G.process.cwd(), logWptreport);
@@ -451,6 +458,10 @@ async function runOneFile(file) {
   currentAbsFile = file;
   currentFile = basename(file);
 
+  // Point location at this test file's URL, as a browser would, so tests that
+  // derive fixture paths from location.pathname resolve to the right directory.
+  setLocation(fileHttpUrl(file));
+
   // Fresh harness realm: re-evaluate testharness.js so the global Tests
   // instance (and its callback lists) reset, then register our collectors.
   pendingResults = [];
@@ -463,9 +474,21 @@ async function runOneFile(file) {
   // to a local read with local `.sub.` expansion.
   let code = await fetchText(file);
   await loadScriptDeps(file, code);
-  // Run the test file with its wpt-server URL as the filename, so relative
-  // fetch()/fs paths resolve against the server (no fetch monkey-patch needed).
-  Aike.evalScript(code, evalOpts(file));
+
+  // Run the test file as an ES module in a fresh module scope. This isolates
+  // each file's top-level `const`/`let` from every other file (the global
+  // lexical environment is NOT shared across modules), fixing the cross-file
+  // redeclaration load errors (e.g. `SyntaxError: redeclaration of 'url'`)
+  // that happened when all files shared one global script scope.
+  //
+  // Dependencies loaded via `META: script=` still use evalScript (global), so
+  // their `var`/`const`/`function` declarations are visible to this module as
+  // ordinary globals — matching how a browser loads the .html shell's <script>
+  // deps before the test. The module's baseUrl is the file's wpt-server URL,
+  // so relative fetch()/fs resolve against the server exactly as in a browser.
+  // Assignments the test makes to globalThis (e.g. self.x = ...) still take
+  // effect on the shared global.
+  await Aike.evalModule(code, fileHttpUrl(file));
 
   // All test()/promise_test() calls in the file have now run synchronously.
   // Now allow completion and drive it: the ShellTestEnvironment hook set
