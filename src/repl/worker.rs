@@ -109,7 +109,7 @@ fn process_input_line(
         _ => {
             match ctx.eval(
                 line.as_bytes(),
-                "<repl>",
+                zuqe::EvalSource::Name("<repl>".to_string()),
                 zuqe::EvalType::Global,
                 zuqe::EvalFlags::empty(),
             ) {

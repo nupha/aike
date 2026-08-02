@@ -379,7 +379,7 @@ async fn main() -> ExitCode {
         .unwrap();
 
     let script: String;
-    let entry_url: String;
+    let entry_url: zuqe::EvalSource;
     let is_module: bool;
 
     if let Some(ref_filename) = filename {
@@ -421,19 +421,18 @@ async fn main() -> ExitCode {
         // Convert the entry filename to a canonical `file://` URL for module resolution.
         // Module names (and `import.meta.url`) are URLs, and a `file://` base is also
         // required so that dynamic `import()` resolves relative specifiers correctly.
-        let url = zuqe::path_to_url(&ref_filename)
-            .expect("entry path must convert to a file:// URL")
-            .to_string();
+        let url =
+            zuqe::path_to_url(&ref_filename).expect("entry path must convert to a file:// URL");
 
         script = transpiled;
-        entry_url = url;
+        entry_url = zuqe::EvalSource::BaseUrl(url);
         is_module = is_module_value;
     } else if let Some(eval_code) = args.eval {
         //
         // Eval mode: inline script
         //
         script = eval_code;
-        entry_url = "eval".to_string();
+        entry_url = zuqe::EvalSource::Name("eval".to_string());
         is_module = args.module;
     } else {
         //
@@ -452,7 +451,7 @@ async fn main() -> ExitCode {
         .eval_wait(
             &mut rt,
             script.as_bytes(),
-            &entry_url,
+            entry_url,
             if is_module {
                 EvalType::Module
             } else {

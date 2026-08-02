@@ -3,7 +3,7 @@
 
 use std::{cell::RefCell, collections::HashMap, time::Instant};
 
-use zuqe::{CallContext, EvalFlags, EvalType, FieldDef, JSResult, JSValue, Object, ScopedContext};
+use zuqe::{CallContext, FieldDef, JSResult, JSValue, Object, ScopedContext};
 
 use crate::{
     color::{Color, colorize},
@@ -105,26 +105,18 @@ fn js_console_trace(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     }
     console_println(out);
 
-    // Append stack trace via JS eval
-    ctx.with_new_scope(|scope| {
-        if let Ok(stack_val) = scope.eval(
-            b"new Error().stack",
-            "<console.trace>",
-            EvalType::Global,
-            EvalFlags::empty(),
-        ) && let Ok(s) = stack_val.to_string(scope)
-        {
-            let stack_str = format!("{}", s);
-            for line in stack_str.lines().skip(1) {
-                let mut out = String::new();
-                for _ in 0..indent {
-                    out.push_str(&colorize("  ", Color::Reset));
-                }
-                out.push_str(&colorize(line, Color::Reset));
-                console_println(out);
+    // Append the current call stack. `backtrace()` walks the live frame chain
+    // directly (no `Error` object, no eval through the `stack` getter).
+    if let Some(stack) = ctx.backtrace() {
+        for line in stack.lines() {
+            let mut out = String::new();
+            for _ in 0..indent {
+                out.push_str(&colorize("  ", Color::Reset));
             }
+            out.push_str(&colorize(line, Color::Reset));
+            console_println(out);
         }
-    });
+    }
 
     Ok(JSValue::UNDEFINED)
 }

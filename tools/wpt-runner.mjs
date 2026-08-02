@@ -63,13 +63,13 @@ let testharnessText = "";
 // Static wpt server (fixtures fetched at runtime)
 // ---------------------------------------------------------------------------
 
-let wptServer = G.Aike.env.WPT_SERVER_URL || "http://web-platform.test:8000";
+let wptServer = G.process.env.WPT_SERVER_URL || "http://web-platform.test:8000";
 let wptServerEnabled = true;
 
-let root = G.Aike.env.AIKE_WPT_ROOT || G.Aike.cwd();
+let root = G.process.env.AIKE_WPT_ROOT || G.process.cwd();
 
 // WPT suite root (also settable via -r). Resolved later in main().
-let repoRoot = G.Aike.cwd();
+let repoRoot = G.process.cwd();
 
 // WPT test status codes (testharness.js Test.prototype.status)
 const STATUS = { PASS: 0, FAIL: 1, TIMEOUT: 2, PRECONDITION_FAILED: 3 };
@@ -173,13 +173,17 @@ function evalOpts(absFile) {
 }
 
 // ---------------------------------------------------------------------------
-// wptserve template substitution
+// Script source fetching
 //
-// Files whose name contains `.sub.` are served by wptserve with `{{...}}`
-// placeholders expanded. We read test files straight off disk, so we must do
-// the same expansion ourselves; otherwise a URL like
-// `http://{{host}}:{{ports[http][0]}}/` reaches fetch() verbatim and fails to
-// parse. Only the placeholders WPT tests actually rely on are supported.
+// WPT `.sub.` files (and other server-processed variants) have `{{...}}`
+// placeholders expanded by wptserve at request time. We therefore fetch the
+// script body from the wpt server (the same URL the browser would load) instead
+// of reading it off disk — this makes wptserve the single source of truth for
+// template substitution, so we no longer need a hand-rolled expander.
+//
+// When the server is disabled (--no-wpt-server), there is nothing to fetch
+// from, so we fall back to reading the local file and expanding `.sub.`
+// placeholders ourselves, preserving legacy behavior.
 // ---------------------------------------------------------------------------
 
 // Host/port of the wpt server, derived from the configured base URL so that
@@ -196,9 +200,8 @@ function serverHostPort() {
   }
 }
 
-// Expand the `{{host}}` / `{{ports[scheme][n]}}` placeholders. Unknown
-// placeholders are left untouched so failures stay visible rather than
-// silently turning into a wrong URL.
+// Local fallback: expand `{{host}}` / `{{ports[scheme][n]}}` placeholders.
+// Only used when the wpt server is disabled and we read files off disk.
 function substituteTemplates(code) {
   const { host, port } = serverHostPort();
   return code
@@ -206,6 +209,23 @@ function substituteTemplates(code) {
     .replace(/\{\{ports\[(\w+)\]\[(\d+)\]\}\}/g, (m, scheme, idx) =>
       scheme === "http" && idx === "0" ? port : m,
     );
+}
+
+// Fetch a test script's source. With a wpt server, request the script URL from
+// it (so `.sub.` substitution happens server-side); without one, read the local
+// file and expand `.sub.` placeholders locally.
+async function fetchText(absFile) {
+  if (wptBase) {
+    const url = fileHttpUrl(absFile);
+    const res = await fetch(url);
+    if (!res.ok) {
+      throw new Error(`fetch ${url} failed: ${res.status} ${res.statusText}`);
+    }
+    return await res.text();
+  }
+  let code = await fs.readText(absFile);
+  if (absFile.includes(".sub.")) code = substituteTemplates(code);
+  return code;
 }
 
 // ---------------------------------------------------------------------------
@@ -242,7 +262,7 @@ async function loadScriptDeps(testFile, code) {
     if (loadedHelpers.has(abs)) continue;
     loadedHelpers.add(abs);
     try {
-      Aike.evalScript(await fs.readText(abs), evalOpts(abs));
+      Aike.evalScript(await fetchText(abs), evalOpts(abs));
     } catch (e) {
       throw new Error(
         `loading META script '${meta.value}': ${e instanceof Error ? e.message : e}`,
@@ -308,15 +328,15 @@ for (let i = 0; i < args.length; i++) {
     globalExclude = new Set(a.slice("--exclude-global=".length).split(","));
   else if (a === "-h" || a === "--help") {
     console.log(USAGE);
-    G.Aike.exit(0);
+    G.process.exit(0);
   } else components.push(a);
 }
 if (logWptreport && !logWptreport.startsWith("/"))
-  logWptreport = join(G.Aike.cwd(), logWptreport);
+  logWptreport = join(G.process.cwd(), logWptreport);
 const timeStart = Date.now() / 1000;
 // Resolve to an absolute path: fs.* resolves relative paths against the
 // process cwd, while import() resolves them against the script's directory.
-repoRoot = root.startsWith("/") ? root : join(G.Aike.cwd(), root);
+repoRoot = root.startsWith("/") ? root : join(G.process.cwd(), root);
 
 // If no component is specified, run nothing.
 if (components.length === 0) {
@@ -324,7 +344,7 @@ if (components.length === 0) {
   console.log(
     "Usage: aike wpt-runner.mjs -r <wpt-root> <component> [component ...]",
   );
-  G.Aike.exit(0);
+  G.process.exit(0);
 }
 
 // After CLI/env resolution, locate and load upstream testharness.js. The WPT
@@ -332,15 +352,15 @@ if (components.length === 0) {
 // a few well-known checkouts.
 testharnessPath = await findTestharness([
   root,
-  G.Aike.env.AIKE_WPT_ROOT,
-  join(G.Aike.env.HOME || "", "devel/wpt"),
-  G.Aike.cwd(),
+  G.process.env.AIKE_WPT_ROOT,
+  join(G.process.env.HOME || "", "devel/wpt"),
+  G.process.cwd(),
 ]);
 if (!testharnessPath) {
   console.log(
     "ERROR: could not find resources/testharness.js. Set AIKE_WPT_ROOT or pass -r <wpt-root>, or place a WPT checkout at ~/devel/wpt.",
   );
-  G.Aike.exit(1);
+  G.process.exit(1);
 }
 testharnessText = await fs.readText(testharnessPath);
 // WPT's testharness.js ShellTestEnvironment.on_tests_ready is a no-op, which
@@ -407,9 +427,10 @@ async function runOneFile(file) {
   Aike.evalScript(testharnessText);
   registerHarnessCallbacks();
 
-  let code = await fs.readText(file);
-  // wptserve only expands {{...}} for files marked `.sub.`.
-  if (currentFile.includes(".sub.")) code = substituteTemplates(code);
+  // Fetch the test file from the wpt server so `.sub.` placeholders are
+  // expanded server-side (single source of truth). With no server, falls back
+  // to a local read with local `.sub.` expansion.
+  let code = await fetchText(file);
   await loadScriptDeps(file, code);
   // Run the test file with its wpt-server URL as the filename, so relative
   // fetch()/fs paths resolve against the server (no fetch monkey-patch needed).
@@ -674,4 +695,4 @@ if (logWptreport) {
   console.log(`wptreport written to ${logWptreport}`);
 }
 
-G.Aike.exit(totalFailed > 0 ? 1 : 0);
+G.process.exit(totalFailed > 0 ? 1 : 0);

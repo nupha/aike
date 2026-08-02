@@ -73,7 +73,7 @@ unsafe extern "C" fn silent_invalid_parameter_handler(
 pub(super) fn js_evalScript(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut stack_barrier = false;
     let mut top_level_await = false;
-    let mut base_url = "<evalScript>".to_string();
+    let mut name = "<evalScript>".to_string();
 
     if cc.length() >= 2 {
         let options_obj = cc.arg(1);
@@ -86,13 +86,21 @@ pub(super) fn js_evalScript(ctx: &mut ScopedContext, cc: CallContext) -> JSResul
             .to_bool()?;
         let fn_val = options_obj.get_property_str(ctx, "baseUrl")?;
         if !fn_val.is_undefined() {
-            base_url =
+            name =
                 String::from_utf8_lossy(&fn_val.to_string(ctx)?.content().encode_utf8_bytes(true))
                     .into_owned();
         }
     }
 
     let str = cc.arg(0).to_string(ctx)?;
+
+    // Resolve the base into an `EvalSource` once: a real URL (file/http/https)
+    // binds `eval_base_url`; the synthetic default "<evalScript>" or any
+    // non-URL string is treated as a plain filename and never sets the base.
+    let base = match url::Url::parse(&name) {
+        Ok(u) if matches!(u.scheme(), "file" | "http" | "https") => zuqe::EvalSource::BaseUrl(u),
+        _ => zuqe::EvalSource::Name(name),
+    };
 
     thread_local! {
         static EVAL_SCRIPT_RECURSE: Cell<u32> = const { Cell::new(0) };
@@ -117,7 +125,7 @@ pub(super) fn js_evalScript(ctx: &mut ScopedContext, cc: CallContext) -> JSResul
     ctx.with_new_scope(|cx| {
         cx.eval(
             str.content().encode_utf8_bytes(true).as_ref(),
-            &base_url,
+            &base,
             EvalType::Global,
             flags,
         )
@@ -140,8 +148,8 @@ pub(super) fn js_evalModule(ctx: &mut ScopedContext, cc: CallContext) -> JSResul
     let base_url = String::from_utf8_lossy(&base_url).into_owned();
 
     // Validate scheme so relative resolution has a well-defined base.
-    match url::Url::parse(&base_url) {
-        Ok(u) if matches!(u.scheme(), "file" | "http" | "https") => {}
+    let base = match url::Url::parse(&base_url) {
+        Ok(u) if matches!(u.scheme(), "file" | "http" | "https") => u,
         Ok(u) => {
             return Err(ctx.throw_type_error(&format!(
                 "evalModule: unsupported base url scheme '{}' (expected file/http/https)",
@@ -153,15 +161,15 @@ pub(super) fn js_evalModule(ctx: &mut ScopedContext, cc: CallContext) -> JSResul
                 ctx.throw_type_error(&format!("evalModule: invalid base url '{base_url}': {e}"))
             );
         }
-    }
+    };
 
-    // `base_url` becomes the module name, which backs `import.meta.url` and is
+    // `base` becomes the module name, which backs `import.meta.url` and is
     // reachable via `ScopedContext::current_module_name` for relative `fs`/`fetch`
     // resolution (no thread-local stack needed; the engine frame carries it).
     ctx.with_new_scope(|cx| {
         cx.eval(
             str.content().encode_utf8_bytes(true).as_ref(),
-            &base_url,
+            &zuqe::EvalSource::BaseUrl(base),
             EvalType::Module,
             EvalFlags::empty(),
         )
