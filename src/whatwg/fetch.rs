@@ -16,6 +16,7 @@ use crate::http::client::{
 };
 
 use super::abort::{JSAbortSignal, signal_is_aborted, signal_notify, signal_set_body};
+use super::http_cache;
 use super::stream::JSReadableStream;
 
 /// Error type carried through the fetch result slot.
@@ -356,10 +357,31 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let notify = signal_val.as_ref().and_then(|s| signal_notify(s));
     let already_aborted = signal_val.as_ref().map_or(false, |s| signal_is_aborted(s));
 
+    // HTTP cache: if we have a stored validator for this URL, attach conditional
+    // revalidation headers so the server may reply `304` (Fetch § HTTP-cache).
+    // `cache_driven` records whether *we* added the validators — only then must
+    // a `304` be reinterpreted as the cached response (caller-supplied headers
+    // must keep the response as a real `304`). It is computed inside the
+    // response closure (before the 304 handling) from the cached validators.
+
     let result_slot =
         zuqe::builtins::promise::PromiseResultSlot::<Result<TransportResponse, FetchError>>::new();
+    // Look up cached validators before issuing the request so the conditional
+    // headers ride on the outgoing request and the `cache_driven` flag (copied
+    // into the response closure below) reflects *our* revalidation.
+    let cached_validators = if method.eq_ignore_ascii_case("GET") {
+        http_cache::lookup_validators(&method, &url_str)
+    } else {
+        None
+    };
+    // Only treat a `304` as cache-driven (to be turned into the cached
+    // response) when *we* added the validators — if the caller supplied them
+    // the `304` is theirs and must be passed through unchanged.
+    let cache_driven = cached_validators.is_some()
+        && !http_cache::caller_supplied_validator(&header_list.to_vec());
     let url_clone = url_str.clone();
     let redirect_clone = redirect.clone();
+    let method_clone = method.clone();
     let promise = zuqe::builtins::promise::Promise::create_with_result_slot(
         ctx,
         result_slot.clone(),
@@ -383,6 +405,38 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                     );
                 }
                 return build_opaque_redirect_response(cx);
+            }
+            // HTTP cache: a `304` we drove via conditional headers becomes the
+            // cached response (status 200) with the 304 headers merged on top.
+            if let Some((cached_status, cached_headers, cached_body)) = http_cache::take_not_modified(
+                &method_clone,
+                &url_clone,
+                status,
+                &tr.headers,
+                cache_driven,
+            ) {
+                let cached_tr = TransportResponse {
+                    status: cached_status,
+                    status_text: "OK".to_string(),
+                    headers: cached_headers,
+                    content_type: String::new(),
+                    content_length: Some(cached_body.len() as u64),
+                    http_version: "1.1",
+                    resp: None,
+                    synthetic_body: Some(cached_body),
+                };
+                return build_response_from_transport(cx, cached_tr, RespType::Basic, &url_clone, false);
+            }
+            // Otherwise remember successful validator-bearing GET responses so
+            // later requests can revalidate them.
+            if method_clone.eq_ignore_ascii_case("GET") && (200..300).contains(&status) {
+                http_cache::store(
+                    &method_clone,
+                    &url_clone,
+                    status,
+                    &tr.headers,
+                    Vec::new(),
+                );
             }
             build_response_from_transport(cx, tr, RespType::Basic, &url_clone, false)
         },
@@ -416,11 +470,20 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     ensure_default_request_headers(&mut header_list);
     // WHATWG: silently drop forbidden request headers the caller tried to set.
     strip_forbidden_request_headers(&mut header_list);
+    // Snapshot after the HTTP-default and forbidden-header passes so the
+    // conditional-revalidation headers added below ride on the final list.
+    let mut req_headers = header_list.to_vec();
+    // Apply conditional-revalidation validators (from the HTTP cache) to the
+    // finalized request headers; this must run after the forbidden-header
+    // strip above so it cannot revive a dropped header.
+    if let Some(validators) = &cached_validators {
+        http_cache::add_conditional_headers(&mut req_headers, validators.clone());
+    }
 
     let req = TransportRequest {
         method,
         url: url_str.clone(),
-        headers: header_list.to_vec(),
+        headers: req_headers,
         body: body_bytes,
         timeout,
         referrer,

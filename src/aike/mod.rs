@@ -118,8 +118,13 @@ pub fn init_aike(
 
     ns.install_fields(ctx, entries)?;
 
-    // Expose as global `Aike`
+    // Expose as global `process` - compatible with nodejs
+    ctx.global_obj()
+        .define_property_value_str(ctx, "process", ns.into(), JS_PROP_ENUMERABLE)?;
+
+    // Expose as global `Aike` - alias, should be removed later?
     ctx.global_obj()
         .define_property_value_str(ctx, "Aike", ns.into(), JS_PROP_ENUMERABLE)?;
+
     Ok(())
 }

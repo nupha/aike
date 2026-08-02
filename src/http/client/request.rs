@@ -241,7 +241,20 @@ fn js_req_body(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         }
     };
     match source {
-        Some(BodySource::Channel(rx)) => readable_stream_from_channel(ctx, rx),
+        Some(BodySource::Channel(rx)) => {
+            // Request bodies are buffered into plain `Vec<u8>` chunks; wrap them
+            // as `Ok` so they flow through the error-aware channel stream.
+            let (tx, rx2) = crossbeam::channel::unbounded::<Result<Vec<u8>, String>>();
+            std::thread::spawn(move || {
+                while let Ok(b) = rx.recv() {
+                    // `b` already carries the chunk/error result; forward as-is.
+                    if tx.send(b).is_err() {
+                        break;
+                    }
+                }
+            });
+            readable_stream_from_channel(ctx, rx2)
+        }
         Some(BodySource::Synthetic(bytes)) => readable_stream_from_bytes(ctx, bytes),
         // Request bodies are always buffered, never a live stream.
         Some(BodySource::Stream(s)) => Ok(s.into()),

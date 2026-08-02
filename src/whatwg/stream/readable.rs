@@ -14,8 +14,8 @@ use std::{
 use crossbeam::channel::{Receiver, TryRecvError};
 use linkme::distributed_slice;
 use zuqe::{
-    CallContext, Callback, ClassCtorDef, ClassID, FieldDef, JSResult, JSValue, JobState, Runtime,
-    ScopedContext,
+    CallContext, Callback, ClassCtorDef, ClassID, ErrorKind, FieldDef, JSResult, JSValue, JobState,
+    Runtime, ScopedContext,
     builtins::{
         iterator::{AsyncIterableIterator, AsyncIteratorFetcher, IterFetchStatus},
         promise::Promise,
@@ -376,7 +376,7 @@ thread_local! {
     /// Channel-backed streams being polled: id -> (controller, receiver, idle deadline).
     /// The deadline is per stream and refreshed on every chunk, so a slow but
     /// live producer is never cut off; only a stalled stream times out.
-    pub(super) static CHANNEL_STREAMS: RefCell<HashMap<u64, (JSReadableStreamDefaultController, Receiver<Vec<u8>>, Instant)>> =
+    pub(super) static CHANNEL_STREAMS: RefCell<HashMap<u64, (JSReadableStreamDefaultController, Receiver<Result<Vec<u8>, String>>, Instant)>> =
         RefCell::new(HashMap::new());
 
     static NEXT_STREAM_ID: Cell<u64> = const { Cell::new(1) };
@@ -945,14 +945,15 @@ fn create_stream_async_iterator(ctx: &mut ScopedContext, stream_val: &JSValue) -
 // Channel/bytes-backed streams
 // ============================================================================
 
-/// Create a `ReadableStream` backed by a `crossbeam::Receiver<Vec<u8>>`.
+/// Create a `ReadableStream` backed by a `crossbeam::Receiver<Result<Vec<u8>, String>>`.
 ///
 /// Uses a background microtask (queue_job) to poll the channel and push
-/// chunks into the stream's controller. When the channel is disconnected
-/// the stream is closed.
+/// chunks into the stream's controller. A `Ok(bytes)` item enqueues a chunk;
+/// an `Err(msg)` item errors the stream (the reader's `read()` rejects); when
+/// the channel is disconnected the stream is closed.
 pub(crate) fn readable_stream_from_channel(
     ctx: &mut ScopedContext,
-    rx: Receiver<Vec<u8>>,
+    rx: Receiver<Result<Vec<u8>, String>>,
 ) -> Result<JSValue, i32> {
     let source = ctx.create_base_object()?;
 
@@ -1033,7 +1034,7 @@ fn start_channel_stream_poller(ctx: &mut ScopedContext) {
 
                 for (&id, (controller, rx, deadline)) in map.iter_mut() {
                     match rx.try_recv() {
-                        Ok(data) => {
+                        Ok(Ok(data)) => {
                             // Producer is alive: extend this stream's deadline.
                             *deadline = Instant::now();
                             let _ = (|| -> Result<(), i32> {
@@ -1049,6 +1050,22 @@ fn start_channel_stream_poller(ctx: &mut ScopedContext) {
                                 );
                                 Ok(())
                             })();
+                        }
+                        Ok(Err(msg)) => {
+                            // The underlying network stream failed mid-body:
+                            // error the ReadableStream so the reader's read()
+                            // promise rejects (e.g. with a TypeError).
+                            let _ = (|| -> Result<(), i32> {
+                                let bytes = msg.into_bytes();
+                                let err = cx
+                                    .create_error_object(ErrorKind::Type, &String::from_utf8_lossy(&bytes), false)
+                                    .ok_or(-1)?;
+                                let error_fn = controller.get_property_str(cx, "error")?;
+                                let _ =
+                                    error_fn.call(cx, JSValue::from(*controller), &[err.into()]);
+                                Ok(())
+                            })();
+                            to_remove.push(id);
                         }
                         Err(TryRecvError::Disconnected) => {
                             let _ = (|| -> Result<(), i32> {

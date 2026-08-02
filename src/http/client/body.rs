@@ -29,7 +29,10 @@ use crate::{
 /// Source of response body data.
 pub(crate) enum BodySource {
     /// Streaming from a real network response — poll the channel.
-    Channel(Receiver<Vec<u8>>),
+    /// Each item is `Ok(bytes)` for a chunk or `Err(msg)` when the underlying
+    /// network stream fails; the latter must reject the body reader, not be
+    /// treated as a normal chunk (see `readable_stream_from_channel`).
+    Channel(Receiver<Result<Vec<u8>, String>>),
     /// Entire body is already available as bytes (synthetic response).
     Synthetic(Vec<u8>),
     /// A JS `ReadableStream` body — drain by pumping its reader.
@@ -126,9 +129,15 @@ pub(crate) fn drain_body(
                     let mut guard = buf.lock().unwrap();
                     let inner = guard.as_mut().unwrap();
                     match rx.try_recv() {
-                        Ok(chunk) => {
+                        Ok(Ok(chunk)) => {
                             inner.extend_from_slice(&chunk);
                             Ok(JobState::Again)
+                        }
+                        // A network error mid-body: reject the buffered read.
+                        Ok(Err(msg)) => {
+                            guard.take();
+                            let _ = result_slot.commit(Err(msg));
+                            Ok(JobState::Done)
                         }
                         Err(TryRecvError::Disconnected) => {
                             let full = guard.take().unwrap();

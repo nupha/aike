@@ -67,7 +67,8 @@ pub(crate) struct ResponsePayload {
     /// Open network response for lazy body streaming (None once taken).
     resp: Option<reqwest::Response>,
     /// Transient holder for the body channel while it is being consumed.
-    body_rx: Option<Receiver<Vec<u8>>>,
+    /// Each item is `Ok(bytes)` for a chunk or `Err(msg)` on a network failure.
+    body_rx: Option<Receiver<Result<Vec<u8>, String>>>,
     /// Whether the body has begun consumption (enforces single-use).
     body_consumed: bool,
     /// Cached `ReadableStream` returned by `response.body` (same instance each
@@ -145,7 +146,7 @@ impl ResponsePayload {
         }
 
         if let Some(resp) = self.resp.take() {
-            let (tx, rx) = crossbeam::channel::unbounded::<Vec<u8>>();
+            let (tx, rx) = crossbeam::channel::unbounded::<Result<Vec<u8>, String>>();
             self.body_rx = Some(rx);
 
             tokio::spawn(async move {
@@ -155,12 +156,14 @@ impl ResponsePayload {
                 while let Some(chunk) = stream.next().await {
                     match chunk {
                         Ok(bytes) => {
-                            if tx.send(bytes.to_vec()).is_err() {
+                            if tx.send(Ok(bytes.to_vec())).is_err() {
                                 break;
                             }
                         }
                         Err(e) => {
-                            tx.send(format!("{e}").into_bytes()).ok();
+                            // Signal the consumer that the body stream failed:
+                            // the reader's read() promise must reject (TypeError).
+                            let _ = tx.send(Err(format!("{e}")));
                             break;
                         }
                     }
