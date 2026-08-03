@@ -339,10 +339,12 @@ pub(crate) async fn perform_request(
             synthetic_body: if is_head { None } else { Some(body) },
         });
     }
+
     // WHATWG fetch: a 421 (Misdirected Request) response means the connection
     // was reused for the wrong origin; retry the request exactly once on a
-    // fresh connection (the client has connection pooling disabled, so a
-    // second attempt lands on a clean connection).
+    // fresh connection. The reqwest client is built with
+    // `pool_max_idle_per_host(0)`, so a second attempt opens a clean
+    // connection (the server counts it as a new connection).
     // Build one request. Owned args keep the returned future free of borrows,
     // so it can be handed to the redirect loop.
     let send_once = |url: String, referrer: String| {

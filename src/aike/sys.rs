@@ -94,12 +94,12 @@ pub(super) fn js_evalScript(ctx: &mut ScopedContext, cc: CallContext) -> JSResul
 
     let str = cc.arg(0).to_string(ctx)?;
 
-    // Resolve the base into an `EvalSource` once: a real URL (file/http/https)
+    // Resolve the base into an `EvalName` once: a real URL (file/http/https)
     // binds `eval_base_url`; the synthetic default "<evalScript>" or any
     // non-URL string is treated as a plain filename and never sets the base.
     let base = match url::Url::parse(&name) {
-        Ok(u) if matches!(u.scheme(), "file" | "http" | "https") => zuqe::EvalSource::BaseUrl(u),
-        _ => zuqe::EvalSource::Name(name),
+        Ok(u) if matches!(u.scheme(), "file" | "http" | "https") => zuqe::EvalName::BaseUrl(u),
+        _ => zuqe::EvalName::Name(name),
     };
 
     thread_local! {
@@ -169,7 +169,7 @@ pub(super) fn js_evalModule(ctx: &mut ScopedContext, cc: CallContext) -> JSResul
     ctx.with_new_scope(|cx| {
         cx.eval(
             str.content().encode_utf8_bytes(true).as_ref(),
-            &zuqe::EvalSource::BaseUrl(base),
+            &zuqe::EvalName::BaseUrl(base),
             EvalType::Module,
             EvalFlags::empty(),
         )

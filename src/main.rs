@@ -379,7 +379,7 @@ async fn main() -> ExitCode {
         .unwrap();
 
     let script: String;
-    let entry_url: zuqe::EvalSource;
+    let entry_url: zuqe::EvalName;
     let is_module: bool;
 
     if let Some(ref_filename) = filename {
@@ -425,14 +425,14 @@ async fn main() -> ExitCode {
             zuqe::path_to_url(&ref_filename).expect("entry path must convert to a file:// URL");
 
         script = transpiled;
-        entry_url = zuqe::EvalSource::BaseUrl(url);
+        entry_url = zuqe::EvalName::BaseUrl(url);
         is_module = is_module_value;
     } else if let Some(eval_code) = args.eval {
         //
         // Eval mode: inline script
         //
         script = eval_code;
-        entry_url = zuqe::EvalSource::Name("eval".to_string());
+        entry_url = zuqe::EvalName::Name("eval".to_string());
         is_module = args.module;
     } else {
         //
@@ -451,7 +451,7 @@ async fn main() -> ExitCode {
         .eval_wait(
             &mut rt,
             script.as_bytes(),
-            entry_url,
+            &entry_url,
             if is_module {
                 EvalType::Module
             } else {
@@ -532,17 +532,24 @@ fn js_module_loader(
             }
         };
 
+        // `resolved_name` is the path actually read from disk; it may differ from
+        // `file_name` only when a `.js` import falls back to `.ts`. The two must
+        // agree whenever no fallback happened — this guards against accidentally
+        // using `resolved_name` (a disk path) as the module's canonical name,
+        // which would break the import/`import.meta.url` cache keyed by `file_name`.
+        debug_assert_eq!(resolved_name, file_path_str);
+
         if is_json {
             // JSON module: wrap as `export default <json>;\n`
             let content = String::from_utf8_lossy(&buf);
             let mut src = String::from("export default ");
             src.push_str(&content);
             src.push('\n');
-            ctx.compile_module(src.as_bytes(), file_name.as_str(), false)
+            ctx.compile_module(src.as_bytes(), file_name, false)
         } else {
             let code = if transpile::needs_transpile(&resolved_name) {
                 if resolved_name.ends_with(".d.ts") {
-                    return ctx.compile_module(b"export {}", &resolved_name, false);
+                    return ctx.compile_module(b"export {}", file_name, false);
                 }
                 let source = String::from_utf8_lossy(&buf);
                 match transpile::transpile(&source) {
@@ -558,7 +565,7 @@ fn js_module_loader(
             };
 
             // Note: should use original file URL (not resolved path) as module name
-            ctx.compile_module(&code, file_name.as_str(), false)
+            ctx.compile_module(&code, file_name, false)
         }
     }
 }

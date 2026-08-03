@@ -96,7 +96,13 @@ impl HttpClientConfig {
 
         let mut builder = reqwest::Client::builder()
             .redirect(redirect)
-            .connect_timeout(self.connect_timeout);
+            .connect_timeout(self.connect_timeout)
+            // Disable idle connection pooling: every request opens a fresh
+            // connection. Required for the 421 (Misdirected Request) retry to
+            // land on a *new* connection, as the fetch spec and the WPT
+            // connection-pool tests expect (otherwise the retry reuses the same
+            // keep-alive socket and the server counts only one connection).
+            .pool_max_idle_per_host(0);
 
         // --- Cookie jar ---
         if self.cookie_jar {
