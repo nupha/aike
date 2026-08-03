@@ -1,161 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-use std::{
-    cell::RefCell,
-    path::{Component, Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 
 use zuqe::{
     Array, CallContext, FieldDef, JSResult, JSValue, NativeObject, PollSender, ScopedContext,
     builtins::{promise::Promise, typed_array::TypedArray},
 };
 
-use crate::{
-    aike::{JSFileHandle, make_stats},
-    helpers::canonicalize_path,
-};
-
-thread_local! {
-    /// Sandbox restriction: limits all fs access to this directory.
-    /// None means no sandbox restriction.
-    static SANDBOX_PATH: RefCell<Option<PathBuf>> = RefCell::new({
-        let p = std::env::var("AIKE_SANDBOX_PATH").unwrap_or_default();
-        if p.is_empty() {
-            None
-        } else {
-            canonicalize_path(std::path::PathBuf::from(p))
-                .ok()
-                .and_then(|p| if p.is_dir() { Some(p) } else { None })
-        }
-    });
-}
-
-/// Normalize a path by resolving . and .. components without following symlinks.
-fn normalize_path(path: &Path) -> PathBuf {
-    let mut result = PathBuf::new();
-    let mut rooted = false;
-
-    for component in path.components() {
-        match component {
-            Component::Prefix(p) => {
-                result.push(p.as_os_str());
-            }
-            Component::RootDir => {
-                // Only set root once. On Windows, Prefix + RootDir forms an
-                // absolute path (e.g. C:\), and we must not overwrite Prefix.
-                if !rooted {
-                    result.push(component.as_os_str());
-                    rooted = true;
-                }
-            }
-            Component::Normal(name) => result.push(name),
-            Component::ParentDir => {
-                // PathBuf::pop() guards against popping beyond root on all
-                // platforms, so we only guard against popping an empty buf.
-                if !result.as_os_str().is_empty() {
-                    result.pop();
-                }
-            }
-            Component::CurDir => {}
-        }
-    }
-    result
-}
-
-/// Convert to a normalized absolute path. Relative paths are resolved against
-/// the innermost module base URL (set by `aike.evalModule`) when it is a
-/// `file://` URL; otherwise against the current working directory.
-/// Does not follow symlinks.
-/// Resolve `path` to an absolute filesystem path.
-///
-/// For relative `path`, prefer the current module's base URL (the value behind
-/// `import.meta.url`, Node/Bun semantics): a `file://` base is joined and
-/// converted to a local path; a non-file base yields no usable local path, so
-/// we fall back to the cwd. When `base` is `None` (no script/module frame),
-/// join against the cwd.
-fn absolute_path(path: &Path, base: Option<&str>) -> PathBuf {
-    let abs = if path.has_root() {
-        path.to_path_buf()
-    } else if let Some(base) = base {
-        if let Ok(url) = url::Url::parse(base) {
-            if url.scheme() == "file" {
-                match url.join(&path.to_string_lossy()) {
-                    Ok(joined) => PathBuf::from(
-                        joined
-                            .to_file_path()
-                            .ok()
-                            .and_then(|p| p.into_os_string().into_string().ok())
-                            .unwrap_or_else(|| path.to_string_lossy().into_owned()),
-                    ),
-                    Err(_) => cwd_join(path),
-                }
-            } else {
-                cwd_join(path)
-            }
-        } else {
-            cwd_join(path)
-        }
-    } else {
-        cwd_join(path)
-    };
-    normalize_path(&abs)
-}
-
-/// Join a relative path against the process current working directory.
-fn cwd_join(path: &Path) -> PathBuf {
-    std::env::current_dir()
-        .map(|cwd| cwd.join(path))
-        .unwrap_or_else(|_| path.to_path_buf())
-}
-
-fn set_sandbox(path: Option<&str>) -> Result<(), String> {
-    if path.is_none() {
-        SANDBOX_PATH.with(|c| {
-            *c.borrow_mut() = None;
-        });
-        return Ok(());
-    }
-
-    let abs_path = canonicalize_path(Path::new(path.unwrap())).map_err(|e| e.to_string())?;
-
-    if !abs_path.is_dir() {
-        return Err("sandbox path must be a directory".to_string());
-    }
-    SANDBOX_PATH.with(|s| {
-        *s.borrow_mut() = Some(abs_path);
-    });
-
-    Ok(())
-}
-
-/// Check if a resolved path is within the sandbox boundary.
-fn is_inside_sandbox(resolved_path: &Path) -> bool {
-    let Some(sandbox) = SANDBOX_PATH.with(|c| c.borrow().clone()) else {
-        return true;
-    };
-    resolved_path.starts_with(&sandbox)
-}
-
-/// Resolve a user-provided path to a safe filesystem path by applying sandbox restriction.
-///
-/// `ctx` is used to read the current module's base URL (when inside a script/module
-/// frame) so relative paths resolve against it instead of the cwd.
-fn resolve_safe_path(user_path: &str, ctx: &mut ScopedContext) -> Result<PathBuf, String> {
-    let user_path = Path::new(user_path);
-    let abs_path = absolute_path(user_path, ctx.current_module_name().as_deref());
-
-    // Sandbox check: after chroot resolution, verify sandbox boundary
-    if is_inside_sandbox(&abs_path) {
-        Ok(abs_path)
-    } else {
-        Err(format!(
-            "forbidden: path outside sandbox: {} ({})",
-            user_path.display(),
-            abs_path.display()
-        ))
-    }
-}
+use crate::aike::{JSFileHandle, make_stats};
 
 /// Helper: create a void promise for async operations returning Result<(), String>.
 fn make_void_promise(
@@ -202,48 +55,12 @@ fn get_bytes_from_arg(ctx: &mut ScopedContext, arg: &mut JSValue) -> Result<Vec<
     Err(ctx.throw_type_error("expect Uint8Array or ArrayBuffer"))
 }
 
-const BOUNDARY_SANDBOX: i32 = 0;
-
-fn js_fs_get_restrict(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let path = match cc.magic() {
-        BOUNDARY_SANDBOX => SANDBOX_PATH.with(|c| c.borrow().clone()),
-        _ => unreachable!(),
-    };
-    match path {
-        Some(p) => {
-            let s = p.to_string_lossy();
-            ctx.create_string_from_utf8(s.as_bytes().to_vec())
-                .map(JSValue::make_string)
-        }
-        None => Ok(JSValue::NULL),
-    }
-}
-
-fn js_fs_set_restrict(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let arg = cc.arg(0);
-    let path = if arg.is_undefined_or_null() {
-        None
-    } else {
-        let v = arg.to_string(ctx)?;
-        Some(v.content().encode_utf8(false).to_string())
-    };
-
-    match cc.magic() {
-        BOUNDARY_SANDBOX => set_sandbox(path.as_deref()),
-        _ => unreachable!(),
-    }
-    .map_err(|e| ctx.throw_internal_error(&e))?;
-
-    Ok(JSValue::UNDEFINED)
-}
-
 // ---------------------------------------------------------------------------
 // readText - read file content as UTF-8 string
 // ---------------------------------------------------------------------------
 fn js_fs_readText(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let v = cc.arg(0).to_string(ctx)?;
-    let path = resolve_safe_path(&v.content().encode_utf8(false).to_string(), ctx)
-        .map_err(|e| ctx.throw_internal_error(&e))?;
+    let path = PathBuf::from(v.content().encode_utf8(false).to_string());
 
     let (promise, tx) =
         Promise::create_with_channel::<Result<String, String>>(ctx, |cx, payload| -> JSResult {
@@ -270,8 +87,7 @@ fn js_fs_readText(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 // ---------------------------------------------------------------------------
 fn js_fs_readJSON(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let v = cc.arg(0).to_string(ctx)?;
-    let path = resolve_safe_path(&v.content().encode_utf8(false).to_string(), ctx)
-        .map_err(|e| ctx.throw_internal_error(&e))?;
+    let path = PathBuf::from(v.content().encode_utf8(false).to_string());
 
     let (promise, tx) = Promise::create_with_channel::<Result<serde_json::Value, String>>(
         ctx,
@@ -302,8 +118,7 @@ fn js_fs_readJSON(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 // ---------------------------------------------------------------------------
 fn js_fs_readBytes(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let v = cc.arg(0).to_string(ctx)?;
-    let path = resolve_safe_path(&v.content().encode_utf8(false).to_string(), ctx)
-        .map_err(|e| ctx.throw_internal_error(&e))?;
+    let path = PathBuf::from(v.content().encode_utf8(false).to_string());
 
     let (promise, tx) =
         Promise::create_with_channel::<Result<Vec<u8>, String>>(ctx, |cx, payload| -> JSResult {
@@ -325,8 +140,7 @@ fn js_fs_readBytes(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 // ---------------------------------------------------------------------------
 fn js_fs_writeText(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let v = cc.arg(0).to_string(ctx)?;
-    let path = resolve_safe_path(&v.content().encode_utf8(false), ctx)
-        .map_err(|e| ctx.throw_internal_error(&e))?;
+    let path = PathBuf::from(v.content().encode_utf8(false).to_string());
     let data = cc.arg(1).to_string(ctx)?;
     let data_str = data.content().encode_utf8(false).to_string();
 
@@ -413,8 +227,7 @@ async fn atomic_replace(tmp: &Path, dst: &Path) -> std::io::Result<()> {
 // ---------------------------------------------------------------------------
 fn js_fs_writeJSON(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let v = cc.arg(0).to_string(ctx)?;
-    let path = resolve_safe_path(&v.content().encode_utf8(false).to_string(), ctx)
-        .map_err(|e| ctx.throw_internal_error(&e))?;
+    let path = PathBuf::from(v.content().encode_utf8(false).to_string());
     let val = cc
         .arg(1)
         .to_serde_json(ctx)
@@ -449,8 +262,7 @@ fn js_fs_writeJSON(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 // ---------------------------------------------------------------------------
 fn js_fs_writeBytes(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let v = cc.arg(0).to_string(ctx)?;
-    let path = resolve_safe_path(&v.content().encode_utf8(false).to_string(), ctx)
-        .map_err(|e| ctx.throw_internal_error(&e))?;
+    let path = PathBuf::from(v.content().encode_utf8(false).to_string());
     let bytes = get_bytes_from_arg(ctx, &mut cc.arg(1))?;
 
     let (promise, tx) = make_void_promise(ctx)?;
@@ -472,8 +284,7 @@ fn js_fs_writeBytes(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 // ---------------------------------------------------------------------------
 fn js_fs_appendText(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let v = cc.arg(0).to_string(ctx)?;
-    let path = resolve_safe_path(&v.content().encode_utf8(false).to_string(), ctx)
-        .map_err(|e| ctx.throw_internal_error(&e))?;
+    let path = PathBuf::from(v.content().encode_utf8(false).to_string());
     let data = cc.arg(1).to_string(ctx)?;
     let data_str = data.content().encode_utf8(false).to_string();
 
@@ -506,8 +317,7 @@ fn js_fs_appendText(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 // ---------------------------------------------------------------------------
 fn js_fs_open(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let v = cc.arg(0).to_string(ctx)?;
-    let path = resolve_safe_path(&v.content().encode_utf8(false).to_string(), ctx)
-        .map_err(|e| ctx.throw_internal_error(&e))?;
+    let path = PathBuf::from(v.content().encode_utf8(false).to_string());
 
     // Parse flags: default 'r'
     let flags = if cc.length() > 1 && !cc.arg(1).is_undefined() {
@@ -565,8 +375,7 @@ fn js_fs_open(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 // ---------------------------------------------------------------------------
 fn js_fs_write(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let v = cc.arg(0).to_string(ctx)?;
-    let path = resolve_safe_path(&v.content().encode_utf8(false).to_string(), ctx)
-        .map_err(|e| ctx.throw_internal_error(&e))?;
+    let path = PathBuf::from(v.content().encode_utf8(false).to_string());
 
     // string data
     if let Some(s) = cc.arg(1).as_string(true) {
@@ -610,8 +419,7 @@ fn js_fs_write(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 // ---------------------------------------------------------------------------
 fn js_fs_ensureDir(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let v = cc.arg(0).to_string(ctx)?;
-    let path = resolve_safe_path(v.content().encode_utf8(false).as_ref(), ctx)
-        .map_err(|e| ctx.throw_internal_error(&e))?;
+    let path = PathBuf::from(v.content().encode_utf8(false).as_ref());
 
     // Parse optional options object: ensureDir(path, { recursive?: boolean })
     let opts = cc.arg(1);
@@ -696,8 +504,7 @@ fn make_dirent_obj(ctx: &mut ScopedContext, d: &DirentData) -> Result<JSValue, i
 // ---------------------------------------------------------------------------
 fn js_fs_readDir(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let v = cc.arg(0).to_string(ctx)?;
-    let path = resolve_safe_path(&v.content().encode_utf8(false).to_string(), ctx)
-        .map_err(|e| ctx.throw_internal_error(&e))?;
+    let path = PathBuf::from(v.content().encode_utf8(false).to_string());
 
     let (promise, tx) = Promise::create_with_channel::<Result<Vec<DirentData>, String>>(
         ctx,
@@ -754,8 +561,7 @@ fn js_fs_readDir(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 // ---------------------------------------------------------------------------
 fn js_fs_exists(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let v = cc.arg(0).to_string(ctx)?;
-    let path = resolve_safe_path(&v.content().encode_utf8(false).to_string(), ctx)
-        .map_err(|e| ctx.throw_internal_error(&e))?;
+    let path = PathBuf::from(v.content().encode_utf8(false).to_string());
 
     let (promise, tx) =
         Promise::create_with_channel::<Result<bool, String>>(ctx, |cx, payload| -> JSResult {
@@ -783,8 +589,7 @@ fn js_fs_exists(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 // ---------------------------------------------------------------------------
 fn js_fs_makeDir(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let v = cc.arg(0).to_string(ctx)?;
-    let path = resolve_safe_path(&v.content().encode_utf8(false).to_string(), ctx)
-        .map_err(|e| ctx.throw_internal_error(&e))?;
+    let path = PathBuf::from(v.content().encode_utf8(false).to_string());
 
     // Parse optional options: makeDir(path, { recursive?: boolean })
     let recursive = if cc.length() > 1 {
@@ -825,8 +630,7 @@ fn js_fs_makeDir(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 // ---------------------------------------------------------------------------
 fn js_fs_removeDir(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let v = cc.arg(0).to_string(ctx)?;
-    let path = resolve_safe_path(&v.content().encode_utf8(false).to_string(), ctx)
-        .map_err(|e| ctx.throw_internal_error(&e))?;
+    let path = PathBuf::from(v.content().encode_utf8(false).to_string());
 
     // Parse optional options: removeDir(path, { recursive?: boolean })
     let opts = cc.arg(1);
@@ -863,8 +667,7 @@ fn js_fs_removeDir(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 // ---------------------------------------------------------------------------
 fn js_fs_remove(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let v = cc.arg(0).to_string(ctx)?;
-    let path = resolve_safe_path(&v.content().encode_utf8(false).to_string(), ctx)
-        .map_err(|e| ctx.throw_internal_error(&e))?;
+    let path = PathBuf::from(v.content().encode_utf8(false).to_string());
 
     let (promise, tx) = make_void_promise(ctx)?;
 
@@ -883,8 +686,7 @@ fn js_fs_remove(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
 fn js_fs_stat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let v = cc.arg(0).to_string(ctx)?;
-    let path = resolve_safe_path(&v.content().encode_utf8(false).to_string(), ctx)
-        .map_err(|e| ctx.throw_internal_error(&e))?;
+    let path = PathBuf::from(v.content().encode_utf8(false).to_string());
 
     let (promise, tx) = Promise::create_with_channel::<Result<std::fs::Metadata, String>>(
         ctx,
@@ -911,8 +713,7 @@ const FS_COUNT_NON_EMPTY: i32 = 1;
 /// rejecting the promise.
 fn js_count_lines(cx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let v = cc.arg(0).to_string(cx)?;
-    let path = resolve_safe_path(&v.content().encode_utf8(false).to_string(), cx)
-        .map_err(|e| cx.throw_internal_error(&e))?;
+    let path = PathBuf::from(v.content().encode_utf8(false).to_string());
     let non_empty = cc.magic() == FS_COUNT_NON_EMPTY;
 
     let (promise, tx) =
@@ -946,8 +747,6 @@ const MOD_FS_ENTRIES: &[FieldDef] = &[
         JSFileHandle::class_id,
         zuqe::JS_PROP_ENUMERABLE,
     ),
-    FieldDef::FUNC("getSandbox", 0, js_fs_get_restrict, BOUNDARY_SANDBOX as _),
-    FieldDef::FUNC("setSandbox", 1, js_fs_set_restrict, BOUNDARY_SANDBOX as _),
     FieldDef::FUNC("open", 2, js_fs_open, 0),
     FieldDef::FUNC("readText", 1, js_fs_readText, 0),
     FieldDef::FUNC("readJSON", 1, js_fs_readJSON, 0),

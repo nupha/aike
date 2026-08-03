@@ -357,49 +357,6 @@ async function testLineCounting() {
 }
 
 // ---------------------------------------------------------------------------
-// Sandbox restriction
-// ---------------------------------------------------------------------------
-async function testSandbox() {
-  console.log("\n=== Sandbox restriction ===");
-  check("sandbox default null", fs.getSandbox() === null, "sandbox is null");
-
-  const SANDBOX_FILE = "../tmp/sandbox_test.txt";
-  await fs.writeText(SANDBOX_FILE, "inside sandbox content");
-
-  fs.setSandbox("../tmp");
-  check(
-    "getSandbox returns string after set",
-    typeof fs.getSandbox() === "string",
-    "sandbox is string",
-  );
-  check("getSandbox not null", fs.getSandbox() !== null, "sandbox is not null");
-
-  const inside = await fs.readText(SANDBOX_FILE);
-  check(
-    "read inside sandbox",
-    inside === "inside sandbox content",
-    `got ${JSON.stringify(inside)}`,
-  );
-
-  try {
-    await fs.readText(SAMPLE_JSON_FILE);
-    check("outside sandbox blocked", false, "expected error to be thrown");
-  } catch (e) {
-    check("outside sandbox blocked", true, e.message);
-  }
-
-  fs.setSandbox(null);
-  check("getSandbox null after clear", fs.getSandbox() === null);
-
-  const afterClear = await fs.readText(SAMPLE_JSON_FILE);
-  check(
-    "read outside works after clear",
-    afterClear.length > 0,
-    `got ${afterClear.length}`,
-  );
-}
-
-// ---------------------------------------------------------------------------
 // Edge-case: open non-existent file
 // ---------------------------------------------------------------------------
 async function testOpenNonexistent() {
@@ -437,7 +394,7 @@ const tests = [
   testOpenAndText, testOpenAndBytes, testReadAll, testReadN,
   testWriteStringRoundtrip, testWriteBinaryRoundtrip, testStat,
   testOnData, testAsyncIterator, testExists,
-  testMakeDirRemoveDir, testRemove, testLineCounting, testSandbox,
+  testMakeDirRemoveDir, testRemove, testLineCounting,
   testOpenNonexistent, testWriteNewPath,
 ];
 for (const t of tests) {
