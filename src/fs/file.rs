@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-use std::{future::Future, path::{Path, PathBuf}};
+use std::{future::Future, io::SeekFrom, path::{Path, PathBuf}};
 
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
 use zuqe::{
     CallContext, JSResult, JSValue, PollSender, ScopedContext,
@@ -87,21 +87,53 @@ pub(super) const FS_READ_BYTES: i32 = 1;
 pub(super) fn js_fs_read(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let path = get_path_arg(ctx, &cc)?;
     let as_text = cc.magic() == FS_READ_TEXT;
+
+    // Optional { offset?: number, length?: number }: start reading at `offset`
+    // and read at most `length` bytes (fewer if fewer remain). Negative values
+    // clamp to 0; length 0 returns empty.
+    let mut offset: u64 = 0;
+    let mut limit: Option<u64> = None;
+    if cc.length() > 1 && cc.arg(1).is_object() {
+        let opts = cc.arg(1);
+        let off = opts.get_property_str(ctx, "offset")?;
+        if !off.is_undefined() {
+            offset = off.to_number(ctx)?.to_i64_saturating().max(0) as u64;
+        }
+        let len = opts.get_property_str(ctx, "length")?;
+        if !len.is_undefined() {
+            limit = Some(len.to_number(ctx)?.to_i64_saturating().max(0) as u64);
+        }
+    }
+
     spawn_fs_op(
         ctx,
         async move {
-            if as_text {
-                tokio::fs::read_to_string(&path)
+            let mut file = tokio::fs::File::open(&path)
+                .await
+                .map_err(|e| e.to_string())?;
+            if offset > 0 {
+                file.seek(SeekFrom::Start(offset))
                     .await
-                    .map(|s| s.into_bytes())
-                    .map_err(|e| e.to_string())
-            } else {
-                tokio::fs::read(&path).await.map_err(|e| e.to_string())
+                    .map_err(|e| e.to_string())?;
             }
+            let mut bytes = Vec::new();
+            match limit {
+                Some(n) => file
+                    .take(n)
+                    .read_to_end(&mut bytes)
+                    .await
+                    .map_err(|e| e.to_string())?,
+                None => file.read_to_end(&mut bytes).await.map_err(|e| e.to_string())?,
+            };
+            Ok(bytes)
         },
         move |cx, bytes| {
             if as_text {
-                cx.create_string_from_utf8(bytes)
+                // A partial range may split a multi-byte UTF-8 char; refuse to
+                // hand back invalid text.
+                let s = String::from_utf8(bytes)
+                    .map_err(|_| cx.throw_type_error("read range is not valid UTF-8"))?;
+                cx.create_string_from_utf8(s.into_bytes())
                     .map(JSValue::make_string)
             } else {
                 TypedArray::create_from_vec_u8(cx, bytes).map(JSValue::from)

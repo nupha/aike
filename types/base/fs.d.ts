@@ -17,12 +17,18 @@ declare module "fs" {
 
   // Read
 
-  /** Read a file as a UTF-8 string. */
-  function readText(path: string): Promise<string>;
+  /** Read a file as a UTF-8 string. `offset` (byte) + `length` (max bytes) slice a range; throws if the range is not valid UTF-8. */
+  function readText(
+    path: string,
+    options?: { offset?: number; length?: number },
+  ): Promise<string>;
   /** Read and parse a JSON file. */
   function readJSON<T = unknown>(path: string): Promise<T>;
-  /** Read a file as binary data (Uint8Array). */
-  function readBytes(path: string): Promise<Uint8Array>;
+  /** Read a file as binary data (Uint8Array). `offset` (byte) + `length` (max bytes) slice a range. */
+  function readBytes(
+    path: string,
+    options?: { offset?: number; length?: number },
+  ): Promise<Uint8Array>;
   /** Check if a file or directory exists. */
   function exists(path: string): Promise<boolean>;
   /** Get file/directory metadata (stat). */

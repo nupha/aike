@@ -530,6 +530,71 @@ async function testReplaceTextUnique() {
 }
 
 // ---------------------------------------------------------------------------
+// fs.readText / readBytes with { offset, length } options
+// ---------------------------------------------------------------------------
+async function testReadOptions() {
+  console.log("\n=== readText/readBytes options ===");
+  const F = "../tmp/test_read_opts.txt";
+  // "0123456789abcdef" (16 bytes) + "中文" (中=bytes16-18, 文=bytes19-21) => 22 bytes
+  const content = "0123456789abcdef" + "中文";
+  const enc = new TextEncoder();
+  const dec = new TextDecoder();
+  await fs.writeText(F, content);
+
+  check("readBytes full", (await fs.readBytes(F)).byteLength === 22);
+  check("readText full", (await fs.readText(F)) === content);
+
+  check(
+    "readBytes offset",
+    dec.decode(await fs.readBytes(F, { offset: 5 })) === "56789abcdef中文",
+  );
+  check("readText offset", (await fs.readText(F, { offset: 5 })) === "56789abcdef中文");
+
+  check(
+    "readBytes length",
+    dec.decode(await fs.readBytes(F, { length: 4 })) === "0123",
+  );
+  check("readText length", (await fs.readText(F, { length: 4 })) === "0123");
+
+  check(
+    "readBytes offset+length",
+    dec.decode(await fs.readBytes(F, { offset: 2, length: 5 })) === "23456",
+  );
+  check("readText offset+length", (await fs.readText(F, { offset: 2, length: 5 })) === "23456");
+
+  // length larger than remaining returns everything available
+  check(
+    "readBytes tail",
+    dec.decode(await fs.readBytes(F, { offset: 19, length: 100 })) === "文",
+  );
+  check("readText tail", (await fs.readText(F, { offset: 19, length: 100 })) === "文");
+
+  // offset past EOF -> empty
+  check("readBytes offset beyond", (await fs.readBytes(F, { offset: 100 })).byteLength === 0);
+  check("readText offset beyond", (await fs.readText(F, { offset: 100 })) === "");
+
+  // offset splitting a multi-byte char: readBytes returns raw bytes,
+  // readText throws because the range is not valid UTF-8
+  const raw = await fs.readBytes(F, { offset: 20, length: 100 });
+  check("readBytes split char raw", raw.byteLength === 2 && raw[0] === 0x96 && raw[1] === 0x87);
+  let threw = false;
+  try {
+    await fs.readText(F, { offset: 20, length: 100 });
+  } catch (e) {
+    threw = true;
+  }
+  check("readText split char throws", threw);
+
+  check("readText ascii range", (await fs.readText(F, { offset: 3, length: 4 })) === "3456");
+  check("readText offset 0", (await fs.readText(F, { offset: 0 })) === content);
+  check("readBytes length 0", (await fs.readBytes(F, { length: 0 })).byteLength === 0);
+  check("readBytes negative clamps", (await fs.readBytes(F, { offset: -5, length: -1 })).byteLength === 0);
+  check("readText empty options", (await fs.readText(F, {})) === content);
+
+  await fs.remove(F).catch(() => { });
+}
+
+// ---------------------------------------------------------------------------
 // Run all
 // ---------------------------------------------------------------------------
 const tests = [
@@ -538,6 +603,7 @@ const tests = [
   testOnData, testAsyncIterator, testExists,
   testMakeDirRemoveDir, testRemove, testLineCounting,
   testOpenNonexistent, testWriteNewPath, testReplaceTextUnique,
+  testReadOptions,
 ];
 for (const t of tests) {
   try {
