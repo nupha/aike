@@ -47,8 +47,13 @@ pub(crate) fn body_to_bytes(ctx: &mut ScopedContext, val: &JSValue) -> Result<Ve
     if let Some(bytes) = blob_bytes_of(val) {
         return Ok(bytes.to_vec());
     }
-    if let Ok(mut ta) = TypedArray::try_from(val.clone()) {
-        return Ok(ta.with_bytes_mut(|b| b.to_vec()));
+    if let Ok(ta) = TypedArray::try_from(val.clone()) {
+        return Ok(ta.with_bytes(|b| b.to_vec()));
+    }
+    // DataView is a distinct class from TypedArray — handle it explicitly so it
+    // is serialized as its underlying bytes rather than "[object DataView]".
+    if let Some(dv) = val.as_object_DataView() {
+        return Ok(dv.payload().with_bytes(|b| b.to_vec()));
     }
     let s = val.to_string(ctx)?;
     Ok(s.content().encode_utf8(false).as_bytes().to_vec())

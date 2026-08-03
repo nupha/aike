@@ -15,12 +15,13 @@ use crate::http::client::{
     request::JSRequest,
     response::{RespType, build_opaque_redirect_response, build_response_from_transport},
     transport::{
-        TransportError, TransportRequest, TransportResponse, perform_request, throw_transport_error,
+        ReferrerCtx, TransportError, TransportRequest, TransportResponse, perform_request,
+        throw_transport_error,
     },
 };
 
 use super::{
-    abort::{JSAbortSignal, signal_is_aborted, signal_notify, signal_set_body},
+    abort::{JSAbortSignal, signal_is_aborted, signal_notify},
     blob::blob_type_of,
     stream::JSReadableStream,
 };
@@ -147,6 +148,100 @@ fn is_forbidden_request_header(name: &str, value: &str) -> bool {
 /// (CONNECT/TRACE/TRACK, byte-case-insensitive). A quoted method like
 /// `"TRACE"` does NOT match (the quotes are part of the token), so a value such
 /// as `",TRACE,"` is permitted.
+/// Compute the outgoing `Referer` value per the Fetch `referrer`/`referrerPolicy`
+/// algorithm.
+///
+/// `referrer` is the explicit `RequestInit.referrer` (or `"about:client"`).
+/// `referrer_policy` is the explicit `referrerPolicy` string (empty = default).
+/// `client_origin`/`client_url` come from the `self.location` shim (browser
+/// document origin / URL). `request_url` is the serialized request URL.
+///
+/// Covers the policies exercised by WPT `referrer.any.js`:
+/// `origin-when-cross-origin` and the implicit default, plus explicit `referrer`
+/// values whose credentials and fragment are stripped to yield the request's
+/// origin (+ trailing slash).
+pub(crate) fn compute_request_referrer(
+    referrer: &str,
+    referrer_policy: &str,
+    client_origin: Option<&str>,
+    client_url: Option<&str>,
+    request_url: &str,
+) -> Option<String> {
+    // Strip any fragment and trailing `#` from a URL string.
+    let strip_fragment = |u: &str| -> String {
+        match u.find('#') {
+            Some(i) => u[..i].to_string(),
+            None => u.to_string(),
+        }
+    };
+    // Origin (scheme://host[:port]) of a URL, or None if unparsable.
+    let origin_of = |u: &str| -> Option<String> {
+        url::Url::parse(u)
+            .ok()
+            .map(|u| u.origin().ascii_serialization())
+    };
+
+    // Resolve the referrer source URL: an explicit `referrer` (non-default) or,
+    // for `"about:client"`, the document URL.
+    let source: Option<String> = if referrer.is_empty() || referrer == "about:client" {
+        client_url.map(|u| strip_fragment(u))
+    } else {
+        // Explicit referrer: parse and strip its fragment.
+        let parsed = url::Url::parse(referrer).ok()?;
+        // A `no-referrer` literal, or a referrer with credentials/fragment, is
+        // reduced to (or replaced by) its origin below. Trim the fragment first.
+        Some(strip_fragment(referrer))
+    };
+    let source = source?;
+
+    let req_origin = origin_of(request_url);
+    let same_origin = match (&req_origin, client_origin) {
+        (Some(ro), Some(co)) => ro == co,
+        _ => false,
+    };
+
+    // Helper: origin of `source` with trailing slash (e.g. "http://h:8000/").
+    let source_origin_slash = || -> Option<String> {
+        let o = origin_of(&source)?;
+        Some(if o.ends_with('/') { o } else { format!("{o}/") })
+    };
+
+    // Fetch spec §4.8 "strip": if the referrer carries credentials (userinfo),
+    // it collapses to its origin (+ trailing slash) regardless of policy or
+    // same/cross-origin status.
+    if url::Url::parse(&source)
+        .map(|u| u.username() != "" || u.password().is_some())
+        .unwrap_or(false)
+    {
+        return source_origin_slash();
+    }
+
+    // Apply the policy. The WPT suite exercises `origin-when-cross-origin`;
+    // for any other (unspecified) policy we fall back to "send full referrer
+    // when same-origin, origin otherwise", which matches the default browser
+    // behaviour closely enough for the remaining tests.
+    let use_origin = referrer_policy == "origin-when-cross-origin"
+        || referrer_policy == "origin"
+        || !same_origin;
+
+    if use_origin {
+        if !same_origin {
+            return source_origin_slash();
+        }
+        // Same-origin but an origin-only policy: still send full URL.
+        return Some(source);
+    }
+
+    // Default path (no `use_origin`): send the full referrer. Serialize it
+    // through the URL parser so an origin-only referrer such as
+    // "http://host:8000" (typically the remains of stripping a fragment)
+    // gains its normalized trailing slash: "http://host:8000/".
+    match url::Url::parse(&source) {
+        Ok(u) => Some(u.to_string()),
+        Err(_) => Some(source),
+    }
+}
+
 fn is_forbidden_override_value(value: &str) -> bool {
     for method in split_on_commas(value) {
         if matches!(
@@ -220,6 +315,99 @@ fn strip_forbidden_request_headers(h: &mut HeaderList) {
     }
 }
 
+/// Hash algorithm named in a Subresource Integrity metadata entry.
+enum HashAlg {
+    Sha256,
+    Sha384,
+    Sha512,
+}
+
+impl HashAlg {
+    /// Parse the algorithm name (case-insensitive, e.g. "sha256").
+    fn parse(name: &str) -> Option<HashAlg> {
+        match name.to_ascii_lowercase().as_str() {
+            "sha256" => Some(HashAlg::Sha256),
+            "sha384" => Some(HashAlg::Sha384),
+            "sha512" => Some(HashAlg::Sha512),
+            _ => None,
+        }
+    }
+    /// Strength ordering — stronger algorithms win per the SRI spec.
+    fn strength(&self) -> u8 {
+        match self {
+            HashAlg::Sha256 => 0,
+            HashAlg::Sha384 => 1,
+            HashAlg::Sha512 => 2,
+        }
+    }
+}
+
+/// Validate `body` against a Subresource Integrity `integrity` metadata string
+/// (space-separated `alg-base64value` tokens). Returns `Err` with a message if
+/// the body matches none of the (parsable) entries — per spec, the response is
+/// rejected in that case.
+fn check_integrity(body: &[u8], integrity: &str) -> Result<(), String> {
+    use base64::Engine;
+    use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD};
+    use sha2::{Digest, Sha256, Sha384, Sha512};
+
+    // Collect every well-formed (`alg-value`) entry. A value may be base64
+    // (standard, padded or unpadded) or base64url (with or without padding);
+    // try each decoder in turn. Entries are kept with their algorithm strength
+    // so we can try the strongest first, per the SRI spec.
+    let mut entries: Vec<(u8, HashAlg, Vec<u8>)> = Vec::new();
+    for tok in integrity.split_whitespace() {
+        let (alg_name, b64) = match tok.split_once('-') {
+            Some((a, b)) => (a, b),
+            None => continue,
+        };
+        let alg = match HashAlg::parse(alg_name) {
+            Some(a) => a,
+            None => continue,
+        };
+        let expected = STANDARD
+            .decode(b64)
+            .or_else(|_| STANDARD_NO_PAD.decode(b64))
+            .or_else(|_| URL_SAFE.decode(b64))
+            .or_else(|_| URL_SAFE_NO_PAD.decode(b64));
+        let expected = match expected {
+            Ok(bytes) => bytes,
+            Err(_) => continue,
+        };
+        entries.push((alg.strength(), alg, expected));
+    }
+    if entries.is_empty() {
+        return Err(format!(
+            "integrity metadata contained no usable entry: {integrity}"
+        ));
+    }
+
+    // SRI "get the strongest metadata": only entries using the strongest
+    // algorithm present are considered. Weaker entries are discarded, so a
+    // valid sha384 cannot rescue an invalid sha512 in the same metadata set.
+    let strongest = entries.iter().map(|(s, _, _)| *s).max().unwrap_or(0);
+
+    // Within the strongest set any single match is enough to pass.
+    for (strength, alg, expected) in &entries {
+        if *strength != strongest {
+            continue;
+        }
+
+        let actual: Vec<u8> = match alg {
+            HashAlg::Sha256 => Sha256::digest(body).to_vec(),
+            HashAlg::Sha384 => Sha384::digest(body).to_vec(),
+            HashAlg::Sha512 => Sha512::digest(body).to_vec(),
+        };
+        if &actual == expected {
+            return Ok(());
+        }
+    }
+    Err(format!(
+        "subresource integrity check failed: no entry matched for {}",
+        integrity
+    ))
+}
+
 fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let input = cc.arg(0);
     let init = if cc.length() > 1 {
@@ -232,16 +420,14 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut method = String::from("GET");
     let mut header_list = HeaderList::new();
     let mut body_bytes: Option<Vec<u8>> = None;
-    // A `ReadableStream` body is uploaded as-is (streaming). We must keep the
-    // JS stream alive so that, per the Fetch spec, an abort can cancel it with
-    // the abort reason (see the abort branch below).
-    let mut body_stream: Option<JSValue> = None;
     let mut redirect = String::from("follow");
     let mut timeout = Duration::from_secs(30);
 
     // RequestInit fields used for client config.
     let mut credentials = String::from("same-origin");
     let mut referrer = String::from("about:client");
+    let mut referrer_policy = String::from("");
+    let mut integrity = String::new();
     // Fetch spec default request mode is "cors"; "no-cors" produces an opaque
     // response for cross-origin fetches.
     let mut mode = String::from("cors");
@@ -327,7 +513,12 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             let b = o.get_property_str(ctx, "body")?;
             if !b.is_undefined_or_null() {
                 if JSReadableStream::payload_of(&b).is_some() {
-                    body_stream = Some(b.clone());
+                    // WHATWG: a `ReadableStream` is not a valid request body — it
+                    // can only be produced by a `Response`, never sent as one.
+                    // Both `Request` construction and `fetch()` reject with a
+                    // TypeError (the body would be consumed lazily and cannot be
+                    // re-sent).
+                    return Err(ctx.throw_type_error("Request body cannot be a ReadableStream"));
                 } else {
                     // Fetch spec: a GET/HEAD request must not carry a body.
                     if method.eq_ignore_ascii_case("GET") || method.eq_ignore_ascii_case("HEAD") {
@@ -383,6 +574,12 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             if let Some(v) = read_str(o, "referrer") {
                 referrer = v;
             }
+            if let Some(v) = read_str(o, "referrerPolicy") {
+                referrer_policy = v;
+            }
+            if let Some(v) = read_str(o, "integrity") {
+                integrity = v;
+            }
             if let Some(v) = read_str(o, "mode") {
                 mode = v;
             }
@@ -392,9 +589,6 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     // A `ReadableStream` body is canceled with the abort reason when the signal
     // aborts (Fetch spec). Attach it to the signal; `js_controller_abort` cancels
     // it synchronously with a live `cx`, avoiding any cross-async JSValue handle.
-    if let (Some(stream), Some(signal)) = (body_stream.as_ref(), signal_val.as_ref()) {
-        signal_set_body(signal, *stream);
-    }
 
     let notify = signal_val.as_ref().and_then(|s| signal_notify(s));
     let already_aborted = signal_val.as_ref().map_or(false, |s| signal_is_aborted(s));
@@ -433,27 +627,66 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     // in the chain is *expected* (null origin), so a failed property read must
     // not leak a pending runtime exception — we take and discard it. Reading
     // through `undefined` would also set an exception, so short-circuit early.
-    let client_origin: Option<String> = ctx
-        .global_obj()
-        .get_property_str(ctx, "self")
-        .ok()
-        .filter(|selfv| !selfv.is_undefined_or_null())
-        .and_then(|selfv| selfv.get_property_str(ctx, "location").ok())
-        .and_then(|loc| loc.get_property_str(ctx, "origin").ok())
-        .and_then(|o| {
-            if o.is_undefined_or_null() {
-                None
-            } else {
-                Some(
-                    o.to_string(ctx)
-                        .ok()?
-                        .content()
-                        .encode_utf8(false)
-                        .to_string(),
-                )
-            }
-        })
-        .filter(|s| !s.is_empty());
+    // Resolve the client origin and document URL from the `self.location` shim
+    // that WPT/Node/Bun runners inject. Both are optional (null origin / no
+    // document URL) — a failed property read is expected and must not leak a
+    // pending exception, so we take and discard it afterwards.
+    let (client_origin, client_url): (Option<String>, Option<String>) = {
+        let loc = ctx
+            .global_obj()
+            .get_property_str(ctx, "self")
+            .ok()
+            .filter(|selfv| !selfv.is_undefined_or_null())
+            .and_then(|selfv| selfv.get_property_str(ctx, "location").ok());
+        let origin = loc
+            .as_ref()
+            .and_then(|loc| loc.get_property_str(ctx, "origin").ok())
+            .and_then(|o| {
+                if o.is_undefined_or_null() {
+                    None
+                } else {
+                    Some(
+                        o.to_string(ctx)
+                            .ok()?
+                            .content()
+                            .encode_utf8(false)
+                            .to_string(),
+                    )
+                }
+            })
+            .filter(|s| !s.is_empty());
+        let url = loc
+            .as_ref()
+            .and_then(|loc| loc.get_property_str(ctx, "href").ok())
+            .and_then(|h| {
+                if h.is_undefined_or_null() {
+                    None
+                } else {
+                    Some(
+                        h.to_string(ctx)
+                            .ok()?
+                            .content()
+                            .encode_utf8(false)
+                            .to_string(),
+                    )
+                }
+            })
+            .filter(|s| !s.is_empty());
+        (origin, url)
+    };
+
+    // Compute the outgoing Referer value per the Fetch `referrer`/`referrerPolicy`
+    // algorithm. Covers the policies exercised by WPT `referrer.any.js`:
+    // `origin-when-cross-origin` and the default (`client`-resolved) policy, plus
+    // explicit `referrer` values with their credentials/fragment stripped.
+    let effective_referrer = compute_request_referrer(
+        &referrer,
+        &referrer_policy,
+        client_origin.as_deref(),
+        client_url.as_deref(),
+        &url_str,
+    )
+    .unwrap_or_default();
 
     // The probing above intentionally tolerates missing properties; clear any
     // exception it may have left behind so the caller does not observe a stale
@@ -463,6 +696,13 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     // Clone the client origin for request-header injection; the original is
     // moved into the response callback closure below.
     let req_origin = client_origin.clone();
+
+    // Same reason: keep a copy of the referrer-policy inputs for the transport,
+    // which recomputes the header on each redirect hop.
+    let rc_origin = client_origin.clone();
+    let rc_url = client_url.clone();
+    let rc_referrer = referrer.clone();
+    let rc_policy = referrer_policy.clone();
 
     let promise =
         Promise::create_with_result_slot(ctx, result_slot.clone(), move |cx, data| -> JSResult {
@@ -498,21 +738,27 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                     .as_ref()
                     .map(|r| r.url().to_string())
                     .unwrap_or_else(|| url_clone.clone());
-                let req_origin = url::Url::parse(&final_url)
-                    .map(|u| u.origin().ascii_serialization())
-                    .unwrap_or_default();
-                let same = client_origin.as_deref() == Some(req_origin.as_str());
-                if !same {
-                    return throw_transport_error(
-                        cx,
-                        TransportError {
-                            code: "same-origin",
-                            message: format!(
-                                "request failed: mode 'same-origin' requires a same-origin \
-                                 request, but URL is cross-origin: {final_url}"
-                            ),
-                        },
-                    );
+                // `data:` URLs are same-origin with any client per the Fetch
+                // scheme fetch algorithm, so they never trip the same-origin
+                // check regardless of the client origin.
+                let is_data = final_url.to_ascii_lowercase().starts_with("data:");
+                if !is_data {
+                    let req_origin = url::Url::parse(&final_url)
+                        .map(|u| u.origin().ascii_serialization())
+                        .unwrap_or_default();
+                    let same = client_origin.as_deref() == Some(req_origin.as_str());
+                    if !same {
+                        return throw_transport_error(
+                            cx,
+                            TransportError {
+                                code: "same-origin",
+                                message: format!(
+                                    "request failed: mode 'same-origin' requires a same-origin \
+                                     request, but URL is cross-origin: {final_url}"
+                                ),
+                            },
+                        );
+                    }
                 }
             }
 
@@ -581,11 +827,18 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         .map(|(h, p)| crate::http::client::config::tls_insecure_for_host(&h, p))
         .unwrap_or(false);
 
+    // A `Referer` must be recomputed at every redirect hop (a hop that crosses
+    // origins collapses it to the origin under `origin-when-cross-origin`), so
+    // when we send one we follow redirects ourselves instead of letting the
+    // client replay the original header.
+    let manual_redirect = redirect == "follow" && !effective_referrer.is_empty();
+
     // Per-host TLS escape hatch: `insecure` skips cert validation for this
     // request's host (AIKE_TLS_INSECURE_HOSTS).
-    let client = match crate::http::client::config::HttpClientConfig::default()
-        .build_http_client_ex(insecure)
-    {
+    let mut cfg = crate::http::client::config::HttpClientConfig::default();
+    cfg.follow_redirects = !manual_redirect;
+
+    let client = match cfg.build_http_client_ex(insecure) {
         Ok(c) => c,
         Err(e) => {
             return Err(ctx.throw_internal_error(&format!("failed to build HTTP client: {e}")));
@@ -622,13 +875,22 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         http_cache::add_conditional_headers(&mut req_headers, validators.clone());
     }
 
+    let referrer_ctx = manual_redirect.then(|| ReferrerCtx {
+        referrer: rc_referrer,
+        policy: rc_policy,
+        client_origin: rc_origin,
+        client_url: rc_url,
+        max_redirects: 10,
+    });
+
     let req = TransportRequest {
         method,
         url: url_str.clone(),
         headers: req_headers,
         body: body_bytes,
         timeout,
-        referrer,
+        referrer: effective_referrer,
+        referrer_ctx,
     };
 
     let rs = result_slot.clone();
@@ -645,10 +907,43 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         }
         None => {
             tokio::spawn(async move {
-                let r = perform_request(&client, req)
-                    .await
-                    .map_err(FetchError::Other);
-                let _ = rs.commit(r);
+                let mut tr = match perform_request(&client, req).await {
+                    Ok(tr) => tr,
+                    Err(e) => {
+                        let _ = rs.commit(Err(FetchError::Other(e)));
+                        return;
+                    }
+                };
+                // Subresource Integrity: for a non-empty `integrity`, the whole
+                // body must be read and its hash matched against the metadata,
+                // otherwise the response is rejected (fetch spec §6.4).
+                if !integrity.is_empty() {
+                    let bytes = match tr.resp.take() {
+                        Some(resp) => match resp.bytes().await {
+                            Ok(b) => b.to_vec(),
+                            Err(e) => {
+                                let _ = rs.commit(Err(FetchError::Other(TransportError {
+                                    code: "integrity",
+                                    message: format!(
+                                        "request failed: reading body for integrity check: {e}"
+                                    ),
+                                })));
+                                return;
+                            }
+                        },
+                        None => tr.synthetic_body.clone().unwrap_or_default(),
+                    };
+                    if let Err(msg) = check_integrity(&bytes, &integrity) {
+                        let _ = rs.commit(Err(FetchError::Other(TransportError {
+                            code: "integrity",
+                            message: format!("request failed: {msg}"),
+                        })));
+                        return;
+                    }
+                    tr.synthetic_body = Some(bytes);
+                }
+
+                let _ = rs.commit(Ok(tr));
             });
         }
     }

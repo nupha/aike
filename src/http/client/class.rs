@@ -278,6 +278,7 @@ fn js_do_request(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         body: req_body,
         timeout,
         referrer: String::from("about:client"),
+        referrer_ctx: None,
     };
 
     // Choose the client bucket by target host (AIKE_TLS_INSECURE_HOSTS).

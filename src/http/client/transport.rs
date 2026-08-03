@@ -18,8 +18,24 @@ pub(crate) struct TransportRequest {
     pub headers: Vec<(String, String)>,
     pub body: Option<Vec<u8>>,
     pub timeout: Duration,
-    /// Referrer URL; "about:client" means no Referer header.
+    /// Referrer URL for the initial hop; "about:client" means no Referer header.
     pub referrer: String,
+    /// Inputs needed to recompute the referrer on each redirect hop. `None`
+    /// disables manual redirect following (the client's own policy applies).
+    pub referrer_ctx: Option<ReferrerCtx>,
+}
+
+/// Policy inputs carried across redirects so each hop can recompute its own
+/// `Referer` value. Without this the initial header would be replayed verbatim,
+/// which breaks `origin-when-cross-origin` when a hop crosses origins.
+pub(crate) struct ReferrerCtx {
+    /// The request's `referrer` field ("about:client" or an explicit URL).
+    pub referrer: String,
+    pub policy: String,
+    pub client_origin: Option<String>,
+    pub client_url: Option<String>,
+    /// Maximum hops to follow before reporting a redirect error.
+    pub max_redirects: usize,
 }
 
 /// Result of [`perform_request`]. `resp` is kept open for lazy body streaming.
@@ -221,6 +237,70 @@ pub(crate) fn throw_transport_error(cx: &mut ScopedContext, te: TransportError) 
     Err(-1)
 }
 
+/// Follow redirects by hand, recomputing the `Referer` for every hop.
+///
+/// The client's own redirect policy replays the initial request headers on
+/// each hop, which is wrong for `origin-when-cross-origin`: once a hop crosses
+/// origins the referrer must collapse to the origin. So the caller disables
+/// auto-follow and we re-issue each hop with a freshly computed referrer.
+async fn follow_redirects<F, Fut>(
+    rc: &ReferrerCtx,
+    start_url: &str,
+    start_referrer: &str,
+    send: F,
+) -> Result<reqwest::Response, TransportError>
+where
+    F: Fn(String, String) -> Fut,
+    Fut: std::future::Future<Output = Result<reqwest::Response, reqwest::Error>>,
+{
+    let mut url = start_url.to_string();
+    let mut referrer = start_referrer.to_string();
+
+    for _ in 0..=rc.max_redirects {
+        let resp = send(url.clone(), referrer.clone())
+            .await
+            .map_err(|e| TransportError {
+                code: classify(&e),
+                message: format!("request failed: {e}"),
+            })?;
+
+        // A redirect without a usable `Location` is delivered as-is.
+        let next = match redirect_target(&resp, &url) {
+            Some(u) => u,
+            None => return Ok(resp),
+        };
+
+        // Recompute the referrer against the *next* URL so a hop that changes
+        // origin gets the origin-only form.
+        referrer = crate::whatwg::fetch::compute_request_referrer(
+            &rc.referrer,
+            &rc.policy,
+            rc.client_origin.as_deref(),
+            rc.client_url.as_deref(),
+            &next,
+        )
+        .unwrap_or_default();
+        url = next;
+    }
+
+    Err(TransportError {
+        code: "redirect",
+        message: format!("too many redirects (limit {})", rc.max_redirects),
+    })
+}
+
+/// Resolve a redirect response's `Location` against the current URL.
+/// Returns `None` when the response is not a redirect or has no valid target.
+fn redirect_target(resp: &reqwest::Response, current: &str) -> Option<String> {
+    if !matches!(resp.status().as_u16(), 301 | 302 | 303 | 307 | 308) {
+        return None;
+    }
+
+    let loc = resp.headers().get(reqwest::header::LOCATION)?.to_str().ok()?;
+    let base = url::Url::parse(current).ok()?;
+    base.join(loc).ok().map(|u| u.to_string())
+}
+
 /// Perform an HTTP request on a pre-built `reqwest::Client`.
 ///
 /// The caller is responsible for building the client with the desired
@@ -252,38 +332,62 @@ pub(crate) async fn perform_request(
             synthetic_body: if is_head { None } else { Some(body) },
         });
     }
-    let method = reqwest::Method::from_bytes(req.method.as_bytes()).unwrap_or(reqwest::Method::GET);
-    let mut rb = client.request(method, &req.url).timeout(req.timeout);
+    // WHATWG fetch: a 421 (Misdirected Request) response means the connection
+    // was reused for the wrong origin; retry the request exactly once on a
+    // fresh connection (the client has connection pooling disabled, so a
+    // second attempt lands on a clean connection).
+    // Build one request. Owned args keep the returned future free of borrows,
+    // so it can be handed to the redirect loop.
+    let send_once = |url: String, referrer: String| {
+        let method =
+            reqwest::Method::from_bytes(req.method.as_bytes()).unwrap_or(reqwest::Method::GET);
+        let mut rb = client.request(method, &url).timeout(req.timeout);
 
-    // referrer → Referer header (unless the caller set one explicitly).
-    let mut headers = req.headers;
-    if req.referrer != "about:client" && !req.referrer.is_empty() {
-        let has_referer = headers
-            .iter()
-            .any(|(k, _)| k.eq_ignore_ascii_case("referer"));
-        if !has_referer {
-            headers.push(("Referer".to_string(), req.referrer.clone()));
+        let mut headers = req.headers.clone();
+        if referrer != "about:client" && !referrer.is_empty() {
+            let has_referer = headers
+                .iter()
+                .any(|(k, _)| k.eq_ignore_ascii_case("referer"));
+            if !has_referer {
+                headers.push(("Referer".to_string(), referrer));
+            }
         }
-    }
 
-    for (k, v) in &headers {
-        // Header values are byte strings, not text. Fetch validates them as
-        // latin-1, so a char like U+00E6 must go on the wire as the single
-        // byte 0xE6 — sending its UTF-8 encoding would make `http` reject the
-        // header and silently drop it.
-        match latin1_header_value(v) {
-            Some(hv) => rb = rb.header(k, hv),
-            None => rb = rb.header(k, v),
+        for (k, v) in &headers {
+            match latin1_header_value(v) {
+                Some(hv) => rb = rb.header(k, hv),
+                None => rb = rb.header(k, v),
+            }
         }
-    }
-    if let Some(b) = req.body {
-        rb = rb.body(b);
-    }
+        if let Some(b) = &req.body {
+            rb = rb.body(b.clone());
+        }
+        async move { rb.send().await }
+    };
 
-    let resp = rb.send().await.map_err(|e| TransportError {
-        code: classify(&e),
-        message: format!("request failed: {e}"),
-    })?;
+    // One attempt at `url`, transparently retried once on a 421.
+    let send_with_retry = |url: String, referrer: String| {
+        let retry = send_once(url.clone(), referrer.clone());
+        async move {
+            match retry.await {
+                Ok(r) if r.status() == reqwest::StatusCode::MISDIRECTED_REQUEST => {
+                    log::debug!("421 on {url}; retrying once on a fresh connection");
+                    send_once(url, referrer).await
+                }
+                other => other,
+            }
+        }
+    };
+
+    let resp = match &req.referrer_ctx {
+        Some(rc) => follow_redirects(rc, &req.url, &req.referrer, send_with_retry).await?,
+        None => send_with_retry(req.url.clone(), req.referrer.clone())
+            .await
+            .map_err(|e| TransportError {
+                code: classify(&e),
+                message: format!("request failed: {e}"),
+            })?,
+    };
 
     let status = resp.status();
     let content_type = resp

@@ -359,6 +359,12 @@ function setLocation(url) {
       search: u.search,
       href: u.href,
       origin: u.origin,
+      // `location.toString()` must return the document URL (same as `href`),
+      // matching real browsers so tests that compare against `location.toString()`
+      // resolve the expected referrer correctly.
+      toString() {
+        return u.href;
+      },
     };
     G.location = location;
     G.self.location = location;

@@ -6,8 +6,7 @@
 //! Holds proxy, TLS, cookie, DNS, and connection-level options.
 //! `build_http_client()` constructs a `reqwest::Client` from the config.
 
-use std::net::SocketAddr;
-use std::time::Duration;
+use std::{net::SocketAddr, time::Duration};
 
 /// Protocol version preference.
 #[derive(Clone, Debug, Default)]
@@ -51,6 +50,11 @@ pub(crate) struct HttpClientConfig {
 
     /// Connection timeout (seconds).
     pub connect_timeout: Duration,
+
+    /// Let the client follow redirects itself. Turn this off when the caller
+    /// follows hops manually (e.g. fetch, which must recompute `Referer` per
+    /// hop) so redirect responses are surfaced instead of swallowed.
+    pub follow_redirects: bool,
 }
 
 impl Default for HttpClientConfig {
@@ -66,6 +70,7 @@ impl Default for HttpClientConfig {
             resolve_overrides: vec![],
             protocol: ProtocolMode::Auto,
             connect_timeout: Duration::from_secs(10),
+            follow_redirects: true,
         }
     }
 }
@@ -83,8 +88,14 @@ impl HttpClientConfig {
     /// client accepts *any* certificate (test/dev escape hatch for self-signed
     /// hosts). Validation stays on for every other host.
     pub fn build_http_client_ex(&self, insecure: bool) -> Result<reqwest::Client, String> {
+        let redirect = if self.follow_redirects {
+            reqwest::redirect::Policy::limited(10)
+        } else {
+            reqwest::redirect::Policy::none()
+        };
+
         let mut builder = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::limited(10))
+            .redirect(redirect)
             .connect_timeout(self.connect_timeout);
 
         // --- Cookie jar ---
@@ -147,16 +158,22 @@ impl HttpClientConfig {
     }
 }
 
-/// Hosts (either `host` or `host:port`) for which TLS certificate validation
-/// is skipped. Populated once from the `AIKE_TLS_INSECURE_HOSTS` env var.
+/// Host patterns (either `host` or `host:port`) for which TLS certificate
+/// validation is skipped. Populated once from the `AIKE_TLS_INSECURE_HOSTS`
+/// env var, as a comma-separated list.
+///
+/// Each entry may contain `*` wildcards, matching any run of characters
+/// (including dots), so `*.web-platform.test` covers every WPT subdomain and
+/// `*.web-platform.test:8443` pins it to one port. Entries without a port
+/// match any port.
 ///
 /// This is a test/dev escape hatch for self-signed servers (e.g. WPT's
 /// `web-platform.test:8443`). It is matched per-request against the target
 /// URL's host/port, so validation stays on for every other host.
-fn insecure_hosts() -> &'static std::collections::HashSet<String> {
+fn insecure_hosts() -> &'static Vec<String> {
     use std::sync::OnceLock;
-    static SET: OnceLock<std::collections::HashSet<String>> = OnceLock::new();
-    SET.get_or_init(|| {
+    static PATTERNS: OnceLock<Vec<String>> = OnceLock::new();
+    PATTERNS.get_or_init(|| {
         std::env::var("AIKE_TLS_INSECURE_HOSTS")
             .unwrap_or_default()
             .split(',')
@@ -166,16 +183,99 @@ fn insecure_hosts() -> &'static std::collections::HashSet<String> {
     })
 }
 
+/// Glob match supporting `*` (any run of characters, including dots).
+///
+/// Greedy scan with backtracking to the last `*`: linear in practice and
+/// allocation-free, which keeps this cheap enough to run per request.
+fn glob_match(pattern: &str, text: &str) -> bool {
+    let (p, t): (Vec<char>, Vec<char>) = (pattern.chars().collect(), text.chars().collect());
+    let (mut pi, mut ti) = (0usize, 0usize);
+    // Position just after the most recent `*`, and where it last matched up to.
+    let (mut star, mut backtrack) = (None, 0usize);
+
+    while ti < t.len() {
+        if pi < p.len() && (p[pi] == t[ti]) {
+            pi += 1;
+            ti += 1;
+        } else if pi < p.len() && p[pi] == '*' {
+            star = Some(pi);
+            backtrack = ti;
+            pi += 1; // tentatively match zero characters
+        } else if let Some(s) = star {
+            // Mismatch: let the last `*` absorb one more character and retry.
+            pi = s + 1;
+            backtrack += 1;
+            ti = backtrack;
+        } else {
+            return false;
+        }
+    }
+    // Trailing `*`s may still match the empty remainder.
+    p[pi..].iter().all(|&c| c == '*')
+}
+
 /// Returns true if the given host (with optional port) is allow-listed to skip
 /// TLS certificate validation via `AIKE_TLS_INSECURE_HOSTS`.
+///
+/// A pattern containing `:` is matched against `host:port`; otherwise it is
+/// matched against the bare host, so it applies to every port.
 pub fn tls_insecure_for_host(host: &str, port: Option<u16>) -> bool {
-    let hosts = insecure_hosts();
     let host = host.to_ascii_lowercase();
-    if hosts.contains(&host) {
-        return true;
+    let with_port = port.map(|p| format!("{host}:{p}"));
+
+    insecure_hosts().iter().any(|pat| {
+        // Only treat the pattern as host:port when it pins an explicit port,
+        // so a bare `*` still means "any host, any port".
+        match (pat.rsplit_once(':'), &with_port) {
+            (Some((_, port_pat)), Some(hp)) if !port_pat.contains('*') => glob_match(pat, hp),
+            _ => glob_match(pat, &host),
+        }
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::glob_match;
+
+    #[test]
+    fn glob_matches_wildcards() {
+        // Exact and full wildcard.
+        assert!(glob_match("web-platform.test", "web-platform.test"));
+        assert!(glob_match("*", "anything.example"));
+        assert!(!glob_match("web-platform.test", "not-web-platform.test"));
+
+        // `*` spans dots, so it covers nested WPT subdomains.
+        assert!(glob_match("*.web-platform.test", "www1.web-platform.test"));
+        assert!(glob_match(
+            "*.web-platform.test",
+            "www1.www2.web-platform.test"
+        ));
+        assert!(glob_match(
+            "*.web-platform.test",
+            "xn--lve-6lad.web-platform.test"
+        ));
+        // A bare `*.` prefix requires at least one leading label.
+        assert!(!glob_match("*.web-platform.test", "web-platform.test"));
+
+        // Suffix patterns must not match a longer, different domain.
+        assert!(!glob_match(
+            "*.web-platform.test",
+            "web-platform.test.evil.com"
+        ));
+
+        // host:port forms.
+        assert!(glob_match(
+            "*.web-platform.test:8443",
+            "www.web-platform.test:8443"
+        ));
+        assert!(!glob_match(
+            "*.web-platform.test:8443",
+            "www.web-platform.test:9999"
+        ));
+
+        // Backtracking: repeated literals after a wildcard.
+        assert!(glob_match("*test", "web-platform.test"));
+        assert!(glob_match("a*b*c", "axxbyyc"));
+        assert!(!glob_match("a*b*c", "axxbyy"));
     }
-    if let Some(p) = port {
-        return hosts.contains(&format!("{host}:{p}"));
-    }
-    false
 }
