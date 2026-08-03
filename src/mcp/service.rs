@@ -12,7 +12,7 @@ use rmcp::{
     ErrorData as McpError,
     handler::server::ServerHandler,
     model::{
-        CallToolResult, Content, CustomNotification, Implementation, ListToolsResult,
+        CallToolResult, Content, CustomNotification, Implementation, JsonObject, ListToolsResult,
         ProtocolVersion, ServerCapabilities, ServerInfo, ServerNotification,
     },
     service::{RequestContext, RoleServer},
@@ -175,6 +175,26 @@ impl ServerHandler for McpService {
             .unwrap_or(serde_json::Value::Null);
 
         async move {
+            // Resolve the tool's schema (native + JS tools both register here)
+            // so arguments are validated before any handler runs.
+            let (method_index, schema) = {
+                let guard = self.shared.read().map_err(|e| {
+                    McpError::internal_error(format!("schema lock poisoned: {}", e), None)
+                })?;
+                let Some(&idx) = guard.name_to_index.get(&tool_name) else {
+                    return Err(McpError::invalid_params(
+                        format!("Unknown tool: {}", tool_name),
+                        None,
+                    ));
+                };
+                (idx, guard.tools[idx].input_schema.clone())
+            };
+
+            // Reject invalid arguments up front, never reaching the handler.
+            if let Err(msg) = validate_against_schema(&schema, &arguments) {
+                return Err(McpError::invalid_params(msg, None));
+            }
+
             // Check native handlers first
             if let Some(handler) = self.native_handlers.get(&tool_name) {
                 return match handler(arguments).await {
@@ -191,18 +211,6 @@ impl ServerHandler for McpService {
             }
 
             // JS tool — dispatch through mpsc channel for streaming SSE support.
-            let method_index = {
-                let guard = self.shared.read().map_err(|e| {
-                    McpError::internal_error(format!("schema lock poisoned: {}", e), None)
-                })?;
-                let Some(&idx) = guard.name_to_index.get(&tool_name) else {
-                    return Err(McpError::invalid_params(
-                        format!("Unknown tool: {}", tool_name),
-                        None,
-                    ));
-                };
-                idx
-            };
 
             // Use mpsc (buffer 32) so the JS handler can send multiple chunks
             // before the final result. Intermediate chunks are forwarded as
@@ -281,6 +289,112 @@ impl ServerHandler for McpService {
                 }
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Input argument validation
+// ---------------------------------------------------------------------------
+
+/// Validate `arguments` against a tool's `inputSchema` before dispatch.
+///
+/// Covers the subset of JSON Schema that `build_input_schema_from_args`
+/// produces: an object with `required` and per-property `type`/`enum`
+/// (including array `items`). Extra keys are ignored; unknown types pass.
+fn validate_against_schema(
+    schema: &JsonObject,
+    arguments: &serde_json::Value,
+) -> Result<(), String> {
+    let Some(obj) = arguments.as_object() else {
+        return Err("arguments must be a JSON object".to_string());
+    };
+
+    // required fields
+    if let Some(required) = schema.get("required").and_then(|v| v.as_array()) {
+        for name in required {
+            let Some(name) = name.as_str() else { continue };
+            if !obj.contains_key(name) {
+                return Err(format!("missing required argument: \"{}\"", name));
+            }
+        }
+    }
+
+    let Some(properties) = schema.get("properties").and_then(|v| v.as_object()) else {
+        return Ok(());
+    };
+    for (prop_name, prop_schema) in properties {
+        if let Some(value) = obj.get(prop_name) {
+            validate_property(prop_name, prop_schema, value)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_property(
+    name: &str,
+    schema: &serde_json::Value,
+    value: &serde_json::Value,
+) -> Result<(), String> {
+    // enum whitelist
+    if let Some(list) = schema.get("enum").and_then(|v| v.as_array()) {
+        if !list.iter().any(|v| v == value) {
+            return Err(format!(
+                "invalid value for \"{}\": {}",
+                name,
+                serde_json::to_string(value).unwrap_or_default()
+            ));
+        }
+    }
+
+    match schema.get("type").and_then(|v| v.as_str()) {
+        None => Ok(()),
+        Some("string") => {
+            if value.is_string() {
+                Ok(())
+            } else {
+                Err(format!("\"{}\" must be a string", name))
+            }
+        }
+        Some("integer") => {
+            if value.as_i64().is_some() {
+                Ok(())
+            } else {
+                Err(format!("\"{}\" must be an integer", name))
+            }
+        }
+        Some("boolean") => {
+            if value.is_boolean() {
+                Ok(())
+            } else {
+                Err(format!("\"{}\" must be a boolean", name))
+            }
+        }
+        Some("array") => {
+            let Some(items) = value.as_array() else {
+                return Err(format!("\"{}\" must be an array", name));
+            };
+            // Validate each item against the item type (default: string)
+            let item_type = schema
+                .get("items")
+                .and_then(|i| i.get("type"))
+                .and_then(|t| t.as_str())
+                .unwrap_or("string");
+            for item in items {
+                let ok = match (item_type, item) {
+                    ("string", v) => v.is_string(),
+                    ("integer", v) => v.as_i64().is_some(),
+                    ("boolean", v) => v.is_boolean(),
+                    _ => true,
+                };
+                if !ok {
+                    return Err(format!("items of \"{}\" must be {}", name, item_type));
+                }
+            }
+            Ok(())
+        }
+        // Unknown type keyword — don't enforce.
+        Some(_) => Ok(()),
     }
 }
 
@@ -600,4 +714,85 @@ fn mcp_reject_catch(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     }
 
     Ok(JSValue::UNDEFINED)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a schema the same shape `build_input_schema_from_args` emits.
+    fn schema(properties: serde_json::Value, required: &[&str]) -> JsonObject {
+        let mut m = serde_json::json!({ "type": "object" });
+        m["properties"] = properties;
+        if !required.is_empty() {
+            m["required"] = serde_json::json!(required);
+        }
+        m.as_object().unwrap().clone()
+    }
+
+    #[test]
+    fn validate_accepts_valid_args() {
+        let s = schema(
+            serde_json::json!({
+                "path": { "type": "string" },
+                "mode": { "type": "string", "enum": ["overwrite", "append"] },
+                "depth": { "type": "integer" },
+                "show_hidden": { "type": "boolean" },
+                "include_patterns": { "type": "array", "items": { "type": "string" } },
+            }),
+            &["path"],
+        );
+        let args = serde_json::json!({
+            "path": "a.txt",
+            "mode": "append",
+            "depth": 3,
+            "show_hidden": true,
+            "include_patterns": ["*.ts"],
+        });
+        assert!(validate_against_schema(&s, &args).is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_missing_required() {
+        let s = schema(serde_json::json!({ "path": { "type": "string" } }), &["path"]);
+        let args = serde_json::json!({});
+        assert_eq!(
+            validate_against_schema(&s, &args),
+            Err("missing required argument: \"path\"".to_string())
+        );
+    }
+
+    #[test]
+    fn validate_rejects_bad_type() {
+        let s = schema(serde_json::json!({ "depth": { "type": "integer" } }), &[]);
+        let args = serde_json::json!({ "depth": "not-an-int" });
+        assert!(validate_against_schema(&s, &args).is_err());
+    }
+
+    #[test]
+    fn validate_rejects_enum_violation() {
+        let s = schema(
+            serde_json::json!({ "mode": { "type": "string", "enum": ["overwrite", "append"] } }),
+            &[],
+        );
+        let args = serde_json::json!({ "mode": "patch" });
+        assert!(validate_against_schema(&s, &args).is_err());
+    }
+
+    #[test]
+    fn validate_rejects_bad_array_items() {
+        let s = schema(
+            serde_json::json!({ "names": { "type": "array", "items": { "type": "string" } } }),
+            &[],
+        );
+        let args = serde_json::json!({ "names": ["ok", 42] });
+        assert!(validate_against_schema(&s, &args).is_err());
+    }
+
+    #[test]
+    fn validate_ignores_extra_keys() {
+        let s = schema(serde_json::json!({ "path": { "type": "string" } }), &["path"]);
+        let args = serde_json::json!({ "path": "a.txt", "surprise": true });
+        assert!(validate_against_schema(&s, &args).is_ok());
+    }
 }
