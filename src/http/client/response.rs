@@ -27,17 +27,14 @@ use crate::{
     http::client::{
         body::{
             BODY_AS_BLOB, BODY_AS_BYTES, BODY_AS_JSON, BODY_AS_TEXT, BODY_AS_TEXT_CONVERT,
-            BodySource, body_to_bytes, drain_body,
+            BodySource, body_content_type, body_to_bytes, drain_body,
         },
         headers::{Guard, HeaderList, HeadersPayload, JSHeaders, header_list_from_js},
         transport::TransportResponse,
     },
-    whatwg::{
-        stream::{
-            JSReadableStream, call_opt_method, make_rejected_promise, readable_stream_from_bytes,
-            readable_stream_from_channel,
-        },
-        url::JSURLSearchParams,
+    whatwg::stream::{
+        JSReadableStream, call_opt_method, make_rejected_promise, readable_stream_from_bytes,
+        readable_stream_from_channel,
     },
 };
 
@@ -360,7 +357,7 @@ fn js_response_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
 
     // Content-Type extracted from the body itself; an explicit `init.headers`
     // entry wins over it, so it is only applied after parsing init below.
-    let mut body_content_type: Option<&str> = None;
+    let mut ctor_content_type: Option<String> = None;
 
     // Init is parsed before the body so that an invalid status rejects even
     // when the body itself would also be invalid.
@@ -424,22 +421,16 @@ fn js_response_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
                     ctor_stream = Some(s)
                 }
                 Err(_) => {
-                    // Per fetch spec, a body's source determines a default
-                    // Content-Type. TypedArray/buffer sources have none.
-                    if JSURLSearchParams::payload_of(&body_arg).is_some() {
-                        body_content_type = Some("application/x-www-form-urlencoded;charset=UTF-8");
-                    } else if body_arg.is_string() {
-                        body_content_type = Some("text/plain;charset=UTF-8");
-                    }
+                    ctor_content_type = body_content_type(&body_arg);
                     synthetic = Some(body_to_bytes(ctx, &body_arg)?);
                 }
             }
         }
     }
-    if let Some(ct) = body_content_type
+    if let Some(ct) = ctor_content_type
         && !header_list.has("content-type")
     {
-        header_list.set("Content-Type", ct);
+        header_list.set("Content-Type", &ct);
     }
 
     JSResponse::new_instance(

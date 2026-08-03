@@ -9,7 +9,7 @@ use zuqe::{
 };
 
 use crate::http::client::{
-    body::body_to_bytes,
+    body::{body_content_type, body_to_bytes},
     cache as http_cache,
     headers::{HeaderList, header_list_from_js},
     request::JSRequest,
@@ -22,7 +22,6 @@ use crate::http::client::{
 
 use super::{
     abort::{JSAbortSignal, signal_is_aborted, signal_notify},
-    blob::blob_type_of,
     stream::JSReadableStream,
 };
 
@@ -526,13 +525,14 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                             ctx.throw_type_error("Request with GET/HEAD method cannot have body")
                         );
                     }
-                    // WHATWG: a Blob body without an explicit Content-Type gets
-                    // its type propagated to the Content-Type request header.
-                    if let Some(t) = blob_type_of(&b) {
-                        if !t.is_empty() && !header_list.has("content-type") {
-                            header_list.set("Content-Type", &t);
-                        }
+                    // The body source implies a default Content-Type unless the
+                    // caller already supplied one.
+                    if let Some(t) = body_content_type(&b)
+                        && !header_list.has("content-type")
+                    {
+                        header_list.set("Content-Type", &t);
                     }
+
                     body_bytes = Some(body_to_bytes(ctx, &b)?);
                 }
             }
@@ -863,6 +863,17 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             Some(o) => header_list.set("Origin", o),
             None => header_list.set("Origin", "null"),
         }
+    }
+
+    // `Content-Length` is likewise forbidden for scripts, so it too is derived
+    // here from the actual payload. With no body only POST/PUT still report 0
+    // (they normally carry one); other methods send no length at all.
+    let implies_body = method.eq_ignore_ascii_case("POST") || method.eq_ignore_ascii_case("PUT");
+
+    if let Some(b) = &body_bytes {
+        header_list.set("Content-Length", &b.len().to_string());
+    } else if implies_body {
+        header_list.set("Content-Length", "0");
     }
 
     // Snapshot after the HTTP-default and forbidden-header passes so the

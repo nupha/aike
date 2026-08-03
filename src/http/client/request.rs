@@ -10,12 +10,14 @@ use zuqe::{
 use crate::{
     USER_CLASS_DEFS,
     http::client::{
-        body::{BODY_AS_BYTES, BODY_AS_JSON, BODY_AS_TEXT, BodySource, body_to_bytes, drain_body},
+        body::{
+            BODY_AS_BYTES, BODY_AS_JSON, BODY_AS_TEXT, BodySource, body_content_type,
+            body_to_bytes, drain_body,
+        },
         headers::{HeaderList, HeadersPayload, JSHeaders, header_list_from_js},
     },
     whatwg::{
         abort::JSAbortSignal,
-        blob::blob_type_of,
         stream::{make_rejected_promise, readable_stream_from_bytes, readable_stream_from_channel},
     },
 };
@@ -107,12 +109,12 @@ fn js_request_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
             }
             let b = o.get_property_str(ctx, "body")?;
             if !b.is_undefined_or_null() {
-                // WHATWG: a Blob body without an explicit Content-Type gets its
-                // type propagated to the Content-Type request header.
-                if let Some(t) = blob_type_of(&b) {
-                    if !t.is_empty() && !header_list.has("content-type") {
-                        header_list.set("Content-Type", &t);
-                    }
+                // The body source implies a default Content-Type unless the
+                // caller already supplied one.
+                if let Some(t) = body_content_type(&b)
+                    && !header_list.has("content-type")
+                {
+                    header_list.set("Content-Type", &t);
                 }
                 synthetic_body = Some(body_to_bytes(ctx, &b)?);
             }

@@ -23,8 +23,11 @@ use zuqe::{
 
 use crate::{
     html::{HtmlConvertMode, convert_html},
-    whatwg::blob::{blob_bytes_of, blob_from_bytes},
-    whatwg::stream::{JSReadableStream, call_opt_method},
+    whatwg::{
+        blob::{blob_bytes_of, blob_from_bytes, blob_type_of},
+        stream::{JSReadableStream, call_opt_method},
+        url::JSURLSearchParams,
+    },
 };
 
 /// Source of response body data.
@@ -50,13 +53,36 @@ pub(crate) fn body_to_bytes(ctx: &mut ScopedContext, val: &JSValue) -> Result<Ve
     if let Ok(ta) = TypedArray::try_from(val.clone()) {
         return Ok(ta.with_bytes(|b| b.to_vec()));
     }
-    // DataView is a distinct class from TypedArray — handle it explicitly so it
-    // is serialized as its underlying bytes rather than "[object DataView]".
+    // DataView and ArrayBuffer are distinct classes from TypedArray — handle
+    // them explicitly so they are serialized as their underlying bytes rather
+    // than "[object DataView]" / "[object ArrayBuffer]".
     if let Some(dv) = val.as_object_DataView() {
         return Ok(dv.payload().with_bytes(|b| b.to_vec()));
     }
+    if let Some(ab) = val.as_object_ArrayBuffer() {
+        return Ok(ab.payload().with_bytes(|b| b.to_vec()));
+    }
     let s = val.to_string(ctx)?;
     Ok(s.content().encode_utf8(false).as_bytes().to_vec())
+}
+
+/// WHATWG fetch "extract a body": the body's source determines a default
+/// `Content-Type`. Buffer sources (ArrayBuffer / TypedArray / DataView) have
+/// none, and a `Blob` contributes its own type only when non-empty.
+///
+/// Returns `None` when the source implies no default header.
+pub(crate) fn body_content_type(val: &JSValue) -> Option<String> {
+    if let Some(t) = blob_type_of(val) {
+        return (!t.is_empty()).then_some(t);
+    }
+
+    if JSURLSearchParams::payload_of(val).is_some() {
+        return Some("application/x-www-form-urlencoded;charset=UTF-8".into());
+    }
+
+    // Strings are the only remaining source with a default type. Checked last
+    // because Blob/URLSearchParams are objects, not strings.
+    val.is_string().then(|| "text/plain;charset=UTF-8".into())
 }
 
 pub(crate) const BODY_AS_BYTES: i32 = 0;
