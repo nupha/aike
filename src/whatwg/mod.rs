@@ -5,6 +5,7 @@
 
 pub mod abort;
 pub mod blob;
+pub mod dom;
 pub mod console;
 pub mod fetch;
 pub mod stream;
@@ -20,6 +21,7 @@ pub(crate) fn install_whatwg(ctx: &mut ScopedContext, mut global: Object) -> Res
     ctx.use_classes(&[
         abort::JSAbortController::class_id(),
         abort::JSAbortSignal::class_id(),
+        dom::JSDOMException::class_id(),
         text_decoder::JSTextDecoder::class_id(),
         text_encoder::JSTextEncoder::class_id(),
         url::JSURL::class_id(),

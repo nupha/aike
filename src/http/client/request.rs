@@ -21,7 +21,7 @@ use crate::{
         headers::{Guard, HeaderList, HeadersPayload, JSHeaders, header_list_from_js},
     },
     whatwg::{
-        abort::JSAbortSignal,
+        abort::{JSAbortSignal, make_default_signal, signal_attach_follower},
         stream::{
             JSReadableStream, make_rejected_promise, readable_stream_from_bytes,
             readable_stream_from_channel,
@@ -166,6 +166,19 @@ fn js_request_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
             }
         }
     }
+
+    // WHATWG: `request.signal` is a fresh "follow" signal that follows the
+    // supplied signal (`request.signal !== signal`), and is never the same
+    // object. If no signal is supplied, create a default non-aborted signal so
+    // that `request.signal` is always present.
+    let signal = match signal {
+        Some(parent) => {
+            let child = make_default_signal(ctx)?;
+            signal_attach_follower(&parent, &child);
+            Some(child)
+        }
+        None => Some(make_default_signal(ctx)?),
+    };
 
     let mut payload = RequestPayload {
         method,

@@ -14,11 +14,14 @@ use tokio::sync::Notify;
 
 use linkme::distributed_slice;
 use zuqe::{
-    CallContext, ClassCtorDef, ClassID, FieldDef, JSResult, JSValue, Object, Runtime,
+    CallContext, ClassCtorDef, ClassID, Exception, FieldDef, JSResult, JSValue, Object, Runtime,
     ScopedContext, def_native_object, gc_lite::{GcTrace, GcTraceCtx},
 };
 
-use crate::USER_CLASS_DEFS;
+use crate::{
+    USER_CLASS_DEFS,
+    whatwg::dom::make_dom_exception,
+};
 
 // ===========================================================================
 // Shared signal state (Rc<RefCell<>> so both Controller and Signal see updates)
@@ -35,6 +38,9 @@ struct SignalInner {
     /// abort reason when this signal aborts, per the Fetch spec. Set by `fetch`
     /// when it uploads a streaming body. GC-traced via the signal payload.
     on_abort_body: Option<JSValue>,
+    /// Follower signals created via `Request`'s "follow" semantics. When this
+    /// signal aborts, each follower is aborted with the same reason.
+    followers: Vec<Rc<RefCell<SignalInner>>>,
 }
 
 // ===========================================================================
@@ -83,7 +89,11 @@ fn js_signal_throw_if_aborted(ctx: &mut ScopedContext, cc: CallContext) -> JSRes
     let signal = get_signal(ctx, &this)?;
     let inner = signal.inner.borrow();
     if inner.aborted {
-        Err(ctx.throw_type_error("Signal has been aborted"))
+        // Throw the signal's abort reason (per spec, e.g. a DOMException
+        // "AbortError" or whatever reason was passed to abort()).
+        let reason = inner.reason;
+        ctx.throw(Exception::Error(reason));
+        return Err(-1);
     } else {
         Ok(JSValue::UNDEFINED)
     }
@@ -94,8 +104,8 @@ fn js_signal_static_abort(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
     let reason = if cc.length() > 0 {
         cc.arg(0)
     } else {
-        // Default reason: DOMException "AbortError" — for now, use a string.
-        JSValue::UNDEFINED
+        // Spec default: a DOMException named "AbortError".
+        make_dom_exception(ctx, "AbortError", "The operation was aborted.")?
     };
 
     let inner = Rc::new(RefCell::new(SignalInner {
@@ -104,6 +114,7 @@ fn js_signal_static_abort(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
         controller: None,
         notify: Arc::new(Notify::new()),
         on_abort_body: None,
+        followers: Vec::new(),
     }));
     inner.borrow().notify.notify_waiters();
 
@@ -119,15 +130,15 @@ fn js_signal_static_abort(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
 fn js_signal_static_timeout(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let _ = cc.length(); // consume the delay param silently
 
+    let reason = make_dom_exception(ctx, "TimeoutError", "The operation timed out.")?;
+
     let inner = Rc::new(RefCell::new(SignalInner {
         aborted: true,
-        reason: ctx
-            .create_string_from_utf8(b"Timeout".to_vec())
-            .map(JSValue::make_string)
-            .unwrap_or(JSValue::UNDEFINED),
+        reason,
         controller: None,
         notify: Arc::new(Notify::new()),
         on_abort_body: None,
+        followers: Vec::new(),
     }));
     inner.borrow().notify.notify_waiters();
 
@@ -162,6 +173,7 @@ fn js_controller_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
         controller: None,
         notify: Arc::new(Notify::new()),
         on_abort_body: None,
+        followers: Vec::new(),
     }));
 
     let signal = JSAbortSignal::new_instance(
@@ -203,21 +215,29 @@ fn js_controller_abort(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         return Ok(JSValue::UNDEFINED);
     }
     inner.aborted = true;
-    inner.reason = if cc.length() > 0 {
+    let reason = if cc.length() > 0 {
         cc.arg(0)
     } else {
-        JSValue::UNDEFINED
+        // Spec default: a DOMException named "AbortError".
+        make_dom_exception(ctx, "AbortError", "The operation was aborted.")?
     };
+    inner.reason = reason;
     // Per Fetch spec, aborting a request with a streaming body must cancel that
     // body with the abort reason (so e.g. a ReadableStream body's cancel()
     // callback runs). The body is a GC-traced JSValue stored on the signal.
-    if let Some(body) = inner.on_abort_body {
+    let on_abort_body = inner.on_abort_body;
+    inner.notify.notify_waiters();
+    // Drop the mutable borrow before propagation (propagate_abort re-borrows).
+    drop(inner);
+
+    if let Some(body) = on_abort_body {
         if let Some(cancel_fn) = body.get_property_str(ctx, "cancel").ok().filter(|v| v.is_callable())
         {
-            let _ = cancel_fn.call(ctx, body, &[inner.reason]);
+            let _ = cancel_fn.call(ctx, body, &[reason]);
         }
     }
-    inner.notify.notify_waiters();
+    // Propagate to any "follow" signals (e.g. `request.signal`).
+    propagate_abort(&controller.inner, reason);
 
     Ok(JSValue::UNDEFINED)
 }
@@ -335,6 +355,78 @@ pub(crate) fn signal_is_aborted(val: &JSValue) -> bool {
     JSAbortSignal::payload_of(val)
         .map(|p| p.is_aborted())
         .unwrap_or(false)
+}
+
+/// The abort reason of a JS `AbortSignal` value, if it is aborted.
+///
+/// Per the Fetch spec, a fetch cancelled by a signal must reject with the
+/// signal's `reason` (e.g. a DOMException "AbortError" or whatever was passed
+/// to `abort()`), not a freshly-constructed error.
+pub(crate) fn signal_reason(val: &JSValue) -> Option<JSValue> {
+    let p = JSAbortSignal::payload_of(val)?;
+    if p.is_aborted() {
+        Some(p.inner.borrow().reason)
+    } else {
+        None
+    }
+}
+
+/// Make `child` a "follower" of `parent`: when `parent` aborts, `child` aborts
+/// with the same reason. If `parent` is already aborted, `child` is aborted
+/// immediately. Used by `Request` to implement WHATWG "follow" signal semantics
+/// (`request.signal` is never the same object as the signal passed to it).
+pub(crate) fn signal_attach_follower(parent: &JSValue, child: &JSValue) {
+    let Some(parent_p) = JSAbortSignal::payload_of(parent) else {
+        return;
+    };
+    let Some(child_p) = JSAbortSignal::payload_of(child) else {
+        return;
+    };
+    let parent_inner = parent_p.inner.clone();
+    let child_inner = child_p.inner.clone();
+    let mut p = parent_inner.borrow_mut();
+    if p.aborted {
+        // Already aborted: mirror the state onto the child right now.
+        let mut c = child_inner.borrow_mut();
+        c.aborted = true;
+        c.reason = p.reason;
+        c.notify.notify_waiters();
+    } else {
+        p.followers.push(child_inner);
+    }
+}
+
+/// Propagate an abort (with `reason`) to `self` and all of its followers.
+/// Called by `AbortController.abort()` / `AbortSignal.abort()` once the
+/// controller's own signal is aborted.
+fn propagate_abort(inner: &Rc<RefCell<SignalInner>>, reason: JSValue) {
+    // Collect followers first so we don't recurse while borrowing `inner`.
+    let followers: Vec<Rc<RefCell<SignalInner>>> = inner.borrow().followers.clone();
+    for f in &followers {
+        {
+            let mut fi = f.borrow_mut();
+            fi.aborted = true;
+            fi.reason = reason;
+            fi.notify.notify_waiters();
+        }
+        propagate_abort(f, reason);
+    }
+}
+
+/// Create a fresh, non-aborted `AbortSignal` value. Used as the default
+/// `request.signal` when none is supplied to `Request`.
+pub(crate) fn make_default_signal(ctx: &mut ScopedContext) -> JSResult {
+    let inner = Rc::new(RefCell::new(SignalInner {
+        aborted: false,
+        reason: JSValue::UNDEFINED,
+        controller: None,
+        notify: Arc::new(Notify::new()),
+        on_abort_body: None,
+        followers: Vec::new(),
+    }));
+    let signal =
+        JSAbortSignal::new_instance(ctx, JSValue::UNDEFINED, AbortSignalPayload { inner })?;
+    Ok(signal.into())
 }
 
 /// Called during `install_whatwg_globals` to wire up static methods

@@ -4,7 +4,7 @@
 use std::{cell::RefCell, rc::Rc, time::Duration};
 
 use zuqe::{
-    CallContext, Callback, ErrorKind, Exception, JSResult, JSValue, JobState, Object,
+    CallContext, Callback, Exception, JSResult, JSValue, JobState, Object,
     ScopedContext,
     builtins::promise::{Promise, PromiseResultSlot},
 };
@@ -22,8 +22,9 @@ use crate::http::client::{
 };
 
 use super::{
-    abort::{JSAbortSignal, signal_is_aborted, signal_notify},
-    stream::JSReadableStream,
+    abort::{JSAbortSignal, signal_is_aborted, signal_notify, signal_reason},
+    dom::make_dom_exception,
+    stream::{JSReadableStream, make_rejected_promise},
 };
 
 /// Error type carried through the fetch result slot.
@@ -32,26 +33,6 @@ enum FetchError {
     Abort,
     /// Any other failure (network, redirect, timeout, ...).
     Other(TransportError),
-}
-
-/// Throw a WHATWG-conformant `AbortError` (a `TypeError` whose `name` is
-/// "AbortError"), as required when a fetch is cancelled by a signal.
-fn throw_abort_error(cx: &mut ScopedContext) -> JSResult {
-    let mut err = match cx.create_error_object(ErrorKind::Type, "The operation was aborted", false)
-    {
-        Some(e) => e,
-        None => return Err(-1),
-    };
-    let name = cx.create_string_from_utf8(b"AbortError".to_vec())?;
-    err.define_property_value_str(
-        cx,
-        "name",
-        JSValue::make_string(name),
-        zuqe::JS_PROP_WRITABLE | zuqe::JS_PROP_CONFIGURABLE,
-    )?;
-
-    cx.throw(Exception::Error(err.into()));
-    Err(-1)
 }
 
 /// `fetch(input, init)` → `Promise<Response>`
@@ -614,6 +595,15 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     let notify = signal_val.as_ref().and_then(|s| signal_notify(s));
     let already_aborted = signal_val.as_ref().map_or(false, |s| signal_is_aborted(s));
+    // When the signal is (already) aborted the fetch must reject with the
+    // signal's `reason` (e.g. a DOMException "AbortError"), matching the Fetch
+    // spec and WPT's `promise_rejects_exactly`/`promise_rejects_dom`.
+    let abort_reason = signal_val
+        .as_ref()
+        .and_then(|s| signal_reason(s))
+        .unwrap_or_else(|| {
+            make_dom_exception(ctx, "AbortError", "The operation was aborted.").unwrap_or(JSValue::UNDEFINED)
+        });
 
     // HTTP cache: if we have a stored validator for this URL, attach conditional
     // revalidation headers so the server may reply `304` (Fetch § HTTP-cache).
@@ -733,7 +723,12 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 Ok(tr) => tr,
                 Err(e) => {
                     return match e {
-                        FetchError::Abort => throw_abort_error(cx),
+                        FetchError::Abort => {
+                            // Reject with the signal's abort reason (DOMException
+                            // "AbortError" or whatever was passed to abort()).
+                            cx.throw(Exception::Error(abort_reason));
+                            Err(-1)
+                        }
                         FetchError::Other(te) => throw_transport_error(cx, te),
                     };
                 }
@@ -836,8 +831,12 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         })?;
 
     if already_aborted {
-        let _ = result_slot.commit(Err(FetchError::Abort));
-        return Ok(promise.into());
+        // An already-aborted signal must reject on a microtask, *before* any
+        // `Promise.resolve().then` callback (WPT "already aborted signal rejects
+        // immediately"). Skip the thread/event-loop hop and reject synchronously
+        // as a (microtask) job via the promise machinery.
+        let rejected = make_rejected_promise(ctx, abort_reason)?;
+        return Ok(rejected.into());
     }
 
     // Per-host TLS escape hatch: skip cert validation only for hosts listed in
