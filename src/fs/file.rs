@@ -79,20 +79,33 @@ fn get_bytes_from_arg(ctx: &mut ScopedContext, arg: &mut JSValue) -> Result<Vec<
 }
 
 // ---------------------------------------------------------------------------
-// readText - read file content as UTF-8 string
+// read - read file content; magic const picks text (UTF-8 string) or bytes
 // ---------------------------------------------------------------------------
-pub(super) fn js_fs_readText(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+pub(super) const FS_READ_TEXT: i32 = 0;
+pub(super) const FS_READ_BYTES: i32 = 1;
+
+pub(super) fn js_fs_read(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let path = get_path_arg(ctx, &cc)?;
+    let as_text = cc.magic() == FS_READ_TEXT;
     spawn_fs_op(
         ctx,
         async move {
-            tokio::fs::read_to_string(&path)
-                .await
-                .map_err(|e| e.to_string())
+            if as_text {
+                tokio::fs::read_to_string(&path)
+                    .await
+                    .map(|s| s.into_bytes())
+                    .map_err(|e| e.to_string())
+            } else {
+                tokio::fs::read(&path).await.map_err(|e| e.to_string())
+            }
         },
-        |cx, text| {
-            cx.create_string_from_utf8(text.into_bytes())
-                .map(JSValue::make_string)
+        move |cx, bytes| {
+            if as_text {
+                cx.create_string_from_utf8(bytes)
+                    .map(JSValue::make_string)
+            } else {
+                TypedArray::create_from_vec_u8(cx, bytes).map(JSValue::from)
+            }
         },
     )
     .map(JSValue::from)
@@ -117,29 +130,21 @@ pub(super) fn js_fs_readJSON(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
 }
 
 // ---------------------------------------------------------------------------
-// readBytes - read file as binary data (Uint8Array)
+// write - write string or bytes to file; magic const picks the data format
 // ---------------------------------------------------------------------------
-pub(super) fn js_fs_readBytes(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let path = get_path_arg(ctx, &cc)?;
-    spawn_fs_op(
-        ctx,
-        async move {
-            tokio::fs::read(&path).await.map_err(|e| e.to_string())
-        },
-        |cx, bytes| TypedArray::create_from_vec_u8(cx, bytes).map(JSValue::from),
-    )
-    .map(JSValue::from)
-}
+pub(super) const FS_WRITE_TEXT: i32 = 0;
+pub(super) const FS_WRITE_BYTES: i32 = 1;
 
-// ---------------------------------------------------------------------------
-// writeText - write string to file
-// ---------------------------------------------------------------------------
-pub(super) fn js_fs_writeText(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+pub(super) fn js_fs_write(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let path = get_path_arg(ctx, &cc)?;
-    let data = cc.arg(1).to_string(ctx)?;
-    let data = data.content().encode_utf8(false).to_string();
+    let data = if cc.magic() == FS_WRITE_TEXT {
+        let s = cc.arg(1).to_string(ctx)?;
+        s.content().encode_utf8(false).to_string().into_bytes()
+    } else {
+        get_bytes_from_arg(ctx, &mut cc.arg(1))?
+    };
     spawn_fs_void(ctx, async move {
-        write_file_atomic(&path, data.as_bytes())
+        write_file_atomic(&path, &data)
             .await
             .map_err(|e| e.to_string())
     })
@@ -234,20 +239,6 @@ pub(super) fn js_fs_writeJSON(ctx: &mut ScopedContext, cc: CallContext) -> JSRes
 
     spawn_fs_void(ctx, async move {
         write_file_atomic(&path, json_str.as_bytes())
-            .await
-            .map_err(|e| e.to_string())
-    })
-    .map(JSValue::from)
-}
-
-// ---------------------------------------------------------------------------
-// writeBytes - write binary data (Uint8Array) to file
-// ---------------------------------------------------------------------------
-pub(super) fn js_fs_writeBytes(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let path = get_path_arg(ctx, &cc)?;
-    let bytes = get_bytes_from_arg(ctx, &mut cc.arg(1))?;
-    spawn_fs_void(ctx, async move {
-        write_file_atomic(&path, &bytes)
             .await
             .map_err(|e| e.to_string())
     })
@@ -496,9 +487,9 @@ pub(super) fn js_fs_open(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 }
 
 // ---------------------------------------------------------------------------
-// write - multi-format unified write
+// write - multi-format unified write (auto-detects string vs bytes)
 // ---------------------------------------------------------------------------
-pub(super) fn js_fs_write(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+pub(super) fn js_fs_write_auto(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let path = get_path_arg(ctx, &cc)?;
     let data = if let Some(s) = cc.arg(1).as_string(true) {
         s.content().encode_utf8(false).to_string().into_bytes()
