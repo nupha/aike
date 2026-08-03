@@ -18,7 +18,10 @@ use crate::{
             blob_type_from_header, body_content_type, body_to_bytes, drain_body,
             text_stream_from_source,
         },
-        headers::{Guard, HeaderList, HeadersPayload, JSHeaders, header_list_from_js},
+        headers::{
+            Guard, HeaderList, HeadersPayload, JSHeaders, header_list_from_js,
+            validate_header_list_for_fetch,
+        },
     },
     whatwg::{
         abort::{JSAbortSignal, make_default_signal, signal_attach_follower, signal_reason},
@@ -166,6 +169,11 @@ fn js_request_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
             }
         }
     }
+
+    // Validate header names/values per the Fetch spec. Must run on the JS
+    // thread so a violation throws a `TypeError` synchronously (WPT expects
+    // `promise_rejects_js(t, TypeError, ...)`).
+    validate_header_list_for_fetch(ctx, &header_list)?;
 
     // WHATWG: `request.signal` is a fresh "follow" signal that follows the
     // supplied signal (`request.signal !== signal`), and is never the same

@@ -210,6 +210,24 @@ fn latin1_header_value(v: &str) -> Option<reqwest::header::HeaderValue> {
     reqwest::header::HeaderValue::from_bytes(&bytes).ok()
 }
 
+/// Fetch spec: strip leading/trailing HTTP whitespace (0x09/0x0A/0x0D/0x20)
+/// from a header value before it hits the wire. Other C0 controls are left
+/// intact (the fetch-side validation already rejects NUL/LF/CR).
+fn strip_header_value_ws(value: &str) -> &str {
+    // Only the four HTTP whitespace code points are trimmed, NOT all Unicode
+    // whitespace (which `str::trim` would also remove).
+    let bytes = value.as_bytes();
+    let mut start = 0;
+    let mut end = bytes.len();
+    while start < end && matches!(bytes[start], 0x09 | 0x0A | 0x0D | 0x20) {
+        start += 1;
+    }
+    while end > start && matches!(bytes[end - 1], 0x09 | 0x0A | 0x0D | 0x20) {
+        end -= 1;
+    }
+    &value[start..end]
+}
+
 /// Map `reqwest::Version` to a short version string.
 fn version_str(v: reqwest::Version) -> &'static str {
     match v {
@@ -363,6 +381,11 @@ pub(crate) async fn perform_request(
         }
 
         for (k, v) in &headers {
+            // Fetch spec: strip leading/trailing HTTP whitespace (0x09/0x0A/
+            // 0x0D/0x20) from header values before they hit the wire.
+            let v = strip_header_value_ws(v);
+            // Non-ASCII (latin-1) values are encoded as raw bytes; ASCII values
+            // go through the normal string path.
             match latin1_header_value(v) {
                 Some(hv) => rb = rb.header(k, hv),
                 None => rb = rb.header(k, v),

@@ -16,7 +16,7 @@ use crate::{
     http::client::{
         body::body_to_bytes,
         config::{HttpClientConfig, ProtocolMode},
-        headers::{HeaderList, header_list_from_js},
+        headers::{HeaderList, header_list_from_js, validate_header_list_for_fetch},
         response::{RespType, build_http_response_from_transport},
         transport::{
             TransportError, TransportRequest, TransportResponse, perform_request,
@@ -270,6 +270,11 @@ fn js_do_request(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let notify = signal_val.as_ref().and_then(|s| signal_notify(s));
 
     let url_for_closure = url_str.clone();
+
+    // Validate header names/values per the Fetch spec. Must run on the JS
+    // thread so a violation rejects the returned promise with a `TypeError`
+    // (WPT expects `promise_rejects_js(t, TypeError, ...)`).
+    validate_header_list_for_fetch(ctx, &req_headers)?;
 
     let req = TransportRequest {
         method,

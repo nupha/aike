@@ -344,6 +344,7 @@ async fn main() -> ExitCode {
                 HtmlElement::class_id(),
                 JSBrowser::class_id(),
                 JSPage::class_id(),
+                crate::http::client::headers::HeaderListIterator::class_id(),
                 JSLlmClient::class_id(),
             ])?;
 
