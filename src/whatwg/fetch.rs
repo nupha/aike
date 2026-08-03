@@ -4,8 +4,7 @@
 use std::{cell::RefCell, rc::Rc, time::Duration};
 
 use zuqe::{
-    CallContext, Callback, Exception, JSResult, JSValue, JobState, Object,
-    ScopedContext,
+    CallContext, Callback, Exception, JSResult, JSValue, JobState, Object, ScopedContext,
     builtins::promise::{Promise, PromiseResultSlot},
 };
 
@@ -13,7 +12,7 @@ use crate::http::client::{
     body::{body_content_type, body_to_bytes, drain_readable_stream},
     cache as http_cache,
     headers::{HeaderList, header_list_from_js},
-    request::JSRequest,
+    request::{JSRequest, get_request_payload_mut},
     response::{RespType, build_opaque_redirect_response, build_response_from_transport},
     transport::{
         ReferrerCtx, TransportError, TransportRequest, TransportResponse, perform_request,
@@ -543,11 +542,16 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             if !r.is_undefined() {
                 redirect = r.to_string(ctx)?.content().encode_utf8(false).to_string();
             }
+            // Per Fetch spec, an *explicit* `signal: null` in the init clears any
+            // signal inherited from the input Request; an absent `signal` key
+            // leaves the inherited signal in place.
             let s = o.get_property_str(ctx, "signal")?;
-            if !s.is_undefined_or_null() {
-                if s.as_native_object::<JSAbortSignal>().is_some() {
-                    signal_val = Some(s.clone());
-                }
+            if s.is_undefined() {
+                // Key absent: keep the inherited signal.
+            } else if s.is_null() {
+                signal_val = None;
+            } else if s.as_native_object::<JSAbortSignal>().is_some() {
+                signal_val = Some(s.clone());
             }
             let t = o.get_property_str(ctx, "timeout")?;
             if !t.is_undefined() {
@@ -602,7 +606,8 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         .as_ref()
         .and_then(|s| signal_reason(s))
         .unwrap_or_else(|| {
-            make_dom_exception(ctx, "AbortError", "The operation was aborted.").unwrap_or(JSValue::UNDEFINED)
+            make_dom_exception(ctx, "AbortError", "The operation was aborted.")
+                .unwrap_or(JSValue::UNDEFINED)
         });
 
     // HTTP cache: if we have a stored validator for this URL, attach conditional
@@ -716,6 +721,14 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let rc_referrer = referrer.clone();
     let rc_policy = referrer_policy.clone();
 
+    // Captured into the result closure so an *in-flight* abort (one that fires
+    // while the request is on the network) rejects with the signal's live
+    // reason — including any custom reason passed to `abort()` — exactly like
+    // the already-aborted path below. A JSValue is not `Send`, so it must live
+    // in the engine job closure (not the `tokio::spawn` closure that does the
+    // network I/O), where it is read only after the abort has committed.
+    let signal_for_reason = signal_val.clone();
+
     let promise =
         Promise::create_with_result_slot(ctx, result_slot.clone(), move |cx, data| -> JSResult {
             let client_origin = client_origin.clone();
@@ -724,9 +737,23 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 Err(e) => {
                     return match e {
                         FetchError::Abort => {
-                            // Reject with the signal's abort reason (DOMException
-                            // "AbortError" or whatever was passed to abort()).
-                            cx.throw(Exception::Error(abort_reason));
+                            // Reject with the signal's live abort reason — a
+                            // custom reason passed to `abort()` must surface even
+                            // when the abort fires mid-flight (while the request
+                            // is on the network). Fall back to the default
+                            // "AbortError" DOMException if no signal is present.
+                            let reason = signal_for_reason
+                                .as_ref()
+                                .and_then(|s| signal_reason(s))
+                                .unwrap_or_else(|| {
+                                    make_dom_exception(
+                                        cx,
+                                        "AbortError",
+                                        "The operation was aborted.",
+                                    )
+                                    .unwrap_or(JSValue::UNDEFINED)
+                                });
+                            cx.throw(Exception::Error(reason));
                             Err(-1)
                         }
                         FetchError::Other(te) => throw_transport_error(cx, te),
@@ -805,6 +832,7 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                     RespType::Basic,
                     &url_clone,
                     false,
+                    signal_val.clone(),
                 );
             }
             // Otherwise remember successful validator-bearing GET responses so
@@ -827,7 +855,7 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             } else {
                 RespType::Basic
             };
-            build_response_from_transport(cx, tr, resp_type, &url_clone, false)
+            build_response_from_transport(cx, tr, resp_type, &url_clone, false, signal_val.clone())
         })?;
 
     if already_aborted {
@@ -835,6 +863,14 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         // `Promise.resolve().then` callback (WPT "already aborted signal rejects
         // immediately"). Skip the thread/event-loop hop and reject synchronously
         // as a (microtask) job via the promise machinery.
+        // Consuming a Request whose signal is already aborted marks its body as
+        // used (Fetch spec): `request.bodyUsed` must become true.
+        if input.as_native_object::<JSRequest>().is_some() {
+            if let Ok(p) = get_request_payload_mut(ctx, &mut input.clone()) {
+                p.body_consumed = true;
+            }
+        }
+
         let rejected = make_rejected_promise(ctx, abort_reason)?;
         return Ok(rejected.into());
     }

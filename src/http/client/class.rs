@@ -297,7 +297,14 @@ fn js_do_request(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                     return throw_transport_error(cx, te);
                 }
             };
-            build_http_response_from_transport(cx, tr, RespType::Basic, &url_for_closure, false)
+            build_http_response_from_transport(
+                cx,
+                tr,
+                RespType::Basic,
+                &url_for_closure,
+                false,
+                signal_val.clone(),
+            )
         })?;
 
     if already_aborted {

@@ -31,6 +31,8 @@ use super::{
     QueueEntry, RsState, call_opt_method, make_iterator_result, make_rejected_promise,
     make_resolved_promise, settle_stream_state,
 };
+use crate::whatwg::abort::{signal_is_aborted, signal_reason};
+use crate::whatwg::dom::make_dom_exception;
 
 pub(crate) struct ReadableStreamPayload {
     pub(crate) state: RsState,
@@ -40,6 +42,15 @@ pub(crate) struct ReadableStreamPayload {
     /// Set once read() is called. Unlike the reader lock this is never
     /// cleared by releaseLock(), so a used stream stays unusable as a body.
     pub(crate) disturbed: bool,
+    /// Abort signal tied to this body's fetch. When aborted mid-body the stream
+    /// errors with the signal's reason. Stored on the stream payload (not just
+    /// the channel registry) so GC keeps it alive while the stream is live.
+    pub(crate) signal: Option<JSValue>,
+    /// Id of this stream's entry in CHANNEL_STREAMS, so the entry can be
+    /// removed when the stream is garbage-collected. The registry is a plain
+    /// RefCell that GC does not scan, so a collected stream would otherwise
+    /// leave a dangling controller handle for the poller to trip over.
+    pub(crate) channel_id: Option<u64>,
 }
 
 impl ReadableStreamPayload {
@@ -50,6 +61,8 @@ impl ReadableStreamPayload {
             reader: None,
             controller: None,
             disturbed: false,
+            signal: None,
+            channel_id: None,
         }
     }
 
@@ -60,6 +73,16 @@ impl ReadableStreamPayload {
         }
         if let Some(ref c) = self.controller {
             c.trace(gcx);
+        }
+        if let Some(ref s) = self.signal {
+            s.trace(gcx);
+        }
+        // Drop the poller registry entry so a collected stream is never visited
+        // via a dangling controller handle. Single-threaded, GC phase: safe.
+        if let Some(id) = self.channel_id {
+            CHANNEL_STREAMS.with(|m| {
+                m.borrow_mut().remove(&id);
+            });
         }
     }
 }
@@ -376,8 +399,9 @@ thread_local! {
     /// Channel-backed streams being polled: id -> (controller, receiver, idle deadline).
     /// The deadline is per stream and refreshed on every chunk, so a slow but
     /// live producer is never cut off; only a stalled stream times out.
-    pub(super) static CHANNEL_STREAMS: RefCell<HashMap<u64, (JSReadableStreamDefaultController, Receiver<Result<Vec<u8>, String>>, Instant)>> =
-        RefCell::new(HashMap::new());
+    pub(super) static CHANNEL_STREAMS: RefCell<
+        HashMap<u64, (JSReadableStreamDefaultController, Receiver<Result<Vec<u8>, String>>, Instant)>,
+    > = RefCell::new(HashMap::new());
 
     static NEXT_STREAM_ID: Cell<u64> = const { Cell::new(1) };
 }
@@ -954,6 +978,7 @@ fn create_stream_async_iterator(ctx: &mut ScopedContext, stream_val: &JSValue) -
 pub(crate) fn readable_stream_from_channel(
     ctx: &mut ScopedContext,
     rx: Receiver<Result<Vec<u8>, String>>,
+    signal: Option<JSValue>,
 ) -> Result<JSValue, i32> {
     let source = ctx.create_base_object()?;
 
@@ -973,9 +998,16 @@ pub(crate) fn readable_stream_from_channel(
         cur
     });
 
+    // Keep the abort signal alive on the stream payload (GC-traced), not just in
+    // the channel registry, so it cannot be reclaimed while the body is live.
+    let mut sp = stream.payload_mut().unwrap();
+    sp.signal = signal;
+    sp.channel_id = Some(id);
+
     let was_empty = CHANNEL_STREAMS.with(|map| {
         let empty = map.borrow().is_empty();
-        map.borrow_mut().insert(id, (controller, rx, Instant::now()));
+        map.borrow_mut()
+            .insert(id, (controller, rx, Instant::now()));
         empty
     });
 
@@ -1072,38 +1104,35 @@ pub(crate) fn readable_stream_from_text_channel(
     let start = Instant::now();
     const TEXT_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(10);
     ctx.queue_job(
-        move |cx| {
-            match rx.try_recv() {
-                Ok(Ok(bytes)) => {
-                    let text = String::from_utf8_lossy(&bytes).into_owned();
-                    let sval = cx.create_string_from_utf8(text.into_bytes())?;
-                    let enqueue_fn = ctrl.get_property_str(cx, "enqueue")?;
-                    let _ = enqueue_fn.call(cx, JSValue::from(ctrl), &[JSValue::make_string(sval)]);
-                    Ok(JobState::Again)
-                }
-                Ok(Err(msg)) => {
-                    let err = cx
-                        .create_error_object(ErrorKind::Type, &msg, false)
-                        .ok_or(-1)?;
+        move |cx| match rx.try_recv() {
+            Ok(Ok(bytes)) => {
+                let text = String::from_utf8_lossy(&bytes).into_owned();
+                let sval = cx.create_string_from_utf8(text.into_bytes())?;
+                let enqueue_fn = ctrl.get_property_str(cx, "enqueue")?;
+                let _ = enqueue_fn.call(cx, JSValue::from(ctrl), &[JSValue::make_string(sval)]);
+                Ok(JobState::Again)
+            }
+            Ok(Err(msg)) => {
+                let err = cx
+                    .create_error_object(ErrorKind::Type, &msg, false)
+                    .ok_or(-1)?;
+                let error_fn = ctrl.get_property_str(cx, "error")?;
+                let _ = error_fn.call(cx, JSValue::from(ctrl), &[err.into()]);
+                Ok(JobState::Done)
+            }
+            Err(TryRecvError::Disconnected) => {
+                let close_fn = ctrl.get_property_str(cx, "close")?;
+                let _ = close_fn.call(cx, JSValue::from(ctrl), &[]);
+                Ok(JobState::Done)
+            }
+            Err(TryRecvError::Empty) => {
+                if start.elapsed() > TEXT_STREAM_IDLE_TIMEOUT {
+                    let err = cx.create_string_from_utf8(b"text stream timeout".to_vec())?;
                     let error_fn = ctrl.get_property_str(cx, "error")?;
-                    let _ = error_fn.call(cx, JSValue::from(ctrl), &[err.into()]);
+                    let _ = error_fn.call(cx, JSValue::from(ctrl), &[JSValue::make_string(err)]);
                     Ok(JobState::Done)
-                }
-                Err(TryRecvError::Disconnected) => {
-                    let close_fn = ctrl.get_property_str(cx, "close")?;
-                    let _ = close_fn.call(cx, JSValue::from(ctrl), &[]);
-                    Ok(JobState::Done)
-                }
-                Err(TryRecvError::Empty) => {
-                    if start.elapsed() > TEXT_STREAM_IDLE_TIMEOUT {
-                        let err = cx.create_string_from_utf8(b"text stream timeout".to_vec())?;
-                        let error_fn = ctrl.get_property_str(cx, "error")?;
-                        let _ =
-                            error_fn.call(cx, JSValue::from(ctrl), &[JSValue::make_string(err)]);
-                        Ok(JobState::Done)
-                    } else {
-                        Ok(JobState::Again)
-                    }
+                } else {
+                    Ok(JobState::Again)
                 }
             }
         },
@@ -1122,14 +1151,66 @@ fn start_channel_stream_poller(ctx: &mut ScopedContext) {
     ctx.queue_job(
         move |cx| {
             CHANNEL_STREAMS.with(|map| {
-                let mut map = map.borrow_mut();
+                // Snapshot ids first, then release the borrow before any JS call.
+                // Holding borrow_mut across the loop would (a) panic on a second
+                // borrow_mut if a GC fires mid-loop (gc_trace removes entries),
+                // and (b) leave a dangling controller in the registry if the
+                // stream's payload is collected. Per-id borrowing keeps the map
+                // free during JS work.
+                let ids: Vec<u64> = map.borrow().keys().cloned().collect();
                 let mut to_remove = Vec::new();
 
-                for (&id, (controller, rx, deadline)) in map.iter_mut() {
-                    match rx.try_recv() {
-                        Ok(Ok(data)) => {
-                            // Producer is alive: extend this stream's deadline.
-                            *deadline = Instant::now();
+                for id in ids {
+                    // Resolve abort signal from the GC-traced stream payload
+                    // (controller -> stream -> signal). Never read a dangling
+                    // handle: only visit entries that still map to a live stream.
+                    let resolved = {
+                        let m = map.borrow();
+                        match m.get(&id) {
+                            Some((ctrl, _, _)) => {
+                                let maybe_signal = JSReadableStreamDefaultController::payload_of(
+                                    &JSValue::from(*ctrl),
+                                )
+                                .and_then(|cp| cp.stream)
+                                .and_then(|stream| {
+                                    JSReadableStream::payload_of(&JSValue::from(stream))
+                                        .map(|sp| sp.signal)
+                                })
+                                .flatten();
+                                Some((JSValue::from(*ctrl), maybe_signal))
+                            }
+                            None => None,
+                        }
+                    };
+                    let (controller, signal_opt) = match resolved {
+                        Some(v) => v,
+                        None => continue,
+                    };
+
+                    // Abort check before draining data: abort wins over a chunk.
+                    if let Some(s) = signal_opt {
+                        if signal_is_aborted(&s) {
+                            let reason = signal_reason(&s).unwrap_or_else(|| {
+                                make_dom_exception(cx, "AbortError", "The operation was aborted.")
+                                    .unwrap_or(JSValue::UNDEFINED)
+                            });
+                            if let Ok(ef) = controller.get_property_str(cx, "error") {
+                                let _ = ef.call(cx, JSValue::from(controller), &[reason]);
+                            }
+                            to_remove.push(id);
+                            continue;
+                        }
+                    }
+
+                    // Re-borrow briefly to receive from the channel, releasing
+                    // before any JS call below.
+                    let recv = map.borrow().get(&id).map(|(_, rx, _)| rx.try_recv());
+                    match recv {
+                        Some(Ok(Ok(data))) => {
+                            // Producer alive: refresh deadline, then enqueue.
+                            if let Some(d) = map.borrow_mut().get_mut(&id) {
+                                d.2 = Instant::now();
+                            }
                             let _ = (|| -> Result<(), i32> {
                                 let ta =
                                     TypedArray::create_from_vec_u8(cx, data).map_err(|_| {
@@ -1138,56 +1219,65 @@ fn start_channel_stream_poller(ctx: &mut ScopedContext) {
                                 let enqueue_fn = controller.get_property_str(cx, "enqueue")?;
                                 let _ = enqueue_fn.call(
                                     cx,
-                                    JSValue::from(*controller),
+                                    JSValue::from(controller),
                                     &[JSValue::from(ta)],
                                 );
                                 Ok(())
                             })();
                         }
-                        Ok(Err(msg)) => {
-                            // The underlying network stream failed mid-body:
-                            // error the ReadableStream so the reader's read()
-                            // promise rejects (e.g. with a TypeError).
+                        Some(Ok(Err(msg))) => {
+                            // Underlying network stream failed mid-body: error.
                             let _ = (|| -> Result<(), i32> {
                                 let bytes = msg.into_bytes();
                                 let err = cx
-                                    .create_error_object(ErrorKind::Type, &String::from_utf8_lossy(&bytes), false)
+                                    .create_error_object(
+                                        ErrorKind::Type,
+                                        &String::from_utf8_lossy(&bytes),
+                                        false,
+                                    )
                                     .ok_or(-1)?;
                                 let error_fn = controller.get_property_str(cx, "error")?;
-                                let _ =
-                                    error_fn.call(cx, JSValue::from(*controller), &[err.into()]);
+                                let _ = error_fn.call(cx, JSValue::from(controller), &[err.into()]);
                                 Ok(())
                             })();
                             to_remove.push(id);
                         }
-                        Err(TryRecvError::Disconnected) => {
+                        Some(Err(TryRecvError::Disconnected)) => {
                             let _ = (|| -> Result<(), i32> {
                                 let close_fn = controller.get_property_str(cx, "close")?;
-                                let _ = close_fn.call(cx, JSValue::from(*controller), &[]);
+                                let _ = close_fn.call(cx, JSValue::from(controller), &[]);
                                 Ok(())
                             })();
                             to_remove.push(id);
                         }
-                        Err(TryRecvError::Empty) => {
-                            if deadline.elapsed() > STREAM_IDLE_TIMEOUT {
+                        Some(Err(TryRecvError::Empty)) => {
+                            let expired = map
+                                .borrow()
+                                .get(&id)
+                                .map(|(_, _, d)| d.elapsed() > STREAM_IDLE_TIMEOUT)
+                                .unwrap_or(true);
+                            if expired {
                                 let _ = (|| -> Result<(), i32> {
                                     let err = cx
                                         .create_string_from_utf8(b"channel stream timeout".to_vec())
                                         .map(JSValue::make_string)
                                         .map_err(|_| -1)?;
                                     let error_fn = controller.get_property_str(cx, "error")?;
-                                    let _ =
-                                        error_fn.call(cx, JSValue::from(*controller), &[err]);
+                                    let _ = error_fn.call(cx, JSValue::from(controller), &[err]);
                                     Ok(())
                                 })();
                                 to_remove.push(id);
                             }
                         }
+                        None => {}
                     }
                 }
 
-                for id in &to_remove {
-                    map.remove(id);
+                if !to_remove.is_empty() {
+                    let mut m = map.borrow_mut();
+                    for id in &to_remove {
+                        m.remove(id);
+                    }
                 }
             });
 

@@ -36,9 +36,12 @@ use crate::{
         headers::{Guard, HeaderList, HeadersPayload, JSHeaders, header_list_from_js},
         transport::TransportResponse,
     },
-    whatwg::stream::{
-        JSReadableStream, call_opt_method, make_rejected_promise, readable_stream_from_bytes,
-        readable_stream_from_channel,
+    whatwg::{
+        abort::signal_reason,
+        stream::{
+            JSReadableStream, call_opt_method, make_rejected_promise, readable_stream_from_bytes,
+            readable_stream_from_channel,
+        },
     },
 };
 
@@ -103,6 +106,10 @@ pub(crate) struct ResponsePayload {
     content_length: Option<u64>,
     /// Negotiated HTTP version ("1.1", "2", …); empty for synthetic responses.
     http_version: &'static str,
+    /// Abort signal tied to this response's fetch. When aborted mid-body, the
+    /// body `ReadableStream` errors with the signal's reason (WHATWG Fetch: an
+    /// abort rejects the in-flight `Response.body` reader). Kept alive for GC.
+    signal: Option<JSValue>,
 }
 
 impl ResponsePayload {
@@ -116,6 +123,9 @@ impl ResponsePayload {
         }
         if let Some(ref h) = self.headers_obj {
             h.trace(gcx);
+        }
+        if let Some(ref s) = self.signal {
+            s.trace(gcx);
         }
     }
 
@@ -230,6 +240,7 @@ pub(crate) fn build_opaque_redirect_response(ctx: &mut ScopedContext) -> JSResul
             headers: Rc::new(RefCell::new(HeaderList::new())),
             content_length: None,
             http_version: "",
+            signal: None,
             headers_obj: None,
             headers_guard: Guard::Immutable,
         },
@@ -285,6 +296,7 @@ pub(crate) fn build_opaque_response(ctx: &mut ScopedContext, tr: TransportRespon
             headers,
             content_length: None,
             http_version: "",
+            signal: None,
             headers_obj: None,
             headers_guard: Guard::Immutable,
         },
@@ -298,6 +310,7 @@ fn transport_payload(
     resp_type: RespType,
     url: &str,
     redirected: bool,
+    signal: Option<JSValue>,
 ) -> ResponsePayload {
     ResponsePayload {
         resp: tr.resp,
@@ -318,6 +331,7 @@ fn transport_payload(
         headers_guard: Guard::Immutable,
         content_length: tr.content_length,
         http_version: tr.http_version,
+        signal,
     }
 }
 
@@ -328,13 +342,14 @@ pub(crate) fn build_response_from_transport(
     resp_type: RespType,
     url: &str,
     redirected: bool,
+    signal: Option<JSValue>,
 ) -> JSResult {
     // An opaque response drops the real status/url/body and filters headers to
     // the CORS-safelisted set (Fetch spec §5.1.1).
     if resp_type == RespType::Opaque {
         return build_opaque_response(ctx, tr);
     }
-    let payload = transport_payload(tr, resp_type, url, redirected);
+    let payload = transport_payload(tr, resp_type, url, redirected, signal);
     JSResponse::new_instance(ctx, JSValue::UNDEFINED, payload).map(JSValue::from)
 }
 
@@ -345,8 +360,9 @@ pub(crate) fn build_http_response_from_transport(
     resp_type: RespType,
     url: &str,
     redirected: bool,
+    signal: Option<JSValue>,
 ) -> JSResult {
-    let payload = transport_payload(tr, resp_type, url, redirected);
+    let payload = transport_payload(tr, resp_type, url, redirected, signal);
     JSHttpClientResponse::new_instance(ctx, JSValue::UNDEFINED, payload).map(JSValue::from)
 }
 
@@ -460,6 +476,7 @@ fn js_response_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
             headers: Rc::new(RefCell::new(header_list)),
             content_length: None,
             http_version: "",
+            signal: None,
             headers_obj: None,
             headers_guard: Guard::Response,
         },
@@ -491,6 +508,7 @@ fn js_response_static_error(ctx: &mut ScopedContext, _cc: CallContext) -> JSResu
             headers: Rc::new(RefCell::new(HeaderList::new())),
             content_length: None,
             http_version: "",
+            signal: None,
             headers_obj: None,
             headers_guard: Guard::Immutable,
         },
@@ -548,6 +566,7 @@ fn js_response_static_redirect(ctx: &mut ScopedContext, cc: CallContext) -> JSRe
             headers: Rc::new(RefCell::new(list)),
             content_length: None,
             http_version: "",
+            signal: None,
             headers_obj: None,
             headers_guard: Guard::Response,
         },
@@ -625,6 +644,7 @@ fn js_response_static_json(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
             headers: Rc::new(RefCell::new(header_list)),
             content_length: None,
             http_version: "",
+            signal: None,
             headers_obj: None,
             headers_guard: Guard::Response,
         },
@@ -769,7 +789,8 @@ fn js_response_body(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         };
         match source {
             Some(BodySource::Channel(rx)) => {
-                JSReadableStream::try_from(readable_stream_from_channel(ctx, rx)?)?
+                let signal = get_response_payload(ctx, &this)?.signal;
+                JSReadableStream::try_from(readable_stream_from_channel(ctx, rx, signal)?)?
             }
             Some(BodySource::Synthetic(bytes)) => {
                 JSReadableStream::try_from(readable_stream_from_bytes(ctx, bytes)?)?
@@ -791,7 +812,8 @@ fn js_response_body_as(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let (source, html_convert) = {
         let p = get_response_payload_mut(ctx, &mut this)?;
         let is_html = p.content_type.starts_with("text/html");
-        // The convert arg is only honored via BODY_AS_TEXT_CONVERT, which is
+
+        // Extended experimenal: the convert arg is only honored via BODY_AS_TEXT_CONVERT, which is
         // wired on HttpClientResponse.text(); base Response.text() ignores args.
         let convert = if magic == BODY_AS_TEXT_CONVERT && is_html && cc.length() > 0 {
             let arg0 = cc.arg(0);
@@ -805,6 +827,14 @@ fn js_response_body_as(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         } else {
             None
         };
+
+        // Spec (Fetch): consuming a body whose signal is already aborted must
+        // reject with the signal's reason (e.g. an "AbortError"), not resolve.
+        if let Some(sig) = p.signal.as_ref()
+            && let Some(reason) = signal_reason(sig)
+        {
+            return make_rejected_promise(ctx, reason);
+        }
 
         // Spec: consuming a body whose stream is already disturbed or locked
         // must reject with TypeError. The stream may be the constructor-supplied
@@ -978,6 +1008,7 @@ fn js_response_clone(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         headers_guard: src.headers_guard,
         content_length: src.content_length,
         http_version: src.http_version,
+        signal: src.signal,
     };
     // Preserve the concrete class: an HttpClientResponse clone stays HttpClientResponse.
     let this_ref = cc.this();

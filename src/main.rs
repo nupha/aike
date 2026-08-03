@@ -532,12 +532,17 @@ fn js_module_loader(
             }
         };
 
-        // `resolved_name` is the path actually read from disk; it may differ from
-        // `file_name` only when a `.js` import falls back to `.ts`. The two must
-        // agree whenever no fallback happened — this guards against accidentally
-        // using `resolved_name` (a disk path) as the module's canonical name,
-        // which would break the import/`import.meta.url` cache keyed by `file_name`.
-        debug_assert_eq!(resolved_name, file_path_str);
+        // `resolved_name` is the path actually read from disk; it differs from
+        // `file_path_str` only when a `.js` import falls back to `.ts` (or
+        // `.mjs`→`.mts` / `.cjs`→`.cts`). That fallback is expected and legal —
+        // the canonical module name stays `file_name` (used below in
+        // `compile_module`), so `resolved_name` must never be used as the key.
+        // Assert agreement only when no fallback happened, which still guards
+        // against accidentally using `resolved_name` as the canonical name.
+        #[cfg(debug_assertions)]
+        if ts_fallback(&file_path_str).as_deref() != Some(resolved_name.as_str()) {
+            debug_assert_eq!(resolved_name, file_path_str);
+        }
 
         if is_json {
             // JSON module: wrap as `export default <json>;\n`
@@ -551,6 +556,7 @@ fn js_module_loader(
                 if resolved_name.ends_with(".d.ts") {
                     return ctx.compile_module(b"export {}", file_name, false);
                 }
+
                 let source = String::from_utf8_lossy(&buf);
                 match transpile::transpile(&source) {
                     Ok(result) => result.code.into_bytes(),
