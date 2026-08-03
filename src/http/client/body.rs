@@ -229,7 +229,7 @@ impl JobGcTrace for DrainRoots {
 /// settle later (e.g. from an async `pull()`); we inspect its state each tick
 /// rather than attaching JS callbacks, which native fn-pointer callbacks
 /// cannot capture state for.
-fn drain_readable_stream(
+pub(crate) fn drain_readable_stream(
     ctx: &mut ScopedContext,
     stream: JSReadableStream,
     slot: PromiseResultSlot<Result<Vec<u8>, String>>,

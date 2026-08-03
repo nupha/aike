@@ -1,15 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-use std::time::Duration;
+use std::{cell::RefCell, rc::Rc, time::Duration};
 
 use zuqe::{
-    CallContext, Callback, ErrorKind, Exception, JSResult, JSValue, Object, ScopedContext,
+    CallContext, Callback, ErrorKind, Exception, JSResult, JSValue, JobState, Object,
+    ScopedContext,
     builtins::promise::{Promise, PromiseResultSlot},
 };
 
 use crate::http::client::{
-    body::{body_content_type, body_to_bytes},
+    body::{body_content_type, body_to_bytes, drain_readable_stream},
     cache as http_cache,
     headers::{HeaderList, header_list_from_js},
     request::JSRequest,
@@ -419,6 +420,8 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut method = String::from("GET");
     let mut header_list = HeaderList::new();
     let mut body_bytes: Option<Vec<u8>> = None;
+    // A `ReadableStream` body, held until it can be pumped to bytes below.
+    let mut stream_body: Option<JSValue> = None;
     let mut redirect = String::from("follow");
     let mut timeout = Duration::from_secs(30);
 
@@ -509,31 +512,50 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             if !h.is_undefined_or_null() {
                 header_list = header_list_from_js(ctx, &mut h)?;
             }
+            // `duplex` must be read whenever a body is present: the spec reads
+            // it off the init dictionary, and a stream body requires it to be
+            // "half". Read it before `body` so a throwing getter still fires.
+            let duplex = o.get_property_str(ctx, "duplex")?;
+            let duplex = match duplex.is_undefined() {
+                true => None,
+                false => Some(
+                    duplex
+                        .to_string(ctx)?
+                        .content()
+                        .encode_utf8(false)
+                        .to_string(),
+                ),
+            };
+
             let b = o.get_property_str(ctx, "body")?;
             if !b.is_undefined_or_null() {
-                if JSReadableStream::payload_of(&b).is_some() {
-                    // WHATWG: a `ReadableStream` is not a valid request body — it
-                    // can only be produced by a `Response`, never sent as one.
-                    // Both `Request` construction and `fetch()` reject with a
-                    // TypeError (the body would be consumed lazily and cannot be
-                    // re-sent).
-                    return Err(ctx.throw_type_error("Request body cannot be a ReadableStream"));
-                } else {
-                    // Fetch spec: a GET/HEAD request must not carry a body.
-                    if method.eq_ignore_ascii_case("GET") || method.eq_ignore_ascii_case("HEAD") {
-                        return Err(
-                            ctx.throw_type_error("Request with GET/HEAD method cannot have body")
-                        );
-                    }
-                    // The body source implies a default Content-Type unless the
-                    // caller already supplied one.
-                    if let Some(t) = body_content_type(&b)
-                        && !header_list.has("content-type")
-                    {
-                        header_list.set("Content-Type", &t);
-                    }
+                // Fetch spec: a GET/HEAD request must not carry a body.
+                if method.eq_ignore_ascii_case("GET") || method.eq_ignore_ascii_case("HEAD") {
+                    return Err(
+                        ctx.throw_type_error("Request with GET/HEAD method cannot have body")
+                    );
+                }
 
-                    body_bytes = Some(body_to_bytes(ctx, &b)?);
+                // The body source implies a default Content-Type unless the
+                // caller already supplied one.
+                if let Some(t) = body_content_type(&b)
+                    && !header_list.has("content-type")
+                {
+                    header_list.set("Content-Type", &t);
+                }
+
+                match JSReadableStream::payload_of(&b).is_some() {
+                    // A stream body is only allowed with `duplex: "half"`;
+                    // omitting it is a TypeError so that code written against
+                    // full-duplex semantics fails loudly instead of silently
+                    // buffering.
+                    true if duplex.as_deref() != Some("half") => {
+                        return Err(ctx.throw_type_error(
+                            "Request body is a ReadableStream but duplex is not 'half'",
+                        ));
+                    }
+                    true => stream_body = Some(b.clone()),
+                    false => body_bytes = Some(body_to_bytes(ctx, &b)?),
                 }
             }
             let r = o.get_property_str(ctx, "redirect")?;
@@ -902,11 +924,15 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         timeout,
         referrer: effective_referrer,
         referrer_ctx,
+        replayable: stream_body.is_none(),
     };
 
+    // Issue the request on the tokio side. Taken as a closure because a stream
+    // body must first be pumped on the JS thread, which defers this call to a
+    // later event-loop turn.
     let rs = result_slot.clone();
     let notify2 = notify;
-    match notify2 {
+    let spawn_request = move |req: TransportRequest| match notify2 {
         Some(n) => {
             tokio::spawn(async move {
                 let fut = perform_request(&client, req);
@@ -957,9 +983,69 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 let _ = rs.commit(Ok(tr));
             });
         }
+    };
+
+    // A buffered body can go out immediately; a stream body must be pumped to
+    // completion on the JS thread first, then the request is issued with the
+    // collected bytes (and the now-known Content-Length).
+    match stream_body {
+        None => spawn_request(req),
+        Some(sv) => {
+            let Some(stream) = sv.as_native_object::<JSReadableStream>() else {
+                return Err(ctx.throw_type_error("body is not a ReadableStream"));
+            };
+
+            let drain_slot = PromiseResultSlot::<Result<Vec<u8>, String>>::new();
+            let raw_err = Rc::new(RefCell::new(None::<JSValue>));
+            drain_readable_stream(ctx, stream, drain_slot.clone(), raw_err.clone())?;
+
+            // The job may run over several turns, so the request and the
+            // one-shot dispatcher are parked in cells and taken on the turn
+            // that actually dispatches.
+            let req = RefCell::new(Some(req));
+            let spawn_request = RefCell::new(Some(spawn_request));
+            let fail_slot = result_slot.clone();
+
+            ctx.queue_job(
+                move |_cx| {
+                    let Some(bytes) = drain_slot.try_take() else {
+                        return Ok(JobState::Again);
+                    };
+
+                    match bytes {
+                        Ok(b) => {
+                            let mut req = req.take().expect("stream drain job ran twice");
+                            set_content_length(&mut req.headers, b.len());
+                            req.body = Some(b);
+
+                            let spawn = spawn_request.take().expect("dispatcher already used");
+                            spawn(req);
+                        }
+                        // The stream errored or produced a bad chunk; surface it
+                        // as a network error so the fetch promise rejects.
+                        Err(msg) => {
+                            let _ = fail_slot.commit(Err(FetchError::Other(TransportError {
+                                code: "body",
+                                message: format!("request failed: {msg}"),
+                            })));
+                        }
+                    }
+
+                    Ok(JobState::Done)
+                },
+                (),
+            );
+        }
     }
 
     Ok(promise.into())
+}
+
+/// Overwrite `Content-Length` on an already-built header list. Used once a
+/// stream body has been pumped and its real length is known.
+fn set_content_length(headers: &mut Vec<(String, String)>, len: usize) {
+    headers.retain(|(k, _)| !k.eq_ignore_ascii_case("content-length"));
+    headers.push(("Content-Length".into(), len.to_string()));
 }
 
 /// Install the `fetch` global and register all WHATWG classes.

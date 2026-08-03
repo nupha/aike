@@ -23,6 +23,9 @@ pub(crate) struct TransportRequest {
     /// Inputs needed to recompute the referrer on each redirect hop. `None`
     /// disables manual redirect following (the client's own policy applies).
     pub referrer_ctx: Option<ReferrerCtx>,
+    /// Whether the body may be sent a second time. False for a stream body,
+    /// which the first attempt consumes, disabling the 421 retry.
+    pub replayable: bool,
 }
 
 /// Policy inputs carried across redirects so each hop can recompute its own
@@ -296,7 +299,11 @@ fn redirect_target(resp: &reqwest::Response, current: &str) -> Option<String> {
         return None;
     }
 
-    let loc = resp.headers().get(reqwest::header::LOCATION)?.to_str().ok()?;
+    let loc = resp
+        .headers()
+        .get(reqwest::header::LOCATION)?
+        .to_str()
+        .ok()?;
     let base = url::Url::parse(current).ok()?;
     base.join(loc).ok().map(|u| u.to_string())
 }
@@ -365,12 +372,15 @@ pub(crate) async fn perform_request(
         async move { rb.send().await }
     };
 
-    // One attempt at `url`, transparently retried once on a 421.
-    let send_with_retry = |url: String, referrer: String| {
-        let retry = send_once(url.clone(), referrer.clone());
+    // One attempt at `url`, transparently retried once on a 421 — but only for
+    // a replayable body. A stream body is consumed by the first attempt, so the
+    // spec requires the 421 to be surfaced instead.
+    let replayable = req.replayable;
+    let send_with_retry = move |url: String, referrer: String| {
+        let first = send_once(url.clone(), referrer.clone());
         async move {
-            match retry.await {
-                Ok(r) if r.status() == reqwest::StatusCode::MISDIRECTED_REQUEST => {
+            match first.await {
+                Ok(r) if replayable && r.status() == reqwest::StatusCode::MISDIRECTED_REQUEST => {
                     log::debug!("421 on {url}; retrying once on a fresh connection");
                     send_once(url, referrer).await
                 }

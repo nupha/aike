@@ -18,7 +18,10 @@ use crate::{
     },
     whatwg::{
         abort::JSAbortSignal,
-        stream::{make_rejected_promise, readable_stream_from_bytes, readable_stream_from_channel},
+        stream::{
+            JSReadableStream, make_rejected_promise, readable_stream_from_bytes,
+            readable_stream_from_channel,
+        },
     },
 };
 
@@ -37,6 +40,8 @@ pub(crate) struct RequestPayload {
     pub(crate) keepalive: bool,
     pub(crate) signal: Option<JSValue>,
     pub(crate) synthetic_body: Option<Vec<u8>>,
+    /// A `ReadableStream` body, kept unread until the request is sent.
+    pub(crate) stream_body: Option<JSValue>,
     pub(crate) body_consumed: bool,
 }
 
@@ -62,6 +67,7 @@ fn js_request_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
     let mut method = String::from("GET");
     let mut header_list = HeaderList::new();
     let mut synthetic_body: Option<Vec<u8>> = None;
+    let mut stream_body: Option<JSValue> = None;
     let mut redirect = String::from("follow");
     let mut signal: Option<JSValue> = None;
 
@@ -73,6 +79,7 @@ fn js_request_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
         redirect = p.redirect.clone();
         signal = p.signal;
         synthetic_body = p.synthetic_body.clone();
+        stream_body = p.stream_body;
     } else if !input.is_undefined_or_null() {
         let href = input.get_property_str(ctx, "href")?;
         if !href.is_undefined() {
@@ -107,6 +114,20 @@ fn js_request_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
             if !h.is_undefined_or_null() {
                 header_list = header_list_from_js(ctx, &mut h)?;
             }
+            // `duplex` must be read off the init dictionary whenever a body is
+            // present, and read before `body` so a getter on it still fires.
+            let duplex = o.get_property_str(ctx, "duplex")?;
+            let duplex = match duplex.is_undefined() {
+                true => None,
+                false => Some(
+                    duplex
+                        .to_string(ctx)?
+                        .content()
+                        .encode_utf8(false)
+                        .to_string(),
+                ),
+            };
+
             let b = o.get_property_str(ctx, "body")?;
             if !b.is_undefined_or_null() {
                 // The body source implies a default Content-Type unless the
@@ -116,7 +137,20 @@ fn js_request_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
                 {
                     header_list.set("Content-Type", &t);
                 }
-                synthetic_body = Some(body_to_bytes(ctx, &b)?);
+
+                match JSReadableStream::payload_of(&b).is_some() {
+                    // A stream body requires `duplex: "half"`; without it the
+                    // request is rejected rather than silently buffered.
+                    true if duplex.as_deref() != Some("half") => {
+                        return Err(ctx.throw_type_error(
+                            "Request body is a ReadableStream but duplex is not 'half'",
+                        ));
+                    }
+                    // The stream stays unread here: it is the request's body and
+                    // is only pumped when the request is actually sent.
+                    true => stream_body = Some(b.clone()),
+                    false => synthetic_body = Some(body_to_bytes(ctx, &b)?),
+                }
             }
             let r = o.get_property_str(ctx, "redirect")?;
             if !r.is_undefined() {
@@ -144,6 +178,7 @@ fn js_request_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
         keepalive: false,
         signal,
         synthetic_body,
+        stream_body,
         body_consumed: false,
     };
 
@@ -239,6 +274,18 @@ fn js_req_body_used_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
 
 fn js_req_body(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut this = cc.this();
+
+    // A stream body is exposed as-is: it is the very stream the caller passed
+    // in, so `request.body` must hand back that same object.
+    {
+        let p = get_request_payload_mut(ctx, &mut this)?;
+        if !p.body_consumed
+            && let Some(s) = p.stream_body
+        {
+            return Ok(s);
+        }
+    }
+
     let source = {
         let p = get_request_payload_mut(ctx, &mut this)?;
         if p.body_consumed {
@@ -338,6 +385,7 @@ fn js_req_clone(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         keepalive: src.keepalive,
         signal: src.signal,
         synthetic_body: src.synthetic_body.clone(),
+        stream_body: src.stream_body,
         body_consumed: false,
     };
     JSRequest::new_instance(ctx, this, payload).map(JSValue::from)

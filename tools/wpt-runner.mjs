@@ -95,13 +95,21 @@ function registerHarnessCallbacks() {
   // Completion is suppressed until after the file's synchronous code has run
   // (see runOneFile). Reset the guard for this fresh harness realm.
   G.__wpt_allow_complete = false;
+
+  // Bind the owning file now, at registration time. A test that settles after
+  // the file's settle deadline would otherwise be filed under whichever file
+  // happens to be current when its callback finally runs.
+  const owner = {
+    component: currentComponent,
+    file: currentFile,
+    abs: currentAbsFile,
+  };
+
   // One result row per test. The callback receives the live Test object.
   G.add_result_callback((test) => {
     const ok = test.status === STATUS.PASS;
     pendingResults.push({
-      component: currentComponent,
-      file: currentFile,
-      abs: currentAbsFile,
+      ...owner,
       kind: "test",
       name: String(test.name || "(unnamed)"),
       status: ok ? "PASS" : "FAIL",
@@ -153,13 +161,20 @@ const wptBase =
 // Map a local checkout path to the wpt-server URL the browser would load it
 // from. e.g. /checkout/console/a.any.js -> http://web-platform.test:8000/console/a.any.js
 // Used as the evalScript filename so relative fetch()/`fs` resolve correctly.
+//
+// Note: `.h2.` tests really belong on the h2 origin (https, port 9000), and
+// their `.h2.py` fixtures 500 on the plain server. Routing them there is left
+// undone on purpose: those fixtures then run every shared test over HTTP/2,
+// which is markedly less reliable here and costs more tests than it gains.
 function fileHttpUrl(absFile) {
   if (!wptBase) return null;
+
   let rel = absFile;
   if (repoRoot && absFile.startsWith(repoRoot)) {
     rel = absFile.slice(repoRoot.replace(/\/+$/, "").length);
   }
   rel = rel.replace(/^\/+/, "");
+
   return wptBase + "/" + rel;
 }
 
@@ -454,7 +469,9 @@ if (testharnessText.includes(SHELL_NOOP)) {
 console.log(`# using testharness.js from ${testharnessPath}`);
 
 // Max wait for outstanding promise_test callbacks to settle, per component.
-const PROMISE_SETTLE_TIMEOUT_MS = 5000;
+// Must comfortably exceed the slowest file: a file cut off here leaves tests
+// pending, and they then settle while a later file is running.
+const PROMISE_SETTLE_TIMEOUT_MS = 30000;
 
 // ---------------------------------------------------------------------------
 // Single-file execution
