@@ -1,53 +1,50 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-use std::path::PathBuf;
-
-use zuqe::{
-    Array, CallContext, JSResult, JSValue, PollSender, ScopedContext,
-    builtins::promise::Promise,
-};
+use zuqe::{Array, CallContext, JSResult, JSValue, ScopedContext};
 
 use crate::aike::make_stats;
 
-use super::file::make_void_promise;
+use super::file::{get_path_arg, spawn_fs_op, spawn_fs_void};
+
+/// Parse an optional `{ recursive?: boolean }` options object from JS argument 1.
+/// A missing options object falls back to `default`. With `strict`, a non-object
+/// is a type error; otherwise it is treated as `false`.
+fn recursive_opt(
+    ctx: &mut ScopedContext,
+    cc: &CallContext,
+    default: bool,
+    strict: bool,
+) -> Result<bool, i32> {
+    let opts = cc.arg(1);
+    if opts.is_undefined() {
+        return Ok(default);
+    }
+    if !opts.is_object() {
+        return if strict {
+            Err(ctx.throw_type_error("options must be an object"))
+        } else {
+            Ok(false)
+        };
+    }
+    opts.get_property_str(ctx, "recursive")?.to_bool()
+}
 
 // ---------------------------------------------------------------------------
 // ensureDir - ensure directory exists (idempotent, default recursive)
 // ---------------------------------------------------------------------------
 pub(super) fn js_fs_ensureDir(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let v = cc.arg(0).to_string(ctx)?;
-    let path = PathBuf::from(v.content().encode_utf8(false).as_ref());
-
-    // Parse optional options object: ensureDir(path, { recursive?: boolean })
-    let opts = cc.arg(1);
-    let recursive = if !opts.is_undefined() {
-        if opts.is_object() {
-            opts.get_property_str(ctx, "recursive")?.to_bool()?
-        } else {
-            return Err(ctx.throw_type_error("options must be an object"));
-        }
-    } else {
-        true
-    };
-
-    let (promise, tx) = make_void_promise(ctx)?;
-
-    tokio::spawn(async move {
+    let path = get_path_arg(ctx, &cc)?;
+    let recursive = recursive_opt(ctx, &cc, true, true)?;
+    spawn_fs_void(ctx, async move {
         let r = if recursive {
-            tokio::fs::create_dir_all(&path)
-                .await
-                .map_err(|e| e.to_string())
+            tokio::fs::create_dir_all(&path).await
         } else {
-            tokio::fs::create_dir(&path)
-                .await
-                .map_err(|e| e.to_string())
+            tokio::fs::create_dir(&path).await
         };
-
-        let _ = PollSender::from(tx).send_async(r).await;
-    });
-
-    Ok(promise.into())
+        r.map_err(|e| e.to_string())
+    })
+    .map(JSValue::from)
 }
 
 // ---------------------------------------------------------------------------
@@ -101,24 +98,10 @@ fn make_dirent_obj(ctx: &mut ScopedContext, d: &DirentData) -> Result<JSValue, i
 // readDir - read directory contents
 // ---------------------------------------------------------------------------
 pub(super) fn js_fs_readDir(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let v = cc.arg(0).to_string(ctx)?;
-    let path = PathBuf::from(v.content().encode_utf8(false).to_string());
-
-    let (promise, tx) = Promise::create_with_channel::<Result<Vec<DirentData>, String>>(
+    let path = get_path_arg(ctx, &cc)?;
+    spawn_fs_op(
         ctx,
-        |cx, payload| -> JSResult {
-            let entries = payload.map_err(|e| cx.throw_internal_error(&e))?;
-
-            let mut arr = Vec::<JSValue>::with_capacity(entries.len());
-            for d in &entries {
-                arr.push(make_dirent_obj(cx, d)?);
-            }
-            Array::from_values(cx, arr).map(JSValue::from)
-        },
-    )?;
-
-    tokio::spawn(async move {
-        let r = async {
+        async move {
             let mut dir = tokio::fs::read_dir(&path)
                 .await
                 .map_err(|e| e.to_string())?;
@@ -145,39 +128,33 @@ pub(super) fn js_fs_readDir(ctx: &mut ScopedContext, cc: CallContext) -> JSResul
             }
 
             Ok(entries)
-        }
-        .await;
-
-        let _ = PollSender::from(tx).send_async(r).await;
-    });
-
-    Ok(promise.into())
+        },
+        |cx, entries| {
+            let mut arr = Vec::<JSValue>::with_capacity(entries.len());
+            for d in &entries {
+                arr.push(make_dirent_obj(cx, d)?);
+            }
+            Array::from_values(cx, arr).map(JSValue::from)
+        },
+    )
+    .map(JSValue::from)
 }
 
 // ---------------------------------------------------------------------------
 // exists - check if a path exists
 // ---------------------------------------------------------------------------
 pub(super) fn js_fs_exists(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let v = cc.arg(0).to_string(ctx)?;
-    let path = PathBuf::from(v.content().encode_utf8(false).to_string());
-
-    let (promise, tx) =
-        Promise::create_with_channel::<Result<bool, String>>(ctx, |cx, payload| -> JSResult {
-            let exists = payload.map_err(|e| cx.throw_internal_error(&e))?;
-            Ok(JSValue::from(exists))
-        })?;
-
-    tokio::spawn(async move {
-        let _ = PollSender::from(tx)
-            .send_async(
-                tokio::fs::try_exists(&path)
-                    .await
-                    .map_err(|e| e.to_string()),
-            )
-            .await;
-    });
-
-    Ok(promise.into())
+    let path = get_path_arg(ctx, &cc)?;
+    spawn_fs_op(
+        ctx,
+        async move {
+            tokio::fs::try_exists(&path)
+                .await
+                .map_err(|e| e.to_string())
+        },
+        |_cx, exists| Ok(JSValue::from(exists)),
+    )
+    .map(JSValue::from)
 }
 
 // ---------------------------------------------------------------------------
@@ -186,39 +163,17 @@ pub(super) fn js_fs_exists(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
 //   makeDir(path, { recursive: true }) – recursive (like mkdir -p)
 // ---------------------------------------------------------------------------
 pub(super) fn js_fs_makeDir(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let v = cc.arg(0).to_string(ctx)?;
-    let path = PathBuf::from(v.content().encode_utf8(false).to_string());
-
-    // Parse optional options: makeDir(path, { recursive?: boolean })
-    let recursive = if cc.length() > 1 {
-        let opts = cc.arg(1);
-        if opts.is_object() {
-            opts.get_property_str(ctx, "recursive")?
-                .to_bool()
-                .unwrap_or(false)
-        } else {
-            false
-        }
-    } else {
-        false
-    };
-
-    let (promise, tx) = make_void_promise(ctx)?;
-
-    tokio::spawn(async move {
+    let path = get_path_arg(ctx, &cc)?;
+    let recursive = recursive_opt(ctx, &cc, false, false)?;
+    spawn_fs_void(ctx, async move {
         let r = if recursive {
-            tokio::fs::create_dir_all(&path)
-                .await
-                .map_err(|e| e.to_string())
+            tokio::fs::create_dir_all(&path).await
         } else {
-            tokio::fs::create_dir(&path)
-                .await
-                .map_err(|e| e.to_string())
+            tokio::fs::create_dir(&path).await
         };
-        let _ = PollSender::from(tx).send_async(r).await;
-    });
-
-    Ok(promise.into())
+        r.map_err(|e| e.to_string())
+    })
+    .map(JSValue::from)
 }
 
 // ---------------------------------------------------------------------------
@@ -227,80 +182,42 @@ pub(super) fn js_fs_makeDir(ctx: &mut ScopedContext, cc: CallContext) -> JSResul
 //   removeDir(path, { recursive: true })   – recursively remove a directory tree
 // ---------------------------------------------------------------------------
 pub(super) fn js_fs_removeDir(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let v = cc.arg(0).to_string(ctx)?;
-    let path = PathBuf::from(v.content().encode_utf8(false).to_string());
-
-    // Parse optional options: removeDir(path, { recursive?: boolean })
-    let opts = cc.arg(1);
-    let recursive = if !opts.is_undefined() {
-        if opts.is_object() {
-            opts.get_property_str(ctx, "recursive")?.to_bool()?
-        } else {
-            return Err(ctx.throw_type_error("options must be an object"));
-        }
-    } else {
-        false
-    };
-
-    let (promise, tx) = make_void_promise(ctx)?;
-
-    tokio::spawn(async move {
+    let path = get_path_arg(ctx, &cc)?;
+    let recursive = recursive_opt(ctx, &cc, false, true)?;
+    spawn_fs_void(ctx, async move {
         let r = if recursive {
-            tokio::fs::remove_dir_all(&path)
-                .await
-                .map_err(|e| e.to_string())
+            tokio::fs::remove_dir_all(&path).await
         } else {
-            tokio::fs::remove_dir(&path)
-                .await
-                .map_err(|e| e.to_string())
+            tokio::fs::remove_dir(&path).await
         };
-        let _ = PollSender::from(tx).send_async(r).await;
-    });
-
-    Ok(promise.into())
+        r.map_err(|e| e.to_string())
+    })
+    .map(JSValue::from)
 }
 
 // ---------------------------------------------------------------------------
 // remove - delete a file or symbolic link (POSIX unlink semantics)
 // ---------------------------------------------------------------------------
 pub(super) fn js_fs_remove(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let v = cc.arg(0).to_string(ctx)?;
-    let path = PathBuf::from(v.content().encode_utf8(false).to_string());
-
-    let (promise, tx) = make_void_promise(ctx)?;
-
-    tokio::spawn(async move {
-        let _ = PollSender::from(tx)
-            .send_async(
-                tokio::fs::remove_file(&path)
-                    .await
-                    .map_err(|e| e.to_string()),
-            )
-            .await;
-    });
-
-    Ok(promise.into())
+    let path = get_path_arg(ctx, &cc)?;
+    spawn_fs_void(ctx, async move {
+        tokio::fs::remove_file(&path)
+            .await
+            .map_err(|e| e.to_string())
+    })
+    .map(JSValue::from)
 }
 
 pub(super) fn js_fs_stat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let v = cc.arg(0).to_string(ctx)?;
-    let path = PathBuf::from(v.content().encode_utf8(false).to_string());
-
-    let (promise, tx) = Promise::create_with_channel::<Result<std::fs::Metadata, String>>(
+    let path = get_path_arg(ctx, &cc)?;
+    spawn_fs_op(
         ctx,
-        |cx, payload| -> JSResult {
-            let meta = payload.map_err(|e| cx.throw_internal_error(&e))?;
-            make_stats(cx, &meta)
+        async move {
+            tokio::fs::metadata(&path).await.map_err(|e| e.to_string())
         },
-    )?;
-
-    tokio::spawn(async move {
-        let _ = PollSender::from(tx)
-            .send_async(tokio::fs::metadata(&path).await.map_err(|e| e.to_string()))
-            .await;
-    });
-
-    Ok(promise.into())
+        |cx, meta| make_stats(cx, &meta),
+    )
+    .map(JSValue::from)
 }
 
 pub(super) const FS_COUNT_ALL: i32 = 0;
@@ -310,31 +227,20 @@ pub(super) const FS_COUNT_NON_EMPTY: i32 = 1;
 /// different magic const). Missing/unreadable files resolve to 0 rather than
 /// rejecting the promise.
 pub(super) fn js_count_lines(cx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let v = cc.arg(0).to_string(cx)?;
-    let path = PathBuf::from(v.content().encode_utf8(false).to_string());
+    let path = get_path_arg(cx, &cc)?;
     let non_empty = cc.magic() == FS_COUNT_NON_EMPTY;
-
-    let (promise, tx) =
-        Promise::create_with_channel::<Result<String, String>>(cx, move |_, data| -> JSResult {
-            let count = match data {
-                Ok(text) => {
-                    if non_empty {
-                        text.lines().filter(|l| !l.trim().is_empty()).count()
-                    } else {
-                        text.lines().count()
-                    }
-                }
-                Err(_) => 0,
+    spawn_fs_op(
+        cx,
+        async move {
+            let text = tokio::fs::read_to_string(&path).await.unwrap_or_default();
+            let count = if non_empty {
+                text.lines().filter(|l| !l.trim().is_empty()).count()
+            } else {
+                text.lines().count()
             };
-            Ok(JSValue::from(count as i32))
-        })?;
-
-    tokio::spawn(async move {
-        let res = tokio::fs::read_to_string(&path)
-            .await
-            .map_err(|e| e.to_string());
-        let _ = PollSender::from(tx).send_async(res).await;
-    });
-
-    Ok(promise.into())
+            Ok(count as i64)
+        },
+        |_cx, count| Ok(JSValue::from(count)),
+    )
+    .map(JSValue::from)
 }

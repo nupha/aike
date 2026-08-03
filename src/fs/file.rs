@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-use std::path::{Path, PathBuf};
+use std::{future::Future, path::{Path, PathBuf}};
 
 use zuqe::{
     CallContext, JSResult, JSValue, PollSender, ScopedContext,
@@ -10,20 +10,41 @@ use zuqe::{
 
 use crate::aike::JSFileHandle;
 
-/// Helper: create a void promise for async operations returning Result<(), String>.
-pub(super) fn make_void_promise(
+/// Extract a filesystem path from JS argument `0`.
+pub(super) fn get_path_arg(ctx: &mut ScopedContext, cc: &CallContext) -> Result<PathBuf, i32> {
+    let v = cc.arg(0).to_string(ctx)?;
+    Ok(PathBuf::from(v.content().encode_utf8(false).to_string()))
+}
+
+/// Run an async filesystem operation in a background task and resolve a Promise
+/// with the converted result; `Err` payloads reject the Promise.
+pub(super) fn spawn_fs_op<T, F, Fut>(
     ctx: &mut ScopedContext,
-) -> Result<
-    (
-        zuqe::builtins::promise::Promise,
-        crossbeam::channel::Sender<Result<(), String>>,
-    ),
-    i32,
-> {
-    Promise::create_with_channel::<Result<(), String>>(ctx, |cx, payload| -> JSResult {
-        payload.map_err(|e| cx.throw_internal_error(&e))?;
-        Ok(JSValue::UNDEFINED)
-    })
+    fut: Fut,
+    convert: F,
+) -> Result<Promise, i32>
+where
+    T: Send + Unpin + 'static,
+    F: FnOnce(&mut ScopedContext, T) -> Result<JSValue, i32> + 'static,
+    Fut: Future<Output = Result<T, String>> + Send + 'static,
+{
+    let (promise, tx) =
+        Promise::create_with_channel::<Result<T, String>>(ctx, |cx, payload| -> JSResult {
+            let val = payload.map_err(|e| cx.throw_internal_error(&e))?;
+            convert(cx, val)
+        })?;
+    tokio::spawn(async move {
+        let _ = PollSender::from(tx).send_async(fut.await).await;
+    });
+    Ok(promise)
+}
+
+/// Like [`spawn_fs_op`] but for operations that resolve with no value.
+pub(super) fn spawn_fs_void<Fut>(ctx: &mut ScopedContext, fut: Fut) -> Result<Promise, i32>
+where
+    Fut: Future<Output = Result<(), String>> + Send + 'static,
+{
+    spawn_fs_op(ctx, fut, |_cx, ()| Ok(JSValue::UNDEFINED))
 }
 
 /// Extract bytes from a JS value: supports ArrayBuffer & TypedArray (Uint8Array).
@@ -59,103 +80,68 @@ fn get_bytes_from_arg(ctx: &mut ScopedContext, arg: &mut JSValue) -> Result<Vec<
 // readText - read file content as UTF-8 string
 // ---------------------------------------------------------------------------
 pub(super) fn js_fs_readText(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let v = cc.arg(0).to_string(ctx)?;
-    let path = PathBuf::from(v.content().encode_utf8(false).to_string());
-
-    let (promise, tx) =
-        Promise::create_with_channel::<Result<String, String>>(ctx, |cx, payload| -> JSResult {
-            let text = payload.map_err(|e| cx.throw_internal_error(&e))?;
+    let path = get_path_arg(ctx, &cc)?;
+    spawn_fs_op(
+        ctx,
+        async move {
+            tokio::fs::read_to_string(&path)
+                .await
+                .map_err(|e| e.to_string())
+        },
+        |cx, text| {
             cx.create_string_from_utf8(text.into_bytes())
                 .map(JSValue::make_string)
-        })?;
-
-    tokio::spawn(async move {
-        let _ = PollSender::from(tx)
-            .send_async(
-                tokio::fs::read_to_string(&path)
-                    .await
-                    .map_err(|e| e.to_string()),
-            )
-            .await;
-    });
-
-    Ok(promise.into())
+        },
+    )
+    .map(JSValue::from)
 }
 
 // ---------------------------------------------------------------------------
 // readJSON - read and parse JSON file
 // ---------------------------------------------------------------------------
 pub(super) fn js_fs_readJSON(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let v = cc.arg(0).to_string(ctx)?;
-    let path = PathBuf::from(v.content().encode_utf8(false).to_string());
-
-    let (promise, tx) = Promise::create_with_channel::<Result<serde_json::Value, String>>(
+    let path = get_path_arg(ctx, &cc)?;
+    spawn_fs_op(
         ctx,
-        |cx, payload| -> JSResult {
-            let val = payload.map_err(|e| cx.throw_internal_error(&e))?;
-            JSValue::from_serde_json(cx, &val)
+        async move {
+            let raw = tokio::fs::read_to_string(&path)
+                .await
+                .map_err(|e| e.to_string())?;
+            serde_json::from_str(&raw).map_err(|e| e.to_string())
         },
-    )?;
-
-    tokio::spawn(async move {
-        let raw = tokio::fs::read_to_string(&path)
-            .await
-            .map_err(|e| e.to_string());
-
-        let result = match raw {
-            Ok(s) => serde_json::from_str(&s).map_err(|e| e.to_string()),
-            Err(e) => Err(e),
-        };
-
-        let _ = PollSender::from(tx).send_async(result).await;
-    });
-
-    Ok(promise.into())
+        |cx, val: serde_json::Value| JSValue::from_serde_json(cx, &val),
+    )
+    .map(JSValue::from)
 }
 
 // ---------------------------------------------------------------------------
 // readBytes - read file as binary data (Uint8Array)
 // ---------------------------------------------------------------------------
 pub(super) fn js_fs_readBytes(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let v = cc.arg(0).to_string(ctx)?;
-    let path = PathBuf::from(v.content().encode_utf8(false).to_string());
-
-    let (promise, tx) =
-        Promise::create_with_channel::<Result<Vec<u8>, String>>(ctx, |cx, payload| -> JSResult {
-            let bytes = payload.map_err(|e| cx.throw_internal_error(&e))?;
-            TypedArray::create_from_vec_u8(cx, bytes).map(JSValue::from)
-        })?;
-
-    tokio::spawn(async move {
-        let _ = PollSender::from(tx)
-            .send_async(tokio::fs::read(&path).await.map_err(|e| e.to_string()))
-            .await;
-    });
-
-    Ok(promise.into())
+    let path = get_path_arg(ctx, &cc)?;
+    spawn_fs_op(
+        ctx,
+        async move {
+            tokio::fs::read(&path).await.map_err(|e| e.to_string())
+        },
+        |cx, bytes| TypedArray::create_from_vec_u8(cx, bytes).map(JSValue::from),
+    )
+    .map(JSValue::from)
 }
 
 // ---------------------------------------------------------------------------
 // writeText - write string to file
 // ---------------------------------------------------------------------------
 pub(super) fn js_fs_writeText(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let v = cc.arg(0).to_string(ctx)?;
-    let path = PathBuf::from(v.content().encode_utf8(false).to_string());
+    let path = get_path_arg(ctx, &cc)?;
     let data = cc.arg(1).to_string(ctx)?;
-    let data_str = data.content().encode_utf8(false).to_string();
-
-    let (promise, tx) = make_void_promise(ctx)?;
-    tokio::spawn(async move {
-        let _ = PollSender::from(tx)
-            .send_async(
-                write_file_atomic(&path, data_str.as_bytes())
-                    .await
-                    .map_err(|e| e.to_string()),
-            )
-            .await;
-    });
-
-    Ok(promise.into())
+    let data = data.content().encode_utf8(false).to_string();
+    spawn_fs_void(ctx, async move {
+        write_file_atomic(&path, data.as_bytes())
+            .await
+            .map_err(|e| e.to_string())
+    })
+    .map(JSValue::from)
 }
 
 // Write `data` to `path` atomically: write to a sibling temp file then
@@ -226,98 +212,66 @@ async fn atomic_replace(tmp: &Path, dst: &Path) -> std::io::Result<()> {
 // writeJSON - write JSON data to file
 // ---------------------------------------------------------------------------
 pub(super) fn js_fs_writeJSON(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let v = cc.arg(0).to_string(ctx)?;
-    let path = PathBuf::from(v.content().encode_utf8(false).to_string());
+    let path = get_path_arg(ctx, &cc)?;
     let val = cc
         .arg(1)
         .to_serde_json(ctx)
         .map_err(|_| ctx.throw_type_error("failed to serialize value to JSON"))?;
 
-    let space = if cc.length() > 2 && !cc.arg(2).is_undefined() {
-        Some(cc.arg(2).to_number(ctx)?.to_i32() as usize)
+    let pretty = cc.length() > 2 && !cc.arg(2).is_undefined();
+    let json_str = if pretty {
+        serde_json::to_string_pretty(&val).map_err(|e| ctx.throw_internal_error(&e.to_string()))?
     } else {
-        None
+        serde_json::to_string(&val).map_err(|e| ctx.throw_internal_error(&e.to_string()))?
     };
 
-    let json_str = if let Some(_n) = space {
-        serde_json::to_string_pretty(&val).map_err(|e| ctx.throw_internal_error(&format!("{e}")))?
-    } else {
-        serde_json::to_string(&val).map_err(|e| ctx.throw_internal_error(&format!("{e}")))?
-    };
-
-    let (promise, tx) = make_void_promise(ctx)?;
-
-    tokio::spawn(async move {
-        let res = write_file_atomic(&path, json_str.as_bytes()).await;
-        let _ = PollSender::from(tx)
-            .send_async(res.map_err(|e| e.to_string()))
-            .await;
-    });
-
-    Ok(promise.into())
+    spawn_fs_void(ctx, async move {
+        write_file_atomic(&path, json_str.as_bytes())
+            .await
+            .map_err(|e| e.to_string())
+    })
+    .map(JSValue::from)
 }
 
 // ---------------------------------------------------------------------------
 // writeBytes - write binary data (Uint8Array) to file
 // ---------------------------------------------------------------------------
 pub(super) fn js_fs_writeBytes(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let v = cc.arg(0).to_string(ctx)?;
-    let path = PathBuf::from(v.content().encode_utf8(false).to_string());
+    let path = get_path_arg(ctx, &cc)?;
     let bytes = get_bytes_from_arg(ctx, &mut cc.arg(1))?;
-
-    let (promise, tx) = make_void_promise(ctx)?;
-    tokio::spawn(async move {
-        let _ = PollSender::from(tx)
-            .send_async(
-                write_file_atomic(&path, &bytes)
-                    .await
-                    .map_err(|e| e.to_string()),
-            )
-            .await;
-    });
-
-    Ok(promise.into())
+    spawn_fs_void(ctx, async move {
+        write_file_atomic(&path, &bytes)
+            .await
+            .map_err(|e| e.to_string())
+    })
+    .map(JSValue::from)
 }
 
 // ---------------------------------------------------------------------------
 // appendText - append text content to file
 // ---------------------------------------------------------------------------
 pub(super) fn js_fs_appendText(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let v = cc.arg(0).to_string(ctx)?;
-    let path = PathBuf::from(v.content().encode_utf8(false).to_string());
+    let path = get_path_arg(ctx, &cc)?;
     let data = cc.arg(1).to_string(ctx)?;
-    let data_str = data.content().encode_utf8(false).to_string();
-
-    let (promise, tx) = make_void_promise(ctx)?;
-
-    tokio::spawn(async move {
+    let data = data.content().encode_utf8(false).to_string();
+    spawn_fs_void(ctx, async move {
         use tokio::io::AsyncWriteExt;
-
-        let res: Result<(), String> = match tokio::fs::OpenOptions::new()
+        let mut f = tokio::fs::OpenOptions::new()
             .append(true)
             .create(true)
             .open(&path)
             .await
-        {
-            Ok(mut f) => f
-                .write_all(data_str.as_bytes())
-                .await
-                .map_err(|e| e.to_string()),
-            Err(e) => Err(e.to_string()),
-        };
-
-        let _ = PollSender::from(tx).send_async(res).await;
-    });
-
-    Ok(promise.into())
+            .map_err(|e| e.to_string())?;
+        f.write_all(data.as_bytes()).await.map_err(|e| e.to_string())
+    })
+    .map(JSValue::from)
 }
 
 // ---------------------------------------------------------------------------
 // open - open a file and return a real FileHandle with fd
 // ---------------------------------------------------------------------------
 pub(super) fn js_fs_open(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let v = cc.arg(0).to_string(ctx)?;
-    let path = PathBuf::from(v.content().encode_utf8(false).to_string());
+    let path = get_path_arg(ctx, &cc)?;
 
     // Parse flags: default 'r'
     let flags = if cc.length() > 1 && !cc.arg(1).is_undefined() {
@@ -327,89 +281,62 @@ pub(super) fn js_fs_open(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         "r".to_string()
     };
 
-    let (promise, tx) = Promise::create_with_channel::<Result<tokio::fs::File, String>>(
+    spawn_fs_op(
         ctx,
-        move |cx, payload| -> JSResult {
-            let file = payload.map_err(|e| cx.throw_internal_error(&e))?;
+        async move {
+            let mut opts = tokio::fs::OpenOptions::new();
+            match flags.as_str() {
+                "r" | "rb" | "rrr" | "" => {
+                    opts.read(true);
+                }
+                "r+" | "r+b" | "rb+" => {
+                    opts.read(true).write(true);
+                }
+                "w" | "wb" => {
+                    opts.write(true).create(true).truncate(true);
+                }
+                "w+" | "w+b" | "wb+" => {
+                    opts.read(true).write(true).create(true).truncate(true);
+                }
+                "a" | "ab" => {
+                    opts.append(true).create(true);
+                }
+                "a+" | "a+b" | "ab+" => {
+                    opts.read(true).append(true).create(true);
+                }
+                "rw" => {
+                    opts.read(true).write(true).create(true);
+                }
+                _ => {
+                    opts.read(true);
+                }
+            }
+            opts.open(&path).await.map_err(|e| e.to_string())
+        },
+        |cx, file| {
             JSFileHandle::new_instance_file(cx, JSValue::UNDEFINED, file).map(JSValue::from)
         },
-    )?;
-
-    tokio::spawn(async move {
-        let mut opts = tokio::fs::OpenOptions::new();
-        match flags.as_str() {
-            "r" | "rb" | "rrr" | "" => {
-                opts.read(true);
-            }
-            "r+" | "r+b" | "rb+" => {
-                opts.read(true).write(true);
-            }
-            "w" | "wb" => {
-                opts.write(true).create(true).truncate(true);
-            }
-            "w+" | "w+b" | "wb+" => {
-                opts.read(true).write(true).create(true).truncate(true);
-            }
-            "a" | "ab" => {
-                opts.append(true).create(true);
-            }
-            "a+" | "a+b" | "ab+" => {
-                opts.read(true).append(true).create(true);
-            }
-            "rw" => {
-                opts.read(true).write(true).create(true);
-            }
-            _ => {
-                opts.read(true);
-            }
-        }
-        let result = opts.open(&path).await.map_err(|e| e.to_string());
-        let _ = PollSender::from(tx).send_async(result).await;
-    });
-
-    Ok(promise.into())
+    )
+    .map(JSValue::from)
 }
 
 // ---------------------------------------------------------------------------
 // write - multi-format unified write
 // ---------------------------------------------------------------------------
 pub(super) fn js_fs_write(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let v = cc.arg(0).to_string(ctx)?;
-    let path = PathBuf::from(v.content().encode_utf8(false).to_string());
-
-    // string data
-    if let Some(s) = cc.arg(1).as_string(true) {
-        let content = s.content().encode_utf8(false).to_string();
-        let (promise, tx) = make_void_promise(ctx)?;
-
-        tokio::spawn(async move {
-            let _ = PollSender::from(tx)
-                .send_async(
-                    write_file_atomic(&path, content.as_bytes())
-                        .await
-                        .map_err(|e| e.to_string()),
-                )
-                .await;
-        });
-
-        return Ok(promise.into());
-    }
-
-    // Uint8Array or ArrayBuffer
-    match get_bytes_from_arg(ctx, &mut cc.arg(1)) {
-        Ok(bytes) => {
-            let (promise, tx) = make_void_promise(ctx)?;
-            tokio::spawn(async move {
-                let _ = PollSender::from(tx)
-                    .send_async(
-                        write_file_atomic(&path, &bytes)
-                            .await
-                            .map_err(|e| e.to_string()),
-                    )
-                    .await;
-            });
-            return Ok(promise.into());
+    let path = get_path_arg(ctx, &cc)?;
+    let data = if let Some(s) = cc.arg(1).as_string(true) {
+        s.content().encode_utf8(false).to_string().into_bytes()
+    } else {
+        match get_bytes_from_arg(ctx, &mut cc.arg(1)) {
+            Ok(bytes) => bytes,
+            Err(_) => return Err(ctx.throw_type_error("unsupported data type for write")),
         }
-        Err(_) => Err(ctx.throw_type_error("unsupported data type for write")),
-    }
+    };
+    spawn_fs_void(ctx, async move {
+        write_file_atomic(&path, &data)
+            .await
+            .map_err(|e| e.to_string())
+    })
+    .map(JSValue::from)
 }
