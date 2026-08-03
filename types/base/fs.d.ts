@@ -15,13 +15,6 @@ declare module "fs" {
     size: number;
   }
 
-  // Sandbox
-
-  /** Get the current sandbox path, or null if no sandbox is active. */
-  function getSandbox(): string | null;
-  /** Set or clear the sandbox path. Pass null to disable. */
-  function setSandbox(path: string | null): void;
-
   // Read
 
   /** Read a file as a UTF-8 string. */
@@ -50,6 +43,12 @@ declare module "fs" {
   ): Promise<void>;
   /** Append a UTF-8 string to a file. Creates the file if it doesn't exist. */
   function appendText(path: string, data: string): Promise<void>;
+  /** Replace oldText with replaceWith only when oldText appears exactly once. Resolves true on success, false otherwise. */
+  function replaceTextUnique(
+    path: string,
+    oldText: string,
+    replaceWith: string,
+  ): Promise<boolean>;
   /** Write data to a file (auto-detect format: string, Uint8Array, or ArrayBuffer). */
   function write(
     path: string,

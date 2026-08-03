@@ -3,6 +3,8 @@
 
 use std::{future::Future, path::{Path, PathBuf}};
 
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
 use zuqe::{
     CallContext, JSResult, JSValue, PollSender, ScopedContext,
     builtins::{promise::Promise, typed_array::TypedArray},
@@ -151,12 +153,17 @@ pub(super) fn js_fs_writeText(ctx: &mut ScopedContext, cc: CallContext) -> JSRes
 // Exposed as `pub(crate)` so other modules (e.g. jsonl) reuse the same atomic
 // write instead of rolling their own non-atomic truncate.
 pub(crate) async fn write_file_atomic(path: &Path, data: &[u8]) -> std::io::Result<()> {
-    let tmp = path.with_extension(match path.extension().and_then(|e| e.to_str()) {
-        Some(ext) => format!("{ext}.tmp"),
-        None => "tmp".to_string(),
-    });
+    let tmp = temp_path_for(path);
     tokio::fs::write(&tmp, data).await?;
     atomic_replace(&tmp, path).await
+}
+
+/// Sibling temp file path used for atomic writes/replacements.
+fn temp_path_for(path: &Path) -> PathBuf {
+    path.with_extension(match path.extension().and_then(|e| e.to_str()) {
+        Some(ext) => format!("{ext}.tmp"),
+        None => "tmp".to_string(),
+    })
 }
 
 // Atomically replace `dst` with `src` (both on the same filesystem).
@@ -255,7 +262,6 @@ pub(super) fn js_fs_appendText(ctx: &mut ScopedContext, cc: CallContext) -> JSRe
     let data = cc.arg(1).to_string(ctx)?;
     let data = data.content().encode_utf8(false).to_string();
     spawn_fs_void(ctx, async move {
-        use tokio::io::AsyncWriteExt;
         let mut f = tokio::fs::OpenOptions::new()
             .append(true)
             .create(true)
@@ -265,6 +271,175 @@ pub(super) fn js_fs_appendText(ctx: &mut ScopedContext, cc: CallContext) -> JSRe
         f.write_all(data.as_bytes()).await.map_err(|e| e.to_string())
     })
     .map(JSValue::from)
+}
+
+// ---------------------------------------------------------------------------
+// replaceTextUnique - replace text in file when oldText matches exactly once
+// ---------------------------------------------------------------------------
+pub(super) fn js_fs_replaceTextUnique(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let path = get_path_arg(ctx, &cc)?;
+    let old_text = cc.arg(1).to_string(ctx)?;
+    let old_text = old_text.content().encode_utf8(false).to_string();
+    let replace_with = cc.arg(2).to_string(ctx)?;
+    let replace_with = replace_with.content().encode_utf8(false).to_string();
+
+    spawn_fs_op(
+        ctx,
+        async move {
+            // Empty oldText or a no-op replacement never replaces.
+            if old_text.is_empty() || old_text == replace_with {
+                return Ok(false);
+            }
+            // Pass 1: stream-count occurrences so a huge file is never loaded
+            // into memory (bounded to chunk size + needle length).
+            let Ok(Some(at)) = find_unique_match(&path, old_text.as_bytes()).await else {
+                return Ok(false);
+            };
+            // Pass 2: stream-copy to a temp file, splicing the replacement at
+            // the single match offset, then atomically swap it in.
+            let tmp = temp_path_for(&path);
+            let res = async {
+                copy_replace(&path, &tmp, at, old_text.len(), replace_with.as_bytes()).await?;
+                atomic_replace(&tmp, &path).await
+            }
+            .await;
+            if res.is_err() {
+                let _ = tokio::fs::remove_file(&tmp).await;
+                return Ok(false);
+            }
+            Ok(true)
+        },
+        |_cx, ok| Ok(JSValue::from(ok)),
+    )
+    .map(JSValue::from)
+}
+
+// Chunk size for streaming the file; keeps peak memory bounded for large files.
+const STREAM_CHUNK: usize = 1 << 20; // 1 MiB
+
+/// Return the byte offset of `needle` in the file if it occurs exactly once
+/// (counting overlapping matches), streaming in chunks. `None` means the match
+/// is missing or not unique, or the file cannot be read.
+async fn find_unique_match(path: &Path, needle: &[u8]) -> std::io::Result<Option<u64>> {
+    let mut file = tokio::fs::File::open(path).await?;
+    let mut carry: Vec<u8> = Vec::new(); // tail of the previous window
+    let mut base: u64 = 0; // absolute offset of carry[0]
+    let mut count = 0u32;
+    let mut first: Option<u64> = None;
+    let mut buf = vec![0u8; STREAM_CHUNK];
+
+    loop {
+        let n = file.read(&mut buf).await?;
+        let eof = n == 0;
+        carry.extend_from_slice(&buf[..n]);
+        let win = &carry[..];
+
+        // Count every match fully contained in this window (starting anywhere in
+        // it); matches straddling the previous boundary are caught because carry
+        // keeps the last needle_len-1 bytes. Advance byte-by-byte so overlapping
+        // matches are all seen (e.g. "aa" in "aaa" counts 2).
+        if win.len() >= needle.len() {
+            let last = win.len() - needle.len();
+            let mut s = 0;
+            while s <= last {
+                if win[s..s + needle.len()] == *needle {
+                    count += 1;
+                    if count == 1 {
+                        first = Some(base + s as u64);
+                    } else {
+                        return Ok(None); // not unique
+                    }
+                }
+                s += 1;
+            }
+        }
+
+        if eof {
+            break;
+        }
+        // Keep the tail that could be a prefix of a match spanning the boundary.
+        let keep = needle.len() - 1;
+        let drop = win.len() - keep.min(win.len());
+        base += drop as u64;
+        carry.drain(..drop);
+    }
+    Ok(first)
+}
+
+/// Stream-copy `src` to `dst`, replacing `needle` (the unique match starting at
+/// byte offset `at`) with `replacement`. Fails if the file no longer matches.
+async fn copy_replace(
+    src: &Path,
+    dst: &Path,
+    at: u64,
+    needle_len: usize,
+    replacement: &[u8],
+) -> std::io::Result<()> {
+    let mut r = tokio::fs::File::open(src).await?;
+    let mut w = tokio::fs::File::create(dst).await?;
+    let mut pos: u64 = 0; // input bytes consumed
+    let mut skip: usize = 0; // needle bytes still to consume after the splice
+    let mut spliced = false;
+    let mut buf = vec![0u8; STREAM_CHUNK];
+
+    loop {
+        let n = r.read(&mut buf).await?;
+        if n == 0 {
+            break;
+        }
+        let mut chunk = &buf[..n];
+
+        // Consume the needle bytes skipped right after the splice point.
+        if skip > 0 {
+            let k = skip.min(chunk.len());
+            chunk = &chunk[k..];
+            skip -= k;
+            pos += k as u64;
+            if skip == 0 {
+                spliced = true;
+            }
+            if chunk.is_empty() {
+                continue;
+            }
+        }
+
+        if spliced || pos >= at + needle_len as u64 {
+            // Everything from here on is past the replacement point.
+            w.write_all(chunk).await?;
+            pos += chunk.len() as u64;
+        } else if pos + chunk.len() as u64 <= at {
+            // Entire chunk lies before the match.
+            w.write_all(chunk).await?;
+            pos += chunk.len() as u64;
+        } else {
+            // Chunk straddles the match start.
+            let cut = (at - pos) as usize;
+            w.write_all(&chunk[..cut]).await?;
+            w.write_all(replacement).await?;
+            pos = at;
+            let rest = &chunk[cut..];
+            let k = needle_len.min(rest.len());
+            skip = needle_len - k;
+            let rest = &rest[k..];
+            pos += k as u64;
+            if skip == 0 {
+                spliced = true;
+            }
+            if !rest.is_empty() {
+                w.write_all(rest).await?;
+                pos += rest.len() as u64;
+            }
+        }
+    }
+
+    if spliced && skip == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "file changed while replacing",
+        ))
+    }
 }
 
 // ---------------------------------------------------------------------------

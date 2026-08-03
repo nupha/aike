@@ -388,6 +388,148 @@ async function testWriteNewPath() {
 }
 
 // ---------------------------------------------------------------------------
+// fs.replaceTextUnique()
+// ---------------------------------------------------------------------------
+async function testReplaceTextUnique() {
+  console.log("\n=== replaceTextUnique() ===");
+  const F = "../tmp/test_replace.txt";
+  const big = "../tmp/test_replace_big.bin";
+  const MB = 1048576; // matches the internal streaming chunk size
+  const enc = new TextEncoder();
+  const dec = new TextDecoder();
+
+  // unique match -> replaced
+  await fs.writeText(F, "hello world hello");
+  check(
+    "unique match replaces",
+    (await fs.replaceTextUnique(F, "world", "W O R L D")) === true &&
+      (await fs.readText(F)) === "hello W O R L D hello",
+  );
+
+  // multiple matches -> false, unchanged
+  await fs.writeText(F, "aaa bbb aaa");
+  check(
+    "multiple matches -> false",
+    (await fs.replaceTextUnique(F, "aaa", "x")) === false &&
+      (await fs.readText(F)) === "aaa bbb aaa",
+  );
+
+  // no match -> false
+  await fs.writeText(F, "abcdef");
+  check(
+    "no match -> false",
+    (await fs.replaceTextUnique(F, "zzz", "x")) === false &&
+      (await fs.readText(F)) === "abcdef",
+  );
+
+  // overlapping matches count as >1 ("aa" in "aaa")
+  await fs.writeText(F, "aaa");
+  check(
+    "overlapping matches -> false",
+    (await fs.replaceTextUnique(F, "aa", "x")) === false &&
+      (await fs.readText(F)) === "aaa",
+  );
+
+  // missing file -> false (no reject)
+  check(
+    "missing file -> false",
+    (await fs.replaceTextUnique("../tmp/nonexistent_replace_xy", "a", "b")) === false,
+  );
+
+  // empty oldText -> false
+  await fs.writeText(F, "abc");
+  check(
+    "empty oldText -> false",
+    (await fs.replaceTextUnique(F, "", "b")) === false &&
+      (await fs.readText(F)) === "abc",
+  );
+
+  // oldText === replaceWith -> false (no-op)
+  await fs.writeText(F, "abc");
+  check(
+    "no-op replacement -> false",
+    (await fs.replaceTextUnique(F, "abc", "abc")) === false &&
+      (await fs.readText(F)) === "abc",
+  );
+
+  // unicode exact match
+  await fs.writeText(F, "中文 测试 中文");
+  check(
+    "unicode match replaces",
+    (await fs.replaceTextUnique(F, "测试", "替换")) === true &&
+      (await fs.readText(F)) === "中文 替换 中文",
+  );
+
+  // multi-line replacement
+  await fs.writeText(F, "line1\nTARGET\nline3\n");
+  check(
+    "multi-line replaces",
+    (await fs.replaceTextUnique(F, "line1\nTARGET", "L1\nTGT")) === true &&
+      (await fs.readText(F)) === "L1\nTGT\nline3\n",
+  );
+
+  // replacement larger than the needle
+  await fs.writeText(F, "x[old]y");
+  check(
+    "larger replacement",
+    (await fs.replaceTextUnique(F, "[old]", "[replacement text]")) === true &&
+      (await fs.readText(F)) === "x[replacement text]y",
+  );
+
+  // needle at very start / end of file
+  await fs.writeText(F, "START rest");
+  check(
+    "match at file start",
+    (await fs.replaceTextUnique(F, "START", "BEGIN")) === true &&
+      (await fs.readText(F)) === "BEGIN rest",
+  );
+  await fs.writeText(F, "rest END");
+  check(
+    "match at file end",
+    (await fs.replaceTextUnique(F, "END", "FIN")) === true &&
+      (await fs.readText(F)) === "rest FIN",
+  );
+
+  // needle straddling the 1 MiB streaming chunk boundary, unique
+  const prefix = "x".repeat(MB - 3);
+  await fs.writeBytes(big, enc.encode(prefix + "TARGET" + "y".repeat(10)));
+  check(
+    "match across chunk boundary",
+    (await fs.replaceTextUnique(big, "TARGET", "DONE")) === true &&
+      dec.decode(await fs.readBytes(big)) === prefix + "DONE" + "y".repeat(10),
+  );
+
+  // needle straddling the boundary but appears twice -> false
+  await fs.writeBytes(big, enc.encode(prefix + "TARGET" + "TARGET"));
+  check(
+    "duplicate across chunk boundary -> false",
+    (await fs.replaceTextUnique(big, "TARGET", "DONE")) === false &&
+      dec.decode(await fs.readBytes(big)) === prefix + "TARGET" + "TARGET",
+  );
+
+  // overlapping matches straddling the boundary -> false
+  const m1 = MB - 2;
+  await fs.writeBytes(big, enc.encode("b".repeat(m1) + "aaaaa" + "c".repeat(5)));
+  check(
+    "overlap across chunk boundary -> false",
+    (await fs.replaceTextUnique(big, "aaaa", "Z")) === false &&
+      dec.decode(await fs.readBytes(big)) ===
+        "b".repeat(m1) + "aaaaa" + "c".repeat(5),
+  );
+
+  // single-char needle in a multi-chunk file of identical bytes -> false
+  await fs.writeBytes(big, enc.encode("z".repeat(3 * MB)));
+  check(
+    "single-char needle in huge file -> false",
+    (await fs.replaceTextUnique(big, "z", "q")) === false,
+  );
+
+  // cleanup
+  await fs.remove(F).catch(() => { });
+  await fs.remove(big).catch(() => { });
+}
+
+// ---------------------------------------------------------------------------
 // Run all
 // ---------------------------------------------------------------------------
 const tests = [
@@ -395,7 +537,7 @@ const tests = [
   testWriteStringRoundtrip, testWriteBinaryRoundtrip, testStat,
   testOnData, testAsyncIterator, testExists,
   testMakeDirRemoveDir, testRemove, testLineCounting,
-  testOpenNonexistent, testWriteNewPath,
+  testOpenNonexistent, testWriteNewPath, testReplaceTextUnique,
 ];
 for (const t of tests) {
   try {

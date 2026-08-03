@@ -11,8 +11,8 @@ use super::{
         js_fs_makeDir, js_fs_readDir, js_fs_remove, js_fs_removeDir, js_fs_stat,
     },
     file::{
-        js_fs_appendText, js_fs_open, js_fs_readBytes, js_fs_readJSON, js_fs_readText, js_fs_write,
-        js_fs_writeBytes, js_fs_writeJSON, js_fs_writeText,
+        js_fs_appendText, js_fs_open, js_fs_readBytes, js_fs_readJSON, js_fs_readText,
+        js_fs_replaceTextUnique, js_fs_write, js_fs_writeBytes, js_fs_writeJSON, js_fs_writeText,
     },
 };
 
@@ -37,6 +37,7 @@ const MOD_FS_ENTRIES: &[FieldDef] = &[
     ),
     FieldDef::FUNC("writeBytes", 2, js_fs_writeBytes, 0),
     FieldDef::FUNC("appendText", 2, js_fs_appendText, 0),
+    FieldDef::FUNC("replaceTextUnique", 3, js_fs_replaceTextUnique, 0),
     FieldDef::FUNC("write", 2, js_fs_write, 0),
     FieldDef::FUNC("exists", 1, js_fs_exists, 0),
     FieldDef::FUNC("remove", 1, js_fs_remove, 0),
