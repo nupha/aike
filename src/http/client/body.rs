@@ -23,9 +23,13 @@ use zuqe::{
 
 use crate::{
     html::{HtmlConvertMode, convert_html},
+    http::client::headers::HeaderList,
     whatwg::{
         blob::{blob_bytes_of, blob_from_bytes, blob_type_of},
-        stream::{JSReadableStream, call_opt_method},
+        stream::{
+            JSReadableStream, call_opt_method, readable_stream_from_text,
+            readable_stream_from_text_channel,
+        },
         url::JSURLSearchParams,
     },
 };
@@ -83,6 +87,22 @@ pub(crate) fn body_content_type(val: &JSValue) -> Option<String> {
     // Strings are the only remaining source with a default type. Checked last
     // because Blob/URLSearchParams are objects, not strings.
     val.is_string().then(|| "text/plain;charset=UTF-8".into())
+}
+
+/// Blob MIME type derived from a header list's current `Content-Type`: the
+/// media type "essence" (type/subtype before any `;` parameter), trimmed and
+/// lowercased. Absent `Content-Type` yields an empty string, per the Fetch
+/// spec's "extract a MIME type" for blob bodies.
+pub(crate) fn blob_type_from_header(list: &HeaderList) -> String {
+    list.get("content-type")
+        .map(|ct| {
+            ct.split(';')
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_ascii_lowercase()
+        })
+        .unwrap_or_default()
 }
 
 pub(crate) const BODY_AS_BYTES: i32 = 0;
@@ -201,7 +221,66 @@ pub(crate) fn drain_body(
     }
 }
 
-/// GC roots for the stream-drain job. The job outlives many event-loop turns,
+//// Build a `ReadableStream` of UTF-8-decoded string chunks from a body source.
+/// Used by Request/Response `textStream()`. A `Stream` body is drained
+/// synchronously, so it must already be populated (as in the WPT tests); a
+/// live `Channel` is decoded incrementally by a polling job.
+pub(crate) fn text_stream_from_source(ctx: &mut ScopedContext, source: BodySource) -> JSResult {
+    match source {
+        BodySource::Synthetic(bytes) => {
+            let text = String::from_utf8_lossy(&bytes).into_owned();
+            readable_stream_from_text(ctx, text)
+        }
+        BodySource::Stream(stream) => {
+            let bytes = drain_stream_sync(ctx, stream)?;
+            let text = String::from_utf8_lossy(&bytes).into_owned();
+            readable_stream_from_text(ctx, text)
+        }
+        BodySource::Channel(rx) => readable_stream_from_text_channel(ctx, rx),
+    }
+}
+
+/// Synchronously read a `ReadableStream` body into a byte buffer. Valid only
+/// for a stream whose data is already queued (e.g. a constructor stream
+/// populated in `start`); a pending read cannot be waited on synchronously.
+fn drain_stream_sync(ctx: &mut ScopedContext, stream: JSReadableStream) -> Result<Vec<u8>, i32> {
+    let reader = match call_opt_method(ctx, stream.into(), "getReader", &[])? {
+        Some(r) if r.is_object() => r,
+        _ => return Err(-1),
+    };
+    let mut buf = Vec::new();
+    loop {
+        let pv = reader
+            .get_property_str(ctx, "read")?
+            .call(ctx, reader, &[])?;
+        let p = Promise::try_from(pv).map_err(|_| ctx.throw_internal_error("read() returned a non-promise"))?;
+        match p.state() {
+            PromiseState::Fulfilled => {
+                let result = p.result();
+                let done = result
+                    .get_property_str(ctx, "done")
+                    .and_then(|d| d.to_bool())
+                    .unwrap_or(false);
+                if done {
+                    break;
+                }
+                let value = result
+                    .get_property_str(ctx, "value")
+                    .map_err(|_| ctx.throw_internal_error("missing read value"))?;
+                let ta = TypedArray::try_from(value)
+                    .map_err(|_| ctx.throw_type_error("body chunk is not a Uint8Array"))?;
+                ta.with_bytes(|b| buf.extend_from_slice(b));
+            }
+            // A stream that is not synchronously settled cannot be drained here.
+            PromiseState::Pending | PromiseState::Rejected => {
+                return Err(ctx.throw_type_error("body stream is not synchronously readable"));
+            }
+        }
+    }
+    Ok(buf)
+}
+
+// GC roots for the stream-drain job. The job outlives many event-loop turns,
 /// so every JS value it can touch later must be traced from here, including the
 /// cells it mutates (`pending` read promise, captured error value).
 struct DrainRoots {

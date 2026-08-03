@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use linkme::distributed_slice;
 use zuqe::{
     CallContext, ClassCtorDef, ClassID, Exception, FieldDef, JSResult, JSValue, Runtime,
@@ -11,10 +14,11 @@ use crate::{
     USER_CLASS_DEFS,
     http::client::{
         body::{
-            BODY_AS_BYTES, BODY_AS_JSON, BODY_AS_TEXT, BodySource, body_content_type,
-            body_to_bytes, drain_body,
+            BODY_AS_BLOB, BODY_AS_BYTES, BODY_AS_JSON, BODY_AS_TEXT, BodySource,
+            blob_type_from_header, body_content_type, body_to_bytes, drain_body,
+            text_stream_from_source,
         },
-        headers::{HeaderList, HeadersPayload, JSHeaders, header_list_from_js},
+        headers::{Guard, HeaderList, HeadersPayload, JSHeaders, header_list_from_js},
     },
     whatwg::{
         abort::JSAbortSignal,
@@ -28,7 +32,7 @@ use crate::{
 pub(crate) struct RequestPayload {
     pub(crate) method: String,
     pub(crate) url: String,
-    pub(crate) headers: HeaderList,
+    pub(crate) headers: Rc<RefCell<HeaderList>>,
     pub(crate) destination: String,
     pub(crate) referrer: String,
     pub(crate) referrer_policy: String,
@@ -75,7 +79,7 @@ fn js_request_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
     if let Some(p) = JSRequest::payload_of(&input) {
         url_str = p.url.clone();
         method = p.method.clone();
-        header_list = p.headers.clone();
+        header_list = p.headers.borrow().clone();
         redirect = p.redirect.clone();
         signal = p.signal;
         synthetic_body = p.synthetic_body.clone();
@@ -166,7 +170,7 @@ fn js_request_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
     let mut payload = RequestPayload {
         method,
         url: url_str,
-        headers: header_list,
+        headers: Rc::new(RefCell::new(header_list)),
         destination: String::new(),
         referrer: "about:client".to_string(),
         referrer_policy: String::new(),
@@ -255,13 +259,14 @@ fn js_req_signal_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 fn js_req_headers_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let p = get_request_payload(ctx, &this)?;
-    let list = p.headers.clone();
-    // A `no-cors` request exposes headers with the "request-no-cors" guard.
-    let payload = if p.mode == "no-cors" {
-        HeadersPayload::no_cors(list)
+    // Share the payload's live header list so mutations through the exposed
+    // `Headers` object are visible to the request (Fetch spec [SameObject]).
+    let guard = if p.mode == "no-cors" {
+        Guard::RequestNoCors
     } else {
-        HeadersPayload::new(list)
+        Guard::None
     };
+    let payload = HeadersPayload::from_shared(p.headers.clone(), guard);
     let headers = JSHeaders::new_instance(ctx, JSValue::UNDEFINED, payload)?;
     Ok(headers.into())
 }
@@ -339,8 +344,18 @@ fn js_req_body_as(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         }
     };
 
+    // Request.blob() sets the Blob's type to the request's *current*
+    // Content-Type header (mutable via `headers.set`), with parameters
+    // stripped. Computed before consuming the source below.
+    let blob_type = if magic == BODY_AS_BLOB {
+        let p = get_request_payload(ctx, &this)?;
+        blob_type_from_header(&p.headers.borrow())
+    } else {
+        String::new()
+    };
+
     match source {
-        Some(source) => drain_body(ctx, source, magic, None, String::new()),
+        Some(source) => drain_body(ctx, source, magic, None, blob_type),
         // Spec: these methods always return a promise; an already-consumed body
         // rejects it rather than throwing synchronously.
         None => {
@@ -354,6 +369,34 @@ fn js_req_body_as(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             };
             make_rejected_promise(ctx, reason)
         }
+    }
+}
+
+/// `textStream()` — returns a `ReadableStream` of UTF-8-decoded string chunks.
+/// Consumes the body (sets `bodyUsed`); a null-body request yields an empty
+/// stream without marking the body used, and an already-consumed body throws.
+fn js_req_text_stream(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
+    let mut this = _cc.this();
+    let source = {
+        let p = get_request_payload_mut(ctx, &mut this)?;
+        if p.body_consumed {
+            return Err(ctx.throw_type_error("body already consumed or locked"));
+        }
+        // Null-body request: empty stream, bodyUsed stays false, reusable.
+        if p.synthetic_body.is_none() && p.stream_body.is_none() {
+            None
+        } else if let Some(bytes) = p.synthetic_body.take() {
+            p.body_consumed = true;
+            Some(BodySource::Synthetic(bytes))
+        } else {
+            p.body_consumed = true;
+            let s = p.stream_body.take().expect("stream_body checked above");
+            Some(BodySource::Stream(JSReadableStream::try_from(s)?))
+        }
+    };
+    match source {
+        Some(src) => text_stream_from_source(ctx, src),
+        None => text_stream_from_source(ctx, BodySource::Synthetic(Vec::new())),
     }
 }
 
@@ -373,7 +416,8 @@ fn js_req_clone(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let payload = RequestPayload {
         method: src.method.clone(),
         url: src.url.clone(),
-        headers: src.headers.clone(),
+        // A cloned request owns an independent header set, not the shared one.
+        headers: Rc::new(RefCell::new(src.headers.borrow().clone())),
         destination: src.destination.clone(),
         referrer: src.referrer.clone(),
         referrer_policy: src.referrer_policy.clone(),
@@ -415,8 +459,9 @@ const REQUEST_PROTO: &[FieldDef] = &[
     FieldDef::FUNC("arrayBuffer", 0, js_req_body_as, BODY_AS_BYTES as i16),
     FieldDef::FUNC("text", 0, js_req_body_as, BODY_AS_TEXT as i16),
     FieldDef::FUNC("json", 0, js_req_body_as, BODY_AS_JSON as i16),
-    FieldDef::FUNC("blob", 0, js_req_body_as, BODY_AS_BYTES as i16),
+    FieldDef::FUNC("blob", 0, js_req_body_as, BODY_AS_BLOB as i16),
     FieldDef::FUNC("formData", 0, js_req_form_data, 0),
+    FieldDef::FUNC("textStream", 0, js_req_text_stream, 0),
     FieldDef::FUNC("clone", 0, js_req_clone, 0),
 ];
 

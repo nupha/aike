@@ -1020,6 +1020,99 @@ pub(crate) fn readable_stream_from_bytes(
     Ok(JSValue::from(stream))
 }
 
+/// Create a `ReadableStream` from an already-decoded text string. Non-empty
+/// text is enqueued as a single string chunk; empty text produces a closed,
+/// chunk-free stream. Used by Request/Response `textStream()`.
+pub(crate) fn readable_stream_from_text(
+    ctx: &mut ScopedContext,
+    text: String,
+) -> Result<JSValue, i32> {
+    let source = ctx.create_base_object()?;
+    let mut stream =
+        JSReadableStream::new_instance(ctx, JSValue::UNDEFINED, ReadableStreamPayload::new())?;
+    let controller = JSReadableStreamDefaultController::new_instance(
+        ctx,
+        JSValue::UNDEFINED,
+        ReadableStreamDefaultControllerPayload::new(JSValue::from(source), Some(stream)),
+    )?;
+    let controller_val = JSValue::from(controller);
+    stream.payload_mut().unwrap().controller = Some(controller);
+
+    if !text.is_empty() {
+        let sval = ctx.create_string_from_utf8(text.into_bytes())?;
+        let enqueue_fn = controller_val.get_property_str(ctx, "enqueue")?;
+        let _ = enqueue_fn.call(ctx, controller_val, &[JSValue::make_string(sval)]);
+    }
+    // Close the stream — the text is the entire body.
+    let close_fn = controller_val.get_property_str(ctx, "close")?;
+    let _ = close_fn.call(ctx, controller_val, &[]);
+
+    Ok(JSValue::from(stream))
+}
+
+/// Create a `ReadableStream` of UTF-8-decoded string chunks from a byte
+/// channel. Each `Ok(bytes)` item is decoded and enqueued as a string; an
+/// `Err(msg)` item errors the stream; disconnect closes it. Used by
+/// `textStream()` on network responses.
+pub(crate) fn readable_stream_from_text_channel(
+    ctx: &mut ScopedContext,
+    rx: Receiver<Result<Vec<u8>, String>>,
+) -> Result<JSValue, i32> {
+    let source = ctx.create_base_object()?;
+    let mut stream =
+        JSReadableStream::new_instance(ctx, JSValue::UNDEFINED, ReadableStreamPayload::new())?;
+    let controller = JSReadableStreamDefaultController::new_instance(
+        ctx,
+        JSValue::UNDEFINED,
+        ReadableStreamDefaultControllerPayload::new(JSValue::from(source), Some(stream)),
+    )?;
+    stream.payload_mut().unwrap().controller = Some(controller);
+
+    let ctrl = controller;
+    let start = Instant::now();
+    const TEXT_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(10);
+    ctx.queue_job(
+        move |cx| {
+            match rx.try_recv() {
+                Ok(Ok(bytes)) => {
+                    let text = String::from_utf8_lossy(&bytes).into_owned();
+                    let sval = cx.create_string_from_utf8(text.into_bytes())?;
+                    let enqueue_fn = ctrl.get_property_str(cx, "enqueue")?;
+                    let _ = enqueue_fn.call(cx, JSValue::from(ctrl), &[JSValue::make_string(sval)]);
+                    Ok(JobState::Again)
+                }
+                Ok(Err(msg)) => {
+                    let err = cx
+                        .create_error_object(ErrorKind::Type, &msg, false)
+                        .ok_or(-1)?;
+                    let error_fn = ctrl.get_property_str(cx, "error")?;
+                    let _ = error_fn.call(cx, JSValue::from(ctrl), &[err.into()]);
+                    Ok(JobState::Done)
+                }
+                Err(TryRecvError::Disconnected) => {
+                    let close_fn = ctrl.get_property_str(cx, "close")?;
+                    let _ = close_fn.call(cx, JSValue::from(ctrl), &[]);
+                    Ok(JobState::Done)
+                }
+                Err(TryRecvError::Empty) => {
+                    if start.elapsed() > TEXT_STREAM_IDLE_TIMEOUT {
+                        let err = cx.create_string_from_utf8(b"text stream timeout".to_vec())?;
+                        let error_fn = ctrl.get_property_str(cx, "error")?;
+                        let _ =
+                            error_fn.call(cx, JSValue::from(ctrl), &[JSValue::make_string(err)]);
+                        Ok(JobState::Done)
+                    } else {
+                        Ok(JobState::Again)
+                    }
+                }
+            }
+        },
+        (),
+    );
+
+    Ok(JSValue::from(stream))
+}
+
 fn start_channel_stream_poller(ctx: &mut ScopedContext) {
     // Idle timeout, applied per stream and refreshed on every received chunk.
     // A stream is only killed when its own producer goes quiet for this long,

@@ -439,7 +439,7 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     if let Some(p) = JSRequest::payload_of(&input) {
         url_str = p.url.clone();
         method = p.method.clone();
-        header_list = p.headers.clone();
+        header_list = p.headers.borrow().clone();
         redirect = p.redirect.clone();
         signal_val = p.signal.clone();
         body_bytes = p.synthetic_body.clone();

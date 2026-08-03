@@ -13,6 +13,9 @@
 //! `ResponsePayload` and the same native callbacks; only the ClassID and
 //! prototype differ.
 
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use crossbeam::channel::Receiver;
 use linkme::distributed_slice;
 use zuqe::{
@@ -27,7 +30,8 @@ use crate::{
     http::client::{
         body::{
             BODY_AS_BLOB, BODY_AS_BYTES, BODY_AS_JSON, BODY_AS_TEXT, BODY_AS_TEXT_CONVERT,
-            BodySource, body_content_type, body_to_bytes, drain_body,
+            BodySource, blob_type_from_header, body_content_type, body_to_bytes, drain_body,
+            text_stream_from_source,
         },
         headers::{Guard, HeaderList, HeadersPayload, JSHeaders, header_list_from_js},
         transport::TransportResponse,
@@ -86,7 +90,10 @@ pub(crate) struct ResponsePayload {
     status: u16,
     status_text: String,
     content_type: String,
-    headers: Vec<(String, String)>,
+    /// Shared live header list. The exposed `Headers` object references the
+    /// same `Rc`, so user mutations via `response.headers.set()` are visible to
+    /// body consumers (e.g. `blob()` type derivation).
+    headers: Rc<RefCell<HeaderList>>,
     /// Cached `Headers` object returned by the `headers` getter ([SameObject]).
     headers_obj: Option<JSValue>,
     /// Guard applied to the exposed `Headers`. Responses built by `fetch()` (or
@@ -220,7 +227,7 @@ pub(crate) fn build_opaque_redirect_response(ctx: &mut ScopedContext) -> JSResul
             status: 0,
             status_text: String::new(),
             content_type: String::new(),
-            headers: Vec::new(),
+            headers: Rc::new(RefCell::new(HeaderList::new())),
             content_length: None,
             http_version: "",
             headers_obj: None,
@@ -257,6 +264,7 @@ pub(crate) fn build_opaque_response(ctx: &mut ScopedContext, tr: TransportRespon
                 .any(|h| h.eq_ignore_ascii_case(k))
         })
         .collect();
+    let headers = Rc::new(RefCell::new(HeaderList::from_vec(headers)));
 
     JSResponse::new_instance(
         ctx,
@@ -304,7 +312,7 @@ fn transport_payload(
         status: tr.status,
         status_text: tr.status_text,
         content_type: tr.content_type,
-        headers: tr.headers,
+        headers: Rc::new(RefCell::new(HeaderList::from_vec(tr.headers))),
         headers_obj: None,
         // Came off the network: headers are immutable.
         headers_guard: Guard::Immutable,
@@ -449,7 +457,7 @@ fn js_response_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
             status,
             status_text,
             content_type: String::new(),
-            headers: header_list.to_vec(),
+            headers: Rc::new(RefCell::new(header_list)),
             content_length: None,
             http_version: "",
             headers_obj: None,
@@ -480,7 +488,7 @@ fn js_response_static_error(ctx: &mut ScopedContext, _cc: CallContext) -> JSResu
             status: 0,
             status_text: String::new(),
             content_type: String::new(),
-            headers: Vec::new(),
+            headers: Rc::new(RefCell::new(HeaderList::new())),
             content_length: None,
             http_version: "",
             headers_obj: None,
@@ -537,7 +545,7 @@ fn js_response_static_redirect(ctx: &mut ScopedContext, cc: CallContext) -> JSRe
             status,
             status_text: String::new(),
             content_type: String::new(),
-            headers: list.to_vec(),
+            headers: Rc::new(RefCell::new(list)),
             content_length: None,
             http_version: "",
             headers_obj: None,
@@ -614,7 +622,7 @@ fn js_response_static_json(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
             status,
             status_text,
             content_type: "application/json".to_string(),
-            headers: header_list.to_vec(),
+            headers: Rc::new(RefCell::new(header_list)),
             content_length: None,
             http_version: "",
             headers_obj: None,
@@ -671,14 +679,13 @@ fn js_response_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             if let Some(h) = get_response_payload_mut(ctx, &mut this)?.headers_obj {
                 return Ok(h);
             }
-            let (list, guard) = {
+            let (shared, guard) = {
                 let p = get_response_payload(ctx, &this)?;
-                (HeaderList::from_vec(p.headers.clone()), p.headers_guard)
+                (p.headers.clone(), p.headers_guard)
             };
-            let payload = match guard {
-                Guard::Response => HeadersPayload::response(list),
-                _ => HeadersPayload::immutable(list),
-            };
+            // Share the payload's live header list so mutations through the
+            // exposed `Headers` object propagate back to body consumers.
+            let payload = HeadersPayload::from_shared(shared, guard);
             let headers = JSHeaders::new_instance(ctx, JSValue::UNDEFINED, payload)?;
             let hv = headers.into();
             get_response_payload_mut(ctx, &mut this)?.headers_obj = Some(hv);
@@ -844,19 +851,14 @@ fn js_response_body_as(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         }
     };
 
-    // Response.blob() sets the Blob's type to the response's Content-Type with
-    // any parameters (e.g. charset) stripped. Resolve it once before borrowing
-    // `source`, since the payload borrow below lives in a nested scope.
+    // Response.blob() sets the Blob's type to the response's *current*
+    // Content-Type header (which the user may have mutated via `headers.set`),
+    // with any parameters (e.g. charset) stripped. Resolve it once before
+    // borrowing `source`, since the payload borrow below lives in a nested scope.
     let blob_type = {
         let p = JSHttpClientResponse::payload_of(&this).or_else(|| JSResponse::payload_of(&this));
         match p {
-            Some(p) => p
-                .content_type
-                .split(';')
-                .next()
-                .unwrap_or("")
-                .trim()
-                .to_ascii_lowercase(),
+            Some(p) => blob_type_from_header(&p.headers.borrow()),
             None => String::new(),
         }
     };
@@ -885,6 +887,38 @@ fn js_response_body_as(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             };
             make_rejected_promise(ctx, reason)
         }
+    }
+}
+
+/// `textStream()` — returns a `ReadableStream` of UTF-8-decoded string chunks.
+/// Consumes the body (sets `bodyUsed`); a null-body response yields an empty
+/// stream without marking the body used; a consumed or locked body throws.
+fn js_response_text_stream(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
+    let mut this = _cc.this();
+    let source = {
+        let p = get_response_payload_mut(ctx, &mut this)?;
+        // Consumed or locked body: textStream throws TypeError.
+        if p.body_unusable() {
+            return Err(ctx.throw_type_error("body already consumed or locked"));
+        }
+        // Null-body response (never had a body): empty stream, bodyUsed stays
+        // false, callable repeatedly.
+        if p.resp.is_none() && p.synthetic_body.is_none() && p.ctor_stream.is_none() {
+            None
+        } else {
+            let src = if p.cached_body.is_some() && !p.body_consumed {
+                p.cached_body.take().map(BodySource::Stream)
+            } else {
+                p.ensure_cached_body().ok()
+            };
+            p.body_consumed = true;
+            Some(src)
+        }
+    };
+    match source {
+        Some(Some(src)) => text_stream_from_source(ctx, src),
+        Some(None) => Err(ctx.throw_internal_error("failed to obtain body")),
+        None => text_stream_from_source(ctx, BodySource::Synthetic(Vec::new())),
     }
 }
 
@@ -938,7 +972,8 @@ fn js_response_clone(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         status: src.status,
         status_text: src.status_text.clone(),
         content_type: src.content_type.clone(),
-        headers: src.headers.clone(),
+        // A cloned response owns an independent header set, not the shared one.
+        headers: Rc::new(RefCell::new(src.headers.borrow().clone())),
         headers_obj: None,
         headers_guard: src.headers_guard,
         content_length: src.content_length,
@@ -995,6 +1030,7 @@ const RESPONSE_PROTO: &[FieldDef] = &[
     FieldDef::FUNC("arrayBuffer", 0, js_response_body_as, BODY_AS_BYTES as i16),
     FieldDef::FUNC("blob", 0, js_response_body_as, BODY_AS_BLOB as i16),
     FieldDef::FUNC("formData", 0, js_response_form_data, 0),
+    FieldDef::FUNC("textStream", 0, js_response_text_stream, 0),
     FieldDef::FUNC("clone", 0, js_response_clone, 0),
 ];
 

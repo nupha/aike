@@ -16,7 +16,8 @@ mod writable;
 pub(crate) use {
     readable::{
         JSReadableStream, JSReadableStreamDefaultController, JSReadableStreamDefaultReader,
-        readable_stream_from_bytes, readable_stream_from_channel,
+        readable_stream_from_bytes, readable_stream_from_channel, readable_stream_from_text,
+        readable_stream_from_text_channel,
     },
     transform::{JSTransformStream, JSTransformStreamDefaultController},
     writable::{

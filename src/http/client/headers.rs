@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use linkme::distributed_slice;
 use zuqe::{
     Array, CallContext, ClassCtorDef, ClassID, FieldDef, JSResult, JSValue, Runtime, ScopedContext,
@@ -239,43 +242,27 @@ fn is_cors_unsafe_byte(b: u8) -> bool {
 }
 
 pub(crate) struct HeadersPayload {
-    pub(crate) list: HeaderList,
+    /// Shared header storage. A `Request`/`Response` and its exposed `Headers`
+    /// object reference the same `Rc`, so mutations through either are visible
+    /// to both (per the Fetch spec, `request.headers` is the live header set).
+    pub(crate) list: Rc<RefCell<HeaderList>>,
     pub(crate) guard: Guard,
 }
 
 impl HeadersPayload {
-    /// A mutable, standalone header set (`new Headers()`, `Request.headers`).
+    /// A mutable, standalone header set (`new Headers()`).
     pub(crate) fn new(list: HeaderList) -> Self {
         HeadersPayload {
-            list,
+            list: Rc::new(RefCell::new(list)),
             guard: Guard::None,
         }
     }
 
-    /// Header set exposed by a `Response`: mutation throws `TypeError`.
-    pub(crate) fn immutable(list: HeaderList) -> Self {
-        HeadersPayload {
-            list,
-            guard: Guard::Immutable,
-        }
-    }
-
-    /// Header set of a `mode: "no-cors"` request: non-safelisted writes are
-    /// silently dropped.
-    pub(crate) fn no_cors(list: HeaderList) -> Self {
-        HeadersPayload {
-            list,
-            guard: Guard::RequestNoCors,
-        }
-    }
-
-    /// Header set of a normal `Response`: mutable except for forbidden
-    /// response headers.
-    pub(crate) fn response(list: HeaderList) -> Self {
-        HeadersPayload {
-            list,
-            guard: Guard::Response,
-        }
+    /// Wrap an existing shared header list. `Request.headers` / `Response.headers`
+    /// reference the payload's live `Rc`, so mutations through the exposed
+    /// `Headers` object are visible to body consumers (Fetch spec [SameObject]).
+    pub(crate) fn from_shared(list: Rc<RefCell<HeaderList>>, guard: Guard) -> Self {
+        HeadersPayload { list, guard }
     }
 }
 
@@ -312,7 +299,7 @@ pub(crate) fn header_list_from_js(
     val: &mut JSValue,
 ) -> Result<HeaderList, i32> {
     if let Some(h) = JSHeaders::payload_of(val) {
-        return Ok(h.list.clone());
+        return Ok(h.list.borrow().clone());
     }
     let mut list = HeaderList::new();
     // WebIDL: an omitted/`undefined` init means "no headers", but `null` is not
@@ -418,7 +405,7 @@ fn js_headers_append(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     // no-cors guard: the safelist test applies to the *combined* value that
     // append would produce, not just the new one.
     if guard == Guard::RequestNoCors {
-        let combined = match h.list.get(&name) {
+        let combined = match h.list.borrow().get(&name) {
             Some(existing) => format!("{existing}, {value}"),
             None => value.to_string(),
         };
@@ -426,7 +413,7 @@ fn js_headers_append(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             return Ok(JSValue::UNDEFINED);
         }
     }
-    h.list.append(&name, value);
+    h.list.borrow_mut().append(&name, value);
     Ok(JSValue::UNDEFINED)
 }
 
@@ -446,7 +433,7 @@ fn js_headers_delete(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     if guard == Guard::Response && is_forbidden_response_header(&name) {
         return Ok(JSValue::UNDEFINED);
     }
-    h.list.delete(&name);
+    h.list.borrow_mut().delete(&name);
     Ok(JSValue::UNDEFINED)
 }
 
@@ -462,7 +449,7 @@ fn js_headers_get(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         .to_string();
     check_header_name(ctx, &name)?;
 
-    match h.list.get(&name) {
+    match h.list.borrow().get(&name) {
         Some(v) => ctx
             .create_string_from_utf8(v.into_bytes())
             .map(JSValue::make_string),
@@ -480,7 +467,7 @@ fn js_headers_has(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         .encode_utf8(false)
         .to_string();
     check_header_name(ctx, &name)?;
-    Ok(JSValue::from(h.list.has(&name)))
+    Ok(JSValue::from(h.list.borrow().has(&name)))
 }
 
 fn js_headers_set(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -511,7 +498,7 @@ fn js_headers_set(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     if guard == Guard::RequestNoCors && !is_cors_safelisted(&name, value) {
         return Ok(JSValue::UNDEFINED);
     }
-    h.list.set(&name, value);
+    h.list.borrow_mut().set(&name, value);
     Ok(JSValue::UNDEFINED)
 }
 
@@ -527,9 +514,8 @@ fn values_iterator(ctx: &mut ScopedContext, values: Vec<JSValue>) -> JSResult {
 fn js_headers_keys(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let h = get_headers(ctx, &this)?;
-    let names: Vec<JSValue> = h
-        .list
-        .entries()
+    let entries = h.list.borrow().entries();
+    let names: Vec<JSValue> = entries
         .iter()
         .map(|(k, _)| {
             ctx.create_string_from_utf8(k.as_bytes().to_vec())
@@ -542,9 +528,8 @@ fn js_headers_keys(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 fn js_headers_values(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let h = get_headers(ctx, &this)?;
-    let vals: Vec<JSValue> = h
-        .list
-        .entries()
+    let entries = h.list.borrow().entries();
+    let vals: Vec<JSValue> = entries
         .iter()
         .map(|(_, v)| {
             ctx.create_string_from_utf8(v.as_bytes().to_vec())
@@ -557,8 +542,9 @@ fn js_headers_values(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 fn js_headers_entries(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let h = get_headers(ctx, &this)?;
+    let entries = h.list.borrow().entries();
     let mut pairs: Vec<JSValue> = Vec::new();
-    for (k, v) in h.list.entries() {
+    for (k, v) in entries {
         let k_js = ctx.create_string_from_utf8(k.as_bytes().to_vec())?;
         let v_js = ctx.create_string_from_utf8(v.as_bytes().to_vec())?;
         pairs.push(
@@ -584,7 +570,8 @@ fn js_headers_for_each(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     } else {
         JSValue::UNDEFINED
     };
-    for (k, v) in h.list.entries() {
+    let entries = h.list.borrow().entries();
+    for (k, v) in entries {
         let k_js = ctx.create_string_from_utf8(k.as_bytes().to_vec())?;
         let v_js = ctx.create_string_from_utf8(v.as_bytes().to_vec())?;
         cb.call(
@@ -602,6 +589,7 @@ fn js_headers_get_set_cookie(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
     let h = get_headers(ctx, &this)?;
     let cookies: Vec<JSValue> = h
         .list
+        .borrow()
         .get_all("set-cookie")
         .into_iter()
         .map(|v| {
@@ -617,8 +605,9 @@ fn js_headers_get_set_cookie(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
 fn js_headers_iterator(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let h = get_headers(ctx, &this)?;
+    let list_entries = h.list.borrow().entries();
     let mut entries: Vec<JSValue> = Vec::new();
-    for (k, v) in h.list.entries() {
+    for (k, v) in list_entries {
         let k_js = ctx.create_string_from_utf8(k.as_bytes().to_vec())?;
         let v_js = ctx.create_string_from_utf8(v.as_bytes().to_vec())?;
         let pair = Array::from_values(
