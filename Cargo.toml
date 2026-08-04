@@ -42,6 +42,14 @@ debug = true
 strip = "none"
 debug = true
 
+# The `http` crate's `HeaderValue::from_maybe_shared_unchecked` panics under
+# `debug_assertions` when given bytes it considers invalid (e.g. control chars
+# like 0x01 that the Fetch spec permits in header values). Build `http` without
+# debug-assertions so we can send those values verbatim (see transport.rs).
+[profile.dev.package."http"]
+opt-level = 3
+debug-assertions = false
+
 [dependencies]
 zuqe = { path = "../../../devel/zhuque", features = [
     "crossbeam_channel",

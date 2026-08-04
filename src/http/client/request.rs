@@ -18,10 +18,13 @@ use crate::{
             blob_type_from_header, body_content_type, body_to_bytes, drain_body,
             text_stream_from_source,
         },
-        headers::{Guard, HeaderList, HeadersPayload, JSHeaders, header_list_from_js},
+        headers::{
+            Guard, HeaderList, HeadersPayload, JSHeaders, header_list_from_js,
+            validate_header_list_for_fetch,
+        },
     },
     whatwg::{
-        abort::{JSAbortSignal, make_default_signal, signal_attach_follower},
+        abort::{JSAbortSignal, make_default_signal, signal_attach_follower, signal_reason},
         stream::{
             JSReadableStream, make_rejected_promise, readable_stream_from_bytes,
             readable_stream_from_channel,
@@ -49,7 +52,7 @@ pub(crate) struct RequestPayload {
     pub(crate) body_consumed: bool,
 }
 
-fn get_request_payload_mut<'a>(
+pub(crate) fn get_request_payload_mut<'a>(
     ctx: &mut ScopedContext,
     val: &'a mut JSValue,
 ) -> Result<&'a mut RequestPayload, i32> {
@@ -167,6 +170,11 @@ fn js_request_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
         }
     }
 
+    // Validate header names/values per the Fetch spec. Must run on the JS
+    // thread so a violation throws a `TypeError` synchronously (WPT expects
+    // `promise_rejects_js(t, TypeError, ...)`).
+    validate_header_list_for_fetch(ctx, &header_list)?;
+
     // WHATWG: `request.signal` is a fresh "follow" signal that follows the
     // supplied signal (`request.signal !== signal`), and is never the same
     // object. If no signal is supplied, create a default non-aborted signal so
@@ -174,7 +182,7 @@ fn js_request_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
     let signal = match signal {
         Some(parent) => {
             let child = make_default_signal(ctx)?;
-            signal_attach_follower(&parent, &child);
+            signal_attach_follower(ctx, &parent, &child);
             Some(child)
         }
         None => Some(make_default_signal(ctx)?),
@@ -328,7 +336,8 @@ fn js_req_body(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                     }
                 }
             });
-            readable_stream_from_channel(ctx, rx2)
+
+            readable_stream_from_channel(ctx, rx2, None)
         }
         Some(BodySource::Synthetic(bytes)) => readable_stream_from_bytes(ctx, bytes),
         // Request bodies are always buffered, never a live stream.
@@ -340,8 +349,16 @@ fn js_req_body(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 /// Body read methods for Request (bytes, text, json, arrayBuffer).
 fn js_req_body_as(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let magic = cc.magic();
-
     let mut this = cc.this();
+
+    // Spec (Fetch): consuming a body whose signal is already aborted must
+    // reject with the signal's reason (e.g. an "AbortError"), not resolve.
+    if let Some(sig) = get_request_payload(ctx, &this)?.signal.as_ref()
+        && let Some(reason) = signal_reason(sig)
+    {
+        return make_rejected_promise(ctx, reason);
+    }
+
     let source = {
         let p = get_request_payload_mut(ctx, &mut this)?;
         if p.body_consumed {
@@ -426,6 +443,18 @@ fn js_req_clone(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         return Err(ctx.throw_type_error("Cannot clone a Request whose body has already been used"));
     }
 
+    // WHATWG: a cloned Request gets its own "follow" signal that tracks the
+    // original. `clone.signal` must be a distinct object from `request.signal`,
+    // and aborting the original controller must abort the clone's signal too.
+    let signal = match src.signal {
+        Some(parent) => {
+            let child = make_default_signal(ctx)?;
+            signal_attach_follower(ctx, &parent, &child);
+            Some(child)
+        }
+        None => None,
+    };
+
     let payload = RequestPayload {
         method: src.method.clone(),
         url: src.url.clone(),
@@ -440,7 +469,7 @@ fn js_req_clone(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         redirect: src.redirect.clone(),
         integrity: src.integrity.clone(),
         keepalive: src.keepalive,
-        signal: src.signal,
+        signal,
         synthetic_body: src.synthetic_body.clone(),
         stream_body: src.stream_body,
         body_consumed: false,

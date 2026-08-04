@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
+use std::error::Error as _;
 use std::time::Duration;
 
 use base64::Engine;
@@ -188,26 +189,22 @@ fn classify(e: &reqwest::Error) -> &'static str {
     "other"
 }
 
-/// Encode a header value as latin-1 bytes.
-///
-/// Fetch validates header values per byte (0x00-0xFF), so a value carrying
-/// e.g. `æ` means the byte 0xE6, not its two-byte UTF-8 encoding. Returns
-/// `None` when the value is plain ASCII (the common case, where the default
-/// `&str` conversion already does the right thing) or when it contains a
-/// non-latin-1 char that cannot be represented.
-fn latin1_header_value(v: &str) -> Option<reqwest::header::HeaderValue> {
-    if v.is_ascii() {
-        return None;
+/// Fetch spec: strip leading/trailing HTTP whitespace (0x09/0x0A/0x0D/0x20)
+/// from a header value before it hits the wire. Other C0 controls are left
+/// intact (the fetch-side validation already rejects NUL/LF/CR).
+fn strip_header_value_ws(value: &str) -> &str {
+    // Only the four HTTP whitespace code points are trimmed, NOT all Unicode
+    // whitespace (which `str::trim` would also remove).
+    let bytes = value.as_bytes();
+    let mut start = 0;
+    let mut end = bytes.len();
+    while start < end && matches!(bytes[start], 0x09 | 0x0A | 0x0D | 0x20) {
+        start += 1;
     }
-    let mut bytes = Vec::with_capacity(v.len());
-    for c in v.chars() {
-        let cp = c as u32;
-        if cp > 0xFF {
-            return None;
-        }
-        bytes.push(cp as u8);
+    while end > start && matches!(bytes[end - 1], 0x09 | 0x0A | 0x0D | 0x20) {
+        end -= 1;
     }
-    reqwest::header::HeaderValue::from_bytes(&bytes).ok()
+    &value[start..end]
 }
 
 /// Map `reqwest::Version` to a short version string.
@@ -363,11 +360,27 @@ pub(crate) async fn perform_request(
         }
 
         for (k, v) in &headers {
-            match latin1_header_value(v) {
-                Some(hv) => rb = rb.header(k, hv),
-                None => rb = rb.header(k, v),
-            }
+            // Fetch spec: strip leading/trailing HTTP whitespace (0x09/0x0A/
+            // 0x0D/0x20) from header values before they hit the wire.
+            let v = strip_header_value_ws(v);
+
+            // Header values are latin-1 strings (validated in JS). Encode to raw
+            // bytes and bypass the http crate's validation so control characters
+            // permitted by the Fetch spec (e.g. 0x01) are sent verbatim, matching
+            // WPT header-values-normalize expectations. Requires the `http` crate
+            // to be compiled without debug-assertions (see aike/Cargo.toml) so
+            // `from_maybe_shared_unchecked` skips its UTF-8/byte validity check.
+            let bytes: Vec<u8> = v
+                .chars()
+                .filter_map(|c| {
+                    let cp = c as u32;
+                    if cp <= 0xFF { Some(cp as u8) } else { None }
+                })
+                .collect();
+            let hv = unsafe { reqwest::header::HeaderValue::from_maybe_shared_unchecked(bytes) };
+            rb = rb.header(k, hv);
         }
+
         if let Some(b) = &req.body {
             rb = rb.body(b.clone());
         }
@@ -395,9 +408,17 @@ pub(crate) async fn perform_request(
         Some(rc) => follow_redirects(rc, &req.url, &req.referrer, send_with_retry).await?,
         None => send_with_retry(req.url.clone(), req.referrer.clone())
             .await
-            .map_err(|e| TransportError {
-                code: classify(&e),
-                message: format!("request failed: {e}"),
+            .map_err(|e| {
+                let mut msg = format!("request failed: {e}");
+                let mut src = e.source();
+                while let Some(s) = src {
+                    msg.push_str(&format!("; caused by: {s}"));
+                    src = s.source();
+                }
+                TransportError {
+                    code: classify(&e),
+                    message: msg,
+                }
             })?,
     };
 

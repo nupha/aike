@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-use std::cell::RefCell;
-use std::rc::Rc;
+use std::{cell::RefCell, rc::Rc};
 
 use linkme::distributed_slice;
 use zuqe::{
-    Array, CallContext, ClassCtorDef, ClassID, FieldDef, JSResult, JSValue, Runtime, ScopedContext,
-    def_native_object,
+    Array, Atom, CallContext, ClassCtorDef, ClassID, FieldDef, JS_CLASS_ITERATOR, JS_PROP_C_W_E,
+    JSIteratorKindEnum, JSResult, JSValue, Object, Runtime, ScopedContext, def_native_object,
+    gc_lite::{GcTrace, GcTraceCtx},
 };
 
 use crate::USER_CLASS_DEFS;
@@ -15,119 +15,150 @@ use crate::USER_CLASS_DEFS;
 /// Case-insensitive header storage. Names keep their original casing; lookups
 /// are case-insensitive per the Fetch/HTTP spec.
 ///
-/// `Set-Cookie` values are stored separately because they MUST NOT be
-/// comma-joined per the Fetch/HTTP spec (unlike all other headers).
+/// `Set-Cookie` values are kept in the same list (as separate, non-merged
+/// entries) because they MUST NOT be comma-joined per the Fetch/HTTP spec.
+///
+/// The list is kept **sorted by lowercased header name** at all times (stable
+/// sort: repeated `Set-Cookie` values keep their insertion order). This matches
+/// the WHATWG Headers iteration/serialization order, and lets the live iterator
+/// walk a single sorted `Vec` with a plain advancing index — deletions shift
+/// later entries left (skipping one), appends at the sorted position either
+/// re-yield a shifted entry or get reached at the end.
 #[derive(Clone, Default)]
 pub(crate) struct HeaderList {
     list: Vec<(String, String)>,
-    /// Separate storage for `Set-Cookie` values (never comma-merged).
-    set_cookies: Vec<String>,
 }
 
 impl HeaderList {
     pub(crate) fn new() -> Self {
-        HeaderList {
-            list: Vec::new(),
-            set_cookies: Vec::new(),
-        }
+        HeaderList { list: Vec::new() }
     }
 
     pub(crate) fn from_vec(v: Vec<(String, String)>) -> Self {
         let mut h = HeaderList::new();
         for (name, value) in v {
-            if name.eq_ignore_ascii_case("set-cookie") {
-                h.set_cookies.push(value);
-            } else {
-                h.list.push((name, value));
-            }
+            h.append(&name, &value);
         }
         h
     }
 
+    pub(crate) fn len(&self) -> usize {
+        self.list.len()
+    }
+
+    /// Clone the entry at `i` (used by the live iterator).
+    pub(crate) fn get_at(&self, i: usize) -> (String, String) {
+        self.list[i].clone()
+    }
+
+    /// First index at which a new entry with `name` should be inserted to keep
+    /// the list sorted by lowercased name. For duplicate names (e.g. repeated
+    /// `Set-Cookie`), this lands *after* the existing same-name block, so the
+    /// duplicates stay contiguous and insertion-ordered.
+    fn sorted_insert_index(&self, name: &str) -> usize {
+        let lower = name.to_lowercase();
+        self.list
+            .iter()
+            .position(|(k, _)| k.to_lowercase() > lower)
+            .unwrap_or(self.list.len())
+    }
+
+    /// Strip leading/trailing HTTP whitespace (0x09/0x0A/0x0D/0x20) from a header
+    /// value. This is the Fetch "header value" normalization applied at storage
+    /// time; other C0 controls are left intact (the transport/fetch layer rejects
+    /// the forbidden NUL/LF/CR ones).
+    fn normalize_header_value(value: &str) -> String {
+        let bytes = value.as_bytes();
+        let mut start = 0;
+        let mut end = bytes.len();
+        while start < end && matches!(bytes[start], 0x09 | 0x0A | 0x0D | 0x20) {
+            start += 1;
+        }
+        while end > start && matches!(bytes[end - 1], 0x09 | 0x0A | 0x0D | 0x20) {
+            end -= 1;
+        }
+        value[start..end].to_string()
+    }
+
     /// Append a value, combining with any existing same-name (case-insensitive)
     /// header as a comma-separated list. `Set-Cookie` is an exception — values
-    /// are stored individually and never comma-merged.
+    /// are stored individually (never comma-merged) and kept sorted in place.
     pub(crate) fn append(&mut self, name: &str, value: &str) {
-        if name.eq_ignore_ascii_case("set-cookie") {
-            self.set_cookies.push(value.to_string());
-            return;
-        }
-        let lower = name.to_lowercase();
-        if let Some(pos) = self
-            .list
-            .iter()
-            .position(|(k, _)| k.to_lowercase() == lower)
-        {
-            self.list[pos].1.push_str(", ");
-            self.list[pos].1.push_str(value);
+        // Header names are normalized to lowercase on storage (Fetch spec).
+        let key = name.to_lowercase();
+        let value = Self::normalize_header_value(value);
+        if let Some(pos) = self.list.iter().position(|(k, _)| *k == key) {
+            if key == "set-cookie" {
+                // `Set-Cookie` never comma-merges; insert a new separate entry
+                // right after the existing `Set-Cookie` block.
+                self.list
+                    .insert(self.sorted_insert_index(&key), (key, value));
+            } else {
+                self.list[pos].1.push_str(", ");
+                self.list[pos].1.push_str(&value);
+            }
         } else {
-            self.list.push((name.to_string(), value.to_string()));
+            let idx = self.sorted_insert_index(&key);
+            self.list.insert(idx, (key, value));
         }
     }
 
     /// Set a value, replacing any existing same-name header.
     /// For `Set-Cookie`, replaces all existing values with a single entry.
     pub(crate) fn set(&mut self, name: &str, value: &str) {
-        if name.eq_ignore_ascii_case("set-cookie") {
-            self.set_cookies.clear();
-            self.set_cookies.push(value.to_string());
-            return;
-        }
-        let lower = name.to_lowercase();
-        self.list.retain(|(k, _)| k.to_lowercase() != lower);
-        self.list.push((name.to_string(), value.to_string()));
+        let key = name.to_lowercase();
+        let lower = key.clone();
+        let value = Self::normalize_header_value(value);
+        self.list.retain(|(k, _)| *k != lower);
+        let idx = self.sorted_insert_index(&key);
+        self.list.insert(idx, (key, value));
     }
 
     pub(crate) fn delete(&mut self, name: &str) {
-        if name.eq_ignore_ascii_case("set-cookie") {
-            self.set_cookies.clear();
-            return;
-        }
         let lower = name.to_lowercase();
         self.list.retain(|(k, _)| k.to_lowercase() != lower);
     }
 
     pub(crate) fn get(&self, name: &str) -> Option<String> {
-        if name.eq_ignore_ascii_case("set-cookie") {
-            if self.set_cookies.is_empty() {
-                return None;
-            }
-            return Some(self.set_cookies.join(", "));
-        }
         let lower = name.to_lowercase();
-        self.list
+        let values: Vec<&str> = self
+            .list
             .iter()
-            .find(|(k, _)| k.to_lowercase() == lower)
-            .map(|(_, v)| v.clone())
+            .filter(|(k, _)| lower.eq(k))
+            .map(|(_, v)| v.as_str())
+            .collect();
+
+        if values.is_empty() {
+            return None;
+        }
+        // `Set-Cookie` is returned as a comma-joined combination of all its
+        // individual values (per the Fetch spec `get()` semantics).
+        if lower == "set-cookie" {
+            Some(values.join(", "))
+        } else {
+            Some(values.join(", "))
+        }
     }
 
     pub(crate) fn has(&self, name: &str) -> bool {
         if name.eq_ignore_ascii_case("set-cookie") {
-            return !self.set_cookies.is_empty();
+            return self
+                .list
+                .iter()
+                .any(|(k, _)| k.to_lowercase() == "set-cookie");
         }
         let lower = name.to_lowercase();
         self.list.iter().any(|(k, _)| k.to_lowercase() == lower)
     }
 
-    /// Entries as exposed to JS: sorted by lowercased name, per the WHATWG
-    /// "sort and combine" algorithm. Multiple `Set-Cookie` values keep their
-    /// relative insertion order (the sort is stable).
+    /// Entries as exposed to JS: sorted by lowercased name. The list is already
+    /// kept sorted, so this is a straight clone.
     pub(crate) fn entries(&self) -> Vec<(String, String)> {
-        let mut out: Vec<(String, String)> = self
-            .to_vec()
-            .into_iter()
-            .map(|(k, v)| (k.to_lowercase(), v))
-            .collect();
-        // Stable sort keeps the relative order of repeated `Set-Cookie` values.
-        out.sort_by(|(a, _), (b, _)| a.cmp(b));
-        out
+        self.list.clone()
     }
 
     /// Get all values for a given header name (case-insensitive).
     pub(crate) fn get_all(&self, name: &str) -> Vec<String> {
-        if name.eq_ignore_ascii_case("set-cookie") {
-            return self.set_cookies.clone();
-        }
         let lower = name.to_lowercase();
         self.list
             .iter()
@@ -137,11 +168,7 @@ impl HeaderList {
     }
 
     pub(crate) fn to_vec(&self) -> Vec<(String, String)> {
-        let mut out = self.list.clone();
-        for v in &self.set_cookies {
-            out.push(("set-cookie".to_string(), v.clone()));
-        }
-        out
+        self.list.clone()
     }
 }
 
@@ -156,14 +183,13 @@ fn is_valid_header_name(name: &str) -> bool {
         })
 }
 
-/// WHATWG valid header value: a *byte* sequence containing no NUL, CR or LF.
-/// Other control characters (notably TAB) are legal. Code points above U+00FF
-/// cannot be represented as a header byte at all, so they are rejected too
-/// (the JS string is a sequence of bytes, not UTF-8, at this layer).
+/// WHATWG valid header value at the *Headers* layer: the value must be a
+/// sequence of code points whose code units are all ≤ U+00FF (i.e. it can be
+/// represented as a byte sequence). Code points above U+00FF (e.g. "\uFFFF")
+/// are rejected here; control characters (including NUL/LF/CR) are accepted and
+/// only normalized/rejected later, when a request is actually built.
 fn is_valid_header_value(value: &str) -> bool {
-    value
-        .chars()
-        .all(|c| !matches!(c, '\0' | '\r' | '\n') && (c as u32) <= 0xFF)
+    value.chars().all(|c| (c as u32) <= 0xFF)
 }
 
 /// WHATWG "normalize a header value": strip leading/trailing HTTP whitespace
@@ -182,6 +208,46 @@ fn check_header_name(ctx: &mut ScopedContext, name: &str) -> JSResult {
 fn check_header_value(ctx: &mut ScopedContext, value: &str) -> JSResult {
     if !is_valid_header_value(value) {
         return Err(ctx.throw_type_error("Invalid header value"));
+    }
+    Ok(JSValue::UNDEFINED)
+}
+
+/// Validate a header list per the Fetch spec before a `Request`/`fetch` is
+/// built. Must be called on the JS thread so failures reject with a `TypeError`
+/// (not an async transport error):
+/// - header names must be valid `tchar` sequences;
+/// - header values must not contain NUL/LF/CR (RFC 7230 / Fetch) after
+///   leading/trailing HTTP whitespace is stripped (the engine sends the value
+///   literally, so control chars other than those three are left to the
+///   transport layer).
+pub(crate) fn validate_header_list_for_fetch(
+    ctx: &mut ScopedContext,
+    list: &HeaderList,
+) -> JSResult {
+    for (name, value) in &list.list {
+        check_header_name(ctx, name)?;
+        let norm = normalize_header_value(value);
+        if norm.contains('\u{0000}') || norm.contains('\u{000a}') || norm.contains('\u{000d}') {
+            return Err(ctx.throw_type_error(&format!(
+                "Invalid header value: {} contains forbidden character",
+                name
+            )));
+        }
+        if !is_valid_header_value(norm) {
+            return Err(ctx.throw_type_error("Invalid header value"));
+        }
+    }
+    Ok(JSValue::UNDEFINED)
+}
+
+/// `Set-Cookie` values are normalized then validated at *storage* time: a value
+/// containing a NUL/LF/CR (the only bytes forbidden in a cookie-pair) must throw
+/// a `TypeError` immediately (WPT `header-setcookie` expects this on
+/// construction, `append`, and `set`).
+fn check_set_cookie_value(ctx: &mut ScopedContext, value: &str) -> JSResult {
+    let norm = normalize_header_value(value);
+    if norm.contains('\u{0000}') || norm.contains('\u{000a}') || norm.contains('\u{000d}') {
+        return Err(ctx.throw_type_error("Invalid Set-Cookie value: contains forbidden character"));
     }
     Ok(JSValue::UNDEFINED)
 }
@@ -212,10 +278,10 @@ fn is_cors_safelisted(name: &str, value: &str) -> bool {
     let lower = name.to_lowercase();
     match lower.as_str() {
         "accept" => !value.bytes().any(is_cors_unsafe_byte),
-        "accept-language" | "content-language" => value
-            .bytes()
-            .all(|b| matches!(b, b'0'..=b'9' | b'A'..=b'Z' | b'a'..=b'z'
-                | b' ' | b'*' | b',' | b'-' | b'.' | b';' | b'=')),
+        "accept-language" | "content-language" => value.bytes().all(|b| {
+            matches!(b, b'0'..=b'9' | b'A'..=b'Z' | b'a'..=b'z'
+                | b' ' | b'*' | b',' | b'-' | b'.' | b';' | b'=')
+        }),
         "content-type" => {
             if value.bytes().any(is_cors_unsafe_byte) {
                 return false;
@@ -236,8 +302,19 @@ fn is_cors_unsafe_byte(b: u8) -> bool {
     b < 0x20 && b != b'\t'
         || matches!(
             b,
-            b'"' | b'(' | b')' | b':' | b'<' | b'>' | b'?' | b'@' | b'[' | b'\\' | b']'
-                | b'{' | b'}' | 0x7F
+            b'"' | b'('
+                | b')'
+                | b':'
+                | b'<'
+                | b'>'
+                | b'?'
+                | b'@'
+                | b'['
+                | b'\\'
+                | b']'
+                | b'{'
+                | b'}'
+                | 0x7F
         )
 }
 
@@ -292,79 +369,134 @@ fn get_headers_mut<'a>(
     JSHeaders::payload_mut_of(val).ok_or_else(|| ctx.throw_type_error("not a Headers instance"))
 }
 
-/// Build a `HeaderList` from a JS init: a Headers instance, an array of
-/// `[name, value]` pairs, or a plain record object.
+/// Build a `HeaderList` from a JS init. WebIDL `HeadersInit` is one of:
+/// - `undefined` / omitted → empty list;
+/// - `null` → type error;
+/// - any value exposing `[Symbol.iterator]` → a *sequence* of `[name, value]`
+///   pairs (this also covers `Headers` instances and monkeypatched iterators);
+/// - any other object → a *record* (own enumerable string/integer keys).
 pub(crate) fn header_list_from_js(
     ctx: &mut ScopedContext,
     val: &mut JSValue,
 ) -> Result<HeaderList, i32> {
-    if let Some(h) = JSHeaders::payload_of(val) {
-        return Ok(h.list.borrow().clone());
-    }
     let mut list = HeaderList::new();
-    // WebIDL: an omitted/`undefined` init means "no headers", but `null` is not
-    // a valid `HeadersInit` and must be rejected.
+    // An omitted/`undefined` init means "no headers".
     if val.is_undefined() {
         return Ok(list);
     }
     if val.is_null() {
         return Err(ctx.throw_type_error("Headers init must not be null"));
     }
-    if let Some(mut obj) = val.as_object() {
-        let pks =
-            obj.get_own_property_names(ctx, zuqe::JS_GPN_ENUM_ONLY | zuqe::JS_GPN_STR_OR_INT_MASK)?;
-        for pk in pks.iter() {
-            let elem = obj.get_property(ctx, pk.atom)?;
-            if elem.is_array(ctx)? {
-                // A sequence init entry must be exactly a [name, value] pair.
-                let len = elem
-                    .get_property_str(ctx, "length")?
-                    .to_number(ctx)?
-                    .to_i32();
-                if len != 2 {
-                    return Err(ctx.throw_type_error(
-                        "Headers init sequence entry must contain exactly two items",
-                    ));
-                }
-                let name = elem
-                    .get_property_str(ctx, "0")?
-                    .to_string(ctx)?
-                    .content()
-                    .encode_utf8(false)
-                    .to_string();
-                let value = elem
-                    .get_property_str(ctx, "1")?
-                    .to_string(ctx)?
-                    .content()
-                    .encode_utf8(false)
-                    .to_string();
-                check_header_name(ctx, &name)?;
-                let value = normalize_header_value(&value);
-                check_header_value(ctx, value)?;
-                list.append(&name, value);
-            } else {
-                let key = pk
-                    .atom
-                    .to_value(ctx)?
-                    .to_string(ctx)?
-                    .content()
-                    .encode_utf8(false)
-                    .to_string();
-                let value = elem
-                    .to_string(ctx)?
-                    .content()
-                    .encode_utf8(false)
-                    .to_string();
-                check_header_name(ctx, &key)?;
-                let value = normalize_header_value(&value);
-                check_header_value(ctx, value)?;
-                list.append(&key, value);
+    let Some(mut obj) = val.as_object() else {
+        return Err(ctx.throw_type_error(
+            "Headers init must be a record, a sequence of name/value pairs, a Headers object, or undefined",
+        ));
+    };
+
+    // Sequence path: anything with a callable [Symbol.iterator].
+    let iter_method = obj.get_property(ctx, Atom::CONST_Symbol_iterator)?;
+    if iter_method.is_callable() {
+        let iter_fn = iter_method.ensure_callable(ctx)?;
+        let iterator = iter_fn.call(ctx, obj.into(), &[])?;
+        loop {
+            let next_fn = iterator.get_property_str(ctx, "next")?;
+            if !next_fn.is_callable() {
+                return Err(ctx.throw_type_error("Header init iterator has no next()"));
             }
+            let next = next_fn.ensure_callable(ctx)?;
+            let result = next.call(ctx, iterator, &[])?;
+            if result.get_property_str(ctx, "done")?.to_bool()? {
+                break;
+            }
+            let pair = result.get_property_str(ctx, "value")?;
+            if !pair.is_array(ctx)? {
+                return Err(ctx.throw_type_error("Each header entry must be a [name, value] pair"));
+            }
+            // A header entry must be a `[name, value]` tuple of exactly two
+            // items. Fewer (e.g. `["name"]`) or more (e.g. `["a", "b", "c"]`)
+            // elements are rejected per the Fetch spec (WPT headers-errors).
+            let pair_len = pair.get_property_str(ctx, "length")?.to_number(ctx)?.to_i32();
+            if pair_len != 2 {
+                return Err(ctx.throw_type_error(
+                    "Each header entry must be a [name, value] pair of exactly two elements",
+                ));
+            }
+            let name = pair
+                .get_property_str(ctx, "0")?
+                .to_string(ctx)?
+                .content()
+                .encode_utf8(false)
+                .to_string();
+            let value_v = pair.get_property_str(ctx, "1")?;
+            // Sequence values are coerced to ByteString like record values
+            // (null/undefined/numbers become "null"/"undefined"/"1"); they are
+            // not rejected.
+            let value = value_v
+                .to_string(ctx)?
+                .content()
+                .encode_utf8(false)
+                .to_string();
+            check_header_name(ctx, &name)?;
+            check_header_value(ctx, &value)?;
+            if name.eq_ignore_ascii_case("set-cookie") {
+                check_set_cookie_value(ctx, &value)?;
+            }
+            list.append(&name, &value);
         }
-        Ok(list)
-    } else {
-        Err(ctx.throw_type_error("invalid Headers init"))
+        return Ok(list);
     }
+
+    // Record path — mirrors the WHATWG `es-to-record` algorithm exactly:
+    //   4. [[OwnPropertyKeys]]  → `ownKeys` trap   (get_own_property_names)
+    //   5. for each key:
+    //     5.1 [[GetOwnProperty]] → `getOwnPropertyDescriptor` trap (get_own_property)
+    //         if absent or non-enumerable → skip
+    //         convert key to ByteString (header name): a Symbol key cannot be
+    //         converted → TypeError; an invalid name → TypeError
+    //     5.2 [[Get]]            → `get` trap (get_property)
+    //         convert value to ByteString: invalid value → TypeError
+    // We include Symbol keys in the enumeration (JS_GPN_SYMBOL_MASK) so that the
+    // spec's mandatory Symbol→ByteString conversion failure is observed, and we
+    // deliberately omit JS_GPN_ENUM_ONLY so the engine doesn't call
+    // `getOwnPropertyDescriptor` a second time (which would double-fire the trap).
+    let pks =
+        obj.get_own_property_names(ctx, zuqe::JS_GPN_STR_OR_INT_MASK | zuqe::JS_GPN_SYMBOL_MASK)?;
+    for pk in pks.iter() {
+        // [[GetOwnProperty]] — the `getOwnPropertyDescriptor` trap (step 5.1).
+        let Some(desc) = obj.get_own_property(ctx, pk.atom)? else {
+            continue;
+        };
+        if desc.flags & zuqe::JS_PROP_ENUMERABLE == 0 {
+            continue; // skip non-enumerable own properties
+        }
+        // Convert the *key* to a ByteString (header name) before the [[Get]].
+        // A Symbol key cannot be stringified → TypeError (per es-to-record).
+        let key_atom_val = pk.atom.to_value(ctx)?;
+        if key_atom_val.is_symbol() {
+            return Err(ctx.throw_type_error("Header name must not be a symbol"));
+        }
+        let key = key_atom_val
+            .to_string(ctx)?
+            .content()
+            .encode_utf8(false)
+            .to_string();
+        check_header_name(ctx, &key)?;
+        // [[Get]] — the `get` trap (step 5.2).
+        let value_v = obj.get_property(ctx, pk.atom)?;
+        // Record values are coerced to ByteString; `null`/`undefined`/`1` become
+        // "null"/"undefined"/"1" rather than being skipped.
+        let value = value_v
+            .to_string(ctx)?
+            .content()
+            .encode_utf8(false)
+            .to_string();
+        check_header_value(ctx, &value)?;
+        if key.eq_ignore_ascii_case("set-cookie") {
+            check_set_cookie_value(ctx, &value)?;
+        }
+        list.append(&key, &value);
+    }
+    Ok(list)
 }
 
 fn js_headers_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -396,8 +528,11 @@ fn js_headers_append(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         .encode_utf8(false)
         .to_string();
     check_header_name(ctx, &name)?;
-    let value = normalize_header_value(&value);
-    check_header_value(ctx, value)?;
+    check_header_value(ctx, &value)?;
+    // `Set-Cookie` values are validated at storage time (NUL/LF/CR are rejected).
+    if name.eq_ignore_ascii_case("set-cookie") {
+        check_set_cookie_value(ctx, &value)?;
+    }
     // response guard: forbidden response headers are silently dropped.
     if guard == Guard::Response && is_forbidden_response_header(&name) {
         return Ok(JSValue::UNDEFINED);
@@ -413,7 +548,7 @@ fn js_headers_append(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             return Ok(JSValue::UNDEFINED);
         }
     }
-    h.list.borrow_mut().append(&name, value);
+    h.list.borrow_mut().append(&name, &value);
     Ok(JSValue::UNDEFINED)
 }
 
@@ -488,74 +623,151 @@ fn js_headers_set(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         .encode_utf8(false)
         .to_string();
     check_header_name(ctx, &name)?;
-    let value = normalize_header_value(&value);
-    check_header_value(ctx, value)?;
+    check_header_value(ctx, &value)?;
+    // `Set-Cookie` values are validated at storage time (NUL/LF/CR are rejected).
+    if name.eq_ignore_ascii_case("set-cookie") {
+        check_set_cookie_value(ctx, &value)?;
+    }
     // response guard: forbidden response headers are silently dropped.
     if guard == Guard::Response && is_forbidden_response_header(&name) {
         return Ok(JSValue::UNDEFINED);
     }
     // no-cors guard: drop writes that are not CORS-safelisted.
-    if guard == Guard::RequestNoCors && !is_cors_safelisted(&name, value) {
+    if guard == Guard::RequestNoCors && !is_cors_safelisted(&name, &value) {
         return Ok(JSValue::UNDEFINED);
     }
-    h.list.borrow_mut().set(&name, value);
+    h.list.borrow_mut().set(&name, &value);
     Ok(JSValue::UNDEFINED)
 }
 
 /// `keys()`/`values()`/`entries()` must return an iterator, not an array.
-/// Snapshot the values into an array and hand back its array iterator.
-fn values_iterator(ctx: &mut ScopedContext, values: Vec<JSValue>) -> JSResult {
-    let arr = Array::from_values(ctx, values)?;
-    let iter_fn = arr.get_property_str(ctx, "[Symbol.iterator]")?;
-    let cb = iter_fn.ensure_callable(ctx)?;
-    cb.call(ctx, arr.into(), &[])
+/// Live iterator over a `Headers` object's header list. Behaves like the
+/// WHATWG header-list iterator: it holds a *live index* into the header list
+/// (which is kept sorted). Each `next()` yields `list[index]` and advances the
+/// index. Because the underlying list is shared and mutable, deletions shift
+/// subsequent entries left (so one gets skipped) and insertions at the sorted
+/// position may shift entries right (re-yielded) or append at the end
+/// (reached) — matching the Fetch spec's iteration semantics.
+#[derive(Debug)]
+pub struct HeaderListIter {
+    pub obj: Object,
+    pub index: u32,
+    pub kind: JSIteratorKindEnum,
+}
+impl HeaderListIter {
+    pub fn new(obj: Object, kind: JSIteratorKindEnum) -> Self {
+        HeaderListIter {
+            obj,
+            index: 0,
+            kind,
+        }
+    }
+}
+
+const HEADER_ITER_PROTO: &[FieldDef] = &[
+    // `next` must be enumerable (WPT `checkIteratorProperties` requires a writable
+    // + configurable + enumerable `next`). We expose it as a normal method that
+    // returns a `{value, done}` record; the engine's generic iteration path
+    // (apply_next NotParsed) reads `.value`/`.done` from the result.
+    FieldDef::FUNC_ENUM("next", 0, js_headers_iterator_next, 0),
+    FieldDef::FUNC("[Symbol.iterator]", 0, js_headers_iterator_self, 0),
+];
+
+fn js_headers_iterator_self(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    Ok(cc.this())
+}
+
+fn js_headers_iterator_ctor(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
+    Ok(JSValue::UNDEFINED)
+}
+
+def_native_object!(
+    "Headers Iterator",
+    HeaderListIterator,
+    HeaderListIter,
+    HEADER_ITER_PROTO,
+    Some(ClassCtorDef::new(js_headers_iterator_ctor, 0, false)),
+    extends: || JS_CLASS_ITERATOR,
+    on_payload_gc: |p: &HeaderListIter, gcx: &mut GcTraceCtx| {
+        p.obj.trace(gcx);
+    }
+);
+
+/// Build a `{value, done}` iterator result object.
+fn make_iter_result(ctx: &mut ScopedContext, value: JSValue, done: bool) -> JSResult {
+    let mut obj = ctx.create_base_object()?;
+    obj.define_property_value(ctx, Atom::CONST_value, value, JS_PROP_C_W_E)?;
+    obj.define_property_value(ctx, Atom::CONST_done, JSValue::from(done), JS_PROP_C_W_E)?;
+    Ok(obj.into())
+}
+
+fn js_headers_iterator_next(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let this = cc.this();
+    let obj = this.as_object().ok_or_else(|| -1)?;
+    let mut wrapper = HeaderListIterator(obj);
+    let it = HeaderListIterator::payload_mut(&mut wrapper).ok_or_else(|| -1)?;
+    let idx = it.index as usize;
+    let kind = it.kind;
+    let obj_val = JSValue::from(it.obj);
+    let list = JSHeaders::payload_of(&obj_val)
+        .ok_or_else(|| -1)?
+        .list
+        .borrow();
+    if idx >= list.len() {
+        // Advance the live index past the end so subsequent calls stay done.
+        it.index = list.len() as u32;
+        return make_iter_result(ctx, JSValue::UNDEFINED, true);
+    }
+
+    let (name, value) = list.get_at(idx);
+    let name_js = JSValue::make_string(ctx.create_string_from_utf8(name.into_bytes())?);
+    let value_js = JSValue::make_string(ctx.create_string_from_utf8(value.into_bytes())?);
+
+    // Advance the live index. Mutations/deletions to the underlying list between
+    // calls are reflected automatically: deletions shift entries left (skipping
+    // one), insertions at the sorted position may shift entries right (re-yield)
+    // or append at the end (reached).
+    it.index = (idx + 1) as u32;
+
+    // Return the `{value, done}` record per the standard iterator protocol.
+    match kind {
+        JSIteratorKindEnum::JS_ITERATOR_KIND_KEY => make_iter_result(ctx, name_js, false),
+        JSIteratorKindEnum::JS_ITERATOR_KIND_VALUE => make_iter_result(ctx, value_js, false),
+        JSIteratorKindEnum::JS_ITERATOR_KIND_KEY_AND_VALUE => {
+            let pair = Array::from_values(ctx, vec![name_js, value_js])?;
+            make_iter_result(ctx, pair.into(), false)
+        }
+    }
+}
+
+fn create_headers_iterator(
+    ctx: &mut ScopedContext,
+    headers_val: JSValue,
+    kind: JSIteratorKindEnum,
+) -> JSResult {
+    let obj = headers_val.as_object().ok_or_else(|| -1)?;
+    let inst =
+        HeaderListIterator::new_instance(ctx, JSValue::UNDEFINED, HeaderListIter::new(obj, kind))?;
+    Ok(inst.into())
 }
 
 fn js_headers_keys(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
-    let h = get_headers(ctx, &this)?;
-    let entries = h.list.borrow().entries();
-    let names: Vec<JSValue> = entries
-        .iter()
-        .map(|(k, _)| {
-            ctx.create_string_from_utf8(k.as_bytes().to_vec())
-                .map(JSValue::make_string)
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    values_iterator(ctx, names)
+    create_headers_iterator(ctx, this, JSIteratorKindEnum::JS_ITERATOR_KIND_KEY)
 }
 
 fn js_headers_values(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
-    let h = get_headers(ctx, &this)?;
-    let entries = h.list.borrow().entries();
-    let vals: Vec<JSValue> = entries
-        .iter()
-        .map(|(_, v)| {
-            ctx.create_string_from_utf8(v.as_bytes().to_vec())
-                .map(JSValue::make_string)
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    values_iterator(ctx, vals)
+    create_headers_iterator(ctx, this, JSIteratorKindEnum::JS_ITERATOR_KIND_VALUE)
 }
 
 fn js_headers_entries(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
-    let h = get_headers(ctx, &this)?;
-    let entries = h.list.borrow().entries();
-    let mut pairs: Vec<JSValue> = Vec::new();
-    for (k, v) in entries {
-        let k_js = ctx.create_string_from_utf8(k.as_bytes().to_vec())?;
-        let v_js = ctx.create_string_from_utf8(v.as_bytes().to_vec())?;
-        pairs.push(
-            Array::from_values(
-                ctx,
-                vec![JSValue::make_string(k_js), JSValue::make_string(v_js)],
-            )?
-            .into(),
-        );
-    }
-    values_iterator(ctx, pairs)
+    create_headers_iterator(
+        ctx,
+        this,
+        JSIteratorKindEnum::JS_ITERATOR_KIND_KEY_AND_VALUE,
+    )
 }
 
 fn js_headers_for_each(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -570,8 +782,10 @@ fn js_headers_for_each(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     } else {
         JSValue::UNDEFINED
     };
-    let entries = h.list.borrow().entries();
-    for (k, v) in entries {
+    // Snapshot the (name, value) pairs up front; deletions during iteration
+    // simply skip the removed pair.
+    let pairs: Vec<(String, String)> = h.list.borrow().list.clone();
+    for (k, v) in pairs {
         let k_js = ctx.create_string_from_utf8(k.as_bytes().to_vec())?;
         let v_js = ctx.create_string_from_utf8(v.as_bytes().to_vec())?;
         cb.call(
@@ -604,19 +818,11 @@ fn js_headers_get_set_cookie(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
 /// `for (const [k, v] of headers)` works.
 fn js_headers_iterator(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
-    let h = get_headers(ctx, &this)?;
-    let list_entries = h.list.borrow().entries();
-    let mut entries: Vec<JSValue> = Vec::new();
-    for (k, v) in list_entries {
-        let k_js = ctx.create_string_from_utf8(k.as_bytes().to_vec())?;
-        let v_js = ctx.create_string_from_utf8(v.as_bytes().to_vec())?;
-        let pair = Array::from_values(
-            ctx,
-            vec![JSValue::make_string(k_js), JSValue::make_string(v_js)],
-        )?;
-        entries.push(pair.into());
-    }
-    values_iterator(ctx, entries)
+    create_headers_iterator(
+        ctx,
+        this,
+        JSIteratorKindEnum::JS_ITERATOR_KIND_KEY_AND_VALUE,
+    )
 }
 
 const HEADERS_PROTO: &[FieldDef] = &[
@@ -644,4 +850,9 @@ def_native_object!(
 #[distributed_slice(USER_CLASS_DEFS)]
 fn register_class_headers(rt: &mut Runtime) -> Result<ClassID, i32> {
     JSHeaders::register(rt)
+}
+
+#[distributed_slice(USER_CLASS_DEFS)]
+fn register_class_headers_iterator(rt: &mut Runtime) -> Result<ClassID, i32> {
+    HeaderListIterator::register(rt)
 }

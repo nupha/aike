@@ -79,6 +79,7 @@ pub fn init_mod_http(ctx: &mut ScopedContext) -> Result<(), i32> {
         JSHttpResponse::class_id(),
         JSHttpResponseSse::class_id(),
         JSWebSocketStream::class_id(),
+        crate::http::client::headers::HeaderListIterator::class_id(),
     ])?;
 
     ctx.create_module("http", MOD_HTTP_ENTRIES)?;
