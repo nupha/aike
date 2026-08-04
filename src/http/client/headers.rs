@@ -412,6 +412,15 @@ pub(crate) fn header_list_from_js(
             if !pair.is_array(ctx)? {
                 return Err(ctx.throw_type_error("Each header entry must be a [name, value] pair"));
             }
+            // A header entry must be a `[name, value]` tuple of exactly two
+            // items. Fewer (e.g. `["name"]`) or more (e.g. `["a", "b", "c"]`)
+            // elements are rejected per the Fetch spec (WPT headers-errors).
+            let pair_len = pair.get_property_str(ctx, "length")?.to_number(ctx)?.to_i32();
+            if pair_len != 2 {
+                return Err(ctx.throw_type_error(
+                    "Each header entry must be a [name, value] pair of exactly two elements",
+                ));
+            }
             let name = pair
                 .get_property_str(ctx, "0")?
                 .to_string(ctx)?
