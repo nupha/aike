@@ -579,6 +579,24 @@ fn create_mcp_bridge(
 // Poller-side handlers (run on JS thread)
 // ---------------------------------------------------------------------------
 
+/// If a JS handler result is already an MCP result envelope — an object with a
+/// `content` array — serialize it untouched so non-text blocks
+/// (`{type:"image"|"audio"|"resource"}`) reach the client. Otherwise return
+/// `None` and let the caller wrap the value in a `{type:"text"}` block.
+fn result_as_mcp_envelope(
+    ctx: &mut ScopedContext,
+    result: &JSValue,
+) -> Option<serde_json::Value> {
+    let Ok(val) = result.to_serde_json(ctx) else {
+        return None;
+    };
+    let obj = val.as_object()?;
+    if !obj.get("content").map_or(false, |c| c.is_array()) {
+        return None;
+    }
+    Some(val)
+}
+
 /// Handle an MCP tool call request on the JS thread.
 /// Looks up the handler from the JS-thread handler table by method_index.
 /// Supports streaming: the JS handler can send intermediate chunks via the
@@ -671,19 +689,27 @@ pub(crate) fn handle_mcp_tool_call(
                 };
                 let _ = promise.then(cx, ok_fn, fail_fn);
             } else {
-                // Sync path: wrap raw result into MCP content format
-                let to_json_result = val.to_serde_json(cx);
-                let text = to_json_result
-                    .ok()
-                    .map(|v| match v {
-                        serde_json::Value::String(s) => s,
-                        other => serde_json::to_string_pretty(&other).unwrap_or_default(),
-                    })
-                    .unwrap_or_default();
-                let mcp_response = serde_json::json!({
-                    "content": [{"type": "text", "text": text}]
-                });
-                let result_json = serde_json::to_string(&mcp_response).ok();
+                // Sync path: pass through a handler-returned MCP envelope
+                // ({ content: [...] }); otherwise wrap the raw value in text.
+                let result_json = match result_as_mcp_envelope(cx, &val) {
+                    Some(mcp) => serde_json::to_string(&mcp).ok(),
+                    None => {
+                        let to_json_result = val.to_serde_json(cx);
+                        let text = to_json_result
+                            .ok()
+                            .map(|v| match v {
+                                serde_json::Value::String(s) => s,
+                                other => {
+                                    serde_json::to_string_pretty(&other).unwrap_or_default()
+                                }
+                            })
+                            .unwrap_or_default();
+                        let mcp_response = serde_json::json!({
+                            "content": [{"type": "text", "text": text}]
+                        });
+                        serde_json::to_string(&mcp_response).ok()
+                    }
+                };
                 let mut bv = bridge_val;
                 let bridge = get_mcp_bridge_payload(cx, &mut bv).unwrap();
                 bridge.send_final(McpChunkMessage {
@@ -743,19 +769,23 @@ fn mcp_send_chunk(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
 fn mcp_resolve_then(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let result = cc.arg(0);
-    let to_json_result = result.to_serde_json(ctx);
-    let text = to_json_result
-        .ok()
-        .map(|v| match v {
-            serde_json::Value::String(s) => s,
-            other => serde_json::to_string_pretty(&other).unwrap_or_default(),
-        })
-        .unwrap_or_default();
-
-    let mcp_response = serde_json::json!({
-        "content": [{"type": "text", "text": text}]
-    });
-    let result_json = serde_json::to_string(&mcp_response).ok();
+    let result_json = match result_as_mcp_envelope(ctx, &result) {
+        Some(mcp) => serde_json::to_string(&mcp).ok(),
+        None => {
+            let to_json_result = result.to_serde_json(ctx);
+            let text = to_json_result
+                .ok()
+                .map(|v| match v {
+                    serde_json::Value::String(s) => s,
+                    other => serde_json::to_string_pretty(&other).unwrap_or_default(),
+                })
+                .unwrap_or_default();
+            let mcp_response = serde_json::json!({
+                "content": [{"type": "text", "text": text}]
+            });
+            serde_json::to_string(&mcp_response).ok()
+        }
+    };
 
     let mut bridge_val = cc.data(0);
     if let Ok(bridge) = get_mcp_bridge_payload(ctx, &mut bridge_val) {
