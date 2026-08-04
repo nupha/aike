@@ -23,7 +23,7 @@ use crate::http::client::{
 use super::{
     abort::{JSAbortSignal, signal_is_aborted, signal_notify, signal_reason},
     dom::make_dom_exception,
-    stream::{JSReadableStream, make_rejected_promise},
+    stream::{JSReadableStream, make_rejected_promise, make_resolved_promise},
 };
 
 /// Error type carried through the fetch result slot.
@@ -414,6 +414,9 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     // response for cross-origin fetches.
     let mut mode = String::from("cors");
     let mut signal_val: Option<JSValue> = None;
+    // Fetch spec request `cache` mode: default | no-store | reload | no-cache |
+    // force-cache | only-if-cached. Drives HTTP cache reuse/revalidation.
+    let mut cache_mode = String::from("default");
 
     // Inherit from a Request input.
     if let Some(p) = JSRequest::payload_of(&input) {
@@ -426,6 +429,7 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         credentials = p.credentials.clone();
         referrer = p.referrer.clone();
         mode = p.mode.clone();
+        cache_mode = p.cache.clone();
     } else if !input.is_undefined_or_null() {
         let href = input.get_property_str(ctx, "href")?;
         if !href.is_undefined() {
@@ -590,6 +594,9 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             if let Some(v) = read_str(o, "mode") {
                 mode = v;
             }
+            if let Some(v) = read_str(o, "cache") {
+                cache_mode = v;
+            }
         }
     }
 
@@ -610,44 +617,11 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 .unwrap_or(JSValue::UNDEFINED)
         });
 
-    // HTTP cache: if we have a stored validator for this URL, attach conditional
-    // revalidation headers so the server may reply `304` (Fetch § HTTP-cache).
-    // `cache_driven` records whether *we* added the validators — only then must
-    // a `304` be reinterpreted as the cached response (caller-supplied headers
-    // must keep the response as a real `304`). It is computed inside the
-    // response closure (before the 304 handling) from the cached validators.
-
-    let result_slot = PromiseResultSlot::<Result<TransportResponse, FetchError>>::new();
-    // Look up cached validators before issuing the request so the conditional
-    // headers ride on the outgoing request and the `cache_driven` flag (copied
-    // into the response closure below) reflects *our* revalidation.
-    let cached_validators = if method.eq_ignore_ascii_case("GET") {
-        http_cache::lookup_validators(&method, &url_str)
-    } else {
-        None
-    };
-    // Only treat a `304` as cache-driven (to be turned into the cached
-    // response) when *we* added the validators — if the caller supplied them
-    // the `304` is theirs and must be passed through unchanged.
-    let cache_driven = cached_validators.is_some()
-        && !http_cache::caller_supplied_validator(&header_list.to_vec());
-    let url_clone = url_str.clone();
-    let redirect_clone = redirect.clone();
-    let method_clone = method.clone();
-    let mode_clone = mode.clone();
-
-    // Client origin for same-origin checks. In a browser this is the document's
-    // origin; here we read the `self.location` shim that WPT runners inject (and
-    // Node/Bun WPT runners do the same). When absent, treat as a null origin so
-    // every URL is cross-origin (no-cors then yields an opaque response).
-    // Probe `self.location.origin` for same-origin checks. Absence of any link
-    // in the chain is *expected* (null origin), so a failed property read must
-    // not leak a pending runtime exception — we take and discard it. Reading
-    // through `undefined` would also set an exception, so short-circuit early.
-    // Resolve the client origin and document URL from the `self.location` shim
-    // that WPT/Node/Bun runners inject. Both are optional (null origin / no
-    // document URL) — a failed property read is expected and must not leak a
-    // pending exception, so we take and discard it afterwards.
+    // Client origin for same-origin checks (used by the cache short-circuit and
+    // the response handler below). In a browser this is the document's origin;
+    // here we read the `self.location` shim that WPT runners inject. When absent
+    // treat as a null origin so every URL is cross-origin. A failed property read
+    // is expected and must not leak a pending exception, so it is taken/discarded.
     let (client_origin, client_url): (Option<String>, Option<String>) = {
         let loc = ctx
             .global_obj()
@@ -691,6 +665,121 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             .filter(|s| !s.is_empty());
         (origin, url)
     };
+
+    // HTTP cache (§ Fetch HTTP-cache). The request's `cache` mode decides
+    // whether we serve straight from cache, revalidate, or always hit network:
+    //   default      fresh hit → serve cache; stale hit → revalidate
+    //   no-store     always network, never read/write cache
+    //   reload       always network (force re-fetch), then re-store
+    //   no-cache     always revalidate via conditional headers
+    //   force-cache  serve cache hit regardless of freshness; else network
+    //   only-if-cached  serve cache hit; a miss is a network error
+    // The short-circuit below runs before the network request is issued, so a
+    // fresh hit (or `force-cache`) never touches the transport.
+
+    // Is this request cacheable at all (GET, no body)?
+    let cacheable = method.eq_ignore_ascii_case("GET")
+        && body_bytes.is_none()
+        && stream_body.is_none();
+
+    // A request carrying any conditional header (`If-None-Match`,
+    // `If-Modified-Since`, `If-Unmodified-Since`, `If-Match`, `If-Range`) is
+    // treated as `no-store`: it bypasses the cache (WPT
+    // request-cache-default-conditional).
+    let has_conditional = cacheable
+        && http_cache::caller_supplied_validator(&header_list.to_vec());
+
+    // Serve-from-cache hit for the modes that can return without a network call.
+    let cache_hit = if cacheable && !has_conditional {
+        match cache_mode.as_str() {
+            "default" => http_cache::lookup_full(&method, &url_str).filter(|h| h.fresh),
+            "force-cache" | "only-if-cached" => http_cache::lookup_full(&method, &url_str),
+            _ => None,
+        }
+    } else {
+        None
+    };
+
+    // `only-if-cached` with no cached entry is a network error (TypeError).
+    if cache_mode == "only-if-cached" && cache_hit.is_none() {
+        return throw_transport_error(
+            ctx,
+            TransportError {
+                code: "other",
+                message: "only-if-cached: no cached response for the request URL".into(),
+            },
+        );
+    }
+
+    if let Some(hit) = cache_hit {
+        // `only-if-cached` requires `mode: "same-origin"`; if the cached
+        // response came from a cross-origin redirect, same-origin mode makes it
+        // a network error (WPT request-cache-only-if-cached cross-origin).
+        if cache_mode == "only-if-cached" && mode == "same-origin" {
+            let hit_origin = url::Url::parse(&hit.final_url)
+                .ok()
+                .map(|u| u.origin().ascii_serialization());
+            let same = match (&client_origin, &hit_origin) {
+                (Some(c), Some(h)) => c == h,
+                _ => false,
+            };
+            if !same {
+                return throw_transport_error(
+                    ctx,
+                    TransportError {
+                        code: "other",
+                        message: "only-if-cached: cached response is cross-origin".into(),
+                    },
+                );
+            }
+        }
+        let response = build_response_from_transport(
+            ctx,
+            TransportResponse {
+                status: hit.status,
+                status_text: "OK".to_string(),
+                headers: hit.headers,
+                content_type: String::new(),
+                content_length: Some(hit.body.len() as u64),
+                http_version: "1.1",
+                resp: None,
+                synthetic_body: Some(hit.body),
+            },
+            RespType::Basic,
+            &url_str,
+            false,
+            signal_val.clone(),
+        )?;
+        // `fetch()` returns a promise; resolve it with the cached Response.
+        return make_resolved_promise(ctx, response);
+    }
+
+    let result_slot = PromiseResultSlot::<Result<TransportResponse, FetchError>>::new();
+    // Look up cached validators before issuing the request so the conditional
+    // headers ride on the outgoing request and the `cache_driven` flag (copied
+    // into the response closure below) reflects *our* revalidation.
+    // `no-store`/`reload` never attach revalidation validators (they go to
+    // network unconditionally); `default` stale and `no-cache` revalidate.
+    let revalidate = match cache_mode.as_str() {
+        "no-store" | "reload" => false,
+        _ => true,
+    };
+    // A conditional-header request is treated as no-store: no revalidation
+    // validators are added on top of the caller's own conditional headers.
+    let cached_validators = if cacheable && revalidate && !has_conditional {
+        http_cache::lookup_validators(&method, &url_str)
+    } else {
+        None
+    };
+    // Only treat a `304` as cache-driven (to be turned into the cached
+    // response) when *we* added the validators — if the caller supplied them
+    // the `304` is theirs and must be passed through unchanged.
+    let cache_driven = cached_validators.is_some()
+        && !http_cache::caller_supplied_validator(&header_list.to_vec());
+    let url_clone = url_str.clone();
+    let redirect_clone = redirect.clone();
+    let method_clone = method.clone();
+    let mode_clone = mode.clone();
 
     // Compute the outgoing Referer value per the Fetch `referrer`/`referrerPolicy`
     // algorithm. Covers the policies exercised by WPT `referrer.any.js`:
@@ -835,11 +924,10 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                     signal_val.clone(),
                 );
             }
-            // Otherwise remember successful validator-bearing GET responses so
-            // later requests can revalidate them.
-            if method_clone.eq_ignore_ascii_case("GET") && (200..300).contains(&status) {
-                http_cache::store(&method_clone, &url_clone, status, &tr.headers, Vec::new());
-            }
+            // Caching a successful GET response (with its full body) is done in
+            // the transport closure above, where the body bytes are available.
+            // (Skipping `no-store` there too.) Nothing to do here.
+            //
             // A `no-cors` request for a cross-origin (or unknown-origin) URL
             // yields an opaque response per Fetch spec (status 0, type opaque,
             // null body, CORS-filtered headers). Same-origin stays basic.
@@ -978,6 +1066,8 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     // later event-loop turn.
     let rs = result_slot.clone();
     let notify2 = notify;
+    let cache_mode_for_spawn = cache_mode.clone();
+    let has_conditional_for_spawn = has_conditional;
     let spawn_request = move |req: TransportRequest| match notify2 {
         Some(n) => {
             tokio::spawn(async move {
@@ -989,6 +1079,10 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             });
         }
         None => {
+            let cache_mode = cache_mode_for_spawn.clone();
+            let has_conditional = has_conditional_for_spawn;
+            let cache_method = req.method.clone();
+            let cache_url = req.url.clone();
             tokio::spawn(async move {
                 let mut tr = match perform_request(&client, req).await {
                     Ok(tr) => tr,
@@ -1023,6 +1117,38 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                         })));
                         return;
                     }
+                    tr.synthetic_body = Some(bytes);
+                }
+                // HTTP cache: buffer the body of a cacheable GET response so it
+                // can be stored and later served/revalidated from cache. The
+                // stored body is also put back as the response's synthetic body.
+                if cache_mode != "no-store"
+                    && !has_conditional
+                    && cache_method.eq_ignore_ascii_case("GET")
+                    && (200..300).contains(&tr.status)
+                {
+                    // The final URL (after any redirect) is stored so a later
+                    // `same-origin` cache hit can reject a cross-origin redirect.
+                    let final_url = tr
+                        .resp
+                        .as_ref()
+                        .map(|r| r.url().to_string())
+                        .unwrap_or_else(|| cache_url.clone());
+                    let bytes = match tr.resp.take() {
+                        Some(resp) => match resp.bytes().await {
+                            Ok(b) => b.to_vec(),
+                            Err(_) => Vec::new(),
+                        },
+                        None => tr.synthetic_body.clone().unwrap_or_default(),
+                    };
+                    http_cache::store(
+                        &cache_method,
+                        &cache_url,
+                        tr.status,
+                        &tr.headers,
+                        bytes.clone(),
+                        &final_url,
+                    );
                     tr.synthetic_body = Some(bytes);
                 }
 
