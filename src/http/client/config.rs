@@ -182,6 +182,57 @@ pub(crate) fn global_cookie_jar() -> Arc<reqwest::cookie::Jar> {
         .clone()
 }
 
+/// First-seen order of cookie names across the session, so the `Cookie` request
+/// header lists cookies in creation order (WPT `cookies.any.js`). The
+/// underlying `reqwest`/`cookie_store` jar returns cookies in hash order, which
+/// does not match the creation order a browser UA cookie store preserves.
+pub(crate) fn global_cookie_order() -> &'static std::sync::RwLock<Vec<String>> {
+    static ORDER: OnceLock<std::sync::RwLock<Vec<String>>> = OnceLock::new();
+    ORDER.get_or_init(|| std::sync::RwLock::new(Vec::new()))
+}
+
+/// Record the name of a cookie being stored, so it keeps its creation position
+/// in the `Cookie` header. The name is the token before the first `=` or `;`.
+pub(crate) fn cookie_order_record(set_cookie: &str) {
+    let name = set_cookie
+        .split(['=', ';'])
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    if name.is_empty() {
+        return;
+    }
+    let mut order = global_cookie_order().write().unwrap();
+    if !order.iter().any(|n| n == &name) {
+        order.push(name);
+    }
+}
+
+/// Reorder a `Cookie` header value's `name=value` pairs into first-seen order.
+/// Names not in the recorded order (e.g. overwritten/expired) are kept at the
+/// end in their original relative order.
+pub(crate) fn reorder_cookie_header(value: &str) -> String {
+    let order = global_cookie_order().read().unwrap();
+    let mut pairs: Vec<(usize, &str)> = value
+        .split("; ")
+        .map(|pair| {
+            let name = pair.split('=').next().unwrap_or("").trim().to_ascii_lowercase();
+            let pos = order
+                .iter()
+                .position(|n| n == &name)
+                .unwrap_or(usize::MAX);
+            (pos, pair)
+        })
+        .collect();
+    pairs.sort_by_key(|(pos, _)| *pos);
+    pairs
+        .into_iter()
+        .map(|(_, pair)| pair)
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
 /// Host patterns (either `host` or `host:port`) for which TLS certificate
 /// validation is skipped. Populated once from the `AIKE_TLS_INSECURE_HOSTS`
 /// env var, as a comma-separated list.

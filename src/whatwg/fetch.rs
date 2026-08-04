@@ -825,6 +825,7 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 http_version: "1.1",
                 resp: None,
                 synthetic_body: Some(hit.body),
+                origin_opaque: false,
             },
             RespType::Basic,
             &url_str,
@@ -998,6 +999,7 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                         http_version: "1.1",
                         resp: None,
                         synthetic_body: Some(cached_body),
+                        origin_opaque: false,
                     },
                     RespType::Basic,
                     &url_clone,
@@ -1033,8 +1035,16 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 let final_cross = is_cross_origin(client_origin.as_deref(), &final_url);
                 if final_cross {
                     let headers = HeaderList::from_vec(tr.headers.clone());
-                    let client_origin_str = serialized_origin(client_origin.as_deref());
-                    if cors_check(&headers, &client_origin_str, credentials_include).is_none() {
+                    // The request's origin may have become opaque ("null") after a
+                    // cross-origin redirect; the CORS check must then compare the
+                    // `Access-Control-Allow-Origin` header against "null" (the
+                    // serialized opaque origin), not the client origin.
+                    let check_origin = if tr.origin_opaque {
+                        "null".to_string()
+                    } else {
+                        serialized_origin(client_origin.as_deref())
+                    };
+                    if cors_check(&headers, &check_origin, credentials_include).is_none() {
                         return throw_transport_error(
                             cx,
                             TransportError {

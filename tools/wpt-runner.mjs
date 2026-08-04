@@ -511,7 +511,20 @@ async function runOneFile(file) {
   // so relative fetch()/fs resolve against the server exactly as in a browser.
   // Assignments the test makes to globalThis (e.g. self.x = ...) still take
   // effect on the shared global.
-  await Aike.evalModule(code, fileHttpUrl(file));
+  //
+  // The test file is evaluated as a sloppy-mode script (so WPT code relying on
+  // implicit globals — e.g. `result = await ...` without a declaration — works
+  // as it does in a browser classic script), but wrapped in an async IIFE so
+  // each file's top-level `const`/`let` stay scoped to that file. This avoids
+  // the cross-file `redeclaration of 'url'` SyntaxErrors that sharing one
+  // global script scope caused, while still allowing top-level `await`. An
+  // async IIFE also keeps `this` as globalThis (arrow inherits the enclosing
+  // global script's `this`) and lets promise callbacks created in the file
+  // close over its top-level declarations.
+  await Aike.evalScript(`(async () => {\n${code}\n})()`, {
+    topLevelAwait: true,
+    baseUrl: fileHttpUrl(file),
+  });
 
   // All test()/promise_test() calls in the file have now run synchronously.
   // Now allow completion and drive it: the ShellTestEnvironment hook set
@@ -774,7 +787,7 @@ if (logWptreport) {
   );
 
   const report = {
-    run_info: { product: "aike", platform: G.Aike.platform },
+    run_info: { product: "aike", platform: G.process.platform },
     time_start: timeStart,
     time_end: Date.now() / 1000,
     results: reportResults,
