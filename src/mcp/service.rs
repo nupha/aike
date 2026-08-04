@@ -169,7 +169,7 @@ impl ServerHandler for McpService {
         context: RequestContext<RoleServer>,
     ) -> impl Future<Output = Result<CallToolResult, McpError>> + Send + '_ {
         let tool_name = request.name.to_string();
-        let arguments: serde_json::Value = request
+        let mut arguments: serde_json::Value = request
             .arguments
             .map(|m| serde_json::Value::Object(m))
             .unwrap_or(serde_json::Value::Null);
@@ -178,17 +178,21 @@ impl ServerHandler for McpService {
             // Resolve the tool's schema (native + JS tools both register here)
             // so arguments are validated before any handler runs.
             let (method_index, schema) = {
-                let guard = self.shared.read().map_err(|e| {
+                let schemas = self.shared.read().map_err(|e| {
                     McpError::internal_error(format!("schema lock poisoned: {}", e), None)
                 })?;
-                let Some(&idx) = guard.name_to_index.get(&tool_name) else {
+                let Some(&idx) = schemas.name_to_index.get(&tool_name) else {
                     return Err(McpError::invalid_params(
                         format!("Unknown tool: {}", tool_name),
                         None,
                     ));
                 };
-                (idx, guard.tools[idx].input_schema.clone())
+                (idx, schemas.tools[idx].input_schema.clone())
             };
+
+            // Fill missing optional args with their schema defaults so the
+            // handler always sees the default value.
+            apply_defaults(&schema, &mut arguments);
 
             // Reject invalid arguments up front, never reaching the handler.
             if let Err(msg) = validate_against_schema(&schema, &arguments) {
@@ -295,12 +299,36 @@ impl ServerHandler for McpService {
 // ---------------------------------------------------------------------------
 // Input argument validation
 // ---------------------------------------------------------------------------
+//
+// Coverage (current):
+//   required  — missing required field rejected
+//   enum      — whitelist check
+//   type      — string / integer / number / boolean / object / null / array
+//               (incl. array `items` element type); unknown type keywords pass
+//   default   — missing optional args filled by `apply_defaults`, then the
+//               inserted value is validated like any provided value
+//
+// Not yet implemented (standard JSON Schema "Validation" vocabulary; the MCP
+// DSL `McpToolShortArg` does not expose them yet, so they never appear in the
+// schemas `build_input_schema_from_args` produces):
+//   minLength/maxLength (string, Unicode code points)
+//   pattern             (string must match a regex)
+//   minimum/maximum / exclusiveMinimum/exclusiveMaximum (numeric bounds)
+//   multipleOf          (number must be a multiple)
+//   minItems/maxItems, uniqueItems (array)
+//   minProperties/maxProperties (object)
+//   format              (semantic hint: email/date-time/uri/ipv4… — in
+//                       2020-12 it is Format-Annotation, default non-enforcing)
+// When the DSL is extended, propagate the new fields in
+// `build_input_schema_from_args` (class_mcp.rs) and add checks here.
+// Schema matches `memo/mcp-schema-validation.md`.
 
 /// Validate `arguments` against a tool's `inputSchema` before dispatch.
 ///
 /// Covers the subset of JSON Schema that `build_input_schema_from_args`
 /// produces: an object with `required` and per-property `type`/`enum`
-/// (including array `items`). Extra keys are ignored; unknown types pass.
+/// (including array `items`). Types string/integer/number/boolean/object/
+/// null/array are enforced; extra keys are ignored; unknown types pass.
 fn validate_against_schema(
     schema: &JsonObject,
     arguments: &serde_json::Value,
@@ -329,6 +357,37 @@ fn validate_against_schema(
     }
 
     Ok(())
+}
+
+/// Fill missing optional arguments with their schema `default` values.
+///
+/// A non-required property that carries a `default` is inserted into
+/// `arguments` when absent, so handlers always receive the default. If
+/// `arguments` is not an object (e.g. `null` when no args were sent) it is
+/// replaced by a fresh object whenever at least one default exists.
+fn apply_defaults(schema: &JsonObject, arguments: &mut serde_json::Value) {
+    let Some(properties) = schema.get("properties").and_then(|v| v.as_object()) else {
+        return;
+    };
+    // Fast path: no property carries a default.
+    if !properties.values().any(|p| p.get("default").is_some()) {
+        return;
+    }
+
+    let obj = match arguments.as_object_mut() {
+        Some(obj) => obj,
+        None => {
+            *arguments = serde_json::Value::Object(serde_json::Map::new());
+            arguments.as_object_mut().expect("just created object")
+        }
+    };
+    for (name, prop_schema) in properties {
+        if !obj.contains_key(name) {
+            if let Some(default) = prop_schema.get("default") {
+                obj.insert(name.clone(), default.clone());
+            }
+        }
+    }
 }
 
 fn validate_property(
@@ -370,6 +429,27 @@ fn validate_property(
                 Err(format!("\"{}\" must be a boolean", name))
             }
         }
+        Some("number") => {
+            if value.is_number() {
+                Ok(())
+            } else {
+                Err(format!("\"{}\" must be a number", name))
+            }
+        }
+        Some("object") => {
+            if value.is_object() {
+                Ok(())
+            } else {
+                Err(format!("\"{}\" must be an object", name))
+            }
+        }
+        Some("null") => {
+            if value.is_null() {
+                Ok(())
+            } else {
+                Err(format!("\"{}\" must be null", name))
+            }
+        }
         Some("array") => {
             let Some(items) = value.as_array() else {
                 return Err(format!("\"{}\" must be an array", name));
@@ -384,7 +464,10 @@ fn validate_property(
                 let ok = match (item_type, item) {
                     ("string", v) => v.is_string(),
                     ("integer", v) => v.as_i64().is_some(),
+                    ("number", v) => v.is_number(),
                     ("boolean", v) => v.is_boolean(),
+                    ("object", v) => v.is_object(),
+                    ("null", v) => v.is_null(),
                     _ => true,
                 };
                 if !ok {
@@ -754,7 +837,10 @@ mod tests {
 
     #[test]
     fn validate_rejects_missing_required() {
-        let s = schema(serde_json::json!({ "path": { "type": "string" } }), &["path"]);
+        let s = schema(
+            serde_json::json!({ "path": { "type": "string" } }),
+            &["path"],
+        );
         let args = serde_json::json!({});
         assert_eq!(
             validate_against_schema(&s, &args),
@@ -767,6 +853,44 @@ mod tests {
         let s = schema(serde_json::json!({ "depth": { "type": "integer" } }), &[]);
         let args = serde_json::json!({ "depth": "not-an-int" });
         assert!(validate_against_schema(&s, &args).is_err());
+    }
+
+    #[test]
+    fn validate_all_types() {
+        let s = schema(
+            serde_json::json!({
+                "n": { "type": "number" },
+                "o": { "type": "object" },
+                "z": { "type": "null" },
+            }),
+            &[],
+        );
+        let ok_args = serde_json::json!({ "n": 1.5, "o": { "a": 1 }, "z": null });
+        assert!(validate_against_schema(&s, &ok_args).is_ok());
+
+        // Wrong types are rejected.
+        let bad_num = serde_json::json!({ "n": "1.5" });
+        assert!(validate_against_schema(&s, &bad_num).is_err());
+        let bad_obj = serde_json::json!({ "o": [1] });
+        assert!(validate_against_schema(&s, &bad_obj).is_err());
+        let bad_null = serde_json::json!({ "z": 0 });
+        assert!(validate_against_schema(&s, &bad_null).is_err());
+    }
+
+    #[test]
+    fn validate_array_items_all_types() {
+        let s = schema(
+            serde_json::json!({
+                "nums": { "type": "array", "items": { "type": "number" } },
+                "objs": { "type": "array", "items": { "type": "object" } },
+            }),
+            &[],
+        );
+        let ok = serde_json::json!({ "nums": [1, 2.5], "objs": [{}, { "k": "v" }] });
+        assert!(validate_against_schema(&s, &ok).is_ok());
+
+        let bad = serde_json::json!({ "nums": [1, "x"] });
+        assert!(validate_against_schema(&s, &bad).is_err());
     }
 
     #[test]
@@ -791,8 +915,64 @@ mod tests {
 
     #[test]
     fn validate_ignores_extra_keys() {
-        let s = schema(serde_json::json!({ "path": { "type": "string" } }), &["path"]);
+        let s = schema(
+            serde_json::json!({ "path": { "type": "string" } }),
+            &["path"],
+        );
         let args = serde_json::json!({ "path": "a.txt", "surprise": true });
         assert!(validate_against_schema(&s, &args).is_ok());
+    }
+
+    #[test]
+    fn apply_defaults_fills_missing_optional() {
+        let s = schema(
+            serde_json::json!({
+                "path": { "type": "string" },
+                "mode": { "type": "string", "enum": ["overwrite", "append"], "default": "overwrite" },
+                "depth": { "type": "integer", "default": 2 },
+            }),
+            &["path"],
+        );
+        // Missing optional args get their defaults; required stays as-is.
+        let mut args = serde_json::json!({ "path": "a.txt" });
+        apply_defaults(&s, &mut args);
+        assert_eq!(
+            args,
+            serde_json::json!({ "path": "a.txt", "mode": "overwrite", "depth": 2 })
+        );
+    }
+
+    #[test]
+    fn apply_defaults_keeps_explicit_values() {
+        let s = schema(
+            serde_json::json!({
+                "mode": { "type": "string", "enum": ["overwrite", "append"], "default": "overwrite" },
+            }),
+            &[],
+        );
+        let mut args = serde_json::json!({ "mode": "append" });
+        apply_defaults(&s, &mut args);
+        assert_eq!(args, serde_json::json!({ "mode": "append" }));
+    }
+
+    #[test]
+    fn apply_defaults_creates_object_from_null() {
+        let s = schema(
+            serde_json::json!({
+                "depth": { "type": "integer", "default": 2 },
+            }),
+            &[],
+        );
+        let mut args = serde_json::Value::Null;
+        apply_defaults(&s, &mut args);
+        assert_eq!(args, serde_json::json!({ "depth": 2 }));
+    }
+
+    #[test]
+    fn apply_defaults_noop_without_defaults() {
+        let s = schema(serde_json::json!({ "path": { "type": "string" } }), &[]);
+        let mut args = serde_json::Value::Null;
+        apply_defaults(&s, &mut args);
+        assert_eq!(args, serde_json::Value::Null);
     }
 }
