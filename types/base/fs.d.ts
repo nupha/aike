@@ -66,12 +66,18 @@ declare module "fs" {
   ): Promise<void>;
   /** Append a UTF-8 string to a file. Creates the file if it doesn't exist. */
   function appendText(path: string, data: string): Promise<void>;
-  /** Replace oldText with replaceWith only when oldText appears exactly once. Resolves true on success, false otherwise. */
+  /** Replace oldText with replaceWith only when oldText appears exactly once. Resolves to 1 on success, 0 otherwise. */
   function replaceTextUnique(
     path: string,
     oldText: string,
     replaceWith: string,
-  ): Promise<boolean>;
+  ): Promise<number>;
+  /** Replace every occurrence of oldText with replaceWith (left-to-right, non-overlapping). Resolves to the count of replacements made (0 if none). */
+  function replaceTextAll(
+    path: string,
+    oldText: string,
+    replaceWith: string,
+  ): Promise<number>;
   /** Write data to a file (auto-detect format: string, Uint8Array, or ArrayBuffer). */
   function write(
     path: string,

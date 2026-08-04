@@ -297,9 +297,14 @@ pub(super) fn js_fs_appendText(ctx: &mut ScopedContext, cc: CallContext) -> JSRe
 }
 
 // ---------------------------------------------------------------------------
-// replaceTextUnique - replace text in file when oldText matches exactly once
+// replaceText - unified replace (unique / replaceAll), selected via magic const.
 // ---------------------------------------------------------------------------
-pub(super) fn js_fs_replaceTextUnique(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+pub(super) const FS_REPLACE_UNIQUE: i32 = 0;
+pub(super) const FS_REPLACE_ALL: i32 = 1;
+
+pub(super) fn js_fs_replaceText(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let replace_all = cc.magic() == FS_REPLACE_ALL;
+
     let path = get_path_arg(ctx, &cc)?;
     let old_text = cc.arg(1).to_string(ctx)?;
     let old_text = old_text.content().encode_utf8(false).to_string();
@@ -309,30 +314,50 @@ pub(super) fn js_fs_replaceTextUnique(ctx: &mut ScopedContext, cc: CallContext) 
     spawn_fs_op(
         ctx,
         async move {
-            // Empty oldText or a no-op replacement never replaces.
             if old_text.is_empty() || old_text == replace_with {
-                return Ok(false);
+                return Ok(0);
             }
-            // Pass 1: stream-count occurrences so a huge file is never loaded
-            // into memory (bounded to chunk size + needle length).
-            let Ok(Some(at)) = find_unique_match(&path, old_text.as_bytes()).await else {
-                return Ok(false);
-            };
-            // Pass 2: stream-copy to a temp file, splicing the replacement at
-            // the single match offset, then atomically swap it in.
-            let tmp = temp_path_for(&path);
-            let res = async {
-                copy_replace(&path, &tmp, at, old_text.len(), replace_with.as_bytes()).await?;
-                atomic_replace(&tmp, &path).await
+
+            let needle = old_text.as_bytes();
+
+            if replace_all {
+                let count = match count_all_matches(&path, needle).await {
+                    Ok(c) => c,
+                    Err(_) => return Ok(0),
+                };
+                if count == 0 {
+                    return Ok(0);
+                }
+                let tmp = temp_path_for(&path);
+                let res = async {
+                    copy_replace_all(&path, &tmp, needle, replace_with.as_bytes()).await?;
+                    atomic_replace(&tmp, &path).await
+                }
+                .await;
+                if res.is_err() {
+                    let _ = tokio::fs::remove_file(&tmp).await;
+                    return Ok(0);
+                }
+                Ok(count)
+            } else {
+                // Unique mode: count=1 → replace, otherwise no-op.
+                let Ok(Some(at)) = find_unique_match(&path, needle).await else {
+                    return Ok(0);
+                };
+                let tmp = temp_path_for(&path);
+                let res = async {
+                    copy_replace(&path, &tmp, at, old_text.len(), replace_with.as_bytes()).await?;
+                    atomic_replace(&tmp, &path).await
+                }
+                .await;
+                if res.is_err() {
+                    let _ = tokio::fs::remove_file(&tmp).await;
+                    return Ok(0);
+                }
+                Ok(1)
             }
-            .await;
-            if res.is_err() {
-                let _ = tokio::fs::remove_file(&tmp).await;
-                return Ok(false);
-            }
-            Ok(true)
         },
-        |_cx, ok| Ok(JSValue::from(ok)),
+        |_cx, count| Ok(JSValue::from(count)),
     )
     .map(JSValue::from)
 }
@@ -463,6 +488,126 @@ async fn copy_replace(
             "file changed while replacing",
         ))
     }
+}
+
+/// Stream-scan the file and return the total number of occurrences of
+/// `needle` (counting left-to-right non-overlapping, matching the
+/// semantics of `copy_replace_all`).
+async fn count_all_matches(path: &Path, needle: &[u8]) -> std::io::Result<i32> {
+    let mut file = tokio::fs::File::open(path).await?;
+    let mut carry: Vec<u8> = Vec::new();
+    let mut count = 0;
+    let mut buf = vec![0u8; STREAM_CHUNK];
+
+    loop {
+        let n = file.read(&mut buf).await?;
+        let eof = n == 0;
+        carry.extend_from_slice(&buf[..n]);
+        let win = &carry[..];
+
+        if win.len() >= needle.len() {
+            let last = win.len() - needle.len();
+            let mut s = 0usize;
+            while s <= last {
+                if win[s..s + needle.len()] == *needle {
+                    count += 1;
+                    s += needle.len();
+                } else {
+                    s += 1;
+                }
+            }
+        }
+
+        if eof {
+            break;
+        }
+        let keep = needle.len() - 1;
+        let drop = win.len() - keep.min(win.len());
+        carry.drain(..drop);
+    }
+    
+    Ok(count)
+}
+
+/// Stream-copy `src` to `dst`, replacing every occurrence of `needle` with
+/// `replacement` (left-to-right, non-overlapping). Uses a sliding window with
+/// `2*needle_len-1` carry bytes so matches straddling chunk boundaries are
+/// always detected. Peak memory is bounded to `STREAM_CHUNK + 2*needle_len`.
+///
+/// Callers should verify that `needle` actually occurs via
+/// `count_all_matches` before invoking.
+async fn copy_replace_all(
+    src: &Path,
+    dst: &Path,
+    needle: &[u8],
+    replacement: &[u8],
+) -> std::io::Result<()> {
+    let mut r = tokio::fs::File::open(src).await?;
+    let mut w = tokio::fs::File::create(dst).await?;
+    let mut win: Vec<u8> = Vec::new(); // sliding window (carry + new chunk)
+    let mut buf = vec![0u8; STREAM_CHUNK];
+    let carry_len = needle.len() * 2 - 1; // enough to catch every boundary match
+
+    loop {
+        let n = r.read(&mut buf).await?;
+        let eof = n == 0;
+        win.extend_from_slice(&buf[..n]);
+
+        if win.is_empty() {
+            break;
+        }
+
+        // We need at least `carry_len` bytes in the window to reliably
+        // commit anything — otherwise a match might start in the committed
+        // zone but extend past it, leaving `last_out > commit_end`.
+        // On EOF we process whatever is left.
+        if win.len() < carry_len && !eof {
+            continue;
+        }
+
+        // Positions up to `commit_end` are safe to emit; positions at/after
+        // `commit_end` may be the start of a match that needs data from the
+        // *next* chunk to confirm.  On EOF everything is safe.
+        let commit_end = if eof { win.len() } else { win.len() - carry_len };
+
+        // On non‑EOF, require a full match to fit in the committed zone
+        // before we start writing — otherwise we might emit the first byte
+        // of a match that straddles the boundary.
+        let done_end = if eof {
+            win.len()
+        } else {
+            commit_end.saturating_sub(needle.len())
+        };
+        if done_end < needle.len() && !eof {
+            continue;
+        }
+
+        let mut last_out: usize = 0;
+        let mut i: usize = 0;
+        while i + needle.len() <= done_end {
+            if win[i..i + needle.len()] == *needle {
+                w.write_all(&win[last_out..i]).await?;
+                w.write_all(replacement).await?;
+                i += needle.len();
+                last_out = i;
+            } else {
+                i += 1;
+            }
+        }
+
+        // Commit bytes not yet written, but only up to the drain point.
+        // The drain point is the maximum of the safety boundary (`done_end`)
+        // and the last processed position (`last_out`), capped at
+        // `commit_end` so we keep at least `carry_len` bytes for the
+        // next iteration (on non-eof).
+        let drain_to = done_end.max(last_out).min(commit_end);
+        if last_out <= drain_to {
+            w.write_all(&win[last_out..drain_to]).await?;
+        }
+        win.drain(..drain_to);
+    }
+
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
