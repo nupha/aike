@@ -213,7 +213,7 @@ fn js_do_request(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             // ── Method ──
             if magic == METHOD_FROM_OPTS {
                 if let Some(m) = read_str_opt(ctx, opts, "method") {
-                    method = m.to_uppercase();
+                    method = crate::http::client::cors::normalize_method(&m);
                 }
             } else {
                 method = match magic {
@@ -285,6 +285,12 @@ fn js_do_request(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         referrer: String::from("about:client"),
         referrer_ctx: None,
         replayable: true,
+        redirect_follow: true,
+        cors_mode: false,
+        cors_tainted: false,
+        cors_client_origin: "null".to_string(),
+        credentials_mode: "include".to_string(),
+        use_shared_cookies: false,
     };
 
     // Choose the client bucket by target host (AIKE_TLS_INSECURE_HOSTS).

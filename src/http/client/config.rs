@@ -6,7 +6,11 @@
 //! Holds proxy, TLS, cookie, DNS, and connection-level options.
 //! `build_http_client()` constructs a `reqwest::Client` from the config.
 
-use std::{net::SocketAddr, time::Duration};
+use std::{
+    net::SocketAddr,
+    sync::{Arc, OnceLock},
+    time::Duration,
+};
 
 /// Protocol version preference.
 #[derive(Clone, Debug, Default)]
@@ -105,6 +109,10 @@ impl HttpClientConfig {
             .pool_max_idle_per_host(0);
 
         // --- Cookie jar ---
+        // The WHATWG `fetch` path disables reqwest's automatic store
+        // (`cookie_jar = false`) and manages cookies itself via the shared
+        // global jar, so the fetch `credentials` mode decides whether a cookie
+        // is sent/stored (reqwest's auto-store would send them unconditionally).
         if self.cookie_jar {
             builder = builder.cookie_store(true);
         }
@@ -162,6 +170,16 @@ impl HttpClientConfig {
             .build()
             .map_err(|e| format!("failed to build HTTP client: {e}"))
     }
+}
+
+/// The global cookie jar shared by WHATWG `fetch()` clients. Cookies persist
+/// across separate `fetch()` calls, matching the browser's per-origin cookie
+/// store. The fetch path reads/writes it manually according to the request's
+/// `credentials` mode.
+pub(crate) fn global_cookie_jar() -> Arc<reqwest::cookie::Jar> {
+    static JAR: OnceLock<Arc<reqwest::cookie::Jar>> = OnceLock::new();
+    JAR.get_or_init(|| Arc::new(reqwest::cookie::Jar::default()))
+        .clone()
 }
 
 /// Host patterns (either `host` or `host:port`) for which TLS certificate

@@ -310,12 +310,12 @@ fn js_request_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
 
             let m = o.get_property_str(ctx, "method")?;
             if !m.is_undefined() {
-                method = m
+                let raw = m
                     .to_string(ctx)?
                     .content()
                     .encode_utf8(false)
-                    .to_string()
-                    .to_uppercase();
+                    .to_string();
+                method = crate::http::client::cors::normalize_method(&raw);
             }
             let mut h = o.get_property_str(ctx, "headers")?;
             if !h.is_undefined_or_null() {
