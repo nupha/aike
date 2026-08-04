@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-use std::sync::LazyLock;
-use std::time::Instant;
+use std::{sync::LazyLock, time::Instant};
 
 use zuqe::{CallContext, JS_PROP_ENUMERABLE, JSResult, JSValue, ScopedContext};
 
@@ -19,12 +18,7 @@ pub(super) fn arch_str() -> &'static str {
         "x86_64" => "x64",
         "x86" => "ia32",
         "aarch64" => "arm64",
-        "arm" => "arm",
-        "mips" => "mips",
-        "mips64" => "mips64",
         "powerpc64" => "ppc64",
-        "s390x" => "s390x",
-        "riscv64" => "riscv64",
         "loongarch64" => "loong64",
         other => other,
     }
@@ -53,7 +47,7 @@ pub(super) fn get_ppid() -> i32 {
 fn get_ppid_windows() -> i32 {
     use windows_sys::Win32::Foundation::CloseHandle;
     use windows_sys::Win32::System::Diagnostics::ToolHelp::{
-        CreateToolhelp32Snapshot, Process32First, Process32Next, PROCESSENTRY32, TH32CS_SNAPPROCESS,
+        CreateToolhelp32Snapshot, PROCESSENTRY32, Process32First, Process32Next, TH32CS_SNAPPROCESS,
     };
     use windows_sys::Win32::System::Threading::GetCurrentProcessId;
 

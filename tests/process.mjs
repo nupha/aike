@@ -253,6 +253,44 @@ function testStdio() {
 }
 
 // ===================================================================
+// process EventEmitter inheritance tests
+// ===================================================================
+function testEventEmitter() {
+  console.log("\n=== process EventEmitter ===");
+
+  check("process.on is a function", typeof process.on === "function");
+  check("process.emit is a function", typeof process.emit === "function");
+  check("process.once is a function", typeof process.once === "function");
+  check("process.removeListener is a function", typeof process.removeListener === "function");
+  check("process.eventNames is a function", typeof process.eventNames === "function");
+  check("process.listenerCount is a function", typeof process.listenerCount === "function");
+  check("process.removeAllListeners is a function", typeof process.removeAllListeners === "function");
+
+  check("process.on returns this", process.on("greet", () => {}) === process);
+  check("process.emit unknown returns false", process.emit("nope") === false);
+
+  let got = null;
+  process.on("ping", msg => {
+    got = msg;
+  });
+  process.emit("ping", "hello");
+  check("listener received args", got === "hello", `got ${got}`);
+
+  let onceCount = 0;
+  process.once("boom", () => {
+    onceCount++;
+  });
+  process.emit("boom");
+  process.emit("boom");
+  check("once fired exactly once", onceCount === 1, `count ${onceCount}`);
+
+  check("eventNames includes ping", process.eventNames().includes("ping"));
+  check("listenerCount ping == 1", process.listenerCount("ping") === 1);
+  process.removeAllListeners("ping");
+  check("listenerCount ping == 0 after removeAll", process.listenerCount("ping") === 0);
+}
+
+// ===================================================================
 // Main
 // ===================================================================
 await testCwdChdir();
@@ -266,6 +304,7 @@ await testNextTick();
 await testUmask();
 await testKill();
 await testStdio();
+await testEventEmitter();
 
 // Summary
 console.log(`\n${"=".repeat(40)}`);

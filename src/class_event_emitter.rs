@@ -24,6 +24,14 @@ pub(crate) struct EmitterPayload {
 }
 
 impl EmitterPayload {
+    /// Create an empty payload (used for `process` and other pre-constructed emitters).
+    pub(crate) fn new() -> Self {
+        Self {
+            listeners: RefCell::new(HashMap::new()),
+            dispatching: RefCell::new(Vec::new()),
+        }
+    }
+
     fn gc_trace(&self, gcx: &mut zuqe::gc_lite::GcTraceCtx) {
         // try_borrow: if emit is in progress (mut borrowed), skip this GC cycle
         if let Ok(listeners) = self.listeners.try_borrow() {
@@ -53,15 +61,7 @@ fn event_name(ctx: &mut ScopedContext, val: &JSValue) -> Result<String, i32> {
 }
 
 fn js_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    JSEventEmitter::new_instance(
-        ctx,
-        cc.this(),
-        EmitterPayload {
-            listeners: RefCell::new(HashMap::new()),
-            dispatching: RefCell::new(Vec::new()),
-        },
-    )
-    .map(JSValue::from)
+    JSEventEmitter::new_instance(ctx, cc.this(), EmitterPayload::new()).map(JSValue::from)
 }
 
 /// addListener(event, listener) / on(event, listener)

@@ -9,16 +9,20 @@ pub(crate) use control::gc_trace_next_tick;
 
 use zuqe::{Array, FieldDef, JS_PROP_ENUMERABLE, JSValue, ScopedContext};
 
-use crate::aike::JSStdioHandle;
+use crate::{
+    aike::JSStdioHandle,
+    class_event_emitter::{EmitterPayload, JSEventEmitter},
+};
 
 /// Build and register the `process` global object (Node.js-compatible).
+/// `process` is an EventEmitter instance, so `.on/.once/.emit/...` work on it.
 pub fn init_process(
     ctx: &mut ScopedContext,
     argv: &[String],
     exec_argv: &[String],
     exec_path: &str,
 ) -> Result<(), i32> {
-    let mut ns = ctx.create_base_object()?;
+    let mut ns = JSEventEmitter::new_instance(ctx, JSValue::UNDEFINED, EmitterPayload::new())?;
 
     // execPath — the aike runtime executable path
     {

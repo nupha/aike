@@ -101,6 +101,35 @@ type SignalName =
 // ---------------------------------------------------------------------------
 
 declare namespace process {
+  // --- event emitter (process is an EventEmitter instance) ---
+
+  /** Add a listener for an event. */
+  function addListener(
+    event: string,
+    listener: (...args: unknown[]) => void,
+  ): typeof process;
+  /** Alias for addListener. */
+  function on(event: string, listener: (...args: unknown[]) => void): typeof process;
+  /** Add a one-time listener. */
+  function once(event: string, listener: (...args: unknown[]) => void): typeof process;
+  /** Remove a listener. */
+  function removeListener(
+    event: string,
+    listener: (...args: unknown[]) => void,
+  ): typeof process;
+  /** Alias for removeListener. */
+  function off(event: string, listener: (...args: unknown[]) => void): typeof process;
+  /** Emit an event; returns false when no listener handled it. */
+  function emit(event: string, ...args: unknown[]): boolean;
+  /** Remove all listeners for an event, or all events when omitted. */
+  function removeAllListeners(event?: string): typeof process;
+  /** Get the listeners registered for an event. */
+  function listeners(event: string): Function[];
+  /** Get the number of listeners for an event. */
+  function listenerCount(event: string): number;
+  /** Get the names of all events with registered listeners. */
+  function eventNames(): string[];
+
   // --- proc ---
 
   /** Returns the current working directory as a string. */
