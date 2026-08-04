@@ -375,7 +375,7 @@ fn split_method_override(value: &str) -> Vec<String> {
 
 /// WHATWG "CORS-safelisted request-header". Only these may be set on a
 /// `no-cors` request; everything else is dropped.
-fn is_cors_safelisted(name: &str, value: &str) -> bool {
+pub(crate) fn is_cors_safelisted(name: &str, value: &str) -> bool {
     // Values over 128 bytes are never safelisted, whatever the name.
     if value.len() > 128 {
         return false;

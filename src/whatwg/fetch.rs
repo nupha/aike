@@ -11,12 +11,16 @@ use zuqe::{
 use crate::http::client::{
     body::{body_content_type, body_to_bytes, drain_readable_stream},
     cache as http_cache,
+    cors::{
+        cors_check, cors_filter_response_headers, is_cross_origin, needs_preflight,
+        preflight_request_headers, serialized_origin, should_append_origin,
+    },
     headers::{HeaderList, header_list_from_js, validate_header_list_for_fetch},
     request::{JSRequest, get_request_payload_mut},
     response::{RespType, build_opaque_redirect_response, build_response_from_transport},
     transport::{
-        ReferrerCtx, TransportError, TransportRequest, TransportResponse, perform_request,
-        throw_transport_error,
+        PreflightCtx, ReferrerCtx, TransportError, TransportRequest, TransportResponse,
+        perform_request, throw_transport_error,
     },
 };
 
@@ -160,17 +164,42 @@ pub(crate) fn compute_request_referrer(
             .ok()
             .map(|u| u.origin().ascii_serialization())
     };
+    // Whether a URL is "potentially trustworthy" enough to send a referrer to
+    // over a (non-)downgrade. http://localhost and https are trustworthy.
+    let trustworthy = |u: &str| -> bool {
+        match url::Url::parse(u) {
+            Ok(parsed) => {
+                parsed.scheme() == "https"
+                    || (parsed.scheme() == "http"
+                        && matches!(parsed.host_str(), Some("localhost") | Some("127.0.0.1")))
+            }
+            Err(_) => false,
+        }
+    };
 
-    // Resolve the referrer source URL: an explicit `referrer` (non-default) or,
-    // for `"about:client"`, the document URL.
+    // `no-referrer` policy always yields an empty referrer.
+    if referrer_policy == "no-referrer" {
+        return Some(String::new());
+    }
+
+    // Resolve the referrer source URL. `"about:client"` (or empty) uses the
+    // document URL; an explicit `referrer` may be absolute or relative and is
+    // resolved against the document URL, then stripped of its fragment.
     let source: Option<String> = if referrer.is_empty() || referrer == "about:client" {
         client_url.map(|u| strip_fragment(u))
     } else {
-        // Explicit referrer: parse and strip its fragment.
-        let parsed = url::Url::parse(referrer).ok()?;
-        // A `no-referrer` literal, or a referrer with credentials/fragment, is
-        // reduced to (or replaced by) its origin below. Trim the fragment first.
-        Some(strip_fragment(referrer))
+        let resolved = if let Ok(u) = url::Url::parse(referrer) {
+            u.to_string()
+        } else if let Some(base) = client_url {
+            url::Url::parse(base)
+                .ok()
+                .and_then(|b| b.join(referrer).ok())
+                .map(|u| u.to_string())
+                .unwrap_or_else(|| referrer.to_string())
+        } else {
+            referrer.to_string()
+        };
+        Some(strip_fragment(&resolved))
     };
     let source = source?;
 
@@ -186,9 +215,8 @@ pub(crate) fn compute_request_referrer(
         Some(if o.ends_with('/') { o } else { format!("{o}/") })
     };
 
-    // Fetch spec §4.8 "strip": if the referrer carries credentials (userinfo),
-    // it collapses to its origin (+ trailing slash) regardless of policy or
-    // same/cross-origin status.
+    // Fetch spec "strip": if the referrer carries credentials (userinfo), it
+    // collapses to its origin (+ trailing slash) regardless of policy.
     if url::Url::parse(&source)
         .map(|u| u.username() != "" || u.password().is_some())
         .unwrap_or(false)
@@ -196,29 +224,67 @@ pub(crate) fn compute_request_referrer(
         return source_origin_slash();
     }
 
-    // Apply the policy. The WPT suite exercises `origin-when-cross-origin`;
-    // for any other (unspecified) policy we fall back to "send full referrer
-    // when same-origin, origin otherwise", which matches the default browser
-    // behaviour closely enough for the remaining tests.
-    let use_origin = referrer_policy == "origin-when-cross-origin"
-        || referrer_policy == "origin"
-        || !same_origin;
+    let full = || {
+        url::Url::parse(&source)
+            .map(|u| u.to_string())
+            .unwrap_or(source.clone())
+    };
 
-    if use_origin {
-        if !same_origin {
-            return source_origin_slash();
+    // Apply the policy (Fetch spec referrer policy table).
+    match referrer_policy {
+        "origin" => source_origin_slash(),
+        "same-origin" => {
+            if same_origin {
+                Some(source)
+            } else {
+                Some(String::new())
+            }
         }
-        // Same-origin but an origin-only policy: still send full URL.
-        return Some(source);
-    }
-
-    // Default path (no `use_origin`): send the full referrer. Serialize it
-    // through the URL parser so an origin-only referrer such as
-    // "http://host:8000" (typically the remains of stripping a fragment)
-    // gains its normalized trailing slash: "http://host:8000/".
-    match url::Url::parse(&source) {
-        Ok(u) => Some(u.to_string()),
-        Err(_) => Some(source),
+        "origin-when-cross-origin" => {
+            if same_origin {
+                Some(source)
+            } else {
+                source_origin_slash()
+            }
+        }
+        "strict-origin" => {
+            if trustworthy(&source) {
+                source_origin_slash()
+            } else {
+                Some(String::new())
+            }
+        }
+        "strict-origin-when-cross-origin" => {
+            if same_origin {
+                Some(source)
+            } else if trustworthy(&source) {
+                source_origin_slash()
+            } else {
+                Some(String::new())
+            }
+        }
+        "unsafe-url" => Some(full()),
+        // Implicit default (no explicit `referrerPolicy`): behaves like
+        // `origin-when-cross-origin` (full referrer same-origin, origin-only
+        // cross-origin), which is what WPT's default-policy tests expect.
+        "" => {
+            if same_origin {
+                Some(source)
+            } else {
+                source_origin_slash()
+            }
+        }
+        // `no-referrer-when-downgrade`: send the full referrer unless the
+        // request would be a downgrade (https → http).
+        _ => {
+            let source_trusted = trustworthy(&source);
+            let req_trusted = trustworthy(request_url);
+            if source_trusted && !req_trusted {
+                Some(String::new())
+            } else {
+                Some(full())
+            }
+        }
     }
 }
 
@@ -485,12 +551,8 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         if let Some(o) = init.as_object() {
             let m = o.get_property_str(ctx, "method")?;
             if !m.is_undefined() {
-                method = m
-                    .to_string(ctx)?
-                    .content()
-                    .encode_utf8(false)
-                    .to_string()
-                    .to_uppercase();
+                let raw = m.to_string(ctx)?.content().encode_utf8(false).to_string();
+                method = crate::http::client::cors::normalize_method(&raw);
             }
             let mut h = o.get_property_str(ctx, "headers")?;
             if !h.is_undefined_or_null() {
@@ -597,6 +659,18 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             if let Some(v) = read_str(o, "cache") {
                 cache_mode = v;
             }
+            // Validate `priority` eagerly: an invalid RequestInit member value
+            // must reject the fetch with a TypeError (WPT request-init-priority).
+            // The valid set is `high` | `low` | `auto`; `high`/`low` are accepted
+            // as hints and otherwise ignored, `auto` is the effective default.
+            if let Some(v) = read_str(o, "priority") {
+                const VALID: &[&str] = &["high", "low", "auto"];
+                if !VALID.contains(&v.as_str()) {
+                    return Err(ctx.throw_type_error(&format!(
+                        "invalid value '{v}' for RequestInit.priority"
+                    )));
+                }
+            }
         }
     }
 
@@ -666,6 +740,15 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         (origin, url)
     };
 
+    // CORS tainting: a cross-origin request in `cors` mode. These require
+    // origin/ACAO handling and (for non-safelisted requests) a preflight.
+    // Computed up front so the response callback (created below) can reference
+    // it and the async side can run the preflight.
+    let cors_tainted = mode == "cors" && is_cross_origin(client_origin.as_deref(), &url_str);
+    // Whether `Access-Control-Allow-Credentials` must be present (fetch
+    // `credentials: "include"`).
+    let credentials_include = credentials == "include";
+
     // HTTP cache (§ Fetch HTTP-cache). The request's `cache` mode decides
     // whether we serve straight from cache, revalidate, or always hit network:
     //   default      fresh hit → serve cache; stale hit → revalidate
@@ -678,16 +761,14 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     // fresh hit (or `force-cache`) never touches the transport.
 
     // Is this request cacheable at all (GET, no body)?
-    let cacheable = method.eq_ignore_ascii_case("GET")
-        && body_bytes.is_none()
-        && stream_body.is_none();
+    let cacheable =
+        method.eq_ignore_ascii_case("GET") && body_bytes.is_none() && stream_body.is_none();
 
     // A request carrying any conditional header (`If-None-Match`,
     // `If-Modified-Since`, `If-Unmodified-Since`, `If-Match`, `If-Range`) is
     // treated as `no-store`: it bypasses the cache (WPT
     // request-cache-default-conditional).
-    let has_conditional = cacheable
-        && http_cache::caller_supplied_validator(&header_list.to_vec());
+    let has_conditional = cacheable && http_cache::caller_supplied_validator(&header_list.to_vec());
 
     // Serve-from-cache hit for the modes that can return without a network call.
     let cache_hit = if cacheable && !has_conditional {
@@ -821,7 +902,7 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let promise =
         Promise::create_with_result_slot(ctx, result_slot.clone(), move |cx, data| -> JSResult {
             let client_origin = client_origin.clone();
-            let tr = match data {
+            let mut tr = match data {
                 Ok(tr) => tr,
                 Err(e) => {
                     return match e {
@@ -931,18 +1012,58 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             // A `no-cors` request for a cross-origin (or unknown-origin) URL
             // yields an opaque response per Fetch spec (status 0, type opaque,
             // null body, CORS-filtered headers). Same-origin stays basic.
-            let is_opaque = mode_clone == "no-cors"
-                && url::Url::parse(&url_clone)
-                    .map(|u| u.origin().ascii_serialization())
-                    .ok()
-                    .map_or(true, |req_origin| {
-                        client_origin.as_deref() != Some(req_origin.as_str())
-                    });
+            let is_opaque =
+                mode_clone == "no-cors" && is_cross_origin(client_origin.as_deref(), &url_clone);
             let resp_type = if is_opaque {
                 RespType::Opaque
             } else {
                 RespType::Basic
             };
+            // Cross-origin `cors` mode: run the CORS check against the final
+            // response origin and, on success, return a `cors` filtered
+            // response (type `cors`, headers limited to the safelist +
+            // `Access-Control-Expose-Headers`). A failed check is a network
+            // error (rejects with TypeError).
+            if !is_opaque && cors_tainted {
+                let final_url = tr
+                    .resp
+                    .as_ref()
+                    .map(|r| r.url().to_string())
+                    .unwrap_or_else(|| url_clone.clone());
+                let final_cross = is_cross_origin(client_origin.as_deref(), &final_url);
+                if final_cross {
+                    let headers = HeaderList::from_vec(tr.headers.clone());
+                    let client_origin_str = serialized_origin(client_origin.as_deref());
+                    if cors_check(&headers, &client_origin_str, credentials_include).is_none() {
+                        return throw_transport_error(
+                            cx,
+                            TransportError {
+                                code: "cors",
+                                message: "request failed: CORS check failed for the response"
+                                    .into(),
+                            },
+                        );
+                    }
+                    // CORS-filter the exposed headers. `content-type` /
+                    // `content-length` are safelisted, so the payload's derived
+                    // fields stay valid.
+                    let expose = headers.get("Access-Control-Expose-Headers");
+                    let filtered = cors_filter_response_headers(
+                        &headers,
+                        expose.as_deref(),
+                        credentials_include,
+                    );
+                    tr.headers = filtered;
+                    return build_response_from_transport(
+                        cx,
+                        tr,
+                        RespType::Cors,
+                        &final_url,
+                        false,
+                        signal_val.clone(),
+                    );
+                }
+            }
             build_response_from_transport(cx, tr, resp_type, &url_clone, false, signal_val.clone())
         })?;
 
@@ -972,31 +1093,6 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         .map(|(h, p)| crate::http::client::config::tls_insecure_for_host(&h, p))
         .unwrap_or(false);
 
-    // A `Referer` must be recomputed at every redirect hop (a hop that crosses
-    // origins collapses it to the origin under `origin-when-cross-origin`), so
-    // when we send one we follow redirects ourselves instead of letting the
-    // client replay the original header.
-    let manual_redirect = redirect == "follow" && !effective_referrer.is_empty();
-
-    // Per-host TLS escape hatch: `insecure` skips cert validation for this
-    // request's host (AIKE_TLS_INSECURE_HOSTS).
-    let mut cfg = crate::http::client::config::HttpClientConfig::default();
-    // HTTP/1.1 by default. HTTP/2 cannot carry header values containing C0
-    // control characters (the h2 spec forbids them, and h2 framing rejects
-    // them at send time), yet the Fetch spec permits such values and expects
-    // them sent verbatim (see WPT header-values-normalize). The test servers
-    // (wptserve) speak HTTP/1.1, so h1 is the correct default; opt into h2
-    // explicitly via the `protocol: "http2"` client option when needed.
-    cfg.protocol = crate::http::client::config::ProtocolMode::Http1Only;
-    cfg.follow_redirects = !manual_redirect;
-
-    let client = match cfg.build_http_client_ex(insecure) {
-        Ok(c) => c,
-        Err(e) => {
-            return Err(ctx.throw_internal_error(&format!("failed to build HTTP client: {e}")));
-        }
-    };
-
     // Fetch spec "HTTP defaults": a request carries default `Accept` and
     // `Accept-Language` headers unless the caller overrides them. reqwest's
     // own defaults are wiped by `perform_request` (it sets each header
@@ -1010,15 +1106,12 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     validate_header_list_for_fetch(ctx, &header_list)?;
 
     // `Origin` is a forbidden request header (scripts cannot set it), so it is
-    // added here *after* the forbidden-header strip. Safe/idempotent methods
-    // (`GET`, `HEAD`) do not carry an `Origin` header; any other method does.
-    // The value is the client's origin, or the literal `null` when the client
-    // origin is opaque.
-    if !method.eq_ignore_ascii_case("GET") && !method.eq_ignore_ascii_case("HEAD") {
-        match &req_origin {
-            Some(o) => header_list.set("Origin", o),
-            None => header_list.set("Origin", "null"),
-        }
+    // added here *after* the forbidden-header strip. Per the Fetch spec an
+    // `Origin` header is appended when the method is not GET/HEAD, OR when the
+    // request is CORS-tainted. The value is the client's origin, or the
+    // literal `null` when the client origin is opaque.
+    if should_append_origin(&method, cors_tainted) {
+        header_list.set("Origin", &serialized_origin(req_origin.as_deref()));
     }
 
     // `Content-Length` is likewise forbidden for scripts, so it too is derived
@@ -1042,12 +1135,73 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         http_cache::add_conditional_headers(&mut req_headers, validators.clone());
     }
 
+    // Whether a CORS preflight is *ever* needed for this request (non-safelisted
+    // method or header). This is independent of CORS tainting: even a same-origin
+    // request needs a preflight once a redirect makes it cross-origin, so the
+    // preflight decision must be made per hop in the transport layer (see
+    // `TransportRequest::preflight`).
+    let preflight_possible = needs_preflight(&method, &req_headers, true);
+
+    // Manually follow redirects when a referrer must be recomputed per hop, or
+    // for cors-mode requests (whose per-hop `Origin` header must be recomputed
+    // and whose cross-origin redirects make the origin opaque). Redirects are
+    // always followed manually so a fresh CORS preflight can run against each
+    // new target URL (Fetch spec: a redirect re-enters HTTP-network-or-cache
+    // fetch, which re-runs CORS-preflight for the new URL).
+    let manual_redirect =
+        redirect == "follow" && (!effective_referrer.is_empty() || cors_tainted || mode == "cors");
+
+    // Per-host TLS escape hatch: `insecure` skips cert validation for this
+    // request's host (AIKE_TLS_INSECURE_HOSTS).
+    let mut cfg = crate::http::client::config::HttpClientConfig::default();
+    cfg.protocol = crate::http::client::config::ProtocolMode::Http1Only;
+    // WHATWG `fetch` manages cookies itself via the shared global jar (driven
+    // by the `credentials` mode), so disable reqwest's automatic store which
+    // would otherwise send cookies unconditionally.
+    cfg.cookie_jar = false;
+    // Disable reqwest's auto-follow whenever we follow redirects manually.
+    cfg.follow_redirects = !manual_redirect;
+
+    let client = match cfg.build_http_client_ex(insecure) {
+        Ok(c) => c,
+        Err(e) => {
+            return Err(ctx.throw_internal_error(&format!("failed to build HTTP client: {e}")));
+        }
+    };
+
     let referrer_ctx = manual_redirect.then(|| ReferrerCtx {
         referrer: rc_referrer,
         policy: rc_policy,
         client_origin: rc_origin,
         client_url: rc_url,
         max_redirects: 10,
+    });
+
+    // The actual request carries `User-Agent: Mozilla/5.0 (aike)` (injected by
+    // `ensure_default_request_headers`); a CORS preflight must send the same
+    // value so a server comparing the two (WPT `checkUserAgentHeaderInPreflight`)
+    // accepts the actual request.
+    let user_agent = req_headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("user-agent"))
+        .map(|(_, v)| v.clone())
+        .unwrap_or_else(|| "Mozilla/5.0 (aike)".to_string());
+
+    let client_origin_str = serialized_origin(req_origin.as_deref());
+
+    // CORS-preflight inputs for the transport layer. `possible` records whether
+    // this request *would* need a preflight once tainted; the transport runs a
+    // fresh OPTIONS preflight against each CORS-tainted redirect target before
+    // sending the actual request there (Fetch spec). A failed preflight rejects
+    // the fetch with a TypeError.
+    let requested_headers = preflight_request_headers(&req_headers);
+    let preflight = preflight_possible.then(|| PreflightCtx {
+        possible: true,
+        method: method.clone(),
+        request_headers: crate::http::client::cors::join_request_headers(&requested_headers),
+        client_origin: client_origin_str.clone(),
+        credentials_include,
+        user_agent,
     });
 
     let req = TransportRequest {
@@ -1059,6 +1213,12 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         referrer: effective_referrer,
         referrer_ctx,
         replayable: stream_body.is_none(),
+        preflight,
+        cors_mode: mode == "cors",
+        cors_tainted,
+        cors_client_origin: client_origin_str,
+        credentials_mode: credentials.clone(),
+        use_shared_cookies: true,
     };
 
     // Issue the request on the tokio side. Taken as a closure because a stream
@@ -1070,10 +1230,13 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let has_conditional_for_spawn = has_conditional;
     let spawn_request = move |req: TransportRequest| match notify2 {
         Some(n) => {
+            let client = client.clone();
             tokio::spawn(async move {
                 let fut = perform_request(&client, req);
                 tokio::select! {
-                    r = fut => { let _ = rs.commit(r.map_err(FetchError::Other)); }
+                    r = fut => {
+                        let _ = rs.commit(r.map_err(FetchError::Other));
+                    }
                     _ = n.notified() => { let _ = rs.commit(Err(FetchError::Abort)); }
                 }
             });
@@ -1083,6 +1246,7 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             let has_conditional = has_conditional_for_spawn;
             let cache_method = req.method.clone();
             let cache_url = req.url.clone();
+            let client = client.clone();
             tokio::spawn(async move {
                 let mut tr = match perform_request(&client, req).await {
                     Ok(tr) => tr,
@@ -1213,6 +1377,7 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     Ok(promise.into())
 }
 
+/// Whether an HTTP status is a redirect status (301/302/303/307/308).
 /// Overwrite `Content-Length` on an already-built header list. Used once a
 /// stream body has been pumped and its real length is known.
 fn set_content_length(headers: &mut Vec<(String, String)>, len: usize) {

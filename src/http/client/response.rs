@@ -50,6 +50,7 @@ use crate::{
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum RespType {
     Basic,
+    Cors,
     Default,
     Error,
     OpaqueRedirect,
@@ -61,6 +62,7 @@ impl RespType {
     fn as_str(self) -> &'static str {
         match self {
             RespType::Basic => "basic",
+            RespType::Cors => "cors",
             RespType::Default => "default",
             RespType::Error => "error",
             RespType::OpaqueRedirect => "opaqueredirect",
@@ -841,7 +843,19 @@ fn js_response_body_as(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         // one or the cached `.body` stream handed out earlier.
         let unusable = p.body_unusable();
 
-        if unusable {
+        // An opaque / error / opaque-redirect response has a null body per the
+        // Fetch spec: `text()`/etc. resolve to the empty value rather than
+        // rejecting. These set `body_consumed: true` at construction, so they
+        // would otherwise trip the "unusable" rejection below.
+        let null_body_type = matches!(
+            p.resp_type,
+            RespType::Error | RespType::OpaqueRedirect | RespType::Opaque
+        );
+
+        if null_body_type {
+            p.body_consumed = true;
+            (Some(BodySource::Synthetic(Vec::new())), convert)
+        } else if unusable {
             (None, convert)
         } else if p.resp.is_none() && p.synthetic_body.is_none() && p.ctor_stream.is_none() {
             // Null-body response (204/205/304, HEAD, or a synthetic response

@@ -173,6 +173,8 @@ const VALID_REFERRER_POLICY: &[&str] = &[
 ];
 /// Fetch spec allowed request modes.
 const VALID_MODE: &[&str] = &["same-origin", "no-cors", "cors", "navigate", "websocket"];
+/// Fetch spec allowed request priorities (RequestInit.priority).
+const VALID_PRIORITY: &[&str] = &["high", "low", "auto"];
 /// Fetch spec allowed request destinations.
 const VALID_DESTINATION: &[&str] = &[
     "",
@@ -308,12 +310,12 @@ fn js_request_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
 
             let m = o.get_property_str(ctx, "method")?;
             if !m.is_undefined() {
-                method = m
+                let raw = m
                     .to_string(ctx)?
                     .content()
                     .encode_utf8(false)
-                    .to_string()
-                    .to_uppercase();
+                    .to_string();
+                method = crate::http::client::cors::normalize_method(&raw);
             }
             let mut h = o.get_property_str(ctx, "headers")?;
             if !h.is_undefined_or_null() {
@@ -403,6 +405,11 @@ fn js_request_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
             }
             if let Some(v) = read_str(o, "referrerPolicy")? {
                 referrer_policy = v;
+            }
+            if let Some(v) = read_str(o, "priority")? {
+                // Validate eagerly: any invalid RequestInit member value must
+                // throw a TypeError (WPT request-init-priority).
+                check_enum_option(ctx, "priority", &v, VALID_PRIORITY)?;
             }
             let rn = o.get_property_str(ctx, "isReloadNavigation")?;
             if !rn.is_undefined() {
