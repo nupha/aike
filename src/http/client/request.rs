@@ -6,8 +6,9 @@ use std::rc::Rc;
 
 use linkme::distributed_slice;
 use zuqe::{
-    CallContext, ClassCtorDef, ClassID, Exception, FieldDef, JSResult, JSValue, Runtime,
+    CallContext, ClassCtorDef, ClassID, Exception, FieldDef, JSResult, JSValue, Object, Runtime,
     ScopedContext, def_native_object,
+    gc_lite::{GcTrace, GcTraceCtx},
 };
 
 use crate::{
@@ -26,8 +27,7 @@ use crate::{
     whatwg::{
         abort::{JSAbortSignal, make_default_signal, signal_attach_follower, signal_reason},
         stream::{
-            JSReadableStream, make_rejected_promise, readable_stream_from_bytes,
-            readable_stream_from_channel,
+            JSReadableStream, call_opt_method, make_rejected_promise, readable_stream_from_bytes,
         },
     },
 };
@@ -45,11 +45,39 @@ pub(crate) struct RequestPayload {
     pub(crate) redirect: String,
     pub(crate) integrity: String,
     pub(crate) keepalive: bool,
+    /// Request `duplex` mode. Defaults to `"half"`; `new Request(stream)` without
+    /// `duplex: "half"` is rejected at construction.
+    pub(crate) duplex: String,
+    pub(crate) is_reload_navigation: bool,
+    pub(crate) is_history_navigation: bool,
     pub(crate) signal: Option<JSValue>,
+    /// Cached `Headers` object returned by the `headers` getter ([SameObject]).
+    pub(crate) headers_obj: Option<JSValue>,
     pub(crate) synthetic_body: Option<Vec<u8>>,
     /// A `ReadableStream` body, kept unread until the request is sent.
     pub(crate) stream_body: Option<JSValue>,
+    /// Cached body `ReadableStream` returned by the `body` getter; stays the
+    /// same object across accesses and after consumption (disturbed).
+    pub(crate) cached_body: Option<JSReadableStream>,
     pub(crate) body_consumed: bool,
+}
+
+impl RequestPayload {
+    /// Keep JS-visible handles alive across GC while the request is held.
+    fn gc_trace(&self, gcx: &mut GcTraceCtx) {
+        if let Some(ref s) = self.signal {
+            s.trace(gcx);
+        }
+        if let Some(ref h) = self.headers_obj {
+            h.trace(gcx);
+        }
+        if let Some(ref s) = self.stream_body {
+            s.trace(gcx);
+        }
+        if let Some(ref s) = self.cached_body {
+            s.trace(gcx);
+        }
+    }
 }
 
 pub(crate) fn get_request_payload_mut<'a>(
@@ -66,6 +94,137 @@ fn get_request_payload<'a>(
     JSRequest::payload_of(val).ok_or_else(|| ctx.throw_type_error("not a Request instance"))
 }
 
+/// HTTP token byte, per RFC 7230 tchar: `!#$%&'*+-.^_`|~` plus alphanumerics.
+fn is_http_token(c: char) -> bool {
+    matches!(c,
+        '!' | '#' | '$' | '%' | '&' | '\'' | '*' | '+' | '-' | '.' | '^' | '_' | '`' | '|' | '~'
+        | '0'..='9' | 'A'..='Z' | 'a'..='z')
+}
+
+/// WHATWG forbidden methods: CONNECT, TRACE, TRACK (byte-case-insensitive).
+fn is_forbidden_method(method: &str) -> bool {
+    matches!(
+        method.to_ascii_lowercase().as_str(),
+        "connect" | "trace" | "track"
+    )
+}
+
+/// Fetch spec "ensure method": the method must be a valid HTTP token, and not a
+/// forbidden method. Returns `Err` (TypeError) on violation.
+fn check_request_method(ctx: &mut ScopedContext, method: &str) -> Result<(), i32> {
+    if is_forbidden_method(method) {
+        return Err(ctx.throw_type_error(&format!("method {method} is forbidden")));
+    }
+    if !method.chars().all(is_http_token) {
+        return Err(ctx.throw_type_error(&format!("invalid method {method}")));
+    }
+    Ok(())
+}
+
+/// Fetch spec "validate request URL": the URL must resolve to a valid `URL`
+/// (absolute, or relative against the current document base), must not contain
+/// credentials, and must not be `about:blank` or `about:srcdoc`. Returns `Err`
+/// (TypeError) on violation.
+fn check_request_url(ctx: &mut ScopedContext, url: &str) -> Result<(), i32> {
+    if url == "about:blank" || url == "about:srcdoc" {
+        return Ok(());
+    }
+    // Resolve relative URLs against the current module/document base, mirroring
+    // how `fetch()` resolves relative specifiers. An absolute URL parses
+    // directly; a relative one needs the base.
+    let parsed = match url::Url::parse(url) {
+        Ok(u) => Some(u),
+        Err(_) => ctx
+            .current_module_name()
+            .and_then(|base| url::Url::parse(&base).ok())
+            .and_then(|base| base.join(url).ok()),
+    };
+    let parsed = parsed.ok_or_else(|| ctx.throw_type_error(&format!("invalid URL: {url}")))?;
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(ctx.throw_type_error("URL contains credentials"));
+    }
+    Ok(())
+}
+
+/// Fetch spec allowed request credentials.
+const VALID_CREDENTIALS: &[&str] = &["omit", "same-origin", "include"];
+/// Fetch spec allowed request cache modes.
+const VALID_CACHE: &[&str] = &[
+    "default",
+    "no-store",
+    "reload",
+    "no-cache",
+    "force-cache",
+    "only-if-cached",
+];
+/// Fetch spec allowed request redirect modes.
+const VALID_REDIRECT: &[&str] = &["follow", "error", "manual"];
+/// Fetch spec allowed request referrer policies.
+const VALID_REFERRER_POLICY: &[&str] = &[
+    "",
+    "no-referrer",
+    "no-referrer-when-downgrade",
+    "same-origin",
+    "origin",
+    "strict-origin",
+    "origin-when-cross-origin",
+    "strict-origin-when-cross-origin",
+    "unsafe-url",
+];
+/// Fetch spec allowed request modes.
+const VALID_MODE: &[&str] = &["same-origin", "no-cors", "cors", "navigate", "websocket"];
+/// Fetch spec allowed request destinations.
+const VALID_DESTINATION: &[&str] = &[
+    "",
+    "audio",
+    "audioworklet",
+    "document",
+    "embed",
+    "font",
+    "frame",
+    "iframe",
+    "image",
+    "manifest",
+    "object",
+    "paintworklet",
+    "report",
+    "script",
+    "sharedworker",
+    "style",
+    "track",
+    "video",
+    "worker",
+    "xslt",
+    "fencedframe",
+    "webidentity",
+];
+
+/// Validate a `RequestInit` option string against its allowed set (per the Fetch
+/// spec, invalid values throw `TypeError`). `request-error.js` WPT exercises the
+/// `referrerPolicy`/`mode`/`credentials`/`cache`/`redirect` bad-value cases.
+fn check_enum_option(
+    ctx: &mut ScopedContext,
+    name: &str,
+    value: &str,
+    allowed: &[&str],
+) -> Result<(), i32> {
+    if !allowed.contains(&value) {
+        return Err(
+            ctx.throw_type_error(&format!("invalid value '{value}' for RequestInit.{name}"))
+        );
+    }
+    Ok(())
+}
+
+/// Fetch spec "request method + no-cors" rule: a `no-cors` request may only use
+/// a CORS-safelisted method (`GET`, `HEAD`, `POST`); anything else throws.
+fn is_cors_safelisted_method(method: &str) -> bool {
+    matches!(
+        method.to_ascii_lowercase().as_str(),
+        "get" | "head" | "post"
+    )
+}
+
 fn js_request_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let new_target = cc.this();
     let input = cc.arg(0);
@@ -77,9 +236,34 @@ fn js_request_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
     let mut stream_body: Option<JSValue> = None;
     let mut redirect = String::from("follow");
     let mut signal: Option<JSValue> = None;
+    // Track the effective `mode`/`cache`/`credentials`/`referrer`/`referrerPolicy`
+    // and `duplex`/navigation flags so validation and defaults can be applied
+    // after the input-Request and RequestInit layers are merged.
+    let mut mode = String::from("cors");
+    let mut cache = String::from("default");
+    let mut credentials = String::from("same-origin");
+    let mut referrer = String::from("about:client");
+    let mut referrer_policy = String::new();
+    let mut duplex: Option<String> = None;
+    let mut keepalive = false;
+    let mut is_reload_navigation = false;
+    let mut is_history_navigation = false;
+    // Whether RequestInit supplied a non-null `body` (overrides the input's).
+    let mut init_body_provided = false;
+
+    // Track an input `Request` so its body can be disturbed (marked used) after
+    // all constructor validation has passed — a *failed* construction must not
+    // disturb the input (WPT request-disturbed "construction failure should not
+    // set bodyUsed").
+    let mut input_is_request = false;
+    let mut input_has_body = false;
+    let mut input_body_consumed = false;
 
     // Inherit from a Request input.
     if let Some(p) = JSRequest::payload_of(&input) {
+        input_is_request = true;
+        input_has_body = p.synthetic_body.is_some() || p.stream_body.is_some();
+        input_body_consumed = p.body_consumed;
         url_str = p.url.clone();
         method = p.method.clone();
         header_list = p.headers.borrow().clone();
@@ -87,6 +271,13 @@ fn js_request_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
         signal = p.signal;
         synthetic_body = p.synthetic_body.clone();
         stream_body = p.stream_body;
+        mode = p.mode.clone();
+        cache = p.cache.clone();
+        credentials = p.credentials.clone();
+        referrer = p.referrer.clone();
+        referrer_policy = p.referrer_policy.clone();
+        is_reload_navigation = p.is_reload_navigation;
+        is_history_navigation = p.is_history_navigation;
     } else if !input.is_undefined_or_null() {
         let href = input.get_property_str(ctx, "href")?;
         if !href.is_undefined() {
@@ -108,6 +299,13 @@ fn js_request_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
     if cc.length() > 1 {
         let init = cc.arg(1);
         if let Some(o) = init.as_object() {
+            // `window` is only ever allowed to be null (it is a forbidden
+            // legacy option). Any other value throws (WPT request-error).
+            let w = o.get_property_str(ctx, "window")?;
+            if !w.is_undefined() && !w.is_null() {
+                return Err(ctx.throw_type_error("RequestInit.window must be null"));
+            }
+
             let m = o.get_property_str(ctx, "method")?;
             if !m.is_undefined() {
                 method = m
@@ -123,20 +321,23 @@ fn js_request_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
             }
             // `duplex` must be read off the init dictionary whenever a body is
             // present, and read before `body` so a getter on it still fires.
-            let duplex = o.get_property_str(ctx, "duplex")?;
-            let duplex = match duplex.is_undefined() {
-                true => None,
-                false => Some(
-                    duplex
-                        .to_string(ctx)?
-                        .content()
-                        .encode_utf8(false)
-                        .to_string(),
-                ),
-            };
+            let d = o.get_property_str(ctx, "duplex")?;
+            if !d.is_undefined() {
+                duplex = Some(d.to_string(ctx)?.content().encode_utf8(false).to_string());
+            }
+
+            // Any non-`"half"` `duplex` value rejects the request, whatever the
+            // body (or absence thereof) — WPT request-init-stream "duplex full"
+            // cases, including `body: null`.
+            if let Some(d) = duplex.as_deref()
+                && d != "half"
+            {
+                return Err(ctx.throw_type_error("duplex must be 'half'"));
+            }
 
             let b = o.get_property_str(ctx, "body")?;
             if !b.is_undefined_or_null() {
+                init_body_provided = true;
                 // The body source implies a default Content-Type unless the
                 // caller already supplied one.
                 if let Some(t) = body_content_type(&b)
@@ -145,18 +346,29 @@ fn js_request_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
                     header_list.set("Content-Type", &t);
                 }
 
-                match JSReadableStream::payload_of(&b).is_some() {
-                    // A stream body requires `duplex: "half"`; without it the
-                    // request is rejected rather than silently buffered.
-                    true if duplex.as_deref() != Some("half") => {
+                let is_stream = JSReadableStream::payload_of(&b).is_some();
+                // A body on a GET/HEAD request is a TypeError.
+                if !is_stream && matches!(method.as_str(), "GET" | "HEAD") {
+                    return Err(ctx.throw_type_error("GET/HEAD requests may not have a body"));
+                }
+                // A stream body requires `duplex: "half"` and must not already be
+                // locked/disturbed (WPT request-init-stream).
+                if is_stream {
+                    let unusable = JSReadableStream::payload_of(&b)
+                        .is_some_and(|sp| sp.disturbed || sp.reader.is_some());
+                    if duplex.as_deref() != Some("half") {
                         return Err(ctx.throw_type_error(
                             "Request body is a ReadableStream but duplex is not 'half'",
                         ));
                     }
-                    // The stream stays unread here: it is the request's body and
-                    // is only pumped when the request is actually sent.
-                    true => stream_body = Some(b.clone()),
-                    false => synthetic_body = Some(body_to_bytes(ctx, &b)?),
+                    if unusable {
+                        return Err(ctx.throw_type_error(
+                            "Request body ReadableStream is locked or already disturbed",
+                        ));
+                    }
+                    stream_body = Some(b.clone());
+                } else {
+                    synthetic_body = Some(body_to_bytes(ctx, &b)?);
                 }
             }
             let r = o.get_property_str(ctx, "redirect")?;
@@ -167,13 +379,136 @@ fn js_request_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
             if !s.is_undefined_or_null() && s.as_native_object::<JSAbortSignal>().is_some() {
                 signal = Some(s.clone());
             }
+            let mut read_str = |o: Object, key: &str| -> Result<Option<String>, i32> {
+                let v = o.get_property_str(ctx, key)?;
+                if v.is_undefined() {
+                    Ok(None)
+                } else {
+                    Ok(Some(
+                        v.to_string(ctx)?.content().encode_utf8(false).to_string(),
+                    ))
+                }
+            };
+            if let Some(v) = read_str(o, "mode")? {
+                mode = v;
+            }
+            if let Some(v) = read_str(o, "credentials")? {
+                credentials = v;
+            }
+            if let Some(v) = read_str(o, "cache")? {
+                cache = v;
+            }
+            if let Some(v) = read_str(o, "referrer")? {
+                referrer = v;
+            }
+            if let Some(v) = read_str(o, "referrerPolicy")? {
+                referrer_policy = v;
+            }
+            let rn = o.get_property_str(ctx, "isReloadNavigation")?;
+            if !rn.is_undefined() {
+                is_reload_navigation = rn.to_bool()?;
+            }
+            let hn = o.get_property_str(ctx, "isHistoryNavigation")?;
+            if !hn.is_undefined() {
+                is_history_navigation = hn.to_bool()?;
+            }
+            let kl = o.get_property_str(ctx, "keepalive")?;
+            if !kl.is_undefined() {
+                keepalive = kl.to_bool()?;
+            }
         }
+    }
+
+    // A `keepalive: true` request cannot use a ReadableStream body (WPT
+    // request-keepalive "keepalive flag with stream body").
+    if keepalive && stream_body.is_some() {
+        return Err(ctx.throw_type_error("keepalive requests cannot have a ReadableStream body"));
+    }
+
+    // Validate the request URL (WPT request-error: invalid URL, credentials).
+    if !url_str.is_empty() {
+        check_request_url(ctx, &url_str)?;
+    }
+    // Validate the request method (WPT forbidden-method / request-error).
+    check_request_method(ctx, &method)?;
+    // A GET/HEAD request may not carry a body — whether inherited from the input
+    // Request or supplied via init (WPT request-disturbed "A get request may not
+    // have body").
+    if matches!(method.as_str(), "GET" | "HEAD")
+        && (synthetic_body.is_some() || stream_body.is_some())
+    {
+        return Err(ctx.throw_type_error("GET/HEAD requests may not have a body"));
+    }
+    // Validate the enum options (WPT request-error bad-option values).
+    check_enum_option(ctx, "mode", &mode, VALID_MODE)?;
+    check_enum_option(ctx, "credentials", &credentials, VALID_CREDENTIALS)?;
+    check_enum_option(ctx, "cache", &cache, VALID_CACHE)?;
+    check_enum_option(ctx, "redirect", &redirect, VALID_REDIRECT)?;
+    check_enum_option(
+        ctx,
+        "referrerPolicy",
+        &referrer_policy,
+        VALID_REFERRER_POLICY,
+    )?;
+    // Validate the referrer: must be `""`, `about:client`, `about:blank`, or a
+    // valid absolute URL (WPT request-error "RequestInit's referrer is invalid").
+    if !matches!(referrer.as_str(), "" | "about:client" | "about:blank")
+        && url::Url::parse(&referrer).is_err()
+    {
+        return Err(ctx.throw_type_error("RequestInit.referrer is not a valid URL"));
+    }
+    // `only-if-cached` requires `mode: "same-origin"` (WPT request-error).
+    if cache == "only-if-cached" && mode != "same-origin" {
+        return Err(ctx.throw_type_error("cache mode 'only-if-cached' requires mode 'same-origin'"));
+    }
+    // `no-cors` mode forbids non-safelisted methods (WPT request-error).
+    if mode == "no-cors" && !is_cors_safelisted_method(&method) {
+        return Err(ctx.throw_type_error("mode 'no-cors' may only use CORS-safelisted methods"));
+    }
+    // A `navigate` mode is never constructible (WPT request-error).
+    if mode == "navigate" {
+        return Err(ctx.throw_type_error("mode 'navigate' is not constructible"));
     }
 
     // Validate header names/values per the Fetch spec. Must run on the JS
     // thread so a violation throws a `TypeError` synchronously (WPT expects
     // `promise_rejects_js(t, TypeError, ...)`).
     validate_header_list_for_fetch(ctx, &header_list)?;
+
+    // Filter headers per the request's final mode: forbidden request headers
+    // are dropped for normal requests; only CORS-safelisted headers survive in
+    // `no-cors` mode (WPT request-headers).
+    header_list.filter_for_request_mode(mode == "no-cors");
+
+    // Disturb the input Request's body per the Fetch spec: constructing a new
+    // Request from an input with a body marks the input's body as used. A
+    // request with a *replaced* body (init.body) disturbs the input too; a
+    // request without a replacement body whose input is already disturbed
+    // throws a TypeError (WPT request-disturbed).
+    // The input Request's body is unusable if it was consumed OR its body
+    // stream was locked/disturbed (e.g. `request.body.getReader()` was called,
+    // WPT request-init-stream). In either case, without a replacement body the
+    // new construction throws.
+    let input_body_unusable = if input_is_request && !init_body_provided {
+        let p = get_request_payload(ctx, &input)?;
+        p.body_consumed
+            || p.cached_body.as_ref().is_some_and(|s| {
+                s.payload()
+                    .is_some_and(|sp| sp.disturbed || sp.reader.is_some())
+            })
+    } else {
+        false
+    };
+    if input_body_unusable {
+        return Err(ctx.throw_type_error(
+            "Cannot construct a Request from a request whose body has already been used",
+        ));
+    }
+    if input_is_request && input_has_body && !input_body_consumed {
+        if let Ok(p) = get_request_payload_mut(ctx, &mut input.clone()) {
+            p.body_consumed = true;
+        }
+    }
 
     // WHATWG: `request.signal` is a fresh "follow" signal that follows the
     // supplied signal (`request.signal !== signal`), and is never the same
@@ -188,55 +523,29 @@ fn js_request_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
         None => Some(make_default_signal(ctx)?),
     };
 
-    let mut payload = RequestPayload {
+    let payload = RequestPayload {
         method,
         url: url_str,
         headers: Rc::new(RefCell::new(header_list)),
         destination: String::new(),
-        referrer: "about:client".to_string(),
-        referrer_policy: String::new(),
-        mode: "cors".to_string(),
-        credentials: "same-origin".to_string(),
-        cache: "default".to_string(),
+        referrer,
+        referrer_policy,
+        mode,
+        credentials,
+        cache,
         redirect,
         integrity: String::new(),
-        keepalive: false,
+        keepalive,
+        duplex: duplex.unwrap_or_else(|| "half".to_string()),
+        is_reload_navigation,
+        is_history_navigation,
         signal,
+        headers_obj: None,
         synthetic_body,
         stream_body,
+        cached_body: None,
         body_consumed: false,
     };
-
-    // Override remaining RequestInit string fields if provided.
-    if cc.length() > 1 {
-        let init = cc.arg(1);
-        if let Some(o) = init.as_object() {
-            let mut str_field = |o: zuqe::Object, name: &str, default: &str| -> String {
-                // safe defaulting helper (ignores errors)
-                match o.get_property_str(ctx, name) {
-                    Ok(v) if !v.is_undefined() => v
-                        .to_string(ctx)
-                        .map(|s| s.content().encode_utf8(false).to_string())
-                        .unwrap_or_else(|_| default.to_string()),
-                    _ => default.to_string(),
-                }
-            };
-            payload.destination = str_field(o, "destination", "");
-            payload.referrer = str_field(o, "referrer", "about:client");
-            payload.referrer_policy = str_field(o, "referrerPolicy", "");
-            payload.mode = str_field(o, "mode", "cors");
-            payload.credentials = str_field(o, "credentials", "same-origin");
-            payload.cache = str_field(o, "cache", "default");
-            payload.integrity = str_field(o, "integrity", "");
-            let ka = o.get_property_str(ctx, "keepalive")?;
-            if !ka.is_undefined() {
-                payload.keepalive = ka
-                    .to_number(ctx)
-                    .map(|n| n.to_f64() != 0.0)
-                    .unwrap_or(false);
-            }
-        }
-    }
 
     JSRequest::new_instance(ctx, new_target, payload).map(JSValue::from)
 }
@@ -271,6 +580,25 @@ fn js_req_keepalive_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
     Ok(JSValue::from(p.keepalive))
 }
 
+fn js_req_duplex_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let this = cc.this();
+    let p = get_request_payload(ctx, &this)?;
+    ctx.create_string_from_utf8(p.duplex.as_bytes().to_vec())
+        .map(JSValue::make_string)
+}
+
+fn js_req_is_reload_navigation_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let this = cc.this();
+    let p = get_request_payload(ctx, &this)?;
+    Ok(JSValue::from(p.is_reload_navigation))
+}
+
+fn js_req_is_history_navigation_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let this = cc.this();
+    let p = get_request_payload(ctx, &this)?;
+    Ok(JSValue::from(p.is_history_navigation))
+}
+
 fn js_req_signal_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let p = get_request_payload(ctx, &this)?;
@@ -278,18 +606,28 @@ fn js_req_signal_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 }
 
 fn js_req_headers_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let this = cc.this();
-    let p = get_request_payload(ctx, &this)?;
-    // Share the payload's live header list so mutations through the exposed
-    // `Headers` object are visible to the request (Fetch spec [SameObject]).
-    let guard = if p.mode == "no-cors" {
-        Guard::RequestNoCors
-    } else {
-        Guard::None
+    // [SameObject]: return the same Headers instance on every access.
+    let mut this = cc.this();
+    if let Some(h) = get_request_payload_mut(ctx, &mut this)?.headers_obj {
+        return Ok(h);
+    }
+    let (shared, guard) = {
+        let p = get_request_payload(ctx, &this)?;
+        // A Request's exposed Headers object uses the `request` guard (or
+        // `request-no-cors` in no-cors mode), which silently drops forbidden
+        // request-header names / non-CORS-safelisted writes.
+        let guard = if p.mode == "no-cors" {
+            Guard::RequestNoCors
+        } else {
+            Guard::Request
+        };
+        (p.headers.clone(), guard)
     };
-    let payload = HeadersPayload::from_shared(p.headers.clone(), guard);
+    let payload = HeadersPayload::from_shared(shared, guard);
     let headers = JSHeaders::new_instance(ctx, JSValue::UNDEFINED, payload)?;
-    Ok(headers.into())
+    let hv = headers.into();
+    get_request_payload_mut(ctx, &mut this)?.headers_obj = Some(hv);
+    Ok(hv)
 }
 
 fn js_req_body_used_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -311,39 +649,49 @@ fn js_req_body(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             return Ok(s);
         }
     }
+    // Return the same cached stream instance on every access ([SameObject]).
+    {
+        let p = get_request_payload_mut(ctx, &mut this)?;
+        if let Some(s) = p.cached_body {
+            return Ok(JSValue::from(s));
+        }
+    }
 
-    let source = {
+    // A *consumed* body still exposes a `body` that is a ReadableStream —
+    // disturbed, so any read rejects (Fetch spec). A request that never had a
+    // body exposes a null `body` (WPT request-disturbed "body's default value
+    // is null").
+    {
         let p = get_request_payload_mut(ctx, &mut this)?;
         if p.body_consumed {
-            None
-        } else if let Some(bytes) = p.synthetic_body.take() {
-            p.body_consumed = true;
-            Some(BodySource::Synthetic(bytes))
+            let stream = readable_stream_from_bytes(ctx, Vec::new())?;
+            let _ = call_opt_method(ctx, stream, "getReader", &[]);
+            let s = JSReadableStream::try_from(stream)?;
+            p.cached_body = Some(s);
+            return Ok(JSValue::from(p.cached_body.expect("just set")));
+        }
+        // A request constructed without any body has a null body.
+        if p.synthetic_body.is_none() && p.stream_body.is_none() {
+            return Ok(JSValue::NULL);
+        }
+    }
+
+    // First access of an unconsumed buffered body: build and cache the stream.
+    // The synthetic bytes are *cloned* (not taken): accessing `request.body`
+    // does not consume the body (bodyUsed stays false), so a later `blob()` /
+    // `text()` must still find the source bytes.
+    let stream = {
+        let p = get_request_payload_mut(ctx, &mut this)?;
+        if let Some(bytes) = p.synthetic_body.clone() {
+            readable_stream_from_bytes(ctx, bytes)?
         } else {
-            None
+            readable_stream_from_bytes(ctx, Vec::new())?
         }
     };
-    match source {
-        Some(BodySource::Channel(rx)) => {
-            // Request bodies are buffered into plain `Vec<u8>` chunks; wrap them
-            // as `Ok` so they flow through the error-aware channel stream.
-            let (tx, rx2) = crossbeam::channel::unbounded::<Result<Vec<u8>, String>>();
-            std::thread::spawn(move || {
-                while let Ok(b) = rx.recv() {
-                    // `b` already carries the chunk/error result; forward as-is.
-                    if tx.send(b).is_err() {
-                        break;
-                    }
-                }
-            });
-
-            readable_stream_from_channel(ctx, rx2, None)
-        }
-        Some(BodySource::Synthetic(bytes)) => readable_stream_from_bytes(ctx, bytes),
-        // Request bodies are always buffered, never a live stream.
-        Some(BodySource::Stream(s)) => Ok(s.into()),
-        None => Ok(JSValue::NULL),
-    }
+    let s = JSReadableStream::try_from(stream)?;
+    get_request_payload_mut(ctx, &mut this)?.cached_body = Some(s);
+    let p = get_request_payload_mut(ctx, &mut this)?;
+    Ok(JSValue::from(p.cached_body.expect("just set")))
 }
 
 /// Body read methods for Request (bytes, text, json, arrayBuffer).
@@ -366,10 +714,14 @@ fn js_req_body_as(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         } else if let Some(bytes) = p.synthetic_body.take() {
             p.body_consumed = true;
             Some(BodySource::Synthetic(bytes))
+        } else if let Some(s) = p.stream_body.take() {
+            // A stream body is drained on demand, like a buffered one.
+            p.body_consumed = true;
+            Some(BodySource::Stream(JSReadableStream::try_from(s)?))
         } else {
             // Null-body request (e.g. `new Request(url)` with no init body):
-            // consumers resolve to the empty value rather than rejecting.
-            p.body_consumed = true;
+            // consumers resolve to the empty value, and the body stays unused
+            // (bodyUsed remains false — a null body is never disturbed).
             Some(BodySource::Synthetic(Vec::new()))
         }
     };
@@ -469,9 +821,14 @@ fn js_req_clone(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         redirect: src.redirect.clone(),
         integrity: src.integrity.clone(),
         keepalive: src.keepalive,
+        duplex: src.duplex.clone(),
+        is_reload_navigation: src.is_reload_navigation,
+        is_history_navigation: src.is_history_navigation,
         signal,
+        headers_obj: None,
         synthetic_body: src.synthetic_body.clone(),
         stream_body: src.stream_body,
+        cached_body: None,
         body_consumed: false,
     };
     JSRequest::new_instance(ctx, this, payload).map(JSValue::from)
@@ -496,6 +853,19 @@ const REQUEST_PROTO: &[FieldDef] = &[
     FieldDef::GETSET("signal", Some(js_req_signal_getter), None, 0),
     FieldDef::GETSET("headers", Some(js_req_headers_getter), None, 0),
     FieldDef::GETSET("bodyUsed", Some(js_req_body_used_getter), None, 0),
+    FieldDef::GETSET("duplex", Some(js_req_duplex_getter), None, 0),
+    FieldDef::GETSET(
+        "isReloadNavigation",
+        Some(js_req_is_reload_navigation_getter),
+        None,
+        0,
+    ),
+    FieldDef::GETSET(
+        "isHistoryNavigation",
+        Some(js_req_is_history_navigation_getter),
+        None,
+        0,
+    ),
     FieldDef::GETSET("body", Some(js_req_body), None, 0),
     FieldDef::FUNC("bytes", 0, js_req_body_as, BODY_AS_BYTES as i16),
     FieldDef::FUNC(
@@ -517,7 +887,10 @@ def_native_object!(
     JSRequest,
     RequestPayload,
     REQUEST_PROTO,
-    Some(ClassCtorDef::new(js_request_constructor, 1, true).expose_to_global())
+    // `call_as_func: false`: Request must be constructed with `new` (WPT
+    // request-error "without new must throw").
+    Some(ClassCtorDef::new(js_request_constructor, 1, false).expose_to_global()),
+    on_payload_gc: RequestPayload::gc_trace
 );
 
 #[distributed_slice(USER_CLASS_DEFS)]

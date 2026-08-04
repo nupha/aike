@@ -123,6 +123,65 @@ fn combine_content_length_headers(raw: Vec<(String, String)>) -> Vec<(String, St
     }
 }
 
+/// Canonical HTTP reason phrase for a status code (IANA registry). The Fetch
+/// spec exposes the response's status message via `Response.statusText`; for a
+/// real HTTP response this is the status-line reason phrase (200 → "OK",
+/// 304 → "Not Modified", ...). Unknown codes fall back to the empty string.
+fn canonical_status_text(status: u16) -> String {
+    let phrase = match status {
+        100 => "Continue",
+        101 => "Switching Protocols",
+        200 => "OK",
+        201 => "Created",
+        202 => "Accepted",
+        203 => "Non-Authoritative Information",
+        204 => "No Content",
+        205 => "Reset Content",
+        206 => "Partial Content",
+        300 => "Multiple Choices",
+        301 => "Moved Permanently",
+        302 => "Found",
+        303 => "See Other",
+        304 => "Not Modified",
+        305 => "Use Proxy",
+        307 => "Temporary Redirect",
+        308 => "Permanent Redirect",
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        402 => "Payment Required",
+        403 => "Forbidden",
+        404 => "Not Found",
+        405 => "Method Not Allowed",
+        406 => "Not Acceptable",
+        407 => "Proxy Authentication Required",
+        408 => "Request Timeout",
+        409 => "Conflict",
+        410 => "Gone",
+        411 => "Length Required",
+        412 => "Precondition Failed",
+        413 => "Payload Too Large",
+        414 => "URI Too Long",
+        415 => "Unsupported Media Type",
+        416 => "Range Not Satisfiable",
+        417 => "Expectation Failed",
+        418 => "I'm a Teapot",
+        421 => "Misdirected Request",
+        426 => "Upgrade Required",
+        428 => "Precondition Required",
+        429 => "Too Many Requests",
+        431 => "Request Header Fields Too Large",
+        451 => "Unavailable For Legal Reasons",
+        500 => "Internal Server Error",
+        501 => "Not Implemented",
+        502 => "Bad Gateway",
+        503 => "Service Unavailable",
+        504 => "Gateway Timeout",
+        505 => "HTTP Version Not Supported",
+        _ => "",
+    };
+    phrase.to_string()
+}
+
 /// Percent-decode a `data:`-URL payload (so the body carries the raw octets,
 /// e.g. `%EF%BB%BF` -> UTF-8 BOM bytes). Not a full URI decode: only the
 /// escapes matter here, and `+` is not special in this context.
@@ -443,9 +502,9 @@ pub(crate) async fn perform_request(
     // Fetch spec: multiple identical `Content-Length` headers combine into one;
     // conflicting `Content-Length` values are dropped (treated as absent).
     let headers = combine_content_length_headers(raw_headers);
-    // WHATWG fetch: the JS-visible `Response.statusText` is always the empty
-    // string; the HTTP reason phrase is intentionally not exposed to scripts.
-    let status_text = String::new();
+    // `Response.statusText` is the response's status message: the HTTP reason
+    // phrase for a real response (200 → "OK", 304 → "Not Modified", ...).
+    let status_text = canonical_status_text(status.as_u16());
     // Read Content-Length from the header: resp.content_length() reports the
     // body size hint, which is erased by the auto-decompression wrapper.
     let content_length = resp

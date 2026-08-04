@@ -119,6 +119,21 @@ impl HeaderList {
         self.list.retain(|(k, _)| k.to_lowercase() != lower);
     }
 
+    /// Filter entries per the Fetch spec's request-header guard:
+    /// - normal request: drop forbidden request-header names;
+    /// - `no-cors` request: keep only CORS-safelisted request headers.
+    /// Used by the `Request` constructor to filter headers given via init or an
+    /// input Request (WPT request-headers).
+    pub(crate) fn filter_for_request_mode(&mut self, no_cors: bool) {
+        self.list.retain(|(name, value)| {
+            if no_cors {
+                is_cors_safelisted(name, value)
+            } else {
+                !is_forbidden_request_header(name, value)
+            }
+        });
+    }
+
     pub(crate) fn get(&self, name: &str) -> Option<String> {
         let lower = name.to_lowercase();
         let values: Vec<&str> = self
@@ -266,6 +281,96 @@ pub(crate) enum Guard {
     /// Headers of a `mode: "no-cors"` `Request`: mutations that are not
     /// CORS-safelisted are silently ignored (no error).
     RequestNoCors,
+    /// Headers of a normal `Request`: mutable, but forbidden request-header
+    /// names (`Host`, `Connection`, `Accept-Encoding`, ...) are silently
+    /// dropped.
+    Request,
+}
+
+/// WHATWG "forbidden request-header name": cannot be set through a Request's
+/// headers object, silently dropped under the `request` guard.
+fn is_forbidden_request_header_name(name: &str) -> bool {
+    const FORBIDDEN: &[&str] = &[
+        "accept-charset",
+        "accept-encoding",
+        "access-control-request-headers",
+        "access-control-request-method",
+        "connection",
+        "content-length",
+        "cookie",
+        "cookie2",
+        "date",
+        "dnt",
+        "expect",
+        "host",
+        "keep-alive",
+        "origin",
+        "referer",
+        "set-cookie",
+        "te",
+        "trailer",
+        "transfer-encoding",
+        "upgrade",
+        "via",
+    ];
+    let lower = name.to_lowercase();
+    if FORBIDDEN.contains(&lower.as_str()) {
+        return true;
+    }
+    if lower.starts_with("proxy-") || lower.starts_with("sec-") {
+        return true;
+    }
+    // The conditional method-override headers are only forbidden when their
+    // value resolves to a forbidden method; that check needs the value, so it
+    // is done in the set/append path.
+    false
+}
+
+/// WHATWG "forbidden request-header name" including the conditional
+/// method-override headers (`x-http-method`, `x-http-method-override`,
+/// `x-method-override`), which are forbidden when their value resolves to a
+/// forbidden method (`CONNECT`/`TRACE`/`TRACK`, byte-case-insensitive, after
+/// "get, decode, and split").
+fn is_forbidden_request_header(name: &str, value: &str) -> bool {
+    if is_forbidden_request_header_name(name) {
+        return true;
+    }
+    let lower = name.to_lowercase();
+    if matches!(
+        lower.as_str(),
+        "x-http-method" | "x-http-method-override" | "x-method-override"
+    ) {
+        return split_method_override(value).iter().any(|m| {
+            matches!(
+                m.to_ascii_lowercase().as_str(),
+                "connect" | "trace" | "track"
+            )
+        });
+    }
+    false
+}
+
+/// "Get, decode, and split" for a header value: split on commas, keeping quoted
+/// strings intact and trimming each item.
+fn split_method_override(value: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut temp = String::new();
+    let mut in_quote = false;
+    for c in value.chars() {
+        if c == '"' {
+            in_quote = !in_quote;
+            temp.push(c);
+            continue;
+        }
+        if c == ',' && !in_quote {
+            out.push(temp.trim().to_string());
+            temp.clear();
+            continue;
+        }
+        temp.push(c);
+    }
+    out.push(temp.trim().to_string());
+    out
 }
 
 /// WHATWG "CORS-safelisted request-header". Only these may be set on a
@@ -415,7 +520,10 @@ pub(crate) fn header_list_from_js(
             // A header entry must be a `[name, value]` tuple of exactly two
             // items. Fewer (e.g. `["name"]`) or more (e.g. `["a", "b", "c"]`)
             // elements are rejected per the Fetch spec (WPT headers-errors).
-            let pair_len = pair.get_property_str(ctx, "length")?.to_number(ctx)?.to_i32();
+            let pair_len = pair
+                .get_property_str(ctx, "length")?
+                .to_number(ctx)?
+                .to_i32();
             if pair_len != 2 {
                 return Err(ctx.throw_type_error(
                     "Each header entry must be a [name, value] pair of exactly two elements",
@@ -537,6 +645,10 @@ fn js_headers_append(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     if guard == Guard::Response && is_forbidden_response_header(&name) {
         return Ok(JSValue::UNDEFINED);
     }
+    // request guard: forbidden request-header names are silently dropped.
+    if guard == Guard::Request && is_forbidden_request_header(&name, &value) {
+        return Ok(JSValue::UNDEFINED);
+    }
     // no-cors guard: the safelist test applies to the *combined* value that
     // append would produce, not just the new one.
     if guard == Guard::RequestNoCors {
@@ -566,6 +678,10 @@ fn js_headers_delete(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     check_header_name(ctx, &name)?;
     // response guard: forbidden response headers cannot be removed either.
     if guard == Guard::Response && is_forbidden_response_header(&name) {
+        return Ok(JSValue::UNDEFINED);
+    }
+    // request guard: forbidden request-header names cannot be removed either.
+    if guard == Guard::Request && is_forbidden_request_header_name(&name) {
         return Ok(JSValue::UNDEFINED);
     }
     h.list.borrow_mut().delete(&name);
@@ -630,6 +746,10 @@ fn js_headers_set(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     }
     // response guard: forbidden response headers are silently dropped.
     if guard == Guard::Response && is_forbidden_response_header(&name) {
+        return Ok(JSValue::UNDEFINED);
+    }
+    // request guard: forbidden request-header names are silently dropped.
+    if guard == Guard::Request && is_forbidden_request_header(&name, &value) {
         return Ok(JSValue::UNDEFINED);
     }
     // no-cors guard: drop writes that are not CORS-safelisted.
