@@ -975,4 +975,33 @@ mod tests {
         apply_defaults(&s, &mut args);
         assert_eq!(args, serde_json::Value::Null);
     }
+
+    #[test]
+    fn apply_defaults_default_enum_violation_rejected() {
+        // A default outside the enum is inserted by apply_defaults but then
+        // rejected by the subsequent validate_against_schema pass.
+        let s = schema(
+            serde_json::json!({
+                "mode": { "type": "string", "enum": ["overwrite", "append"], "default": "patch" },
+            }),
+            &[],
+        );
+        let mut args = serde_json::Value::Null;
+        apply_defaults(&s, &mut args);
+        assert!(validate_against_schema(&s, &args).is_err());
+    }
+
+    #[test]
+    fn apply_defaults_default_type_violation_rejected() {
+        // A default of the wrong type is inserted then rejected by validation.
+        let s = schema(
+            serde_json::json!({
+                "depth": { "type": "integer", "default": "oops" },
+            }),
+            &[],
+        );
+        let mut args = serde_json::Value::Null;
+        apply_defaults(&s, &mut args);
+        assert!(validate_against_schema(&s, &args).is_err());
+    }
 }

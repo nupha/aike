@@ -35,6 +35,8 @@ declare module "fs" {
   function stat(path: string): Promise<FileStat>;
   /** Read the contents of a directory. */
   function readDir(path: string): Promise<Dirent[]>;
+  /** Canonicalize a path, resolving all symlinks. Throws if the path does not exist. */
+  function realpath(path: string): Promise<string>;
 
   /** Match files/directories against a glob pattern. Returns matching paths, relative to `cwd` unless `absolute`. */
   function glob(

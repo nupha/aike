@@ -278,6 +278,24 @@ pub(super) fn js_fs_writeJSON(ctx: &mut ScopedContext, cc: CallContext) -> JSRes
 }
 
 // ---------------------------------------------------------------------------
+// realpath - canonicalize a path, resolving all symlinks
+// ---------------------------------------------------------------------------
+pub(super) fn js_fs_realpath(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let path = get_path_arg(ctx, &cc)?;
+    spawn_fs_op(
+        ctx,
+        async move {
+            tokio::fs::canonicalize(&path)
+                .await
+                .map(|p| p.to_string_lossy().to_string())
+                .map_err(|e| e.to_string())
+        },
+        |cx, s| cx.create_string_from_str(&s).map(JSValue::make_string),
+    )
+    .map(JSValue::from)
+}
+
+// ---------------------------------------------------------------------------
 // appendText - append text content to file
 // ---------------------------------------------------------------------------
 pub(super) fn js_fs_appendText(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {

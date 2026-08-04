@@ -700,6 +700,31 @@ async function testReadOptions() {
 }
 
 // ---------------------------------------------------------------------------
+// fs.realpath()
+// ---------------------------------------------------------------------------
+async function testRealpath() {
+  console.log("\n=== realpath() ===");
+  const F = "../tmp/test_realpath.txt";
+  await fs.ensureDir("../tmp", { recursive: true });
+  await fs.writeText(F, "x");
+
+  const rp = await fs.realpath(F);
+  check("realpath is absolute", rp.startsWith("/"));
+  check("realpath ends with filename", rp.endsWith("/test_realpath.txt"));
+
+  // non-existent path throws
+  let threw = false;
+  try {
+    await fs.realpath("../tmp/nonexistent_realpath_xy");
+  } catch {
+    threw = true;
+  }
+  check("realpath throws on missing path", threw);
+
+  await fs.remove(F).catch(() => { });
+}
+
+// ---------------------------------------------------------------------------
 // Run all
 // ---------------------------------------------------------------------------
 const tests = [
@@ -708,7 +733,7 @@ const tests = [
   testOnData, testAsyncIterator, testExists,
   testMakeDirRemoveDir, testRemove, testLineCounting,
   testOpenNonexistent, testWriteNewPath, testReplaceTextUnique,
-  testReplaceTextAll, testReadOptions,
+  testReplaceTextAll, testReadOptions, testRealpath,
 ];
 for (const t of tests) {
   try {

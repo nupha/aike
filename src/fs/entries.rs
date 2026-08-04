@@ -12,8 +12,8 @@ use super::{
     },
     file::{
         FS_READ_BYTES, FS_READ_TEXT, FS_REPLACE_ALL, FS_REPLACE_UNIQUE, FS_WRITE_BYTES,
-        FS_WRITE_TEXT, js_fs_appendText, js_fs_open, js_fs_read, js_fs_readJSON, js_fs_replaceText,
-        js_fs_write, js_fs_write_auto, js_fs_writeJSON,
+        FS_WRITE_TEXT, js_fs_appendText, js_fs_open, js_fs_read, js_fs_readJSON, js_fs_realpath,
+        js_fs_replaceText, js_fs_write, js_fs_write_auto, js_fs_writeJSON,
     },
     glob::js_fs_glob,
 };
@@ -25,6 +25,7 @@ const MOD_FS_ENTRIES: &[FieldDef] = &[
         zuqe::JS_PROP_ENUMERABLE,
     ),
     FieldDef::FUNC("open", 2, js_fs_open, 0),
+    FieldDef::FUNC("realpath", 1, js_fs_realpath, 0),
     FieldDef::FUNC("glob", 1, js_fs_glob, 0),
     FieldDef::FUNC("readText", 1, js_fs_read, FS_READ_TEXT as i16),
     FieldDef::FUNC("readJSON", 1, js_fs_readJSON, 0),
