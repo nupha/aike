@@ -157,7 +157,7 @@ impl McpServicePayload {
 
         let info = ServerInfo::new(capabilities)
             .with_server_info(si)
-            .with_protocol_version(ProtocolVersion::V_2025_06_18);
+            .with_protocol_version(ProtocolVersion::V_2026_07_28);
 
         if self.instructions.borrow().is_empty() {
             info

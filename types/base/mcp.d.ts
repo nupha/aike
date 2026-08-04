@@ -30,8 +30,65 @@ declare module "mcp" {
     [key: string]: unknown;
   }
 
+  /**
+   * Payload of a streaming chunk emitted via {@link McpChunkSender}.
+   *
+   * A JSON value (recursive): string, number, boolean, null, arrays, and plain
+   * objects. This matches what the server actually forwards — the chunk is
+   * serialized to JSON and sent as the `notifications/tool-chunk` params, so
+   * non-serializable values (functions, `undefined`, symbols, `Date`, class
+   * instances, ...) are not expressible.
+   */
+  export type McpChunkPayload =
+    | string
+    | number
+    | boolean
+    | null
+    | McpChunkPayload[]
+    | { [key: string]: McpChunkPayload };
+
+  /**
+   * Live chunk emitter passed to a tool handler as its second argument.
+   *
+   * Calling `chunkSender(payload)` pushes an intermediate
+   * `notifications/tool-chunk` SSE event to the MCP client while the tool is
+   * still running. The handler's return value is delivered afterwards as the
+   * normal `tools/call` result, so clients can render live progress / partial
+   * results before the final answer.
+   *
+   * Semantics:
+   * - Synchronous: returns `undefined` immediately. It is NOT a Promise — do
+   *   not `await` it; `await` adds a useless microtask and waits for nothing.
+   * - Fire-and-forget: emitting never blocks on the client.
+   * - Best-effort: chunks are queued through a bounded channel (capacity 32);
+   *   when the queue is full a chunk is silently dropped.
+   * - The server always emits a leading `notifications/tool-chunk`
+   *   `{ status: "started", tool }` event before your handler runs.
+   *
+   * @example
+   * handler: async (args, chunkSender) => {
+   *   chunkSender({ status: "searching", engine: "bing" });
+   *   for (const page of pages) {
+   *     chunkSender({ results: page.items, page: page.num });
+   *   }
+   *   return { content: [{ type: "text", text: "done" }] };
+   * }
+   */
+  export type McpChunkSender = (payload: McpChunkPayload) => void;
+
+  /**
+   * Tool handler invoked on `tools/call`.
+   *
+   * The second parameter `chunkSender` streams intermediate SSE events to the
+   * client (see {@link McpChunkSender}). It is always provided at runtime even
+   * though handlers that do not use streaming may simply ignore it.
+   *
+   * Return the final result as a {@link McpToolCallResult} envelope (keeps
+   * non-text content blocks) or a plain value (auto-wrapped into a text block).
+   */
   type McpToolHandler = (
     args: Record<string, any>,
+    chunkSender: McpChunkSender,
   ) => McpToolCallResult | Promise<McpToolCallResult>;
 
   /** JSON Schema describing a tool's input parameters. */
@@ -182,7 +239,12 @@ declare module "mcp" {
 
   /** what "initialize" method returns — mirrors `rmcp::ServerInfo` (== `InitializeResult`). */
   export interface McpInitializeResult {
-    protocolVersion: "2024-11-05" | "2025-03-26" | "2025-06-18" | "2025-11-25";
+    protocolVersion:
+      | "2024-11-05"
+      | "2025-03-26"
+      | "2025-06-18"
+      | "2025-11-25"
+      | "2026-07-28";
     capabilities: {
       experimental?: Record<string, any>;
       extensions?: Record<string, any>;

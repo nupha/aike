@@ -12,8 +12,9 @@ use rmcp::{
     ErrorData as McpError,
     handler::server::ServerHandler,
     model::{
-        CallToolResult, Content, CustomNotification, Implementation, JsonObject, ListToolsResult,
-        ProtocolVersion, ServerCapabilities, ServerInfo, ServerNotification,
+        CallToolResponse, CallToolResult, ContentBlock, CustomNotification, Implementation,
+        JsonObject, ListToolsResult, ProtocolVersion, ServerCapabilities, ServerInfo,
+        ServerNotification,
     },
     service::{RequestContext, RoleServer},
     transport::streamable_http_server::{
@@ -141,7 +142,7 @@ impl ServerHandler for McpService {
 
         let info = ServerInfo::new(capabilities)
             .with_server_info(si)
-            .with_protocol_version(ProtocolVersion::V_2025_03_26);
+            .with_protocol_version(ProtocolVersion::V_2026_07_28);
 
         if !self.instructions.is_empty() {
             info.with_instructions(self.instructions.clone())
@@ -167,7 +168,7 @@ impl ServerHandler for McpService {
         &self,
         request: rmcp::model::CallToolRequestParams,
         context: RequestContext<RoleServer>,
-    ) -> impl Future<Output = Result<CallToolResult, McpError>> + Send + '_ {
+    ) -> impl Future<Output = Result<CallToolResponse, McpError>> + Send + '_ {
         let tool_name = request.name.to_string();
         let mut arguments: serde_json::Value = request
             .arguments
@@ -203,14 +204,15 @@ impl ServerHandler for McpService {
             if let Some(handler) = self.native_handlers.get(&tool_name) {
                 return match handler(arguments).await {
                     Ok(result) => {
-                        let content = Content::json(result)
-                            .unwrap_or_else(|_| Content::text("Failed to serialize result"));
-                        Ok(CallToolResult::success(vec![content]))
+                        let content = ContentBlock::json(result)
+                            .unwrap_or_else(|_| ContentBlock::text("Failed to serialize result"));
+                        Ok(CallToolResult::success(vec![content]).into())
                     }
-                    Err(msg) => Ok(CallToolResult::error(vec![Content::text(format!(
+                    Err(msg) => Ok(CallToolResult::error(vec![ContentBlock::text(format!(
                         "Error: {}",
                         msg
-                    ))])),
+                    ))])
+                    .into()),
                 };
             }
 
@@ -249,17 +251,19 @@ impl ServerHandler for McpService {
                     Some(chunk) => {
                         if chunk.final_chunk {
                             if let Some(err) = chunk.error {
-                                return Ok(CallToolResult::error(vec![Content::text(format!(
+                                return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
                                     "Error: {}",
                                     err.message
-                                ))]));
+                                ))])
+                                .into());
                             }
                             let result_json = chunk.result_json.as_deref().unwrap_or("null");
                             return match serde_json::from_str::<CallToolResult>(result_json) {
-                                Ok(ctr) => Ok(ctr),
-                                Err(_e) => Ok(CallToolResult::success(vec![Content::text(
+                                Ok(ctr) => Ok(ctr.into()),
+                                Err(_e) => Ok(CallToolResult::success(vec![ContentBlock::text(
                                     result_json.to_string(),
-                                )])),
+                                )])
+                                .into()),
                             };
                         } else {
                             // Intermediate chunk: send as custom notification (SSE event).
@@ -482,13 +486,17 @@ fn validate_property(
 }
 
 // ---------------------------------------------------------------------------
-// MCP transport — Streamable HTTP (stateful, session-based, SSE)
+// MCP transport — Streamable HTTP (stateless by default, SSE)
 // ---------------------------------------------------------------------------
 
 /// Build an axum Router for the MCP service via Streamable HTTP.
 ///
 /// The returned Router can be merged into an existing axum app via
 /// `router.merge(mcp_router)`.
+///
+/// Serves statelessly by default: `legacy_session_mode` is disabled so no
+/// session is created for any protocol version (per SEP-2567 the `2026-07-28`
+/// version is always served statelessly anyway).
 pub(crate) fn build_axum_mcp_route(
     p: &McpServicePayload,
     js_tx: channel::Sender<IncomingRequest>,
@@ -496,7 +504,7 @@ pub(crate) fn build_axum_mcp_route(
 ) -> axum::Router {
     let service = McpService::from_payload(p, js_tx, endpoint_index);
     let config = StreamableHttpServerConfig::default()
-        .with_stateful_mode(true)
+        .with_legacy_session_mode(false)
         .disable_allowed_hosts();
     let session_manager = Arc::new(LocalSessionManager::default());
 
@@ -631,7 +639,8 @@ pub(crate) fn handle_mcp_tool_call(
 
     // Create a "chunk sender" function that the JS handler can call
     // to emit intermediate SSE events before returning the final result.
-    // Usage in JS: await chunkSender({ results: [...], engine: "bing" })
+    // Synchronous and fire-and-forget (not a Promise — do not `await` it).
+    // Usage in JS: chunkSender({ results: [...], engine: "bing" })
     //
     // TEMPORARY HACK (workaround, not a real fix):
     // `params_val` (the handler's `args`) is carried in the callback data so it
