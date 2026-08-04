@@ -13,6 +13,7 @@ use zuqe::{
     CallContext, Callback, ErrorKind, Exception, JSResult, JSValue, JobGcTrace, JobState,
     ScopedContext,
     builtins::{
+        array_buffer::ArrayBuffer,
         iterator::AsyncIterableIterator,
         json::JSON,
         promise::{Promise, PromiseResultSlot, PromiseState},
@@ -113,6 +114,9 @@ pub(crate) const BODY_AS_JSON: i32 = 2;
 pub(crate) const BODY_AS_TEXT_CONVERT: i32 = 3;
 /// Returns a `Blob` instance (type taken from `blob_type`).
 pub(crate) const BODY_AS_BLOB: i32 = 4;
+/// Returns a real `ArrayBuffer` (used by `Response.arrayBuffer()`; distinct
+/// from `BODY_AS_BYTES`, which yields a `Uint8Array` view).
+pub(crate) const BODY_AS_ARRAY_BUFFER: i32 = 5;
 
 const BODY_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -141,6 +145,13 @@ pub(crate) fn drain_body(
             })?;
             match mode {
                 BODY_AS_BYTES => TypedArray::create_from_vec_u8(cx, buf).map(JSValue::from),
+                BODY_AS_ARRAY_BUFFER => ArrayBuffer::from_bytes(
+                    cx,
+                    JSValue::UNDEFINED,
+                    buf.into_boxed_slice(),
+                    std::ptr::null_mut(),
+                )
+                .map(JSValue::from),
                 BODY_AS_TEXT => {
                     // WHATWG "UTF-8 decode" strips a single leading U+FEFF BOM
                     // (see decode branch of BODY_AS_JSON above). text() must
@@ -253,7 +264,8 @@ fn drain_stream_sync(ctx: &mut ScopedContext, stream: JSReadableStream) -> Resul
         let pv = reader
             .get_property_str(ctx, "read")?
             .call(ctx, reader, &[])?;
-        let p = Promise::try_from(pv).map_err(|_| ctx.throw_internal_error("read() returned a non-promise"))?;
+        let p = Promise::try_from(pv)
+            .map_err(|_| ctx.throw_internal_error("read() returned a non-promise"))?;
         match p.state() {
             PromiseState::Fulfilled => {
                 let result = p.result();

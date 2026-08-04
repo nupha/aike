@@ -11,7 +11,7 @@ use zuqe::{
 use crate::http::client::{
     body::{body_content_type, body_to_bytes, drain_readable_stream},
     cache as http_cache,
-    headers::{HeaderList, header_list_from_js},
+    headers::{HeaderList, header_list_from_js, validate_header_list_for_fetch},
     request::{JSRequest, get_request_payload_mut},
     response::{RespType, build_opaque_redirect_response, build_response_from_transport},
     transport::{
@@ -916,6 +916,10 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     ensure_default_request_headers(&mut header_list);
     // WHATWG: silently drop forbidden request headers the caller tried to set.
     strip_forbidden_request_headers(&mut header_list);
+    // Validate header names/values per the Fetch spec. Must run on the JS
+    // thread so a violation rejects the returned promise with a `TypeError`
+    // (WPT header-values expects `promise_rejects_js(t, TypeError, ...)`).
+    validate_header_list_for_fetch(ctx, &header_list)?;
 
     // `Origin` is a forbidden request header (scripts cannot set it), so it is
     // added here *after* the forbidden-header strip. Safe/idempotent methods

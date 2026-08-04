@@ -29,9 +29,9 @@ use crate::{
     html::HtmlConvertMode,
     http::client::{
         body::{
-            BODY_AS_BLOB, BODY_AS_BYTES, BODY_AS_JSON, BODY_AS_TEXT, BODY_AS_TEXT_CONVERT,
-            BodySource, blob_type_from_header, body_content_type, body_to_bytes, drain_body,
-            text_stream_from_source,
+            BODY_AS_ARRAY_BUFFER, BODY_AS_BLOB, BODY_AS_BYTES, BODY_AS_JSON, BODY_AS_TEXT,
+            BODY_AS_TEXT_CONVERT, BodySource, blob_type_from_header, body_content_type,
+            body_to_bytes, drain_body, text_stream_from_source,
         },
         headers::{Guard, HeaderList, HeadersPayload, JSHeaders, header_list_from_js},
         transport::TransportResponse,
@@ -1058,7 +1058,12 @@ const RESPONSE_PROTO: &[FieldDef] = &[
     FieldDef::FUNC("bytes", 0, js_response_body_as, BODY_AS_BYTES as i16),
     FieldDef::FUNC("text", 0, js_response_body_as, BODY_AS_TEXT as i16),
     FieldDef::FUNC("json", 0, js_response_body_as, BODY_AS_JSON as i16),
-    FieldDef::FUNC("arrayBuffer", 0, js_response_body_as, BODY_AS_BYTES as i16),
+    FieldDef::FUNC(
+        "arrayBuffer",
+        0,
+        js_response_body_as,
+        BODY_AS_ARRAY_BUFFER as i16,
+    ),
     FieldDef::FUNC("blob", 0, js_response_body_as, BODY_AS_BLOB as i16),
     FieldDef::FUNC("formData", 0, js_response_form_data, 0),
     FieldDef::FUNC("textStream", 0, js_response_text_stream, 0),

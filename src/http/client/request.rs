@@ -14,8 +14,8 @@ use crate::{
     USER_CLASS_DEFS,
     http::client::{
         body::{
-            BODY_AS_BLOB, BODY_AS_BYTES, BODY_AS_JSON, BODY_AS_TEXT, BodySource,
-            blob_type_from_header, body_content_type, body_to_bytes, drain_body,
+            BODY_AS_ARRAY_BUFFER, BODY_AS_BLOB, BODY_AS_BYTES, BODY_AS_JSON, BODY_AS_TEXT,
+            BodySource, blob_type_from_header, body_content_type, body_to_bytes, drain_body,
             text_stream_from_source,
         },
         headers::{
@@ -498,7 +498,12 @@ const REQUEST_PROTO: &[FieldDef] = &[
     FieldDef::GETSET("bodyUsed", Some(js_req_body_used_getter), None, 0),
     FieldDef::GETSET("body", Some(js_req_body), None, 0),
     FieldDef::FUNC("bytes", 0, js_req_body_as, BODY_AS_BYTES as i16),
-    FieldDef::FUNC("arrayBuffer", 0, js_req_body_as, BODY_AS_BYTES as i16),
+    FieldDef::FUNC(
+        "arrayBuffer",
+        0,
+        js_req_body_as,
+        BODY_AS_ARRAY_BUFFER as i16,
+    ),
     FieldDef::FUNC("text", 0, js_req_body_as, BODY_AS_TEXT as i16),
     FieldDef::FUNC("json", 0, js_req_body_as, BODY_AS_JSON as i16),
     FieldDef::FUNC("blob", 0, js_req_body_as, BODY_AS_BLOB as i16),
