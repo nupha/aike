@@ -114,6 +114,29 @@ declare module "mcp" {
   }
 
   /**
+   * MCP tool annotations (hints for clients; see the MCP spec `ToolAnnotations`).
+   * Only the fields present here are advertised.
+   */
+  export interface McpToolAnnotations {
+    /** If true, the tool does not modify its environment. */
+    readOnlyHint?: boolean;
+    /**
+     * If true, the tool may perform destructive updates.
+     * Meaningful only when `readOnlyHint` is false.
+     */
+    destructiveHint?: boolean;
+    /**
+     * If true, repeated calls with the same arguments have no additional effect.
+     * Meaningful only when `readOnlyHint` is false.
+     */
+    idempotentHint?: boolean;
+    /**
+     * If true, the tool may interact with an open world of external entities.
+     */
+    openWorldHint?: boolean;
+  }
+
+  /**
    * Tool definition using object-keyed DSL format.
    *
    * Tool name is the key — no `name` field needed.
@@ -124,6 +147,7 @@ declare module "mcp" {
    *   read_file: {
    *     desc: "Read file content.",
    *     handler: handleRead,
+   *     annotations: { readOnlyHint: true, openWorldHint: false },
    *     args: {
    *       path:   { desc: "File path.", required: true },
    *       offset: { desc: "Start line", type: "integer", default: 0 },
@@ -140,6 +164,8 @@ declare module "mcp" {
      * Argument DSL — Rust auto-converts this to standard JSON Schema inputSchema.
      */
     args: Record<string, McpToolShortArg>;
+    /** Optional MCP tool annotations (readOnlyHint / destructiveHint / ...). */
+    annotations?: McpToolAnnotations;
   }
 
   /** An icon advertised by an MCP server (`Implementation.icons`). */

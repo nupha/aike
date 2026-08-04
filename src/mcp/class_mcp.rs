@@ -11,7 +11,9 @@ use std::{
 
 use crossbeam::channel;
 use linkme::distributed_slice;
-use rmcp::model::{Implementation, ProtocolVersion, ServerCapabilities, ServerInfo, Tool};
+use rmcp::model::{
+    Implementation, ProtocolVersion, ServerCapabilities, ServerInfo, Tool, ToolAnnotations,
+};
 use zuqe::{
     Array, CallContext, ClassCtorDef, ClassID, FieldDef, JS_GPN_ENUM_ONLY, JS_GPN_STR_OR_INT_MASK,
     JSResult, JSValue, Object, Runtime, ScopedContext, def_native_object,
@@ -759,7 +761,25 @@ pub(crate) fn parse_mcp_tools_object(
                 .clone(),
         };
 
-        let tool = Tool::new(name.clone(), description, Arc::new(input_schema_obj.into()));
+        let annotations = if let Some(ann_val) = tool_obj.get_property_str(ctx, "annotations").ok()
+        {
+            if !ann_val.is_undefined() {
+                if let Some(ann_obj) = ann_val.as_object() {
+                    Some(build_tool_annotations(ctx, ann_obj)?)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let mut tool = Tool::new(name.clone(), description, Arc::new(input_schema_obj.into()));
+        if let Some(ann) = annotations {
+            tool = tool.with_annotations(ann);
+        }
 
         let idx = tools.len();
         tools.push(tool);
@@ -768,4 +788,33 @@ pub(crate) fn parse_mcp_tools_object(
     }
 
     Ok((tools, name_to_index, js_handlers))
+}
+
+/// Parse the optional `annotations` object on a tool def into `ToolAnnotations`.
+/// Fields mirror the MCP protocol (`readOnlyHint` / `destructiveHint` /
+/// `idempotentHint` / `openWorldHint`); any non-boolean value is ignored.
+fn build_tool_annotations(
+    ctx: &mut ScopedContext,
+    ann_obj: Object,
+) -> Result<ToolAnnotations, i32> {
+    let mut ann = ToolAnnotations::new();
+    for (field, hint) in [
+        ("readOnlyHint", "read"),
+        ("destructiveHint", "destructive"),
+        ("idempotentHint", "idempotent"),
+        ("openWorldHint", "open_world"),
+    ] {
+        if let Ok(v) = ann_obj.get_property_str(ctx, field)
+            && v.is_bool()
+            && let Some(b) = v.as_bool()
+        {
+            ann = match hint {
+                "read" => ann.read_only(b),
+                "destructive" => ann.destructive(b),
+                "idempotent" => ann.idempotent(b),
+                _ => ann.open_world(b),
+            };
+        }
+    }
+    Ok(ann)
 }
