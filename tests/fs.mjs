@@ -1,4 +1,5 @@
 import * as fs from "fs";
+import * as path from "path";
 
 // --- Helpers ---
 let pass = 0;
@@ -709,8 +710,8 @@ async function testRealpath() {
   await fs.writeText(F, "x");
 
   const rp = await fs.realpath(F);
-  check("realpath is absolute", rp.startsWith("/"));
-  check("realpath ends with filename", rp.endsWith("/test_realpath.txt"));
+  check("realpath is absolute", path.isAbsolute(rp), `got ${rp}`);
+  check("realpath ends with filename", path.basename(rp) === "test_realpath.txt", `got ${rp}`);
 
   // non-existent path throws
   let threw = false;
