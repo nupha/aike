@@ -278,6 +278,24 @@ pub(super) fn js_fs_writeJSON(ctx: &mut ScopedContext, cc: CallContext) -> JSRes
 }
 
 // ---------------------------------------------------------------------------
+// sha256 - hash a file's contents (lowercase hex digest)
+// ---------------------------------------------------------------------------
+pub(super) fn js_fs_sha256(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let path = get_path_arg(ctx, &cc)?;
+    spawn_fs_op(
+        ctx,
+        async move {
+            let data = tokio::fs::read(&path).await.map_err(|e| e.to_string())?;
+            use sha2::Digest;
+            let digest = sha2::Sha256::digest(&data);
+            Ok(digest.iter().map(|b| format!("{b:02x}")).collect::<String>())
+        },
+        |cx, s| cx.create_string_from_str(&s).map(JSValue::make_string),
+    )
+    .map(JSValue::from)
+}
+
+// ---------------------------------------------------------------------------
 // realpath - canonicalize a path, resolving all symlinks
 // ---------------------------------------------------------------------------
 pub(super) fn js_fs_realpath(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {

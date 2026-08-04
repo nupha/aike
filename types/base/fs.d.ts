@@ -37,6 +37,8 @@ declare module "fs" {
   function readDir(path: string): Promise<Dirent[]>;
   /** Canonicalize a path, resolving all symlinks. Throws if the path does not exist. */
   function realpath(path: string): Promise<string>;
+  /** SHA-256 hash of a file's contents, returned as a lowercase hex string. */
+  function sha256(path: string): Promise<string>;
 
   /** Match files/directories against a glob pattern. Returns matching paths, relative to `cwd` unless `absolute`. */
   function glob(

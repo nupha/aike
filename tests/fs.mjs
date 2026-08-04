@@ -725,6 +725,23 @@ async function testRealpath() {
 }
 
 // ---------------------------------------------------------------------------
+// fs.sha256()
+// ---------------------------------------------------------------------------
+async function testSha256() {
+  console.log("\n=== sha256() ===");
+  const F = "../tmp/test_sha256.txt";
+  await fs.ensureDir("../tmp", { recursive: true });
+  await fs.writeText(F, "abc");
+
+  // Known SHA-256 of "abc".
+  const h = await fs.sha256(F);
+  check("sha256 matches known digest", h === "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+  check("sha256 is lowercase hex", /^[0-9a-f]{64}$/.test(h));
+
+  await fs.remove(F).catch(() => { });
+}
+
+// ---------------------------------------------------------------------------
 // Run all
 // ---------------------------------------------------------------------------
 const tests = [
@@ -733,7 +750,7 @@ const tests = [
   testOnData, testAsyncIterator, testExists,
   testMakeDirRemoveDir, testRemove, testLineCounting,
   testOpenNonexistent, testWriteNewPath, testReplaceTextUnique,
-  testReplaceTextAll, testReadOptions, testRealpath,
+  testReplaceTextAll, testReadOptions, testRealpath, testSha256,
 ];
 for (const t of tests) {
   try {
