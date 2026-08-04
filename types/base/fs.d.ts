@@ -36,6 +36,23 @@ declare module "fs" {
   /** Read the contents of a directory. */
   function readDir(path: string): Promise<Dirent[]>;
 
+  /** Match files/directories against a glob pattern. Returns matching paths, relative to `cwd` unless `absolute`. */
+  function glob(
+    pattern: string,
+    options?: {
+      /** Base directory for relative patterns. Default: process cwd. */
+      cwd?: string;
+      /** Patterns whose matches are excluded from the result. */
+      exclude?: string[];
+      /** Include hidden files/dirs (names starting with `.`). Default: false. */
+      dot?: boolean;
+      /** Match case-sensitively. Default: true. */
+      caseSensitive?: boolean;
+      /** Return absolute paths instead of cwd-relative ones. Default: false. */
+      absolute?: boolean;
+    },
+  ): Promise<string[]>;
+
   // Write
 
   /** Write a UTF-8 string to a file (overwrites). */

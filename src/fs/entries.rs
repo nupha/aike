@@ -15,6 +15,7 @@ use super::{
         js_fs_read, js_fs_readJSON, js_fs_replaceTextUnique, js_fs_write, js_fs_write_auto,
         js_fs_writeJSON,
     },
+    glob::js_fs_glob,
 };
 
 const MOD_FS_ENTRIES: &[FieldDef] = &[
@@ -24,6 +25,7 @@ const MOD_FS_ENTRIES: &[FieldDef] = &[
         zuqe::JS_PROP_ENUMERABLE,
     ),
     FieldDef::FUNC("open", 2, js_fs_open, 0),
+    FieldDef::FUNC("glob", 1, js_fs_glob, 0),
     FieldDef::FUNC("readText", 1, js_fs_read, FS_READ_TEXT as i16),
     FieldDef::FUNC("readJSON", 1, js_fs_readJSON, 0),
     FieldDef::FUNC("readBytes", 1, js_fs_read, FS_READ_BYTES as i16),
