@@ -1,14 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-use std::cell::RefCell;
-use std::rc::Rc;
+use std::{cell::RefCell, rc::Rc};
 
 use linkme::distributed_slice;
 use zuqe::{
-    Array, Atom, CallContext, ClassCtorDef, ClassID, FieldDef, IteratorState, JS_CLASS_ITERATOR,
-    JS_PROP_C_W_E, JSIteratorKindEnum, JSResult, JSValue, Object, Runtime, ScopedContext,
-    def_native_object,
+    Array, Atom, CallContext, ClassCtorDef, ClassID, FieldDef, JS_CLASS_ITERATOR, JS_PROP_C_W_E,
+    JSIteratorKindEnum, JSResult, JSValue, Object, Runtime, ScopedContext, def_native_object,
     gc_lite::{GcTrace, GcTraceCtx},
 };
 

@@ -893,6 +893,13 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     // Per-host TLS escape hatch: `insecure` skips cert validation for this
     // request's host (AIKE_TLS_INSECURE_HOSTS).
     let mut cfg = crate::http::client::config::HttpClientConfig::default();
+    // HTTP/1.1 by default. HTTP/2 cannot carry header values containing C0
+    // control characters (the h2 spec forbids them, and h2 framing rejects
+    // them at send time), yet the Fetch spec permits such values and expects
+    // them sent verbatim (see WPT header-values-normalize). The test servers
+    // (wptserve) speak HTTP/1.1, so h1 is the correct default; opt into h2
+    // explicitly via the `protocol: "http2"` client option when needed.
+    cfg.protocol = crate::http::client::config::ProtocolMode::Http1Only;
     cfg.follow_redirects = !manual_redirect;
 
     let client = match cfg.build_http_client_ex(insecure) {
