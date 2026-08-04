@@ -4,6 +4,7 @@
 //! WHATWG standard API implementations for Aike runtime.
 
 pub mod abort;
+pub mod base64;
 pub mod blob;
 pub mod dom;
 pub mod console;
@@ -43,6 +44,7 @@ pub(crate) fn install_whatwg(ctx: &mut ScopedContext, mut global: Object) -> Res
     timeout::install_timeout(ctx, global)?;
     abort::install_abort_statics(ctx, &mut global)?;
     fetch::install_fetch(ctx, global)?;
+    base64::install_base64(ctx, global)?;
 
     Ok(())
 }

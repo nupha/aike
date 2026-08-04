@@ -166,6 +166,32 @@ declare class TextEncoder {
 }
 
 // ---------------------------------------------------------------------------
+// Base64
+// ---------------------------------------------------------------------------
+
+/**
+ * Encode a string as base64 (WHATWG: each code point becomes a byte, so only
+ * Latin-1 code points ≤ 0xFF are allowed; throws InvalidCharacterError).
+ */
+declare function btoa(data: string): string;
+
+/**
+ * Decode a base64 string back to a string (each decoded byte becomes a Latin-1
+ * code point). Follows WHATWG forgiving-base64: ASCII whitespace is ignored
+ * and unpadded input is accepted; malformed input throws InvalidCharacterError.
+ */
+declare function atob(data: string): string;
+
+/** Base64-encode a raw byte array. */
+declare function bytesToBase64(bytes: Uint8Array | ArrayBuffer): string;
+
+/**
+ * Base64-decode a string into raw bytes. Follows WHATWG forgiving-base64
+ * (whitespace ignored, unpadded accepted); throws on malformed input.
+ */
+declare function base64ToBytes(data: string): Uint8Array;
+
+// ---------------------------------------------------------------------------
 // URL
 // ---------------------------------------------------------------------------
 
