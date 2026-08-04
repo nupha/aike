@@ -597,6 +597,18 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             if let Some(v) = read_str(o, "cache") {
                 cache_mode = v;
             }
+            // Validate `priority` eagerly: an invalid RequestInit member value
+            // must reject the fetch with a TypeError (WPT request-init-priority).
+            // The valid set is `high` | `low` | `auto`; `high`/`low` are accepted
+            // as hints and otherwise ignored, `auto` is the effective default.
+            if let Some(v) = read_str(o, "priority") {
+                const VALID: &[&str] = &["high", "low", "auto"];
+                if !VALID.contains(&v.as_str()) {
+                    return Err(ctx.throw_type_error(&format!(
+                        "invalid value '{v}' for RequestInit.priority"
+                    )));
+                }
+            }
         }
     }
 
@@ -678,16 +690,14 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     // fresh hit (or `force-cache`) never touches the transport.
 
     // Is this request cacheable at all (GET, no body)?
-    let cacheable = method.eq_ignore_ascii_case("GET")
-        && body_bytes.is_none()
-        && stream_body.is_none();
+    let cacheable =
+        method.eq_ignore_ascii_case("GET") && body_bytes.is_none() && stream_body.is_none();
 
     // A request carrying any conditional header (`If-None-Match`,
     // `If-Modified-Since`, `If-Unmodified-Since`, `If-Match`, `If-Range`) is
     // treated as `no-store`: it bypasses the cache (WPT
     // request-cache-default-conditional).
-    let has_conditional = cacheable
-        && http_cache::caller_supplied_validator(&header_list.to_vec());
+    let has_conditional = cacheable && http_cache::caller_supplied_validator(&header_list.to_vec());
 
     // Serve-from-cache hit for the modes that can return without a network call.
     let cache_hit = if cacheable && !has_conditional {
