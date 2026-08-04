@@ -1,7 +1,7 @@
-// Type declarations for process global object
+// Type declarations for process and Aike global objects
 
 // ---------------------------------------------------------------------------
-// StdioHandle  —  used by process.stdin/stdout/stderr and spawn()
+// StdioHandle  —  used by process.stdin/stdout/stderr and Aike.spawn()
 // ---------------------------------------------------------------------------
 
 interface FileStat {
@@ -22,7 +22,7 @@ interface FileStat {
 
 /**
  * I/O handle for standard streams (stdin, stdout, stderr) and pipe write ends.
- * Obtained via process.stdin/stdout/stderr or spawn().
+ * Obtained via process.stdin/stdout/stderr or Aike.spawn().
  */
 interface StdioHandle {
   /** File descriptor number. */
@@ -72,10 +72,10 @@ interface CronJob {
   cancel(): void;
 }
 
-/** Alias for SpawnAsyncResult, returned by process.spawn(). */
-type ChildProcess = process.SpawnAsyncResult;
+/** Alias for SpawnAsyncResult, returned by Aike.spawn(). */
+type ChildProcess = Aike.SpawnAsyncResult;
 
-/** Signal names supported by process.onSignal(). */
+/** Signal names supported by Aike.onSignal(). */
 type SignalName =
   | "SIGINT"
   | "SIGABRT"
@@ -96,6 +96,10 @@ type SignalName =
   | "SIGTTIN"
   | "SIGTTOU";
 
+// ---------------------------------------------------------------------------
+// process — Node.js-compatible namespace
+// ---------------------------------------------------------------------------
+
 declare namespace process {
   // --- proc ---
 
@@ -108,18 +112,102 @@ declare namespace process {
   /** Environment variables as a read-only key-value object. */
   const env: Record<string, string>;
 
-  // --- timer / promise ---
+  // --- info ---
+
+  /** Process ID. */
+  const pid: number;
+
+  /** Parent process ID. */
+  const ppid: number;
+
+  /** CPU architecture ("x64", "arm64", etc.). */
+  const arch: string;
+
+  /** Runtime version string (e.g. "v0.1.0"). */
+  const version: string;
+
+  /** Version info object. */
+  const versions: { aike: string };
+
+  /** Process title (getter/setter). */
+  let title: string;
+
+  /** Returns the number of seconds the process has been running. */
+  function uptime(): number;
+
+  // --- control ---
+
+  /** Change the current working directory. */
+  function chdir(dir: string): void;
+
+  /** Send a signal to a process. Default signal: SIGTERM. */
+  function kill(pid: number, signal?: string | number): void;
+
+  /** Schedule a callback to run on the next microtask. */
+  function nextTick(callback: () => void): void;
+
+  /** Returns memory usage statistics. */
+  function memoryUsage(): {
+    /** Resident set size in bytes. */
+    rss: number;
+    /** Total heap size in bytes. */
+    heapTotal: number;
+    /** Used heap size in bytes. */
+    heapUsed: number;
+    /** External memory usage in bytes. */
+    external: number;
+  };
+
+  /** Returns CPU usage in microseconds. */
+  function cpuUsage(): { user: number; system: number };
 
   /**
-   * Delay execution for `ms` milliseconds.
-   *
-   * Uses the event loop — does NOT block the thread. Returns a `Promise` that
-   * resolves with `undefined` after the delay. Analogous to `Bun.sleep(ms)`.
-   *
-   * @param ms - Milliseconds to wait (clamped to >= 0).
+   * High-resolution monotonic time.
+   * Returns [seconds, nanoseconds]. Pass a previous hrtime result to get the difference.
    */
-  function sleep(ms: number): Promise<void>;
+  function hrtime(time?: [number, number]): [number, number];
 
+  /**
+   * Get or set the file mode creation mask (Unix only).
+   * Returns the previous umask. On Windows, always returns 0.
+   */
+  function umask(mask?: number): number;
+
+  // --- stdio ---
+
+  /** Standard input handle. */
+  const stdin: StdioHandle;
+  /** Standard output handle. */
+  const stdout: StdioHandle;
+  /** Standard error handle. */
+  const stderr: StdioHandle;
+
+  // --- runtime ---
+
+  /** Operating system platform. ('windows', 'darwin', 'linux', etc.) */
+  const platform:
+    | "windows"
+    | "darwin"
+    | "linux"
+    | "android"
+    | "freebsd"
+    | "openbsd"
+    | "aix"
+    | string;
+
+  /** Command-line arguments (argv[1:]). */
+  const argv: readonly string[];
+  /** Runtime flags passed to the aike binary. */
+  const execArgv: readonly string[];
+  /** Absolute path to the aike executable. */
+  const execPath: string;
+}
+
+// ---------------------------------------------------------------------------
+// Aike — Aike-specific namespace
+// ---------------------------------------------------------------------------
+
+declare namespace Aike {
   // --- spawn ---
 
   /** Spawn a child process synchronously. */
@@ -244,7 +332,7 @@ declare namespace process {
    * Platform-available signal name → number mapping.
    * On Windows, only SIGINT, SIGABRT, SIGFPE, SIGILL, SIGSEGV, SIGTERM are present.
    * On Unix, all POSIX signals are available (including SIGQUIT, SIGUSR1, etc.).
-   * Check `process.signals.SIGUSR1 !== undefined` to detect platform support.
+   * Check `Aike.signals.SIGUSR1 !== undefined` to detect platform support.
    */
   const signals: {
     SIGINT: number;
@@ -274,9 +362,9 @@ declare namespace process {
   function onSignal(
     signal: SignalName,
     handler: (() => void) | null,
-  ): typeof process;
+  ): typeof Aike;
 
-  // --- cron ---
+  // --- cron / timer ---
 
   /**
    * Schedule a recurring task using a cron expression.
@@ -289,38 +377,13 @@ declare namespace process {
     options?: { name?: string },
   ): CronJob;
 
-  // --- stdio ---
-
-  /** Standard input handle. */
-  const stdin: StdioHandle;
-  /** Standard output handle. */
-  const stdout: StdioHandle;
-  /** Standard error handle. */
-  const stderr: StdioHandle;
-
-  // --- runtime ---
-
-  /** Operating system platform. ('windows', 'darwin', 'linux', etc.) */
-  const platform:
-    | "windows"
-    | "darwin"
-    | "linux"
-    | "android"
-    | "freebsd"
-    | "openbsd"
-    | "aix"
-    | string;
-
-  /** Command-line arguments (argv[1:]). */
-  const argv: readonly string[];
-  /** Runtime flags passed to the aike binary. */
-  const execArgv: readonly string[];
-  /** Absolute path to the aike executable. */
-  const execPath: string;
+  /**
+   * Delay execution for `ms` milliseconds.
+   *
+   * Uses the event loop — does NOT block the thread. Returns a `Promise` that
+   * resolves with `undefined` after the delay. Analogous to `Bun.sleep(ms)`.
+   *
+   * @param ms - Milliseconds to wait (clamped to >= 0).
+   */
+  function sleep(ms: number): Promise<void>;
 }
-
-/**
- * @deprecated Use `process` instead. `Aike` is a backward-compatible alias
- * kept only for existing code and may be removed in a future release.
- */
-declare var Aike: typeof process;

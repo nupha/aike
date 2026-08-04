@@ -17,27 +17,27 @@ function check(label, condition, detail) {
 // Aike.stdio tests
 // ===================================================================
 async function testStdio() {
-  console.log("\n=== Aike.stdio ===");
+  console.log("\n=== process.stdio ===");
 
   // 1. Existence and type
-  check("Aike.stdin exists", Aike.stdin !== undefined && Aike.stdin !== null);
+  check("process.stdin exists", process.stdin !== undefined && process.stdin !== null);
   check(
-    "Aike.stdout exists",
-    Aike.stdout !== undefined && Aike.stdout !== null,
+    "process.stdout exists",
+    process.stdout !== undefined && process.stdout !== null,
   );
   check(
-    "Aike.stderr exists",
-    Aike.stderr !== undefined && Aike.stderr !== null,
+    "process.stderr exists",
+    process.stderr !== undefined && process.stderr !== null,
   );
 
   // 2. fd values
-  check("stdin.fd === 0", Aike.stdin.fd === 0, `got ${Aike.stdin.fd}`);
-  check("stdout.fd === 1", Aike.stdout.fd === 1, `got ${Aike.stdout.fd}`);
-  check("stderr.fd === 2", Aike.stderr.fd === 2, `got ${Aike.stderr.fd}`);
+  check("stdin.fd === 0", process.stdin.fd === 0, `got ${process.stdin.fd}`);
+  check("stdout.fd === 1", process.stdout.fd === 1, `got ${process.stdout.fd}`);
+  check("stderr.fd === 2", process.stderr.fd === 2, `got ${process.stderr.fd}`);
 
   // 3. Property descriptors — enumerable, non-writable, non-configurable
   for (const name of ["stdin", "stdout", "stderr"]) {
-    const d = Object.getOwnPropertyDescriptor(Aike, name);
+    const d = Object.getOwnPropertyDescriptor(process, name);
     check(`${name} enumerable`, d.enumerable === true, `got ${d.enumerable}`);
     check(`${name} non-writable`, d.writable === false, `got ${d.writable}`);
     check(
@@ -48,17 +48,17 @@ async function testStdio() {
   }
 
   // 4. stdout.writeSync()
-  Aike.stdout.writeSync("hello from stdout\n");
+  process.stdout.writeSync("hello from stdout\n");
   check("stdout.writeSync works", true);
 
   // 5. stderr.writeSync()
-  Aike.stderr.writeSync("hello from stderr\n");
+  process.stderr.writeSync("hello from stderr\n");
   check("stderr.writeSync works", true);
 
   // 6. Cannot read from stdout/stderr
   let stdoutReadError = false;
   try {
-    await Aike.stdout.read();
+    await process.stdout.read();
   } catch (e) {
     stdoutReadError = true;
   }
@@ -66,7 +66,7 @@ async function testStdio() {
 
   let stderrReadError = false;
   try {
-    await Aike.stderr.read();
+    await process.stderr.read();
   } catch (e) {
     stderrReadError = true;
   }
@@ -75,7 +75,7 @@ async function testStdio() {
   // 7. Cannot onData on stdout/stderr
   let stdoutOnReadError = false;
   try {
-    Aike.stdout.onData(() => {});
+    process.stdout.onData(() => {});
   } catch (e) {
     stdoutOnReadError = true;
   }
@@ -83,16 +83,16 @@ async function testStdio() {
 
   let stderrOnDataError = false;
   try {
-    Aike.stderr.onData(() => {});
+    process.stderr.onData(() => {});
   } catch (e) {
     stderrOnDataError = true;
   }
   check("stderr.onData() throws", stderrOnDataError);
 
   // 8. stdin is same object across accesses
-  check("stdin is stable", Aike.stdin === Aike.stdin);
-  check("stdout is stable", Aike.stdout === Aike.stdout);
-  check("stderr is stable", Aike.stderr === Aike.stderr);
+  check("stdin is stable", process.stdin === process.stdin);
+  check("stdout is stable", process.stdout === process.stdout);
+  check("stderr is stable", process.stderr === process.stderr);
 }
 
 // ===================================================================
@@ -428,7 +428,7 @@ async function testSpawnSync() {
   check("spawnSync exists", typeof Aike.spawnSync === "function");
 
   // 2-10. Unix-only spawnSync tests (skip on Windows)
-  if (Aike.platform !== "windows") {
+  if (process.platform !== "windows") {
     // 2. Basic echo with args array
     {
       const r = Aike.spawnSync("echo", ["hello spawnSync"]);
@@ -544,7 +544,7 @@ async function testSpawn() {
   check("spawn exists", typeof Aike.spawn === "function");
 
   // 2-12. Unix-only async spawn tests (skip on Windows)
-  if (Aike.platform !== "windows") {
+  if (process.platform !== "windows") {
     // 2. Basic async echo — read stdout via FileHandle.text()
     {
       const p = Aike.spawn("echo", ["hello async"]);
@@ -730,37 +730,37 @@ async function testSpawn() {
 }
 
 // ===================================================================
-// Aike.cwd tests
+// process.cwd tests
 // ===================================================================
 function testCwd() {
-  console.log("\n=== Aike.cwd ===");
-  check("cwd is a function", typeof Aike.cwd === "function");
-  const cwd = Aike.cwd();
+  console.log("\n=== process.cwd ===");
+  check("cwd is a function", typeof process.cwd === "function");
+  const cwd = process.cwd();
   check("cwd returns a string", typeof cwd === "string");
   check("cwd is absolute path", Path.isAbsolute(cwd), `got ${cwd}`);
   check("cwd is non-empty", cwd.length > 0);
 }
 
 // ===================================================================
-// Aike.env tests
+// process.env tests
 // ===================================================================
 function testEnv() {
-  console.log("\n=== Aike.env ===");
-  check("env exists", typeof Aike.env === "object" && Aike.env !== null);
+  console.log("\n=== process.env ===");
+  check("env exists", typeof process.env === "object" && process.env !== null);
   // PATH: env var names are case-insensitive on Windows; check case-insensitively
-  const envKeys = Object.keys(Aike.env);
+  const envKeys = Object.keys(process.env);
   const pathKey = envKeys.find(k => k.toUpperCase() === "PATH");
   check(
     "env has PATH (case-insensitive)",
-    typeof pathKey === "string" && typeof Aike.env[pathKey] === "string",
-    `got PATH=${typeof Aike.env.PATH}, Path=${typeof Aike.env.Path}`,
+    typeof pathKey === "string" && typeof process.env[pathKey] === "string",
+    `got PATH=${typeof process.env.PATH}, Path=${typeof process.env.Path}`,
   );
   if (pathKey) {
-    check("env PATH length > 0", Aike.env[pathKey].length > 0);
+    check("env PATH length > 0", process.env[pathKey].length > 0);
   }
 
   // Property descriptor
-  const d = Object.getOwnPropertyDescriptor(Aike, "env");
+  const d = Object.getOwnPropertyDescriptor(process, "env");
   check("env enumerable", d.enumerable === true);
   check("env non-writable", d.writable === false);
   check("env non-configurable", d.configurable === false);
@@ -768,21 +768,21 @@ function testEnv() {
   // Cannot replace the whole env object, but individual properties are writable (Node.js convention)
   let envReplaceError = false;
   try {
-    Aike.env = {};
+    process.env = {};
   } catch (_) {
     envReplaceError = true;
   }
-  check("Aike.env cannot be replaced", envReplaceError);
+  check("process.env cannot be replaced", envReplaceError);
 
   // Individual env properties are writable (use case-insensitive PATH key)
   const writablePathKey = pathKey || "PATH";
   check(
     `env.${writablePathKey} is writable`,
     (() => {
-      const orig = Aike.env[writablePathKey];
-      Aike.env[writablePathKey] = "__test_writeable__";
-      const changed = Aike.env[writablePathKey] === "__test_writeable__";
-      Aike.env[writablePathKey] = orig;
+      const orig = process.env[writablePathKey];
+      process.env[writablePathKey] = "__test_writeable__";
+      const changed = process.env[writablePathKey] === "__test_writeable__";
+      process.env[writablePathKey] = orig;
       return changed;
     })(),
   );
@@ -869,7 +869,7 @@ function testTty() {
 
   // ttySetRaw on invalid fd throws TypeError (Unix only — Windows impl doesn't validate fd)
   let ttyRawError = false;
-  if (Aike.platform !== "windows") {
+  if (process.platform !== "windows") {
     try {
       Aike.ttySetRaw(999);
     } catch (e) {
@@ -1008,20 +1008,20 @@ async function testSleep() {
 }
 
 // ===================================================================
-// Aike runtime properties (argv, execArgv, execPath) tests
+// process runtime properties (argv, execArgv, execPath) + Aike.homedir
 // ===================================================================
 function testRuntimeProps() {
-  console.log("\n=== Aike.runtime ===");
+  console.log("\n=== process.runtime ===");
 
-  check("platform is a string", typeof Aike.platform === "string");
-  check("platform is non-empty", Aike.platform.length > 0);
+  check("platform is a string", typeof process.platform === "string");
+  check("platform is non-empty", process.platform.length > 0);
 
   // Platform should match one of the standard Node.js values
   const knownPlatforms = ["windows", "darwin", "linux", "android", "freebsd", "openbsd", "aix", "sunos"];
   check(
     "platform is a known value",
-    knownPlatforms.includes(Aike.platform),
-    `got ${JSON.stringify(Aike.platform)}`,
+    knownPlatforms.includes(process.platform),
+    `got ${JSON.stringify(process.platform)}`,
   );
 
   // ── homedir ──
@@ -1031,18 +1031,18 @@ function testRuntimeProps() {
   check("homedir is non-empty", home.length > 0, `got ${JSON.stringify(home)}`);
   check("homedir is absolute path", Path.isAbsolute(home), `got ${home}`);
 
-  check("argv is an array", Array.isArray(Aike.argv));
-  check("argv has at least 1 element", Aike.argv.length >= 1);
-  check("argv[0] is a string", typeof Aike.argv[0] === "string");
+  check("argv is an array", Array.isArray(process.argv));
+  check("argv has at least 1 element", process.argv.length >= 1);
+  check("argv[0] is a string", typeof process.argv[0] === "string");
 
-  check("execArgv is an array", Array.isArray(Aike.execArgv));
+  check("execArgv is an array", Array.isArray(process.execArgv));
 
-  check("execPath is a string", typeof Aike.execPath === "string");
-  check("execPath is absolute", Path.isAbsolute(Aike.execPath), `got ${Aike.execPath}`);
+  check("execPath is a string", typeof process.execPath === "string");
+  check("execPath is absolute", Path.isAbsolute(process.execPath), `got ${process.execPath}`);
 
   // Property descriptors
   for (const name of ["argv", "execArgv", "execPath"]) {
-    const d = Object.getOwnPropertyDescriptor(Aike, name);
+    const d = Object.getOwnPropertyDescriptor(process, name);
     check(`${name} enumerable`, d.enumerable === true, `got ${d.enumerable}`);
   }
 }

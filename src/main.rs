@@ -17,6 +17,7 @@ mod jsonl;
 mod llm;
 mod mcp;
 mod path;
+mod process;
 mod repl;
 mod transpile;
 mod whatwg;
@@ -51,6 +52,7 @@ use crate::{
     llm::JSLlmClient,
     mcp::init_mod_mcp,
     path::init_mod_path,
+    process::gc_trace_next_tick,
     whatwg::stream::gc_trace_stream,
     whatwg::timeout::gc_trace_timeout,
     yaml::init_mod_yaml,
@@ -322,6 +324,7 @@ async fn main() -> ExitCode {
         gc_trace_stdio_state(gcx);
         gc_trace_browser(gcx);
         gc_trace_stream(gcx);
+        gc_trace_next_tick(gcx);
     });
 
     // register native classes

@@ -3,7 +3,7 @@
 
 use zuqe::ScopedContext;
 
-use crate::{aike::init_aike, whatwg::install_whatwg};
+use crate::{aike::init_aike, process::init_process, whatwg::install_whatwg};
 
 pub fn setup_globals(
     ctx: &mut ScopedContext,
@@ -16,8 +16,11 @@ pub fn setup_globals(
     // Install all WHATWG-standard global APIs (console, timers, etc.)
     install_whatwg(ctx, global)?;
 
-    // Aike — branding namespace
-    init_aike(ctx, argv, exec_argv, exec_path)?;
+    // process — Node.js-compatible namespace
+    init_process(ctx, argv, exec_argv, exec_path)?;
+
+    // Aike — Aike-specific namespace
+    init_aike(ctx)?;
 
     Ok(())
 }

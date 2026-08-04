@@ -12,7 +12,7 @@ import { HttpServer } from "http";
 // Model path: override via AIKE_MODEL_PATH env var (set on the cargo command),
 // or edit it here.
 const MODEL_PATH =
-  (typeof Aike !== "undefined" && Aike.env && Aike.env.AIKE_MODEL_PATH) || "";
+  (typeof process !== "undefined" && process.env && process.env.AIKE_MODEL_PATH) || "";
 
 if (!MODEL_PATH) {
   console.log("[server_llama] AIKE_MODEL_PATH not set; nothing to serve.");

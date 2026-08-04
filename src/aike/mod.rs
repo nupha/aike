@@ -10,80 +10,22 @@ mod sys;
 pub(crate) use {
     class_io_handle::{JSFileHandle, JSStdioHandle, gc_trace_io, make_stats},
     cron::{JSCronJob, gc_trace_cron},
-    signal::{gc_trace_signals, register_signal_handler, signal_number, unregister_signal_handler},
+    signal::{gc_trace_signals, register_signal_handler, signal_number},
+    spawn::terminate_process,
+    sys::get_time_ns,
 };
 
-use zuqe::{Array, FieldDef, JS_PROP_ENUMERABLE, JSValue, ScopedContext};
+use zuqe::{FieldDef, JS_PROP_ENUMERABLE, ScopedContext};
 
-/// Build and register the `Aike` global object.
-pub fn init_aike(
-    ctx: &mut ScopedContext,
-    argv: &[String],
-    exec_argv: &[String],
-    exec_path: &str,
-) -> Result<(), i32> {
-    // Aike object inherits EventEmitter so process signals can be emitted on it
-    // let mut ns =  class_event_emitter::create_event_emitter_instance(ctx)?;
-
+/// Build and register the `Aike` global object (Aike-specific APIs).
+pub fn init_aike(ctx: &mut ScopedContext) -> Result<(), i32> {
     let mut ns = ctx.create_base_object()?;
 
-    // execPath — the aike runtime executable path
-    {
-        let s = ctx.create_string_from_utf8(exec_path.as_bytes().to_vec())?;
-        ns.define_property_value_str(ctx, "execPath", JSValue::make_string(s), JS_PROP_ENUMERABLE)?;
-    }
-
-    // argv / execArgv require runtime data — build JS arrays dynamically
-    {
-        let mut elems: Vec<JSValue> = Vec::with_capacity(argv.len());
-        for a in argv {
-            let s = ctx.create_string_from_utf8(a.as_bytes().to_vec())?;
-            elems.push(JSValue::make_string(s));
-        }
-        let arr = Array::from_values(ctx, elems)?;
-        ns.define_property_value_str(ctx, "argv", arr.into(), JS_PROP_ENUMERABLE)?;
-    }
-    {
-        let mut elems: Vec<JSValue> = Vec::with_capacity(exec_argv.len());
-        for a in exec_argv {
-            let s = ctx.create_string_from_utf8(a.as_bytes().to_vec())?;
-            elems.push(JSValue::make_string(s));
-        }
-        let arr = Array::from_values(ctx, elems)?;
-        ns.define_property_value_str(ctx, "execArgv", arr.into(), JS_PROP_ENUMERABLE)?;
-    }
-
     let entries: &[FieldDef] = &[
-        // --- proc ---
-        FieldDef::FUNC("cwd", 0, sys::js_cwd, 0),
-        FieldDef::FUNC("exit", 1, sys::js_exit, 0),
-        FieldDef::LAZY_VALUE(
-            "env",
-            |cx| {
-                let mut env_obj = cx.create_base_object()?;
-                for (key, value) in std::env::vars() {
-                    let v = cx.create_string_from_utf8(value.as_bytes().to_vec())?;
-                    env_obj.set_property_str(cx, &key, JSValue::make_string(v))?;
-                }
-                Ok(env_obj.into())
-            },
-            JS_PROP_ENUMERABLE,
-        ),
         // --- spawn ---
         FieldDef::FUNC("spawnSync", 0, spawn::js_spawn, 0),
         FieldDef::FUNC("spawn", 0, spawn::js_spawn, 1),
         // --- sys ---
-        FieldDef::STR(
-            "platform",
-            {
-                match std::env::consts::OS {
-                    "windows" => "windows",
-                    "macos" => "darwin",
-                    other => other,
-                }
-            },
-            JS_PROP_ENUMERABLE,
-        ),
         FieldDef::FUNC("evalScript", 1, sys::js_evalScript, 0),
         FieldDef::FUNC("evalModule", 2, sys::js_evalModule, 0),
         FieldDef::FUNC("gc", 0, sys::js_gc, 0),
@@ -98,31 +40,11 @@ pub fn init_aike(
         // --- cron / timer ---
         FieldDef::FUNC("schedule", 2, cron::js_schedule, 0),
         FieldDef::FUNC("sleep", 0, crate::whatwg::timeout::js_sleep, 0),
-        // --- stdio ---
-        FieldDef::LAZY_VALUE(
-            "stdin",
-            |cx| JSStdioHandle::new_instance_stdin(cx).map(JSValue::from),
-            JS_PROP_ENUMERABLE,
-        ),
-        FieldDef::LAZY_VALUE(
-            "stdout",
-            |cx| JSStdioHandle::new_instance_stdout(cx).map(JSValue::from),
-            JS_PROP_ENUMERABLE,
-        ),
-        FieldDef::LAZY_VALUE(
-            "stderr",
-            |cx| JSStdioHandle::new_instance_stderr(cx).map(JSValue::from),
-            JS_PROP_ENUMERABLE,
-        ),
     ];
 
     ns.install_fields(ctx, entries)?;
 
-    // Expose as global `process` - compatible with nodejs
-    ctx.global_obj()
-        .define_property_value_str(ctx, "process", ns.into(), JS_PROP_ENUMERABLE)?;
-
-    // Expose as global `Aike` - alias, should be removed later?
+    // Expose as global `Aike` — Aike-specific namespace
     ctx.global_obj()
         .define_property_value_str(ctx, "Aike", ns.into(), JS_PROP_ENUMERABLE)?;
 

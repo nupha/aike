@@ -367,7 +367,7 @@ fn js_child_kill(_ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     Ok(JSValue::from(unsafe { terminate_process(pid) }))
 }
 #[cfg(windows)]
-unsafe fn terminate_process(pid: i32) -> bool {
+pub(crate) unsafe fn terminate_process(pid: i32) -> bool {
     use windows_sys::Win32::Foundation::CloseHandle;
     use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_TERMINATE, TerminateProcess};
 
