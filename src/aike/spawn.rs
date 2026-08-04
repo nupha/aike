@@ -357,7 +357,7 @@ fn js_child_kill(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     Ok(JSValue::from(ret == 0))
 }
 
-/// Windows equivalent: kill process by pid (ignores signal arg).
+/// kill(signal?) — Windows: terminate process by pid (ignores signal arg).
 #[cfg(windows)]
 fn js_child_kill(_ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let pid = pid_from_this(_ctx, &cc);
@@ -366,6 +366,13 @@ fn js_child_kill(_ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     }
     Ok(JSValue::from(unsafe { terminate_process(pid) }))
 }
+
+/// Force-kill process by pid (SIGKILL). Unix equivalent of Windows TerminateProcess.
+#[cfg(unix)]
+pub(crate) unsafe fn terminate_process(pid: i32) -> bool {
+    unsafe { libc::kill(pid, libc::SIGKILL) == 0 }
+}
+/// Windows: terminate process by pid (ignores signal arg).
 #[cfg(windows)]
 pub(crate) unsafe fn terminate_process(pid: i32) -> bool {
     use windows_sys::Win32::Foundation::CloseHandle;
