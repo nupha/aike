@@ -50,6 +50,19 @@ declare function clearInterval(timerId: number): void;
 declare function queueMicrotask(callback: () => void): void;
 
 /**
+ * Deep clone a value using the WHATWG structured clone algorithm. Clones
+ * objects, arrays, maps, sets, dates, regexps, errors, ArrayBuffers and typed
+ * arrays; cycles and duplicate references are preserved. Symbols, functions,
+ * promises, WeakMap/WeakSet and other non-serializable objects throw a
+ * `DataCloneError` DOMException. `options.transfer` transfers (detaches) the
+ * listed ArrayBuffers instead of cloning them.
+ */
+declare function structuredClone<T>(value: T, options?: {
+  /** ArrayBuffers to transfer (detached in the source) instead of clone. */
+  transfer?: ArrayBuffer[];
+}): T;
+
+/**
  * WHATWG Fetch `Response` class (strict spec subset, no aike extensions).
  * `HttpClient` returns the enhanced subclass `HttpClientResponse` (module "http").
  */

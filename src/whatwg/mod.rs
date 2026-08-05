@@ -13,6 +13,7 @@ pub mod fetch;
 pub mod form_data;
 pub mod microtask;
 pub mod stream;
+pub mod structured_clone;
 pub mod text_decoder;
 pub mod text_encoder;
 pub mod timeout;
@@ -54,6 +55,7 @@ pub(crate) fn install_whatwg(ctx: &mut ScopedContext, mut global: Object) -> Res
     abort::install_abort_statics(ctx, &mut global)?;
     fetch::install_fetch(ctx, global)?;
     base64::install_encoding(ctx, global)?;
+    structured_clone::install_structured_clone(ctx, global)?;
     crypto::install_crypto(ctx, global)?;
 
     Ok(())
