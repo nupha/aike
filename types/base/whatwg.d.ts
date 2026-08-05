@@ -43,6 +43,13 @@ declare function clearTimeout(timerId: number): void;
 declare function clearInterval(timerId: number): void;
 
 /**
+ * Queue a microtask to run `callback` once the JavaScript execution stack is
+ * next empty (before control returns to the event loop). Throws a TypeError
+ * if `callback` is not callable. Per WHATWG HTML §8.8 Microtask queuing.
+ */
+declare function queueMicrotask(callback: () => void): void;
+
+/**
  * WHATWG Fetch `Response` class (strict spec subset, no aike extensions).
  * `HttpClient` returns the enhanced subclass `HttpClientResponse` (module "http").
  */
