@@ -10,8 +10,8 @@ use zuqe::{ErrorKind, Exception, JSResult, JSValue, ScopedContext};
 
 use super::{
     cors::{
-        check_preflight, cors_safelisted_method, preflight_cache_hit, preflight_cache_key,
-        preflight_cache_store,
+        check_preflight, cors_safelisted_method, is_cross_origin, preflight_cache_hit,
+        preflight_cache_key, preflight_cache_store,
     },
     headers::HeaderList,
 };
@@ -108,6 +108,10 @@ pub(crate) struct TransportResponse {
     /// Negotiated HTTP version: "0.9" | "1.0" | "1.1" | "2" | "3".
     pub http_version: &'static str,
     pub resp: Option<reqwest::Response>,
+    /// Final URL after redirects. Recorded before `resp` is taken/consumed so
+    /// the fetch layer always has the post-redirect URL even after the body is
+    /// read (the `Response.url` property must reflect the last URL in the chain).
+    pub final_url: String,
     /// Pre-decoded body for non-network responses (e.g. `data:` URLs).
     pub synthetic_body: Option<Vec<u8>>,
     /// The request's origin became opaque ("null") via a cross-origin redirect.
@@ -379,6 +383,7 @@ async fn follow_redirects<F, Fut>(
     rc: &ReferrerCtx,
     start_url: &str,
     start_referrer: &str,
+    start_method: &str,
     cors_mode: bool,
     cors_tainted: bool,
     cors_client_origin: &str,
@@ -387,11 +392,23 @@ async fn follow_redirects<F, Fut>(
     send: F,
 ) -> Result<(reqwest::Response, bool), TransportError>
 where
-    F: Fn(String, String, bool, bool, bool) -> Fut,
+    F: Fn(String, String, String, bool, bool) -> Fut,
     Fut: std::future::Future<Output = Result<reqwest::Response, reqwest::Error>>,
 {
     let mut url = start_url.to_string();
     let mut referrer = start_referrer.to_string();
+    // The referrer already determined for the *initial* request (computed with
+    // the init policy against the same-origin initial URL). Redirect responses
+    // can only tighten it, never loosen it.
+    let initial_referrer = referrer.clone();
+    // The request method, which Fetch rewrites to GET on a 301/302/303 redirect
+    // of a non-GET/HEAD request (history-preserving behavior; 303 always, and
+    // 301/302 per the ubiquitous POST→GET convention the WPT suite asserts).
+    let mut method = start_method.to_string();
+    // The effective referrer policy, which a redirect response may tighten via
+    // its `Referrer-Policy` response header (Fetch spec: the redirect's policy
+    // overrides the initiating request's policy for the *next* hop).
+    let mut policy = rc.policy.clone();
     let mut tainted = cors_tainted;
     let mut origin_opaque = false;
     // Origin of the previous hop (initially the start URL). When a redirect
@@ -404,7 +421,11 @@ where
     // preflight whose only unsafe headers were those credentials is no longer
     // needed for any subsequent hop.
     let mut credentials_stripped = false;
-
+    // Whether we have already followed at least one redirect. A request whose
+    // initial method is non-safe (e.g. POST) must not emit an `Origin` header on
+    // any *subsequent* hop, since POST redirects are treated as potentially
+    // leaking and browsers strip `Origin`/`Authorization` across them (WPT
+    // `redirect-origin.any.js`).
     for _ in 0..=rc.max_redirects {
         // A cross-origin redirect (current URL's origin differs from the
         // previous hop's) strips the credentials headers on this hop.
@@ -436,9 +457,9 @@ where
         }
 
         let resp = send(
+            method.clone(),
             url.clone(),
             referrer.clone(),
-            tainted,
             origin_opaque,
             cross_origin_hop,
         )
@@ -448,11 +469,37 @@ where
             message: format!("request failed: {e}"),
         })?;
 
-        // A redirect without a usable `Location` is delivered as-is.
+        // A redirect without a usable `Location` is delivered as-is; WPT serves
+        // `.any.js` via a 302 with an empty `Location` (self-redirect) so the
+        // engine must tolerate it and surface the response rather than reject.
         let next = match redirect_target(&resp, &url) {
             Some(u) => u,
             None => return Ok((resp, origin_opaque)),
         };
+
+        // A redirect response's `Referrer-Policy` header overrides the policy
+        // used to compute the referrer for the *next* hop (Fetch spec). This is
+        // how a server can tighten the referrer after a redirect (e.g. WPT
+        // `redirect-referrer-override`).
+        if let Some(hdr) = resp
+            .headers()
+            .get(reqwest::header::HeaderName::from_static("referrer-policy"))
+        {
+            if let Ok(v) = hdr.to_str() {
+                let v = v.trim().to_ascii_lowercase();
+                if !v.is_empty() {
+                    policy = v;
+                }
+            }
+        }
+
+        // 301/302/303 rewrite a non-GET/HEAD method to GET for the next hop (the
+        // ubiquitous POST→GET behavior; 303 always does). The request body is
+        // dropped for GET automatically in `send_once`.
+        let status = resp.status().as_u16();
+        if matches!(status, 301 | 302 | 303) && !method_is_safe(&method) {
+            method = "GET".to_string();
+        }
 
         // Fetch spec: a cors request must not follow a redirect to a URL that
         // carries credentials (userinfo); that is a network error.
@@ -486,14 +533,32 @@ where
 
         // Recompute the referrer against the *next* URL so a hop that changes
         // origin gets the origin-only form.
-        referrer = crate::whatwg::fetch::compute_request_referrer(
+        //
+        // Per the Fetch spec + WPT `redirect-referrer-override`, the referrer of
+        // a hop that follows a redirect is the *more conservative* of:
+        //   (a) the referrer already determined for the initial request
+        //       (`initial_referrer`, computed with the init policy against the
+        //       same-origin initial URL), and
+        //   (b) the referrer recomputed with the redirect response's
+        //       `Referrer-Policy` against the new (possibly cross-origin) URL.
+        // A redirect response only ever *tightens* the referrer. An omitted
+        // referrer (`""`) always wins, and an origin-only form
+        // (`http://h:port/`) is more conservative than a full URL.
+        let ref_resp = crate::whatwg::fetch::compute_request_referrer(
             &rc.referrer,
-            &rc.policy,
+            &policy,
             rc.client_origin.as_deref(),
             rc.client_url.as_deref(),
             &next,
         )
         .unwrap_or_default();
+        referrer = if initial_referrer.is_empty() || ref_resp.is_empty() {
+            String::new()
+        } else if initial_referrer.len() <= ref_resp.len() {
+            initial_referrer.clone()
+        } else {
+            ref_resp
+        };
         prev_url = url;
         url = next;
     }
@@ -616,7 +681,9 @@ fn redirect_target(resp: &reqwest::Response, current: &str) -> Option<String> {
         .to_str()
         .ok()?;
     let base = url::Url::parse(current).ok()?;
-    base.join(loc).ok().map(|u| u.to_string())
+    let joined = base.join(loc).ok()?;
+    let joined = joined.to_string();
+    Some(joined)
 }
 
 /// Preflight request parameters for a CORS preflight.
@@ -684,6 +751,7 @@ pub(crate) async fn perform_preflight(
         content_length: None,
         http_version: version_str(resp.version()),
         resp: None,
+        final_url: preflight.url.clone(),
         synthetic_body: None,
         origin_opaque: false,
     })
@@ -717,6 +785,7 @@ pub(crate) async fn perform_request(
             content_length: Some(body.len() as u64),
             http_version: "1.1",
             resp: None,
+            final_url: req.url.clone(),
             synthetic_body: if is_head { None } else { Some(body) },
             origin_opaque: false,
         });
@@ -730,14 +799,13 @@ pub(crate) async fn perform_request(
     // Build one request. Owned args keep the returned future free of borrows,
     // so it can be handed to the redirect loop. `cors_tainted`/`origin_opaque`
     // drive the per-hop `Origin` header (Fetch spec redirect handling).
-    let send_once = |url: String,
+    let send_once = |method: String,
+                     url: String,
                      referrer: String,
-                     cors_tainted: bool,
                      origin_opaque: bool,
                      cross_origin_hop: bool| {
-        let method =
-            reqwest::Method::from_bytes(req.method.as_bytes()).unwrap_or(reqwest::Method::GET);
-        let mut rb = client.request(method, &url).timeout(req.timeout);
+        let method = reqwest::Method::from_bytes(method.as_bytes()).unwrap_or(reqwest::Method::GET);
+        let mut rb = client.request(method.clone(), &url).timeout(req.timeout);
 
         let mut headers = req.headers.clone();
         // A cross-origin redirect must not leak the request's credentials
@@ -762,18 +830,28 @@ pub(crate) async fn perform_request(
         }
         // For `cors`-mode requests, recompute the `Origin` header for this hop:
         // `null` once the origin is opaque, otherwise the client origin when the
-        // method is not GET/HEAD or the request is CORS-tainted, otherwise none.
-        // `Origin` is a forbidden request header, so any caller-provided value is
-        // replaced. Non-cors requests (e.g. the low-level HTTP client API) keep
-        // whatever `Origin` the caller set.
+        // current hop's URL is cross-origin with the client origin, otherwise none.
+        // A same-origin request (even a POST) never emits `Origin`; a cross-origin
+        // hop (even a GET) does — matching the WHATWG fetch algorithm and WPT
+        // `redirect-origin.any.js`. `Origin` is a forbidden request header, so any
+        // caller-provided value is replaced. Non-cors requests keep whatever
+        // `Origin` the caller set.
         if req.cors_mode {
             headers.retain(|(k, _)| !k.eq_ignore_ascii_case("origin"));
             let origin_value: Option<String> = if origin_opaque {
                 Some("null".to_string())
-            } else if !method_is_safe(&req.method) || cors_tainted {
-                Some(req.cors_client_origin.clone())
             } else {
-                None
+                // Send the `Origin` header only when the *current* hop's URL is
+                // cross-origin with the client origin. A same-origin request (even
+                // a POST) never emits `Origin`; a cross-origin hop (even a GET)
+                // does, mirroring the WHATWG fetch algorithm and WPT
+                // `redirect-origin.any.js`.
+                let hop_cross = is_cross_origin(Some(&req.cors_client_origin), &url);
+                if hop_cross {
+                    Some(req.cors_client_origin.clone())
+                } else {
+                    None
+                }
             };
             if let Some(ov) = origin_value {
                 headers.push(("Origin".to_string(), ov));
@@ -818,8 +896,13 @@ pub(crate) async fn perform_request(
             rb = rb.header(k, hv);
         }
 
-        if let Some(b) = &req.body {
-            rb = rb.body(b.clone());
+        // A redirect rewrites the method to GET (see `follow_redirects`); a GET
+        // request must not carry the original request body, so only attach it for
+        // non-GET/HEAD methods.
+        if !method_is_safe(&method.to_string()) {
+            if let Some(b) = &req.body {
+                rb = rb.body(b.clone());
+            }
         }
         async move { rb.send().await }
     };
@@ -828,15 +911,15 @@ pub(crate) async fn perform_request(
     // a replayable body. A stream body is consumed by the first attempt, so the
     // spec requires the 421 to be surfaced instead.
     let replayable = req.replayable;
-    let send_with_retry = move |url: String,
+    let send_with_retry = move |method: String,
+                                url: String,
                                 referrer: String,
-                                cors_tainted: bool,
                                 origin_opaque: bool,
                                 cross_origin_hop: bool| {
         let first = send_once(
+            method.clone(),
             url.clone(),
             referrer.clone(),
-            cors_tainted,
             origin_opaque,
             cross_origin_hop,
         );
@@ -844,7 +927,7 @@ pub(crate) async fn perform_request(
             match first.await {
                 Ok(r) if replayable && r.status() == reqwest::StatusCode::MISDIRECTED_REQUEST => {
                     log::debug!("421 on {url}; retrying once on a fresh connection");
-                    send_once(url, referrer, cors_tainted, origin_opaque, cross_origin_hop).await
+                    send_once(method, url, referrer, origin_opaque, cross_origin_hop).await
                 }
                 other => other,
             }
@@ -865,6 +948,7 @@ pub(crate) async fn perform_request(
                 rc,
                 &req.url,
                 &req.referrer,
+                &req.method,
                 cors_mode,
                 cors_tainted,
                 &cors_client_origin,
@@ -888,9 +972,9 @@ pub(crate) async fn perform_request(
                 });
             }
             send_with_retry(
+                req.method.clone(),
                 req.url.clone(),
                 req.referrer.clone(),
-                cors_tainted,
                 false,
                 false,
             )
@@ -965,6 +1049,7 @@ pub(crate) async fn perform_request(
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.parse::<u64>().ok());
 
+    let final_url_val = resp.url().to_string();
     let mut tr = TransportResponse {
         status: status.as_u16(),
         status_text,
@@ -973,6 +1058,7 @@ pub(crate) async fn perform_request(
         content_length,
         http_version: version_str(resp.version()),
         resp: Some(resp),
+        final_url: final_url_val,
         synthetic_body: None,
         origin_opaque: resp_origin_opaque,
     };

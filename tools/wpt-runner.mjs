@@ -128,6 +128,8 @@ function registerHarnessCallbacks() {
 
 // WPT .any.js tests reference `self`.
 G.self = G;
+// WPT tests also reference `window` (the global object in window scope).
+G.window = G;
 // `.any.js` files run in the "window"-like variant here; GLOBAL lets tests
 // branch on the scope they were loaded into (e.g. isWindow() guards).
 G.GLOBAL = {
@@ -232,7 +234,13 @@ function substituteTemplates(code) {
 async function fetchText(absFile) {
   if (wptBase) {
     const url = fileHttpUrl(absFile);
-    const res = await fetch(url);
+    let res;
+    try {
+      res = await fetch(url);
+    } catch (e) {
+      console.error(`# fetchText failed for ${url}: ${e}`);
+      throw e;
+    }
     if (!res.ok) {
       throw new Error(`fetch ${url} failed: ${res.status} ${res.statusText}`);
     }
@@ -373,6 +381,9 @@ function setLocation(url) {
       pathname: u.pathname || "/",
       search: u.search,
       href: u.href,
+      // `location.origin` must carry the real port (`:8000` here) so the fetch
+      // engine's CORS same-origin check matches the wpt server's
+      // `Access-Control-Allow-Origin` header (which also includes the port).
       origin: u.origin,
       // `location.toString()` must return the document URL (same as `href`),
       // matching real browsers so tests that compare against `location.toString()`
@@ -383,6 +394,29 @@ function setLocation(url) {
     };
     G.location = location;
     G.self.location = location;
+    // Expose the document URL/origin as plain globals so the fetch harness
+    // (which may not see the decorated `self.location` native object) can use
+    // them as the default referrer / client origin. `__wptClientUrl` is the full
+    // document URL (with port), `__wptClientOrigin` the origin (with port) used
+    // for CORS same-origin checks against the server's ACAO header.
+    G.__wptClientUrl = u.href;
+    G.__wptClientOrigin = u.origin;
+    // WPT tests reference `get-host-info.sub.js` globals (e.g. HTTP_ORIGIN,
+    // HTTP_NOTSAMESITE_ORIGIN) that are normally injected by that fixture. Since
+    // the runner does not load dependency <script>s, define them here from the
+    // current host so tests referencing them resolve.
+    const host = u.hostname; // e.g. web-platform.test
+    const port = u.port || (u.protocol === "https:" ? "443" : "80");
+    const portElided = port === "80" || port === "443" ? "" : `:${port}`;
+    const remoteHost = host.startsWith("www1.") ? host : `www1.${host}`;
+    const notSameSiteHost = host.startsWith("not.") ? host : `not.${host}`;
+    G.HTTP_PORT = port;
+    G.HTTP_ORIGIN = `http://${host}${portElided}`;
+    G.HTTP_REMOTE_ORIGIN = `http://${remoteHost}${portElided}`;
+    G.HTTP_NOTSAMESITE_ORIGIN = `http://${notSameSiteHost}${portElided}`;
+    G.HTTP_NOTSAMESITE_ORIGIN_DOMAIN = `http://${notSameSiteHost}${portElided}`;
+    G.REMOTE_ORIGIN = G.HTTP_REMOTE_ORIGIN;
+    G.NOTSAMESITE_ORIGIN = G.HTTP_NOTSAMESITE_ORIGIN;
   } catch (e) {
     console.error(`# WARNING: failed to shim self.location from ${url}: ${e}`);
   }
@@ -492,10 +526,23 @@ async function runOneFile(file) {
   Aike.evalScript(testharnessText);
   registerHarnessCallbacks();
 
+  // testharness.js may redefine `self`/`location` globals, clobbering the shim
+  // we injected above. Re-apply it now (after testharness) so the fetch engine
+  // still sees a valid client URL/origin for referrer + CORS checks.
+  setLocation(fileHttpUrl(file));
+
   // Fetch the test file from the wpt server so `.sub.` placeholders are
   // expanded server-side (single source of truth). With no server, falls back
   // to a local read with local `.sub.` expansion.
-  let code = await fetchText(file);
+  let code;
+  try {
+    code = await fetchText(file);
+  } catch (e) {
+    console.error(
+      `# fetchText failed for ${file}: ${e && e.stack ? e.stack : e}`,
+    );
+    throw e;
+  }
   await loadScriptDeps(file, code);
 
   // Run the test file as an ES module in a fresh module scope. This isolates

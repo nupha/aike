@@ -222,7 +222,7 @@ fn get_response_payload<'a>(
 }
 
 /// Build an opaque-redirect `Response` (used for `redirect: "manual"`).
-pub(crate) fn build_opaque_redirect_response(ctx: &mut ScopedContext) -> JSResult {
+pub(crate) fn build_opaque_redirect_response(ctx: &mut ScopedContext, url: &str) -> JSResult {
     JSResponse::new_instance(
         ctx,
         JSValue::UNDEFINED,
@@ -234,7 +234,7 @@ pub(crate) fn build_opaque_redirect_response(ctx: &mut ScopedContext) -> JSResul
             synthetic_body: None,
             ctor_stream: None,
             resp_type: RespType::OpaqueRedirect,
-            url: String::new(),
+            url: url.to_string(),
             redirected: false,
             status: 0,
             status_text: String::new(),

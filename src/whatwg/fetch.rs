@@ -248,19 +248,21 @@ pub(crate) fn compute_request_referrer(
             }
         }
         "strict-origin" => {
-            if trustworthy(&source) {
-                source_origin_slash()
-            } else {
+            // Send the origin unless this is a downgrade (a trustworthy/encrypted
+            // referrer being sent to a non-trustworthy request target).
+            if trustworthy(&source) && !trustworthy(request_url) {
                 Some(String::new())
+            } else {
+                source_origin_slash()
             }
         }
         "strict-origin-when-cross-origin" => {
             if same_origin {
                 Some(source)
-            } else if trustworthy(&source) {
-                source_origin_slash()
-            } else {
+            } else if trustworthy(&source) && !trustworthy(request_url) {
                 Some(String::new())
+            } else {
+                source_origin_slash()
             }
         }
         "unsafe-url" => Some(full()),
@@ -737,6 +739,43 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 }
             })
             .filter(|s| !s.is_empty());
+        // WPT runner shim: when the JS `self.location` shim is unavailable (e.g.
+        // the engine's `self` is a native object the runner can't decorate), the
+        // runner injects the document URL/origin here so the default referrer and
+        // client origin resolve to the test document (not `None`).
+        let wpt_url = ctx
+            .global_obj()
+            .get_property_str(ctx, "__wptClientUrl")
+            .ok()
+            .and_then(|v| {
+                if v.is_undefined_or_null() {
+                    None
+                } else {
+                    v.to_string(ctx)
+                        .ok()
+                        .map(|s| s.content().encode_utf8(false).to_string())
+                }
+            })
+            .filter(|s| !s.is_empty());
+        let wpt_origin = ctx
+            .global_obj()
+            .get_property_str(ctx, "__wptClientOrigin")
+            .ok()
+            .and_then(|v| {
+                if v.is_undefined_or_null() {
+                    None
+                } else {
+                    v.to_string(ctx)
+                        .ok()
+                        .map(|s| s.content().encode_utf8(false).to_string())
+                }
+            })
+            .filter(|s| !s.is_empty());
+        // The WPT runner injects `__wptClientUrl` (document URL) and
+        // `__wptClientOrigin` (origin with port) as fallbacks when `self.location`
+        // is unavailable to the engine; otherwise prefer `self.location`.
+        let url = wpt_url.or(url);
+        let origin = origin.or(wpt_origin);
         (origin, url)
     };
 
@@ -824,11 +863,12 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 content_length: Some(hit.body.len() as u64),
                 http_version: "1.1",
                 resp: None,
+                final_url: hit.final_url.clone(),
                 synthetic_body: Some(hit.body),
                 origin_opaque: false,
             },
             RespType::Basic,
-            &url_str,
+            &hit.final_url,
             false,
             signal_val.clone(),
         )?;
@@ -900,8 +940,10 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     // network I/O), where it is read only after the abort has committed.
     let signal_for_reason = signal_val.clone();
 
-    let promise =
-        Promise::create_with_result_slot(ctx, result_slot.clone(), move |cx, data| -> JSResult {
+    let promise = Promise::create_with_result_slot(
+        ctx,
+        result_slot.clone(),
+        move |cx, data| -> JSResult {
             let client_origin = client_origin.clone();
             let mut tr = match data {
                 Ok(tr) => tr,
@@ -940,7 +982,36 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                         cx.throw_type_error("Failed to fetch: redirect not allowed (mode 'error')")
                     );
                 }
-                return build_opaque_redirect_response(cx);
+                // `manual` mode surfaces the first 3xx response as an opaqueredirect,
+                // but a cross-origin 3xx is invalid for a `no-cors` request (no-cors
+                // only allows `follow`), so it must reject (WPT redirect-mode.any.js).
+                // A `cors`-mode cross-origin 3xx without a valid
+                // `Access-Control-Allow-Origin` is also a CORS failure and rejects.
+                let cross_origin = is_cross_origin(client_origin.as_deref(), &url_clone);
+                if mode_clone == "no-cors" && cross_origin {
+                    return Err(cx.throw_type_error(
+                        "Failed to fetch: no-cors request cannot follow a cross-origin redirect with manual/error mode",
+                    ));
+                }
+                if mode_clone == "cors" && cors_tainted {
+                    let acao = tr
+                        .headers
+                        .iter()
+                        .find(|(k, _)| k.eq_ignore_ascii_case("access-control-allow-origin"))
+                        .map(|(_, v)| v.clone());
+                    let allowed = crate::http::client::cors::check_allow_origin(
+                        acao.as_deref(),
+                        client_origin.as_deref().unwrap_or(""),
+                        credentials_include,
+                    )
+                    .is_some();
+                    if !allowed {
+                        return Err(cx.throw_type_error(
+                            "Failed to fetch: redirect response is a cross-origin CORS failure",
+                        ));
+                    }
+                }
+                return build_opaque_redirect_response(cx, &url_clone);
             }
 
             // Fetch spec: `mode: "same-origin"` requires the request (and every
@@ -948,11 +1019,7 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             // error. reqwest auto-follows redirects, so we check the *final*
             // response URL (redirect target otherwise hides the violation).
             if mode_clone == "same-origin" {
-                let final_url = tr
-                    .resp
-                    .as_ref()
-                    .map(|r| r.url().to_string())
-                    .unwrap_or_else(|| url_clone.clone());
+                let final_url = tr.final_url.clone();
                 // `data:` URLs are same-origin with any client per the Fetch
                 // scheme fetch algorithm, so they never trip the same-origin
                 // check regardless of the client origin.
@@ -998,6 +1065,7 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                         content_length: Some(cached_body.len() as u64),
                         http_version: "1.1",
                         resp: None,
+                        final_url: url_clone.clone(),
                         synthetic_body: Some(cached_body),
                         origin_opaque: false,
                     },
@@ -1021,18 +1089,23 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             } else {
                 RespType::Basic
             };
+            // The response URL is the *final* URL after any redirect (Fetch spec
+            // sets `response.url` to the last URL in the chain), and `redirected`
+            // is true once the chain followed at least one redirect.
+            let final_url = tr.final_url.clone();
+            let redirected = final_url != url_clone;
             // Cross-origin `cors` mode: run the CORS check against the final
             // response origin and, on success, return a `cors` filtered
             // response (type `cors`, headers limited to the safelist +
             // `Access-Control-Expose-Headers`). A failed check is a network
             // error (rejects with TypeError).
-            if !is_opaque && cors_tainted {
-                let final_url = tr
-                    .resp
-                    .as_ref()
-                    .map(|r| r.url().to_string())
-                    .unwrap_or_else(|| url_clone.clone());
+            if !is_opaque && cors_tainted && mode_clone == "cors" {
                 let final_cross = is_cross_origin(client_origin.as_deref(), &final_url);
+                // A `cors` request that went through a cross-origin redirect keeps the
+                // CORS-filtered (`cors`) response type even when the final URL ends up
+                // same-origin again (whatwg/fetch#737). The CORS check still applies
+                // when the *final* response is cross-origin; a same-origin final URL
+                // always passes.
                 if final_cross {
                     let headers = HeaderList::from_vec(tr.headers.clone());
                     // The request's origin may have become opaque ("null") after a
@@ -1054,28 +1127,33 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                             },
                         );
                     }
-                    // CORS-filter the exposed headers. `content-type` /
-                    // `content-length` are safelisted, so the payload's derived
-                    // fields stay valid.
-                    let expose = headers.get("Access-Control-Expose-Headers");
-                    let filtered = cors_filter_response_headers(
-                        &headers,
-                        expose.as_deref(),
-                        credentials_include,
-                    );
-                    tr.headers = filtered;
-                    return build_response_from_transport(
-                        cx,
-                        tr,
-                        RespType::Cors,
-                        &final_url,
-                        false,
-                        signal_val.clone(),
-                    );
                 }
+                // CORS-filter the exposed headers. `content-type` / `content-length`
+                // are safelisted, so the payload's derived fields stay valid.
+                let headers = HeaderList::from_vec(tr.headers.clone());
+                let expose = headers.get("Access-Control-Expose-Headers");
+                let filtered =
+                    cors_filter_response_headers(&headers, expose.as_deref(), credentials_include);
+                tr.headers = filtered;
+                return build_response_from_transport(
+                    cx,
+                    tr,
+                    RespType::Cors,
+                    &final_url,
+                    redirected,
+                    signal_val.clone(),
+                );
             }
-            build_response_from_transport(cx, tr, resp_type, &url_clone, false, signal_val.clone())
-        })?;
+            build_response_from_transport(
+                cx,
+                tr,
+                resp_type,
+                &final_url,
+                redirected,
+                signal_val.clone(),
+            )
+        },
+    )?;
 
     if already_aborted {
         // An already-aborted signal must reject on a microtask, *before* any
@@ -1152,14 +1230,21 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     // `TransportRequest::preflight`).
     let preflight_possible = needs_preflight(&method, &req_headers, true);
 
-    // Manually follow redirects when a referrer must be recomputed per hop, or
-    // for cors-mode requests (whose per-hop `Origin` header must be recomputed
-    // and whose cross-origin redirects make the origin opaque). Redirects are
-    // always followed manually so a fresh CORS preflight can run against each
-    // new target URL (Fetch spec: a redirect re-enters HTTP-network-or-cache
-    // fetch, which re-runs CORS-preflight for the new URL).
-    let manual_redirect =
-        redirect == "follow" && (!effective_referrer.is_empty() || cors_tainted || mode == "cors");
+    // Always follow redirects manually when `redirect == "follow"`. Every hop
+    // must recompute the outgoing `Referer` (per the hop's referrer policy) and,
+    // for cors-mode, the `Origin` header; a cross-origin redirect also makes the
+    // origin opaque. reqwest's auto-follow replays the *initial* headers verbatim
+    // and would (a) leak the full referrer on cross-origin hops (WPT
+    // `redirect-referrer`), (b) wrongly send a `Referer` under `no-referrer`
+    // after a redirect, and (c) never re-run a CORS preflight for the new URL
+    // (Fetch spec: a redirect re-enters HTTP-network-or-cache fetch). Manual
+    // following is the only path that honors the per-hop recomputation.
+    //
+    // For `manual`/`error` we also must *not* let reqwest auto-follow: the spec
+    // wants the first 3xx response surfaced as an `opaqueredirect` (status 0) or
+    // a TypeError, which the dispatch below handles. So reqwest's auto-follow is
+    // disabled in every case — the redirect handling is fully owned here.
+    let manual_redirect = redirect == "follow";
 
     // Per-host TLS escape hatch: `insecure` skips cert validation for this
     // request's host (AIKE_TLS_INSECURE_HOSTS).
@@ -1169,8 +1254,10 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     // by the `credentials` mode), so disable reqwest's automatic store which
     // would otherwise send cookies unconditionally.
     cfg.cookie_jar = false;
-    // Disable reqwest's auto-follow whenever we follow redirects manually.
-    cfg.follow_redirects = !manual_redirect;
+    // Disable reqwest's auto-follow in all redirect modes: `follow` is handled
+    // manually here (per-hop referrer/origin recomputation); `manual`/`error`
+    // must surface the first 3xx response rather than following it.
+    cfg.follow_redirects = false;
 
     let client = match cfg.build_http_client_ex(insecure) {
         Ok(c) => c,
@@ -1184,7 +1271,7 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         policy: rc_policy,
         client_origin: rc_origin,
         client_url: rc_url,
-        max_redirects: 10,
+        max_redirects: 20,
     });
 
     // The actual request carries `User-Agent: Mozilla/5.0 (aike)` (injected by
@@ -1303,11 +1390,7 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 {
                     // The final URL (after any redirect) is stored so a later
                     // `same-origin` cache hit can reject a cross-origin redirect.
-                    let final_url = tr
-                        .resp
-                        .as_ref()
-                        .map(|r| r.url().to_string())
-                        .unwrap_or_else(|| cache_url.clone());
+                    let final_url = tr.final_url.clone();
                     let bytes = match tr.resp.take() {
                         Some(resp) => match resp.bytes().await {
                             Ok(b) => b.to_vec(),
