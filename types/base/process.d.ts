@@ -268,9 +268,9 @@ declare namespace Aike {
     stderr?: "pipe" | "inherit" | "ignore";
     /**
      * Kill the child if it runs longer than this many milliseconds (wall
-     * clock). The whole process tree is killed (process group on Unix,
-     * taskkill /T on Windows). Set `killedByTimeout` on the result to detect
-     * the timeout.
+     * clock). Must be a positive integer. The whole process tree is killed
+     * (process group on Unix, taskkill /T on Windows). Set `killedByTimeout`
+     * on the result to detect the timeout.
      */
     timeout?: number;
   }

@@ -15,7 +15,7 @@ use std::{
 use std::os::unix::process::CommandExt;
 
 use zuqe::{
-    CallContext, Callback, JS_GPN_ENUM_ONLY, JS_GPN_STR_OR_INT_MASK, JS_PROP_C_W_E,
+    CallContext, Callback, IntOrFloat, JS_GPN_ENUM_ONLY, JS_GPN_STR_OR_INT_MASK, JS_PROP_C_W_E,
     JS_PROP_ENUMERABLE, JSResult, JSValue, Object, ScopedContext,
     builtins::{promise::Promise, typed_array::TypedArray},
 };
@@ -26,18 +26,22 @@ pub(super) fn js_spawn(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let is_async = cc.magic() == 1;
 
     // arg 0: command string
-    let cmd = cc.arg(0).to_string(ctx)?;
-    let cmd_str = cmd.content().encode_utf8(false).to_string();
+    let cmd_str = match cc.arg(0).as_string(true) {
+        Some(s) => s.content().encode_utf8(false).to_string(),
+        None => return Err(ctx.throw_type_error("spawn command must be a string")),
+    };
 
-    // arg 1 (optional): args array
+    // arg 1 (optional): args array of strings
     let mut args: Vec<String> = Vec::new();
-    if cc.length() > 1
-        && let Some(arr) = cc.arg(1).as_object_Array()
-    {
+    if cc.length() > 1 && !cc.arg(1).is_undefined_or_null() {
+        let Some(arr) = cc.arg(1).as_object_Array() else {
+            return Err(ctx.throw_type_error("spawn args must be an array"));
+        };
         for v in arr.payload().values() {
-            if let Some(s) = v.as_string(true) {
-                args.push(s.content().encode_utf8(false).to_string());
-            }
+            let Some(s) = v.as_string(true) else {
+                return Err(ctx.throw_type_error("spawn args must be an array of strings"));
+            };
+            args.push(s.content().encode_utf8(false).to_string());
         }
     }
 
@@ -53,13 +57,19 @@ pub(super) fn js_spawn(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut input_data: Option<Vec<u8>> = None;
 
     // arg 2 (optional): options object
-    if cc.length() > 2
-        && let Some(opts) = cc.arg(2).as_object()
-    {
-        cwd = get_str_prop(ctx, &opts, "cwd");
+    if cc.length() > 2 {
+        let opts_val = cc.arg(2);
+        let Some(opts) = opts_val.as_object() else {
+            return Err(ctx.throw_type_error("spawn options must be an object"));
+        };
 
-        // env — replaces entire env when provided
-        if let Some(env_map) = parse_env_obj(ctx, &opts)? {
+        // cwd — string
+        if let Some(dir) = get_str_prop_strict(ctx, &opts, "cwd")? {
+            cwd = Some(dir);
+        }
+
+        // env — object; replaces entire env when provided
+        if let Some(env_map) = parse_env_obj_strict(ctx, &opts)? {
             env_opt = Some(env_map);
         }
 
@@ -77,36 +87,21 @@ pub(super) fn js_spawn(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                         input_data = Some(ta.bytes().to_vec());
                     } else if let Some(ab) = payload.array_buffer() {
                         input_data = Some(ab.bytes().to_vec());
+                    } else {
+                        return Err(ctx
+                            .throw_type_error("`input` must be a string, TypedArray, or ArrayBuffer"));
                     }
+                } else {
+                    return Err(ctx
+                        .throw_type_error("`input` must be a string, TypedArray, or ArrayBuffer"));
                 }
             }
         }
 
         // stdio modes
-        if let Some(mode) = get_str_prop(ctx, &opts, "stdin") {
-            match mode.as_str() {
-                "pipe" => stdin_mode = Stdio::piped(),
-                "inherit" => stdin_mode = Stdio::inherit(),
-                "ignore" => stdin_mode = Stdio::null(),
-                _ => {}
-            }
-        }
-        if let Some(mode) = get_str_prop(ctx, &opts, "stdout") {
-            match mode.as_str() {
-                "pipe" => stdout_mode = Stdio::piped(),
-                "inherit" => stdout_mode = Stdio::inherit(),
-                "ignore" => stdout_mode = Stdio::null(),
-                _ => {}
-            }
-        }
-        if let Some(mode) = get_str_prop(ctx, &opts, "stderr") {
-            match mode.as_str() {
-                "pipe" => stderr_mode = Stdio::piped(),
-                "inherit" => stderr_mode = Stdio::inherit(),
-                "ignore" => stderr_mode = Stdio::null(),
-                _ => {}
-            }
-        }
+        stdin_mode = parse_stdio_mode_strict(ctx, &opts, "stdin", stdin_mode)?;
+        stdout_mode = parse_stdio_mode_strict(ctx, &opts, "stdout", stdout_mode)?;
+        stderr_mode = parse_stdio_mode_strict(ctx, &opts, "stderr", stderr_mode)?;
     }
 
     // input implies stdin=pipe
@@ -114,9 +109,9 @@ pub(super) fn js_spawn(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         stdin_mode = Stdio::piped();
     }
 
-    // timeout (ms) — kill the child if it runs longer than this.
+    // timeout (ms) — positive integer; kill the child if it runs longer than this.
     let timeout_limit: Option<u64> = match cc.arg(2).as_object() {
-        Some(opts) => get_num_prop(ctx, &opts, "timeout").filter(|n| *n > 0.0).map(|n| n as u64),
+        Some(opts) => get_timeout_prop(ctx, &opts)?,
         None => None,
     };
 
@@ -539,29 +534,64 @@ fn pid_from_this(ctx: &mut ScopedContext, cc: &CallContext) -> i32 {
         .unwrap_or(-1)
 }
 
-/// Extract a string property from an options object; returns None if missing.
-fn get_str_prop(ctx: &mut ScopedContext, obj: &Object, key: &str) -> Option<String> {
-    let v = obj.get_property_str(ctx, key).ok()?;
-    let s = v.as_string(true)?;
-    Some(s.content().encode_utf8(false).to_string())
-}
-
-/// Read a numeric property; returns None when missing, null, or not numeric.
-fn get_num_prop(ctx: &mut ScopedContext, obj: &Object, key: &str) -> Option<f64> {
-    let v = obj.get_property_str(ctx, key).ok()?;
+/// Read a string property strictly; Ok(None) when absent, TypeError when the
+/// value is present but not a string.
+fn get_str_prop_strict(
+    ctx: &mut ScopedContext,
+    obj: &Object,
+    key: &str,
+) -> Result<Option<String>, i32> {
+    let v = obj.get_property_str(ctx, key)?;
     if v.is_undefined_or_null() {
-        return None;
+        return Ok(None);
     }
-    let n = v.to_number(ctx).ok()?.to_f64();
-    if n.is_nan() {
-        None
-    } else {
-        Some(n)
+    match v.as_string(true) {
+        Some(s) => Ok(Some(s.content().encode_utf8(false).to_string())),
+        None => Err(ctx.throw_type_error(&format!("`{key}` must be a string"))),
     }
 }
 
-/// Parse the `env` option: iterate the JS object and collect into a HashMap.
-fn parse_env_obj(
+/// Read the `timeout` option: a positive integer number of milliseconds.
+/// TypeError for non-numbers, RangeError for non-positive or fractional values.
+fn get_timeout_prop(ctx: &mut ScopedContext, obj: &Object) -> Result<Option<u64>, i32> {
+    let v = obj.get_property_str(ctx, "timeout")?;
+    if v.is_undefined_or_null() {
+        return Ok(None);
+    }
+    if !v.is_number() {
+        return Err(ctx.throw_type_error("`timeout` must be a number"));
+    }
+    let n = v.to_number(ctx)?;
+    match n {
+        IntOrFloat::Int64(i) if i > 0 => Ok(Some(i as u64)),
+        IntOrFloat::Float64(d) if d > 0.0 && d.fract() == 0.0 => Ok(Some(d as u64)),
+        _ => Err(ctx.throw_range_error("`timeout` must be a positive integer")),
+    }
+}
+
+/// Parse a stdio mode property strictly: "pipe" | "inherit" | "ignore".
+fn parse_stdio_mode_strict(
+    ctx: &mut ScopedContext,
+    opts: &Object,
+    key: &str,
+    default: Stdio,
+) -> Result<Stdio, i32> {
+    let Some(mode) = get_str_prop_strict(ctx, opts, key)? else {
+        return Ok(default);
+    };
+    match mode.as_str() {
+        "pipe" => Ok(Stdio::piped()),
+        "inherit" => Ok(Stdio::inherit()),
+        "ignore" => Ok(Stdio::null()),
+        _ => Err(ctx.throw_range_error(&format!(
+            "`{key}` must be \"pipe\", \"inherit\", or \"ignore\""
+        ))),
+    }
+}
+
+/// Parse the `env` option strictly: an object mapping string keys to string
+/// values; replaces the entire env when provided.
+fn parse_env_obj_strict(
     ctx: &mut ScopedContext,
     opts: &Object,
 ) -> Result<Option<HashMap<String, String>>, i32> {
@@ -570,7 +600,7 @@ fn parse_env_obj(
         return Ok(None);
     }
     let Some(mut env_obj) = v.as_object() else {
-        return Ok(None);
+        return Err(ctx.throw_type_error("`env` must be an object"));
     };
 
     let mut map = HashMap::new();
@@ -581,9 +611,10 @@ fn parse_env_obj(
         let key = key_r.encode_utf8(false).to_string();
 
         let val = env_obj.get_property(ctx, pk.atom)?;
-        if let Some(s) = val.as_string(true) {
-            map.insert(key, s.content().encode_utf8(false).to_string());
-        }
+        let Some(s) = val.as_string(true) else {
+            return Err(ctx.throw_type_error("`env` values must be strings"));
+        };
+        map.insert(key, s.content().encode_utf8(false).to_string());
     }
     Ok(Some(map))
 }
