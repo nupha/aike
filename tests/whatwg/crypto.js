@@ -71,10 +71,23 @@ function testCryptoBasics() {
     crypto.sha256Hex(new TextEncoder().encode("abc")) === "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
   );
   check(
+    "sha256Hex string input (UTF-8)",
+    crypto.sha256Hex("abc") === "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+  );
+  check(
+    "sha256Hex string + bytes equivalent",
+    crypto.sha256Hex("你好") === crypto.sha256Hex(new TextEncoder().encode("你好")),
+  );
+  check(
     "sha256Hex(empty)",
     crypto.sha256Hex(new Uint8Array(0)) === "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
   );
-  rejectsSync("sha256Hex rejects string", "TypeError", () => crypto.sha256Hex("abc"));
+  check(
+    "sha256Hex(ArrayBuffer)",
+    crypto.sha256Hex(new TextEncoder().encode("abc").buffer) === "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+  );
+  rejectsSync("sha256Hex rejects number", "TypeError", () => crypto.sha256Hex(123));
+  rejectsSync("sha256Hex rejects object", "TypeError", () => crypto.sha256Hex({}));
 }
 
 // ===================================================================

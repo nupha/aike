@@ -160,8 +160,11 @@ declare class Crypto {
   getRandomValues<T extends ArrayBufferView>(array: T): T;
   /** Generate a random version-4 UUID string. */
   randomUUID(): string;
-  /** Aike extension: SHA-256 of `data` as a lowercase hex string. */
-  sha256Hex(data: BufferSource): string;
+  /**
+   * Aike extension: SHA-256 of `data` as a lowercase hex string.
+   * A string is encoded as UTF-8; BufferSource is hashed directly.
+   */
+  sha256Hex(data: string | BufferSource): string;
 }
 
 /** The global Web Crypto object. */

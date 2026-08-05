@@ -340,9 +340,16 @@ fn js_crypto_random_uuid(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult 
     make_string(ctx, &u)
 }
 
-/// `sha256Hex(data)`: aike extension — SHA-256 of `data` as a hex string.
+/// `sha256Hex(data)`: aike extension — SHA-256 of `data` as a lowercase hex
+/// string. Accepts a UTF-8 string or a BufferSource (convenience over
+/// `subtle.digest`, which returns an ArrayBuffer needing manual hex conversion).
 fn js_crypto_sha256_hex(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let bytes = get_buffer_source_bytes(ctx, &cc.arg(0))?;
+    let arg = cc.arg(0);
+    let bytes = if let Some(s) = arg.as_string(false) {
+        s.content().encode_utf8(false).as_bytes().to_vec()
+    } else {
+        get_buffer_source_bytes(ctx, &arg)?
+    };
     let digest = Sha256::digest(&bytes);
     make_string(ctx, &hex_encode(&digest))
 }
