@@ -376,6 +376,17 @@ declare namespace Aike {
    */
   function which(cmd: string): string | null;
 
+  // --- gzip (aike 增强，非 WHATWG；memo §5.1) ---
+
+  /**
+   * Gzip-compress bytes into a complete RFC 1952 gzip member.
+   * @param data - Uint8Array or ArrayBuffer to compress.
+   */
+  function gzip(data: Uint8Array | ArrayBuffer): Uint8Array;
+
+  /** Gzip-decompress bytes. Throws a RangeError on invalid gzip data. */
+  function gunzip(data: Uint8Array | ArrayBuffer): Uint8Array;
+
   // --- signal ---
 
   /**

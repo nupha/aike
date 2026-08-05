@@ -9,6 +9,7 @@ mod class_event_emitter;
 mod color;
 mod fs;
 mod global;
+mod gzip;
 mod helpers;
 mod html;
 mod http;
