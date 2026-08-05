@@ -45,7 +45,15 @@ pub(crate) fn serialized_origin(client_origin: Option<&str>) -> String {
 /// Whether a request URL is cross-origin with respect to the client origin.
 /// An unparsable request URL or an unknown client origin counts as
 /// cross-origin (conservative: such requests get CORS treatment).
+///
+/// `data:` URLs are same-origin with any client per the Fetch scheme fetch
+/// algorithm (their origin is the client's), so they are never cross-origin.
+/// Treating them as cross-origin would wrongly CORS-taint `fetch("data:...")`
+/// (default `cors` mode) and fail the response CORS check.
 pub(crate) fn is_cross_origin(client_origin: Option<&str>, url: &str) -> bool {
+    if url.to_ascii_lowercase().starts_with("data:") {
+        return false;
+    }
     let req_origin = url::Url::parse(url)
         .ok()
         .map(|u| u.origin().ascii_serialization());
