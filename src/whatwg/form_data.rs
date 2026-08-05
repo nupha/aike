@@ -380,7 +380,11 @@ fn js_fd_entries(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 /// Fixed multipart boundary. The spec only requires that the boundary not
 /// appear in the payload; a constant keeps serialization deterministic (and
 /// testable) since we do not escape occurrences in content.
-const MULTIPART_BOUNDARY: &str = "----AikeFormBoundary7MA4YWxkTrZu0gW";
+// Boundary is restricted to lowercase letters + digits so that, e.g., a
+// caller-supplied body whose bytes have been case-folded (WPT
+// fetch/api/body/formdata.any.js lowercases the whole body) still matches the
+// `boundary` parameter declared in the Content-Type header.
+const MULTIPART_BOUNDARY: &str = "----aikeformboundary7ma4ywxktrzu0gw";
 
 /// `Content-Type` a `FormData` body contributes when used as a `BodyInit`.
 ///
@@ -557,10 +561,19 @@ pub(crate) fn form_data_parse(
         .to_ascii_lowercase();
 
     match mime.as_str() {
-        "multipart/form-data" => match param_unquoted(content_type, "boundary") {
-            Some(b) => form_data_from_multipart(ctx, body, &b),
-            None => Ok(None),
-        },
+        "multipart/form-data" => {
+            let boundary = match param_unquoted(content_type, "boundary") {
+                Some(b) => b,
+                // When the `boundary` parameter is absent (e.g. the body was
+                // round-tripped through a `Blob`, whose MIME type keeps only the
+                // essence), recover it from the body's first `--{boundary}` line.
+                None => match boundary_from_body(body) {
+                    Some(b) => b,
+                    None => return Ok(None),
+                },
+            };
+            form_data_from_multipart(ctx, body, &boundary)
+        }
         "application/x-www-form-urlencoded" => {
             let text = String::from_utf8_lossy(body);
             let entries = urlencoded_entries(&text);
@@ -614,6 +627,21 @@ fn percent_decode_plus(s: &str) -> String {
         i += 1;
     }
     String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Recover the multipart boundary from the body's first delimiter line when
+/// the `Content-Type` lacks an explicit `boundary` parameter. A delimiter line
+/// is `--{boundary}\r\n` (an optional leading CRLF preamble is skipped).
+fn boundary_from_body(body: &[u8]) -> Option<String> {
+    // Skip an optional leading CRLF (multipart preamble).
+    let body = body.strip_prefix(b"\r\n").unwrap_or(body);
+    let line_end = find_sub(body, b"\r\n")?;
+    let line = &body[..line_end];
+    let line = line.strip_prefix(b"--")?;
+    if line.is_empty() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(line).into_owned())
 }
 
 /// Extract a header parameter that may or may not be quoted

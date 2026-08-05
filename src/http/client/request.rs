@@ -853,7 +853,9 @@ fn js_req_body_as(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
 /// `textStream()` — returns a `ReadableStream` of UTF-8-decoded string chunks.
 /// Consumes the body (sets `bodyUsed`); a null-body request yields an empty
-/// stream without marking the body used, and an already-consumed body throws.
+/// stream without marking the body used, and an already-consumed or locked
+/// body throws (WPT fetch/api/body/textstream.any.js expects a TypeError when
+/// `request.body` is locked via `getReader()`).
 fn js_req_text_stream(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
     let mut this = _cc.this();
     let source = {
@@ -861,6 +863,16 @@ fn js_req_text_stream(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
         if p.body_consumed {
             return Err(ctx.throw_type_error("body already consumed or locked"));
         }
+        // A body exposed as a ReadableStream that is locked (or disturbed)
+        // cannot be consumed again — `textStream()` must reject, just like
+        // `blob()`/`text()` do (the shared `request_body_unusable` helper).
+        if p.cached_body.as_ref().is_some_and(|s| {
+            s.payload()
+                .is_some_and(|sp| sp.disturbed || sp.reader.is_some())
+        }) {
+            return Err(ctx.throw_type_error("body is locked"));
+        }
+
         // Null-body request: empty stream, bodyUsed stays false, reusable.
         if p.synthetic_body.is_none() && p.stream_body.is_none() {
             None
@@ -873,6 +885,7 @@ fn js_req_text_stream(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
             Some(BodySource::Stream(JSReadableStream::try_from(s)?))
         }
     };
+
     match source {
         Some(src) => text_stream_from_source(ctx, src),
         None => text_stream_from_source(ctx, BodySource::Synthetic(Vec::new())),
