@@ -920,6 +920,38 @@ fn js_response_body_as(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         }
     };
 
+    // A null-body response (204/205/304/HEAD, or a synthetic response built
+    // without a body that was never accessed as a stream) consumed as
+    // `formData()` must reject per the Fetch spec when the `Content-Type` is
+    // multipart/form-data — WPT "Consume response's body as formData with
+    // correct multipart type (error case)". An `application/x-www-form-urlencoded`
+    // null body still parses (to an empty FormData) and is allowed through.
+    let is_null_body = {
+        let p = JSHttpClientResponse::payload_of(&this).or_else(|| JSResponse::payload_of(&this));
+        matches!(p, Some(p) if p.resp.is_none()
+            && p.synthetic_body.is_none()
+            && p.ctor_stream.is_none()
+            && p.cached_body.is_none()
+            && !matches!(p.resp_type, RespType::Error | RespType::OpaqueRedirect | RespType::Opaque))
+    };
+    if magic == BODY_AS_FORM_DATA && is_null_body {
+        let p = JSHttpClientResponse::payload_of(&this).or_else(|| JSResponse::payload_of(&this));
+        let ct = p
+            .map(|p| p.headers.borrow().get("content-type").unwrap_or_default())
+            .unwrap_or_default();
+        if ct.to_ascii_lowercase().starts_with("multipart/form-data") {
+            let _ = ctx.throw_type_error("cannot parse null body as FormData");
+            let reason = match ctx.take_exception() {
+                Exception::Error(v) => v,
+                other => {
+                    ctx.throw(other);
+                    return Err(-1);
+                }
+            };
+            return make_rejected_promise(ctx, reason);
+        }
+    }
+
     // Response.blob() sets the Blob's type to the response's *current*
     // Content-Type header (which the user may have mutated via `headers.set`),
     // with any parameters (e.g. charset) stripped. Resolve it once before

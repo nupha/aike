@@ -494,10 +494,20 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         redirect = p.redirect.clone();
         signal_val = p.signal.clone();
         body_bytes = p.synthetic_body.clone();
+        // Consuming an input Request's body marks it used (Fetch spec):
+        // subsequent body methods on it must reject with TypeError. A null-body
+        // request stays unconsumed (bodyUsed remains false), matching WPT's
+        // "aborted consumed empty request" cases.
+        let input_has_body = p.synthetic_body.is_some() || p.stream_body.is_some();
         credentials = p.credentials.clone();
         referrer = p.referrer.clone();
         mode = p.mode.clone();
         cache_mode = p.cache.clone();
+        if input_has_body {
+            if let Ok(p) = get_request_payload_mut(ctx, &mut input.clone()) {
+                p.body_consumed = true;
+            }
+        }
     } else if !input.is_undefined_or_null() {
         let href = input.get_property_str(ctx, "href")?;
         if !href.is_undefined() {
@@ -551,6 +561,14 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     // Apply RequestInit overrides.
     if !init.is_undefined_or_null() {
         if let Some(o) = init.as_object() {
+            // `window` may only be null (forbidden legacy option). Any other
+            // value throws a TypeError, and it must take priority over an
+            // already-aborted signal (WPT "TypeError from request constructor
+            // takes priority"). Mirrors `js_request_constructor`.
+            let w = o.get_property_str(ctx, "window")?;
+            if !w.is_undefined() && !w.is_null() {
+                return Err(ctx.throw_type_error("RequestInit.window must be null"));
+            }
             let m = o.get_property_str(ctx, "method")?;
             if !m.is_undefined() {
                 let raw = m.to_string(ctx)?.content().encode_utf8(false).to_string();

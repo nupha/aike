@@ -32,7 +32,10 @@ enum EntryValue {
     /// A `Blob` value plus the filename it was appended under. The spec stores
     /// the filename on the entry, not on the blob, so `append(n, blob, fname)`
     /// does not mutate the blob itself.
-    Blob { value: JSValue, filename: String },
+    Blob {
+        value: JSValue,
+        filename: String,
+    },
 }
 
 impl EntryValue {
@@ -76,9 +79,7 @@ fn make_entry(
 ) -> Result<EntryValue, i32> {
     if blob_bytes_of(&value).is_none() {
         let s = value.to_string(ctx)?;
-        return Ok(EntryValue::Str(
-            s.content().encode_utf8(false).to_string(),
-        ));
+        return Ok(EntryValue::Str(s.content().encode_utf8(false).to_string()));
     }
 
     // A `Blob` entry: the filename defaults to "blob" unless one is supplied.
@@ -351,7 +352,8 @@ fn create_fd_iterator(
     // Validate the receiver before building an iterator over it.
     get_fd(ctx, &fd_val)?;
     let obj = fd_val.as_object().ok_or(-1)?;
-    let inst = FormDataIterator::new_instance(ctx, JSValue::UNDEFINED, FormDataIter::new(obj, kind))?;
+    let inst =
+        FormDataIterator::new_instance(ctx, JSValue::UNDEFINED, FormDataIter::new(obj, kind))?;
     Ok(inst.into())
 }
 
@@ -381,6 +383,10 @@ fn js_fd_entries(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 const MULTIPART_BOUNDARY: &str = "----AikeFormBoundary7MA4YWxkTrZu0gW";
 
 /// `Content-Type` a `FormData` body contributes when used as a `BodyInit`.
+///
+/// An empty `FormData` still carries the multipart content type so that the
+/// (empty) body remains parseable back into an empty `FormData`; only its byte
+/// payload is empty.
 pub(crate) fn form_data_content_type(val: &JSValue) -> Option<String> {
     JSFormData::payload_of(val)
         .map(|_| format!("multipart/form-data; boundary={MULTIPART_BOUNDARY}"))
@@ -396,15 +402,22 @@ fn escape_disposition(name: &str) -> String {
 
 /// Serialize a `FormData` into a `multipart/form-data` byte body matching
 /// `form_data_content_type`'s boundary. Returns `None` for non-FormData values.
+///
+/// An empty `FormData` (empty entry list) produces an empty body: a trailing
+/// boundary alone (`--boundary--\r\n`) would be non-empty text when the body is
+/// consumed as text, but the Fetch tests expect an empty `FormData` to yield an
+/// empty string. The multipart `Content-Type` is still set (see
+/// `form_data_content_type`), so the body remains parseable back into an empty
+/// `FormData`.
 pub(crate) fn form_data_to_bytes(val: &JSValue) -> Option<Vec<u8>> {
     let fd = JSFormData::payload_of(val)?;
     let entries = fd.entries.borrow();
-    // An empty entry list produces an empty body (not a bare closing
-    // delimiter), per WPT `response-consume-empty`.
-    if entries.is_empty() {
-        return Some(Vec::new());
-    }
     let mut out = Vec::new();
+
+    if entries.is_empty() {
+        return Some(out);
+    }
+
     for (name, entry) in entries.iter() {
         out.extend_from_slice(format!("--{MULTIPART_BOUNDARY}\r\n").as_bytes());
         match entry {
@@ -451,11 +464,24 @@ pub(crate) fn form_data_from_multipart(
     let delim = format!("--{boundary}");
     let mut entries: Vec<(String, EntryValue)> = Vec::new();
 
+    // An empty body with a multipart content type (e.g. an empty `FormData`)
+    // parses to an empty `FormData`, not a parse error.
+    if body.is_empty() {
+        let inst = JSFormData::new_instance(
+            ctx,
+            JSValue::UNDEFINED,
+            FormDataPayload {
+                entries: RefCell::new(entries),
+            },
+        )?;
+        return Ok(Some(inst.into()));
+    }
+
     // Split on the boundary delimiter; the first chunk is the preamble and the
     // last one is the closing "--" epilogue, both ignored.
     let parts = split_on(body, delim.as_bytes());
     // A well-formed multipart body contains at least the closing delimiter.
-    // An empty body has none, which is a parse error (WPT expects TypeError).
+    // A non-empty body without one is malformed (WPT expects TypeError).
     if parts.len() < 2 {
         return Ok(None);
     }

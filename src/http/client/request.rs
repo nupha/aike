@@ -25,7 +25,7 @@ use crate::{
         },
     },
     whatwg::{
-        abort::{JSAbortSignal, make_default_signal, signal_attach_follower, signal_reason},
+        abort::{JSAbortSignal, make_default_signal, signal_attach_follower},
         stream::{
             JSReadableStream, call_opt_method, make_rejected_promise, readable_stream_from_bytes,
         },
@@ -757,13 +757,44 @@ fn js_req_body_as(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         }
     }
 
-    // Spec (Fetch): consuming a body whose signal is already aborted must
-    // reject with the signal's reason (e.g. an "AbortError"), not resolve.
-    if let Some(sig) = get_request_payload(ctx, &this)?.signal.as_ref()
-        && let Some(reason) = signal_reason(sig)
-    {
-        return make_rejected_promise(ctx, reason);
+    // A null-body request (e.g. `new Request(url)` with no init body) has no
+    // synthetic/stream body and is never disturbed. `formData()` must reject on
+    // a null body per the Fetch spec (e.g. WPT "Consume request's body as
+    // formData with correct multipart type (error case)"), even when a multipart
+    // `Content-Type` header is set without an actual body. We record this before
+    // the source block turns it into an empty synthetic body.
+    let is_null_body = {
+        let p = get_request_payload(ctx, &this)?;
+        !p.body_consumed && p.synthetic_body.is_none() && p.stream_body.is_none()
+    };
+
+    // A null-body request consumed as `formData()` must reject per the Fetch
+    // spec when the `Content-Type` is multipart/form-data (which needs a closing
+    // delimiter that an empty body lacks) — WPT "Consume request's body as
+    // formData with correct multipart type (error case)". A null body with an
+    // `application/x-www-form-urlencoded` type still parses (to an empty
+    // FormData), so it is allowed through.
+    if magic == BODY_AS_FORM_DATA && is_null_body {
+        let p = get_request_payload(ctx, &this)?;
+        let ct = p.headers.borrow().get("content-type").unwrap_or_default();
+        if ct.to_ascii_lowercase().starts_with("multipart/form-data") {
+            let _ = ctx.throw_type_error("cannot parse null body as FormData");
+            let reason = match ctx.take_exception() {
+                Exception::Error(v) => v,
+                other => {
+                    ctx.throw(other);
+                    return Err(-1);
+                }
+            };
+            return make_rejected_promise(ctx, reason);
+        }
     }
+
+    // NOTE: Unlike Response (whose body consumption is aborted by its signal),
+    // a Request's body methods consume the *request* body and are NOT affected
+    // by signal abort. An aborted-but-unconsumed request resolves normally; a
+    // consumed request rejects with TypeError (handled above). See WPT
+    // fetch/api/abort/request.any.js.
 
     let source = {
         let p = get_request_payload_mut(ctx, &mut this)?;
