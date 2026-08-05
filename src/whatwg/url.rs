@@ -7,7 +7,9 @@
 //! `URL.searchParams` returns a `URLSearchParams` that shares state via `Rc<RefCell<url::Url>>`.
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::{LazyLock, Mutex};
 
 use linkme::distributed_slice;
 use url::Url;
@@ -16,7 +18,18 @@ use zuqe::{
     ScopedContext, def_native_object,
 };
 
-use crate::USER_CLASS_DEFS;
+use crate::{USER_CLASS_DEFS, whatwg::blob::BlobPayload};
+
+/// Global registry of object URLs created by `URL.createObjectURL`. Keyed by the
+/// full `blob:` URL string so `fetch` can resolve it back to its `Blob`.
+static BLOB_URLS: LazyLock<Mutex<HashMap<String, BlobPayload>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Look up a `blob:` object URL, returning a clone of its `BlobPayload` if the
+/// URL was created via `URL.createObjectURL` and not yet revoked.
+pub(crate) fn blob_store_get(url: &str) -> Option<BlobPayload> {
+    BLOB_URLS.lock().unwrap().get(url).cloned()
+}
 
 // ===========================================================================
 // URL class
@@ -150,10 +163,11 @@ fn js_url_setter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             let _ = url.shared.borrow_mut().set_username(&text);
         }
         URL_PASSWORD => {
-            let _ = url
-                .shared
-                .borrow_mut()
-                .set_password(if text.is_empty() { None } else { Some(&text) });
+            let _ = url.shared.borrow_mut().set_password(if text.is_empty() {
+                None
+            } else {
+                Some(&text)
+            });
         }
         URL_HOST | URL_HOSTNAME => {
             let _ = url.shared.borrow_mut().set_host(Some(&text));
@@ -223,6 +237,43 @@ fn js_url_to_string(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let s = url.shared.borrow().as_str().to_string();
     ctx.create_string_from_utf8(s.into_bytes())
         .map(JSValue::make_string)
+}
+
+// -- createObjectURL / revokeObjectURL --------------------------------------
+
+/// Monotonic counter mixed with a process-random seed to synthesize unique
+/// object-URL suffixes (good enough for `blob:` URL identity in this engine).
+static BLOB_URL_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+fn js_url_create_object_url(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let arg = cc.arg(0);
+    let bytes = crate::whatwg::blob::blob_bytes_of(&arg)
+        .ok_or_else(|| ctx.throw_type_error("createObjectURL requires a Blob"))?;
+    let type_ = crate::whatwg::blob::blob_type_of(&arg).unwrap_or_default();
+    let seq = BLOB_URL_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let url = format!(
+        "blob:{:016x}-{:016x}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0),
+        seq
+    );
+    BLOB_URLS
+        .lock()
+        .unwrap()
+        .insert(url.clone(), BlobPayload { bytes, type_ });
+    ctx.create_string_from_utf8(url.into_bytes())
+        .map(JSValue::make_string)
+}
+
+fn js_url_revoke_object_url(_ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let arg = cc.arg(0);
+    if let Some(s) = arg.as_string(false) {
+        let key = s.content().encode_utf8(false);
+        BLOB_URLS.lock().unwrap().remove(key.as_ref());
+    }
+    Ok(JSValue::UNDEFINED)
 }
 
 // ===========================================================================
@@ -514,14 +565,44 @@ fn js_sp_values(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
 const CLASS_URL_PROTO: &[FieldDef] = &[
     FieldDef::GETSET("href", Some(js_url_getter), Some(js_url_setter), URL_HREF),
     FieldDef::GETSET("origin", Some(js_url_getter), None, URL_ORIGIN),
-    FieldDef::GETSET("protocol", Some(js_url_getter), Some(js_url_setter), URL_PROTOCOL),
-    FieldDef::GETSET("username", Some(js_url_getter), Some(js_url_setter), URL_USERNAME),
-    FieldDef::GETSET("password", Some(js_url_getter), Some(js_url_setter), URL_PASSWORD),
+    FieldDef::GETSET(
+        "protocol",
+        Some(js_url_getter),
+        Some(js_url_setter),
+        URL_PROTOCOL,
+    ),
+    FieldDef::GETSET(
+        "username",
+        Some(js_url_getter),
+        Some(js_url_setter),
+        URL_USERNAME,
+    ),
+    FieldDef::GETSET(
+        "password",
+        Some(js_url_getter),
+        Some(js_url_setter),
+        URL_PASSWORD,
+    ),
     FieldDef::GETSET("host", Some(js_url_getter), Some(js_url_setter), URL_HOST),
-    FieldDef::GETSET("hostname", Some(js_url_getter), Some(js_url_setter), URL_HOSTNAME),
+    FieldDef::GETSET(
+        "hostname",
+        Some(js_url_getter),
+        Some(js_url_setter),
+        URL_HOSTNAME,
+    ),
     FieldDef::GETSET("port", Some(js_url_getter), Some(js_url_setter), URL_PORT),
-    FieldDef::GETSET("pathname", Some(js_url_getter), Some(js_url_setter), URL_PATHNAME),
-    FieldDef::GETSET("search", Some(js_url_getter), Some(js_url_setter), URL_SEARCH),
+    FieldDef::GETSET(
+        "pathname",
+        Some(js_url_getter),
+        Some(js_url_setter),
+        URL_PATHNAME,
+    ),
+    FieldDef::GETSET(
+        "search",
+        Some(js_url_getter),
+        Some(js_url_setter),
+        URL_SEARCH,
+    ),
     FieldDef::GETSET("hash", Some(js_url_getter), Some(js_url_setter), URL_HASH),
     FieldDef::GETSET("searchParams", Some(js_url_search_params_getter), None, 0),
     FieldDef::FUNC("toString", 0, js_url_to_string, 0),
@@ -539,6 +620,46 @@ def_native_object!(
 #[distributed_slice(USER_CLASS_DEFS)]
 fn register_class_url(rt: &mut Runtime) -> Result<ClassID, i32> {
     JSURL::register(rt)
+}
+
+// ===========================================================================
+// Registration: URL static methods (createObjectURL / revokeObjectURL)
+// ===========================================================================
+
+/// Mount `URL.createObjectURL` / `URL.revokeObjectURL` as static methods on the
+/// global `URL` constructor. These back the WHATWG object-URL store used by
+/// `fetch('blob:...')`.
+pub(crate) fn register_url_statics(
+    ctx: &mut ScopedContext,
+    global: &mut Object,
+) -> Result<(), i32> {
+    let create_fn = ctx.create_native_function(
+        zuqe::Callback::Func(js_url_create_object_url),
+        "createObjectURL",
+        1,
+        0,
+    )?;
+    let revoke_fn = ctx.create_native_function(
+        zuqe::Callback::Func(js_url_revoke_object_url),
+        "revokeObjectURL",
+        1,
+        0,
+    )?;
+    if let Some(mut ctor) = global.get_property_str(ctx, "URL")?.as_object() {
+        ctor.define_property_value_str(
+            ctx,
+            "createObjectURL",
+            create_fn.into(),
+            zuqe::JS_PROP_C_W_E,
+        )?;
+        ctor.define_property_value_str(
+            ctx,
+            "revokeObjectURL",
+            revoke_fn.into(),
+            zuqe::JS_PROP_C_W_E,
+        )?;
+    }
+    Ok(())
 }
 
 // ===========================================================================

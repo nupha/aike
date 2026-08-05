@@ -11,7 +11,7 @@ use zuqe::{ErrorKind, Exception, JSResult, JSValue, ScopedContext};
 use super::{
     cors::{
         check_preflight, cors_safelisted_method, is_cross_origin, preflight_cache_hit,
-        preflight_cache_key, preflight_cache_store,
+        preflight_cache_key, preflight_cache_store, should_append_origin,
     },
     headers::HeaderList,
 };
@@ -828,30 +828,24 @@ pub(crate) async fn perform_request(
                 headers.push(("Referer".to_string(), referrer));
             }
         }
-        // For `cors`-mode requests, recompute the `Origin` header for this hop:
-        // `null` once the origin is opaque, otherwise the client origin when the
-        // current hop's URL is cross-origin with the client origin, otherwise none.
-        // A same-origin request (even a POST) never emits `Origin`; a cross-origin
-        // hop (even a GET) does — matching the WHATWG fetch algorithm and WPT
-        // `redirect-origin.any.js`. `Origin` is a forbidden request header, so any
+        // For `cors`-mode requests, recompute the `Origin` header for this hop.
+        // Per the WHATWG fetch "append a request `Origin` header" algorithm the
+        // value is set whenever the method is not GET/HEAD, or when the request is
+        // CORS-tainted (a cross-origin `cors`-mode hop) — regardless of whether the
+        // *current* URL is cross-origin. So a same-origin `cors`-mode POST still
+        // emits `Origin` (= client origin), and a cross-origin GET does too. An
+        // opaque origin (turned opaque by a cross-origin redirect) serializes to the
+        // literal `null`. `Origin` is a forbidden request header, so any
         // caller-provided value is replaced. Non-cors requests keep whatever
         // `Origin` the caller set.
         if req.cors_mode {
             headers.retain(|(k, _)| !k.eq_ignore_ascii_case("origin"));
             let origin_value: Option<String> = if origin_opaque {
                 Some("null".to_string())
+            } else if should_append_origin(&method.to_string(), cross_origin_hop) {
+                Some(req.cors_client_origin.clone())
             } else {
-                // Send the `Origin` header only when the *current* hop's URL is
-                // cross-origin with the client origin. A same-origin request (even
-                // a POST) never emits `Origin`; a cross-origin hop (even a GET)
-                // does, mirroring the WHATWG fetch algorithm and WPT
-                // `redirect-origin.any.js`.
-                let hop_cross = is_cross_origin(Some(&req.cors_client_origin), &url);
-                if hop_cross {
-                    Some(req.cors_client_origin.clone())
-                } else {
-                    None
-                }
+                None
             };
             if let Some(ov) = origin_value {
                 headers.push(("Origin".to_string(), ov));
@@ -1040,7 +1034,14 @@ pub(crate) async fn perform_request(
     let headers = combine_content_length_headers(raw_headers);
     // `Response.statusText` is the response's status message: the HTTP reason
     // phrase for a real response (200 → "OK", 304 → "Not Modified", ...).
-    let status_text = canonical_status_text(status.as_u16());
+    // HTTP/2 has no reason phrase, so the spec mandates an empty `statusText`
+    // for h2 responses regardless of the status code (WPT `status.h2.any.js`).
+    let http_ver = version_str(resp.version());
+    let status_text = if http_ver.starts_with("HTTP/2") {
+        String::new()
+    } else {
+        canonical_status_text(status.as_u16())
+    };
     // Read Content-Length from the header: resp.content_length() reports the
     // body size hint, which is erased by the auto-decompression wrapper.
     let content_length = resp

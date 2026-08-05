@@ -53,6 +53,7 @@ pub(crate) fn install_whatwg(ctx: &mut ScopedContext, mut global: Object) -> Res
     timeout::install_timeout(ctx, global)?;
     microtask::install_microtask(ctx, global)?;
     abort::install_abort_statics(ctx, &mut global)?;
+    url::register_url_statics(ctx, &mut global)?;
     fetch::install_fetch(ctx, global)?;
     base64::install_encoding(ctx, global)?;
     structured_clone::install_structured_clone(ctx, global)?;

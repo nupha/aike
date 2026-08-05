@@ -894,6 +894,51 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         return make_resolved_promise(ctx, response);
     }
 
+    // `blob:` scheme: resolve the object URL against the global blob store
+    // populated by `URL.createObjectURL`. A revoked or unknown blob URL is a
+    // network error; a valid one yields a basic 200 response carrying the
+    // blob's bytes and MIME type (WPT `scheme-blob.sub.any.js`).
+    if url_str.starts_with("blob:") {
+        match crate::whatwg::url::blob_store_get(&url_str) {
+            Some(blob) => {
+                let bytes = blob.bytes().to_vec();
+                let mime = blob.type_().to_string();
+                let response = build_response_from_transport(
+                    ctx,
+                    TransportResponse {
+                        status: 200,
+                        status_text: "OK".to_string(),
+                        headers: vec![
+                            ("Content-Type".to_string(), mime.clone()),
+                            ("Content-Length".to_string(), bytes.len().to_string()),
+                        ],
+                        content_type: mime,
+                        content_length: Some(bytes.len() as u64),
+                        http_version: "1.1",
+                        resp: None,
+                        final_url: url_str.clone(),
+                        synthetic_body: Some(bytes),
+                        origin_opaque: false,
+                    },
+                    RespType::Basic,
+                    &url_str,
+                    false,
+                    signal_val.clone(),
+                )?;
+                return make_resolved_promise(ctx, response);
+            }
+            None => {
+                return throw_transport_error(
+                    ctx,
+                    TransportError {
+                        code: "other",
+                        message: "Failed to fetch: unknown blob URL".into(),
+                    },
+                );
+            }
+        }
+    }
+
     let result_slot = PromiseResultSlot::<Result<TransportResponse, FetchError>>::new();
     // Look up cached validators before issuing the request so the conditional
     // headers ride on the outgoing request and the `cache_driven` flag (copied
@@ -1419,6 +1464,8 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                     && !has_conditional
                     && cache_method.eq_ignore_ascii_case("GET")
                     && (200..300).contains(&tr.status)
+                    // 204/205/304 (and HEAD) carry no body and are never cached.
+                    && !matches!(tr.status, 204 | 205 | 304)
                 {
                     // The final URL (after any redirect) is stored so a later
                     // `same-origin` cache hit can reject a cross-origin redirect.

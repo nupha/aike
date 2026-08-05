@@ -20,23 +20,24 @@ use zuqe::{
 use crate::{USER_CLASS_DEFS, whatwg::stream::readable_stream_from_bytes};
 
 /// Immutable blob contents: a shared byte buffer plus its MIME type.
+#[derive(Clone)]
 pub(crate) struct BlobPayload {
     /// Underlying bytes, shared across `slice()` results via `Rc`.
-    bytes: Arc<[u8]>,
+    pub(crate) bytes: Arc<[u8]>,
     /// Lower-cased MIME type, stripped of control characters per spec.
-    type_: String,
+    pub(crate) type_: String,
 }
 
 impl BlobPayload {
-    fn size(&self) -> usize {
+    pub(crate) fn size(&self) -> usize {
         self.bytes.len()
     }
 
-    fn bytes(&self) -> &[u8] {
+    pub(crate) fn bytes(&self) -> &[u8] {
         &self.bytes
     }
 
-    fn type_(&self) -> &str {
+    pub(crate) fn type_(&self) -> &str {
         &self.type_
     }
 }
