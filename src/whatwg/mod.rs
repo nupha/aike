@@ -6,8 +6,9 @@
 pub mod abort;
 pub mod base64;
 pub mod blob;
-pub mod dom;
 pub mod console;
+pub mod crypto;
+pub mod dom;
 pub mod fetch;
 pub mod stream;
 pub mod text_decoder;
@@ -38,6 +39,9 @@ pub(crate) fn install_whatwg(ctx: &mut ScopedContext, mut global: Object) -> Res
         stream::JSByteLengthQueuingStrategy::class_id(),
         stream::JSCountQueuingStrategy::class_id(),
         blob::JSBlob::class_id(),
+        crypto::JSCrypto::class_id(),
+        crypto::subtle::JSCryptoSubtle::class_id(),
+        crypto::JSCryptoKey::class_id(),
     ])?;
 
     console::install_console(ctx, &mut global)?;
@@ -45,6 +49,7 @@ pub(crate) fn install_whatwg(ctx: &mut ScopedContext, mut global: Object) -> Res
     abort::install_abort_statics(ctx, &mut global)?;
     fetch::install_fetch(ctx, global)?;
     base64::install_base64(ctx, global)?;
+    crypto::install_crypto(ctx, global)?;
 
     Ok(())
 }

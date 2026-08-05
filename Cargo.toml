@@ -137,6 +137,11 @@ tokio-tungstenite = { version = "0.24", default-features = false, features = [
 url = "2"
 base64 = "0.22"
 sha2 = "0.10"
+sha1 = "0.10"
+hmac = "0.12"
+aes-gcm = "0.10"
+rand = "0.9"
+subtle = "2"
 
 # TypeScript transpilation — only compiled when typescript feature is enabled
 swc_common = { version = "23", optional = true }
