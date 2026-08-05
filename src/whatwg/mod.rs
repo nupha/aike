@@ -10,6 +10,7 @@ pub mod console;
 pub mod crypto;
 pub mod dom;
 pub mod fetch;
+pub mod form_data;
 pub mod stream;
 pub mod text_decoder;
 pub mod text_encoder;
@@ -39,6 +40,8 @@ pub(crate) fn install_whatwg(ctx: &mut ScopedContext, mut global: Object) -> Res
         stream::JSByteLengthQueuingStrategy::class_id(),
         stream::JSCountQueuingStrategy::class_id(),
         blob::JSBlob::class_id(),
+        form_data::JSFormData::class_id(),
+        form_data::FormDataIterator::class_id(),
         crypto::JSCrypto::class_id(),
         crypto::subtle::JSCryptoSubtle::class_id(),
         crypto::JSCryptoKey::class_id(),

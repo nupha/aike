@@ -27,6 +27,7 @@ use crate::{
     http::client::headers::HeaderList,
     whatwg::{
         blob::{blob_bytes_of, blob_from_bytes, blob_type_of},
+        form_data::{form_data_content_type, form_data_parse, form_data_to_bytes},
         stream::{
             JSReadableStream, call_opt_method, readable_stream_from_text,
             readable_stream_from_text_channel,
@@ -55,6 +56,11 @@ pub(crate) fn body_to_bytes(ctx: &mut ScopedContext, val: &JSValue) -> Result<Ve
     if let Some(bytes) = blob_bytes_of(val) {
         return Ok(bytes.to_vec());
     }
+    // A FormData body serializes to multipart/form-data; without this it would
+    // stringify to "[object FormData]".
+    if let Some(bytes) = form_data_to_bytes(val) {
+        return Ok(bytes);
+    }
     if let Ok(ta) = TypedArray::try_from(val.clone()) {
         return Ok(ta.with_bytes(|b| b.to_vec()));
     }
@@ -79,6 +85,10 @@ pub(crate) fn body_to_bytes(ctx: &mut ScopedContext, val: &JSValue) -> Result<Ve
 pub(crate) fn body_content_type(val: &JSValue) -> Option<String> {
     if let Some(t) = blob_type_of(val) {
         return (!t.is_empty()).then_some(t);
+    }
+
+    if let Some(t) = form_data_content_type(val) {
+        return Some(t);
     }
 
     if JSURLSearchParams::payload_of(val).is_some() {
@@ -117,6 +127,10 @@ pub(crate) const BODY_AS_BLOB: i32 = 4;
 /// Returns a real `ArrayBuffer` (used by `Response.arrayBuffer()`; distinct
 /// from `BODY_AS_BYTES`, which yields a `Uint8Array` view).
 pub(crate) const BODY_AS_ARRAY_BUFFER: i32 = 5;
+/// Returns a `FormData` parsed from the body. `blob_type` carries the full
+/// `Content-Type` header (with parameters) so the multipart boundary and the
+/// urlencoded variant can be told apart.
+pub(crate) const BODY_AS_FORM_DATA: i32 = 6;
 
 const BODY_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -177,6 +191,14 @@ pub(crate) fn drain_body(
                     JSON::parse(cx, &text)
                 }
                 BODY_AS_BLOB => blob_from_bytes(cx, buf.into(), blob_type),
+                BODY_AS_FORM_DATA => {
+                    // `blob_type` holds the raw Content-Type here, which
+                    // selects the parse algorithm per the Fetch spec.
+                    match form_data_parse(cx, &buf, &blob_type)? {
+                        Some(v) => Ok(v),
+                        None => Err(cx.throw_type_error("could not parse body as FormData")),
+                    }
+                }
                 _ => unreachable!(),
             }
         })?;

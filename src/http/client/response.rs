@@ -29,8 +29,8 @@ use crate::{
     html::HtmlConvertMode,
     http::client::{
         body::{
-            BODY_AS_ARRAY_BUFFER, BODY_AS_BLOB, BODY_AS_BYTES, BODY_AS_JSON, BODY_AS_TEXT,
-            BODY_AS_TEXT_CONVERT, BodySource, blob_type_from_header, body_content_type,
+            BODY_AS_ARRAY_BUFFER, BODY_AS_BLOB, BODY_AS_BYTES, BODY_AS_FORM_DATA, BODY_AS_JSON,
+            BODY_AS_TEXT, BODY_AS_TEXT_CONVERT, BodySource, blob_type_from_header, body_content_type,
             body_to_bytes, drain_body, text_stream_from_source,
         },
         headers::{Guard, HeaderList, HeadersPayload, JSHeaders, header_list_from_js},
@@ -902,6 +902,11 @@ fn js_response_body_as(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let blob_type = {
         let p = JSHttpClientResponse::payload_of(&this).or_else(|| JSResponse::payload_of(&this));
         match p {
+            // formData() needs the *raw* Content-Type: the multipart boundary
+            // lives in the parameters that blob_type_from_header strips.
+            Some(p) if magic == BODY_AS_FORM_DATA => {
+                p.headers.borrow().get("content-type").unwrap_or_default()
+            }
             Some(p) => blob_type_from_header(&p.headers.borrow()),
             None => String::new(),
         }
@@ -964,10 +969,6 @@ fn js_response_text_stream(ctx: &mut ScopedContext, _cc: CallContext) -> JSResul
         Some(None) => Err(ctx.throw_internal_error("failed to obtain body")),
         None => text_stream_from_source(ctx, BodySource::Synthetic(Vec::new())),
     }
-}
-
-fn js_response_form_data(ctx: &mut ScopedContext, _: CallContext) -> JSResult {
-    Err(ctx.throw_type_error("formData() is not supported in this runtime"))
 }
 
 fn js_response_close(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -1079,7 +1080,7 @@ const RESPONSE_PROTO: &[FieldDef] = &[
         BODY_AS_ARRAY_BUFFER as i16,
     ),
     FieldDef::FUNC("blob", 0, js_response_body_as, BODY_AS_BLOB as i16),
-    FieldDef::FUNC("formData", 0, js_response_form_data, 0),
+    FieldDef::FUNC("formData", 0, js_response_body_as, BODY_AS_FORM_DATA as i16),
     FieldDef::FUNC("textStream", 0, js_response_text_stream, 0),
     FieldDef::FUNC("clone", 0, js_response_clone, 0),
 ];

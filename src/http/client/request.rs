@@ -15,8 +15,9 @@ use crate::{
     USER_CLASS_DEFS,
     http::client::{
         body::{
-            BODY_AS_ARRAY_BUFFER, BODY_AS_BLOB, BODY_AS_BYTES, BODY_AS_JSON, BODY_AS_TEXT,
-            BodySource, blob_type_from_header, body_content_type, body_to_bytes, drain_body,
+            BODY_AS_ARRAY_BUFFER, BODY_AS_BLOB, BODY_AS_BYTES, BODY_AS_FORM_DATA, BODY_AS_JSON,
+            BODY_AS_TEXT, BodySource, blob_type_from_header, body_content_type, body_to_bytes,
+            drain_body,
             text_stream_from_source,
         },
         headers::{
@@ -736,11 +737,19 @@ fn js_req_body_as(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     // Request.blob() sets the Blob's type to the request's *current*
     // Content-Type header (mutable via `headers.set`), with parameters
     // stripped. Computed before consuming the source below.
-    let blob_type = if magic == BODY_AS_BLOB {
-        let p = get_request_payload(ctx, &this)?;
-        blob_type_from_header(&p.headers.borrow())
-    } else {
-        String::new()
+    let blob_type = match magic {
+        BODY_AS_BLOB => {
+            let p = get_request_payload(ctx, &this)?;
+            blob_type_from_header(&p.headers.borrow())
+        }
+        // formData() needs the raw Content-Type: the multipart boundary lives
+        // in the parameters that blob_type_from_header strips.
+        BODY_AS_FORM_DATA => {
+            let p = get_request_payload(ctx, &this)?;
+            let ct = p.headers.borrow().get("content-type");
+            ct.unwrap_or_default()
+        }
+        _ => String::new(),
     };
 
     match source {
@@ -787,11 +796,6 @@ fn js_req_text_stream(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
         Some(src) => text_stream_from_source(ctx, src),
         None => text_stream_from_source(ctx, BodySource::Synthetic(Vec::new())),
     }
-}
-
-/// `formData()` — not yet supported.
-fn js_req_form_data(ctx: &mut ScopedContext, _: CallContext) -> JSResult {
-    Err(ctx.throw_type_error("formData() is not supported in this runtime"))
 }
 
 fn js_req_clone(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -884,7 +888,7 @@ const REQUEST_PROTO: &[FieldDef] = &[
     FieldDef::FUNC("text", 0, js_req_body_as, BODY_AS_TEXT as i16),
     FieldDef::FUNC("json", 0, js_req_body_as, BODY_AS_JSON as i16),
     FieldDef::FUNC("blob", 0, js_req_body_as, BODY_AS_BLOB as i16),
-    FieldDef::FUNC("formData", 0, js_req_form_data, 0),
+    FieldDef::FUNC("formData", 0, js_req_body_as, BODY_AS_FORM_DATA as i16),
     FieldDef::FUNC("textStream", 0, js_req_text_stream, 0),
     FieldDef::FUNC("clone", 0, js_req_clone, 0),
 ];
