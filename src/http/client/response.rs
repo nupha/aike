@@ -30,8 +30,8 @@ use crate::{
     http::client::{
         body::{
             BODY_AS_ARRAY_BUFFER, BODY_AS_BLOB, BODY_AS_BYTES, BODY_AS_FORM_DATA, BODY_AS_JSON,
-            BODY_AS_TEXT, BODY_AS_TEXT_CONVERT, BodySource, blob_type_from_header, body_content_type,
-            body_to_bytes, drain_body, text_stream_from_source,
+            BODY_AS_TEXT, BODY_AS_TEXT_CONVERT, BodySource, blob_type_from_header,
+            body_content_type, body_to_bytes, drain_body, text_stream_from_source,
         },
         headers::{Guard, HeaderList, HeadersPayload, JSHeaders, header_list_from_js},
         transport::TransportResponse,
@@ -529,10 +529,20 @@ fn js_response_static_redirect(ctx: &mut ScopedContext, cc: CallContext) -> JSRe
         .encode_utf8(false)
         .to_string();
 
-    // Per WHATWG fetch, redirect() must reject a non-absolute URL with TypeError.
-    if url::Url::parse(&url).is_err() {
-        return Err(ctx.throw_type_error("Failed to execute 'Response.redirect': invalid url"));
+    // Per WHATWG fetch, redirect() parses the url against the current base URL
+    // and only throws TypeError when that fails. A relative url like "/" is
+    // valid whenever a base exists, so resolve it the way fetch() does.
+    let url = match url::Url::parse(&url) {
+        Ok(u) => u,
+        Err(_) => ctx
+            .current_module_name()
+            .and_then(|base| url::Url::parse(&base).ok())
+            .and_then(|base| base.join(&url).ok())
+            .ok_or_else(|| {
+                ctx.throw_type_error("Failed to execute 'Response.redirect': invalid url")
+            })?,
     }
+    .to_string();
 
     let status = if cc.length() > 1 {
         let s = cc.arg(1).to_number(ctx)?.to_i32();
@@ -555,7 +565,9 @@ fn js_response_static_redirect(ctx: &mut ScopedContext, cc: CallContext) -> JSRe
         ResponsePayload {
             resp: None,
             body_rx: None,
-            body_consumed: true,
+            // A redirect response has a *null* body, not a consumed one:
+            // `.body` must be null and consumers resolve to the empty value.
+            body_consumed: false,
             cached_body: None,
             synthetic_body: None,
             ctor_stream: None,
@@ -857,11 +869,22 @@ fn js_response_body_as(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             (Some(BodySource::Synthetic(Vec::new())), convert)
         } else if unusable {
             (None, convert)
-        } else if p.resp.is_none() && p.synthetic_body.is_none() && p.ctor_stream.is_none() {
+        } else if p.resp.is_none()
+            && p.synthetic_body.is_none()
+            && p.ctor_stream.is_none()
+            && p.cached_body.is_none()
+        {
             // Null-body response (204/205/304, HEAD, or a synthetic response
             // built without a body that was never accessed as a stream):
             // consumers resolve to the empty value rather than rejecting.
-            p.body_consumed = true;
+            // `bodyUsed` is `body != null && body.stream.disturbed`, so a null
+            // body stays undisturbed and repeated consumption keeps working.
+            //
+            // `cached_body` must be checked as well: the `.body` getter calls
+            // ensure_cached_body(), which takes `resp` and moves the body into
+            // the cached stream. Without it a network response whose `.body`
+            // was merely touched would be misread as null-body and consumers
+            // would resolve to "" instead of the real bytes.
             (Some(BodySource::Synthetic(Vec::new())), convert)
         } else {
             let src = if p.cached_body.is_some() && !p.body_consumed {

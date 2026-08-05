@@ -168,6 +168,22 @@ fn js_readable_stream_get_reader(ctx: &mut ScopedContext, cc: CallContext) -> JS
         return Err(ctx.throw_type_error("ReadableStream is already locked"));
     }
 
+    // options.mode: undefined -> default reader, "byob" -> BYOB reader,
+    // anything else -> TypeError (the spec converts mode to a fixed enum).
+    let options = cc.arg(0);
+    let byob = if options.is_undefined() || options.is_null() {
+        false
+    } else {
+        let mode = options.get_property_str(ctx, "mode")?;
+        if mode.is_undefined() {
+            false
+        } else if mode.to_string(ctx)?.content().encode_utf8(false).as_ref() == "byob" {
+            true
+        } else {
+            return Err(ctx.throw_type_error("`mode` must be undefined or \"byob\""));
+        }
+    };
+
     let mut closed_promise = Promise::create(ctx)?.0;
     if let Some(sp) = JSReadableStream::payload_of(&this) {
         match sp.state {
@@ -183,6 +199,7 @@ fn js_readable_stream_get_reader(ctx: &mut ScopedContext, cc: CallContext) -> JS
         ReadableStreamDefaultReaderPayload {
             stream: Some(JSReadableStream::try_from(this)?),
             closed_promise: Some(closed_promise),
+            byob,
         },
     )?;
     JSReadableStream::payload_mut_of(&mut this).unwrap().reader = Some(reader);
@@ -393,6 +410,9 @@ fn js_readable_stream_async_iterator(ctx: &mut ScopedContext, cc: CallContext) -
 pub(crate) struct ReadableStreamDefaultReaderPayload {
     stream: Option<JSReadableStream>,
     pub(crate) closed_promise: Option<Promise>,
+    /// True when acquired via `getReader({mode: 'byob'})`. A BYOB read writes
+    /// the chunk into the caller-supplied view instead of allocating one.
+    byob: bool,
 }
 
 thread_local! {
@@ -444,10 +464,73 @@ def_native_object!(
     on_payload_gc: ReadableStreamDefaultReaderPayload::gc_trace
 );
 
+/// Copy `chunk` into the BYOB destination `view`, returning the view to hand
+/// back to the caller. Bytes that do not fit are pushed to the front of `queue`
+/// so the following read resumes from there.
+///
+/// The returned view spans exactly the written bytes, sharing the caller's
+/// buffer, which is what makes `value.buffer` usable for the next read.
+fn byob_fill_view(
+    ctx: &mut ScopedContext,
+    mut view: TypedArray,
+    chunk: JSValue,
+    queue: &mut Vec<QueueEntry>,
+) -> Result<JSValue, i32> {
+    let src: Vec<u8> = match chunk.as_object().and_then(|o| TypedArray::try_from(o).ok()) {
+        Some(ta) => ta.with_bytes(|b| b.to_vec()),
+        // Non-byte chunk in a byte stream: hand it through untouched.
+        None => return Ok(chunk),
+    };
+
+    let n = view.with_bytes_mut(|dest| {
+        let n = src.len().min(dest.len());
+        dest[..n].copy_from_slice(&src[..n]);
+        n
+    });
+
+    if n < src.len() {
+        let rest = TypedArray::create_from_vec_u8(ctx, src[n..].to_vec())?;
+        queue.insert(
+            0,
+            QueueEntry {
+                chunk: JSValue::from(rest),
+                size: 1.0,
+            },
+        );
+    }
+
+    // Return a view over the same buffer covering only the filled range, so the
+    // caller can chain `value.buffer` plus `value.byteLength` as an offset.
+    // `subarray` keeps the underlying buffer shared, unlike a fresh array.
+    let view_val = JSValue::from(view);
+    view_val.get_property_str(ctx, "subarray")?.call(
+        ctx,
+        view_val,
+        &[JSValue::from(0.0), (n as f64).into()],
+    )
+}
+
 fn js_reader_read(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let p = JSReadableStreamDefaultReader::payload_of(&this)
         .ok_or_else(|| ctx.throw_type_error("not a ReadableStreamDefaultReader"))?;
+
+    // A BYOB read takes the destination view as its only argument; the chunk is
+    // written into that view's own buffer region rather than a fresh array.
+    let byob_view = if p.byob {
+        let view = cc.arg(0);
+        let obj = view
+            .as_object()
+            .ok_or_else(|| ctx.throw_type_error("view must be a TypedArray"))?;
+        let ta = TypedArray::try_from(obj)
+            .map_err(|_| ctx.throw_type_error("view must be a TypedArray"))?;
+        if ta.length() == 0 {
+            return Err(ctx.throw_type_error("view must have non-zero length"));
+        }
+        Some(ta)
+    } else {
+        None
+    };
 
     let mut stream_val = p
         .stream
@@ -487,6 +570,20 @@ fn js_reader_read(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             let total = cp.queue_total_size.get();
             cp.queue_total_size.set(total - entry.size);
 
+            // BYOB: copy as much of the chunk as fits into the caller's view and
+            // push the remainder back so the next read continues where this one
+            // stopped. Done before the close transition so a partially consumed
+            // chunk keeps the stream readable.
+            let chunk = if let Some(view) = byob_view {
+                let filled = byob_fill_view(ctx, view, entry.chunk, &mut q)?;
+                if !q.is_empty() {
+                    cp.queue_total_size.set(cp.queue_total_size.get() + 1.0);
+                }
+                filled
+            } else {
+                entry.chunk
+            };
+
             // Per spec: after draining last item, if close_requested,
             // transition stream to closed state.
             if q.is_empty()
@@ -496,7 +593,7 @@ fn js_reader_read(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 sp.state = RsState::Closed;
             }
 
-            let result = make_iterator_result(ctx, entry.chunk, false)?;
+            let result = make_iterator_result(ctx, chunk, false)?;
             return make_resolved_promise(ctx, result);
         }
 
@@ -853,6 +950,7 @@ fn create_stream_async_iterator(ctx: &mut ScopedContext, stream_val: &JSValue) -
             ReadableStreamDefaultReaderPayload {
                 stream: Some(JSReadableStream::try_from(*stream_val)?),
                 closed_promise: None,
+                byob: false,
             },
         )?;
         if let Some(sp) = JSReadableStream::payload_mut_of(&mut this) {

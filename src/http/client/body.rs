@@ -95,9 +95,17 @@ pub(crate) fn body_content_type(val: &JSValue) -> Option<String> {
         return Some("application/x-www-form-urlencoded;charset=UTF-8".into());
     }
 
-    // Strings are the only remaining source with a default type. Checked last
-    // because Blob/URLSearchParams are objects, not strings.
-    val.is_string().then(|| "text/plain;charset=UTF-8".into())
+    // Fetch spec "extract a body": any value that is not a BufferSource
+    // (ArrayBuffer / TypedArray / DataView) nor a ReadableStream is encoded as a
+    // string via its `toString`, and defaults to this Content-Type. This covers
+    // string literals and objects exposing `toString` (e.g.
+    // `{ toString: () => "hi!" }`). BufferSources and streams carry no default
+    // Content-Type, so they fall through to `None` below.
+    let is_buffer_source = val.as_object_DataView().is_some()
+        || val.as_object_ArrayBuffer().is_some()
+        || val.as_object_TypedArray().is_some()
+        || JSReadableStream::payload_of(val).is_some();
+    (!is_buffer_source).then(|| "text/plain;charset=UTF-8".into())
 }
 
 /// Blob MIME type derived from a header list's current `Content-Type`: the
