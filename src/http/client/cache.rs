@@ -47,6 +47,15 @@ struct CacheEntry {
     final_url: String,
 }
 
+/// Upper bound on a body we are willing to hold in the in-memory cache.
+///
+/// The cache is a plain `HashMap<(method,url), Vec<u8>>`; buffering an
+/// unbounded body (e.g. the 8GiB file in WPT `huge-fetch`) would OOM the
+/// process or yield an empty chunk. Responses larger than this are not cached
+/// (the spec does not require caching every response), and the caller is
+/// expected to stream such bodies to the consumer instead of buffering them.
+pub(crate) const MAX_CACHE_BODY_BYTES: u64 = 64 * 1024 * 1024;
+
 /// Global, process-wide cache. Keyed by (method, url).
 static CACHE: LazyLock<Mutex<HashMap<(String, String), CacheEntry>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -236,6 +245,12 @@ pub(crate) fn store(
     if method.to_ascii_uppercase() != "GET" {
         return;
     }
+    // Never buffer an unbounded body in the in-memory cache: an 8GiB response
+    // would OOM the process. The caller should stream such bodies instead.
+    if (body.len() as u64) > MAX_CACHE_BODY_BYTES {
+        return;
+    }
+
     // Only cache responses that carry a validator; everything else is not
     // revalidateable and caching it would only add risk of stale data.
     let etag = header_value(headers, "etag");
@@ -243,6 +258,7 @@ pub(crate) fn store(
     if etag.is_none() && last_modified.is_none() {
         return;
     }
+
     // Never cache `no-store` / `private` responses.
     if let Some(cc) = header_value(headers, "cache-control") {
         let cc = cc.to_ascii_lowercase();

@@ -1381,8 +1381,7 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                     tr.synthetic_body = Some(bytes);
                 }
                 // HTTP cache: buffer the body of a cacheable GET response so it
-                // can be stored and later served/revalidated from cache. The
-                // stored body is also put back as the response's synthetic body.
+                // can be stored and later served/revalidated from cache.
                 if cache_mode != "no-store"
                     && !has_conditional
                     && cache_method.eq_ignore_ascii_case("GET")
@@ -1391,22 +1390,34 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                     // The final URL (after any redirect) is stored so a later
                     // `same-origin` cache hit can reject a cross-origin redirect.
                     let final_url = tr.final_url.clone();
-                    let bytes = match tr.resp.take() {
-                        Some(resp) => match resp.bytes().await {
-                            Ok(b) => b.to_vec(),
-                            Err(_) => Vec::new(),
-                        },
-                        None => tr.synthetic_body.clone().unwrap_or_default(),
-                    };
-                    http_cache::store(
-                        &cache_method,
-                        &cache_url,
-                        tr.status,
-                        &tr.headers,
-                        bytes.clone(),
-                        &final_url,
+                    // Never buffer an unbounded body just to cache it: WPT
+                    // `huge-fetch` is 8GiB and the in-memory cache (a plain
+                    // HashMap) would OOM the process, yielding an empty chunk
+                    // or a crash. Only cache when we know the body is small
+                    // enough; otherwise keep `tr.resp` intact so the body is
+                    // streamed lazily to the consumer, one chunk at a time.
+                    let small_enough = matches!(
+                        tr.content_length,
+                        Some(len) if len <= http_cache::MAX_CACHE_BODY_BYTES
                     );
-                    tr.synthetic_body = Some(bytes);
+                    if small_enough {
+                        let bytes = match tr.resp.take() {
+                            Some(resp) => match resp.bytes().await {
+                                Ok(b) => b.to_vec(),
+                                Err(_) => Vec::new(),
+                            },
+                            None => tr.synthetic_body.clone().unwrap_or_default(),
+                        };
+                        http_cache::store(
+                            &cache_method,
+                            &cache_url,
+                            tr.status,
+                            &tr.headers,
+                            bytes.clone(),
+                            &final_url,
+                        );
+                        tr.synthetic_body = Some(bytes);
+                    }
                 }
 
                 let _ = rs.commit(Ok(tr));
