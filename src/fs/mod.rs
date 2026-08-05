@@ -7,4 +7,4 @@ mod file;
 mod glob;
 
 pub use entries::init_mod_fs;
-pub(crate) use file::write_file_atomic;
+pub(crate) use file::{TempFileGuard, write_file_atomic};
