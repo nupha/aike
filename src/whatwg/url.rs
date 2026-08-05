@@ -68,241 +68,126 @@ fn js_url_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 }
 
 // -- Getters / Setters -----------------------------------------------------
+//
+// All URL accessors share one getter and one setter native function; the
+// `FieldDef::GETSET` magic value selects the field.
 
-fn js_url_href_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+const URL_HREF: i16 = 0;
+const URL_ORIGIN: i16 = 1;
+const URL_PROTOCOL: i16 = 2;
+const URL_USERNAME: i16 = 3;
+const URL_PASSWORD: i16 = 4;
+const URL_HOST: i16 = 5;
+const URL_HOSTNAME: i16 = 6;
+const URL_PORT: i16 = 7;
+const URL_PATHNAME: i16 = 8;
+const URL_SEARCH: i16 = 9;
+const URL_HASH: i16 = 10;
+
+fn js_url_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let url = get_url(ctx, &this)?;
-    let s = url.shared.borrow().as_str().to_string();
+    let u = url.shared.borrow();
+    let s = match cc.magic() as i16 {
+        URL_HREF => u.as_str().to_string(),
+        URL_ORIGIN => match u.origin() {
+            url::Origin::Opaque(_) => "null".to_string(),
+            url::Origin::Tuple(scheme, host, port) => {
+                if port > 0 {
+                    format!("{}://{}:{}", scheme, host, port)
+                } else {
+                    format!("{}://{}", scheme, host)
+                }
+            }
+        },
+        URL_PROTOCOL => format!("{}:", u.scheme()),
+        URL_USERNAME => u.username().to_string(),
+        URL_PASSWORD => u.password().unwrap_or("").to_string(),
+        URL_HOST => match (u.host_str(), u.port()) {
+            (Some(host), Some(port)) => format!("{}:{}", host, port),
+            (Some(host), None) => host.to_string(),
+            _ => String::new(),
+        },
+        URL_HOSTNAME => u.host_str().unwrap_or("").to_string(),
+        URL_PORT => match u.port() {
+            Some(port) => port.to_string(),
+            None => String::new(),
+        },
+        URL_PATHNAME => u.path().to_string(),
+        URL_SEARCH => match u.query() {
+            Some(q) if !q.is_empty() => format!("?{}", q),
+            _ => String::new(),
+        },
+        URL_HASH => match u.fragment() {
+            Some(f) if !f.is_empty() => format!("#{}", f),
+            _ => String::new(),
+        },
+        _ => unreachable!(),
+    };
     ctx.create_string_from_utf8(s.into_bytes())
         .map(JSValue::make_string)
 }
 
-fn js_url_href_setter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+fn js_url_setter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let url = get_url(ctx, &this)?;
     let val = cc.arg(0).to_string(ctx)?;
     let text = val.content().encode_utf8(false).to_string();
-    let new_url =
-        Url::parse(&text).map_err(|_| ctx.throw_type_error("Failed to set 'href': Invalid URL"))?;
-    *url.shared.borrow_mut() = new_url;
-    // Invalidate cached searchParams on href change
-    *url.search_params.borrow_mut() = None;
-    Ok(JSValue::UNDEFINED)
-}
 
-fn js_url_origin_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let this = cc.this();
-    let url = get_url(ctx, &this)?;
-    let u = url.shared.borrow();
-    let origin = match u.origin() {
-        url::Origin::Opaque(_) => "null".to_string(),
-        url::Origin::Tuple(scheme, host, port) => {
-            if port > 0 {
-                format!("{}://{}:{}", scheme, host, port)
-            } else {
-                format!("{}://{}", scheme, host)
+    match cc.magic() as i16 {
+        URL_HREF => {
+            let new_url = Url::parse(&text)
+                .map_err(|_| ctx.throw_type_error("Failed to set 'href': Invalid URL"))?;
+            *url.shared.borrow_mut() = new_url;
+            // Invalidate cached searchParams on href change
+            *url.search_params.borrow_mut() = None;
+        }
+        URL_PROTOCOL => {
+            let scheme = text.trim_end_matches(':');
+            let _ = url.shared.borrow_mut().set_scheme(scheme);
+        }
+        URL_USERNAME => {
+            let _ = url.shared.borrow_mut().set_username(&text);
+        }
+        URL_PASSWORD => {
+            let _ = url
+                .shared
+                .borrow_mut()
+                .set_password(if text.is_empty() { None } else { Some(&text) });
+        }
+        URL_HOST | URL_HOSTNAME => {
+            let _ = url.shared.borrow_mut().set_host(Some(&text));
+        }
+        URL_PORT => {
+            let mut u = url.shared.borrow_mut();
+            if text.is_empty() {
+                let _ = u.set_port(None);
+            } else if let Ok(port) = text.parse::<u16>() {
+                let _ = u.set_port(Some(port));
             }
         }
-    };
-    let js = ctx.create_string_from_utf8(origin.into_bytes())?;
-    Ok(JSValue::make_string(js))
-}
-
-fn js_url_protocol_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let this = cc.this();
-    let url = get_url(ctx, &this)?;
-    let u = url.shared.borrow();
-    let s = format!("{}:", u.scheme());
-    ctx.create_string_from_utf8(s.into_bytes())
-        .map(JSValue::make_string)
-}
-
-fn js_url_protocol_setter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let this = cc.this();
-    let url = get_url(ctx, &this)?;
-    let val = cc.arg(0).to_string(ctx)?;
-    let text = val.content().encode_utf8(false).to_string();
-    let scheme = text.trim_end_matches(':');
-    let mut u = url.shared.borrow_mut();
-    let _ = u.set_scheme(scheme);
-    Ok(JSValue::UNDEFINED)
-}
-
-fn js_url_username_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let this = cc.this();
-    let url = get_url(ctx, &this)?;
-    let u = url.shared.borrow();
-    let s = u.username().to_string();
-    ctx.create_string_from_utf8(s.into_bytes())
-        .map(JSValue::make_string)
-}
-
-fn js_url_username_setter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let this = cc.this();
-    let url = get_url(ctx, &this)?;
-    let val = cc.arg(0).to_string(ctx)?;
-    let text = val.content().encode_utf8(false).to_string();
-    let mut u = url.shared.borrow_mut();
-    let _ = u.set_username(&text);
-    Ok(JSValue::UNDEFINED)
-}
-
-fn js_url_password_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let this = cc.this();
-    let url = get_url(ctx, &this)?;
-    let u = url.shared.borrow();
-    let s = u.password().unwrap_or("").to_string();
-    ctx.create_string_from_utf8(s.into_bytes())
-        .map(JSValue::make_string)
-}
-
-fn js_url_password_setter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let this = cc.this();
-    let url = get_url(ctx, &this)?;
-    let val = cc.arg(0).to_string(ctx)?;
-    let text = val.content().encode_utf8(false).to_string();
-    let mut u = url.shared.borrow_mut();
-    let _ = u.set_password(if text.is_empty() { None } else { Some(&text) });
-    Ok(JSValue::UNDEFINED)
-}
-
-fn js_url_host_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let this = cc.this();
-    let url = get_url(ctx, &this)?;
-    let u = url.shared.borrow();
-    let s = match (u.host_str(), u.port()) {
-        (Some(host), Some(port)) => format!("{}:{}", host, port),
-        (Some(host), None) => host.to_string(),
-        _ => String::new(),
-    };
-    ctx.create_string_from_utf8(s.into_bytes())
-        .map(JSValue::make_string)
-}
-
-fn js_url_host_setter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let this = cc.this();
-    let url = get_url(ctx, &this)?;
-    let val = cc.arg(0).to_string(ctx)?;
-    let text = val.content().encode_utf8(false).to_string();
-    let mut u = url.shared.borrow_mut();
-    let _ = u.set_host(Some(&text));
-    Ok(JSValue::UNDEFINED)
-}
-
-fn js_url_hostname_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let this = cc.this();
-    let url = get_url(ctx, &this)?;
-    let u = url.shared.borrow();
-    let s = u.host_str().unwrap_or("").to_string();
-    ctx.create_string_from_utf8(s.into_bytes())
-        .map(JSValue::make_string)
-}
-
-fn js_url_hostname_setter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let this = cc.this();
-    let url = get_url(ctx, &this)?;
-    let val = cc.arg(0).to_string(ctx)?;
-    let text = val.content().encode_utf8(false).to_string();
-    let mut u = url.shared.borrow_mut();
-    let _ = u.set_host(Some(&text));
-    Ok(JSValue::UNDEFINED)
-}
-
-fn js_url_port_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let this = cc.this();
-    let url = get_url(ctx, &this)?;
-    let u = url.shared.borrow();
-    let s = match u.port() {
-        Some(port) => port.to_string(),
-        None => String::new(),
-    };
-    ctx.create_string_from_utf8(s.into_bytes())
-        .map(JSValue::make_string)
-}
-
-fn js_url_port_setter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let this = cc.this();
-    let url = get_url(ctx, &this)?;
-    let val = cc.arg(0).to_string(ctx)?;
-    let text = val.content().encode_utf8(false).to_string();
-    let mut u = url.shared.borrow_mut();
-    if text.is_empty() {
-        let _ = u.set_port(None);
-    } else if let Ok(port) = text.parse::<u16>() {
-        let _ = u.set_port(Some(port));
-    }
-    Ok(JSValue::UNDEFINED)
-}
-
-fn js_url_pathname_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let this = cc.this();
-    let url = get_url(ctx, &this)?;
-    let u = url.shared.borrow();
-    let s = u.path().to_string();
-    ctx.create_string_from_utf8(s.into_bytes())
-        .map(JSValue::make_string)
-}
-
-fn js_url_pathname_setter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let this = cc.this();
-    let url = get_url(ctx, &this)?;
-    let val = cc.arg(0).to_string(ctx)?;
-    let text = val.content().encode_utf8(false).to_string();
-    let mut u = url.shared.borrow_mut();
-    u.set_path(&text);
-    Ok(JSValue::UNDEFINED)
-}
-
-fn js_url_search_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let this = cc.this();
-    let url = get_url(ctx, &this)?;
-    let u = url.shared.borrow();
-    let s = match u.query() {
-        Some(q) if !q.is_empty() => format!("?{}", q),
-        _ => String::new(),
-    };
-    ctx.create_string_from_utf8(s.into_bytes())
-        .map(JSValue::make_string)
-}
-
-fn js_url_search_setter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let this = cc.this();
-    let url = get_url(ctx, &this)?;
-    let val = cc.arg(0).to_string(ctx)?;
-    let text = val.content().encode_utf8(false).to_string();
-    let mut u = url.shared.borrow_mut();
-    let query = text.strip_prefix('?').unwrap_or(&text);
-    if query.is_empty() {
-        u.set_query(None);
-    } else {
-        u.set_query(Some(query));
-    }
-    Ok(JSValue::UNDEFINED)
-}
-
-fn js_url_hash_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let this = cc.this();
-    let url = get_url(ctx, &this)?;
-    let u = url.shared.borrow();
-    let s = match u.fragment() {
-        Some(f) if !f.is_empty() => format!("#{}", f),
-        _ => String::new(),
-    };
-    ctx.create_string_from_utf8(s.into_bytes())
-        .map(JSValue::make_string)
-}
-
-fn js_url_hash_setter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let this = cc.this();
-    let url = get_url(ctx, &this)?;
-    let val = cc.arg(0).to_string(ctx)?;
-    let text = val.content().encode_utf8(false).to_string();
-    let mut u = url.shared.borrow_mut();
-    let fragment = text.strip_prefix('#').unwrap_or(&text);
-    if fragment.is_empty() {
-        u.set_fragment(None);
-    } else {
-        u.set_fragment(Some(fragment));
+        URL_PATHNAME => {
+            url.shared.borrow_mut().set_path(&text);
+        }
+        URL_SEARCH => {
+            let mut u = url.shared.borrow_mut();
+            let query = text.strip_prefix('?').unwrap_or(&text);
+            if query.is_empty() {
+                u.set_query(None);
+            } else {
+                u.set_query(Some(query));
+            }
+        }
+        URL_HASH => {
+            let mut u = url.shared.borrow_mut();
+            let fragment = text.strip_prefix('#').unwrap_or(&text);
+            if fragment.is_empty() {
+                u.set_fragment(None);
+            } else {
+                u.set_fragment(Some(fragment));
+            }
+        }
+        _ => unreachable!(),
     }
     Ok(JSValue::UNDEFINED)
 }
@@ -333,7 +218,11 @@ fn js_url_search_params_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSRe
 // -- toString / toJSON -----------------------------------------------------
 
 fn js_url_to_string(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    js_url_href_getter(ctx, cc)
+    let this = cc.this();
+    let url = get_url(ctx, &this)?;
+    let s = url.shared.borrow().as_str().to_string();
+    ctx.create_string_from_utf8(s.into_bytes())
+        .map(JSValue::make_string)
 }
 
 // ===========================================================================
@@ -623,67 +512,17 @@ fn js_sp_values(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
 // ===========================================================================
 
 const CLASS_URL_PROTO: &[FieldDef] = &[
-    FieldDef::GETSET(
-        "href",
-        Some(js_url_href_getter),
-        Some(js_url_href_setter),
-        0,
-    ),
-    FieldDef::GETSET("origin", Some(js_url_origin_getter), None, 0),
-    FieldDef::GETSET(
-        "protocol",
-        Some(js_url_protocol_getter),
-        Some(js_url_protocol_setter),
-        0,
-    ),
-    FieldDef::GETSET(
-        "username",
-        Some(js_url_username_getter),
-        Some(js_url_username_setter),
-        0,
-    ),
-    FieldDef::GETSET(
-        "password",
-        Some(js_url_password_getter),
-        Some(js_url_password_setter),
-        0,
-    ),
-    FieldDef::GETSET(
-        "host",
-        Some(js_url_host_getter),
-        Some(js_url_host_setter),
-        0,
-    ),
-    FieldDef::GETSET(
-        "hostname",
-        Some(js_url_hostname_getter),
-        Some(js_url_hostname_setter),
-        0,
-    ),
-    FieldDef::GETSET(
-        "port",
-        Some(js_url_port_getter),
-        Some(js_url_port_setter),
-        0,
-    ),
-    FieldDef::GETSET(
-        "pathname",
-        Some(js_url_pathname_getter),
-        Some(js_url_pathname_setter),
-        0,
-    ),
-    FieldDef::GETSET(
-        "search",
-        Some(js_url_search_getter),
-        Some(js_url_search_setter),
-        0,
-    ),
-    FieldDef::GETSET(
-        "hash",
-        Some(js_url_hash_getter),
-        Some(js_url_hash_setter),
-        0,
-    ),
+    FieldDef::GETSET("href", Some(js_url_getter), Some(js_url_setter), URL_HREF),
+    FieldDef::GETSET("origin", Some(js_url_getter), None, URL_ORIGIN),
+    FieldDef::GETSET("protocol", Some(js_url_getter), Some(js_url_setter), URL_PROTOCOL),
+    FieldDef::GETSET("username", Some(js_url_getter), Some(js_url_setter), URL_USERNAME),
+    FieldDef::GETSET("password", Some(js_url_getter), Some(js_url_setter), URL_PASSWORD),
+    FieldDef::GETSET("host", Some(js_url_getter), Some(js_url_setter), URL_HOST),
+    FieldDef::GETSET("hostname", Some(js_url_getter), Some(js_url_setter), URL_HOSTNAME),
+    FieldDef::GETSET("port", Some(js_url_getter), Some(js_url_setter), URL_PORT),
+    FieldDef::GETSET("pathname", Some(js_url_getter), Some(js_url_setter), URL_PATHNAME),
+    FieldDef::GETSET("search", Some(js_url_getter), Some(js_url_setter), URL_SEARCH),
+    FieldDef::GETSET("hash", Some(js_url_getter), Some(js_url_setter), URL_HASH),
     FieldDef::GETSET("searchParams", Some(js_url_search_params_getter), None, 0),
     FieldDef::FUNC("toString", 0, js_url_to_string, 0),
     FieldDef::FUNC("toJSON", 0, js_url_to_string, 0),
@@ -732,4 +571,34 @@ def_native_object!(
 #[distributed_slice(USER_CLASS_DEFS)]
 fn register_class_url_search_params(rt: &mut Runtime) -> Result<ClassID, i32> {
     JSURLSearchParams::register(rt)
+}
+
+// ===========================================================================
+// Shared helpers for other modules (path.fileURLToPath / path.pathToFileURL)
+// ===========================================================================
+
+/// Extract the URL text from a `URL` instance or a plain string. Used by
+/// `path.fileURLToPath`; any other value throws a TypeError.
+pub(crate) fn url_arg_to_str(ctx: &mut ScopedContext, val: &JSValue) -> Result<String, i32> {
+    if let Some(s) = val.as_string(false) {
+        return Ok(s.content().encode_utf8(false).to_string());
+    }
+    if let Some(p) = JSURL::payload_of(val) {
+        return Ok(p.shared.borrow().as_str().to_string());
+    }
+    Err(ctx.throw_type_error("`url` must be a string or a URL object"))
+}
+
+/// Build a `URL` object from an already-parsed `url::Url`. Used by
+/// `path.pathToFileURL`, which returns a URL per Node's convention.
+pub(crate) fn new_url(ctx: &mut ScopedContext, parsed: Url) -> Result<JSValue, i32> {
+    JSURL::new_instance(
+        ctx,
+        JSValue::UNDEFINED,
+        UrlPayload {
+            shared: Rc::new(RefCell::new(parsed)),
+            search_params: RefCell::new(None),
+        },
+    )
+    .map(JSValue::from)
 }

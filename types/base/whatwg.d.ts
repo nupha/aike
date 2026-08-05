@@ -198,6 +198,18 @@ declare function bytesToBase64(bytes: Uint8Array | ArrayBuffer): string;
  */
 declare function base64ToBytes(data: string): Uint8Array;
 
+/**
+ * Encode raw bytes as a lowercase hexadecimal string.
+ * @param bytes - Uint8Array or ArrayBuffer to encode.
+ */
+declare function bytesToHex(bytes: Uint8Array | ArrayBuffer): string;
+
+/**
+ * Decode a hexadecimal string (lowercase or uppercase) into a Uint8Array.
+ * Throws a RangeError on an odd length or a non-hex character.
+ */
+declare function hexToBytes(data: string): Uint8Array;
+
 // ---------------------------------------------------------------------------
 // URL
 // ---------------------------------------------------------------------------

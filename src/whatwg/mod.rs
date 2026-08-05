@@ -53,7 +53,7 @@ pub(crate) fn install_whatwg(ctx: &mut ScopedContext, mut global: Object) -> Res
     microtask::install_microtask(ctx, global)?;
     abort::install_abort_statics(ctx, &mut global)?;
     fetch::install_fetch(ctx, global)?;
-    base64::install_base64(ctx, global)?;
+    base64::install_encoding(ctx, global)?;
     crypto::install_crypto(ctx, global)?;
 
     Ok(())

@@ -3,7 +3,10 @@
 
 use std::path::{Component, Path, PathBuf};
 
+use url::Url;
 use zuqe::{CallContext, FieldDef, JS_PROP_ENUMERABLE, JSResult, JSValue, ScopedContext};
+
+use crate::whatwg::url::{new_url, url_arg_to_str};
 
 /// Normalize a path by resolving `.` and `..` components without following symlinks.
 fn normalize_path(path: &Path) -> PathBuf {
@@ -307,6 +310,77 @@ fn js_path_relative(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 }
 
 // ---------------------------------------------------------------------------
+// path.fileURLToPath(url) / path.pathToFileURL(path)
+// ---------------------------------------------------------------------------
+
+/// `path.fileURLToPath(url)` — convert a `file:` URL (string or `URL` object)
+/// to a platform path. Follows Node's semantics: non-file scheme, a non-empty
+/// host on POSIX, percent-encoded separators, or a non-absolute path all throw.
+fn js_file_url_to_path(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let text = url_arg_to_str(ctx, &cc.arg(0))?;
+    let parsed =
+        Url::parse(&text).map_err(|_| ctx.throw_type_error("`url` must be a valid URL"))?;
+    if parsed.scheme() != "file" {
+        return Err(ctx.throw_type_error("`url` must be a file: URL"));
+    }
+
+    // Reject percent-encoded separators: after decoding they are ambiguous with
+    // real path separators, so Node refuses them (ERR_INVALID_FILE_URL_PATH).
+    let lower = parsed.path().to_ascii_lowercase();
+    if lower.contains("%2f") {
+        return Err(ctx.throw_type_error("`url` must not contain an encoded '/'"));
+    }
+    if cfg!(windows) && lower.contains("%5c") {
+        return Err(ctx.throw_type_error("`url` must not contain an encoded '\\'"));
+    }
+    // On POSIX a file URL must not carry a host; Windows uses it for UNC shares.
+    if !cfg!(windows) {
+        let host = parsed.host_str().unwrap_or("");
+        if !host.is_empty() && host != "localhost" {
+            return Err(ctx.throw_type_error("`url` host must be empty or 'localhost'"));
+        }
+    }
+
+    let path = parsed
+        .to_file_path()
+        .map_err(|_| ctx.throw_type_error("`url` must be an absolute file: URL"))?;
+    js_str(ctx, &path.to_string_lossy())
+}
+
+/// `path.pathToFileURL(path)` — convert a path to a `file:` `URL` object.
+/// Resolves the path to absolute first (Node behavior), preserving a trailing
+/// separator so directory URLs round-trip.
+fn js_path_to_file_url(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let p = cc
+        .arg(0)
+        .as_string(false)
+        .ok_or_else(|| ctx.throw_type_error("`path` must be a string"))?
+        .content()
+        .encode_utf8(false)
+        .to_string();
+
+    let is_dir = p.ends_with('/') || (cfg!(windows) && p.ends_with('\\'));
+    let raw = Path::new(&p);
+    let abs = if raw.is_absolute() {
+        normalize_path(raw)
+    } else {
+        let cwd = std::env::current_dir().map_err(|e| ctx.throw_internal_error(&e.to_string()))?;
+        normalize_path(&cwd.join(raw))
+    };
+
+    let parsed = if is_dir {
+        Url::from_directory_path(&abs)
+            .or_else(|_| Url::from_file_path(&abs))
+            .map_err(|_| ctx.throw_type_error("`path` must be an absolute path"))?
+    } else {
+        Url::from_file_path(&abs)
+            .map_err(|_| ctx.throw_type_error("`path` must be an absolute path"))?
+    };
+
+    new_url(ctx, parsed)
+}
+
+// ---------------------------------------------------------------------------
 // Module registration
 // ---------------------------------------------------------------------------
 const MOD_PATH_ENTRIES: &[FieldDef] = &[
@@ -320,6 +394,8 @@ const MOD_PATH_ENTRIES: &[FieldDef] = &[
     FieldDef::FUNC("normalize", 1, js_path_inspect, INSPECT_NORMALIZE as _),
     FieldDef::FUNC("relative", 2, js_path_relative, 0),
     FieldDef::FUNC("isAbsolute", 1, js_path_inspect, INSPECT_IS_ABSOLUTE as _),
+    FieldDef::FUNC("fileURLToPath", 1, js_file_url_to_path, 0),
+    FieldDef::FUNC("pathToFileURL", 1, js_path_to_file_url, 0),
     // Platform path separator: POSIX "/" , Windows "\"
     FieldDef::LAZY_VALUE(
         "sep",

@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-//! Base64 global functions.
+//! Binary↔text encoding global functions.
 //!
 //! `btoa`/`atob` follow the WHATWG "base64" section (Latin-1 string code
 //! points only, ASCII whitespace stripped on decode). `bytesToBase64` /
-//! `base64ToBytes` are the byte-oriented variants aike's standard library
-//! actually needs (no `Buffer` exists on this runtime).
+//! `base64ToBytes` are the byte-oriented base64 variants; `bytesToHex` /
+//! `hexToBytes` are the lowercase-hex equivalents. aike has no `Buffer`,
+//! so these are the built-in byte-to-text encoders scripts actually use.
 
 use base64::{Engine, engine::general_purpose::STANDARD};
 
@@ -15,6 +16,7 @@ use zuqe::{
     builtins::typed_array::TypedArray,
 };
 
+use super::crypto::hex_encode;
 use super::dom::make_dom_exception;
 
 /// Throw a DOMException synchronously. `make_dom_exception` builds the value;
@@ -168,8 +170,57 @@ fn js_base64_to_bytes(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     TypedArray::create_from_vec_u8(ctx, bytes).map(JSValue::from)
 }
 
-/// Install the base64 globals: `btoa`, `atob`, `bytesToBase64`, `base64ToBytes`.
-pub(crate) fn install_base64(ctx: &mut ScopedContext, mut global: Object) -> Result<(), i32> {
+/// `bytesToHex(bytes: Uint8Array | ArrayBuffer) -> string`: lowercase hex.
+fn js_bytes_to_hex(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let bytes = get_bytes_from_arg(ctx, &mut cc.arg(0))?;
+    ctx.create_string_from_utf8(hex_encode(&bytes).into_bytes())
+        .map(JSValue::make_string)
+}
+
+/// `hexToBytes(str: string) -> Uint8Array`: decode a lowercase or uppercase
+/// hex string to bytes. Strict: non-string throws TypeError; odd length or a
+/// non-hex character throws RangeError.
+fn js_hex_to_bytes(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let s = cc
+        .arg(0)
+        .as_string(false)
+        .ok_or_else(|| ctx.throw_type_error("`data` must be a string"))?
+        .content()
+        .encode_utf8(false)
+        .to_string();
+
+    if s.len() % 2 != 0 {
+        return Err(ctx.throw_range_error(
+            "`data` must have an even number of hex digits",
+        ));
+    }
+
+    let nibble = |c: u8| -> Option<u8> {
+        match c {
+            b'0'..=b'9' => Some(c - b'0'),
+            b'a'..=b'f' => Some(c - b'a' + 10),
+            b'A'..=b'F' => Some(c - b'A' + 10),
+            _ => None,
+        }
+    };
+
+    let mut bytes = Vec::with_capacity(s.len() / 2);
+    let raw = s.as_bytes();
+    for i in (0..raw.len()).step_by(2) {
+        let hi = nibble(raw[i]).ok_or_else(|| {
+            ctx.throw_range_error("`data` must be a hexadecimal string")
+        })?;
+        let lo = nibble(raw[i + 1]).ok_or_else(|| {
+            ctx.throw_range_error("`data` must be a hexadecimal string")
+        })?;
+        bytes.push((hi << 4) | lo);
+    }
+    TypedArray::create_from_vec_u8(ctx, bytes).map(JSValue::from)
+}
+
+/// Install the encoding globals: `btoa`, `atob`, `bytesToBase64`,
+/// `base64ToBytes`, `bytesToHex`, `hexToBytes`.
+pub(crate) fn install_encoding(ctx: &mut ScopedContext, mut global: Object) -> Result<(), i32> {
     let btoa = ctx.create_native_function(Callback::Func(js_btoa), "btoa", 1, 0)?;
     global.define_property_value_str(ctx, "btoa", btoa.into(), zuqe::JS_PROP_C_W_E)?;
     let atob = ctx.create_native_function(Callback::Func(js_atob), "atob", 1, 0)?;
@@ -178,5 +229,9 @@ pub(crate) fn install_base64(ctx: &mut ScopedContext, mut global: Object) -> Res
     global.define_property_value_str(ctx, "bytesToBase64", enc.into(), zuqe::JS_PROP_C_W_E)?;
     let dec = ctx.create_native_function(Callback::Func(js_base64_to_bytes), "base64ToBytes", 1, 0)?;
     global.define_property_value_str(ctx, "base64ToBytes", dec.into(), zuqe::JS_PROP_C_W_E)?;
+    let hex = ctx.create_native_function(Callback::Func(js_bytes_to_hex), "bytesToHex", 1, 0)?;
+    global.define_property_value_str(ctx, "bytesToHex", hex.into(), zuqe::JS_PROP_C_W_E)?;
+    let unhex = ctx.create_native_function(Callback::Func(js_hex_to_bytes), "hexToBytes", 1, 0)?;
+    global.define_property_value_str(ctx, "hexToBytes", unhex.into(), zuqe::JS_PROP_C_W_E)?;
     Ok(())
 }

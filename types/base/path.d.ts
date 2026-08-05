@@ -36,6 +36,19 @@ declare module "path" {
   /** Test whether a path is absolute. */
   function isAbsolute(p: string): boolean;
 
+  /**
+   * Convert a `file:` URL (a string or a `URL` object) to a platform path.
+   * Throws a TypeError if the URL is not a file URL, carries a non-empty host
+   * on POSIX, contains an encoded `/` (or `\` on Windows), or is not absolute.
+   */
+  function fileURLToPath(url: string | URL): string;
+
+  /**
+   * Convert a path to a `file:` `URL` object. The path is resolved to absolute
+   * first; a trailing separator is preserved so directory URLs round-trip.
+   */
+  function pathToFileURL(filepath: string): URL;
+
   /** Platform-specific path segment separator. "/" on POSIX, "\" on Windows. */
   const sep: string;
   /** Platform-specific environment variable delimiter. ":" on POSIX, ";" on Windows. */
