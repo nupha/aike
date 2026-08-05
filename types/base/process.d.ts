@@ -266,6 +266,13 @@ declare namespace Aike {
     stdout?: "pipe" | "inherit" | "ignore";
     /** stderr mode: "pipe" | "inherit" | "ignore". Default: "pipe" */
     stderr?: "pipe" | "inherit" | "ignore";
+    /**
+     * Kill the child if it runs longer than this many milliseconds (wall
+     * clock). The whole process tree is killed (process group on Unix,
+     * taskkill /T on Windows). Set `killedByTimeout` on the result to detect
+     * the timeout.
+     */
+    timeout?: number;
   }
 
   interface SpawnSyncResult {
@@ -281,6 +288,8 @@ declare namespace Aike {
     signalCode: string | null;
     /** Whether the process exited successfully (exitCode 0, no signal). */
     success: boolean;
+    /** Whether the process was killed because it exceeded `timeout`. */
+    killedByTimeout: boolean;
   }
 
   interface SpawnAsyncResult {
@@ -296,6 +305,8 @@ declare namespace Aike {
     exitCode: Promise<number>;
     /** Promise resolving to signal name or null. */
     signalCode: Promise<string | null>;
+    /** Promise resolving to true if the process was killed by `timeout`. */
+    killedByTimeout: Promise<boolean>;
     /** Send a signal to the child process. Default: SIGTERM. */
     kill(signal?: string | number): boolean;
     /** Check if the child process is still running. */
