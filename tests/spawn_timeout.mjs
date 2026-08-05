@@ -130,8 +130,10 @@ function testStrictValidation() {
     () => Aike.spawnSync("cmd", ["/c", "echo"], { timeout: 0 }), "RangeError") !== null);
   check("timeout:-1 throws RangeError", throws(
     () => Aike.spawnSync("cmd", ["/c", "echo"], { timeout: -1 }), "RangeError") !== null);
-  check("timeout:null does not throw", throws(
-    () => Aike.spawnSync("cmd", ["/c", "echo"], { timeout: null }), "x") === null);
+  check("timeout:null throws TypeError", throws(
+    () => Aike.spawnSync("cmd", ["/c", "echo"], { timeout: null }), "TypeError") !== null);
+  check("timeout:undefined does not throw", throws(
+    () => Aike.spawnSync("cmd", ["/c", "echo"], { timeout: undefined }), "x") === null);
 
   // other options
   check("cwd:123 throws TypeError", throws(
@@ -144,16 +146,22 @@ function testStrictValidation() {
     () => Aike.spawnSync("cmd", ["/c", "echo"], { stdin: "foo" }), "RangeError") !== null);
   check("input:123 throws TypeError", throws(
     () => Aike.spawnSync("cmd", ["/c", "echo"], { input: 123 }), "TypeError") !== null);
+  check("input:null throws TypeError", throws(
+    () => Aike.spawnSync("cmd", ["/c", "echo"], { input: null }), "TypeError") !== null);
 
   // positional args
   check("command:123 throws TypeError", throws(
     () => Aike.spawnSync(123), "TypeError") !== null);
   check("args:'str' throws TypeError", throws(
     () => Aike.spawnSync("cmd", "str"), "TypeError") !== null);
+  check("args:null throws TypeError", throws(
+    () => Aike.spawnSync("cmd", null), "TypeError") !== null);
   check("non-string arg element throws TypeError", throws(
     () => Aike.spawnSync("cmd", [1]), "TypeError") !== null);
   check("options:'str' throws TypeError", throws(
     () => Aike.spawnSync("cmd", [], "str"), "TypeError") !== null);
+  check("options:null throws TypeError", throws(
+    () => Aike.spawnSync("cmd", [], null), "TypeError") !== null);
 
   // async also strict
   check("async timeout:'abc' throws TypeError", throws(

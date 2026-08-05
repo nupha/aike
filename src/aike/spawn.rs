@@ -33,7 +33,7 @@ pub(super) fn js_spawn(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     // arg 1 (optional): args array of strings
     let mut args: Vec<String> = Vec::new();
-    if cc.length() > 1 && !cc.arg(1).is_undefined_or_null() {
+    if cc.length() > 1 && !cc.arg(1).is_undefined() {
         let Some(arr) = cc.arg(1).as_object_Array() else {
             return Err(ctx.throw_type_error("spawn args must be an array"));
         };
@@ -79,7 +79,7 @@ pub(super) fn js_spawn(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 .get_property_str(ctx, "input")
                 .unwrap_or(JSValue::UNDEFINED);
 
-            if !input_val.is_undefined_or_null() {
+            if !input_val.is_undefined() {
                 if let Some(s) = input_val.as_string(true) {
                     input_data = Some(s.content().encode_utf8(false).into_owned().into_bytes());
                 } else if let Some(payload) = input_val.payload() {
@@ -542,7 +542,7 @@ fn get_str_prop_strict(
     key: &str,
 ) -> Result<Option<String>, i32> {
     let v = obj.get_property_str(ctx, key)?;
-    if v.is_undefined_or_null() {
+    if v.is_undefined() {
         return Ok(None);
     }
     match v.as_string(true) {
@@ -555,7 +555,7 @@ fn get_str_prop_strict(
 /// TypeError for non-numbers, RangeError for non-positive or fractional values.
 fn get_timeout_prop(ctx: &mut ScopedContext, obj: &Object) -> Result<Option<u64>, i32> {
     let v = obj.get_property_str(ctx, "timeout")?;
-    if v.is_undefined_or_null() {
+    if v.is_undefined() {
         return Ok(None);
     }
     if !v.is_number() {
@@ -596,7 +596,7 @@ fn parse_env_obj_strict(
     opts: &Object,
 ) -> Result<Option<HashMap<String, String>>, i32> {
     let v = opts.get_property_str(ctx, "env")?;
-    if v.is_undefined_or_null() {
+    if v.is_undefined() {
         return Ok(None);
     }
     let Some(mut env_obj) = v.as_object() else {
