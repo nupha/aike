@@ -16,7 +16,7 @@ use crate::http::client::{
         preflight_request_headers, serialized_origin, should_append_origin,
     },
     headers::{HeaderList, header_list_from_js, validate_header_list_for_fetch},
-    request::{JSRequest, get_request_payload_mut},
+    request::{JSRequest, get_request_payload_mut, validate_request_init_options},
     response::{RespType, build_opaque_redirect_response, build_response_from_transport},
     transport::{
         PreflightCtx, ReferrerCtx, TransportError, TransportRequest, TransportResponse,
@@ -1155,6 +1155,21 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         },
     )?;
 
+    // Argument validation (method/mode/cache/referrer etc.) must take priority
+    // over an already-aborted signal: WPT "TypeError from request constructor
+    // takes priority" expects the `TypeError` to surface before the `AbortError`.
+    validate_request_init_options(
+        ctx,
+        &url_str,
+        &method,
+        &mode,
+        &cache_mode,
+        &credentials,
+        &redirect,
+        &referrer,
+        &referrer_policy,
+    )?;
+
     if already_aborted {
         // An already-aborted signal must reject on a microtask, *before* any
         // `Promise.resolve().then` callback (WPT "already aborted signal rejects
@@ -1493,6 +1508,17 @@ fn set_content_length(headers: &mut Vec<(String, String)>, len: usize) {
 pub(crate) fn install_fetch(ctx: &mut ScopedContext, mut global: Object) -> Result<(), i32> {
     let func = ctx.create_native_function(Callback::Func(js_fetch), "fetch", 1, 0)?;
     global.define_property_value_str(ctx, "fetch", func.into(), zuqe::JS_PROP_C_W_E)?;
+
+    // Cache Storage API
+    let caches = super::super::http::client::cache_storage::JSCacheStorage::new_instance(
+        ctx,
+        JSValue::UNDEFINED,
+        crate::http::client::cache_storage::CacheStoragePayload {
+            stores: std::rc::Rc::new(std::cell::RefCell::new(std::collections::HashMap::new())),
+        },
+    )
+    .map(JSValue::from)?;
+    global.define_property_value_str(ctx, "caches", caches, zuqe::JS_PROP_C_W_E)?;
 
     Ok(())
 }

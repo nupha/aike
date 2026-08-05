@@ -17,8 +17,7 @@ use crate::{
         body::{
             BODY_AS_ARRAY_BUFFER, BODY_AS_BLOB, BODY_AS_BYTES, BODY_AS_FORM_DATA, BODY_AS_JSON,
             BODY_AS_TEXT, BodySource, blob_type_from_header, body_content_type, body_to_bytes,
-            drain_body,
-            text_stream_from_source,
+            drain_body, text_stream_from_source,
         },
         headers::{
             Guard, HeaderList, HeadersPayload, JSHeaders, header_list_from_js,
@@ -112,7 +111,7 @@ fn is_forbidden_method(method: &str) -> bool {
 
 /// Fetch spec "ensure method": the method must be a valid HTTP token, and not a
 /// forbidden method. Returns `Err` (TypeError) on violation.
-fn check_request_method(ctx: &mut ScopedContext, method: &str) -> Result<(), i32> {
+pub(crate) fn check_request_method(ctx: &mut ScopedContext, method: &str) -> Result<(), i32> {
     if is_forbidden_method(method) {
         return Err(ctx.throw_type_error(&format!("method {method} is forbidden")));
     }
@@ -228,6 +227,65 @@ fn is_cors_safelisted_method(method: &str) -> bool {
     )
 }
 
+/// Validate the request options that the Fetch spec rejects with a `TypeError`
+/// (`method`, `mode`, `cache`, `credentials`, `redirect`, `referrerPolicy`,
+/// `referrer`, `only-if-cached`/`same-origin`, `no-cors` method, `navigate` mode).
+///
+/// Shared by `new Request` and `fetch`: a string-`input` `fetch` call does not
+/// build a `Request` object, so it must run this validation itself — WPT
+/// `abort/general.any.js` "TypeError from request constructor takes priority"
+/// requires a bad init to reject with `TypeError` *before* an already-aborted
+/// signal surfaces an `AbortError`.
+pub(crate) fn validate_request_init_options(
+    ctx: &mut ScopedContext,
+    url_str: &str,
+    method: &str,
+    mode: &str,
+    cache: &str,
+    credentials: &str,
+    redirect: &str,
+    referrer: &str,
+    referrer_policy: &str,
+) -> Result<(), i32> {
+    // Validate the request URL (WPT request-error: invalid URL, credentials).
+    if !url_str.is_empty() {
+        check_request_url(ctx, url_str)?;
+    }
+    // Validate the request method (WPT forbidden-method / request-error).
+    check_request_method(ctx, method)?;
+    // Validate the enum options (WPT request-error bad-option values).
+    check_enum_option(ctx, "mode", mode, VALID_MODE)?;
+    check_enum_option(ctx, "credentials", credentials, VALID_CREDENTIALS)?;
+    check_enum_option(ctx, "cache", cache, VALID_CACHE)?;
+    check_enum_option(ctx, "redirect", redirect, VALID_REDIRECT)?;
+    check_enum_option(
+        ctx,
+        "referrerPolicy",
+        referrer_policy,
+        VALID_REFERRER_POLICY,
+    )?;
+    // Validate the referrer: must be `""`, `about:client`, `about:blank`, or a
+    // valid absolute URL (WPT request-error "RequestInit's referrer is invalid").
+    if !matches!(referrer, "" | "about:client" | "about:blank")
+        && url::Url::parse(referrer).is_err()
+    {
+        return Err(ctx.throw_type_error("RequestInit.referrer is not a valid URL"));
+    }
+    // `only-if-cached` requires `mode: "same-origin"` (WPT request-error).
+    if cache == "only-if-cached" && mode != "same-origin" {
+        return Err(ctx.throw_type_error("cache mode 'only-if-cached' requires mode 'same-origin'"));
+    }
+    // `no-cors` mode forbids non-safelisted methods (WPT request-error).
+    if mode == "no-cors" && !is_cors_safelisted_method(method) {
+        return Err(ctx.throw_type_error("mode 'no-cors' may only use CORS-safelisted methods"));
+    }
+    // A `navigate` mode is never constructible (WPT request-error).
+    if mode == "navigate" {
+        return Err(ctx.throw_type_error("mode 'navigate' is not constructible"));
+    }
+    Ok(())
+}
+
 fn js_request_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let new_target = cc.this();
     let input = cc.arg(0);
@@ -311,11 +369,7 @@ fn js_request_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
 
             let m = o.get_property_str(ctx, "method")?;
             if !m.is_undefined() {
-                let raw = m
-                    .to_string(ctx)?
-                    .content()
-                    .encode_utf8(false)
-                    .to_string();
+                let raw = m.to_string(ctx)?.content().encode_utf8(false).to_string();
                 method = crate::http::client::cors::normalize_method(&raw);
             }
             let mut h = o.get_property_str(ctx, "headers")?;
@@ -433,12 +487,19 @@ fn js_request_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
         return Err(ctx.throw_type_error("keepalive requests cannot have a ReadableStream body"));
     }
 
-    // Validate the request URL (WPT request-error: invalid URL, credentials).
-    if !url_str.is_empty() {
-        check_request_url(ctx, &url_str)?;
-    }
-    // Validate the request method (WPT forbidden-method / request-error).
-    check_request_method(ctx, &method)?;
+    // Validate request URL + method + enum options (WPT request-error, and shared
+    // with `fetch` so a string-input fetch also rejects bad init with TypeError).
+    validate_request_init_options(
+        ctx,
+        &url_str,
+        &method,
+        &mode,
+        &cache,
+        &credentials,
+        &redirect,
+        &referrer,
+        &referrer_policy,
+    )?;
     // A GET/HEAD request may not carry a body — whether inherited from the input
     // Request or supplied via init (WPT request-disturbed "A get request may not
     // have body").
@@ -446,36 +507,6 @@ fn js_request_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
         && (synthetic_body.is_some() || stream_body.is_some())
     {
         return Err(ctx.throw_type_error("GET/HEAD requests may not have a body"));
-    }
-    // Validate the enum options (WPT request-error bad-option values).
-    check_enum_option(ctx, "mode", &mode, VALID_MODE)?;
-    check_enum_option(ctx, "credentials", &credentials, VALID_CREDENTIALS)?;
-    check_enum_option(ctx, "cache", &cache, VALID_CACHE)?;
-    check_enum_option(ctx, "redirect", &redirect, VALID_REDIRECT)?;
-    check_enum_option(
-        ctx,
-        "referrerPolicy",
-        &referrer_policy,
-        VALID_REFERRER_POLICY,
-    )?;
-    // Validate the referrer: must be `""`, `about:client`, `about:blank`, or a
-    // valid absolute URL (WPT request-error "RequestInit's referrer is invalid").
-    if !matches!(referrer.as_str(), "" | "about:client" | "about:blank")
-        && url::Url::parse(&referrer).is_err()
-    {
-        return Err(ctx.throw_type_error("RequestInit.referrer is not a valid URL"));
-    }
-    // `only-if-cached` requires `mode: "same-origin"` (WPT request-error).
-    if cache == "only-if-cached" && mode != "same-origin" {
-        return Err(ctx.throw_type_error("cache mode 'only-if-cached' requires mode 'same-origin'"));
-    }
-    // `no-cors` mode forbids non-safelisted methods (WPT request-error).
-    if mode == "no-cors" && !is_cors_safelisted_method(&method) {
-        return Err(ctx.throw_type_error("mode 'no-cors' may only use CORS-safelisted methods"));
-    }
-    // A `navigate` mode is never constructible (WPT request-error).
-    if mode == "navigate" {
-        return Err(ctx.throw_type_error("mode 'navigate' is not constructible"));
     }
 
     // Validate header names/values per the Fetch spec. Must run on the JS
@@ -706,6 +737,25 @@ fn js_req_body(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 fn js_req_body_as(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let magic = cc.magic();
     let mut this = cc.this();
+
+    // Spec (Fetch): an already-consumed body rejects with a `TypeError`
+    // *before* any abort-signal check — WPT "Calling arrayBuffer() on an
+    // aborted consumed nonempty request must reject with TypeError" expects
+    // the consumed state to take priority over a(`AbortError`) abort reason.
+    {
+        let p = get_request_payload(ctx, &this)?;
+        if p.body_consumed {
+            let _ = ctx.throw_type_error("body already consumed or unavailable");
+            let reason = match ctx.take_exception() {
+                Exception::Error(v) => v,
+                other => {
+                    ctx.throw(other);
+                    return Err(-1);
+                }
+            };
+            return make_rejected_promise(ctx, reason);
+        }
+    }
 
     // Spec (Fetch): consuming a body whose signal is already aborted must
     // reject with the signal's reason (e.g. an "AbortError"), not resolve.
