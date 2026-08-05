@@ -79,26 +79,28 @@ pub(crate) struct ResponsePayload {
     body_rx: Option<Receiver<Result<Vec<u8>, String>>>,
     /// Whether the body has begun consumption (enforces single-use).
     body_consumed: bool,
+
     /// Cached `ReadableStream` returned by `response.body` (same instance each
     /// access; locked once the body is consumed).
-    cached_body: Option<JSReadableStream>,
+    pub(crate) cached_body: Option<JSReadableStream>,
     /// Fixed body bytes for constructed (synthetic) responses.
-    synthetic_body: Option<Vec<u8>>,
+    pub(crate) synthetic_body: Option<Vec<u8>>,
+
     /// `ReadableStream` passed to `new Response(stream)`; drained on consumption.
     ctor_stream: Option<JSReadableStream>,
 
     /// WHATWG `Response.type`; see [`RespType`].
     resp_type: RespType,
 
-    url: String,
+    pub(crate) url: String,
     redirected: bool,
-    status: u16,
-    status_text: String,
+    pub(crate) status: u16,
+    pub(crate) status_text: String,
     content_type: String,
     /// Shared live header list. The exposed `Headers` object references the
     /// same `Rc`, so user mutations via `response.headers.set()` are visible to
     /// body consumers (e.g. `blob()` type derivation).
-    headers: Rc<RefCell<HeaderList>>,
+    pub(crate) headers: Rc<RefCell<HeaderList>>,
     /// Cached `Headers` object returned by the `headers` getter ([SameObject]).
     headers_obj: Option<JSValue>,
     /// Guard applied to the exposed `Headers`. Responses built by `fetch()` (or

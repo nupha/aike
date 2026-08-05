@@ -80,6 +80,8 @@ pub fn init_mod_http(ctx: &mut ScopedContext) -> Result<(), i32> {
         JSHttpResponseSse::class_id(),
         JSWebSocketStream::class_id(),
         crate::http::client::headers::HeaderListIterator::class_id(),
+        crate::http::client::cache_storage::JSCacheStorage::class_id(),
+        crate::http::client::cache_storage::JSCache::class_id(),
     ])?;
 
     ctx.create_module("http", MOD_HTTP_ENTRIES)?;
