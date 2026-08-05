@@ -36,9 +36,9 @@ pub fn init_aike(ctx: &mut ScopedContext) -> Result<(), i32> {
         FieldDef::FUNC("homedir", 0, sys::js_homedir, 0),
         FieldDef::FUNC("tmpdir", 0, sys::js_tmpdir, 0),
         FieldDef::FUNC("which", 1, sys::js_which, 0),
-        // --- gzip (non-WHATWG; Aike convenience helpers) ---
         FieldDef::FUNC("gzip", 1, crate::gzip::js_gzip, 0),
         FieldDef::FUNC("gunzip", 1, crate::gzip::js_gunzip, 0),
+        FieldDef::FUNC("sh", 1, spawn::js_sh, 0),
         // --- signal ---
         FieldDef::FUNC("onSignal", 2, signal::js_on_signal, 0),
         FieldDef::LAZY_VALUE("signals", signal::js_signals, JS_PROP_ENUMERABLE),

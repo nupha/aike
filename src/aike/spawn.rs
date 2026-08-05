@@ -1,23 +1,22 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-#[cfg(unix)]
-use std::os::fd::AsRawFd;
 use std::{
     collections::HashMap,
     io::{Read, Write},
-    process::{ExitStatus, Stdio},
+    process::{Command, ExitStatus, Stdio},
     sync::mpsc,
     thread,
     time::Duration,
 };
+
 #[cfg(unix)]
-use std::os::unix::process::CommandExt;
+use std::os::{fd::AsRawFd, unix::process::CommandExt};
 
 use zuqe::{
-    CallContext, Callback, IntOrFloat, JS_GPN_ENUM_ONLY, JS_GPN_STR_OR_INT_MASK, JS_PROP_C_W_E,
-    JS_PROP_ENUMERABLE, JSResult, JSValue, Object, ScopedContext,
-    builtins::{promise::Promise, typed_array::TypedArray},
+    CallContext, Callback, Exception, ErrorKind, IntOrFloat, JS_GPN_ENUM_ONLY,
+    JS_GPN_STR_OR_INT_MASK, JS_PROP_C_W_E, JS_PROP_ENUMERABLE, JSResult, JSValue, Object,
+    ScopedContext, builtins::{promise::Promise, typed_array::TypedArray},
 };
 
 use super::{JSStdioHandle, signal::signal_name};
@@ -52,8 +51,6 @@ pub(super) fn js_spawn(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     let mut cwd = None;
     let mut env_opt: Option<HashMap<String, String>> = None;
-
-    // input option (sync only): string / TypedArray / ArrayBuffer → bytes to write to stdin
     let mut input_data: Option<Vec<u8>> = None;
 
     // arg 2 (optional): options object
@@ -75,27 +72,7 @@ pub(super) fn js_spawn(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
         // input — extract bytes for spawnSync stdin
         if !is_async {
-            let input_val = opts
-                .get_property_str(ctx, "input")
-                .unwrap_or(JSValue::UNDEFINED);
-
-            if !input_val.is_undefined() {
-                if let Some(s) = input_val.as_string(true) {
-                    input_data = Some(s.content().encode_utf8(false).into_owned().into_bytes());
-                } else if let Some(payload) = input_val.payload() {
-                    if let Some(ta) = payload.typed_array() {
-                        input_data = Some(ta.bytes().to_vec());
-                    } else if let Some(ab) = payload.array_buffer() {
-                        input_data = Some(ab.bytes().to_vec());
-                    } else {
-                        return Err(ctx
-                            .throw_type_error("`input` must be a string, TypedArray, or ArrayBuffer"));
-                    }
-                } else {
-                    return Err(ctx
-                        .throw_type_error("`input` must be a string, TypedArray, or ArrayBuffer"));
-                }
-            }
+            input_data = extract_input(ctx, &opts)?;
         }
 
         // stdio modes
@@ -173,6 +150,136 @@ pub(super) fn js_spawn(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     }
 }
 
+/// `Aike.sh(command, options?)` → `{ stdout, stderr, exitCode }`.
+///
+/// Run a command through the platform shell and capture its output. A
+/// convenience sugar over `spawnSync` (memo §5.4): the command string is
+/// interpreted by the platform shell, so pipelines/redirects/env expansion
+/// work. POSIX uses `/bin/sh -c` (guaranteed by POSIX); Windows uses
+/// `%COMSPEC%` (default `cmd.exe`) with `/d /s /c`, matching Node. stdout/stderr
+/// are always captured and returned as strings.
+pub(super) fn js_sh(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let command = cc
+        .arg(0)
+        .as_string(false)
+        .ok_or_else(|| ctx.throw_type_error("`command` must be a string"))?
+        .content()
+        .encode_utf8(false)
+        .to_string();
+
+    let mut cwd = None;
+    let mut env_opt = None;
+    let mut input = None;
+    let mut timeout_ms = None;
+    let mut check = false;
+
+    // options (optional object) — strict parsing, same schema as spawnSync
+    if cc.length() > 1 {
+        let opts_val = cc.arg(1);
+        let Some(opts) = opts_val.as_object() else {
+            return Err(ctx.throw_type_error("sh options must be an object"));
+        };
+
+        if let Some(dir) = get_str_prop_strict(ctx, &opts, "cwd")? {
+            cwd = Some(dir);
+        }
+        if let Some(env_map) = parse_env_obj_strict(ctx, &opts)? {
+            env_opt = Some(env_map);
+        }
+        input = extract_input(ctx, &opts)?;
+        timeout_ms = get_timeout_prop(ctx, &opts)?;
+
+        let check_val = opts.get_property_str(ctx, "check")?;
+        if !check_val.is_undefined() {
+            if !check_val.is_bool() {
+                return Err(ctx.throw_type_error("`check` must be a boolean"));
+            }
+            check = check_val.to_bool()?;
+        }
+    }
+
+    // Platform shell: POSIX `/bin/sh -c` (guaranteed by POSIX); Windows uses
+    // %COMSPEC% (`cmd.exe`) with /d (no AutoRun) and /s (normalized quote
+    // stripping), mirroring Node's exec.
+    let (shell, shell_flags): (String, &[&str]) = if cfg!(windows) {
+        (
+            std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string()),
+            &["/d", "/s", "/c"],
+        )
+    } else {
+        ("/bin/sh".to_string(), &["-c"])
+    };
+
+    let mut cmd = Command::new(&shell);
+    cmd.args(shell_flags).arg(&command);
+    // Never inherit stdin: feed input when given, otherwise close it so a child
+    // reading stdin sees EOF instead of hanging on the terminal.
+    cmd.stdin(if input.is_some() {
+        Stdio::piped()
+    } else {
+        Stdio::null()
+    });
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+
+    if let Some(dir) = cwd {
+        cmd.current_dir(dir);
+    }
+    if let Some(env_map) = env_opt {
+        cmd.env_clear();
+        cmd.envs(env_map);
+    }
+    // Own process group so a timeout can kill the whole tree.
+    if timeout_ms.is_some() {
+        #[cfg(unix)]
+        cmd.process_group(0);
+    }
+
+    let child = cmd
+        .spawn()
+        .map_err(|e| ctx.throw_internal_error(&format!("spawn failed: {e}")))?;
+    let pid = child.id() as i32;
+
+    let (stdout_buf, stderr_buf, exit_status, _killed) =
+        match collect_with_timeout(child, pid, input, timeout_ms) {
+            Ok(t) => t,
+            Err(e) => return Err(ctx.throw_internal_error(&e)),
+        };
+
+    // `check`: throw when the command didn't succeed (non-zero or signal).
+    let success = exit_status.code() == Some(0) && get_signal_code(&exit_status).is_none();
+    if check && !success {
+        let msg = match exit_status.code() {
+            Some(code) => format!("`command` exited with code {code}"),
+            None => "`command` was terminated by a signal".to_string(),
+        };
+        return match ctx.create_error_object(ErrorKind::Internal, &msg, false) {
+            Some(err) => {
+                ctx.throw(Exception::Error(err.into()));
+                Err(-1)
+            }
+            None => Err(ctx.throw_internal_error(&msg)),
+        };
+    }
+
+    let stdout_js =
+        JSValue::make_string(ctx.create_string_from_str(&String::from_utf8_lossy(&stdout_buf))?);
+    let stderr_js =
+        JSValue::make_string(ctx.create_string_from_str(&String::from_utf8_lossy(&stderr_buf))?);
+
+    let mut result = ctx.create_base_object()?;
+    result.define_property_value_str(ctx, "stdout", stdout_js, JS_PROP_C_W_E)?;
+    result.define_property_value_str(ctx, "stderr", stderr_js, JS_PROP_C_W_E)?;
+    result.define_property_value_str(
+        ctx,
+        "exitCode",
+        exit_status.code().map_or(JSValue::NULL, JSValue::from),
+        JS_PROP_C_W_E,
+    )?;
+
+    Ok(result.into())
+}
+
 fn spawn_sync(
     ctx: &mut ScopedContext,
     child: std::process::Child,
@@ -180,9 +287,33 @@ fn spawn_sync(
     input: Option<Vec<u8>>,
     timeout_ms: Option<u64>,
 ) -> JSResult {
-    // The blocking reads/wait run on a worker thread so the caller can apply a
-    // timeout: recv_timeout returns, then we kill the tree and drain the
-    // (now-finished) worker result.
+    let (stdout_buf, stderr_buf, exit_status, killed_by_timeout) =
+        match collect_with_timeout(child, pid, input, timeout_ms) {
+            Ok(t) => t,
+            Err(e) => return Err(ctx.throw_internal_error(&e)),
+        };
+    build_sync_result(
+        ctx,
+        pid,
+        stdout_buf,
+        stderr_buf,
+        exit_status,
+        killed_by_timeout,
+    )
+}
+
+/// Collect a child's output with an optional timeout, killing the process tree
+/// when it overruns. Shared by `spawnSync` and `Aike.sh`.
+///
+/// The blocking reads/wait run on a worker thread so the caller can apply a
+/// timeout: recv_timeout returns, then we kill the tree and drain the
+/// (now-finished) worker result.
+fn collect_with_timeout(
+    child: std::process::Child,
+    pid: i32,
+    input: Option<Vec<u8>>,
+    timeout_ms: Option<u64>,
+) -> Result<(Vec<u8>, Vec<u8>, ExitStatus, bool), String> {
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
         let _ = tx.send(collect_child_output(child, input));
@@ -203,9 +334,9 @@ fn spawn_sync(
 
     let (stdout_buf, stderr_buf, exit_status) = match collected {
         Ok(t) => t,
-        Err(e) => return Err(ctx.throw_internal_error(&e)),
+        Err(e) => return Err(e),
     };
-    build_sync_result(ctx, pid, stdout_buf, stderr_buf, exit_status, killed_by_timeout)
+    Ok((stdout_buf, stderr_buf, exit_status, killed_by_timeout))
 }
 
 /// Write input, read stdout/stderr to end, and wait for the child to exit.
@@ -234,10 +365,37 @@ fn collect_child_output(
         let _ = r.read_to_end(&mut stderr_buf);
     }
 
-    let exit_status = child
-        .wait()
-        .map_err(|e| format!("wait failed: {e}"))?;
+    let exit_status = child.wait().map_err(|e| format!("wait failed: {e}"))?;
     Ok((stdout_buf, stderr_buf, exit_status))
+}
+
+/// Extract the `input` option (string / TypedArray / ArrayBuffer) as bytes to
+/// write to the child's stdin. Shared by `spawnSync` and `Aike.sh`.
+fn extract_input(
+    ctx: &mut ScopedContext,
+    opts: &Object,
+) -> Result<Option<Vec<u8>>, i32> {
+    let input_val = opts
+        .get_property_str(ctx, "input")
+        .unwrap_or(JSValue::UNDEFINED);
+
+    if input_val.is_undefined() {
+        return Ok(None);
+    }
+    if let Some(s) = input_val.as_string(true) {
+        return Ok(Some(
+            s.content().encode_utf8(false).into_owned().into_bytes(),
+        ));
+    }
+    if let Some(payload) = input_val.payload() {
+        if let Some(ta) = payload.typed_array() {
+            return Ok(Some(ta.bytes().to_vec()));
+        }
+        if let Some(ab) = payload.array_buffer() {
+            return Ok(Some(ab.bytes().to_vec()));
+        }
+    }
+    Err(ctx.throw_type_error("`input` must be a string, TypedArray, or ArrayBuffer"))
 }
 
 /// Build the SpawnSyncResult object from collected child output.
@@ -363,10 +521,8 @@ fn spawn_async(
         },
     )?;
 
-    let (prom_killed, tx_killed) = Promise::create_with_channel::<bool>(
-        ctx,
-        |cx, killed| Ok(JSValue::from(killed)),
-    )?;
+    let (prom_killed, tx_killed) =
+        Promise::create_with_channel::<bool>(ctx, |cx, killed| Ok(JSValue::from(killed)))?;
 
     // Build result object with Promises
     let mut result = ctx.create_base_object()?;

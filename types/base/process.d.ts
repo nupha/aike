@@ -387,6 +387,36 @@ declare namespace Aike {
   /** Gzip-decompress bytes. Throws a RangeError on invalid gzip data. */
   function gunzip(data: Uint8Array | ArrayBuffer): Uint8Array;
 
+  // --- sh (aike 增强，非 WHATWG；memo §5.4) ---
+
+  /** Result of `Aike.sh`: captured stdout/stderr as strings and the exit code. */
+  interface ShResult {
+    stdout: string;
+    stderr: string;
+    /** Exit code, or null if the command was terminated by a signal. */
+    exitCode: number | null;
+  }
+
+  /** Options for `Aike.sh`. */
+  interface ShOptions {
+    /** Working directory for the shell. */
+    cwd?: string;
+    /** Environment; replaces the entire environment when provided. */
+    env?: Record<string, string>;
+    /** Timeout in milliseconds; the process tree is killed on overrun. */
+    timeout?: number;
+    /** Data written to the command's stdin. */
+    input?: string | ArrayBufferView | ArrayBuffer;
+    /** Throw an Error if the command exits non-zero or is killed by a signal. */
+    check?: boolean;
+  }
+
+  /**
+   * Run a command through the platform shell (`/bin/sh -c` on POSIX,
+   * `%COMSPEC%` i.e. cmd.exe on Windows) and capture its output.
+   */
+  function sh(command: string, options?: ShOptions): ShResult;
+
   // --- signal ---
 
   /**
