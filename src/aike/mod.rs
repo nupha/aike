@@ -34,6 +34,8 @@ pub fn init_aike(ctx: &mut ScopedContext) -> Result<(), i32> {
         FieldDef::FUNC("ttySetRaw", 1, sys::js_ttySetRaw, 0),
         FieldDef::FUNC("now", 0, sys::js_now, 0),
         FieldDef::FUNC("homedir", 0, sys::js_homedir, 0),
+        FieldDef::FUNC("tmpdir", 0, sys::js_tmpdir, 0),
+        FieldDef::FUNC("which", 1, sys::js_which, 0),
         // --- signal ---
         FieldDef::FUNC("onSignal", 2, signal::js_on_signal, 0),
         FieldDef::LAZY_VALUE("signals", signal::js_signals, JS_PROP_ENUMERABLE),

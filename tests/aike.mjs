@@ -1048,6 +1048,35 @@ function testRuntimeProps() {
 }
 
 // ===================================================================
+// Aike.tmpdir + Aike.which tests
+// ===================================================================
+function testTmpdirWhich() {
+  console.log("\n=== Aike.tmpdir / Aike.which ===");
+
+  check("tmpdir is a function", typeof Aike.tmpdir === "function");
+  const tmp = Aike.tmpdir();
+  check("tmpdir returns a string", typeof tmp === "string", `got ${typeof tmp}`);
+  check("tmpdir is non-empty", tmp.length > 0, `got ${JSON.stringify(tmp)}`);
+
+  check("which is a function", typeof Aike.which === "function");
+  const exe = Aike.which(process.platform === "windows" ? "cmd" : "sh");
+  check("which finds a PATH command", typeof exe === "string" && exe.length > 0, `got ${exe}`);
+  check("which result is absolute", exe !== null && Path.isAbsolute(exe), `got ${exe}`);
+  check("which missing command is null", Aike.which("aike_no_such_cmd_xyz") === null);
+
+  const self = Aike.which(process.execPath);
+  check("which(execPath) resolves the literal path", self === process.execPath, `got ${self}`);
+
+  let threw = false;
+  try {
+    Aike.which(42);
+  } catch (e) {
+    threw = e instanceof TypeError;
+  }
+  check("which(non-string) throws TypeError", threw);
+}
+
+// ===================================================================
 // Main
 // ===================================================================
 await testStdio();
@@ -1064,6 +1093,7 @@ await testTty();
 await testNow();
 await testSchedule();
 await testSleep();
+await testTmpdirWhich();
 await testRuntimeProps();
 
 // Summary

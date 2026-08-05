@@ -366,6 +366,16 @@ declare namespace Aike {
   /** Returns the current user's home directory path. */
   function homedir(): string;
 
+  /** Returns the system temporary directory path. */
+  function tmpdir(): string;
+
+  /**
+   * Resolve a command name to its absolute executable path by searching `PATH`,
+   * or `null` when not found. A `cmd` containing a path separator is treated as
+   * a literal path. On Windows each `PATHEXT` extension is tried too.
+   */
+  function which(cmd: string): string | null;
+
   // --- signal ---
 
   /**

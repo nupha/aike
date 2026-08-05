@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
 use std::cell::Cell;
+use std::path::Path;
 
 use zuqe::{
     Array, CallContext, EvalFlags, EvalType, JS_PROP_C_W_E, JSResult, JSValue, ScopedContext,
@@ -328,4 +329,81 @@ pub(super) fn js_homedir(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult 
             .map(JSValue::make_string),
         None => Err(ctx.throw_internal_error("cannot determine home directory")),
     }
+}
+
+/// `Aike.tmpdir()` — the system temporary directory path.
+pub(super) fn js_tmpdir(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
+    let p = std::env::temp_dir();
+    ctx.create_string_from_utf8(p.to_string_lossy().as_bytes().to_vec())
+        .map(JSValue::make_string)
+}
+
+/// `Aike.which(cmd)` — resolve a command name to its absolute executable path
+/// by searching `PATH`, or return `null` when not found.
+///
+/// A `cmd` containing a path separator is treated as a literal path. On
+/// Windows each `PATHEXT` extension is tried too, so `which("cmd")` matches
+/// `cmd.exe`. POSIX executability is verified via the executable bit.
+pub(super) fn js_which(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let cmd = cc
+        .arg(0)
+        .as_string(false)
+        .ok_or_else(|| ctx.throw_type_error("`cmd` must be a string"))?
+        .content()
+        .encode_utf8(false)
+        .to_string();
+
+    match which_executable(&cmd) {
+        Some(p) => ctx
+            .create_string_from_utf8(p.into_bytes())
+            .map(JSValue::make_string),
+        None => Ok(JSValue::NULL),
+    }
+}
+
+/// Whether `p` is an executable regular file.
+#[cfg(unix)]
+fn is_executable(p: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    p.is_file()
+        && p.metadata()
+            .map(|m| m.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+fn is_executable(p: &Path) -> bool {
+    p.is_file()
+}
+
+/// Search `PATH` for `cmd`, returning the resolved path or `None`.
+fn which_executable(cmd: &str) -> Option<String> {
+    // A command with a separator is already a path — check it directly.
+    if cmd.contains('/') || cmd.contains('\\') {
+        return is_executable(Path::new(cmd)).then(|| cmd.to_string());
+    }
+
+    let path_env = std::env::var_os("PATH")?;
+    let extensions: Vec<String> = if cfg!(windows) {
+        std::env::var("PATHEXT")
+            .map(|s| {
+                s.split(';')
+                    .filter(|e| !e.is_empty())
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_else(|_| vec![".EXE".to_string(), ".CMD".to_string(), ".BAT".to_string()])
+    } else {
+        vec![String::new()]
+    };
+
+    for dir in std::env::split_paths(&path_env) {
+        for ext in &extensions {
+            let full = dir.join(format!("{cmd}{ext}"));
+            if is_executable(&full) {
+                return Some(full.to_string_lossy().into_owned());
+            }
+        }
+    }
+    None
 }
