@@ -109,7 +109,12 @@ async fn wait_for_debug_url(port: u16) -> Result<String, String> {
 }
 
 /// Find Chrome/Chromium executable path.
+///
+/// Search order: known per-platform install locations first, then the PATH via
+/// the same resolver `Aike.which` uses (`which_executable`), so both the
+/// bundled-paths and the command-name lookups share one logic.
 fn find_chrome() -> Option<String> {
+    // Known install locations that are not on PATH.
     #[cfg(target_os = "macos")]
     {
         let paths = [
@@ -121,27 +126,6 @@ fn find_chrome() -> Option<String> {
         for p in &paths {
             if std::path::Path::new(p).exists() {
                 return Some(p.to_string());
-            }
-        }
-    }
-
-    #[cfg(target_os = "linux")]
-    {
-        let candidates = [
-            "google-chrome",
-            "google-chrome-stable",
-            "chromium",
-            "chromium-browser",
-            "brave-browser",
-        ];
-        for name in &candidates {
-            if let Ok(output) = std::process::Command::new("which").arg(name).output() {
-                if output.status.success() {
-                    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                    if !path.is_empty() {
-                        return Some(path);
-                    }
-                }
             }
         }
     }
@@ -159,21 +143,20 @@ fn find_chrome() -> Option<String> {
                 return Some(p.to_string());
             }
         }
-        // Also check PATH via where.exe
-        if let Ok(output) = std::process::Command::new("where").arg("chrome").output() {
-            if output.status.success() {
-                let path = String::from_utf8_lossy(&output.stdout)
-                    .lines()
-                    .next()
-                    .unwrap_or("")
-                    .trim()
-                    .to_string();
-                if !path.is_empty() {
-                    return Some(path);
-                }
-            }
-        }
     }
 
-    None
+    // Fall back to searching PATH for the common command names. Reuses the
+    // crate-wide resolver (PATHEXT-aware on Windows, executable-bit check on
+    // POSIX) instead of shelling out to `which`/`where`.
+    const CANDIDATES: &[&str] = &[
+        "google-chrome",
+        "google-chrome-stable",
+        "chromium",
+        "chromium-browser",
+        "brave-browser",
+        "chrome",
+    ];
+    CANDIDATES
+        .iter()
+        .find_map(|name| crate::aike::which_executable(name))
 }

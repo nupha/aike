@@ -13,7 +13,7 @@ pub(crate) use {
     cron::{JSCronJob, gc_trace_cron},
     signal::{gc_trace_signals, register_signal_handler, signal_number},
     spawn::terminate_process,
-    sys::get_time_ns,
+    sys::{get_time_ns, which_executable},
 };
 
 use zuqe::{FieldDef, JS_PROP_ENUMERABLE, ScopedContext};

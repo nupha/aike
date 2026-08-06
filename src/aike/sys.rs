@@ -377,7 +377,8 @@ fn is_executable(p: &Path) -> bool {
 }
 
 /// Search `PATH` for `cmd`, returning the resolved path or `None`.
-fn which_executable(cmd: &str) -> Option<String> {
+/// Shared with the browser module (Chrome lookup) — crate-visible.
+pub(crate) fn which_executable(cmd: &str) -> Option<String> {
     // A command with a separator is already a path — check it directly.
     if cmd.contains('/') || cmd.contains('\\') {
         return is_executable(Path::new(cmd)).then(|| cmd.to_string());
