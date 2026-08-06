@@ -923,7 +923,22 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     // populated by `URL.createObjectURL`. A revoked or unknown blob URL is a
     // network error; a valid one yields a basic 200 response carrying the
     // blob's bytes and MIME type (WPT `scheme-blob.sub.any.js`).
+    //
+    // Fetch spec (blob scheme fetch) only performs the fetch for a GET request;
+    // any other method is a network error (TypeError). So reject non-GET
+    // methods before touching the store (WPT `scheme-blob.sub.any.js` expects
+    // POST/OPTIONS/HEAD/PUT/DELETE/INVALID on a blob: URL to reject).
     if url_str.starts_with("blob:") {
+        if !method.eq_ignore_ascii_case("GET") {
+            return throw_transport_error(
+                ctx,
+                TransportError {
+                    code: "method",
+                    message: "Failed to fetch: blob: URLs only support GET".into(),
+                },
+            );
+        }
+
         match crate::whatwg::url::blob_store_get(&url_str) {
             Some(blob) => {
                 let bytes = blob.bytes().to_vec();
@@ -989,6 +1004,12 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let url_clone = url_str.clone();
     let redirect_clone = redirect.clone();
     let method_clone = method.clone();
+    // Whether the request body was a streaming (non-replayable) ReadableStream.
+    // Captured into the result closure for the 401/407 auth-entry rejection.
+    let had_stream_body = stream_body.is_some();
+    // Credentials mode, cloned *before* the `move` closure so the original
+    // `credentials` stays available for later use (e.g. validate_request_init).
+    let credentials_clone = credentials.clone();
     let mode_clone = mode.clone();
 
     // Compute the outgoing Referer value per the Fetch `referrer`/`referrerPolicy`
@@ -1073,6 +1094,11 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             let _drop_guard = SignalGuardDrop(signal_for_reason);
 
             let client_origin = client_origin.clone();
+            // Captured for the 401/407 authentication-entry check below: a
+            // streaming (non-replayable) request body cannot be re-sent when the
+            // server issues an auth challenge, so the fetch must reject.
+            let had_stream_body = had_stream_body;
+            let credentials_clone = credentials_clone;
             let mut tr = match data {
                 Ok(tr) => tr,
                 Err(e) => {
@@ -1102,6 +1128,24 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 }
             };
             let status = tr.status;
+
+            // Fetch spec (HTTP-network fetch, authentication entries): a 401 or
+            // 407 response with credentials mode other than "omit" is an auth
+            // challenge that normally triggers a credentialed re-issue of the
+            // request. A streaming (non-replayable) body cannot be re-sent, so
+            // the re-issue is impossible and the fetch becomes a network error
+            // (rejects with TypeError). Browsers reject such streaming uploads
+            // on a 401 (WPT `request-upload.h2.any.js`:
+            // "Streaming upload should fail on a 401 response").
+            if (status == 401 || status == 407) && credentials_clone != "omit" && had_stream_body {
+                return throw_transport_error(
+                    cx,
+                    TransportError {
+                        code: "unauthorized",
+                        message: "Failed to fetch: streaming upload cannot be retried on an authentication challenge".into(),
+                    },
+                );
+            }
 
             if matches!(redirect_clone.as_str(), "error" | "manual") && (300..400).contains(&status)
             {

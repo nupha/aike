@@ -63,16 +63,54 @@ pub(crate) fn blob_type_of(val: &JSValue) -> Option<String> {
     JSBlob::payload_of(val).map(|p| p.type_.clone())
 }
 
-/// Normalize a type string per File API: remove control characters (0x00-0x1F
-/// and 0x7F) and convert to lower case. An invalid media type becomes empty.
+/// Normalize a type string per File API. The result is a valid media type in
+/// lower case, or the empty string when the input is not a valid media type.
+///
+/// File API: `new Blob(parts, {type})` ignores `type` (treating it as empty)
+/// unless it is a *valid media type* — i.e. it parses as `type"/"subtype` with
+/// non-empty `type` and `subtype` tokens made of token characters. Control
+/// characters (0x00-0x1F, 0x7F) are stripped first; the remaining string is
+/// then validated and lower-cased (WPT `scheme-blob.sub.any.js`:
+/// `Blob([], {type:"invalid"})` must yield type `""`, not `"invalid"`).
 fn normalize_type(raw: &str) -> String {
     let cleaned: String = raw
         .chars()
         .filter(|c| !(*c as u32 <= 0x1F || *c as u32 == 0x7F))
         .collect();
-    // Require a non-empty, control-free, lower-cased type. We keep the spec's
-    // lenient behavior (no full media-type validation) but lower-case it.
-    cleaned.to_ascii_lowercase()
+
+    // A valid media type is `<token>/<token>`: a single '/', each side a
+    // non-empty token (RFC 7230 token = alpha/digit or `!#$%&'*+-.^_`|~`).
+    fn is_token(s: &str) -> bool {
+        !s.is_empty()
+            && s.chars().all(|c| {
+                c.is_ascii_alphanumeric()
+                    || matches!(
+                        c,
+                        '!' | '#'
+                            | '$'
+                            | '%'
+                            | '&'
+                            | '\''
+                            | '*'
+                            | '+'
+                            | '-'
+                            | '.'
+                            | '^'
+                            | '_'
+                            | '`'
+                            | '|'
+                            | '~'
+                    )
+            })
+    }
+
+    if let Some((ty, sub)) = cleaned.split_once('/') {
+        if is_token(ty) && is_token(sub) {
+            return cleaned.to_ascii_lowercase();
+        }
+    }
+
+    String::new()
 }
 
 /// Extract bytes from a single BlobPart (String / ArrayBufferView / ArrayBuffer
