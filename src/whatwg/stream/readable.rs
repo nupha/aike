@@ -974,8 +974,12 @@ fn create_stream_async_iterator(ctx: &mut ScopedContext, stream_val: &JSValue) -
                 return Ok(IterFetchStatus::Done);
             }
 
-            // Check cached promise first (from a previous try_fetch call)
-            if let Some(promise) = self.cached_promise.borrow_mut().take() {
+            // Check cached promise first (from a previous try_fetch call).
+            // The cached promise is moved out under a single borrow; for the
+            // Pending case we put it back before returning so the same borrow
+            // is never held across a second borrow_mut() call.
+            let cached = self.cached_promise.borrow_mut().take();
+            if let Some(promise) = cached {
                 match promise.state() {
                     zuqe::builtins::promise::PromiseState::Fulfilled => {
                         let result = promise.result();
@@ -993,7 +997,8 @@ fn create_stream_async_iterator(ctx: &mut ScopedContext, stream_val: &JSValue) -
                         return Err(ctx.throw_type_error("stream read rejected"));
                     }
                     zuqe::builtins::promise::PromiseState::Pending => {
-                        // Still pending — put it back and wait
+                        // Still pending — put it back and wait. Borrow is now
+                        // released (promise is owned locally), so this is safe.
                         *self.cached_promise.borrow_mut() = Some(promise);
                         return Ok(IterFetchStatus::Wait);
                     }
