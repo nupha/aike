@@ -151,11 +151,16 @@ pub(crate) fn js_browser_handle_certificate_error(
                     }
                 }
 
-                if let Some(o) = obj {
-                    let _ = cb.call(cx, JSValue::UNDEFINED, &[o.into()]);
+                if let Some(o) = obj
+                    && cb.call(cx, JSValue::UNDEFINED, &[o.into()]).is_err()
+                {
+                    let _e = cx.take_exception();
+                    #[cfg(debug_assertions)]
+                    eprintln!("[swallow-exc] security.rs:{}: {:?}", line!(), _e);
                 }
                 CERT_EVENT_ID.with(|e| *e.borrow_mut() = None);
             }
+
             true
         },
         || CERT_CALLBACK.with(|m| m.borrow().is_some()),

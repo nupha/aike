@@ -31,17 +31,14 @@ use crate::{
         body::{
             BODY_AS_ARRAY_BUFFER, BODY_AS_BLOB, BODY_AS_BYTES, BODY_AS_FORM_DATA, BODY_AS_JSON,
             BODY_AS_TEXT, BODY_AS_TEXT_CONVERT, BodySource, blob_type_from_header,
-            body_content_type, body_to_bytes, drain_body, text_stream_from_source,
+            body_content_type, body_to_bytes, drain_body,
         },
         headers::{Guard, HeaderList, HeadersPayload, JSHeaders, header_list_from_js},
         transport::TransportResponse,
     },
     whatwg::{
         abort::signal_reason,
-        stream::{
-            JSReadableStream, call_opt_method, make_rejected_promise, readable_stream_from_bytes,
-            readable_stream_from_channel,
-        },
+        stream::{JSReadableStream, make_rejected_promise},
     },
 };
 
@@ -747,16 +744,6 @@ fn js_response_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     }
 }
 
-/// Build a ReadableStream already locked/disturbed, so any later
-/// getReader() call throws a TypeError. Used as the `body` value once the body
-/// has been consumed (spec: response.body stays non-null, but body.getReader()
-/// must reject).
-fn disturbed_empty_stream(ctx: &mut ScopedContext) -> JSResult {
-    let stream = readable_stream_from_bytes(ctx, Vec::new())?;
-    let _ = call_opt_method(ctx, stream, "getReader", &[]);
-    Ok(stream)
-}
-
 fn js_response_body(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut this = cc.this();
 
@@ -788,7 +775,11 @@ fn js_response_body(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     // First access (or access after consumption): build/disturb and cache.
     let stream = if get_response_payload_mut(ctx, &mut this)?.body_consumed {
-        JSReadableStream::try_from(disturbed_empty_stream(ctx)?)?
+        // A consumed body stays non-null but its getReader() must reject:
+        // build an empty stream and lock it.
+        let mut s = JSReadableStream::from_bytes(ctx, Vec::new())?;
+        s.acquire_reader(ctx, false)?;
+        s
     } else {
         // A constructor-supplied stream IS the body — expose it directly.
         if let Some(s) = get_response_payload_mut(ctx, &mut this)?.ctor_stream {
@@ -806,14 +797,17 @@ fn js_response_body(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         match source {
             Some(BodySource::Channel(rx)) => {
                 let signal = get_response_payload(ctx, &this)?.signal;
-                JSReadableStream::try_from(readable_stream_from_channel(ctx, rx, signal)?)?
+                JSReadableStream::from_channel(ctx, rx, signal)?
             }
-            Some(BodySource::Synthetic(bytes)) => {
-                JSReadableStream::try_from(readable_stream_from_bytes(ctx, bytes)?)?
-            }
+            Some(BodySource::Synthetic(bytes)) => JSReadableStream::from_bytes(ctx, bytes)?,
             // Handled above by the ctor_stream early return.
             Some(BodySource::Stream(s)) => s,
-            None => JSReadableStream::try_from(disturbed_empty_stream(ctx)?)?,
+            None => {
+                // No source: body stays non-null but getReader() must reject.
+                let mut s = JSReadableStream::from_bytes(ctx, Vec::new())?;
+                s.acquire_reader(ctx, false)?;
+                s
+            }
         }
     };
 
@@ -904,18 +898,25 @@ fn js_response_body_as(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             // NOT via the .body getter (js_response_body).
             if src.is_some() {
                 p.body_consumed = true;
-                // Lock the cached .body stream (if any) so its getReader() throws.
-                // Skip when it is the constructor-supplied stream: drain_body
+                // Lock the cached .body stream (if any) so its getReader()
+                // throws. Skip the constructor-supplied stream: drain_body
                 // acquires that reader itself.
                 let is_own_stream =
                     matches!((p.cached_body, p.ctor_stream), (Some(a), Some(b)) if a == b);
-
-                if let Some(s) = p.cached_body
+                if let Some(mut s) = p.cached_body
                     && !is_own_stream
                 {
-                    let _ = call_opt_method(ctx, JSValue::from(s), "getReader", &[]);
+                    // This closure returns a tuple (can't `?`); on a live
+                    // cached body the lock won't fail, but if it does, drop
+                    // the error rather than failing the consumer.
+                    if s.acquire_reader(ctx, false).is_err() {
+                        let _e = ctx.take_exception();
+                        #[cfg(debug_assertions)]
+                        eprintln!("[swallow-exc] response.rs:{}: {:?}", line!(), _e);
+                    }
                 }
             }
+
             (src, convert)
         }
     };
@@ -1022,9 +1023,12 @@ fn js_response_text_stream(ctx: &mut ScopedContext, _cc: CallContext) -> JSResul
         }
     };
     match source {
-        Some(Some(src)) => text_stream_from_source(ctx, src),
+        Some(Some(src)) => Ok(JSValue::from(JSReadableStream::from_text_source(ctx, src)?)),
         Some(None) => Err(ctx.throw_internal_error("failed to obtain body")),
-        None => text_stream_from_source(ctx, BodySource::Synthetic(Vec::new())),
+        None => Ok(JSValue::from(JSReadableStream::from_text_source(
+            ctx,
+            BodySource::Synthetic(Vec::new()),
+        )?)),
     }
 }
 

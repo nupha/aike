@@ -275,8 +275,12 @@ pub(crate) fn dispatch_ws_open(
     {
         let mut ov = obj_val;
         if let Ok(p) = get_ws_payload_mut(cx, &mut ov) {
-            if let Some(cb) = p.on_open.clone() {
-                let _ = cb.call(cx, ov, &[]);
+            if let Some(cb) = p.on_open.clone()
+                && cb.call(cx, ov, &[]).is_err()
+            {
+                let _e = cx.take_exception();
+                #[cfg(debug_assertions)]
+                eprintln!("[swallow-exc] ws.rs:{}: {:?}", line!(), _e);
             }
         }
     }
@@ -315,7 +319,11 @@ pub(crate) fn dispatch_ws_data(
                     Ok(s) => s,
                     Err(_) => return,
                 };
-                let _ = cb.call(cx, ov, &[JSValue::make_string(s)]);
+                if cb.call(cx, ov, &[JSValue::make_string(s)]).is_err() {
+                    let _e = cx.take_exception();
+                    #[cfg(debug_assertions)]
+                    eprintln!("[swallow-exc] ws.rs:{}: {:?}", line!(), _e);
+                }
             } else if let Some(tx) = &p.read_tx {
                 // pull mode: forward to the async iterator's channel
                 let _ = tx.try_send(msg);
@@ -330,8 +338,12 @@ pub(crate) fn dispatch_ws_data(
                 p.closed.store(true, Ordering::Release);
                 p.ready_state.set(3);
                 p.read_tx = None; // → iterator sees Disconnected → for await ends
-                if let Some(cb) = p.on_close.clone() {
-                    let _ = cb.call(cx, ov, &[]);
+                if let Some(cb) = p.on_close.clone()
+                    && cb.call(cx, ov, &[]).is_err()
+                {
+                    let _e = cx.take_exception();
+                    #[cfg(debug_assertions)]
+                    eprintln!("[swallow-exc] ws.rs:{}: {:?}", line!(), _e);
                 }
             }
             // Now re-borrow the payload to drop the connection from the registry.

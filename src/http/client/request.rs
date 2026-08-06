@@ -17,7 +17,7 @@ use crate::{
         body::{
             BODY_AS_ARRAY_BUFFER, BODY_AS_BLOB, BODY_AS_BYTES, BODY_AS_FORM_DATA, BODY_AS_JSON,
             BODY_AS_TEXT, BodySource, blob_type_from_header, body_content_type, body_to_bytes,
-            drain_body, text_stream_from_source,
+            drain_body,
         },
         headers::{
             Guard, HeaderList, HeadersPayload, JSHeaders, header_list_from_js,
@@ -26,9 +26,7 @@ use crate::{
     },
     whatwg::{
         abort::{JSAbortSignal, make_default_signal, signal_attach_follower},
-        stream::{
-            JSReadableStream, call_opt_method, make_rejected_promise, readable_stream_from_bytes,
-        },
+        stream::{JSReadableStream, make_rejected_promise},
     },
 };
 
@@ -703,9 +701,10 @@ fn js_req_body(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     {
         let p = get_request_payload_mut(ctx, &mut this)?;
         if p.body_consumed {
-            let stream = readable_stream_from_bytes(ctx, Vec::new())?;
-            let _ = call_opt_method(ctx, stream, "getReader", &[]);
-            let s = JSReadableStream::try_from(stream)?;
+            let mut s = JSReadableStream::from_bytes(ctx, Vec::new())?;
+            // Lock the stream so a later getReader() throws (Fetch spec: a
+            // consumed request body still exposes a disturbed ReadableStream).
+            s.acquire_reader(ctx, false)?;
             p.cached_body = Some(s);
             return Ok(JSValue::from(p.cached_body.expect("just set")));
         }
@@ -722,13 +721,12 @@ fn js_req_body(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let stream = {
         let p = get_request_payload_mut(ctx, &mut this)?;
         if let Some(bytes) = p.synthetic_body.clone() {
-            readable_stream_from_bytes(ctx, bytes)?
+            JSReadableStream::from_bytes(ctx, bytes)?
         } else {
-            readable_stream_from_bytes(ctx, Vec::new())?
+            JSReadableStream::from_bytes(ctx, Vec::new())?
         }
     };
-    let s = JSReadableStream::try_from(stream)?;
-    get_request_payload_mut(ctx, &mut this)?.cached_body = Some(s);
+    get_request_payload_mut(ctx, &mut this)?.cached_body = Some(stream);
     let p = get_request_payload_mut(ctx, &mut this)?;
     Ok(JSValue::from(p.cached_body.expect("just set")))
 }
@@ -887,8 +885,11 @@ fn js_req_text_stream(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
     };
 
     match source {
-        Some(src) => text_stream_from_source(ctx, src),
-        None => text_stream_from_source(ctx, BodySource::Synthetic(Vec::new())),
+        Some(src) => Ok(JSValue::from(JSReadableStream::from_text_source(ctx, src)?)),
+        None => Ok(JSValue::from(JSReadableStream::from_text_source(
+            ctx,
+            BodySource::Synthetic(Vec::new()),
+        )?)),
     }
 }
 

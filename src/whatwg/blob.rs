@@ -17,7 +17,7 @@ use zuqe::{
     def_native_object,
 };
 
-use crate::{USER_CLASS_DEFS, whatwg::stream::readable_stream_from_bytes};
+use crate::{USER_CLASS_DEFS, whatwg::stream::JSReadableStream};
 
 /// Immutable blob contents: a shared byte buffer plus its MIME type.
 #[derive(Clone)]
@@ -280,7 +280,10 @@ fn js_blob_stream(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let bytes: Arc<[u8]> = JSBlob::payload_of(&this)
         .map(|p| p.bytes.clone())
         .ok_or_else(|| ctx.throw_type_error("Blob.prototype.stream called on non-Blob"))?;
-    readable_stream_from_bytes(ctx, bytes.to_vec())
+    Ok(JSValue::from(JSReadableStream::from_bytes(
+        ctx,
+        bytes.to_vec(),
+    )?))
 }
 
 const BLOB_PROTO: &[FieldDef] = &[

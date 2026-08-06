@@ -75,7 +75,6 @@ pub(crate) fn js_page_set_request_interception(
             }
         });
 
-        let session_for_poller = session_id.clone();
         crate::helpers::start_channel_poller(
             ctx,
             "fetch",
@@ -125,12 +124,19 @@ pub(crate) fn js_page_set_request_interception(
                             }
                         }
                     }
-                    if let Some(o) = obj {
-                        let _ = cb.call(cx, JSValue::UNDEFINED, &[o.into()]);
+
+                    // Poller returns bool (can't `?`); a throwing event callback
+                    // is taken here so we can keep returning `true` (keep polling)
+                    // without a lingering exception.
+                    if let Some(o) = obj
+                        && cb.call(cx, JSValue::UNDEFINED, &[o.into()]).is_err()
+                    {
+                        let _e = cx.take_exception();
+                        #[cfg(debug_assertions)]
+                        eprintln!("[swallow-exc] fetch.rs:{}: {:?}", line!(), _e);
                     }
                 }
 
-                let _ = session_for_poller;
                 true
             },
             || true, // interception stays active until disabled

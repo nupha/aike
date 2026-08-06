@@ -1,7 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-use std::{cell::RefCell, rc::Rc, time::Duration};
+use std::{
+    cell::{Cell, RefCell},
+    collections::HashMap,
+    rc::Rc,
+    time::Duration,
+};
 
 use zuqe::{
     CallContext, Callback, Exception, JSResult, JSValue, JobState, Object, ScopedContext,
@@ -9,7 +14,7 @@ use zuqe::{
 };
 
 use crate::http::client::{
-    body::{body_content_type, body_to_bytes, drain_readable_stream},
+    body::{BODY_TIMEOUT, body_content_type, body_to_bytes},
     cache as http_cache,
     cors::{
         cors_check, cors_filter_response_headers, is_cross_origin, needs_preflight,
@@ -24,11 +29,31 @@ use crate::http::client::{
     },
 };
 
+use zuqe::gc_lite::{GcTrace, GcTraceCtx};
+
 use super::{
     abort::{JSAbortSignal, signal_is_aborted, signal_notify, signal_reason},
     dom::make_dom_exception,
     stream::{JSReadableStream, make_rejected_promise, make_resolved_promise},
 };
+
+thread_local! {
+    /// In-flight fetch signals kept alive across GC, keyed by an auto-increment
+    /// id. Registered as a global trace handler in `main.rs` (mirrors
+    /// `gc_trace_stream`). Entries are removed when the fetch settles.
+    static FETCH_SIGNAL_GUARD: RefCell<HashMap<usize, JSValue>> = RefCell::new(HashMap::new());
+    static FETCH_SIGNAL_NEXT_ID: Cell<usize> = const { Cell::new(1) };
+}
+
+/// Keep all in-flight fetch signals alive across GC. Registered as a global
+/// trace handler in `main.rs` (mirrors `gc_trace_stream`).
+pub(crate) fn gc_trace_fetch(gcx: &mut GcTraceCtx) {
+    FETCH_SIGNAL_GUARD.with(|guards| {
+        for v in guards.borrow().values() {
+            v.trace(gcx);
+        }
+    });
+}
 
 /// Error type carried through the fetch result slot.
 enum FetchError {
@@ -981,8 +1006,14 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     // The probing above intentionally tolerates missing properties; clear any
     // exception it may have left behind so the caller does not observe a stale
-    // pending error.
-    let _ = ctx.take_exception();
+    // pending error. (In practice the probe returns Ok/None and there is none.)
+    if let zuqe::Exception::Error(_) = ctx.take_exception() {
+        #[cfg(debug_assertions)]
+        eprintln!(
+            "[swallow-exc] fetch.rs:{}: (probe left an exception)",
+            line!()
+        );
+    }
 
     // Clone the client origin for request-header injection; the original is
     // moved into the response callback closure below.
@@ -1001,12 +1032,46 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     // the already-aborted path below. A JSValue is not `Send`, so it must live
     // in the engine job closure (not the `tokio::spawn` closure that does the
     // network I/O), where it is read only after the abort has committed.
-    let signal_for_reason = signal_val.clone();
+    //
+    // The `convert` closure is NOT traced by `create_with_result_slot`, so we
+    // register the signal as a GC root for the fetch's lifetime (see
+    // `gc_trace_fetch`) and clear it once the closure has run, preventing the
+    // AbortSignal from being collected into a dangling pointer mid-flight.
+    // Register the signal as a GC root only when one is present (id 0 is the
+    // "no signal" sentinel, since ids start at 1). `signal_for_reason` indexes
+    // the entry that the convert closure's Drop guard removes on settle.
+    let signal_for_reason: usize = match &signal_val {
+        Some(s) => FETCH_SIGNAL_GUARD.with(|g| {
+            let id = FETCH_SIGNAL_NEXT_ID.with(|n| {
+                let id = n.get();
+                n.set(id.wrapping_add(1));
+                id
+            });
+            g.borrow_mut().insert(id, s.clone());
+            id
+        }),
+        None => 0,
+    };
 
     let promise = Promise::create_with_result_slot(
         ctx,
         result_slot.clone(),
         move |cx, data| -> JSResult {
+            // Drop guard: remove the signal entry from the GC root set once this
+            // convert closure returns (any path), so the AbortSignal can be
+            // collected after the fetch settles.
+            struct SignalGuardDrop(usize);
+            impl Drop for SignalGuardDrop {
+                fn drop(&mut self) {
+                    if self.0 != 0 {
+                        FETCH_SIGNAL_GUARD.with(|g| {
+                            g.borrow_mut().remove(&self.0);
+                        });
+                    }
+                }
+            }
+            let _drop_guard = SignalGuardDrop(signal_for_reason);
+
             let client_origin = client_origin.clone();
             let mut tr = match data {
                 Ok(tr) => tr,
@@ -1018,9 +1083,9 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                             // when the abort fires mid-flight (while the request
                             // is on the network). Fall back to the default
                             // "AbortError" DOMException if no signal is present.
-                            let reason = signal_for_reason
-                                .as_ref()
-                                .and_then(|s| signal_reason(s))
+                            let reason = FETCH_SIGNAL_GUARD
+                                .with(|g| g.borrow().get(&signal_for_reason).cloned())
+                                .and_then(|s| signal_reason(&s))
                                 .unwrap_or_else(|| {
                                     make_dom_exception(
                                         cx,
@@ -1135,7 +1200,7 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                     RespType::Basic,
                     &url_clone,
                     false,
-                    signal_val.clone(),
+                    signal_val,
                 );
             }
             // Caching a successful GET response (with its full body) is done in
@@ -1204,17 +1269,10 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                     RespType::Cors,
                     &final_url,
                     redirected,
-                    signal_val.clone(),
+                    signal_val,
                 );
             }
-            build_response_from_transport(
-                cx,
-                tr,
-                resp_type,
-                &final_url,
-                redirected,
-                signal_val.clone(),
-            )
+            build_response_from_transport(cx, tr, resp_type, &final_url, redirected, signal_val)
         },
     )?;
 
@@ -1511,13 +1569,13 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     match stream_body {
         None => spawn_request(req),
         Some(sv) => {
-            let Some(stream) = sv.as_native_object::<JSReadableStream>() else {
-                return Err(ctx.throw_type_error("body is not a ReadableStream"));
-            };
+            let mut s = JSReadableStream::try_from(sv)
+                .map_err(|_| ctx.throw_type_error("body is not a ReadableStream"))?;
 
             let drain_slot = PromiseResultSlot::<Result<Vec<u8>, String>>::new();
             let raw_err = Rc::new(RefCell::new(None::<JSValue>));
-            drain_readable_stream(ctx, stream, drain_slot.clone(), raw_err.clone())?;
+            let reader = s.acquire_reader(ctx, false)?;
+            reader.drain(ctx, drain_slot.clone(), raw_err.clone(), BODY_TIMEOUT)?;
 
             // The job may run over several turns, so the request and the
             // one-shot dispatcher are parked in cells and taken on the turn

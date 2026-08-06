@@ -3,6 +3,7 @@
 
 //! WritableStream and its default writer/controller.
 
+use crate::whatwg::stream::extract_high_water_mark;
 use linkme::distributed_slice;
 use zuqe::{
     CallContext, ClassCtorDef, ClassID, FieldDef, JSResult, JSValue, Runtime, ScopedContext,
@@ -74,19 +75,27 @@ def_native_object!(
 fn js_writable_stream_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let new_target = cc.this();
     let underlying_sink = cc.arg(0);
-    let _queuing_strategy = cc.arg(1);
+    let queuing_strategy = cc.arg(1);
+    let hwm = extract_high_water_mark(ctx, queuing_strategy)?;
 
     let mut stream = JSWritableStream::new_instance(ctx, new_target, WritableStreamPayload::new())?;
 
     let controller = JSWritableStreamDefaultController::new_instance(
         ctx,
         JSValue::UNDEFINED,
-        WritableStreamDefaultControllerPayload::new(underlying_sink, Some(stream)),
+        WritableStreamDefaultControllerPayload::new(underlying_sink, Some(stream), hwm),
     )?;
 
     stream.payload_mut().unwrap().controller = Some(controller);
 
-    let _ = call_opt_method(ctx, underlying_sink, "start", &[JSValue::from(controller)]);
+    // Spec: a throwing underlying start() errors the stream's controller.
+    if call_opt_method(ctx, underlying_sink, "start", &[JSValue::from(controller)]).is_err() {
+        let e = match ctx.take_exception() {
+            zuqe::Exception::Error(v) => v,
+            _ => JSValue::UNDEFINED,
+        };
+        call_opt_method(ctx, JSValue::from(controller), "error", &[e])?;
+    }
 
     Ok(stream.into())
 }
@@ -138,10 +147,14 @@ fn js_writable_stream_abort(ctx: &mut ScopedContext, cc: CallContext) -> JSResul
             && let Some(controller) = p.controller
             && let Some(cp) = controller.payload()
         {
-            // Clear any pending exception left by previous polling jobs
-            // before invoking user callback.
-            ctx.rt_mut().clear_exception();
-            let _ = call_opt_method(ctx, cp.underlying_sink, "abort", &[reason]);
+            // A throwing sink.abort() rejects the abort promise with that error.
+            if call_opt_method(ctx, cp.underlying_sink, "abort", &[reason]).is_err() {
+                let e = match ctx.take_exception() {
+                    zuqe::Exception::Error(v) => v,
+                    _ => JSValue::UNDEFINED,
+                };
+                return make_rejected_promise(ctx, e);
+            }
         }
     }
     make_resolved_promise(ctx, JSValue::UNDEFINED)
@@ -204,6 +217,12 @@ fn js_writer_desired_size(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
         .ok_or_else(|| ctx.throw_type_error("not a WritableStream writer"))?;
     if let Some(stream_val) = p.stream {
         if let Some(sp) = stream_val.payload() {
+            // Spec: errored -> null, closed -> 0, else highWaterMark.
+            match sp.state {
+                RsState::Errored => return Ok(JSValue::NULL),
+                RsState::Closed => return Ok(JSValue::ZERO),
+                RsState::Readable => {}
+            }
             if let Some(ctrl) = sp.controller {
                 if let Some(cp) = ctrl.payload() {
                     return Ok(JSValue::from(cp.high_water_mark));
@@ -211,7 +230,7 @@ fn js_writer_desired_size(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
             }
         }
     }
-    Ok(JSValue::from(1.0))
+    Ok(JSValue::from(1))
 }
 
 fn js_writer_constructor(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
@@ -317,23 +336,46 @@ fn js_writer_close(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         .stream
         .ok_or_else(|| ctx.throw_type_error("writer released"))?;
 
+    // Spec: close() must reject (not silently settle) when the stream is
+    // already closed or errored.
+    if let Some(sp) = stream_val.payload() {
+        match sp.state {
+            RsState::Errored => {
+                return make_rejected_promise(ctx, sp.stored_error);
+            }
+            RsState::Closed => {
+                let reason = ctx
+                    .create_string_from_utf8(b"cannot close a closed stream".to_vec())
+                    .map(JSValue::make_string)
+                    .unwrap_or(JSValue::UNDEFINED);
+                return make_rejected_promise(ctx, reason);
+            }
+            _ => {}
+        }
+    }
+
     if let Some(sp) = stream_val.payload_mut() {
         if let Some(controller) = sp.controller
             && let Some(cp) = controller.payload()
         {
-            // TransformStream flush path: call transformer.flush(transformController)
+            // TransformStream flush path: call transformer.flush(transformController).
+            let mut close_err: Option<JSValue> = None;
             if let Some(tc) = cp.transform_controller
                 && let Some(tcp) = tc.payload()
                 && let Some(_obj) = tcp.transformer.as_object()
             {
-                let _ = call_opt_method(ctx, tcp.transformer, "flush", &[JSValue::from(tc)]);
+                // If flush() throws, the close promise must reject with that error.
+                if call_opt_method(ctx, tcp.transformer, "flush", &[JSValue::from(tc)]).is_err() {
+                    close_err = Some(match ctx.take_exception() {
+                        zuqe::Exception::Error(v) => v,
+                        _ => JSValue::UNDEFINED,
+                    });
+                }
 
                 // After flush, close the readable side of the transform stream
                 if let Some(rcp) = tcp.readable_controller.payload() {
                     rcp.close_requested.set(true);
-
                     rcp.resolve_pending_read(ctx, JSValue::UNDEFINED, true);
-
                     if rcp.queue.borrow().is_empty()
                         && let Some(mut stream_val) = rcp.stream
                         && let Some(rsp) = stream_val.payload_mut()
@@ -341,8 +383,18 @@ fn js_writer_close(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                         rsp.state = RsState::Closed;
                     }
                 }
-            } else {
-                let _ = call_opt_method(ctx, cp.underlying_sink, "close", &[]);
+            } else if call_opt_method(ctx, cp.underlying_sink, "close", &[]).is_err() {
+                // Underlying sink close() threw; reject the close promise.
+                close_err = Some(match ctx.take_exception() {
+                    zuqe::Exception::Error(v) => v,
+                    _ => JSValue::UNDEFINED,
+                });
+            }
+
+            if let Some(e) = close_err {
+                sp.state = RsState::Errored;
+                sp.stored_error = e;
+                return make_rejected_promise(ctx, e);
             }
         }
 
@@ -366,8 +418,14 @@ fn js_writer_abort(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             && let Some(controller) = sp.controller
             && let Some(cp) = controller.payload()
         {
-            ctx.rt_mut().clear_exception();
-            let _ = call_opt_method(ctx, cp.underlying_sink, "abort", &[reason]);
+            // A throwing sink.abort() rejects the abort promise.
+            if call_opt_method(ctx, cp.underlying_sink, "abort", &[reason]).is_err() {
+                let e = match ctx.take_exception() {
+                    zuqe::Exception::Error(v) => v,
+                    _ => JSValue::UNDEFINED,
+                };
+                return make_rejected_promise(ctx, e);
+            }
         }
     }
 
@@ -397,12 +455,16 @@ pub(crate) struct WritableStreamDefaultControllerPayload {
 }
 
 impl WritableStreamDefaultControllerPayload {
-    pub(crate) fn new(underlying_sink: JSValue, stream: Option<JSWritableStream>) -> Self {
+    pub(crate) fn new(
+        underlying_sink: JSValue,
+        stream: Option<JSWritableStream>,
+        high_water_mark: f64,
+    ) -> Self {
         Self {
             stream,
             underlying_sink,
             transform_controller: None,
-            high_water_mark: 1.0,
+            high_water_mark,
         }
     }
 
@@ -439,7 +501,7 @@ def_native_object!(
     on_payload_gc: WritableStreamDefaultControllerPayload::gc_trace
 );
 
-fn js_writable_controller_error(_: &mut ScopedContext, cc: CallContext) -> JSResult {
+fn js_writable_controller_error(_ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let e = cc.arg(0);
     let this = cc.this();
 
@@ -447,6 +509,10 @@ fn js_writable_controller_error(_: &mut ScopedContext, cc: CallContext) -> JSRes
         && let Some(mut stream_val) = p.stream
         && let Some(sp) = stream_val.payload_mut()
     {
+        // Spec: error() is a no-op once the stream has left the writable state.
+        if sp.state != RsState::Readable {
+            return Ok(JSValue::UNDEFINED);
+        }
         sp.state = RsState::Errored;
         sp.stored_error = e;
     }

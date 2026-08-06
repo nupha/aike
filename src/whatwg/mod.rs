@@ -34,6 +34,7 @@ pub(crate) fn install_whatwg(ctx: &mut ScopedContext, mut global: Object) -> Res
         stream::JSReadableStream::class_id(),
         stream::JSReadableStreamDefaultReader::class_id(),
         stream::JSReadableStreamDefaultController::class_id(),
+        stream::JSReadableByteStreamController::class_id(),
         stream::JSWritableStream::class_id(),
         stream::JSWritableStreamDefaultWriter::class_id(),
         stream::JSWritableStreamDefaultController::class_id(),
@@ -52,7 +53,8 @@ pub(crate) fn install_whatwg(ctx: &mut ScopedContext, mut global: Object) -> Res
     console::install_console(ctx, &mut global)?;
     timeout::install_timeout(ctx, global)?;
     microtask::install_microtask(ctx, global)?;
-    abort::install_abort_statics(ctx, &mut global)?;
+    abort::install_abort_signal_statics(ctx, &mut global)?;
+    stream::install_readable_stream_statics(ctx, &mut global)?;
     url::register_url_statics(ctx, &mut global)?;
     fetch::install_fetch(ctx, global)?;
     base64::install_encoding(ctx, global)?;

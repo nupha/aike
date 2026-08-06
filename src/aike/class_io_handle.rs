@@ -165,7 +165,9 @@ fn start_on_read_microtask(ctx: &mut ScopedContext) {
                     {
                         // Clear any exception the callback may have thrown (ES §9.5)
                         if cb.call(cx, JSValue::UNDEFINED, &[arg]).is_err() {
-                            cx.take_exception();
+                            let _e = cx.take_exception();
+                            #[cfg(debug_assertions)]
+                            eprintln!("[swallow-exc] class_io_handle.rs:{}: {:?}", line!(), _e);
                         }
                     }
                 }
@@ -177,7 +179,9 @@ fn start_on_read_microtask(ctx: &mut ScopedContext) {
                     if let Some(cb) = cb {
                         // Clear any exception the callback may have thrown (ES §9.5)
                         if cb.call(cx, JSValue::UNDEFINED, &[JSValue::NULL]).is_err() {
-                            cx.take_exception();
+                            let _e = cx.take_exception();
+                            #[cfg(debug_assertions)]
+                            eprintln!("[swallow-exc] class_io_handle.rs:{}: {:?}", line!(), _e);
                         }
                     }
                 }
@@ -192,7 +196,9 @@ fn start_on_read_microtask(ctx: &mut ScopedContext) {
                     {
                         // Clear any exception the callback may have thrown (ES §9.5)
                         if cb.call(cx, JSValue::UNDEFINED, &[err_obj.into()]).is_err() {
-                            cx.take_exception();
+                            let _e = cx.take_exception();
+                            #[cfg(debug_assertions)]
+                            eprintln!("[swallow-exc] class_io_handle.rs:{}: {:?}", line!(), _e);
                         }
                     }
                 }

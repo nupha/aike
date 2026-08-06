@@ -56,6 +56,7 @@ use crate::{
     process::gc_trace_next_tick,
     whatwg::stream::gc_trace_stream,
     whatwg::timeout::gc_trace_timeout,
+    whatwg::fetch::gc_trace_fetch,
     yaml::init_mod_yaml,
 };
 
@@ -325,6 +326,7 @@ async fn main() -> ExitCode {
         gc_trace_stdio_state(gcx);
         gc_trace_browser(gcx);
         gc_trace_stream(gcx);
+        gc_trace_fetch(gcx);
         gc_trace_next_tick(gcx);
     });
 

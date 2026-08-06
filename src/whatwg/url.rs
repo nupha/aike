@@ -6,10 +6,12 @@
 //! Both classes are backed by the `url` crate for spec-compliant parsing.
 //! `URL.searchParams` returns a `URLSearchParams` that shares state via `Rc<RefCell<url::Url>>`.
 
-use std::cell::RefCell;
-use std::collections::HashMap;
-use std::rc::Rc;
-use std::sync::{LazyLock, Mutex};
+use std::{
+    cell::RefCell,
+    collections::HashMap,
+    rc::Rc,
+    sync::{LazyLock, Mutex},
+};
 
 use linkme::distributed_slice;
 use url::Url;

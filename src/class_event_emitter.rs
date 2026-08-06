@@ -150,10 +150,11 @@ fn js_emit(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     };
 
     for i in start..start + n {
-        // copy the entry out so no RefCell borrow is held across the call
         let (_, cb) = emitter.dispatching.borrow()[i].clone();
         if cb.call(ctx, JSValue::UNDEFINED, args).is_err() {
-            ctx.take_exception(); // Ignore listener errors
+            let _e = ctx.take_exception();
+            #[cfg(debug_assertions)]
+            eprintln!("[swallow-exc] {}:{}: {:?}", file!(), line!(), _e); // Ignore listener errors
         }
     }
 

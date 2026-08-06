@@ -4,13 +4,12 @@
 pub(crate) mod body;
 pub(crate) mod cache;
 pub(crate) mod cache_storage;
+mod class;
 pub(crate) mod config;
 pub(crate) mod cors;
 pub(crate) mod headers;
 pub(crate) mod request;
 pub(crate) mod response;
 pub(crate) mod transport;
-
-mod class;
 
 pub(crate) use class::JSHttpClient;

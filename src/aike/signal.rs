@@ -210,8 +210,12 @@ fn start_signal_microtask(ctx: &mut ScopedContext, rx: channel::Receiver<u32>) {
         rx,
         |sig_num, cx| {
             let cb = HANDLER_MAP.with(|map| map.borrow().get(&sig_num).copied());
-            if let Some(cb) = cb {
-                let _ = cb.call(cx, JSValue::UNDEFINED, &[]);
+            if let Some(cb) = cb
+                && cb.call(cx, JSValue::UNDEFINED, &[]).is_err()
+            {
+                let _e = cx.take_exception();
+                #[cfg(debug_assertions)]
+                eprintln!("[swallow-exc] signal.rs:{}: {:?}", line!(), _e);
             }
             true // always continue polling
         },

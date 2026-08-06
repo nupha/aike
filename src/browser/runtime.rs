@@ -576,8 +576,13 @@ pub(crate) fn js_page_on_console(ctx: &mut ScopedContext, cc: CallContext) -> JS
 
             if let (Some(cb), Some(_sess)) = (cb, sess) {
                 let obj = JSValue::from_serde_json(cx, &params).unwrap_or(JSValue::UNDEFINED);
-                let _ = cb.call(cx, JSValue::UNDEFINED, &[obj]);
+                if cb.call(cx, JSValue::UNDEFINED, &[obj]).is_err() {
+                    let _e = cx.take_exception();
+                    #[cfg(debug_assertions)]
+                    eprintln!("[swallow-exc] runtime.rs:{}: {:?}", line!(), _e);
+                }
             }
+
             true
         },
         || true,

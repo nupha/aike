@@ -251,10 +251,9 @@ impl ServerHandler for McpService {
                     Some(chunk) => {
                         if chunk.final_chunk {
                             if let Some(err) = chunk.error {
-                                return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
-                                    "Error: {}",
-                                    err.message
-                                ))])
+                                return Ok(CallToolResult::error(vec![ContentBlock::text(
+                                    format!("Error: {}", err.message),
+                                )])
                                 .into());
                             }
                             let result_json = chunk.result_json.as_deref().unwrap_or("null");
@@ -591,10 +590,7 @@ fn create_mcp_bridge(
 /// `content` array — serialize it untouched so non-text blocks
 /// (`{type:"image"|"audio"|"resource"}`) reach the client. Otherwise return
 /// `None` and let the caller wrap the value in a `{type:"text"}` block.
-fn result_as_mcp_envelope(
-    ctx: &mut ScopedContext,
-    result: &JSValue,
-) -> Option<serde_json::Value> {
+fn result_as_mcp_envelope(ctx: &mut ScopedContext, result: &JSValue) -> Option<serde_json::Value> {
     let Ok(val) = result.to_serde_json(ctx) else {
         return None;
     };
@@ -696,7 +692,13 @@ pub(crate) fn handle_mcp_tool_call(
                         return;
                     }
                 };
-                let _ = promise.then(cx, ok_fn, fail_fn);
+                // Inside an async fn returning Result<_, McpError> we can't `?`
+                // an i32 error; drop any .then() exception so it doesn't linger.
+                if promise.then(cx, ok_fn, fail_fn).is_err() {
+                    let _e = cx.take_exception();
+                    #[cfg(debug_assertions)]
+                    eprintln!("[swallow-exc] service.rs:{}: {:?}", line!(), _e);
+                }
             } else {
                 // Sync path: pass through a handler-returned MCP envelope
                 // ({ content: [...] }); otherwise wrap the raw value in text.
@@ -708,9 +710,7 @@ pub(crate) fn handle_mcp_tool_call(
                             .ok()
                             .map(|v| match v {
                                 serde_json::Value::String(s) => s,
-                                other => {
-                                    serde_json::to_string_pretty(&other).unwrap_or_default()
-                                }
+                                other => serde_json::to_string_pretty(&other).unwrap_or_default(),
                             })
                             .unwrap_or_default();
                         let mcp_response = serde_json::json!({

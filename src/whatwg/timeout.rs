@@ -181,7 +181,9 @@ fn start_timer_task(ctx: &mut ScopedContext) {
                 if cb.call(cx, JSValue::UNDEFINED, &[]).is_err() {
                     let msg = cx.rt().exception().to_text(cx);
                     eprintln!("timer callback error: {}", msg.message);
-                    let _ = cx.take_exception();
+                    let _e = cx.take_exception();
+                    #[cfg(debug_assertions)]
+                    eprintln!("[swallow-exc] timeout.rs:{}: {:?}", line!(), _e);
                 }
 
                 if let Some(ms) = interval_ms {

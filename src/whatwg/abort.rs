@@ -6,13 +6,10 @@
 //! Provides `AbortController` and `AbortSignal` for cooperative cancellation
 //! of asynchronous operations, following the WHATWG spec.
 
-use std::cell::RefCell;
-use std::rc::Rc;
-use std::sync::Arc;
-
-use tokio::sync::Notify;
+use std::{cell::RefCell, rc::Rc, sync::Arc};
 
 use linkme::distributed_slice;
+use tokio::sync::Notify;
 use zuqe::{
     CallContext, ClassCtorDef, ClassID, Exception, FieldDef, JSResult, JSValue, Object, Runtime,
     ScopedContext, def_native_object,
@@ -122,9 +119,12 @@ fn fire_abort_events(ctx: &mut ScopedContext, inner: &Rc<RefCell<SignalInner>>) 
     let _ = event.set_property_str(ctx, "type", type_val);
     let _ = event.set_property_str(ctx, "bubbles", JSValue::from(false));
     let _ = event.set_property_str(ctx, "cancelable", JSValue::from(false));
+
     for cb in listeners {
-        if cb.is_callable() {
-            let _ = cb.call(ctx, JSValue::UNDEFINED, &[event.into()]);
+        if cb.is_callable() && cb.call(ctx, JSValue::UNDEFINED, &[event.into()]).is_err() {
+            let _e = ctx.take_exception();
+            #[cfg(debug_assertions)]
+            eprintln!("[swallow-exc] {}:{}: {:?}", file!(), line!(), _e);
         }
     }
 }
@@ -171,10 +171,10 @@ fn js_signal_remove_event_listener(ctx: &mut ScopedContext, cc: CallContext) -> 
     Ok(JSValue::UNDEFINED)
 }
 
-fn js_signal_dispatch_event(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
+fn js_signal_dispatch_event(_: &mut ScopedContext, _: CallContext) -> JSResult {
     // AbortSignal only meaningfully dispatches `abort`; we don't support arbitrary
     // event dispatch here. Spec-compliant no-op for non-abort events.
-    Ok(JSValue::from(true))
+    Ok(JSValue::TRUE)
 }
 
 fn js_signal_onabort_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -289,8 +289,6 @@ fn js_controller_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
         },
     )?;
 
-    inner.borrow_mut().controller = None;
-
     let payload = AbortControllerPayload {
         signal: signal.0,
         inner: inner.clone(),
@@ -314,26 +312,23 @@ fn js_controller_abort(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let controller = get_controller(ctx, &this)?;
 
-    let mut inner = controller.inner.borrow_mut();
-    if inner.aborted {
-        // Already aborted — no-op per spec
-        return Ok(JSValue::UNDEFINED);
-    }
-    inner.aborted = true;
-    let reason = if cc.length() > 0 {
-        cc.arg(0)
-    } else {
-        // Spec default: a DOMException named "AbortError".
-        make_dom_exception(ctx, "AbortError", "The operation was aborted.")?
+    let (reason, on_abort_body) = {
+        let mut inner = controller.inner.borrow_mut();
+        if inner.aborted {
+            return Ok(JSValue::UNDEFINED);
+        }
+        inner.aborted = true;
+        let reason = if cc.length() > 0 {
+            cc.arg(0)
+        } else {
+            // Spec default: a DOMException named "AbortError".
+            make_dom_exception(ctx, "AbortError", "The operation was aborted.")?
+        };
+        inner.reason = reason;
+        let body = inner.on_abort_body;
+        inner.notify.notify_waiters();
+        (reason, body)
     };
-    inner.reason = reason;
-    // Per Fetch spec, aborting a request with a streaming body must cancel that
-    // body with the abort reason (so e.g. a ReadableStream body's cancel()
-    // callback runs). The body is a GC-traced JSValue stored on the signal.
-    let on_abort_body = inner.on_abort_body;
-    inner.notify.notify_waiters();
-    // Drop the mutable borrow before propagation (propagate_abort re-borrows).
-    drop(inner);
 
     if let Some(body) = on_abort_body {
         if let Some(cancel_fn) = body
@@ -341,9 +336,14 @@ fn js_controller_abort(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             .ok()
             .filter(|v| v.is_callable())
         {
-            let _ = cancel_fn.call(ctx, body, &[reason]);
+            if cancel_fn.call(ctx, body, &[reason]).is_err() {
+                let _e = ctx.take_exception();
+                #[cfg(debug_assertions)]
+                eprintln!("[swallow-exc] {}:{}: {:?}", file!(), line!(), _e);
+            }
         }
     }
+
     // Fire this signal's own `abort` listeners, then propagate to any "follow"
     // signals (e.g. `request.signal`).
     fire_abort_events(ctx, &controller.inner);
@@ -380,37 +380,6 @@ def_native_object!(
     Some(ClassCtorDef::new(js_signal_constructor, 0, true).expose_to_global()),
     on_payload_gc: AbortSignalPayload::gc_trace
 );
-
-// Static methods are registered after class creation,
-// handled via the `static_fields` concept or by manual registration.
-// We register them in the expose phase below.
-
-fn register_abort_signal_statics(ctx: &mut ScopedContext, global: &mut Object) -> Result<(), i32> {
-    // Register AbortSignal.abort() static method
-    let abort_fn =
-        ctx.create_native_function(zuqe::Callback::Func(js_signal_static_abort), "abort", 1, 0)?;
-
-    // Get the AbortSignal constructor from global
-    let ctor_val = global.get_property_str(ctx, "AbortSignal")?;
-    if let Some(mut ctor) = ctor_val.as_object() {
-        ctor.define_property_value_str(ctx, "abort", abort_fn.into(), zuqe::JS_PROP_C_W_E)?;
-    }
-
-    // Register AbortSignal.timeout() static method
-    let timeout_fn = ctx.create_native_function(
-        zuqe::Callback::Func(js_signal_static_timeout),
-        "timeout",
-        1,
-        0,
-    )?;
-
-    let ctor_val = global.get_property_str(ctx, "AbortSignal")?;
-    if let Some(mut ctor) = ctor_val.as_object() {
-        ctor.define_property_value_str(ctx, "timeout", timeout_fn.into(), zuqe::JS_PROP_C_W_E)?;
-    }
-
-    Ok(())
-}
 
 #[distributed_slice(USER_CLASS_DEFS)]
 fn register_class_abort_signal(rt: &mut Runtime) -> Result<ClassID, i32> {
@@ -463,14 +432,6 @@ impl AbortSignalPayload {
 /// Get the abort `Notify` for a JS `AbortSignal` value, if it is one.
 pub(crate) fn signal_notify(val: &JSValue) -> Option<Arc<Notify>> {
     JSAbortSignal::payload_of(val).map(|p| p.notify())
-}
-
-/// Attach a request body (e.g. a `ReadableStream`) to a JS `AbortSignal` so that,
-/// when the signal aborts, the body is canceled with the abort reason (Fetch spec).
-pub(crate) fn signal_set_body(val: &JSValue, body: JSValue) {
-    if let Some(p) = JSAbortSignal::payload_of(val) {
-        p.inner.borrow_mut().on_abort_body = Some(body);
-    }
 }
 
 /// Whether a JS `AbortSignal` value is already aborted.
@@ -556,11 +517,32 @@ pub(crate) fn make_default_signal(ctx: &mut ScopedContext) -> JSResult {
     Ok(signal.into())
 }
 
-/// Called during `install_whatwg_globals` to wire up static methods
-/// on AbortSignal (since `def_native_object!` doesn't handle statics).
-pub(crate) fn install_abort_statics(
+pub(crate) fn install_abort_signal_statics(
     ctx: &mut ScopedContext,
     global: &mut Object,
 ) -> Result<(), i32> {
-    register_abort_signal_statics(ctx, global)
+    // Register AbortSignal.abort() static method
+    let abort_fn =
+        ctx.create_native_function(zuqe::Callback::Func(js_signal_static_abort), "abort", 1, 0)?;
+
+    // Get the AbortSignal constructor from global
+    let ctor_val = global.get_property_str(ctx, "AbortSignal")?;
+    if let Some(mut ctor) = ctor_val.as_object() {
+        ctor.define_property_value_str(ctx, "abort", abort_fn.into(), zuqe::JS_PROP_C_W_E)?;
+    }
+
+    // Register AbortSignal.timeout() static method
+    let timeout_fn = ctx.create_native_function(
+        zuqe::Callback::Func(js_signal_static_timeout),
+        "timeout",
+        1,
+        0,
+    )?;
+
+    let ctor_val = global.get_property_str(ctx, "AbortSignal")?;
+    if let Some(mut ctor) = ctor_val.as_object() {
+        ctor.define_property_value_str(ctx, "timeout", timeout_fn.into(), zuqe::JS_PROP_C_W_E)?;
+    }
+
+    Ok(())
 }

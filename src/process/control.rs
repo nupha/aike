@@ -70,9 +70,9 @@ pub(super) fn js_kill(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         let _ = sig; // Windows only supports terminate
         let ok = unsafe { crate::aike::terminate_process(pid) };
         if !ok {
-            return Err(ctx.throw_internal_error(&format!(
-                "process.kill: failed to terminate pid {pid}"
-            )));
+            return Err(
+                ctx.throw_internal_error(&format!("process.kill: failed to terminate pid {pid}"))
+            );
         }
     }
 
@@ -95,7 +95,9 @@ pub(super) fn js_nextTick(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
                 for cb in callbacks {
                     if cb.call(cx, JSValue::UNDEFINED, &[]).is_err() {
                         // Clear exception to continue processing remaining callbacks
-                        cx.take_exception();
+                        let _e = cx.take_exception();
+                        #[cfg(debug_assertions)]
+                        eprintln!("[swallow-exc] control.rs:{}: {:?}", line!(), _e);
                     }
                 }
                 Ok(JobState::Done)
@@ -112,10 +114,30 @@ pub(super) fn js_memoryUsage(ctx: &mut ScopedContext, _cc: CallContext) -> JSRes
     let rss = get_rss_bytes();
 
     let mut obj = ctx.create_base_object()?;
-    obj.define_property_value_str(ctx, "rss", JSValue::from(rss as f64), zuqe::JS_PROP_ENUMERABLE)?;
-    obj.define_property_value_str(ctx, "heapTotal", JSValue::from(0.0), zuqe::JS_PROP_ENUMERABLE)?;
-    obj.define_property_value_str(ctx, "heapUsed", JSValue::from(0.0), zuqe::JS_PROP_ENUMERABLE)?;
-    obj.define_property_value_str(ctx, "external", JSValue::from(0.0), zuqe::JS_PROP_ENUMERABLE)?;
+    obj.define_property_value_str(
+        ctx,
+        "rss",
+        JSValue::from(rss as f64),
+        zuqe::JS_PROP_ENUMERABLE,
+    )?;
+    obj.define_property_value_str(
+        ctx,
+        "heapTotal",
+        JSValue::from(0.0),
+        zuqe::JS_PROP_ENUMERABLE,
+    )?;
+    obj.define_property_value_str(
+        ctx,
+        "heapUsed",
+        JSValue::from(0.0),
+        zuqe::JS_PROP_ENUMERABLE,
+    )?;
+    obj.define_property_value_str(
+        ctx,
+        "external",
+        JSValue::from(0.0),
+        zuqe::JS_PROP_ENUMERABLE,
+    )?;
 
     Ok(obj.into())
 }
@@ -138,7 +160,6 @@ fn get_rss_bytes() -> u64 {
                 }
             }
         }
-        0
     }
 
     #[cfg(target_os = "macos")]
@@ -149,7 +170,6 @@ fn get_rss_bytes() -> u64 {
             // ru_maxrss is in bytes on macOS
             return usage.ru_maxrss as u64;
         }
-        0
     }
 
     #[cfg(windows)]
@@ -171,13 +191,9 @@ fn get_rss_bytes() -> u64 {
                 return counters.WorkingSetSize as u64;
             }
         }
-        0
     }
 
-    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
-    {
-        0
-    }
+    0
 }
 
 /// `process.cpuUsage()` — CPU time usage in microseconds.
@@ -185,8 +201,18 @@ pub(super) fn js_cpuUsage(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult
     let (user_us, system_us) = get_cpu_usage_us();
 
     let mut obj = ctx.create_base_object()?;
-    obj.define_property_value_str(ctx, "user", JSValue::from(user_us as f64), zuqe::JS_PROP_ENUMERABLE)?;
-    obj.define_property_value_str(ctx, "system", JSValue::from(system_us as f64), zuqe::JS_PROP_ENUMERABLE)?;
+    obj.define_property_value_str(
+        ctx,
+        "user",
+        JSValue::from(user_us as f64),
+        zuqe::JS_PROP_ENUMERABLE,
+    )?;
+    obj.define_property_value_str(
+        ctx,
+        "system",
+        JSValue::from(system_us as f64),
+        zuqe::JS_PROP_ENUMERABLE,
+    )?;
 
     Ok(obj.into())
 }
@@ -243,8 +269,14 @@ pub(super) fn js_hrtime(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         if let Some(arr) = cc.arg(0).as_object_Array() {
             let vals: Vec<JSValue> = arr.payload().values().to_vec();
             if vals.len() >= 2 {
-                let prev_s = vals[0].to_number(ctx).map(|n| n.to_f64() as i64).unwrap_or(0);
-                let prev_ns = vals[1].to_number(ctx).map(|n| n.to_f64() as i64).unwrap_or(0);
+                let prev_s = vals[0]
+                    .to_number(ctx)
+                    .map(|n| n.to_f64() as i64)
+                    .unwrap_or(0);
+                let prev_ns = vals[1]
+                    .to_number(ctx)
+                    .map(|n| n.to_f64() as i64)
+                    .unwrap_or(0);
                 let prev_total = prev_s * 1_000_000_000 + prev_ns;
                 now_ns.saturating_sub(prev_total as u64)
             } else {

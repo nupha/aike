@@ -22,13 +22,9 @@ fn js_queue_microtask(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     ctx.queue_oneshot_job(
         move |cx| {
-            // Invoke with no arguments, `this` undefined. Report the exception
-            // ("report" invocation in spec terms) instead of letting it break
-            // the microtask queue, mirroring the timer-callback handling.
             if callback.call(cx, JSValue::UNDEFINED, &[]).is_err() {
-                let msg = cx.rt().exception().to_text(cx);
+                let msg = cx.take_exception().to_text(cx);
                 eprintln!("queueMicrotask callback error: {}", msg.message);
-                cx.take_exception();
             }
             Ok(())
         },
@@ -39,7 +35,9 @@ fn js_queue_microtask(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 }
 
 pub(crate) fn install_microtask(ctx: &mut ScopedContext, mut global: Object) -> Result<(), i32> {
-    let f = ctx.create_native_function(Callback::Func(js_queue_microtask), "queueMicrotask", 1, 0)?;
+    let f =
+        ctx.create_native_function(Callback::Func(js_queue_microtask), "queueMicrotask", 1, 0)?;
     global.define_property_value_str(ctx, "queueMicrotask", f.into(), zuqe::JS_PROP_C_W_E)?;
+
     Ok(())
 }

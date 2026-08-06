@@ -15,9 +15,8 @@ mod writable;
 
 pub(crate) use {
     readable::{
-        JSReadableStream, JSReadableStreamDefaultController, JSReadableStreamDefaultReader,
-        readable_stream_from_bytes, readable_stream_from_channel, readable_stream_from_text,
-        readable_stream_from_text_channel,
+        JSReadableByteStreamController, JSReadableStream, JSReadableStreamDefaultController,
+        JSReadableStreamDefaultReader, install_readable_stream_statics,
     },
     transform::{JSTransformStream, JSTransformStreamDefaultController},
     writable::{
@@ -28,7 +27,7 @@ pub(crate) use {
 use linkme::distributed_slice;
 use zuqe::{
     CallContext, ClassCtorDef, ClassID, FieldDef, JSResult, JSValue, Runtime, ScopedContext,
-    builtins::promise::Promise,
+    builtins::promise::{Promise, PromiseState},
     def_native_object,
     gc_lite::{GcTrace, GcTraceCtx},
 };
@@ -105,7 +104,47 @@ fn queuing_strategy_init<'a>(
     if init_val.is_undefined() || init_val.is_null() || init_val.as_object().is_none() {
         return Err(ctx.throw_type_error("QueuingStrategy requires an object init"));
     }
-    Ok(init_val.as_object().unwrap())
+    Ok(init_val
+        .as_object()
+        .ok_or_else(|| ctx.throw_type_error("QueuingStrategy requires an object init"))?)
+}
+
+/// Extract `highWaterMark` from a `QueuingStrategy`-like init object.
+/// Per the WHATWG Streams spec the default value is 1 when the field is
+/// missing or the strategy is undefined, so callers that pass `undefined`
+/// get `Ok(1.0)`. A non-object strategy still throws TypeError via
+/// `queuing_strategy_init`.
+///
+/// Validates the strategy as the spec requires:
+/// - `size`, when present, must be a callable; otherwise a TypeError is thrown.
+/// - `highWaterMark`, when present, must be a non-NaN, finite, non-negative
+///   number; otherwise a RangeError is thrown.
+pub(crate) fn extract_high_water_mark(
+    ctx: &mut ScopedContext,
+    strategy: JSValue,
+) -> Result<f64, i32> {
+    if strategy.is_undefined() || strategy.is_null() {
+        return Ok(1.0);
+    }
+    let obj = queuing_strategy_init(ctx, strategy)?;
+    // `size` must be a function when provided.
+    let size = obj.get_property_str(ctx, "size")?;
+    if !size.is_undefined() && !size.is_callable() {
+        return Err(ctx.throw_type_error("QueuingStrategy.size must be a function"));
+    }
+    let hwm = obj.get_property_str(ctx, "highWaterMark")?;
+    if hwm.is_undefined() {
+        return Ok(1.0);
+    }
+    let hwm_f = hwm.to_number(ctx)?.to_f64();
+    // NaN and infinite are rejected by the spec with a RangeError.
+    if hwm_f.is_nan() || hwm_f.is_infinite() {
+        return Err(ctx.throw_range_error("highWaterMark must be a finite number"));
+    }
+    if hwm_f < 0.0 {
+        return Err(ctx.throw_range_error("highWaterMark must be non-negative"));
+    }
+    Ok(hwm_f)
 }
 
 // ============================================================================
@@ -183,8 +222,15 @@ pub(crate) fn make_iterator_result(
     // `Object.prototype.then` must not make it look like a thenable when the
     // reader's read promise is resolved with it (WPT forbids intercepting the
     // body conversion this way). Shadow `then` with a non-callable own property
-    // so the promise resolution settles with the object directly.
-    obj.define_property_value_str(ctx, "then", JSValue::UNDEFINED, zuqe::JS_PROP_C_W_E)?;
+    // so the promise resolution settles with the object directly. The property
+    // is non-enumerable so structure comparisons (assert_object_equals /
+    // Object.keys) don't see it.
+    obj.define_property_value_str(
+        ctx,
+        "then",
+        JSValue::UNDEFINED,
+        zuqe::JS_PROP_CONFIGURABLE | zuqe::JS_PROP_WRITABLE,
+    )?;
     Ok(JSValue::from(obj))
 }
 
@@ -212,27 +258,24 @@ pub(crate) fn make_rejected_promise(
 /// Returns `Some(call result)` if the method existed and was invoked,
 /// `None` if `obj` is not an object / the property was absent / not callable.
 ///
-/// Note: implemented via the public `get_property_str` + `is_callable` API.
-/// zuqe's `Object::invoke_callable`/`invoke_defined` do the same but take an
-/// `Atom`, and aike's public API has no `&str -> Atom` constructor
-/// (`Atom::from_str` / `StringImpl::to_atom` are `pub(crate)`), so the
-/// string-based form is the idiomatic aike-level equivalent.
+/// Thin convenience over zuqe's `Object::invoke_callable`: that returns
+/// `Option<JSResult>` (a nested Result), whereas callers here want the plain
+/// `Option<JSValue>`. `Atom::from_static` gives the `&'static str -> Atom`
+/// constructor.
 pub(crate) fn call_opt_method(
     ctx: &mut ScopedContext,
     obj: JSValue,
-    name: &str,
+    name: &'static str,
     args: &[JSValue],
 ) -> Result<Option<JSValue>, i32> {
     let Some(o) = obj.as_object() else {
         return Ok(None);
     };
-    let Ok(f) = o.get_property_str(ctx, name) else {
-        return Ok(None);
-    };
-    if !f.is_callable() {
-        return Ok(None);
+    let atom = zuqe::Atom::from_static(ctx, name)?;
+    match o.invoke_callable(ctx, atom, args)? {
+        Some(r) => Ok(Some(r?)),
+        None => Ok(None),
     }
-    f.call(ctx, obj, args).map(Some)
 }
 
 /// Set a stream's state (and `stored_error` when errored), then settle the
@@ -276,16 +319,21 @@ pub(super) fn settle_stream_state(
 
 /// Resolve or reject the peer (reader/writer) `closed_promise` if present.
 ///
-/// The `closed_promise` is taken out (`Option::take`) so it can only be settled
-/// once: settling it twice would violate Promise's contract (a settled promise
-/// must ignore further resolve/reject). Fetch body teardown can call
-/// `settle_stream_state` repeatedly (error then cancel) against the same reader.
+/// The `closed_promise` is kept in place so `reader.closed` / `writer.closed`
+/// keeps returning a valid promise; it is settled only while still Pending.
+/// `Promise::settle` must not run on an already-settled promise (debug_assert),
+/// and fetch body teardown can call `settle_stream_state` repeatedly (error then
+/// cancel) against the same reader.
 fn notify_peer_closed(ctx: &mut ScopedContext, peer: Option<JSValue>, reason: Option<JSValue>) {
     let Some(mut pv) = peer else {
         return;
     };
 
     let mut settle = |cp: &mut Promise| {
+        // Only settle a still-pending promise; repeated teardown calls no-op.
+        if cp.state() != PromiseState::Pending {
+            return;
+        }
         if let Some(r) = reason {
             cp.reject(ctx, r);
         } else {
@@ -294,12 +342,12 @@ fn notify_peer_closed(ctx: &mut ScopedContext, peer: Option<JSValue>, reason: Op
     };
 
     if let Some(rp) = JSReadableStreamDefaultReader::payload_mut_of(&mut pv) {
-        if let Some(mut cp) = rp.closed_promise.take() {
-            settle(&mut cp);
+        if let Some(cp) = rp.closed_promise.as_mut() {
+            settle(cp);
         }
     } else if let Some(wp) = JSWritableStreamDefaultWriter::payload_mut_of(&mut pv) {
-        if let Some(mut cp) = wp.closed_promise.take() {
-            settle(&mut cp);
+        if let Some(cp) = wp.closed_promise.as_mut() {
+            settle(cp);
         }
     }
 }

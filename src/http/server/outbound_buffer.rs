@@ -165,8 +165,8 @@ pub(crate) fn js_stream_write(
     if pending_empty && buf.drain_notified {
         // Backlog just cleared by the drain watcher → fire on_drain once.
         buf.drain_notified = false;
-        if let Some(cb) = buf.on_drain.clone() {
-            let _ = cb.call(ctx, JSValue::UNDEFINED, &[]);
+        if let Some(cb) = buf.on_drain {
+            cb.call(ctx, JSValue::UNDEFINED, &[])?;
         }
     } else if !pending_empty {
         // Entered (or still in) backlog → remember to notify when it clears.
