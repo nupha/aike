@@ -25,10 +25,7 @@ use zuqe::{
     def_native_object,
 };
 
-use crate::{
-    USER_CLASS_DEFS,
-    whatwg::stream::make_resolved_promise,
-};
+use crate::{USER_CLASS_DEFS};
 
 use super::{
     CryptoKeyPayload, JSCryptoKey, algorithm_name, get_buffer_source_bytes, get_key_usages,
@@ -84,10 +81,19 @@ fn subtle_digest(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let name = algorithm_name(ctx, &cc.arg(0))?;
     let data = get_buffer_source_bytes(ctx, &cc.arg(1))?;
     let bytes = digest_bytes(&name, &data).ok_or_else(|| {
-        throw_dom_exception(ctx, "NotSupportedError", &format!("Unrecognized algorithm '{name}'"))
+        throw_dom_exception(
+            ctx,
+            "NotSupportedError",
+            &format!("Unrecognized algorithm '{name}'"),
+        )
     })?;
-    let ab = ArrayBuffer::from_bytes(ctx, JSValue::UNDEFINED, bytes.into_boxed_slice(), ptr::null_mut())?;
-    make_resolved_promise(ctx, ab.into())
+    let ab = ArrayBuffer::from_bytes(
+        ctx,
+        JSValue::UNDEFINED,
+        bytes.into_boxed_slice(),
+        ptr::null_mut(),
+    )?;
+    Promise::from_resolve_value(ctx, ab.into()).map(JSValue::from)
 }
 
 async_op!(subtle_digest, js_subtle_digest);
@@ -212,11 +218,15 @@ fn subtle_sign(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     }
     let key = get_hmac_key(ctx, &cc.arg(1), "sign")?;
     let hash = resolve_hmac_hash(ctx, &alg_val, &key)?;
-    let mac = hmac_mac(&key.raw, &hash, &data).ok_or_else(|| {
-        throw_dom_exception(ctx, "OperationError", "invalid HMAC key material")
-    })?;
-    let ab = ArrayBuffer::from_bytes(ctx, JSValue::UNDEFINED, mac.into_boxed_slice(), ptr::null_mut())?;
-    make_resolved_promise(ctx, ab.into())
+    let mac = hmac_mac(&key.raw, &hash, &data)
+        .ok_or_else(|| throw_dom_exception(ctx, "OperationError", "invalid HMAC key material"))?;
+    let ab = ArrayBuffer::from_bytes(
+        ctx,
+        JSValue::UNDEFINED,
+        mac.into_boxed_slice(),
+        ptr::null_mut(),
+    )?;
+    Promise::from_resolve_value(ctx, ab.into()).map(JSValue::from)
 }
 
 async_op!(subtle_sign, js_subtle_sign);
@@ -238,12 +248,11 @@ fn subtle_verify(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     }
     let key = get_hmac_key(ctx, &cc.arg(1), "verify")?;
     let hash = resolve_hmac_hash(ctx, &alg_val, &key)?;
-    let mac = hmac_mac(&key.raw, &hash, &data).ok_or_else(|| {
-        throw_dom_exception(ctx, "OperationError", "invalid HMAC key material")
-    })?;
+    let mac = hmac_mac(&key.raw, &hash, &data)
+        .ok_or_else(|| throw_dom_exception(ctx, "OperationError", "invalid HMAC key material"))?;
     // Constant-time comparison; unequal lengths simply compare as false.
     let ok: bool = mac.ct_eq(&signature).into();
-    make_resolved_promise(ctx, JSValue::from(ok))
+    Promise::from_resolve_value(ctx, JSValue::from(ok)).map(JSValue::from)
 }
 
 async_op!(subtle_verify, js_subtle_verify);
@@ -406,10 +415,23 @@ fn subtle_encrypt(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     }
     let key = get_aes_key(ctx, &cc.arg(1), "encrypt")?;
     let params = parse_gcm_params(ctx, &alg_val)?;
-    let ct = gcm_crypt(&key.raw, &params.iv, &params.aad, &data, params.tag_len, false)
-        .ok_or_else(|| throw_dom_exception(ctx, "OperationError", "AES-GCM encryption failed"))?;
-    let ab = ArrayBuffer::from_bytes(ctx, JSValue::UNDEFINED, ct.into_boxed_slice(), ptr::null_mut())?;
-    make_resolved_promise(ctx, ab.into())
+    let ct = gcm_crypt(
+        &key.raw,
+        &params.iv,
+        &params.aad,
+        &data,
+        params.tag_len,
+        false,
+    )
+    .ok_or_else(|| throw_dom_exception(ctx, "OperationError", "AES-GCM encryption failed"))?;
+    let ab = ArrayBuffer::from_bytes(
+        ctx,
+        JSValue::UNDEFINED,
+        ct.into_boxed_slice(),
+        ptr::null_mut(),
+    )?;
+
+    Promise::from_resolve_value(ctx, ab.into()).map(JSValue::from)
 }
 
 async_op!(subtle_encrypt, js_subtle_encrypt);
@@ -430,10 +452,22 @@ fn subtle_decrypt(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     }
     let key = get_aes_key(ctx, &cc.arg(1), "decrypt")?;
     let params = parse_gcm_params(ctx, &alg_val)?;
-    let pt = gcm_crypt(&key.raw, &params.iv, &params.aad, &data, params.tag_len, true)
-        .ok_or_else(|| throw_dom_exception(ctx, "OperationError", "AES-GCM decryption failed"))?;
-    let ab = ArrayBuffer::from_bytes(ctx, JSValue::UNDEFINED, pt.into_boxed_slice(), ptr::null_mut())?;
-    make_resolved_promise(ctx, ab.into())
+    let pt = gcm_crypt(
+        &key.raw,
+        &params.iv,
+        &params.aad,
+        &data,
+        params.tag_len,
+        true,
+    )
+    .ok_or_else(|| throw_dom_exception(ctx, "OperationError", "AES-GCM decryption failed"))?;
+    let ab = ArrayBuffer::from_bytes(
+        ctx,
+        JSValue::UNDEFINED,
+        pt.into_boxed_slice(),
+        ptr::null_mut(),
+    )?;
+    Promise::from_resolve_value(ctx, ab.into()).map(JSValue::from)
 }
 
 async_op!(subtle_decrypt, js_subtle_decrypt);
@@ -460,7 +494,9 @@ fn jwk_member(ctx: &mut ScopedContext, jwk: &Object, name: &str) -> Result<Optio
     if v.is_undefined() {
         Ok(None)
     } else {
-        Ok(Some(v.to_string(ctx)?.content().encode_utf8(false).to_string()))
+        Ok(Some(
+            v.to_string(ctx)?.content().encode_utf8(false).to_string(),
+        ))
     }
 }
 
@@ -527,7 +563,7 @@ fn import_hmac_jwk(
                     ctx,
                     "DataError",
                     "JWK alg does not match the HMAC hash",
-                ))
+                ));
             }
         }
     }
@@ -541,9 +577,8 @@ fn import_hmac_jwk(
         ));
     }
     check_ext_and_key_ops(ctx, jwk, usages, extractable)?;
-    let k = jwk_member(ctx, jwk, "k")?.ok_or_else(|| {
-        throw_dom_exception(ctx, "DataError", "JWK is missing the k member")
-    })?;
+    let k = jwk_member(ctx, jwk, "k")?
+        .ok_or_else(|| throw_dom_exception(ctx, "DataError", "JWK is missing the k member"))?;
     let bytes = base64url_decode(&k)
         .ok_or_else(|| throw_dom_exception(ctx, "DataError", "JWK k is not valid base64url"))?;
     if bytes.is_empty() {
@@ -613,7 +648,12 @@ fn subtle_import_key(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     if cc.length() < 5 {
         return Err(ctx.throw_type_error("importKey() requires 5 arguments"));
     }
-    let format = cc.arg(0).to_string(ctx)?.content().encode_utf8(false).to_string();
+    let format = cc
+        .arg(0)
+        .to_string(ctx)?
+        .content()
+        .encode_utf8(false)
+        .to_string();
     if format != "raw" && format != "jwk" {
         return Err(throw_dom_exception(
             ctx,
@@ -702,12 +742,12 @@ fn subtle_import_key(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 ctx,
                 "NotSupportedError",
                 &format!("Unrecognized algorithm '{name}'"),
-            ))
+            ));
         }
     };
 
     let key = make_key(ctx, raw, name, hash_name, extractable, usages)?;
-    make_resolved_promise(ctx, key)
+    Promise::from_resolve_value(ctx, key).map(JSValue::from)
 }
 
 async_op!(subtle_import_key, js_subtle_import_key);
@@ -752,7 +792,12 @@ fn subtle_export_key(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     if cc.length() < 2 {
         return Err(ctx.throw_type_error("exportKey() requires 2 arguments"));
     }
-    let format = cc.arg(0).to_string(ctx)?.content().encode_utf8(false).to_string();
+    let format = cc
+        .arg(0)
+        .to_string(ctx)?
+        .content()
+        .encode_utf8(false)
+        .to_string();
     let key_val = cc.arg(1);
     let key = JSCryptoKey::payload_of(&key_val)
         .ok_or_else(|| ctx.throw_type_error("key must be a CryptoKey"))?;
@@ -771,11 +816,11 @@ fn subtle_export_key(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 key.raw.clone().into_boxed_slice(),
                 ptr::null_mut(),
             )?;
-            make_resolved_promise(ctx, ab.into())
+            Promise::from_resolve_value(ctx, ab.into()).map(JSValue::from)
         }
         "jwk" => {
             let jwk = build_jwk(ctx, key)?;
-            make_resolved_promise(ctx, jwk.into())
+            Promise::from_resolve_value(ctx, jwk.into()).map(JSValue::from)
         }
         _ => Err(throw_dom_exception(
             ctx,
@@ -793,9 +838,7 @@ async_op!(subtle_export_key, js_subtle_export_key);
 
 /// Per WebCrypto, `SubtleCrypto` cannot be constructed from JS.
 fn js_subtle_constructor(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
-    Err(ctx.throw_type_error(
-        "Illegal constructor: 'SubtleCrypto' is not constructable",
-    ))
+    Err(ctx.throw_type_error("Illegal constructor: 'SubtleCrypto' is not constructable"))
 }
 
 const CLASS_SUBTLE_PROTO: &[FieldDef] = &[
@@ -820,4 +863,3 @@ def_native_object!(
 fn register_class_subtle_crypto(rt: &mut Runtime) -> Result<ClassID, i32> {
     JSCryptoSubtle::register(rt)
 }
-

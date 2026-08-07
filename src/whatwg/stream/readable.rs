@@ -28,10 +28,7 @@ use zuqe::{
 use crate::http::client::body::BodySource;
 use crate::{USER_CLASS_DEFS, whatwg::stream::extract_high_water_mark};
 
-use super::{
-    QueueEntry, RsState, call_opt_method, make_iterator_result, make_rejected_promise,
-    make_resolved_promise, settle_stream_state,
-};
+use super::{QueueEntry, RsState, call_opt_method, make_iterator_result, settle_stream_state};
 use crate::whatwg::abort::{JSAbortSignal, signal_is_aborted, signal_reason};
 use crate::whatwg::dom::make_dom_exception;
 use crate::whatwg::stream::writable::JSWritableStream;
@@ -841,7 +838,9 @@ fn tee_do_pull(ctx: &mut ScopedContext, tee_id: u64, shared: &TeeShared) -> JSRe
     shared.pulling.set(true);
     let p = JSReadableStreamDefaultReader::payload_of(&shared.reader)
         .ok_or_else(|| ctx.throw_type_error("not a ReadableStreamDefaultReader"))?;
-    let read_promise = p.read(ctx, None)?;
+
+    let mut promise = p.read(ctx, None)?;
+
     let step = ctx
         .create_native_function_with_data(
             Callback::Func(tee_pull_fulfilled),
@@ -860,8 +859,8 @@ fn tee_do_pull(ctx: &mut ScopedContext, tee_id: u64, shared: &TeeShared) -> JSRe
             [JSValue::from(tee_id as f64)].into(),
         )?
         .into();
-    let mut promise: Promise = Promise::try_from(read_promise)?;
     promise.then(ctx, step, fail)?;
+
     Ok(JSValue::UNDEFINED)
 }
 
@@ -944,16 +943,17 @@ fn js_readable_stream_pipe_to(ctx: &mut ScopedContext, cc: CallContext) -> JSRes
             zuqe::Exception::Error(v) => v,
             _ => JSValue::UNDEFINED,
         };
-        return make_rejected_promise(ctx, e);
+        return Promise::from_reject_value(ctx, e).map(JSValue::from);
     }
     let writer = dest
         .get_property_str(ctx, "getWriter")?
         .call(ctx, dest, &[])?;
     // Acquire a reader on the source synchronously: this locks (disturbs) the
     // stream immediately so `locked` is true and a later getReader() throws.
-    let reader = this
-        .get_property_str(ctx, "getReader")?
-        .call(ctx, this, &[])?;
+    // `this` is already a ReadableStream (checked above): acquire its reader via
+    // the Rust-side API instead of the JS-layer `getReader`.
+    let mut src_stream = JSReadableStream::try_from(this)?;
+    let reader = src_stream.acquire_reader(ctx, false)?;
 
     run_pipe_driver(ctx, reader, writer, signal, options)
 }
@@ -964,51 +964,19 @@ fn js_readable_stream_pipe_to(ctx: &mut ScopedContext, cc: CallContext) -> JSRes
 // AbortSignal. `options` drives the abort reaction flags.
 fn run_pipe_driver(
     ctx: &mut ScopedContext,
-    reader: JSValue,
+    reader: JSReadableStreamDefaultReader,
     writer: JSValue,
     signal: JSValue,
     options: JSValue,
 ) -> JSResult {
     let (promise, rr) = Promise::create(ctx)?;
-    let data = [rr[0], rr[1], reader, writer, signal];
+    let data = [rr[0], rr[1], JSValue::from(reader), writer, signal, options];
 
     // Synchronous abort check: a signal already aborted must reject the pipe
-    // promise immediately without doing any reads.
+    // promise without doing any reads.
     if !signal.is_undefined() && crate::whatwg::abort::signal_is_aborted(&signal) {
-        let reason = crate::whatwg::abort::signal_reason(&signal).unwrap_or(JSValue::UNDEFINED);
-        let (prevent_cancel, prevent_abort) = if let Some(obj) = options.as_object() {
-            let pc = obj
-                .get_property_str(ctx, "preventCancel")?
-                .to_bool()
-                .unwrap_or(false);
-            let pa = obj
-                .get_property_str(ctx, "preventAbort")?
-                .to_bool()
-                .unwrap_or(false);
-            (pc, pa)
-        } else {
-            (false, false)
-        };
-        // abort()/cancel() are best-effort cleanup; a throw here must NOT change
-        // the pipeTo rejection (rr[1] below rejects with `reason`), so take and
-        // drop the exception rather than propagating it.
-        for (target, method) in [(writer, "abort"), (reader, "cancel")] {
-            let should = if method == "abort" {
-                !prevent_abort
-            } else {
-                !prevent_cancel
-            };
-            if should
-                && let Ok(f) = target.get_property_str(ctx, method)
-                && f.call(ctx, target, &[reason]).is_err()
-            {
-                let _e = ctx.take_exception();
-                #[cfg(debug_assertions)]
-                eprintln!("[swallow-exc] {}:{}: {:?}", file!(), line!(), _e);
-            }
-        }
-        rr[1].call(ctx, JSValue::UNDEFINED, &[reason])?;
-        release_pipe_locks(ctx, reader, writer);
+        pipe_to_perform_abort(ctx, reader, writer, signal, options, rr[1])?;
+        release_pipe_locks(ctx, JSValue::from(reader), writer);
         return Ok(JSValue::from(promise));
     }
 
@@ -1039,7 +1007,7 @@ fn run_pipe_driver(
         }
     }
 
-    let data = [rr[0], rr[1], reader, writer, signal];
+    let data = [rr[0], rr[1], JSValue::from(reader), writer, signal];
     let step = ctx
         .create_native_function_with_data(
             Callback::Func(pipe_to_on_read),
@@ -1059,9 +1027,10 @@ fn run_pipe_driver(
         )?
         .into();
 
-    let p = JSReadableStreamDefaultReader::payload_of(&reader)
+    let p = reader
+        .payload()
         .ok_or_else(|| ctx.throw_type_error("not a ReadableStreamDefaultReader"))?;
-    let mut read_promise: Promise = Promise::try_from(p.read(ctx, None)?)?;
+    let mut read_promise = p.read(ctx, None)?;
     read_promise.then(ctx, step, step_fail)?;
 
     Ok(JSValue::from(promise))
@@ -1088,36 +1057,227 @@ fn release_pipe_locks(ctx: &mut ScopedContext, reader: JSValue, writer: JSValue)
 // pipe promise with the signal's reason, and release the locks.
 fn pipe_to_on_abort(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let reject = cc.data(1);
-    let reader = cc.data(2);
+    let reader = JSReadableStreamDefaultReader::try_from(cc.data(2))?;
     let writer = cc.data(3);
     let signal = cc.data(4);
+    let options = cc.data(5);
+    pipe_to_perform_abort(ctx, reader, writer, signal, options, reject)?;
+    release_pipe_locks(ctx, JSValue::from(reader), writer);
+    Ok(JSValue::UNDEFINED)
+}
+
+// Perform the abort-triggered shutdown of a pipe: abort the destination writer
+// and cancel the source reader, then reject the pipe promise with the most
+// appropriate error. Per the streams spec, preference order is:
+//   1. the error from `writer.abort()` (sink),
+//   2. the error from `reader.cancel()` (source),
+//   3. the signal's abort reason.
+// Both cleanup calls use the same `reason` object so the writer's `closed` and
+// the reader's `closed` reject with the same object the pipe promise rejects
+// with (WPT: "all the error objects should be the same object").
+fn pipe_to_perform_abort(
+    ctx: &mut ScopedContext,
+    reader: JSReadableStreamDefaultReader,
+    writer: JSValue,
+    signal: JSValue,
+    options: JSValue,
+    reject: JSValue,
+) -> JSResult {
     let reason = if !signal.is_undefined() {
         crate::whatwg::abort::signal_reason(&signal).unwrap_or(JSValue::UNDEFINED)
     } else {
         JSValue::UNDEFINED
     };
-    // Each of these may throw (e.g. abort()/cancel() on an already-errored
-    // peer). Swallow and clear the exception so it doesn't pollute cur_exception
-    // on the Ok return (engine invariant).
-    for (target, method, arg) in [(writer, "abort", reason), (reader, "cancel", reason)] {
-        if let Ok(f) = target.get_property_str(ctx, method)
-            && f.call(ctx, target, &[arg]).is_err()
-        {
-            let _e = ctx.take_exception();
-            #[cfg(debug_assertions)]
-            eprintln!("[swallow-exc] {}:{}: {:?}", file!(), line!(), _e);
-        }
+    let (prevent_cancel, prevent_abort) = if let Some(obj) = options.as_object() {
+        let pc = obj
+            .get_property_str(ctx, "preventCancel")?
+            .to_bool()
+            .unwrap_or(false);
+        let pa = obj
+            .get_property_str(ctx, "preventAbort")?
+            .to_bool()
+            .unwrap_or(false);
+        (pc, pa)
+    } else {
+        (false, false)
+    };
+
+    // Collect the cleanup actions that must run.
+    //
+    // NOTE: `actions` intentionally holds only an enum tag, never the JSValue
+    // targets. In the arena GC model, native-stack-local JSValues are no longer
+    // traced (only values pushed into a `f.call` arena frame are), so storing
+    // raw JSValues in a heap `Vec` would leave them with no GC root and risk a
+    // use-after-free if a nested JS call triggers GC. The target objects
+    // (`writer`/`reader`) live in this closure's binding data, which is traced
+    // via `NFuncPayload::trace`, so we resolve them from those rooted locals
+    // inside the loop instead of caching the values here.
+    #[derive(Clone, Copy)]
+    enum ShutdownAction {
+        Abort,
+        Cancel,
     }
-    reject.call(ctx, JSValue::UNDEFINED, &[reason])?;
-    release_pipe_locks(ctx, reader, writer);
+    let mut actions: Vec<ShutdownAction> = Vec::new();
+    if !prevent_abort {
+        actions.push(ShutdownAction::Abort);
+    }
+    if !prevent_cancel {
+        actions.push(ShutdownAction::Cancel);
+    }
+
+    // No actions (both prevented, or streams already settled): reject with the
+    // signal reason directly.
+    if actions.is_empty() {
+        reject.call(ctx, JSValue::UNDEFINED, &[reason])?;
+        return Ok(JSValue::UNDEFINED);
+    }
+
+    // Shared aggregation state across the action settle callbacks.
+    let mut state = ctx.create_base_object()?;
+    state.set_property_str(ctx, "pending", (actions.len() as f64).into())?;
+    state.set_property_str(ctx, "abortErr", JSValue::UNDEFINED)?;
+    state.set_property_str(ctx, "cancelErr", JSValue::UNDEFINED)?;
+
+    for action in actions {
+        // Resolve the target from the GC-rooted locals (`writer`/`reader`)
+        // rather than from a cached JSValue, keeping the value under a root.
+        let (method, target): (&'static str, JSValue) = match action {
+            ShutdownAction::Abort => ("abort", writer),
+            ShutdownAction::Cancel => ("cancel", JSValue::from(reader)),
+        };
+        let mut action_promise = if let Ok(f) = target.get_property_str(ctx, method) {
+            match f.call(ctx, target, &[reason]) {
+                Ok(res) => {
+                    if let Ok(p) = Promise::try_from(res) {
+                        p
+                    } else {
+                        Promise::from_resolve_value(ctx, res)?
+                    }
+                }
+                Err(_) => {
+                    let _e = ctx.take_exception();
+                    Promise::from_resolve_value(ctx, JSValue::UNDEFINED)?
+                }
+            }
+        } else {
+            let _e = ctx.take_exception();
+            Promise::from_resolve_value(ctx, JSValue::UNDEFINED)?
+        };
+
+        // Field on `state` that records this action's rejection reason.
+        let field = if method == "abort" {
+            "abortErr"
+        } else {
+            "cancelErr"
+        };
+        let field_val =
+            JSValue::make_string(ctx.create_string_from_utf8(field.as_bytes().to_vec())?);
+        let ok_data = [
+            JSValue::from(state),
+            JSValue::from(reader),
+            writer,
+            reject,
+            reason,
+        ];
+        let err_data = [
+            JSValue::from(state),
+            field_val,
+            JSValue::from(reader),
+            writer,
+            reject,
+            reason,
+        ];
+        let ok_fn = ctx
+            .create_native_function_with_data(
+                Callback::Func(pipe_shutdown_ok),
+                "pipeShutdownOk",
+                0,
+                0,
+                ok_data.into(),
+            )?
+            .into();
+        let err_fn = ctx
+            .create_native_function_with_data(
+                Callback::Func(pipe_shutdown_err),
+                "pipeShutdownErr",
+                1,
+                0,
+                err_data.into(),
+            )?
+            .into();
+        action_promise.then(ctx, ok_fn, err_fn)?;
+    }
+
+    Ok(JSValue::UNDEFINED)
+}
+
+// Action fulfilled: record nothing, decrement the pending counter, finalize.
+fn pipe_shutdown_ok(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let state = cc.data(0);
+    let reader = cc.data(1);
+    let writer = cc.data(2);
+    let reject = cc.data(3);
+    let reason = cc.data(4);
+    pipe_shutdown_finalize(ctx, state, reader, writer, reject, reason)
+}
+
+// Action rejected: record the rejection reason for this action (in the field
+// named by `field`), decrement the pending counter, then finalize.
+fn pipe_shutdown_err(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let state = cc.data(0);
+    let field_val = cc.data(1);
+    let reader = cc.data(2);
+    let writer = cc.data(3);
+    let reject = cc.data(4);
+    let reason = cc.data(5);
+    let err = cc.arg(0);
+    let field_str = field_val.to_string(ctx)?;
+    let field = field_str.content().encode_utf8(false);
+    let mut state_obj = state.as_object().unwrap();
+    state_obj.set_property_str(ctx, &field, err)?;
+    pipe_shutdown_finalize(ctx, state, reader, writer, reject, reason)
+}
+
+// Once every action has settled, reject the pipe promise with the most
+// appropriate error: sink abort error > source cancel error > signal reason.
+fn pipe_shutdown_finalize(
+    ctx: &mut ScopedContext,
+    state: JSValue,
+    reader: JSValue,
+    writer: JSValue,
+    reject: JSValue,
+    reason: JSValue,
+) -> JSResult {
+    let mut state_obj = state.as_object().unwrap();
+    let pending = state_obj
+        .get_property_str(ctx, "pending")?
+        .to_number(ctx)?
+        .to_f64();
+    state_obj.set_property_str(ctx, "pending", (pending - 1.0).into())?;
+    if (pending - 1.0).abs() < f64::EPSILON {
+        let abort_err = state_obj.get_property_str(ctx, "abortErr")?;
+        let cancel_err = state_obj.get_property_str(ctx, "cancelErr")?;
+        let final_err = if !abort_err.is_undefined() {
+            abort_err
+        } else if !cancel_err.is_undefined() {
+            cancel_err
+        } else {
+            reason
+        };
+        reject.call(ctx, JSValue::UNDEFINED, &[final_err])?;
+        release_pipe_locks(ctx, reader, writer);
+    }
     Ok(JSValue::UNDEFINED)
 }
 
 fn js_readable_stream_pipe_through(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
-    if JSReadableStream::payload_of(&this).is_none() {
-        return Err(ctx.throw_type_error("pipeThrough: this must be a ReadableStream"));
-    }
+
+    let mut this_stream = JSReadableStream::try_from(this).map_err(|e| {
+        let _ = ctx.throw_type_error("pipeThrough: this must be a ReadableStream");
+        e
+    })?;
+
     let transform = cc.arg(0);
     // `transform` is duck-typed: `{ readable, writable }`. Brand-check `readable`
     // first (so a bad readable does not access `writable`), then `writable`.
@@ -1153,9 +1313,8 @@ fn js_readable_stream_pipe_through(ctx: &mut ScopedContext, cc: CallContext) -> 
     let writer = writable
         .get_property_str(ctx, "getWriter")?
         .call(ctx, writable, &[])?;
-    let reader = this
-        .get_property_str(ctx, "getReader")?
-        .call(ctx, this, &[])?;
+
+    let reader = this_stream.acquire_reader(ctx, false)?;
     run_pipe_driver(ctx, reader, writer, signal, options)?;
 
     Ok(readable)
@@ -1168,8 +1327,8 @@ fn pipe_to_read(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let signal = cc.data(4);
     let p = JSReadableStreamDefaultReader::payload_of(&reader)
         .ok_or_else(|| ctx.throw_type_error("not a ReadableStreamDefaultReader"))?;
-    let read_js = p.read(ctx, None)?;
-    let mut read_promise: Promise = Promise::try_from(read_js)?;
+    let mut read_promise = p.read(ctx, None)?;
+
     let step = ctx
         .create_native_function_with_data(
             Callback::Func(pipe_to_on_read),
@@ -1208,7 +1367,14 @@ fn pipe_to_on_read(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         let close_js = match close_fn.call(ctx, writer, &[]) {
             Ok(v) => v,
             Err(_) => {
-                reject.call(ctx, JSValue::UNDEFINED, &[])?;
+                // close() threw synchronously: take the exception (it is set
+                // even though the call returned Err) and reject the pipe
+                // promise with it as the reason, instead of crashing the driver.
+                let err = match ctx.take_exception() {
+                    zuqe::Exception::Error(v) => v,
+                    _ => JSValue::UNDEFINED,
+                };
+                reject.call(ctx, JSValue::UNDEFINED, &[err])?;
                 release_pipe_locks(ctx, reader, writer);
                 return Ok(JSValue::UNDEFINED);
             }
@@ -1370,7 +1536,11 @@ impl ReadableStreamDefaultReaderPayload {
     /// resolves to `{ value, done }`. Internal callers (drain/tee/pipe/async
     /// iteration) call this directly instead of going through the JS `read`
     /// property; the JS API entry point `js_reader_read` delegates here.
-    pub(crate) fn read(&self, ctx: &mut ScopedContext, byob_view: Option<TypedArray>) -> JSResult {
+    pub(crate) fn read(
+        &self,
+        ctx: &mut ScopedContext,
+        byob_view: Option<TypedArray>,
+    ) -> Result<Promise, i32> {
         let mut stream_val = self
             .stream
             .ok_or_else(|| ctx.throw_type_error("reader released"))?;
@@ -1390,11 +1560,11 @@ impl ReadableStreamDefaultReaderPayload {
 
         match stream_p.state {
             RsState::Errored => {
-                return make_rejected_promise(ctx, stream_p.stored_error);
+                return Promise::from_reject_value(ctx, stream_p.stored_error);
             }
             RsState::Closed => {
                 let result = make_iterator_result(ctx, JSValue::UNDEFINED, true)?;
-                return make_resolved_promise(ctx, result);
+                return Promise::from_resolve_value(ctx, result);
             }
             RsState::Readable => {}
         }
@@ -1434,12 +1604,12 @@ impl ReadableStreamDefaultReaderPayload {
                 }
 
                 let result = make_iterator_result(ctx, chunk, false)?;
-                return make_resolved_promise(ctx, result);
+                return Promise::from_resolve_value(ctx, result);
             }
 
             if cp.close_requested.get() {
                 let result = make_iterator_result(ctx, JSValue::UNDEFINED, true)?;
-                return make_resolved_promise(ctx, result);
+                return Promise::from_resolve_value(ctx, result);
             }
 
             // No data in queue — register a pending read on this controller so a
@@ -1453,7 +1623,7 @@ impl ReadableStreamDefaultReaderPayload {
 
         // No controller (e.g. detached) — nothing to read.
         let result = make_iterator_result(ctx, JSValue::UNDEFINED, true)?;
-        make_resolved_promise(ctx, result)
+        Promise::from_resolve_value(ctx, result)
     }
 }
 
@@ -1552,7 +1722,7 @@ fn js_reader_read(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         None
     };
 
-    p.read(ctx, byob_view)
+    p.read(ctx, byob_view).map(JSValue::from)
 }
 
 fn js_reader_cancel(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -1953,25 +2123,40 @@ fn create_readable_stream_controller(
 // Stream cancel & async iterator
 // ============================================================================
 
-fn readable_stream_cancel(ctx: &mut ScopedContext, stream: &JSValue, reason: JSValue) -> JSResult {
+fn readable_stream_cancel(
+    ctx: &mut ScopedContext,
+    stream: &JSValue,
+    reason: JSValue,
+) -> Result<JSValue, i32> {
     if let Some(mut stream_obj) = stream.as_native_object::<JSReadableStream>() {
         // Spec: cancel() sets disturbed, so the stream is no longer usable as
         // a body even though no read() ever happened.
         if let Some(p) = stream_obj.payload_mut() {
             p.disturbed = true;
         }
-        settle_stream_state(ctx, (*stream_obj).into(), RsState::Closed, None);
+
+        // Spec: reader.cancel() rejects the reader's `closed` promise with
+        // `reason` (which may be undefined for a bare cancel). pipeTo's abort
+        // path relies on this to make reader.closed reject with the abort reason
+        // so all error objects are the same object. We model cancel as an
+        // Errored settlement (not Closed) so a later getReader().closed also
+        // rejects with `reason` per spec.
+        settle_stream_state(ctx, (*stream_obj).into(), RsState::Errored, Some(reason));
 
         if let Some(p) = stream_obj.payload()
             && let Some(controller_val) = p.controller
             && let Some(cp) = controller_val.payload()
         {
             let source = cp.underlying_source;
-            call_opt_method(ctx, source, "cancel", &[reason])?;
+            // Propagate the underlying source's cancel() result (including a
+            // rejection) to the reader.cancel() promise — pipeTo relies on this
+            // to surface source cancel errors.
+            let cancel_res = call_opt_method(ctx, source, "cancel", &[reason])?;
+            return Ok(cancel_res.unwrap_or(JSValue::UNDEFINED));
         }
     }
 
-    make_resolved_promise(ctx, JSValue::UNDEFINED)
+    Promise::from_resolve_value(ctx, JSValue::UNDEFINED).map(JSValue::from)
 }
 
 fn create_stream_async_iterator(ctx: &mut ScopedContext, stream_val: &JSValue) -> JSResult {
@@ -2054,36 +2239,28 @@ fn create_stream_async_iterator(ctx: &mut ScopedContext, stream_val: &JSValue) -
                 None => return Ok(IterFetchStatus::Done),
             };
 
-            let promise_val = p.read(ctx, None)?;
-            if !promise_val.is_object() {
-                return Ok(IterFetchStatus::Done);
-            }
-
-            if let Ok(promise) = Promise::try_from(promise_val) {
-                match promise.state() {
-                    zuqe::builtins::promise::PromiseState::Fulfilled => {
-                        let result = promise.result();
-                        if let Ok(done_val) = result.get_property_str(ctx, "done")
-                            && done_val.to_bool()?
-                        {
-                            return Ok(IterFetchStatus::Done);
-                        }
-                        if let Ok(value) = result.get_property_str(ctx, "value") {
-                            return Ok(IterFetchStatus::Value(value));
-                        }
-                        Ok(IterFetchStatus::Value(result))
+            let promise = p.read(ctx, None)?;
+            match promise.state() {
+                zuqe::builtins::promise::PromiseState::Fulfilled => {
+                    let result = promise.result();
+                    if let Ok(done_val) = result.get_property_str(ctx, "done")
+                        && done_val.to_bool()?
+                    {
+                        return Ok(IterFetchStatus::Done);
                     }
-                    zuqe::builtins::promise::PromiseState::Rejected => {
-                        Err(ctx.throw_type_error("stream read rejected"))
+                    if let Ok(value) = result.get_property_str(ctx, "value") {
+                        return Ok(IterFetchStatus::Value(value));
                     }
-                    zuqe::builtins::promise::PromiseState::Pending => {
-                        // Cache the pending promise and wait for enqueue() to resolve it
-                        *self.cached_promise.borrow_mut() = Some(promise);
-                        Ok(IterFetchStatus::Wait)
-                    }
+                    Ok(IterFetchStatus::Value(result))
                 }
-            } else {
-                Ok(IterFetchStatus::Done)
+                zuqe::builtins::promise::PromiseState::Rejected => {
+                    Err(ctx.throw_type_error("stream read rejected"))
+                }
+                zuqe::builtins::promise::PromiseState::Pending => {
+                    // Cache the pending promise and wait for enqueue() to resolve it
+                    *self.cached_promise.borrow_mut() = Some(promise);
+                    Ok(IterFetchStatus::Wait)
+                }
             }
         }
 
@@ -2146,7 +2323,7 @@ impl JSReadableStream {
 
         // Keep the abort signal alive on the stream payload (GC-traced), not just in
         // the channel registry, so it cannot be reclaimed while the body is live.
-        let mut sp = stream.payload_mut().unwrap();
+        let sp = stream.payload_mut().unwrap();
         sp.signal = signal;
         sp.channel_id = Some(id);
 

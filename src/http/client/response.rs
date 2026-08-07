@@ -20,7 +20,9 @@ use crossbeam::channel::Receiver;
 use linkme::distributed_slice;
 use zuqe::{
     CallContext, ClassCtorDef, ClassID, Exception, FieldDef, JSResult, JSValue, NativeObject,
-    Runtime, ScopedContext, def_native_object,
+    Runtime, ScopedContext,
+    builtins::promise::Promise,
+    def_native_object,
     gc_lite::{GcTrace, GcTraceCtx},
 };
 
@@ -36,10 +38,7 @@ use crate::{
         headers::{Guard, HeaderList, HeadersPayload, JSHeaders, header_list_from_js},
         transport::TransportResponse,
     },
-    whatwg::{
-        abort::signal_reason,
-        stream::{JSReadableStream, make_rejected_promise},
-    },
+    whatwg::{abort::signal_reason, stream::JSReadableStream},
 };
 
 /// WHATWG `Response.type` (closed set of values this runtime produces).
@@ -843,7 +842,7 @@ fn js_response_body_as(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         if let Some(sig) = p.signal.as_ref()
             && let Some(reason) = signal_reason(sig)
         {
-            return make_rejected_promise(ctx, reason);
+            return Promise::from_reject_value(ctx, reason).map(JSValue::from);
         }
 
         // Spec: consuming a body whose stream is already disturbed or locked
@@ -949,7 +948,7 @@ fn js_response_body_as(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                     return Err(-1);
                 }
             };
-            return make_rejected_promise(ctx, reason);
+            return Promise::from_reject_value(ctx, reason).map(JSValue::from);
         }
     }
 
@@ -992,7 +991,7 @@ fn js_response_body_as(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                     return Err(-1);
                 }
             };
-            make_rejected_promise(ctx, reason)
+            Promise::from_reject_value(ctx, reason).map(JSValue::from)
         }
     }
 }

@@ -203,10 +203,11 @@ fn js_signal_onabort_setter(ctx: &mut ScopedContext, cc: CallContext) -> JSResul
 
 /// Static method: AbortSignal.abort(reason?)
 fn js_signal_static_abort(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let reason = if cc.length() > 0 {
+    // Spec: `AbortSignal.abort(reason = new DOMException('...', 'AbortError'))`.
+    // An explicitly passed `undefined` still triggers the default.
+    let reason = if cc.length() > 0 && !cc.arg(0).is_undefined() {
         cc.arg(0)
     } else {
-        // Spec default: a DOMException named "AbortError".
         make_dom_exception(ctx, "AbortError", "The operation was aborted.")?
     };
 
@@ -318,10 +319,11 @@ fn js_controller_abort(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             return Ok(JSValue::UNDEFINED);
         }
         inner.aborted = true;
-        let reason = if cc.length() > 0 {
+        // Spec: `AbortController.abort(reason = new DOMException('...', 'AbortError'))`.
+        // An explicitly passed `undefined` still triggers the default.
+        let reason = if cc.length() > 0 && !cc.arg(0).is_undefined() {
             cc.arg(0)
         } else {
-            // Spec default: a DOMException named "AbortError".
             make_dom_exception(ctx, "AbortError", "The operation was aborted.")?
         };
         inner.reason = reason;

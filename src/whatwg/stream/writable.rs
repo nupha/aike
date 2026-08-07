@@ -15,7 +15,7 @@ use zuqe::{
 use crate::USER_CLASS_DEFS;
 
 use super::{
-    RsState, call_opt_method, make_rejected_promise, make_resolved_promise, settle_stream_state,
+    RsState, call_opt_method, settle_stream_state,
     transform::JSTransformStreamDefaultController,
 };
 
@@ -147,24 +147,36 @@ fn js_writable_stream_abort(ctx: &mut ScopedContext, cc: CallContext) -> JSResul
             && let Some(controller) = p.controller
             && let Some(cp) = controller.payload()
         {
-            // A throwing sink.abort() rejects the abort promise with that error.
-            if call_opt_method(ctx, cp.underlying_sink, "abort", &[reason]).is_err() {
-                let e = match ctx.take_exception() {
-                    zuqe::Exception::Error(v) => v,
-                    _ => JSValue::UNDEFINED,
-                };
-                return make_rejected_promise(ctx, e);
+            // The sink's abort() may reject asynchronously (e.g. return a
+            // Promise.reject). Propagate its result promise verbatim so the
+            // rejection reaches the caller — a synchronous throw is turned into
+            // a rejected promise.
+            match call_opt_method(ctx, cp.underlying_sink, "abort", &[reason]) {
+                Err(_) => {
+                    let e = match ctx.take_exception() {
+                        zuqe::Exception::Error(v) => v,
+                        _ => JSValue::UNDEFINED,
+                    };
+                    return Promise::from_reject_value(ctx, e).map(JSValue::from);
+                }
+                Ok(Some(v)) => {
+                    if let Ok(p) = Promise::try_from(v) {
+                        return Ok(JSValue::from(p));
+                    }
+                    return Ok(JSValue::from(Promise::from_resolve_value(ctx, v)?));
+                }
+                Ok(None) => {}
             }
         }
     }
-    make_resolved_promise(ctx, JSValue::UNDEFINED)
+    Promise::from_resolve_value(ctx, JSValue::UNDEFINED).map(JSValue::from)
 }
 
 fn js_writable_stream_close(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     if let Some(stream) = cc.this().as_native_object::<JSWritableStream>() {
         settle_stream_state(ctx, stream.into(), RsState::Closed, None);
     }
-    make_resolved_promise(ctx, JSValue::UNDEFINED)
+    Promise::from_resolve_value(ctx, JSValue::UNDEFINED).map(JSValue::from)
 }
 
 // ============================================================================
@@ -266,14 +278,14 @@ fn js_writer_write(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         match sp.state {
             RsState::Errored => {
                 let reason = sp.stored_error;
-                return make_rejected_promise(ctx, reason);
+                return Promise::from_reject_value(ctx, reason).map(JSValue::from);
             }
             RsState::Closed => {
                 let reason = ctx
                     .create_string_from_utf8(b"Writer is closed".to_vec())
                     .map(JSValue::make_string)
                     .unwrap_or(JSValue::UNDEFINED);
-                return make_rejected_promise(ctx, reason);
+                return Promise::from_reject_value(ctx, reason).map(JSValue::from);
             }
             _ => {}
         }
@@ -307,7 +319,7 @@ fn js_writer_write(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                         JSValue::from(tcp.readable_controller).get_property_str(ctx, "enqueue")?;
                     enqueue_fn.call(ctx, JSValue::from(tcp.readable_controller), &[chunk])?;
                 }
-                return make_resolved_promise(ctx, JSValue::UNDEFINED);
+                return Promise::from_resolve_value(ctx, JSValue::UNDEFINED).map(JSValue::from);
             }
 
             // Normal writable path
@@ -324,7 +336,7 @@ fn js_writer_write(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         }
     }
 
-    make_resolved_promise(ctx, JSValue::UNDEFINED)
+    Promise::from_resolve_value(ctx, JSValue::UNDEFINED).map(JSValue::from)
 }
 
 fn js_writer_close(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -341,14 +353,14 @@ fn js_writer_close(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     if let Some(sp) = stream_val.payload() {
         match sp.state {
             RsState::Errored => {
-                return make_rejected_promise(ctx, sp.stored_error);
+                return Promise::from_reject_value(ctx, sp.stored_error).map(JSValue::from);
             }
             RsState::Closed => {
                 let reason = ctx
                     .create_string_from_utf8(b"cannot close a closed stream".to_vec())
                     .map(JSValue::make_string)
                     .unwrap_or(JSValue::UNDEFINED);
-                return make_rejected_promise(ctx, reason);
+                return Promise::from_reject_value(ctx, reason).map(JSValue::from);
             }
             _ => {}
         }
@@ -394,14 +406,14 @@ fn js_writer_close(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             if let Some(e) = close_err {
                 sp.state = RsState::Errored;
                 sp.stored_error = e;
-                return make_rejected_promise(ctx, e);
+                return Promise::from_reject_value(ctx, e).map(JSValue::from);
             }
         }
 
         sp.state = RsState::Closed;
     }
 
-    make_resolved_promise(ctx, JSValue::UNDEFINED)
+    Promise::from_resolve_value(ctx, JSValue::UNDEFINED).map(JSValue::from)
 }
 
 fn js_writer_abort(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -418,18 +430,30 @@ fn js_writer_abort(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             && let Some(controller) = sp.controller
             && let Some(cp) = controller.payload()
         {
-            // A throwing sink.abort() rejects the abort promise.
-            if call_opt_method(ctx, cp.underlying_sink, "abort", &[reason]).is_err() {
-                let e = match ctx.take_exception() {
-                    zuqe::Exception::Error(v) => v,
-                    _ => JSValue::UNDEFINED,
-                };
-                return make_rejected_promise(ctx, e);
+            // The sink's abort() may reject asynchronously (e.g. return a
+            // Promise.reject). Propagate its result promise verbatim so the
+            // rejection reaches pipeTo — a synchronous throw is turned into a
+            // rejected promise.
+            match call_opt_method(ctx, cp.underlying_sink, "abort", &[reason]) {
+                Err(_) => {
+                    let e = match ctx.take_exception() {
+                        zuqe::Exception::Error(v) => v,
+                        _ => JSValue::UNDEFINED,
+                    };
+                    return Promise::from_reject_value(ctx, e).map(JSValue::from);
+                }
+                Ok(Some(v)) => {
+                    if let Ok(p) = Promise::try_from(v) {
+                        return Ok(JSValue::from(p));
+                    }
+                    return Ok(JSValue::from(Promise::from_resolve_value(ctx, v)?));
+                }
+                Ok(None) => {}
             }
         }
     }
 
-    make_resolved_promise(ctx, JSValue::UNDEFINED)
+    Promise::from_resolve_value(ctx, JSValue::UNDEFINED).map(JSValue::from)
 }
 
 fn js_writer_release_lock(_: &mut ScopedContext, cc: CallContext) -> JSResult {

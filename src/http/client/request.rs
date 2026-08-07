@@ -7,7 +7,9 @@ use std::rc::Rc;
 use linkme::distributed_slice;
 use zuqe::{
     CallContext, ClassCtorDef, ClassID, Exception, FieldDef, JSResult, JSValue, Object, Runtime,
-    ScopedContext, def_native_object,
+    ScopedContext,
+    builtins::promise::Promise,
+    def_native_object,
     gc_lite::{GcTrace, GcTraceCtx},
 };
 
@@ -26,7 +28,7 @@ use crate::{
     },
     whatwg::{
         abort::{JSAbortSignal, make_default_signal, signal_attach_follower},
-        stream::{JSReadableStream, make_rejected_promise},
+        stream::JSReadableStream,
     },
 };
 
@@ -751,7 +753,7 @@ fn js_req_body_as(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                     return Err(-1);
                 }
             };
-            return make_rejected_promise(ctx, reason);
+            return Promise::from_reject_value(ctx, reason).map(JSValue::from);
         }
     }
 
@@ -784,7 +786,7 @@ fn js_req_body_as(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                     return Err(-1);
                 }
             };
-            return make_rejected_promise(ctx, reason);
+            return Promise::from_reject_value(ctx, reason).map(JSValue::from);
         }
     }
 
@@ -844,7 +846,7 @@ fn js_req_body_as(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                     return Err(-1);
                 }
             };
-            make_rejected_promise(ctx, reason)
+            Promise::from_reject_value(ctx, reason).map(JSValue::from)
         }
     }
 }

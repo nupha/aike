@@ -157,7 +157,7 @@ if (typeof G.structured_clone === "undefined") {
 // injected and relative URLs resolve against the engine cwd (legacy behavior).
 // ---------------------------------------------------------------------------
 
-const wptBase =
+let wptBase =
   wptServerEnabled && wptServer ? wptServer.replace(/\/+$/, "") : null;
 
 // Map a local checkout path to the wpt-server URL the browser would load it
@@ -285,8 +285,11 @@ async function loadScriptDeps(testFile, code) {
     if (loadedHelpers.has(abs)) continue;
     loadedHelpers.add(abs);
     try {
+      Aike.evalScript("globalThis.self = globalThis; globalThis.window = globalThis;");
       Aike.evalScript(await fetchText(abs), evalOpts(abs));
     } catch (e) {
+      console.log("DEBUG loadScriptDeps failed for", meta.value, "abs=", abs);
+      console.log("DEBUG err:", e && e.stack ? e.stack : e);
       throw new Error(
         `loading META script '${meta.value}': ${e instanceof Error ? e.message : e}`,
       );
@@ -358,6 +361,9 @@ for (let i = 0; i < args.length; i++) {
     G.process.exit(2);
   } else components.push(a);
 }
+
+// Recompute the base URL now that --wpt-server / --no-wpt-server have been applied.
+wptBase = wptServerEnabled && wptServer ? wptServer.replace(/\/+$/, "") : null;
 
 // WPT .sub.js fixtures (e.g. /common/get-host-info.sub.js) read self.location to
 // derive the server protocol/host/origin at load time. Non-browser shells lack

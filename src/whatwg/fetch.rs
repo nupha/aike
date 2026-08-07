@@ -34,7 +34,7 @@ use zuqe::gc_lite::{GcTrace, GcTraceCtx};
 use super::{
     abort::{JSAbortSignal, signal_is_aborted, signal_notify, signal_reason},
     dom::make_dom_exception,
-    stream::{JSReadableStream, make_rejected_promise, make_resolved_promise},
+    stream::{JSReadableStream},
 };
 
 thread_local! {
@@ -915,8 +915,9 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             false,
             signal_val.clone(),
         )?;
+
         // `fetch()` returns a promise; resolve it with the cached Response.
-        return make_resolved_promise(ctx, response);
+        return Promise::from_resolve_value(ctx, response).map(JSValue::from);
     }
 
     // `blob:` scheme: resolve the object URL against the global blob store
@@ -965,7 +966,8 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                     false,
                     signal_val.clone(),
                 )?;
-                return make_resolved_promise(ctx, response);
+
+                return Promise::from_resolve_value(ctx, response).map(JSValue::from);
             }
             None => {
                 return throw_transport_error(
@@ -1347,9 +1349,7 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 p.body_consumed = true;
             }
         }
-
-        let rejected = make_rejected_promise(ctx, abort_reason)?;
-        return Ok(rejected.into());
+        return Promise::from_reject_value(ctx, abort_reason).map(JSValue::from);
     }
 
     // Per-host TLS escape hatch: skip cert validation only for hosts listed in

@@ -137,8 +137,9 @@ pub(crate) fn extract_high_water_mark(
         return Ok(1.0);
     }
     let hwm_f = hwm.to_number(ctx)?.to_f64();
-    // NaN and infinite are rejected by the spec with a RangeError.
-    if hwm_f.is_nan() || hwm_f.is_infinite() {
+    // Spec: only NaN triggers a RangeError. Infinity and other finite values are
+    // allowed (e.g. CountQueuingStrategy({ highWaterMark: Infinity }) disables backpressure).
+    if hwm_f.is_nan() {
         return Err(ctx.throw_range_error("highWaterMark must be a finite number"));
     }
     if hwm_f < 0.0 {
@@ -232,24 +233,6 @@ pub(crate) fn make_iterator_result(
         zuqe::JS_PROP_CONFIGURABLE | zuqe::JS_PROP_WRITABLE,
     )?;
     Ok(JSValue::from(obj))
-}
-
-pub(crate) fn make_resolved_promise(
-    ctx: &mut ScopedContext,
-    value: JSValue,
-) -> Result<JSValue, i32> {
-    let (promise, rr) = Promise::create(ctx)?;
-    rr[0].call(ctx, JSValue::UNDEFINED, &[value])?;
-    Ok(promise.into())
-}
-
-pub(crate) fn make_rejected_promise(
-    ctx: &mut ScopedContext,
-    reason: JSValue,
-) -> Result<JSValue, i32> {
-    let (promise, rr) = Promise::create(ctx)?;
-    rr[1].call(ctx, JSValue::UNDEFINED, &[reason])?;
-    Ok(promise.into())
 }
 
 /// Call an optionally-present, callable method `name` on `obj`.

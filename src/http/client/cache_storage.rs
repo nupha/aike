@@ -14,7 +14,7 @@ use std::{cell::RefCell, collections::HashMap, rc::Rc};
 use linkme::distributed_slice;
 use zuqe::{
     Array, CallContext, ClassCtorDef, ClassID, FieldDef, JSResult, JSValue, Runtime, ScopedContext,
-    builtins::typed_array::TypedArray,
+    builtins::promise::Promise, builtins::typed_array::TypedArray,
     def_native_object,
     gc_lite::{GcTrace, GcTraceCtx},
 };
@@ -22,7 +22,6 @@ use zuqe::{
 use crate::{
     USER_CLASS_DEFS,
     http::client::{request::JSRequest, response::JSResponse},
-    whatwg::stream::make_resolved_promise,
 };
 
 /// A stored request/response pair keyed by `method + " " + url`.
@@ -155,7 +154,7 @@ fn js_cache_storage_ctor(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult 
 }
 
 fn js_cache_storage_open(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let mut this = cc.this();
+    let this = cc.this();
     let p = JSCacheStorage::payload_of(&this)
         .ok_or_else(|| ctx.throw_type_error("not a CacheStorage instance"))?;
     let name = cc
@@ -184,11 +183,11 @@ fn js_cache_storage_has(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         .encode_utf8(false)
         .to_string();
     let has = p.stores.borrow().contains_key(&name);
-    make_resolved_promise(ctx, JSValue::from(has))
+    Promise::from_resolve_value(ctx, JSValue::from(has)).map(JSValue::from)
 }
 
 fn js_cache_storage_delete(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let mut this = cc.this();
+    let this = cc.this();
     let p = JSCacheStorage::payload_of(&this)
         .ok_or_else(|| ctx.throw_type_error("not a CacheStorage instance"))?;
     let name = cc
@@ -198,16 +197,17 @@ fn js_cache_storage_delete(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
         .encode_utf8(false)
         .to_string();
     let removed = p.stores.borrow_mut().remove(&name).is_some();
-    make_resolved_promise(ctx, JSValue::from(removed))
+    Promise::from_resolve_value(ctx, JSValue::from(removed)).map(JSValue::from)
 }
 
-fn js_cache_storage_keys(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
+fn js_cache_storage_keys(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let stores = {
-        let mut this = _cc.this();
+        let this = cc.this();
         let p = JSCacheStorage::payload_of(&this)
             .ok_or_else(|| ctx.throw_type_error("not a CacheStorage instance"))?;
         p.stores.clone()
     };
+
     let mut keys: Vec<JSValue> = Vec::new();
     for k in stores.borrow().keys() {
         let s = ctx
@@ -216,15 +216,16 @@ fn js_cache_storage_keys(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult 
             .unwrap_or(JSValue::UNDEFINED);
         keys.push(s);
     }
+
     let arr = Array::from_values(ctx, keys)?;
-    make_resolved_promise(ctx, arr.into())
+    Promise::from_resolve_value(ctx, arr.into()).map(JSValue::from)
 }
 
 fn get_cache_stores(
     ctx: &mut ScopedContext,
     cc: &CallContext,
 ) -> Result<Rc<RefCell<HashMap<String, CacheData>>>, i32> {
-    let mut this = cc.this();
+    let this = cc.this();
     let p =
         JSCache::payload_of(&this).ok_or_else(|| ctx.throw_type_error("not a Cache instance"))?;
     Ok(p.stores.clone())
@@ -263,7 +264,7 @@ fn js_cache_put(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             );
         }
     }
-    make_resolved_promise(ctx, JSValue::UNDEFINED)
+    Promise::from_resolve_value(ctx, JSValue::UNDEFINED).map(JSValue::from)
 }
 
 fn js_cache_match(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -284,9 +285,9 @@ fn js_cache_match(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     match found {
         Some(snap) => {
             let resp = rebuild_response(ctx, &snap)?;
-            make_resolved_promise(ctx, resp)
+            Promise::from_resolve_value(ctx, resp).map(JSValue::from)
         }
-        None => make_resolved_promise(ctx, JSValue::UNDEFINED),
+        None => Promise::from_resolve_value(ctx, JSValue::UNDEFINED).map(JSValue::from),
     }
 }
 
@@ -321,7 +322,7 @@ fn js_cache_match_all(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         .map(|snap| rebuild_response(ctx, snap))
         .collect::<Result<_, _>>()?;
     let arr = Array::from_values(ctx, arr_elems)?;
-    make_resolved_promise(ctx, arr.into())
+    Promise::from_resolve_value(ctx, arr.into()).map(JSValue::from)
 }
 
 fn js_cache_delete(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -339,7 +340,7 @@ fn js_cache_delete(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             .map(|c| c.entries.remove(&key).is_some())
             .unwrap_or(false)
     };
-    make_resolved_promise(ctx, JSValue::from(removed))
+    Promise::from_resolve_value(ctx, JSValue::from(removed)).map(JSValue::from)
 }
 
 fn js_cache_keys(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -373,7 +374,7 @@ fn js_cache_keys(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         .map(|snap| rebuild_request(ctx, snap))
         .collect::<Result<_, _>>()?;
     let arr = Array::from_values(ctx, arr_elems)?;
-    make_resolved_promise(ctx, arr.into())
+    Promise::from_resolve_value(ctx, arr.into()).map(JSValue::from)
 }
 
 const CACHE_STORAGE_PROTO: &[FieldDef] = &[

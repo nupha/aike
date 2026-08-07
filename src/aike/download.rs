@@ -29,7 +29,6 @@ use crate::{
     whatwg::{
         abort::{JSAbortSignal, signal_is_aborted, signal_notify, signal_reason},
         dom::make_dom_exception,
-        stream::make_rejected_promise,
     },
 };
 
@@ -89,7 +88,7 @@ pub(super) fn js_download(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
                 .create_error_object(ErrorKind::Type, "`url` must be a valid URL", false)
                 .map(JSValue::from)
                 .unwrap_or(JSValue::UNDEFINED);
-            return make_rejected_promise(ctx, reason);
+            return Promise::from_reject_value(ctx, reason).map(JSValue::from);
         }
     };
     let mut cfg = HttpClientConfig::default();
@@ -115,17 +114,15 @@ pub(super) fn js_download(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
                 make_dom_exception(ctx, "AbortError", "The operation was aborted.")
                     .unwrap_or(JSValue::UNDEFINED)
             });
-        return make_rejected_promise(ctx, reason);
+        return Promise::from_reject_value(ctx, reason).map(JSValue::from);
     }
 
     // Result channel; the JS-side closure maps the outcome to a JS value and
     // holds the signal so an *in-flight* abort rejects with its live reason
     // (a JSValue is not Send, so it must be read on the JS thread).
     let result_slot = PromiseResultSlot::<Result<DownloadOutcome, DownloadError>>::new();
-    let promise = Promise::create_with_result_slot(
-        ctx,
-        result_slot.clone(),
-        move |cx, data| -> JSResult {
+    let promise =
+        Promise::create_with_result_slot(ctx, result_slot.clone(), move |cx, data| -> JSResult {
             match data {
                 Ok(DownloadOutcome::Bytes(b)) => {
                     TypedArray::create_from_vec_u8(cx, b).map(JSValue::from)
@@ -146,8 +143,7 @@ pub(super) fn js_download(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
                 }
                 Err(DownloadError::Other(msg)) => Err(cx.throw_internal_error(&msg)),
             }
-        },
-    )?;
+        })?;
 
     // Run the download on tokio, raced against the signal's Notify. When abort
     // wins, the download future is dropped (cancelling the request and the file
@@ -190,9 +186,9 @@ async fn download_impl(
             // the partial temp file.
             let mut guard = TempFileGuard::new(dest.clone());
             let tmp = guard.temp_path().to_path_buf();
-            let mut file = tokio::fs::File::create(&tmp)
-                .await
-                .map_err(|e| DownloadError::Other(format!("cannot create {}: {e}", tmp.display())))?;
+            let mut file = tokio::fs::File::create(&tmp).await.map_err(|e| {
+                DownloadError::Other(format!("cannot create {}: {e}", tmp.display()))
+            })?;
             let mut stream = resp.bytes_stream();
             while let Some(chunk) = stream.next().await {
                 let chunk = chunk.map_err(|e| DownloadError::Other(format!("read failed: {e}")))?;
