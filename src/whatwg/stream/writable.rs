@@ -15,8 +15,7 @@ use zuqe::{
 use crate::USER_CLASS_DEFS;
 
 use super::{
-    RsState, call_opt_method, settle_stream_state,
-    transform::JSTransformStreamDefaultController,
+    RsState, call_opt_method, settle_stream_state, transform::JSTransformStreamDefaultController,
 };
 
 // ============================================================================
@@ -79,23 +78,20 @@ fn js_writable_stream_constructor(ctx: &mut ScopedContext, cc: CallContext) -> J
     let hwm = extract_high_water_mark(ctx, queuing_strategy)?;
 
     let mut stream = JSWritableStream::new_instance(ctx, new_target, WritableStreamPayload::new())?;
-
     let controller = JSWritableStreamDefaultController::new_instance(
         ctx,
         JSValue::UNDEFINED,
         WritableStreamDefaultControllerPayload::new(underlying_sink, Some(stream), hwm),
     )?;
 
-    stream.payload_mut().unwrap().controller = Some(controller);
-
-    // Spec: a throwing underlying start() errors the stream's controller.
-    if call_opt_method(ctx, underlying_sink, "start", &[JSValue::from(controller)]).is_err() {
-        let e = match ctx.take_exception() {
-            zuqe::Exception::Error(v) => v,
-            _ => JSValue::UNDEFINED,
-        };
-        call_opt_method(ctx, JSValue::from(controller), "error", &[e])?;
+    if let Some(o) = underlying_sink.as_object()
+        && let Some(Err(_)) = o.invoke_str_defined(ctx, "start", &[JSValue::from(controller)])?
+    {
+        let e = ctx.take_exception().to_value(ctx);
+        controller.invoke_str(ctx, "error", &[e])?;
     }
+
+    stream.payload_mut().unwrap().controller = Some(controller);
 
     Ok(stream.into())
 }
@@ -146,29 +142,29 @@ fn js_writable_stream_abort(ctx: &mut ScopedContext, cc: CallContext) -> JSResul
         if let Some(p) = stream.payload()
             && let Some(controller) = p.controller
             && let Some(cp) = controller.payload()
+            && let Some(o) = cp.underlying_sink.as_object()
         {
-            // The sink's abort() may reject asynchronously (e.g. return a
-            // Promise.reject). Propagate its result promise verbatim so the
-            // rejection reaches the caller — a synchronous throw is turned into
-            // a rejected promise.
-            match call_opt_method(ctx, cp.underlying_sink, "abort", &[reason]) {
-                Err(_) => {
-                    let e = match ctx.take_exception() {
-                        zuqe::Exception::Error(v) => v,
-                        _ => JSValue::UNDEFINED,
+            match o.invoke_str_defined(ctx, "abort", &[reason]) {
+                Ok(None) => {}
+                Ok(Some(Ok(v))) => {
+                    // The sink's abort() may reject asynchronously (e.g. return a
+                    // Promise.reject). Propagate its result promise verbatim so the
+                    // rejection reaches the caller — a synchronous throw is turned into
+                    // a rejected promise.
+                    return if let Ok(_) = Promise::try_from(v) {
+                        Ok(v)
+                    } else {
+                        Ok(JSValue::from(Promise::from_resolve_value(ctx, v)?))
                     };
+                }
+                Ok(Some(Err(_))) | Err(_) => {
+                    let e = ctx.take_exception().to_value(ctx);
                     return Promise::from_reject_value(ctx, e).map(JSValue::from);
                 }
-                Ok(Some(v)) => {
-                    if let Ok(p) = Promise::try_from(v) {
-                        return Ok(JSValue::from(p));
-                    }
-                    return Ok(JSValue::from(Promise::from_resolve_value(ctx, v)?));
-                }
-                Ok(None) => {}
             }
         }
     }
+
     Promise::from_resolve_value(ctx, JSValue::UNDEFINED).map(JSValue::from)
 }
 

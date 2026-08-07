@@ -25,13 +25,17 @@ use zuqe::{
     gc_lite::{GcTrace, GcTraceCtx},
 };
 
-use crate::http::client::body::BodySource;
-use crate::{USER_CLASS_DEFS, whatwg::stream::extract_high_water_mark};
+use crate::{
+    USER_CLASS_DEFS,
+    http::client::body::BodySource,
+    whatwg::{
+        abort::{JSAbortSignal, signal_is_aborted, signal_reason},
+        dom::make_dom_exception,
+        stream::{extract_high_water_mark, writable::JSWritableStream},
+    },
+};
 
 use super::{QueueEntry, RsState, call_opt_method, make_iterator_result, settle_stream_state};
-use crate::whatwg::abort::{JSAbortSignal, signal_is_aborted, signal_reason};
-use crate::whatwg::dom::make_dom_exception;
-use crate::whatwg::stream::writable::JSWritableStream;
 
 pub(crate) struct ReadableStreamPayload {
     pub(crate) state: RsState,
@@ -408,12 +412,11 @@ fn js_readable_stream_constructor(ctx: &mut ScopedContext, cc: CallContext) -> J
 
     // Spec: a throwing underlying start() errors the stream's controller (the
     // constructor itself does not throw); reject any read against it.
-    if call_opt_method(ctx, underlying_source, "start", &[start_controller]).is_err() {
-        let e = match ctx.take_exception() {
-            zuqe::Exception::Error(v) => v,
-            _ => JSValue::UNDEFINED,
-        };
-        call_opt_method(ctx, start_controller, "error", &[e])?;
+    if let Some(o) = underlying_source.as_object()
+        && let Some(Err(_)) = o.invoke_str_defined(ctx, "start", &[start_controller])?
+    {
+        let e = ctx.take_exception().to_value(ctx);
+        start_controller.invoke_str_defined(ctx, "error", &[e])?;
     }
 
     Ok(instance.into())
@@ -2151,8 +2154,12 @@ fn readable_stream_cancel(
             // Propagate the underlying source's cancel() result (including a
             // rejection) to the reader.cancel() promise — pipeTo relies on this
             // to surface source cancel errors.
-            let cancel_res = call_opt_method(ctx, source, "cancel", &[reason])?;
-            return Ok(cancel_res.unwrap_or(JSValue::UNDEFINED));
+            return if let Some(o) = source.as_object() {
+                o.invoke_str_defined(ctx, "cancel", &[reason])?
+                    .unwrap_or(Ok(JSValue::UNDEFINED))
+            } else {
+                Ok(JSValue::UNDEFINED)
+            };
         }
     }
 
