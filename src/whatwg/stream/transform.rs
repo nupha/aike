@@ -14,11 +14,11 @@ use crate::{
     USER_CLASS_DEFS,
     whatwg::stream::{
         JSReadableStreamDefaultController, ReadableControllerPayload, extract_high_water_mark,
-        readable_stream::{JSReadableStream, ReadableStreamPayload},
+        readable::{JSReadableStream, ReadableStreamPayload},
         transform_stream_default_controller::{
             JSTransformStreamDefaultController, TransformStreamDefaultControllerPayload,
         },
-        writable_stream::{JSWritableStream, WritableStreamPayload},
+        writable::{JSWritableStream, WritableStreamPayload},
         writable_stream_default_controller::{
             JSWritableStreamDefaultController, WritableStreamDefaultControllerPayload,
         },

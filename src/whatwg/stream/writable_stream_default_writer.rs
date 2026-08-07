@@ -13,7 +13,7 @@ use zuqe::{
     gc_lite::{GcTrace, GcTraceCtx},
 };
 
-use crate::{USER_CLASS_DEFS, whatwg::stream::writable_stream::JSWritableStream};
+use crate::{USER_CLASS_DEFS, whatwg::stream::writable::JSWritableStream};
 
 use super::RsState;
 

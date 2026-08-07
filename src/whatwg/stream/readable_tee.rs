@@ -15,11 +15,11 @@ use zuqe::{
     builtins::promise::Promise,
 };
 
-use crate::whatwg::stream::readable_stream::get_readable_stream_payload;
+use crate::whatwg::stream::readable::get_readable_stream_payload;
 
 use super::{
     JSReadableStream, JSReadableStreamDefaultController, ReadableControllerPayload,
-    ReadableStreamPayload, RsState, readable_stream_default_reader::JSReadableStreamDefaultReader,
+    ReadableStreamPayload, RsState, reader::JSReadableStreamDefaultReader,
 };
 
 /// Shared state for a `tee()` split: one source reader feeding two branch
@@ -53,13 +53,6 @@ pub(crate) fn js_readable_stream_tee(ctx: &mut ScopedContext, cc: CallContext) -
     let mut stream = this
         .as_native_object::<JSReadableStream>()
         .ok_or_else(|| ctx.throw_type_error("not a ReadableStream"))?;
-
-    // if p.reader.is_some() {
-    //     return Err(ctx.throw_type_error("ReadableStream is already locked"));
-    // }
-    // let reader = this
-    //     .get_property_str(ctx, "getReader")?
-    //     .call(ctx, this, &[])?;
 
     let reader = stream.acquire_reader(ctx, false)?;
     let p = get_readable_stream_payload(ctx, &this)?;

@@ -22,11 +22,12 @@ use zuqe::{
     gc_lite::{GcTrace, GcTraceCtx},
 };
 
-use crate::{USER_CLASS_DEFS, whatwg::stream::readable_stream::JSReadableStream};
+use crate::{USER_CLASS_DEFS, whatwg::stream::readable::JSReadableStream};
 
 use super::{QueueEntry, RsState, make_iterator_result};
 
-pub(crate) struct ReadableStreamDefaultReaderPayload {
+/// Unified reader for ReadableStreamDefaultReaderPayload, ReadableStreamBYOBReaderPayload
+pub(crate) struct ReaderPayload {
     pub(super) stream: Option<JSReadableStream>,
     pub(crate) closed_promise: Option<Promise>,
     /// True when acquired via `getReader({mode: 'byob'})`. A BYOB read writes
@@ -34,7 +35,7 @@ pub(crate) struct ReadableStreamDefaultReaderPayload {
     pub(super) byob: bool,
 }
 
-impl ReadableStreamDefaultReaderPayload {
+impl ReaderPayload {
     fn gc_trace(&self, gcx: &mut GcTraceCtx) {
         if let Some(ref s) = self.stream {
             s.trace(gcx);
@@ -196,10 +197,10 @@ fn js_reader_constructor(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult 
 def_native_object!(
     "ReadableStreamDefaultReader",
     JSReadableStreamDefaultReader,
-    ReadableStreamDefaultReaderPayload,
+    ReaderPayload,
     READER_PROTO,
     Some(ClassCtorDef::new(js_reader_constructor, 0, false).expose_to_global()),
-    on_payload_gc: ReadableStreamDefaultReaderPayload::gc_trace
+    on_payload_gc: ReaderPayload::gc_trace
 );
 
 /// Copy `chunk` into the BYOB destination `view`, returning the view to hand

@@ -14,8 +14,7 @@ use zuqe::{
 use crate::{
     USER_CLASS_DEFS,
     whatwg::stream::{
-        readable_stream_default_controller::JSReadableStreamDefaultController,
-        writable_stream::JSWritableStream,
+        readable_controller_default::JSReadableStreamDefaultController, writable::JSWritableStream,
     },
 };
 

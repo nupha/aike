@@ -9,27 +9,27 @@
 //! Split one class per file, named after the class in snake case. Shared items
 //! (stream state, queue entry, pending-read slot, queuing strategies) live here.
 
-mod readable_byte_stream_controller;
+mod readable;
 mod readable_controller;
-mod readable_stream;
-mod readable_stream_default_controller;
-mod readable_stream_default_reader;
+mod readable_controller_byte;
+mod readable_controller_default;
 mod readable_tee;
-mod transform_stream;
+mod reader;
+mod transform;
 mod transform_stream_default_controller;
-mod writable_stream;
+mod writable;
 mod writable_stream_default_controller;
 mod writable_stream_default_writer;
 
 pub(crate) use {
-    readable_byte_stream_controller::JSReadableByteStreamController,
+    readable::{JSReadableStream, ReadableStreamPayload, install_readable_stream_statics},
     readable_controller::ReadableControllerPayload,
-    readable_stream::{JSReadableStream, ReadableStreamPayload, install_readable_stream_statics},
-    readable_stream_default_controller::JSReadableStreamDefaultController,
-    readable_stream_default_reader::JSReadableStreamDefaultReader,
-    transform_stream::JSTransformStream,
+    readable_controller_byte::JSReadableByteStreamController,
+    readable_controller_default::JSReadableStreamDefaultController,
+    reader::JSReadableStreamDefaultReader,
+    transform::JSTransformStream,
     transform_stream_default_controller::JSTransformStreamDefaultController,
-    writable_stream::JSWritableStream,
+    writable::JSWritableStream,
     writable_stream_default_controller::JSWritableStreamDefaultController,
     writable_stream_default_writer::JSWritableStreamDefaultWriter,
 };
@@ -59,7 +59,7 @@ pub(crate) struct QueueEntry {
 
 /// Called by the runtime GC to keep stream-related JSValues alive.
 pub(crate) fn gc_trace_stream(gcx: &mut GcTraceCtx) {
-    readable_stream::CHANNEL_STREAMS.with_borrow(|map| {
+    readable::CHANNEL_STREAMS.with_borrow(|map| {
         for (controller, _, _) in map.values() {
             controller.as_object().trace(gcx);
         }

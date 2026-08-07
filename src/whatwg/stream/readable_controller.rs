@@ -328,21 +328,23 @@ impl ReadableControllerPayload {
 
     /// Enqueue a chunk, throwing if the stream is already closed/errored.
     pub(crate) fn enqueue(&self, ctx: &mut ScopedContext, chunk: JSValue) -> JSResult {
-        if let Some(stream_val) = self.stream {
-            if let Some(sp) = stream_val.payload() {
-                if sp.state == RsState::Errored {
-                    return Err(ctx.throw_type_error("cannot enqueue to an errored stream"));
-                }
-                if sp.state == RsState::Closed {
-                    return Err(ctx.throw_type_error("cannot enqueue to a closed stream"));
-                }
+        if let Some(rs) = self.stream
+            && let Some(sp) = rs.payload()
+        {
+            if sp.state == RsState::Errored {
+                return Err(ctx.throw_type_error("cannot enqueue to an errored stream"));
+            }
+            if sp.state == RsState::Closed {
+                return Err(ctx.throw_type_error("cannot enqueue to a closed stream"));
             }
         }
+
         if self.close_requested.get() {
             return Err(ctx.throw_type_error("cannot enqueue after close"));
         }
+
         match &self.kind {
-            ReadableControllerKind::Default { pending_read, .. } => {
+            ReadableControllerKind::Default { .. } => {
                 let resolved = self.resolve_pending_read(ctx, chunk, false);
                 if !resolved {
                     self.queue

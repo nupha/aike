@@ -1,10 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-//! ReadableStream: the stream object itself, `ReadableStream.from()`, `tee()`,
-//! pipe machinery, cancel, async iterator support and the channel/bytes-backed
-//! stream constructors.
-
 use std::{
     cell::{Cell, RefCell},
     collections::HashMap,
@@ -33,10 +29,8 @@ use crate::{
         dom::make_dom_exception,
         stream::{
             extract_high_water_mark,
-            readable_stream_default_reader::{
-                JSReadableStreamDefaultReader, ReadableStreamDefaultReaderPayload,
-            },
-            writable_stream::JSWritableStream,
+            reader::{JSReadableStreamDefaultReader, ReaderPayload},
+            writable::JSWritableStream,
         },
     },
 };
@@ -204,7 +198,7 @@ impl JSReadableStream {
         let reader = JSReadableStreamDefaultReader::new_instance(
             ctx,
             JSValue::UNDEFINED,
-            ReadableStreamDefaultReaderPayload {
+            ReaderPayload {
                 stream: Some(handle),
                 closed_promise: Some(closed_promise),
                 byob,
@@ -1381,7 +1375,7 @@ fn create_stream_async_iterator(ctx: &mut ScopedContext, stream_val: &JSValue) -
         let reader = JSReadableStreamDefaultReader::new_instance(
             ctx,
             JSValue::UNDEFINED,
-            ReadableStreamDefaultReaderPayload {
+            ReaderPayload {
                 stream: Some(JSReadableStream::try_from(*stream_val)?),
                 closed_promise: None,
                 byob: false,
