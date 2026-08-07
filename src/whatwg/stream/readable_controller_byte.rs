@@ -42,7 +42,7 @@ fn js_byte_controller_desired_size(ctx: &mut ScopedContext, cc: CallContext) -> 
     let this = cc.this();
     let p = get_readable_controller(ctx, &this)?;
     let size = p.desired_size(ctx)?;
-    if size == u32::MAX {
+    if size == i32::MAX {
         Ok(JSValue::NULL)
     } else {
         Ok(JSValue::from(size))

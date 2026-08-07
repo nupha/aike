@@ -1,9 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-//! ReadableStreamDefaultReader: the reader handle returned by
-//! `ReadableStream.getReader()`.
-
 use std::{
     cell::RefCell,
     rc::Rc,
@@ -42,6 +39,25 @@ impl ReaderPayload {
         }
         if let Some(ref cp) = self.closed_promise {
             cp.trace(gcx);
+        }
+    }
+
+    /// Release the lock on the underlying stream: detach the reader so the
+    /// stream can be acquired again. No-op if the reader is already released.
+    pub(crate) fn release_lock(&mut self) {
+        if let Some(mut rs) = self.stream.take()
+            && let Some(sp) = rs.payload_mut()
+        {
+            sp.reader = None;
+        }
+    }
+
+    /// Cancel the underlying stream with `reason`. Errors if the reader has
+    /// already been released (no stream attached).
+    pub(crate) fn cancel(&self, ctx: &mut ScopedContext, reason: JSValue) -> Result<Promise, i32> {
+        match self.stream {
+            Some(mut rs) => rs.payload_mut().unwrap().cancel(ctx, reason),
+            None => Err(ctx.throw_type_error("reader released")),
         }
     }
 
@@ -91,7 +107,7 @@ impl ReaderPayload {
                 let mut q = cp.queue().borrow_mut();
                 let entry = q.remove(0);
                 let total = cp.queue_total_size();
-                cp.set_queue_total_size(total - entry.size as u32);
+                cp.set_queue_total_size(total.saturating_sub(entry.size));
 
                 // BYOB: copy as much of the chunk as fits into the caller's view
                 // and push the remainder back so the next read continues where
@@ -176,33 +192,6 @@ impl ReaderPayload {
     }
 }
 
-const READER_PROTO: &[FieldDef] = &[
-    FieldDef::FUNC("read", 0, js_reader_read, 0),
-    FieldDef::FUNC("cancel", 1, js_reader_cancel, 0),
-    FieldDef::FUNC("releaseLock", 0, js_reader_release_lock, 0),
-    FieldDef::GETSET("closed", Some(js_reader_closed), None, 0),
-    FieldDef::STR(
-        "[Symbol.toStringTag]",
-        "ReadableStreamDefaultReader",
-        zuqe::JS_PROP_CONFIGURABLE,
-    ),
-];
-
-fn js_reader_constructor(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
-    Err(ctx.throw_type_error(
-        "ReadableStreamDefaultReader must be obtained via ReadableStream.getReader()",
-    ))
-}
-
-def_native_object!(
-    "ReadableStreamDefaultReader",
-    JSReadableStreamDefaultReader,
-    ReaderPayload,
-    READER_PROTO,
-    Some(ClassCtorDef::new(js_reader_constructor, 0, false).expose_to_global()),
-    on_payload_gc: ReaderPayload::gc_trace
-);
-
 /// Copy `chunk` into the BYOB destination `view`, returning the view to hand
 /// back to the caller. Bytes that do not fit are pushed to the front of `queue`
 /// so the following read resumes from there.
@@ -233,7 +222,7 @@ fn byob_fill_view(
             0,
             QueueEntry {
                 chunk: JSValue::from(rest),
-                size: 1.0,
+                size: 1,
             },
         );
     }
@@ -241,27 +230,63 @@ fn byob_fill_view(
     // Return a view over the same buffer covering only the filled range, so the
     // caller can chain `value.buffer` plus `value.byteLength` as an offset.
     // `subarray` keeps the underlying buffer shared, unlike a fresh array.
-    let view_val = JSValue::from(view);
-    view_val.get_property_str(ctx, "subarray")?.call(
-        ctx,
-        view_val,
-        &[JSValue::from(0.0), (n as f64).into()],
-    )
+    view.invoke_str(ctx, "subarray", &[JSValue::ZERO, (n as u32).into()])
 }
+
+/// Get the `&ReaderPayload` attached to a `ReadableStreamDefaultReader` value.
+pub(crate) fn get_read_payload<'a>(
+    ctx: &mut ScopedContext,
+    this: &'a JSValue,
+) -> Result<&'a ReaderPayload, i32> {
+    JSReadableStreamDefaultReader::payload_of(this)
+        .ok_or_else(|| ctx.throw_type_error("not a ReadableStreamDefaultReader"))
+}
+
+/// Get the `&mut ReaderPayload` attached to a `ReadableStreamDefaultReader` value.
+pub(crate) fn get_read_payload_mut<'a>(
+    ctx: &mut ScopedContext,
+    this: &'a mut JSValue,
+) -> Result<&'a mut ReaderPayload, i32> {
+    JSReadableStreamDefaultReader::payload_mut_of(this)
+        .ok_or_else(|| ctx.throw_type_error("not a ReadableStreamDefaultReader"))
+}
+
+const READER_PROTO: &[FieldDef] = &[
+    FieldDef::FUNC("read", 0, js_reader_read, 0),
+    FieldDef::FUNC("cancel", 1, js_reader_cancel, 0),
+    FieldDef::FUNC("releaseLock", 0, js_reader_release_lock, 0),
+    FieldDef::GETSET("closed", Some(js_reader_closed), None, 0),
+    FieldDef::STR(
+        "[Symbol.toStringTag]",
+        "ReadableStreamDefaultReader",
+        zuqe::JS_PROP_CONFIGURABLE,
+    ),
+];
+
+fn js_reader_constructor(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
+    Err(ctx.throw_type_error(
+        "ReadableStreamDefaultReader must be obtained via ReadableStream.getReader()",
+    ))
+}
+
+def_native_object!(
+    "ReadableStreamDefaultReader",
+    JSReadableStreamDefaultReader,
+    ReaderPayload,
+    READER_PROTO,
+    Some(ClassCtorDef::new(js_reader_constructor, 0, false).expose_to_global()),
+    on_payload_gc: ReaderPayload::gc_trace
+);
 
 fn js_reader_read(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
-    let p = JSReadableStreamDefaultReader::payload_of(&this)
-        .ok_or_else(|| ctx.throw_type_error("not a ReadableStreamDefaultReader"))?;
+    let p = get_read_payload(ctx, &this)?;
 
     // A BYOB read takes the destination view as its only argument; the chunk is
     // written into that view's own buffer region rather than a fresh array.
     let byob_view = if p.byob {
         let view = cc.arg(0);
-        let obj = view
-            .as_object()
-            .ok_or_else(|| ctx.throw_type_error("view must be a TypedArray"))?;
-        let ta = TypedArray::try_from(obj)
+        let ta = TypedArray::try_from(view)
             .map_err(|_| ctx.throw_type_error("view must be a TypedArray"))?;
         if ta.length() == 0 {
             return Err(ctx.throw_type_error("view must have non-zero length"));
@@ -277,34 +302,20 @@ fn js_reader_read(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 fn js_reader_cancel(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let reason = cc.arg(0);
-    let p = JSReadableStreamDefaultReader::payload_of(&this)
-        .ok_or_else(|| ctx.throw_type_error("not a ReadableStreamDefaultReader"))?;
-
-    match p.stream {
-        Some(mut rs) => rs
-            .payload_mut()
-            .unwrap()
-            .cancel(ctx, reason)
-            .map(JSValue::from),
-        None => Err(ctx.throw_type_error("reader released")),
-    }
+    let p = get_read_payload(ctx, &this)?;
+    p.cancel(ctx, reason).map(JSValue::from)
 }
 
-fn js_reader_release_lock(_: &mut ScopedContext, cc: CallContext) -> JSResult {
+fn js_reader_release_lock(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut this = cc.this();
-    if let Some(p) = JSReadableStreamDefaultReader::payload_mut_of(&mut this)
-        && let Some(mut stream) = p.stream.take()
-        && let Some(sp) = stream.payload_mut()
-    {
-        sp.reader = None;
-    }
+    let p = get_read_payload_mut(ctx, &mut this)?;
+    p.release_lock();
     Ok(JSValue::UNDEFINED)
 }
 
 fn js_reader_closed(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
-    let p = JSReadableStreamDefaultReader::payload_of(&this)
-        .ok_or_else(|| ctx.throw_type_error("not a ReadableStream reader"))?;
+    let p = get_read_payload(ctx, &this)?;
     if let Some(cp) = p.closed_promise {
         return Ok(JSValue::from(cp));
     }
@@ -320,7 +331,7 @@ fn register_readable_stream_default_reader(rt: &mut Runtime) -> Result<ClassID, 
 /// so every JS value it can touch later must be traced from here, including the
 /// cells it mutates (`pending` read promise, captured error value).
 struct ReaderDrainRoots {
-    reader: JSValue,
+    reader: JSReadableStreamDefaultReader,
     pending: Rc<RefCell<Option<Promise>>>,
     raw_err: Rc<RefCell<Option<JSValue>>>,
 }
@@ -356,9 +367,8 @@ impl JSReadableStreamDefaultReader {
 
         // Holds the in-flight read() promise between polls.
         let pending = Rc::new(RefCell::new(None::<Promise>));
-        let start = Instant::now();
         let roots = ReaderDrainRoots {
-            reader: JSValue::from(reader),
+            reader,
             pending: pending.clone(),
             raw_err: raw_err.clone(),
         };
@@ -367,6 +377,7 @@ impl JSReadableStreamDefaultReader {
         // (not `FnMut`), so interior mutability via RefCell is required to grow
         // `buf` on each turn.
         let buf = Rc::new(RefCell::new(Vec::<u8>::new()));
+        let start = Instant::now();
 
         ctx.queue_job(
             move |cx| {

@@ -18,7 +18,7 @@ mod reader;
 mod transform;
 mod transform_stream_default_controller;
 mod writable;
-mod writable_stream_default_controller;
+mod writable_controller;
 mod writable_stream_default_writer;
 
 pub(crate) use {
@@ -30,7 +30,7 @@ pub(crate) use {
     transform::JSTransformStream,
     transform_stream_default_controller::JSTransformStreamDefaultController,
     writable::JSWritableStream,
-    writable_stream_default_controller::JSWritableStreamDefaultController,
+    writable_controller::JSWritableStreamDefaultController,
     writable_stream_default_writer::JSWritableStreamDefaultWriter,
 };
 
@@ -54,14 +54,14 @@ pub(crate) enum RsState {
 
 pub(crate) struct QueueEntry {
     pub(crate) chunk: JSValue,
-    pub(crate) size: f64,
+    pub(crate) size: i32,
 }
 
 /// Called by the runtime GC to keep stream-related JSValues alive.
 pub(crate) fn gc_trace_stream(gcx: &mut GcTraceCtx) {
     readable::CHANNEL_STREAMS.with_borrow(|map| {
-        for (controller, _, _) in map.values() {
-            controller.as_object().trace(gcx);
+        for (c, _, _) in map.values() {
+            c.as_object().trace(gcx);
         }
     });
 }
@@ -90,8 +90,10 @@ def_native_object!(
 fn js_byte_length_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let new_target = cc.this();
     let init_val = cc.arg(0);
+
     let mut instance = JSByteLengthQueuingStrategy::new_instance(ctx, new_target)?;
     let obj = queuing_strategy_init(ctx, init_val)?;
+
     let hwm = obj.get_property_str(ctx, "highWaterMark")?;
     if hwm.is_undefined() {
         return Err(ctx.throw_type_error("highWaterMark is required"));
@@ -133,7 +135,7 @@ fn queuing_strategy_init<'a>(
 pub(crate) fn extract_high_water_mark(
     ctx: &mut ScopedContext,
     strategy: JSValue,
-) -> Result<u32, i32> {
+) -> Result<i32, i32> {
     if strategy.is_undefined() || strategy.is_null() {
         return Ok(1);
     }
@@ -161,10 +163,10 @@ pub(crate) fn extract_high_water_mark(
     if hwm_i < 0 {
         return Err(ctx.throw_range_error("highWaterMark must be non-negative"));
     }
-    if hwm_i > u32::MAX as i64 {
-        return Err(ctx.throw_range_error("highWaterMark must fit in u32"));
+    if hwm_i > i32::MAX as i64 {
+        return Err(ctx.throw_range_error("highWaterMark must fit in i32"));
     }
-    Ok(hwm_i as u32)
+    Ok(hwm_i as i32)
 }
 
 // ============================================================================

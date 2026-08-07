@@ -15,9 +15,7 @@ use crate::{
     USER_CLASS_DEFS,
     whatwg::stream::{
         extract_high_water_mark,
-        writable_stream_default_controller::{
-            JSWritableStreamDefaultController, WritableStreamDefaultControllerPayload,
-        },
+        writable_controller::{JSWritableStreamDefaultController, WritableControllerPayload},
         writable_stream_default_writer::{
             JSWritableStreamDefaultWriter, WritableStreamDefaultWriterPayload,
         },
@@ -144,7 +142,7 @@ fn js_writable_stream_constructor(ctx: &mut ScopedContext, cc: CallContext) -> J
     let controller = JSWritableStreamDefaultController::new_instance(
         ctx,
         JSValue::UNDEFINED,
-        WritableStreamDefaultControllerPayload::new(underlying_sink, Some(stream), hwm),
+        WritableControllerPayload::new(underlying_sink, Some(stream), hwm as u32),
     )?;
 
     if let Some(o) = underlying_sink.as_object()

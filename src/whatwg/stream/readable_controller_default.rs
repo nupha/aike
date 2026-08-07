@@ -62,9 +62,10 @@ fn js_controller_desired_size(ctx: &mut ScopedContext, cc: CallContext) -> JSRes
     let this = cc.this();
     let p = get_readable_controller(ctx, &this)?;
 
-    // Spec: errored -> null, closed -> 0, else highWaterMark - queueTotalSize.
+    // Spec: errored -> null, closed -> 0, else highWaterMark - queueTotalSize
+    // (can be negative when the queue is over-full).
     let size = p.desired_size(ctx)?;
-    if size == u32::MAX {
+    if size == i32::MAX {
         Ok(JSValue::NULL)
     } else {
         Ok(JSValue::from(size))

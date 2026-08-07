@@ -1,17 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-use std::error::Error as _;
-use std::time::Duration;
+use std::{error::Error, time::Duration};
 
 use base64::Engine;
-use reqwest::cookie::CookieStore as _;
+use reqwest::cookie::CookieStore;
 use zuqe::{ErrorKind, Exception, JSResult, JSValue, ScopedContext};
 
 use super::{
     cors::{
-        check_preflight, cors_safelisted_method, is_cross_origin, preflight_cache_hit,
-        preflight_cache_key, preflight_cache_store, should_append_origin,
+        check_preflight, cors_safelisted_method, preflight_cache_hit, preflight_cache_key,
+        preflight_cache_store, should_append_origin,
     },
     headers::HeaderList,
 };
@@ -142,6 +141,7 @@ fn decode_data_url(url: &str) -> Result<(String, Vec<u8>), String> {
     } else {
         media_type.to_string()
     };
+
     // Payload is percent-decoded unless base64.
     let bytes = if is_base64 {
         let trimmed: String = data.chars().filter(|c| !c.is_whitespace()).collect();

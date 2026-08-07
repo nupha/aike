@@ -21,18 +21,14 @@ use crate::{
 
 use super::RsState;
 
-// ============================================================================
-// WritableStreamDefaultController
-// ============================================================================
-
-pub(crate) struct WritableStreamDefaultControllerPayload {
+pub(crate) struct WritableControllerPayload {
     pub(crate) stream: Option<JSWritableStream>,
     pub(crate) underlying_sink: JSValue,
     pub(crate) transform_controller: Option<JSTransformStreamDefaultController>,
     pub(crate) high_water_mark: u32,
 }
 
-impl WritableStreamDefaultControllerPayload {
+impl WritableControllerPayload {
     pub(crate) fn new(
         underlying_sink: JSValue,
         stream: Option<JSWritableStream>,
@@ -73,10 +69,10 @@ fn js_writable_controller_constructor(ctx: &mut ScopedContext, _cc: CallContext)
 def_native_object!(
     "WritableStreamDefaultController",
     JSWritableStreamDefaultController,
-    WritableStreamDefaultControllerPayload,
+    WritableControllerPayload,
     WRITABLE_CONTROLLER_PROTO,
     Some(ClassCtorDef::new(js_writable_controller_constructor, 0, false).expose_to_global()),
-    on_payload_gc: WritableStreamDefaultControllerPayload::gc_trace
+    on_payload_gc: WritableControllerPayload::gc_trace
 );
 
 fn js_writable_controller_error(_ctx: &mut ScopedContext, cc: CallContext) -> JSResult {

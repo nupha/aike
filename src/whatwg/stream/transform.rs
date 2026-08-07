@@ -19,9 +19,7 @@ use crate::{
             JSTransformStreamDefaultController, TransformStreamDefaultControllerPayload,
         },
         writable::{JSWritableStream, WritableStreamPayload},
-        writable_stream_default_controller::{
-            JSWritableStreamDefaultController, WritableStreamDefaultControllerPayload,
-        },
+        writable_controller::{JSWritableStreamDefaultController, WritableControllerPayload},
     },
 };
 
@@ -88,11 +86,7 @@ fn js_transform_stream_constructor(ctx: &mut ScopedContext, cc: CallContext) -> 
     let rc = JSReadableStreamDefaultController::new_instance(
         ctx,
         JSValue::UNDEFINED,
-        ReadableControllerPayload::new_default(
-            JSValue::UNDEFINED,
-            Some(readable),
-            readable_hwm as u32,
-        ),
+        ReadableControllerPayload::new_default(JSValue::UNDEFINED, Some(readable), readable_hwm),
     )?;
     readable.payload_mut().unwrap().controller.replace(rc);
 
@@ -100,7 +94,7 @@ fn js_transform_stream_constructor(ctx: &mut ScopedContext, cc: CallContext) -> 
     let mut writable =
         JSWritableStream::new_instance(ctx, JSValue::UNDEFINED, WritableStreamPayload::new())?;
     let wc_payload =
-        WritableStreamDefaultControllerPayload::new(transformer, Some(writable), writable_hwm);
+        WritableControllerPayload::new(transformer, Some(writable), writable_hwm as u32);
     let wcv = JSWritableStreamDefaultController::new_instance(ctx, JSValue::UNDEFINED, wc_payload)?;
     writable.payload_mut().unwrap().controller.replace(wcv);
 

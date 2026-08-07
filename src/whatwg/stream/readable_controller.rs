@@ -53,8 +53,8 @@ pub(crate) struct ReadableControllerPayload {
     pub(crate) stream: Option<JSReadableStream>,
     pub(crate) underlying_source: JSValue,
     pub(crate) queue: Rc<RefCell<Vec<QueueEntry>>>,
-    pub(crate) queue_total_size: Rc<Cell<u32>>,
-    pub(crate) high_water_mark: u32,
+    pub(crate) queue_total_size: Rc<Cell<i32>>,
+    pub(crate) high_water_mark: i32,
     pub(crate) close_requested: Cell<bool>,
     pub(crate) kind: ReadableControllerKind,
 }
@@ -63,7 +63,7 @@ impl ReadableControllerPayload {
     pub(crate) fn new_default(
         underlying_source: JSValue,
         stream: Option<JSReadableStream>,
-        high_water_mark: u32,
+        high_water_mark: i32,
     ) -> Self {
         Self {
             stream,
@@ -85,7 +85,7 @@ impl ReadableControllerPayload {
     pub(crate) fn new_byte(
         underlying_source: JSValue,
         stream: Option<JSReadableStream>,
-        high_water_mark: u32,
+        high_water_mark: i32,
     ) -> Self {
         Self {
             stream,
@@ -153,7 +153,7 @@ impl ReadableControllerPayload {
         }
     }
 
-    pub(crate) fn high_water_mark(&self) -> u32 {
+    pub(crate) fn high_water_mark(&self) -> i32 {
         self.high_water_mark
     }
 
@@ -170,11 +170,11 @@ impl ReadableControllerPayload {
         &self.queue
     }
 
-    pub(crate) fn queue_total_size(&self) -> u32 {
+    pub(crate) fn queue_total_size(&self) -> i32 {
         self.queue_total_size.get()
     }
 
-    pub(crate) fn set_queue_total_size(&self, v: u32) {
+    pub(crate) fn set_queue_total_size(&self, v: i32) {
         self.queue_total_size.set(v);
     }
 
@@ -347,17 +347,13 @@ impl ReadableControllerPayload {
             ReadableControllerKind::Default { .. } => {
                 let resolved = self.resolve_pending_read(ctx, chunk, false);
                 if !resolved {
-                    self.queue
-                        .borrow_mut()
-                        .push(QueueEntry { chunk, size: 1.0 });
+                    self.queue.borrow_mut().push(QueueEntry { chunk, size: 1 });
                     self.queue_total_size.set(self.queue_total_size.get() + 1);
                 }
                 Ok(JSValue::UNDEFINED)
             }
             ReadableControllerKind::Byte { .. } => {
-                self.queue
-                    .borrow_mut()
-                    .push(QueueEntry { chunk, size: 1.0 });
+                self.queue.borrow_mut().push(QueueEntry { chunk, size: 1 });
                 self.queue_total_size.set(self.queue_total_size.get() + 1);
                 Ok(JSValue::UNDEFINED)
             }
@@ -440,14 +436,15 @@ impl ReadableControllerPayload {
         Ok(())
     }
 
-    /// Spec: errored -> null (signalled as `u32::MAX`), closed -> 0, else
-    /// highWaterMark - queueTotalSize.
-    pub(crate) fn desired_size(&self, _: &mut ScopedContext) -> Result<u32, i32> {
+    /// Spec: errored -> null (signalled as `i32::MAX`), closed -> 0, else
+    /// highWaterMark - queueTotalSize. The result can be negative when the
+    /// queue is over-full; that is the spec-mandated backpressure signal.
+    pub(crate) fn desired_size(&self, _: &mut ScopedContext) -> Result<i32, i32> {
         if let Some(s) = self.stream
             && let Some(sp) = s.payload()
         {
             match sp.state {
-                RsState::Errored => return Ok(u32::MAX),
+                RsState::Errored => return Ok(i32::MAX),
                 RsState::Closed => return Ok(0),
                 RsState::Readable => {}
             }

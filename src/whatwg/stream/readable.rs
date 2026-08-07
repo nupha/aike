@@ -295,7 +295,7 @@ fn js_readable_stream_constructor(ctx: &mut ScopedContext, cc: CallContext) -> J
                     underlying_source
                 },
                 Some(instance),
-                hwm as u32,
+                hwm,
             ),
         )?;
         bc.into()
