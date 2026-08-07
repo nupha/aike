@@ -235,32 +235,6 @@ pub(crate) fn make_iterator_result(
     Ok(JSValue::from(obj))
 }
 
-/// Call an optionally-present, callable method `name` on `obj`.
-///
-/// `this` is bound to `obj` (all call sites pass the receiver as `this`).
-/// Returns `Some(call result)` if the method existed and was invoked,
-/// `None` if `obj` is not an object / the property was absent / not callable.
-///
-/// Thin convenience over zuqe's `Object::invoke_callable`: that returns
-/// `Option<JSResult>` (a nested Result), whereas callers here want the plain
-/// `Option<JSValue>`. `Atom::from_static` gives the `&'static str -> Atom`
-/// constructor.
-pub(crate) fn call_opt_method(
-    ctx: &mut ScopedContext,
-    obj: JSValue,
-    name: &'static str,
-    args: &[JSValue],
-) -> Result<Option<JSValue>, i32> {
-    let Some(o) = obj.as_object() else {
-        return Ok(None);
-    };
-    let atom = zuqe::Atom::from_static(ctx, name)?;
-    match o.invoke_callable(ctx, atom, args)? {
-        Some(r) => Ok(Some(r?)),
-        None => Ok(None),
-    }
-}
-
 /// Set a stream's state (and `stored_error` when errored), then settle the
 /// peer reader/writer's `closed_promise` accordingly.
 ///

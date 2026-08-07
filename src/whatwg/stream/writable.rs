@@ -6,7 +6,8 @@
 use crate::whatwg::stream::extract_high_water_mark;
 use linkme::distributed_slice;
 use zuqe::{
-    CallContext, ClassCtorDef, ClassID, FieldDef, JSResult, JSValue, Runtime, ScopedContext,
+    CallContext, Callback, ClassCtorDef, ClassID, FieldDef, JSResult, JSValue, Runtime,
+    ScopedContext,
     builtins::promise::Promise,
     def_native_object,
     gc_lite::{GcTrace, GcTraceCtx},
@@ -14,9 +15,7 @@ use zuqe::{
 
 use crate::USER_CLASS_DEFS;
 
-use super::{
-    RsState, call_opt_method, settle_stream_state, transform::JSTransformStreamDefaultController,
-};
+use super::{RsState, settle_stream_state, transform::JSTransformStreamDefaultController};
 
 // ============================================================================
 // WritableStream
@@ -142,15 +141,11 @@ fn js_writable_stream_abort(ctx: &mut ScopedContext, cc: CallContext) -> JSResul
         if let Some(p) = stream.payload()
             && let Some(controller) = p.controller
             && let Some(cp) = controller.payload()
-            && let Some(o) = cp.underlying_sink.as_object()
+            && let Some(sink) = cp.underlying_sink.as_object()
         {
-            match o.invoke_str_defined(ctx, "abort", &[reason]) {
+            match sink.invoke_str_callable(ctx, "abort", &[reason]) {
                 Ok(None) => {}
                 Ok(Some(Ok(v))) => {
-                    // The sink's abort() may reject asynchronously (e.g. return a
-                    // Promise.reject). Propagate its result promise verbatim so the
-                    // rejection reaches the caller — a synchronous throw is turned into
-                    // a rejected promise.
                     return if let Ok(_) = Promise::try_from(v) {
                         Ok(v)
                     } else {
@@ -319,12 +314,10 @@ fn js_writer_write(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             }
 
             // Normal writable path
-            if let Some(result) = call_opt_method(
-                ctx,
-                cp.underlying_sink,
-                "write",
-                &[chunk, controller.into()],
-            )? {
+            if let Some(sink) = cp.underlying_sink.as_object()
+                && let Some(Ok(result)) =
+                    sink.invoke_str_callable(ctx, "write", &[chunk, controller.into()])?
+            {
                 if result.is_object() {
                     return Ok(result);
                 }
@@ -362,54 +355,137 @@ fn js_writer_close(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         }
     }
 
-    if let Some(sp) = stream_val.payload_mut() {
-        if let Some(controller) = sp.controller
-            && let Some(cp) = controller.payload()
-        {
-            // TransformStream flush path: call transformer.flush(transformController).
-            let mut close_err: Option<JSValue> = None;
-            if let Some(tc) = cp.transform_controller
-                && let Some(tcp) = tc.payload()
-                && let Some(_obj) = tcp.transformer.as_object()
-            {
-                // If flush() throws, the close promise must reject with that error.
-                if call_opt_method(ctx, tcp.transformer, "flush", &[JSValue::from(tc)]).is_err() {
-                    close_err = Some(match ctx.take_exception() {
-                        zuqe::Exception::Error(v) => v,
-                        _ => JSValue::UNDEFINED,
-                    });
-                }
+    // Copy the stream handle before borrowing stream_val via payload_mut, so it
+    // can be handed to the async flush handlers below.
+    let stream_handle = stream_val;
+    if let Some(sp) = stream_val.payload_mut()
+        && let Some(controller) = sp.controller
+        && let Some(cp) = controller.payload()
+    {
+        // TransformStream calls `flush`; a plain WritableStream calls `close`.
+        // These are mutually exclusive: flush is the close equivalent for a
+        // TransformStream, so its underlying sink's close() is never invoked.
+        let mut close_err: Option<JSValue> = None;
+        let mut flush_promise: Option<Promise> = None;
 
-                // After flush, close the readable side of the transform stream
-                if let Some(rcp) = tcp.readable_controller.payload() {
-                    rcp.close_requested.set(true);
-                    rcp.resolve_pending_read(ctx, JSValue::UNDEFINED, true);
-                    if rcp.queue.borrow().is_empty()
-                        && let Some(mut stream_val) = rcp.stream
-                        && let Some(rsp) = stream_val.payload_mut()
-                    {
-                        rsp.state = RsState::Closed;
+        if let Some(tc) = cp.transform_controller
+            && let Some(tcp) = tc.payload()
+            && let Some(tr) = tcp.transformer.as_object()
+        {
+            // If flush() throws synchronously or returns a rejected promise that
+            // is already settled, the close promise must reject with that error.
+            match tr.invoke_str_callable(ctx, "flush", &[tc.into()]) {
+                Ok(Some(Err(_))) | Err(_) => {
+                    close_err = Some(ctx.take_exception().to_value(ctx));
+                }
+                Ok(Some(Ok(v))) => {
+                    // flush may return a promise: await it so an async rejection
+                    // also rejects the close promise (spec: flush rejection ->
+                    // both sides errored).
+                    if let Ok(p) = Promise::try_from(v) {
+                        flush_promise = Some(p);
                     }
                 }
-            } else if call_opt_method(ctx, cp.underlying_sink, "close", &[]).is_err() {
-                // Underlying sink close() threw; reject the close promise.
-                close_err = Some(match ctx.take_exception() {
-                    zuqe::Exception::Error(v) => v,
-                    _ => JSValue::UNDEFINED,
-                });
+                _ => {}
             }
 
-            if let Some(e) = close_err {
-                sp.state = RsState::Errored;
-                sp.stored_error = e;
-                return Promise::from_reject_value(ctx, e).map(JSValue::from);
+            // Synchronous flush (no promise returned): close the readable side now.
+            if flush_promise.is_none()
+                && let Some(rcp) = tcp.readable_controller.payload()
+            {
+                rcp.close_requested.set(true);
+                rcp.resolve_pending_read(ctx, JSValue::UNDEFINED, true);
+                if rcp.queue.borrow().is_empty()
+                    && let Some(mut rs_val) = rcp.stream
+                    && let Some(rsp) = rs_val.payload_mut()
+                {
+                    rsp.state = RsState::Closed;
+                }
             }
+        } else if let Some(sink) = cp.underlying_sink.as_object()
+            && matches!(
+                sink.invoke_str_callable(ctx, "close", &[]),
+                Ok(Some(Err(_))) | Err(_)
+            )
+        {
+            close_err = Some(ctx.take_exception().to_value(ctx));
+        }
+
+        if let Some(e) = close_err {
+            sp.state = RsState::Errored;
+            sp.stored_error = e;
+            return Promise::from_reject_value(ctx, e).map(JSValue::from);
+        }
+
+        // flush returned a promise: the close promise settles with it, and the
+        // readable side / state are only finalized after flush fulfills.
+        if let Some(mut fp) = flush_promise {
+            let ok = ctx
+                .create_native_function_with_data(
+                    Callback::Func(flush_close_ok),
+                    "flushCloseOk",
+                    0,
+                    0,
+                    [JSValue::from(stream_handle)].into(),
+                )?
+                .into();
+            let err = ctx
+                .create_native_function_with_data(
+                    Callback::Func(flush_close_err),
+                    "flushCloseErr",
+                    1,
+                    0,
+                    [JSValue::from(stream_handle)].into(),
+                )?
+                .into();
+            fp.then(ctx, ok, err)?;
+            return Ok(JSValue::from(fp));
         }
 
         sp.state = RsState::Closed;
     }
 
     Promise::from_resolve_value(ctx, JSValue::UNDEFINED).map(JSValue::from)
+}
+
+// flush fulfilled: close the readable side of the transform stream and mark
+// the writable stream closed, per spec (close after flush resolves).
+fn flush_close_ok(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let mut stream_val = cc.data(0);
+    if let Some(sp) = JSWritableStream::payload_mut_of(&mut stream_val)
+        && let Some(controller) = sp.controller
+        && let Some(cp) = controller.payload()
+        && let Some(tc) = cp.transform_controller
+        && let Some(tcp) = tc.payload()
+        && let Some(rcp) = tcp.readable_controller.payload()
+    {
+        rcp.close_requested.set(true);
+        rcp.resolve_pending_read(ctx, JSValue::UNDEFINED, true);
+        if rcp.queue.borrow().is_empty()
+            && let Some(mut rs_val) = rcp.stream
+            && let Some(rsp) = rs_val.payload_mut()
+        {
+            rsp.state = RsState::Closed;
+        }
+        sp.state = RsState::Closed;
+    }
+    Ok(JSValue::UNDEFINED)
+}
+
+// flush rejected: error the writable stream with the flush error. Returning a
+// rejected promise makes the close promise reject with that error.
+fn flush_close_err(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let mut stream_val = cc.data(0);
+    let err = cc.arg(0);
+    if let Some(sp) = JSWritableStream::payload_mut_of(&mut stream_val)
+        && let Some(controller) = sp.controller
+        && let Some(cp) = controller.payload()
+        && let Some(_tc) = cp.transform_controller
+    {
+        sp.state = RsState::Errored;
+        sp.stored_error = err;
+    }
+    Promise::from_reject_value(ctx, err).map(JSValue::from)
 }
 
 fn js_writer_abort(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -425,26 +501,21 @@ fn js_writer_abort(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         if let Some(sp) = stream_val.payload()
             && let Some(controller) = sp.controller
             && let Some(cp) = controller.payload()
+            && let Some(sink) = cp.underlying_sink.as_object()
         {
-            // The sink's abort() may reject asynchronously (e.g. return a
-            // Promise.reject). Propagate its result promise verbatim so the
-            // rejection reaches pipeTo — a synchronous throw is turned into a
-            // rejected promise.
-            match call_opt_method(ctx, cp.underlying_sink, "abort", &[reason]) {
-                Err(_) => {
-                    let e = match ctx.take_exception() {
-                        zuqe::Exception::Error(v) => v,
-                        _ => JSValue::UNDEFINED,
+            match sink.invoke_str_callable(ctx, "abort", &[reason]) {
+                Ok(Some(Ok(v))) => {
+                    return if let Ok(_) = Promise::try_from(v) {
+                        return Ok(v);
+                    } else {
+                        Ok(JSValue::from(Promise::from_resolve_value(ctx, v)?))
                     };
-                    return Promise::from_reject_value(ctx, e).map(JSValue::from);
-                }
-                Ok(Some(v)) => {
-                    if let Ok(p) = Promise::try_from(v) {
-                        return Ok(JSValue::from(p));
-                    }
-                    return Ok(JSValue::from(Promise::from_resolve_value(ctx, v)?));
                 }
                 Ok(None) => {}
+                Ok(Some(Err(_))) | Err(_) => {
+                    let e = ctx.take_exception().to_value(ctx);
+                    return Promise::from_reject_value(ctx, e).map(JSValue::from);
+                }
             }
         }
     }

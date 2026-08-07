@@ -35,7 +35,7 @@ use crate::{
     },
 };
 
-use super::{QueueEntry, RsState, call_opt_method, make_iterator_result, settle_stream_state};
+use super::{QueueEntry, RsState, make_iterator_result, settle_stream_state};
 
 pub(crate) struct ReadableStreamPayload {
     pub(crate) state: RsState,
@@ -2012,14 +2012,14 @@ fn js_controller_close(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         .ok_or_else(|| ctx.throw_type_error("not a ReadableStreamDefaultController"))?;
 
     // Spec: close must throw when the stream is already closed or errored.
-    if let Some(stream_val) = p.stream {
-        if let Some(sp) = stream_val.payload() {
-            if sp.state == RsState::Errored {
-                return Err(ctx.throw_type_error("cannot close an errored stream"));
-            }
-            if sp.state == RsState::Closed {
-                return Err(ctx.throw_type_error("cannot close a closed stream"));
-            }
+    if let Some(stream_val) = p.stream
+        && let Some(sp) = stream_val.payload()
+    {
+        if sp.state == RsState::Errored {
+            return Err(ctx.throw_type_error("cannot close an errored stream"));
+        }
+        if sp.state == RsState::Closed {
+            return Err(ctx.throw_type_error("cannot close a closed stream"));
         }
     }
 
