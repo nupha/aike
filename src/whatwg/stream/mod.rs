@@ -13,6 +13,7 @@ mod readable_byte_stream_controller;
 mod readable_stream;
 mod readable_stream_default_controller;
 mod readable_stream_default_reader;
+mod readable_tee;
 mod transform_stream;
 mod transform_stream_default_controller;
 mod writable_stream;
@@ -21,7 +22,7 @@ mod writable_stream_default_writer;
 
 pub(crate) use {
     readable_byte_stream_controller::JSReadableByteStreamController,
-    readable_stream::{JSReadableStream, install_readable_stream_statics},
+    readable_stream::{JSReadableStream, ReadableStreamPayload, install_readable_stream_statics},
     readable_stream_default_controller::JSReadableStreamDefaultController,
     readable_stream_default_reader::JSReadableStreamDefaultReader,
     transform_stream::JSTransformStream,
