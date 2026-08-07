@@ -29,14 +29,14 @@ pub(crate) struct WritableStreamDefaultControllerPayload {
     pub(crate) stream: Option<JSWritableStream>,
     pub(crate) underlying_sink: JSValue,
     pub(crate) transform_controller: Option<JSTransformStreamDefaultController>,
-    pub(crate) high_water_mark: f64,
+    pub(crate) high_water_mark: u32,
 }
 
 impl WritableStreamDefaultControllerPayload {
     pub(crate) fn new(
         underlying_sink: JSValue,
         stream: Option<JSWritableStream>,
-        high_water_mark: f64,
+        high_water_mark: u32,
     ) -> Self {
         Self {
             stream,

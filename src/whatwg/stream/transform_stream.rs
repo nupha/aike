@@ -88,7 +88,11 @@ fn js_transform_stream_constructor(ctx: &mut ScopedContext, cc: CallContext) -> 
     let rc = JSReadableStreamDefaultController::new_instance(
         ctx,
         JSValue::UNDEFINED,
-        ReadableControllerPayload::new_default(JSValue::UNDEFINED, Some(readable), readable_hwm),
+        ReadableControllerPayload::new_default(
+            JSValue::UNDEFINED,
+            Some(readable),
+            readable_hwm as u32,
+        ),
     )?;
     readable.payload_mut().unwrap().controller.replace(rc);
 

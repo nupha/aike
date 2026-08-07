@@ -36,7 +36,8 @@ pub(crate) use {
 
 use linkme::distributed_slice;
 use zuqe::{
-    CallContext, ClassCtorDef, ClassID, FieldDef, JSResult, JSValue, Runtime, ScopedContext,
+    CallContext, ClassCtorDef, ClassID, FieldDef, IntOrFloat, JSResult, JSValue, Runtime,
+    ScopedContext,
     builtins::promise::{Promise, PromiseState},
     def_native_object,
     gc_lite::{GcTrace, GcTraceCtx},
@@ -132,9 +133,9 @@ fn queuing_strategy_init<'a>(
 pub(crate) fn extract_high_water_mark(
     ctx: &mut ScopedContext,
     strategy: JSValue,
-) -> Result<f64, i32> {
+) -> Result<u32, i32> {
     if strategy.is_undefined() || strategy.is_null() {
-        return Ok(1.0);
+        return Ok(1);
     }
     let obj = queuing_strategy_init(ctx, strategy)?;
     // `size` must be a function when provided.
@@ -144,18 +145,26 @@ pub(crate) fn extract_high_water_mark(
     }
     let hwm = obj.get_property_str(ctx, "highWaterMark")?;
     if hwm.is_undefined() {
-        return Ok(1.0);
+        return Ok(1);
     }
-    let hwm_f = hwm.to_number(ctx)?.to_f64();
-    // Spec: only NaN triggers a RangeError. Infinity and other finite values are
-    // allowed (e.g. CountQueuingStrategy({ highWaterMark: Infinity }) disables backpressure).
-    if hwm_f.is_nan() {
-        return Err(ctx.throw_range_error("highWaterMark must be a finite number"));
-    }
-    if hwm_f < 0.0 {
+    // Only non-negative integers are accepted; NaN/Infinity/fractional/negative
+    // values are rejected (u32 cannot represent them).
+    let hwm_i = match hwm.to_number(ctx)? {
+        IntOrFloat::Int64(i) => i,
+        IntOrFloat::Float64(f) => {
+            if f.is_nan() || f.is_infinite() || f.fract() != 0.0 {
+                return Err(ctx.throw_range_error("highWaterMark must be a non-negative integer"));
+            }
+            f as i64
+        }
+    };
+    if hwm_i < 0 {
         return Err(ctx.throw_range_error("highWaterMark must be non-negative"));
     }
-    Ok(hwm_f)
+    if hwm_i > u32::MAX as i64 {
+        return Err(ctx.throw_range_error("highWaterMark must fit in u32"));
+    }
+    Ok(hwm_i as u32)
 }
 
 // ============================================================================

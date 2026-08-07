@@ -103,7 +103,7 @@ fn js_transform_controller_enqueue(ctx: &mut ScopedContext, cc: CallContext) -> 
             .borrow_mut()
             .push(QueueEntry { chunk, size: 1.0 });
         let total = rcp.queue_total_size();
-        rcp.set_queue_total_size(total + 1.0);
+        rcp.set_queue_total_size(total + 1);
     }
 
     Ok(JSValue::UNDEFINED)

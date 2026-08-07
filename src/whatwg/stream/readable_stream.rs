@@ -301,7 +301,7 @@ fn js_readable_stream_constructor(ctx: &mut ScopedContext, cc: CallContext) -> J
                     underlying_source
                 },
                 Some(instance),
-                hwm,
+                hwm as u32,
             ),
         )?;
         bc.into()
@@ -423,7 +423,7 @@ fn js_readable_stream_from_static(ctx: &mut ScopedContext, cc: CallContext) -> J
     let mut controller = JSReadableStreamDefaultController::new_instance(
         ctx,
         JSValue::UNDEFINED,
-        ReadableControllerPayload::new_default(source_val, Some(stream), 1.0),
+        ReadableControllerPayload::new_default(source_val, Some(stream), 1),
     )?;
     // Wire the controller's self-handle (call_controller_pull needs it).
     let handle = controller;
@@ -1514,7 +1514,7 @@ impl JSReadableStream {
         let controller = JSReadableStreamDefaultController::new_instance(
             ctx,
             JSValue::UNDEFINED,
-            ReadableControllerPayload::new_default(JSValue::from(source), Some(stream), 1.0),
+            ReadableControllerPayload::new_default(JSValue::from(source), Some(stream), 1),
         )?;
         stream.payload_mut().unwrap().controller = Some(controller);
 
@@ -1557,7 +1557,7 @@ impl JSReadableStream {
         let controller = JSReadableStreamDefaultController::new_instance(
             ctx,
             JSValue::UNDEFINED,
-            ReadableControllerPayload::new_default(JSValue::from(source), Some(stream), 1.0),
+            ReadableControllerPayload::new_default(JSValue::from(source), Some(stream), 1),
         )?;
         let controller_val = JSValue::from(controller);
 
@@ -1585,7 +1585,7 @@ impl JSReadableStream {
         let controller = JSReadableStreamDefaultController::new_instance(
             ctx,
             JSValue::UNDEFINED,
-            ReadableControllerPayload::new_default(JSValue::from(source), Some(stream), 1.0),
+            ReadableControllerPayload::new_default(JSValue::from(source), Some(stream), 1),
         )?;
         let controller_val = JSValue::from(controller);
         stream.payload_mut().unwrap().controller = Some(controller);
@@ -1616,7 +1616,7 @@ impl JSReadableStream {
         let controller = JSReadableStreamDefaultController::new_instance(
             ctx,
             JSValue::UNDEFINED,
-            ReadableControllerPayload::new_default(JSValue::from(source), Some(stream), 1.0),
+            ReadableControllerPayload::new_default(JSValue::from(source), Some(stream), 1),
         )?;
         stream.payload_mut().unwrap().controller = Some(controller);
 

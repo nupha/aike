@@ -70,7 +70,7 @@ fn js_controller_desired_size(ctx: &mut ScopedContext, cc: CallContext) -> JSRes
         .ok_or_else(|| ctx.throw_type_error("not a ReadableStreamDefaultController"))?;
     // Spec: errored -> null, closed -> 0, else highWaterMark - queueTotalSize.
     let size = p.desired_size(ctx)?;
-    if size.is_nan() {
+    if size == u32::MAX {
         Ok(JSValue::NULL)
     } else {
         Ok(JSValue::from(size))

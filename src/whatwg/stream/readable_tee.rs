@@ -111,7 +111,7 @@ pub(crate) fn js_readable_stream_tee(ctx: &mut ScopedContext, cc: CallContext) -
         let mut controller = JSReadableStreamDefaultController::new_instance(
             ctx,
             JSValue::UNDEFINED,
-            ReadableControllerPayload::new_default(JSValue::from(source), Some(stream), 1.0),
+            ReadableControllerPayload::new_default(JSValue::from(source), Some(stream), 1),
         )?;
 
         // Wire the controller's self-handle (call_controller_pull needs it).

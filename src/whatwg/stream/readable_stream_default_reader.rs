@@ -90,7 +90,7 @@ impl ReadableStreamDefaultReaderPayload {
                 let mut q = cp.queue().borrow_mut();
                 let entry = q.remove(0);
                 let total = cp.queue_total_size();
-                cp.set_queue_total_size(total - entry.size);
+                cp.set_queue_total_size(total - entry.size as u32);
 
                 // BYOB: copy as much of the chunk as fits into the caller's view
                 // and push the remainder back so the next read continues where
@@ -99,7 +99,7 @@ impl ReadableStreamDefaultReaderPayload {
                 let chunk = if let Some(view) = byob_view {
                     let filled = byob_fill_view(ctx, view, entry.chunk, &mut q)?;
                     if !q.is_empty() {
-                        cp.set_queue_total_size(cp.queue_total_size() + 1.0);
+                        cp.set_queue_total_size(cp.queue_total_size() + 1);
                     }
                     filled
                 } else {
