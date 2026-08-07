@@ -16,10 +16,10 @@ use crossbeam::channel::{Receiver, TryRecvError};
 use linkme::distributed_slice;
 use zuqe::{
     Array, CallContext, Callback, ClassCtorDef, ClassID, ErrorKind, Exception, FieldDef, JSResult,
-    JSValue, JobGcTrace, JobState, Object, Runtime, ScopedContext,
+    JSValue, JobState, Object, Runtime, ScopedContext,
     builtins::{
         iterator::{AsyncIterableIterator, AsyncIteratorFetcher, IterFetchStatus},
-        promise::{Promise, PromiseResultSlot, PromiseState},
+        promise::{Promise, PromiseState},
         typed_array::TypedArray,
     },
     def_native_object,
@@ -191,158 +191,7 @@ impl JSReadableStream {
         Ok(buf)
     }
 }
-/// GC roots for the reader-drain job. The job outlives many event-loop turns,
-/// so every JS value it can touch later must be traced from here, including the
-/// cells it mutates (`pending` read promise, captured error value).
-struct ReaderDrainRoots {
-    reader: JSValue,
-    pending: Rc<RefCell<Option<Promise>>>,
-    raw_err: Rc<RefCell<Option<JSValue>>>,
-}
 
-impl JobGcTrace for ReaderDrainRoots {
-    fn job_trace_values(&self, gcx: &mut GcTraceCtx) {
-        self.reader.trace(gcx);
-        if let Some(p) = *self.pending.borrow() {
-            JSValue::from(p).trace(gcx);
-        }
-        if let Some(ref v) = *self.raw_err.borrow() {
-            v.trace(gcx);
-        }
-    }
-}
-
-impl JSReadableStreamDefaultReader {
-    /// Pump this reader to completion, committing the concatenated bytes (or
-    /// the stream's error) into `slot`.
-    ///
-    /// Runs as a polling job because `read()` returns a promise that may settle
-    /// later (e.g. from an async `pull()`); we inspect its state each tick
-    /// rather than attaching JS callbacks, which native fn-pointer callbacks
-    /// cannot capture state for.
-    pub(crate) fn drain(
-        &self,
-        ctx: &mut ScopedContext,
-        slot: PromiseResultSlot<Result<Vec<u8>, String>>,
-        raw_err: Rc<RefCell<Option<JSValue>>>,
-        timeout: Duration,
-    ) -> Result<(), i32> {
-        let reader = *self;
-
-        // Holds the in-flight read() promise between polls.
-        let pending = Rc::new(RefCell::new(None::<Promise>));
-        let start = Instant::now();
-        let roots = ReaderDrainRoots {
-            reader: JSValue::from(reader),
-            pending: pending.clone(),
-            raw_err: raw_err.clone(),
-        };
-
-        // Accumulated body bytes across polling turns. The job closure is `Fn`
-        // (not `FnMut`), so interior mutability via RefCell is required to grow
-        // `buf` on each turn.
-        let buf = Rc::new(RefCell::new(Vec::<u8>::new()));
-
-        ctx.queue_job(
-            move |cx| {
-                // Start a new read() unless one is already in flight.
-                if pending.borrow().is_none() {
-                    let p = reader
-                        .payload()
-                        .ok_or_else(|| cx.throw_type_error("reader released"))?;
-
-                    match p.read(cx, None) {
-                        Ok(pv) => match Promise::try_from(pv) {
-                            Ok(p) => *pending.borrow_mut() = Some(p),
-                            Err(_) => {
-                                let _ = slot.commit(Err("read() did not return a promise".into()));
-                                return Ok(JobState::Done);
-                            }
-                        },
-                        Err(_) => {
-                            // read() threw synchronously — carry the thrown value
-                            // over so identity is preserved.
-                            if let Exception::Error(v) = cx.take_exception() {
-                                *raw_err.borrow_mut() = Some(v);
-                            }
-                            let _ = slot.commit(Err("stream read failed".into()));
-                            return Ok(JobState::Done);
-                        }
-                    }
-                }
-
-                let p = pending.borrow().unwrap();
-                match p.state() {
-                    PromiseState::Pending => {
-                        if start.elapsed() > timeout {
-                            let _ = slot.commit(Err("body read timeout".into()));
-                            return Ok(JobState::Done);
-                        }
-                        Ok(JobState::Again)
-                    }
-                    PromiseState::Rejected => {
-                        // Stream errored — hand over the original reason value (not
-                        // a stringified copy) so identity is preserved, as
-                        // `promise_rejects_exactly` and user `catch` blocks expect.
-                        *raw_err.borrow_mut() = Some(p.result());
-                        let _ = slot.commit(Err("stream errored".into()));
-                        Ok(JobState::Done)
-                    }
-                    PromiseState::Fulfilled => {
-                        *pending.borrow_mut() = None;
-                        let result = p.result();
-                        let done = result
-                            .get_property_str(cx, "done")
-                            .and_then(|d| d.to_bool())
-                            .unwrap_or(false);
-                        if done {
-                            let full = std::mem::take(&mut *buf.borrow_mut());
-                            let _ = slot.commit(Ok(full));
-                            return Ok(JobState::Done);
-                        }
-                        let value = match result.get_property_str(cx, "value") {
-                            Ok(v) => v,
-                            // Missing `value` on a non-done chunk — malformed.
-                            _ => {
-                                *raw_err.borrow_mut() = cx
-                                    .create_error_object(
-                                        ErrorKind::Type,
-                                        "body chunk is not a Uint8Array",
-                                        false,
-                                    )
-                                    .map(Into::into);
-                                let _ = slot.commit(Err("body chunk is not a Uint8Array".into()));
-                                return Ok(JobState::Done);
-                            }
-                        };
-
-                        // Per WHATWG fetch, a ReadableStream body must yield
-                        // Uint8Array chunks (see "extract a byte stream"); any
-                        // other chunk type must reject the consume promise with
-                        // a TypeError.
-                        let Ok(ta) = TypedArray::try_from(value) else {
-                            *raw_err.borrow_mut() = cx
-                                .create_error_object(
-                                    ErrorKind::Type,
-                                    "body chunk is not a Uint8Array",
-                                    false,
-                                )
-                                .map(Into::into);
-                            let _ = slot.commit(Err("body chunk is not a Uint8Array".into()));
-                            return Ok(JobState::Done);
-                        };
-                        ta.with_bytes(|b| buf.borrow_mut().extend_from_slice(b));
-
-                        Ok(JobState::Again)
-                    }
-                }
-            },
-            roots,
-        );
-
-        Ok(())
-    }
-}
 const READABLE_STREAM_PROTO: &[FieldDef] = &[
     FieldDef::GETSET("locked", Some(js_readable_stream_locked), None, 0),
     FieldDef::GETSET("state", Some(js_readable_stream_state), None, 0),
@@ -456,16 +305,15 @@ fn js_readable_stream_state(ctx: &mut ScopedContext, cc: CallContext) -> JSResul
 }
 
 fn js_readable_stream_get_reader(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let this = cc.this();
-
-    if JSReadableStream::payload_of(&this).is_none() {
-        return Err(ctx.throw_type_error("not a ReadableStream"));
-    }
+    let mut stream = cc
+        .this()
+        .as_native_object::<JSReadableStream>()
+        .ok_or_else(|| ctx.throw_type_error("not a ReadableStream"))?;
 
     // options.mode: undefined -> default reader, "byob" -> BYOB reader,
     // anything else -> TypeError (the spec converts mode to a fixed enum).
     let options = cc.arg(0);
-    let byob = if options.is_undefined() || options.is_null() {
+    let byob = if options.is_undefined_or_null() {
         false
     } else {
         let mode = options.get_property_str(ctx, "mode")?;
@@ -478,7 +326,6 @@ fn js_readable_stream_get_reader(ctx: &mut ScopedContext, cc: CallContext) -> JS
         }
     };
 
-    let mut stream = JSReadableStream::try_from(this)?;
     let reader = stream.acquire_reader(ctx, byob)?;
     Ok(JSValue::from(reader))
 }
