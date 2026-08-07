@@ -965,6 +965,22 @@ fn js_readable_stream_pipe_to(ctx: &mut ScopedContext, cc: CallContext) -> JSRes
 // Called by both pipeTo (after brand checks + signal validation) and pipeThrough
 // (with duck-typed transform's reader/writer). `signal` is undefined or a valid
 // AbortSignal. `options` drives the abort reaction flags.
+//
+// Coordination: all state that async pipe callbacks need (resolve/reject fns,
+// reader/writer/signal/options, and the `settled` / `shutting_down` / abort
+// aggregation flags) lives on a JS `state` object threaded through the callback
+// `data` arrays. JS objects and the `data` arrays are both traced by the GC, so
+// the JSValues they hold stay rooted for the transfer's lifetime.
+//
+// `state` fields:
+//   settled: bool          - pipe promise settled exactly once (prevents the
+//                            normal error path and the abort path from both
+//                            rejecting the same promise).
+//   shuttingDown: bool     - shutdown began; the read/write loop stops pulling
+//                            and stops closing the destination.
+//   remainingActions: int  - abort/error cleanup actions still settling.
+//   abortErr, cancelErr    - first error from the abort/cancel cleanup action.
+//   fallbackReason         - rejection reason when cleanup settles cleanly.
 fn run_pipe_driver(
     ctx: &mut ScopedContext,
     reader: JSReadableStreamDefaultReader,
@@ -973,13 +989,32 @@ fn run_pipe_driver(
     options: JSValue,
 ) -> JSResult {
     let (promise, rr) = Promise::create(ctx)?;
-    let data = [rr[0], rr[1], JSValue::from(reader), writer, signal, options];
+
+    let mut state = ctx.create_base_object()?;
+    state.set_property_str(ctx, "settled", false.into())?;
+    state.set_property_str(ctx, "shuttingDown", false.into())?;
+    state.set_property_str(ctx, "remainingActions", 0.into())?;
+    state.set_property_str(ctx, "abortErr", JSValue::UNDEFINED)?;
+    state.set_property_str(ctx, "cancelErr", JSValue::UNDEFINED)?;
+    state.set_property_str(ctx, "fallbackReason", JSValue::UNDEFINED)?;
+
+    // Uniform data layout threaded through every async pipe callback:
+    //   [0] state, [1] resolve, [2] reject, [3] reader, [4] writer,
+    //   [5] signal, [6] options
+    let data = [
+        state.into(),
+        rr[0],
+        rr[1],
+        JSValue::from(reader),
+        writer,
+        signal,
+        options,
+    ];
 
     // Synchronous abort check: a signal already aborted must reject the pipe
     // promise without doing any reads.
     if !signal.is_undefined() && crate::whatwg::abort::signal_is_aborted(&signal) {
-        pipe_to_perform_abort(ctx, reader, writer, signal, options, rr[1])?;
-        release_pipe_locks(ctx, JSValue::from(reader), writer);
+        pipe_to_perform_abort(ctx, &data)?;
         return Ok(JSValue::from(promise));
     }
 
@@ -1000,17 +1035,64 @@ fn run_pipe_driver(
         // The signal is already brand-checked by pipeTo, so addEventListener
         // won't throw here; if it somehow does, ignore it rather than turn the
         // pipeTo call into a synchronous throw (it must return a promise).
-        if add_listener
-            .call(ctx, signal, &[abort_name, abort_handler])
-            .is_err()
-        {
-            let _e = ctx.take_exception();
-            #[cfg(debug_assertions)]
-            eprintln!("[swallow-exc] {}:{}: {:?}", file!(), line!(), _e);
+        //
+        // NOTE: if the signal was aborted between the check above and here,
+        // addEventListener fires the handler synchronously; its Err is swallowed
+        // by addEventListener (which returns Ok), so clean cur_exception
+        // unconditionally rather than only on is_err().
+        add_listener.call(ctx, signal, &[abort_name, abort_handler])?;
+        if ctx.rt().exception() != Exception::No {
+            ctx.take_exception();
         }
     }
 
-    let data = [rr[0], rr[1], JSValue::from(reader), writer, signal];
+    pipe_to_read(ctx, &data)?;
+    Ok(JSValue::from(promise))
+}
+
+// True if the pipe has already settled (promise settled) or begun shutting down;
+// used by the read/write loop and the abort handler to stop doing work.
+fn pipe_is_shutting_down(ctx: &mut ScopedContext, state: &JSValue) -> Result<bool, i32> {
+    let obj = state.as_object().unwrap();
+    let settled = obj.get_property_str(ctx, "settled")?.to_bool()?;
+    let shutting = obj.get_property_str(ctx, "shuttingDown")?.to_bool()?;
+    Ok(settled || shutting)
+}
+
+// Mark the pipe as settled; returns true if this call claimed the settlement
+// (i.e. it was not already settled). Guards all resolve/reject paths.
+fn pipe_mark_settled(ctx: &mut ScopedContext, state: &JSValue) -> Result<bool, i32> {
+    let mut obj = state.as_object().unwrap();
+    if obj.get_property_str(ctx, "settled")?.to_bool()? {
+        return Ok(false);
+    }
+    obj.set_property_str(ctx, "settled", true.into())?;
+    Ok(true)
+}
+
+fn pipe_option_bool(ctx: &mut ScopedContext, options: &JSValue, key: &str) -> Result<bool, i32> {
+    if let Some(obj) = options.as_object() {
+        let b = obj.get_property_str(ctx, key)?.to_bool().unwrap_or(false);
+        Ok(b)
+    } else {
+        Ok(false)
+    }
+}
+
+// Kick off the read loop: read one chunk and chain the next step. Called both
+// for the initial read and after each write resolves (loop continuation).
+// `data` layout: [0] state, [1] resolve, [2] reject, [3] reader, [4] writer,
+// [5] signal.
+fn pipe_to_read(ctx: &mut ScopedContext, data: &[JSValue]) -> JSResult {
+    // Once shutdown begins (abort or error), stop reading new data.
+    if pipe_is_shutting_down(ctx, &data[0])? {
+        return Ok(JSValue::UNDEFINED);
+    }
+    let reader = data[3];
+    let p = JSReadableStreamDefaultReader::payload_of(&reader)
+        .ok_or_else(|| ctx.throw_type_error("not a ReadableStreamDefaultReader"))?;
+    let mut read_promise = p.read(ctx, None)?;
+
     let step = ctx
         .create_native_function_with_data(
             Callback::Func(pipe_to_on_read),
@@ -1029,14 +1111,8 @@ fn run_pipe_driver(
             data.into(),
         )?
         .into();
-
-    let p = reader
-        .payload()
-        .ok_or_else(|| ctx.throw_type_error("not a ReadableStreamDefaultReader"))?;
-    let mut read_promise = p.read(ctx, None)?;
     read_promise.then(ctx, step, step_fail)?;
-
-    Ok(JSValue::from(promise))
+    Ok(JSValue::UNDEFINED)
 }
 
 // Release the reader/writer locks acquired by pipeTo/pipeThrough once the pipe
@@ -1056,221 +1132,253 @@ fn release_pipe_locks(ctx: &mut ScopedContext, reader: JSValue, writer: JSValue)
     }
 }
 
-// Abort signal fired mid-pipe: abort the writer, cancel the reader, reject the
-// pipe promise with the signal's reason, and release the locks.
+// Abort signal fired mid-pipe: shut the pipe down with the abort reason. This
+// is a no-op if the pipe has already settled or begun shutting down (e.g. the
+// readable/writable already errored) — "abort should do nothing after the
+// stream is closed/errored".
 fn pipe_to_on_abort(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let reject = cc.data(1);
-    let reader = JSReadableStreamDefaultReader::try_from(cc.data(2))?;
-    let writer = cc.data(3);
-    let signal = cc.data(4);
-    let options = cc.data(5);
-    pipe_to_perform_abort(ctx, reader, writer, signal, options, reject)?;
-    release_pipe_locks(ctx, JSValue::from(reader), writer);
-    Ok(JSValue::UNDEFINED)
+    let data = [
+        cc.data(0),
+        cc.data(1),
+        cc.data(2),
+        cc.data(3),
+        cc.data(4),
+        cc.data(5),
+        cc.data(6),
+    ];
+    if pipe_is_shutting_down(ctx, &data[0])? {
+        return Ok(JSValue::UNDEFINED);
+    }
+    set_state_bool(ctx, &data[0], "shuttingDown", true)?;
+    pipe_to_perform_abort(ctx, &data)
+}
+
+fn set_state_bool(ctx: &mut ScopedContext, state: &JSValue, key: &str, v: bool) -> Result<(), i32> {
+    state
+        .as_object()
+        .unwrap()
+        .set_property_str(ctx, key, v.into())?;
+    Ok(())
+}
+
+// Read the abort reason off the signal (or undefined if no signal).
+fn pipe_signal_reason(_ctx: &mut ScopedContext, signal: &JSValue) -> JSValue {
+    if !signal.is_undefined() {
+        signal_reason(signal).unwrap_or(JSValue::UNDEFINED)
+    } else {
+        JSValue::UNDEFINED
+    }
 }
 
 // Perform the abort-triggered shutdown of a pipe: abort the destination writer
 // and cancel the source reader, then reject the pipe promise with the most
 // appropriate error. Per the streams spec, preference order is:
 //   1. the error from `writer.abort()` (sink),
-//   2. the error from `reader.cancel()` (source),
+//   2. the error from `reader.cancel()` (source), unless the source is already
+//      in a final state (in which case cancel only returns its stale stored
+//      error and must not override the abort reason),
 //   3. the signal's abort reason.
 // Both cleanup calls use the same `reason` object so the writer's `closed` and
 // the reader's `closed` reject with the same object the pipe promise rejects
 // with (WPT: "all the error objects should be the same object").
-fn pipe_to_perform_abort(
-    ctx: &mut ScopedContext,
-    reader: JSReadableStreamDefaultReader,
-    writer: JSValue,
-    signal: JSValue,
-    options: JSValue,
-    reject: JSValue,
-) -> JSResult {
-    let reason = if !signal.is_undefined() {
-        crate::whatwg::abort::signal_reason(&signal).unwrap_or(JSValue::UNDEFINED)
-    } else {
-        JSValue::UNDEFINED
-    };
-    let (prevent_cancel, prevent_abort) = if let Some(obj) = options.as_object() {
-        let pc = obj
-            .get_property_str(ctx, "preventCancel")?
-            .to_bool()
-            .unwrap_or(false);
-        let pa = obj
-            .get_property_str(ctx, "preventAbort")?
-            .to_bool()
-            .unwrap_or(false);
-        (pc, pa)
-    } else {
-        (false, false)
-    };
+fn pipe_to_perform_abort(ctx: &mut ScopedContext, data: &[JSValue]) -> JSResult {
+    let state = data[0];
+    let reader = data[3];
+    let options = data[6];
+    let reason = pipe_signal_reason(ctx, &data[5]);
+    let prevent_cancel = pipe_option_bool(ctx, &options, "preventCancel")?;
+    let prevent_abort = pipe_option_bool(ctx, &options, "preventAbort")?;
 
-    // Collect the cleanup actions that must run.
-    //
-    // NOTE: `actions` intentionally holds only an enum tag, never the JSValue
-    // targets. In the arena GC model, native-stack-local JSValues are no longer
-    // traced (only values pushed into a `f.call` arena frame are), so storing
-    // raw JSValues in a heap `Vec` would leave them with no GC root and risk a
-    // use-after-free if a nested JS call triggers GC. The target objects
-    // (`writer`/`reader`) live in this closure's binding data, which is traced
-    // via `NFuncPayload::trace`, so we resolve them from those rooted locals
-    // inside the loop instead of caching the values here.
-    #[derive(Clone, Copy)]
-    enum ShutdownAction {
-        Abort,
-        Cancel,
-    }
-    let mut actions: Vec<ShutdownAction> = Vec::new();
+    // The abort shutdown only waits for cleanup actions that must run. If both
+    // are prevented (or both already moot), reject directly with the reason.
+    let mut pending = 0;
     if !prevent_abort {
-        actions.push(ShutdownAction::Abort);
+        pending += 1;
     }
-    if !prevent_cancel {
-        actions.push(ShutdownAction::Cancel);
+    if !prevent_cancel && !pipe_source_is_final(&reader) {
+        pending += 1;
     }
-
-    // No actions (both prevented, or streams already settled): reject with the
-    // signal reason directly.
-    if actions.is_empty() {
-        reject.call(ctx, JSValue::UNDEFINED, &[reason])?;
-        return Ok(JSValue::UNDEFINED);
+    if pending == 0 {
+        return pipe_reject(ctx, data, reason);
     }
 
-    // Shared aggregation state across the action settle callbacks.
-    let mut state = ctx.create_base_object()?;
-    state.set_property_str(ctx, "pending", (actions.len() as f64).into())?;
-    state.set_property_str(ctx, "abortErr", JSValue::UNDEFINED)?;
-    state.set_property_str(ctx, "cancelErr", JSValue::UNDEFINED)?;
+    // Aggregation state across the action settle callbacks: remaining actions
+    // + the first error each action reports (sink abort error > source cancel
+    // error) + the fallback reason (the abort reason).
+    set_state_num(ctx, &state, "remainingActions", pending)?;
+    state
+        .as_object()
+        .unwrap()
+        .set_property_str(ctx, "abortErr", JSValue::UNDEFINED)?;
+    state
+        .as_object()
+        .unwrap()
+        .set_property_str(ctx, "cancelErr", JSValue::UNDEFINED)?;
+    state
+        .as_object()
+        .unwrap()
+        .set_property_str(ctx, "fallbackReason", reason)?;
 
-    for action in actions {
-        // Resolve the target from the GC-rooted locals (`writer`/`reader`)
-        // rather than from a cached JSValue, keeping the value under a root.
-        let (method, target): (&'static str, JSValue) = match action {
-            ShutdownAction::Abort => ("abort", writer),
-            ShutdownAction::Cancel => ("cancel", JSValue::from(reader)),
-        };
-        let mut action_promise = if let Ok(f) = target.get_property_str(ctx, method) {
-            match f.call(ctx, target, &[reason]) {
-                Ok(res) => {
-                    if let Ok(p) = Promise::try_from(res) {
-                        p
-                    } else {
-                        Promise::from_resolve_value(ctx, res)?
-                    }
-                }
-                Err(_) => {
-                    let _e = ctx.take_exception();
-                    Promise::from_resolve_value(ctx, JSValue::UNDEFINED)?
-                }
-            }
-        } else {
-            let _e = ctx.take_exception();
-            Promise::from_resolve_value(ctx, JSValue::UNDEFINED)?
-        };
-
-        // Field on `state` that records this action's rejection reason.
-        let field = if method == "abort" {
-            "abortErr"
-        } else {
-            "cancelErr"
-        };
-        let field_val =
-            JSValue::make_string(ctx.create_string_from_utf8(field.as_bytes().to_vec())?);
-        let ok_data = [
-            JSValue::from(state),
-            JSValue::from(reader),
-            writer,
-            reject,
-            reason,
-        ];
-        let err_data = [
-            JSValue::from(state),
-            field_val,
-            JSValue::from(reader),
-            writer,
-            reject,
-            reason,
-        ];
-        let ok_fn = ctx
-            .create_native_function_with_data(
-                Callback::Func(pipe_shutdown_ok),
-                "pipeShutdownOk",
-                0,
-                0,
-                ok_data.into(),
-            )?
-            .into();
-        let err_fn = ctx
-            .create_native_function_with_data(
-                Callback::Func(pipe_shutdown_err),
-                "pipeShutdownErr",
-                1,
-                0,
-                err_data.into(),
-            )?
-            .into();
-        action_promise.then(ctx, ok_fn, err_fn)?;
+    if !prevent_abort {
+        pipe_run_shutdown_action(ctx, data, ShutdownAction::Abort, reason)?;
+    }
+    if !prevent_cancel && !pipe_source_is_final(&reader) {
+        pipe_run_shutdown_action(ctx, data, ShutdownAction::Cancel, reason)?;
     }
 
     Ok(JSValue::UNDEFINED)
 }
 
-// Action fulfilled: record nothing, decrement the pending counter, finalize.
-fn pipe_shutdown_ok(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let state = cc.data(0);
-    let reader = cc.data(1);
-    let writer = cc.data(2);
-    let reject = cc.data(3);
-    let reason = cc.data(4);
-    pipe_shutdown_finalize(ctx, state, reader, writer, reject, reason)
+fn set_state_num(ctx: &mut ScopedContext, state: &JSValue, key: &str, n: u32) -> Result<(), i32> {
+    state
+        .as_object()
+        .unwrap()
+        .set_property_str(ctx, key, (n as f64).into())?;
+    Ok(())
 }
 
-// Action rejected: record the rejection reason for this action (in the field
-// named by `field`), decrement the pending counter, then finalize.
-fn pipe_shutdown_err(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let state = cc.data(0);
-    let field_val = cc.data(1);
-    let reader = cc.data(2);
-    let writer = cc.data(3);
-    let reject = cc.data(4);
-    let reason = cc.data(5);
-    let err = cc.arg(0);
-    let field_str = field_val.to_string(ctx)?;
-    let field = field_str.content().encode_utf8(false);
-    let mut state_obj = state.as_object().unwrap();
-    state_obj.set_property_str(ctx, &field, err)?;
-    pipe_shutdown_finalize(ctx, state, reader, writer, reject, reason)
+#[derive(Clone, Copy, PartialEq)]
+enum ShutdownAction {
+    Abort,
+    Cancel,
 }
 
-// Once every action has settled, reject the pipe promise with the most
-// appropriate error: sink abort error > source cancel error > signal reason.
-fn pipe_shutdown_finalize(
+// Run one abort cleanup action (`writer.abort(reason)` or `reader.cancel(reason)`)
+// and register a settle callback that records its outcome and finalizes.
+// `data` layout for the settle callback: [0] state, [1] resolve, [2] reject,
+// [3] reader, [4] writer, [5] signal, [6] actionTag.
+fn pipe_run_shutdown_action(
     ctx: &mut ScopedContext,
-    state: JSValue,
-    reader: JSValue,
-    writer: JSValue,
-    reject: JSValue,
+    data: &[JSValue],
+    action: ShutdownAction,
     reason: JSValue,
 ) -> JSResult {
+    let (method, target): (&'static str, JSValue) = match action {
+        ShutdownAction::Abort => ("abort", data[4]),
+        ShutdownAction::Cancel => ("cancel", data[3]),
+    };
+    let mut action_promise = if let Ok(f) = target.get_property_str(ctx, method) {
+        match f.call(ctx, target, &[reason]) {
+            Ok(res) => {
+                if let Ok(p) = Promise::try_from(res) {
+                    p
+                } else {
+                    Promise::from_resolve_value(ctx, res)?
+                }
+            }
+            Err(_) => {
+                // abort()/cancel() threw synchronously: treat as a rejection
+                // with the thrown error.
+                let e = ctx.take_exception().to_value(ctx);
+                Promise::from_reject_value(ctx, e)?
+            }
+        }
+    } else {
+        // Method missing: treat the action as a fulfilled no-op.
+        Promise::from_resolve_value(ctx, JSValue::UNDEFINED)?
+    };
+
+    let action_tag = if action == ShutdownAction::Abort {
+        0.0
+    } else {
+        1.0
+    };
+    let settle_data = [
+        data[0],
+        data[1],
+        data[2],
+        data[3],
+        data[4],
+        data[5],
+        JSValue::from(action_tag),
+    ];
+    let settle_fn = ctx
+        .create_native_function_with_data(
+            Callback::Func(pipe_shutdown_action_settle),
+            "pipeShutdownSettle",
+            1,
+            0,
+            settle_data.into(),
+        )?
+        .into();
+    action_promise.then(ctx, settle_fn, settle_fn)?;
+    Ok(JSValue::UNDEFINED)
+}
+
+// One abort cleanup action settled. The single callback handles both the
+// fulfilled (reason arg is undefined) and rejected (reason arg is the error)
+// cases, recording the outcome and finalizing the abort shutdown.
+// `data`: [0] state, [1] resolve, [2] reject, [3] reader, [4] writer,
+// [5] signal, [6] actionTag.
+fn pipe_shutdown_action_settle(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let state = cc.data(0);
+    let is_abort = cc.data(6).to_number(ctx)?.to_f64() == 0.0;
+    let arg = cc.arg(0);
+    // `.then(settle, settle)` passes the fulfillment value on the fulfilled
+    // path and the rejection reason on the rejected path.
+    let err = if cc.length() > 0 && !arg.is_undefined() {
+        Some(arg)
+    } else {
+        None
+    };
     let mut state_obj = state.as_object().unwrap();
-    let pending = state_obj
-        .get_property_str(ctx, "pending")?
+    if let Some(e) = err {
+        let field = if is_abort { "abortErr" } else { "cancelErr" };
+        state_obj.set_property_str(ctx, field, e)?;
+    }
+
+    let remaining = state_obj
+        .get_property_str(ctx, "remainingActions")?
         .to_number(ctx)?
-        .to_f64();
-    state_obj.set_property_str(ctx, "pending", (pending - 1.0).into())?;
-    if (pending - 1.0).abs() < f64::EPSILON {
+        .to_f64() as u32
+        - 1;
+    state_obj.set_property_str(ctx, "remainingActions", (remaining as f64).into())?;
+    if remaining == 0 {
         let abort_err = state_obj.get_property_str(ctx, "abortErr")?;
         let cancel_err = state_obj.get_property_str(ctx, "cancelErr")?;
+        let fallback = state_obj.get_property_str(ctx, "fallbackReason")?;
         let final_err = if !abort_err.is_undefined() {
             abort_err
         } else if !cancel_err.is_undefined() {
             cancel_err
         } else {
-            reason
+            fallback
         };
-        reject.call(ctx, JSValue::UNDEFINED, &[final_err])?;
-        release_pipe_locks(ctx, reader, writer);
+        let data = [
+            cc.data(0),
+            cc.data(1),
+            cc.data(2),
+            cc.data(3),
+            cc.data(4),
+            cc.data(5),
+        ];
+        return pipe_reject(ctx, &data, final_err);
     }
     Ok(JSValue::UNDEFINED)
+}
+
+// Settle the pipe promise with a rejection, guarded so it happens exactly once.
+// Also releases the reader/writer locks. Returns the `reject` call result so
+// the caller (a promise reaction job) can propagate it; swallowing it would
+// leak `cur_exception`. `data` layout: [0] state, [1] resolve, [2] reject,
+// [3] reader, [4] writer, [5] signal.
+fn pipe_reject(ctx: &mut ScopedContext, data: &[JSValue], reason: JSValue) -> JSResult {
+    if !pipe_mark_settled(ctx, &data[0])? {
+        return Ok(JSValue::UNDEFINED);
+    }
+    let res = data[2].call(ctx, JSValue::UNDEFINED, &[reason]);
+    release_pipe_locks(ctx, data[3], data[4]);
+    res
+}
+
+// Settle the pipe promise with a resolution, guarded so it happens exactly once.
+fn pipe_resolve(ctx: &mut ScopedContext, data: &[JSValue]) -> JSResult {
+    if !pipe_mark_settled(ctx, &data[0])? {
+        return Ok(JSValue::UNDEFINED);
+    }
+    let res = data[1].call(ctx, JSValue::UNDEFINED, &[]);
+    release_pipe_locks(ctx, data[3], data[4]);
+    res
 }
 
 fn js_readable_stream_pipe_through(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -1323,46 +1431,31 @@ fn js_readable_stream_pipe_through(ctx: &mut ScopedContext, cc: CallContext) -> 
     Ok(readable)
 }
 
-// Read one chunk and schedule the next step.
-fn pipe_to_read(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let reader = cc.data(2);
-    let writer = cc.data(3);
-    let signal = cc.data(4);
-    let p = JSReadableStreamDefaultReader::payload_of(&reader)
-        .ok_or_else(|| ctx.throw_type_error("not a ReadableStreamDefaultReader"))?;
-    let mut read_promise = p.read(ctx, None)?;
-
-    let step = ctx
-        .create_native_function_with_data(
-            Callback::Func(pipe_to_on_read),
-            "pipeToOnRead",
-            1,
-            0,
-            [cc.data(0), cc.data(1), reader, writer, signal].into(),
-        )?
-        .into();
-    let step_fail = ctx
-        .create_native_function_with_data(
-            Callback::Func(pipe_to_on_read_error),
-            "pipeToOnReadErr",
-            1,
-            0,
-            [cc.data(0), cc.data(1), reader, writer, signal].into(),
-        )?
-        .into();
-    read_promise.then(ctx, step, step_fail)?;
-    Ok(JSValue::UNDEFINED)
-}
-
-// A chunk was read: close on done, otherwise write and loop.
+// A chunk was read: close on done, otherwise write and continue the loop.
+// `data` layout: [0] state, [1] resolve, [2] reject, [3] reader, [4] writer,
+// [5] signal.
 fn pipe_to_on_read(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let data = [
+        cc.data(0),
+        cc.data(1),
+        cc.data(2),
+        cc.data(3),
+        cc.data(4),
+        cc.data(5),
+        cc.data(6),
+    ];
+    // Shutdown may have started while this read was in flight; stop the loop.
+    if pipe_is_shutting_down(ctx, &data[0])? {
+        return Ok(JSValue::UNDEFINED);
+    }
     let result = cc.arg(0);
     let done = result.get_property_str(ctx, "done")?.to_bool()?;
     if done {
-        let resolve = cc.data(0);
-        let reject = cc.data(1);
-        let reader = cc.data(2);
-        let writer = cc.data(3);
+        let prevent_close = pipe_option_bool(ctx, &data[6], "preventClose")?;
+        let writer = data[4];
+        if prevent_close {
+            return pipe_resolve(ctx, &data);
+        }
         // Close the destination; resolve the pipe promise when done. A close
         // that throws synchronously (e.g. destination already errored) must
         // not crash the driver — reject the pipe promise instead.
@@ -1370,16 +1463,8 @@ fn pipe_to_on_read(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         let close_js = match close_fn.call(ctx, writer, &[]) {
             Ok(v) => v,
             Err(_) => {
-                // close() threw synchronously: take the exception (it is set
-                // even though the call returned Err) and reject the pipe
-                // promise with it as the reason, instead of crashing the driver.
-                let err = match ctx.take_exception() {
-                    zuqe::Exception::Error(v) => v,
-                    _ => JSValue::UNDEFINED,
-                };
-                reject.call(ctx, JSValue::UNDEFINED, &[err])?;
-                release_pipe_locks(ctx, reader, writer);
-                return Ok(JSValue::UNDEFINED);
+                let err = ctx.take_exception().to_value(ctx);
+                return pipe_reject(ctx, &data, err);
             }
         };
         let mut close_promise: Promise = Promise::try_from(close_js)?;
@@ -1389,7 +1474,7 @@ fn pipe_to_on_read(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 "pipeToSettleOk",
                 0,
                 0,
-                [resolve, JSValue::UNDEFINED, reader, writer].into(),
+                data.into(),
             )?
             .into();
         let settle_err = ctx
@@ -1398,26 +1483,25 @@ fn pipe_to_on_read(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 "pipeToSettleErr",
                 1,
                 0,
-                [resolve, reject, reader, writer].into(),
+                data.into(),
             )?
             .into();
         close_promise.then(ctx, settle_ok, settle_err)?;
         return Ok(JSValue::UNDEFINED);
     }
     let value = result.get_property_str(ctx, "value")?;
-    let writer = cc.data(3);
-    let signal = cc.data(4);
+    let writer = data[4];
     let write_js = writer
         .get_property_str(ctx, "write")?
         .call(ctx, writer, &[value])?;
     let mut write_promise: Promise = Promise::try_from(write_js)?;
     let loop_fn = ctx
         .create_native_function_with_data(
-            Callback::Func(pipe_to_read),
-            "pipeToRead",
+            Callback::Func(pipe_to_on_write_done),
+            "pipeToWriteDone",
             1,
             0,
-            [cc.data(0), cc.data(1), cc.data(2), writer, signal].into(),
+            data.into(),
         )?
         .into();
     let write_fail = ctx
@@ -1426,64 +1510,151 @@ fn pipe_to_on_read(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             "pipeToWriteErr",
             1,
             0,
-            [cc.data(0), cc.data(1), cc.data(2), writer, signal].into(),
+            data.into(),
         )?
         .into();
     write_promise.then(ctx, loop_fn, write_fail)?;
     Ok(JSValue::UNDEFINED)
 }
 
-// Source read failed: abort the writer, reject the pipe promise, release locks.
-fn pipe_to_on_read_error(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let reason = cc.arg(0);
-    let reject = cc.data(1);
-    let writer = cc.data(3);
-    let reader = cc.data(2);
-    writer
-        .get_property_str(ctx, "abort")?
-        .call(ctx, writer, &[reason])?;
-    reader
-        .get_property_str(ctx, "cancel")?
-        .call(ctx, reader, &[reason])?;
-    reject.call(ctx, JSValue::UNDEFINED, &[reason])?;
-    release_pipe_locks(ctx, reader, writer);
-    Ok(JSValue::UNDEFINED)
+// A write fulfilled: continue the read loop (unless shutdown began meanwhile).
+fn pipe_to_on_write_done(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let data = [
+        cc.data(0),
+        cc.data(1),
+        cc.data(2),
+        cc.data(3),
+        cc.data(4),
+        cc.data(5),
+        cc.data(6),
+    ];
+    if pipe_is_shutting_down(ctx, &data[0])? {
+        return Ok(JSValue::UNDEFINED);
+    }
+    pipe_to_read(ctx, &data)
 }
 
-// Write failed: abort the writer, cancel the reader, reject, release locks.
-fn pipe_to_on_write_error(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+// Source read failed: shut the pipe down with the read error. Per spec the
+// source's error propagates as the pipe rejection (aborting the writer unless
+// prevented, cancelling the reader unless prevented).
+fn pipe_to_on_read_error(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let data = [
+        cc.data(0),
+        cc.data(1),
+        cc.data(2),
+        cc.data(3),
+        cc.data(4),
+        cc.data(5),
+        cc.data(6),
+    ];
+    // If the pipe already settled (or abort already began shutting down), the
+    // shutdown is handled by that path — don't run a second one.
+    if pipe_is_shutting_down(ctx, &data[0])? {
+        return Ok(JSValue::UNDEFINED);
+    }
+    set_state_bool(ctx, &data[0], "shuttingDown", true)?;
     let reason = cc.arg(0);
-    let reject = cc.data(1);
-    let writer = cc.data(3);
-    let reader = cc.data(2);
-    writer
-        .get_property_str(ctx, "abort")?
-        .call(ctx, writer, &[reason])?;
-    reader
-        .get_property_str(ctx, "cancel")?
-        .call(ctx, reader, &[reason])?;
-    reject.call(ctx, JSValue::UNDEFINED, &[reason])?;
-    release_pipe_locks(ctx, reader, writer);
+    pipe_shutdown_with_error(ctx, &data, reason)
+}
+
+// Write failed: shut the pipe down with the write error.
+fn pipe_to_on_write_error(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let data = [
+        cc.data(0),
+        cc.data(1),
+        cc.data(2),
+        cc.data(3),
+        cc.data(4),
+        cc.data(5),
+        cc.data(6),
+    ];
+    if pipe_is_shutting_down(ctx, &data[0])? {
+        return Ok(JSValue::UNDEFINED);
+    }
+    set_state_bool(ctx, &data[0], "shuttingDown", true)?;
+    let reason = cc.arg(0);
+    pipe_shutdown_with_error(ctx, &data, reason)
+}
+
+// Shut a pipe down after a read/write error: abort the writer (unless
+// prevented) and cancel the reader (unless prevented), then reject the pipe
+// promise with the original error. Uses the abort cleanup machinery so the
+// final rejection is the action error, or the original error if cleanup runs
+// cleanly (per spec, the original error is preferred once cleanup succeeds).
+fn pipe_shutdown_with_error(
+    ctx: &mut ScopedContext,
+    data: &[JSValue],
+    reason: JSValue,
+) -> JSResult {
+    let state = data[0];
+    let prevent_abort = pipe_option_bool(ctx, &data[6], "preventAbort")?;
+    let prevent_cancel = pipe_option_bool(ctx, &data[6], "preventCancel")?;
+
+    let mut pending = 0;
+    if !prevent_abort {
+        pending += 1;
+    }
+    if !prevent_cancel && !pipe_source_is_final(&data[3]) {
+        pending += 1;
+    }
+    if pending == 0 {
+        return pipe_reject(ctx, data, reason);
+    }
+
+    // For an error shutdown the fallback reason is the original error (not the
+    // abort reason); `pipe_shutdown_action_settle` rejects with it once the
+    // cleanup actions settle cleanly.
+    set_state_num(ctx, &state, "remainingActions", pending)?;
+    state
+        .as_object()
+        .unwrap()
+        .set_property_str(ctx, "abortErr", JSValue::UNDEFINED)?;
+    state
+        .as_object()
+        .unwrap()
+        .set_property_str(ctx, "cancelErr", JSValue::UNDEFINED)?;
+    state
+        .as_object()
+        .unwrap()
+        .set_property_str(ctx, "fallbackReason", reason)?;
+
+    if !prevent_abort {
+        pipe_run_shutdown_action(ctx, data, ShutdownAction::Abort, reason)?;
+    }
+    if !prevent_cancel && !pipe_source_is_final(&data[3]) {
+        pipe_run_shutdown_action(ctx, data, ShutdownAction::Cancel, reason)?;
+    }
     Ok(JSValue::UNDEFINED)
 }
 
 // Settle the pipe promise once the destination close finishes.
 // Success path (close fulfilled): resolve the pipe promise and release locks.
 fn pipe_to_settle_ok(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let resolve = cc.data(0);
-    release_pipe_locks(ctx, cc.data(2), cc.data(3));
-    resolve.call(ctx, JSValue::UNDEFINED, &[])?;
-    Ok(JSValue::UNDEFINED)
+    let data = [
+        cc.data(0),
+        cc.data(1),
+        cc.data(2),
+        cc.data(3),
+        cc.data(4),
+        cc.data(5),
+        cc.data(6),
+    ];
+    pipe_resolve(ctx, &data)
 }
 
 // Failure path (close rejected): reject the pipe promise with the close error
 // and release locks.
 fn pipe_to_settle_err(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let reject = cc.data(1);
-    let reason = cc.arg(0);
-    release_pipe_locks(ctx, cc.data(2), cc.data(3));
-    reject.call(ctx, JSValue::UNDEFINED, &[reason])?;
-    Ok(JSValue::UNDEFINED)
+    let data = [
+        cc.data(0),
+        cc.data(1),
+        cc.data(2),
+        cc.data(3),
+        cc.data(4),
+        cc.data(5),
+        cc.data(6),
+    ];
+    pipe_reject(ctx, &data, cc.arg(0))
 }
 
 fn js_readable_stream_async_iterator(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -1523,6 +1694,24 @@ struct TeeShared {
 thread_local! {
     pub(super) static TEE_STREAMS: RefCell<HashMap<u64, Rc<TeeShared>>> = RefCell::new(HashMap::new());
     static NEXT_TEE_ID: Cell<u64> = const { Cell::new(1) };
+}
+
+/// True if the source stream attached to this pipe's reader is already in a
+/// final (errored/closed) state, in which case `reader.cancel()` would only
+/// return the stored error without performing a real cancellation. The abort
+/// shutdown must then fall back to the abort reason instead of surfacing that
+/// stale stored error (WPT "abort signal takes priority over errored readable").
+fn pipe_source_is_final(reader: &JSValue) -> bool {
+    let Some(r) = JSReadableStreamDefaultReader::payload_of(reader) else {
+        return true;
+    };
+    let Some(stream) = r.stream else {
+        return true;
+    };
+    let Some(p) = stream.payload() else {
+        return true;
+    };
+    p.state != super::RsState::Readable
 }
 
 impl ReadableStreamDefaultReaderPayload {
