@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-//! ReadableStream, its default reader/controller, async iterator support and
-//! channel/bytes-backed stream constructors.
+//! ReadableStream: the stream object itself, `ReadableStream.from()`, `tee()`,
+//! pipe machinery, cancel, async iterator support and the channel/bytes-backed
+//! stream constructors.
 
 use std::{
     cell::{Cell, RefCell},
@@ -31,11 +32,23 @@ use crate::{
     whatwg::{
         abort::{JSAbortSignal, signal_is_aborted, signal_reason},
         dom::make_dom_exception,
-        stream::{extract_high_water_mark, writable::JSWritableStream},
+        stream::{
+            extract_high_water_mark,
+            readable_byte_stream_controller::{
+                JSReadableByteStreamController, ReadableByteStreamControllerPayload,
+            },
+            readable_stream_default_controller::{
+                JSReadableStreamDefaultController, ReadableStreamDefaultControllerPayload,
+            },
+            readable_stream_default_reader::{
+                JSReadableStreamDefaultReader, ReadableStreamDefaultReaderPayload,
+            },
+            writable_stream::JSWritableStream,
+        },
     },
 };
 
-use super::{QueueEntry, RsState, make_iterator_result, settle_stream_state};
+use super::{RsState, settle_stream_state};
 
 pub(crate) struct ReadableStreamPayload {
     pub(crate) state: RsState,
@@ -178,7 +191,6 @@ impl JSReadableStream {
         Ok(buf)
     }
 }
-
 /// GC roots for the reader-drain job. The job outlives many event-loop turns,
 /// so every JS value it can touch later must be traced from here, including the
 /// cells it mutates (`pending` read promise, captured error value).
@@ -331,7 +343,6 @@ impl JSReadableStreamDefaultReader {
         Ok(())
     }
 }
-
 const READABLE_STREAM_PROTO: &[FieldDef] = &[
     FieldDef::GETSET("locked", Some(js_readable_stream_locked), None, 0),
     FieldDef::GETSET("state", Some(js_readable_stream_state), None, 0),
@@ -475,7 +486,6 @@ fn js_readable_stream_get_reader(ctx: &mut ScopedContext, cc: CallContext) -> JS
 fn js_readable_stream_cancel(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     readable_stream_cancel(ctx, &cc.this(), cc.arg(0))
 }
-
 // ============================================================================
 // ReadableStream.from(asyncIterable)
 // ============================================================================
@@ -661,7 +671,6 @@ fn from_pump_rejected(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     }
     Ok(JSValue::UNDEFINED)
 }
-
 // ============================================================================
 // ReadableStream.prototype.tee()
 // ============================================================================
@@ -914,7 +923,6 @@ fn tee_ignore(_ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
 // Callback `data` layout shared across the async driver:
 //   [0] = result resolve fn, [1] = result reject fn, [2] = reader,
 //   [3] = writer, [4] = signal (UNDEFINED if none)
-
 fn js_readable_stream_pipe_to(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     // Spec: pipeTo always returns a promise; brand/validation failures reject it
@@ -1660,15 +1668,6 @@ fn pipe_to_settle_err(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 fn js_readable_stream_async_iterator(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     create_stream_async_iterator(ctx, &cc.this())
 }
-
-pub(crate) struct ReadableStreamDefaultReaderPayload {
-    stream: Option<JSReadableStream>,
-    pub(crate) closed_promise: Option<Promise>,
-    /// True when acquired via `getReader({mode: 'byob'})`. A BYOB read writes
-    /// the chunk into the caller-supplied view instead of allocating one.
-    byob: bool,
-}
-
 thread_local! {
     /// Channel-backed streams being polled: id -> (controller, receiver, idle deadline).
     /// The deadline is per stream and refreshed on every chunk, so a slow but
@@ -1713,572 +1712,6 @@ fn pipe_source_is_final(reader: &JSValue) -> bool {
     };
     p.state != super::RsState::Readable
 }
-
-impl ReadableStreamDefaultReaderPayload {
-    fn gc_trace(&self, gcx: &mut GcTraceCtx) {
-        if let Some(ref s) = self.stream {
-            s.trace(gcx);
-        }
-        if let Some(ref cp) = self.closed_promise {
-            cp.trace(gcx);
-        }
-    }
-
-    /// Perform a `read()` on the underlying stream and return a Promise that
-    /// resolves to `{ value, done }`. Internal callers (drain/tee/pipe/async
-    /// iteration) call this directly instead of going through the JS `read`
-    /// property; the JS API entry point `js_reader_read` delegates here.
-    pub(crate) fn read(
-        &self,
-        ctx: &mut ScopedContext,
-        byob_view: Option<TypedArray>,
-    ) -> Result<Promise, i32> {
-        let mut stream_val = self
-            .stream
-            .ok_or_else(|| ctx.throw_type_error("reader released"))?;
-
-        // Mark disturbed before any early return: even a read on a closed or
-        // errored stream counts as consuming it.
-        if let Some(sp) = stream_val.payload_mut() {
-            sp.disturbed = true;
-        }
-
-        // Copy to decouple borrow: stream_p borrows sv, leaving stream_val free
-        // for mutable access later.
-        let sv = stream_val;
-        let stream_p = sv
-            .payload()
-            .ok_or_else(|| ctx.throw_internal_error("invalid stream"))?;
-
-        match stream_p.state {
-            RsState::Errored => {
-                return Promise::from_reject_value(ctx, stream_p.stored_error);
-            }
-            RsState::Closed => {
-                let result = make_iterator_result(ctx, JSValue::UNDEFINED, true)?;
-                return Promise::from_resolve_value(ctx, result);
-            }
-            RsState::Readable => {}
-        }
-
-        if let Some(controller_val) = stream_p.controller {
-            let cp = controller_val
-                .payload()
-                .ok_or_else(|| ctx.throw_internal_error("invalid controller"))?;
-
-            if !cp.queue.borrow().is_empty() {
-                let mut q = cp.queue.borrow_mut();
-                let entry = q.remove(0);
-                let total = cp.queue_total_size.get();
-                cp.queue_total_size.set(total - entry.size);
-
-                // BYOB: copy as much of the chunk as fits into the caller's view
-                // and push the remainder back so the next read continues where
-                // this one stopped. Done before the close transition so a
-                // partially consumed chunk keeps the stream readable.
-                let chunk = if let Some(view) = byob_view {
-                    let filled = byob_fill_view(ctx, view, entry.chunk, &mut q)?;
-                    if !q.is_empty() {
-                        cp.queue_total_size.set(cp.queue_total_size.get() + 1.0);
-                    }
-                    filled
-                } else {
-                    entry.chunk
-                };
-
-                // Per spec: after draining last item, if close_requested,
-                // transition stream to closed state.
-                if q.is_empty()
-                    && cp.close_requested.get()
-                    && let Some(sp) = stream_val.payload_mut()
-                {
-                    sp.state = RsState::Closed;
-                }
-
-                let result = make_iterator_result(ctx, chunk, false)?;
-                return Promise::from_resolve_value(ctx, result);
-            }
-
-            if cp.close_requested.get() {
-                let result = make_iterator_result(ctx, JSValue::UNDEFINED, true)?;
-                return Promise::from_resolve_value(ctx, result);
-            }
-
-            // No data in queue — register a pending read on this controller so a
-            // later enqueue()/close()/error() can resolve it. Stored per-controller
-            // (not globally) so concurrent/sequential streams don't steal chunks.
-            let (promise, rr) = Promise::create(ctx)?;
-            cp.pending_read.borrow_mut().push([rr[0], rr[1]]);
-            cp.call_controller_pull(ctx)?;
-            return Ok(promise.into());
-        }
-
-        // No controller (e.g. detached) — nothing to read.
-        let result = make_iterator_result(ctx, JSValue::UNDEFINED, true)?;
-        Promise::from_resolve_value(ctx, result)
-    }
-}
-
-const READER_PROTO: &[FieldDef] = &[
-    FieldDef::FUNC("read", 0, js_reader_read, 0),
-    FieldDef::FUNC("cancel", 1, js_reader_cancel, 0),
-    FieldDef::FUNC("releaseLock", 0, js_reader_release_lock, 0),
-    FieldDef::GETSET("closed", Some(js_reader_closed), None, 0),
-    FieldDef::STR(
-        "[Symbol.toStringTag]",
-        "ReadableStreamDefaultReader",
-        zuqe::JS_PROP_CONFIGURABLE,
-    ),
-];
-
-fn js_reader_constructor(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
-    Err(ctx.throw_type_error(
-        "ReadableStreamDefaultReader must be obtained via ReadableStream.getReader()",
-    ))
-}
-
-def_native_object!(
-    "ReadableStreamDefaultReader",
-    JSReadableStreamDefaultReader,
-    ReadableStreamDefaultReaderPayload,
-    READER_PROTO,
-    Some(ClassCtorDef::new(js_reader_constructor, 0, false).expose_to_global()),
-    on_payload_gc: ReadableStreamDefaultReaderPayload::gc_trace
-);
-
-/// Copy `chunk` into the BYOB destination `view`, returning the view to hand
-/// back to the caller. Bytes that do not fit are pushed to the front of `queue`
-/// so the following read resumes from there.
-///
-/// The returned view spans exactly the written bytes, sharing the caller's
-/// buffer, which is what makes `value.buffer` usable for the next read.
-fn byob_fill_view(
-    ctx: &mut ScopedContext,
-    mut view: TypedArray,
-    chunk: JSValue,
-    queue: &mut Vec<QueueEntry>,
-) -> Result<JSValue, i32> {
-    let src: Vec<u8> = match chunk.as_object().and_then(|o| TypedArray::try_from(o).ok()) {
-        Some(ta) => ta.with_bytes(|b| b.to_vec()),
-        // Non-byte chunk in a byte stream: hand it through untouched.
-        None => return Ok(chunk),
-    };
-
-    let n = view.with_bytes_mut(|dest| {
-        let n = src.len().min(dest.len());
-        dest[..n].copy_from_slice(&src[..n]);
-        n
-    });
-
-    if n < src.len() {
-        let rest = TypedArray::create_from_vec_u8(ctx, src[n..].to_vec())?;
-        queue.insert(
-            0,
-            QueueEntry {
-                chunk: JSValue::from(rest),
-                size: 1.0,
-            },
-        );
-    }
-
-    // Return a view over the same buffer covering only the filled range, so the
-    // caller can chain `value.buffer` plus `value.byteLength` as an offset.
-    // `subarray` keeps the underlying buffer shared, unlike a fresh array.
-    let view_val = JSValue::from(view);
-    view_val.get_property_str(ctx, "subarray")?.call(
-        ctx,
-        view_val,
-        &[JSValue::from(0.0), (n as f64).into()],
-    )
-}
-
-fn js_reader_read(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let this = cc.this();
-    let p = JSReadableStreamDefaultReader::payload_of(&this)
-        .ok_or_else(|| ctx.throw_type_error("not a ReadableStreamDefaultReader"))?;
-
-    // A BYOB read takes the destination view as its only argument; the chunk is
-    // written into that view's own buffer region rather than a fresh array.
-    let byob_view = if p.byob {
-        let view = cc.arg(0);
-        let obj = view
-            .as_object()
-            .ok_or_else(|| ctx.throw_type_error("view must be a TypedArray"))?;
-        let ta = TypedArray::try_from(obj)
-            .map_err(|_| ctx.throw_type_error("view must be a TypedArray"))?;
-        if ta.length() == 0 {
-            return Err(ctx.throw_type_error("view must have non-zero length"));
-        }
-        Some(ta)
-    } else {
-        None
-    };
-
-    p.read(ctx, byob_view).map(JSValue::from)
-}
-
-fn js_reader_cancel(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let this = cc.this();
-    let reason = cc.arg(0);
-    let p = JSReadableStreamDefaultReader::payload_of(&this)
-        .ok_or_else(|| ctx.throw_type_error("not a ReadableStreamDefaultReader"))?;
-    match &p.stream {
-        Some(stream_val) => readable_stream_cancel(ctx, &JSValue::from(*stream_val), reason),
-        None => Err(ctx.throw_type_error("reader released")),
-    }
-}
-
-fn js_reader_release_lock(_: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let mut this = cc.this();
-    if let Some(p) = JSReadableStreamDefaultReader::payload_mut_of(&mut this)
-        && let Some(mut stream) = p.stream.take()
-        && let Some(sp) = stream.payload_mut()
-    {
-        sp.reader = None;
-    }
-    Ok(JSValue::UNDEFINED)
-}
-
-fn js_reader_closed(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let this = cc.this();
-    let p = JSReadableStreamDefaultReader::payload_of(&this)
-        .ok_or_else(|| ctx.throw_type_error("not a ReadableStream reader"))?;
-    if let Some(cp) = p.closed_promise {
-        return Ok(JSValue::from(cp));
-    }
-    Ok(JSValue::UNDEFINED)
-}
-
-// ============================================================================
-// ReadableStreamDefaultController
-// ============================================================================
-
-pub(crate) struct ReadableStreamDefaultControllerPayload {
-    pub(crate) stream: Option<JSReadableStream>,
-    pub(crate) underlying_source: JSValue,
-    pub(crate) queue: Rc<RefCell<Vec<QueueEntry>>>,
-    pub(crate) queue_total_size: Rc<Cell<f64>>,
-    pub(crate) high_water_mark: f64,
-    pub(crate) started: Cell<bool>,
-    pub(crate) close_requested: Cell<bool>,
-    pub(crate) pull_again: Cell<bool>,
-    pub(crate) pulling: Cell<bool>,
-    /// Queue of in-flight read() resolvers awaiting data (each is [resolve,
-    /// reject]). Kept as a queue so concurrent read() calls each get their own
-    /// resolver instead of clobbering the previous one. Stored per-controller
-    /// (not globally) so concurrent/sequential streams do not steal chunks.
-    pub(crate) pending_read: Rc<RefCell<Vec<[JSValue; 2]>>>,
-    /// Self JS handle, set right after instance creation, used to re-queue
-    /// pull jobs.
-    pub(crate) controller: Option<JSReadableStreamDefaultController>,
-}
-
-impl ReadableStreamDefaultControllerPayload {
-    pub(crate) fn new(
-        underlying_source: JSValue,
-        stream: Option<JSReadableStream>,
-        high_water_mark: f64,
-    ) -> Self {
-        Self {
-            stream,
-            underlying_source,
-            queue: Rc::new(RefCell::new(Vec::new())),
-            queue_total_size: Rc::new(Cell::new(0.0)),
-            high_water_mark,
-            started: Cell::new(false),
-            close_requested: Cell::new(false),
-            pull_again: Cell::new(false),
-            pulling: Cell::new(false),
-            pending_read: Rc::new(RefCell::new(Vec::new())),
-            controller: None,
-        }
-    }
-
-    fn gc_trace(&self, gcx: &mut GcTraceCtx) {
-        self.underlying_source.trace(gcx);
-        if let Some(ref s) = self.stream {
-            s.trace(gcx);
-        }
-        for entry in self.queue.borrow().iter() {
-            entry.chunk.trace(gcx);
-        }
-        for rr in self.pending_read.borrow().iter() {
-            rr[0].trace(gcx);
-            rr[1].trace(gcx);
-        }
-    }
-
-    /// Resolve the controller's pending read (if any) with an iterator result
-    /// `{value, done}`. Returns true if a pending read was present and resolved.
-    /// Resolve the controller's *oldest* pending read (if any) with an iterator
-    /// result `{value, done}`. Returns true if a pending read was resolved.
-    pub(super) fn resolve_pending_read(
-        &self,
-        ctx: &mut ScopedContext,
-        value: JSValue,
-        done: bool,
-    ) -> bool {
-        let rr = self.pending_read.borrow_mut().first().copied();
-        if let Some([resolve, _reject]) = rr {
-            if let Ok(result) = make_iterator_result(ctx, value, done) {
-                self.pending_read.borrow_mut().remove(0);
-                if resolve.call(ctx, JSValue::UNDEFINED, &[result]).is_err() {
-                    let _e = ctx.take_exception();
-                    #[cfg(debug_assertions)]
-                    eprintln!("[swallow-exc] {}:{}: {:?}", file!(), line!(), _e);
-                }
-                true
-            } else {
-                false
-            }
-        } else {
-            false
-        }
-    }
-
-    /// Reject the controller's *oldest* pending read with `reason`.
-    pub(super) fn reject_pending_read(&self, ctx: &mut ScopedContext, reason: JSValue) {
-        let rr = self.pending_read.borrow_mut().first().copied();
-        if let Some([_resolve, reject]) = rr {
-            self.pending_read.borrow_mut().remove(0);
-            // fn returns (); a throwing resolver is abnormal, drop its exception.
-            if reject.call(ctx, JSValue::UNDEFINED, &[reason]).is_err() {
-                let _e = ctx.take_exception();
-                #[cfg(debug_assertions)]
-                eprintln!("[swallow-exc] {}:{}: {:?}", file!(), line!(), _e);
-            }
-        }
-    }
-
-    /// Reject every outstanding pending read with `reason` (used on error).
-    pub(super) fn reject_all_pending_reads(&self, ctx: &mut ScopedContext, reason: JSValue) {
-        let reads = self.pending_read.borrow_mut().drain(..).collect::<Vec<_>>();
-        for [_, reject] in reads {
-            if reject.call(ctx, JSValue::UNDEFINED, &[reason]).is_err() {
-                let _e = ctx.take_exception();
-                #[cfg(debug_assertions)]
-                eprintln!("[swallow-exc] {}:{}: {:?}", file!(), line!(), _e);
-            }
-        }
-    }
-
-    /// Ask the controller to pull one more chunk (call its underlying source's
-    /// pull, or refill the queue if strategy is undefined).
-    pub(super) fn call_controller_pull(&self, ctx: &mut ScopedContext) -> Result<(), i32> {
-        if self.pulling.get() {
-            self.pull_again.set(true);
-            return Ok(());
-        }
-
-        self.pulling.set(true);
-        self.started.set(true);
-
-        let source = &self.underlying_source;
-        if source.is_undefined() {
-            self.pulling.set(false);
-            return Ok(());
-        }
-
-        let obj = match source.ensure_object(ctx) {
-            Ok(o) => o,
-            Err(_) => {
-                self.pulling.set(false);
-                return Ok(());
-            }
-        };
-
-        let pull_fn = match obj.get_property_str(ctx, "pull") {
-            Ok(v) if v.is_callable() => v,
-            _ => {
-                self.pulling.set(false);
-                return Ok(());
-            }
-        };
-
-        let controller_val = self
-            .controller
-            .ok_or_else(|| ctx.throw_internal_error("invalid controller"))?;
-        // Spec: if the underlying source's pull() throws, error the stream with
-        // that value (which rejects any pending reads) rather than swallowing it.
-        let pull_res = pull_fn.call(ctx, *source, &[JSValue::from(controller_val)]);
-        if pull_res.is_err() {
-            let err = match ctx.take_exception() {
-                zuqe::Exception::Error(v) => v,
-                _ => JSValue::UNDEFINED,
-            };
-            self.pulling.set(false);
-            self.reject_all_pending_reads(ctx, err);
-            self.queue.borrow_mut().clear();
-            self.queue_total_size.set(0.0);
-            if let Some(stream_val) = self.stream {
-                settle_stream_state(ctx, stream_val.into(), RsState::Errored, Some(err));
-            }
-            return Ok(());
-        }
-
-        self.pulling.set(false);
-
-        if self.pull_again.get() {
-            self.pull_again.set(false);
-            let ctrl = controller_val;
-            ctx.queue_job(
-                move |cx| {
-                    let p = ctrl
-                        .payload()
-                        .ok_or_else(|| cx.throw_internal_error("invalid controller"))?;
-                    p.call_controller_pull(cx)?;
-                    Ok(JobState::Done)
-                },
-                (),
-            );
-        }
-
-        Ok(())
-    }
-}
-
-const CONTROLLER_PROTO: &[FieldDef] = &[
-    FieldDef::FUNC("enqueue", 1, js_controller_enqueue, 0),
-    FieldDef::FUNC("close", 0, js_controller_close, 0),
-    FieldDef::FUNC("error", 1, js_controller_error, 0),
-    FieldDef::GETSET("desiredSize", Some(js_controller_desired_size), None, 0),
-    FieldDef::STR(
-        "[Symbol.toStringTag]",
-        "ReadableStreamDefaultController",
-        zuqe::JS_PROP_CONFIGURABLE,
-    ),
-];
-
-fn js_controller_constructor(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
-    Err(ctx.throw_type_error("ReadableStreamDefaultController cannot be constructed directly"))
-}
-
-def_native_object!(
-    "ReadableStreamDefaultController",
-    JSReadableStreamDefaultController,
-    ReadableStreamDefaultControllerPayload,
-    CONTROLLER_PROTO,
-    Some(ClassCtorDef::new(js_controller_constructor, 0, false).expose_to_global()),
-    on_payload_gc: ReadableStreamDefaultControllerPayload::gc_trace
-);
-
-fn js_controller_enqueue(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let this = cc.this();
-    let chunk = cc.arg(0);
-    let p = JSReadableStreamDefaultController::payload_of(&this)
-        .ok_or_else(|| ctx.throw_type_error("not a ReadableStreamDefaultController"))?;
-
-    // Spec: enqueue must throw when the stream is already closed or errored.
-    if let Some(stream_val) = p.stream {
-        if let Some(sp) = stream_val.payload() {
-            if sp.state == RsState::Errored {
-                return Err(ctx.throw_type_error("cannot enqueue to an errored stream"));
-            }
-            if sp.state == RsState::Closed {
-                return Err(ctx.throw_type_error("cannot enqueue to a closed stream"));
-            }
-        }
-    }
-
-    if p.close_requested.get() {
-        return Err(ctx.throw_type_error("cannot enqueue after close"));
-    }
-
-    let resolved = p.resolve_pending_read(ctx, chunk, false);
-
-    if !resolved {
-        p.queue.borrow_mut().push(QueueEntry { chunk, size: 1.0 });
-        let total = p.queue_total_size.get();
-        p.queue_total_size.set(total + 1.0);
-    }
-
-    Ok(JSValue::UNDEFINED)
-}
-
-fn js_controller_close(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let this = cc.this();
-    let p = JSReadableStreamDefaultController::payload_of(&this)
-        .ok_or_else(|| ctx.throw_type_error("not a ReadableStreamDefaultController"))?;
-
-    // Spec: close must throw when the stream is already closed or errored.
-    if let Some(stream_val) = p.stream
-        && let Some(sp) = stream_val.payload()
-    {
-        if sp.state == RsState::Errored {
-            return Err(ctx.throw_type_error("cannot close an errored stream"));
-        }
-        if sp.state == RsState::Closed {
-            return Err(ctx.throw_type_error("cannot close a closed stream"));
-        }
-    }
-
-    p.close_requested.set(true);
-
-    // Every outstanding read() past the queue now resolves as done.
-    while p.resolve_pending_read(ctx, JSValue::UNDEFINED, true) {}
-
-    // Per spec: only transition to closed when queue is empty.
-    // If queue still has items, state stays "readable" until last
-    // item is consumed by read().
-    if p.queue.borrow().is_empty()
-        && let Some(stream_val) = p.stream
-    {
-        settle_stream_state(ctx, stream_val.into(), RsState::Closed, None);
-    }
-
-    Ok(JSValue::UNDEFINED)
-}
-
-fn js_controller_error(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let this = cc.this();
-    let e = cc.arg(0);
-    let p = JSReadableStreamDefaultController::payload_of(&this)
-        .ok_or_else(|| ctx.throw_type_error("not a ReadableStreamDefaultController"))?;
-
-    // Spec: error must throw when the stream is already closed or errored.
-    if let Some(stream_val) = p.stream {
-        if let Some(sp) = stream_val.payload() {
-            if sp.state == RsState::Errored {
-                return Err(ctx.throw_type_error("cannot error an errored stream"));
-            }
-            if sp.state == RsState::Closed {
-                return Err(ctx.throw_type_error("cannot error a closed stream"));
-            }
-        }
-    }
-
-    // Reject every outstanding read() with the error, and drop any queued
-    // chunks (spec: an errored stream discards its queue, so later reads
-    // reject instead of draining stale data).
-    p.reject_all_pending_reads(ctx, e);
-    p.queue.borrow_mut().clear();
-    p.queue_total_size.set(0.0);
-
-    if let Some(stream_val) = p.stream {
-        settle_stream_state(ctx, stream_val.into(), RsState::Errored, Some(e));
-    }
-
-    Ok(JSValue::UNDEFINED)
-}
-
-fn js_controller_desired_size(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let this = cc.this();
-    let p = JSReadableStreamDefaultController::payload_of(&this)
-        .ok_or_else(|| ctx.throw_type_error("not a ReadableStreamDefaultController"))?;
-    // Spec: errored -> null, closed -> 0, else highWaterMark - queueTotalSize.
-    if let Some(s) = p.stream
-        && let Some(sp) = s.payload()
-    {
-        match sp.state {
-            RsState::Errored => return Ok(JSValue::NULL),
-            RsState::Closed => return Ok(JSValue::from(0.0)),
-            RsState::Readable => {}
-        }
-    }
-    let total = p.queue_total_size.get();
-    Ok(JSValue::from(p.high_water_mark - total))
-}
-
 // ============================================================================
 // Controller setup helpers
 // ============================================================================
@@ -2310,12 +1743,11 @@ fn create_readable_stream_controller(
         .controller = Some(handle);
     Ok(controller)
 }
-
 // ============================================================================
 // Stream cancel & async iterator
 // ============================================================================
 
-fn readable_stream_cancel(
+pub(super) fn readable_stream_cancel(
     ctx: &mut ScopedContext,
     stream: &JSValue,
     reason: JSValue,
@@ -2482,7 +1914,6 @@ fn create_stream_async_iterator(ctx: &mut ScopedContext, stream_val: &JSValue) -
 
     Ok(iter.into())
 }
-
 // ============================================================================
 // Channel/bytes/text-backed stream constructors
 // ============================================================================
@@ -2809,167 +2240,6 @@ fn start_channel_stream_poller(ctx: &mut ScopedContext) {
         (),
     );
 }
-
-// ============================================================================
-// ReadableByteStreamController (minimal exposure)
-//
-// The full byte-stream engine (byte queue, pull-into, BYOB request lifecycle)
-// is not implemented. This class exists so that `ReadableByteStreamController`
-// is a visible global constructor and so that `new ReadableStream({ type:
-// "bytes" }, strategy)` passes a `ReadableByteStreamController` instance to
-// the user's `start(controller)` callback (per WPT construct-byob-request).
-// Methods reuse the shared stream-state transitions; end-to-end byte transfer
-// through `read()` is intentionally not wired up yet.
-// ============================================================================
-
-pub(crate) struct ReadableByteStreamControllerPayload {
-    pub(crate) stream: Option<JSReadableStream>,
-    pub(crate) underlying_source: JSValue,
-    pub(crate) queue: Rc<RefCell<Vec<QueueEntry>>>,
-    pub(crate) queue_total_size: Rc<Cell<f64>>,
-    pub(crate) high_water_mark: f64,
-    pub(crate) close_requested: Cell<bool>,
-    /// Pending BYOB request view, if any. Left `None` in this minimal build.
-    pub(crate) byob_request: Rc<RefCell<Option<JSValue>>>,
-}
-
-impl ReadableByteStreamControllerPayload {
-    pub(crate) fn new(
-        underlying_source: JSValue,
-        stream: Option<JSReadableStream>,
-        high_water_mark: f64,
-    ) -> Self {
-        Self {
-            stream,
-            underlying_source,
-            queue: Rc::new(RefCell::new(Vec::new())),
-            queue_total_size: Rc::new(Cell::new(0.0)),
-            high_water_mark,
-            close_requested: Cell::new(false),
-            byob_request: Rc::new(RefCell::new(None)),
-        }
-    }
-
-    fn gc_trace(&self, gcx: &mut GcTraceCtx) {
-        self.underlying_source.trace(gcx);
-        if let Some(ref s) = self.stream {
-            s.trace(gcx);
-        }
-        if let Some(ref br) = *self.byob_request.borrow() {
-            br.trace(gcx);
-        }
-    }
-}
-
-const BYTE_CONTROLLER_PROTO: &[FieldDef] = &[
-    FieldDef::FUNC("enqueue", 1, js_byte_controller_enqueue, 0),
-    FieldDef::FUNC("close", 0, js_byte_controller_close, 0),
-    FieldDef::FUNC("error", 1, js_byte_controller_error, 0),
-    FieldDef::GETSET(
-        "desiredSize",
-        Some(js_byte_controller_desired_size),
-        None,
-        0,
-    ),
-    FieldDef::GETSET(
-        "byobRequest",
-        Some(js_byte_controller_byob_request),
-        None,
-        0,
-    ),
-    FieldDef::STR(
-        "[Symbol.toStringTag]",
-        "ReadableByteStreamController",
-        zuqe::JS_PROP_CONFIGURABLE,
-    ),
-];
-
-fn js_byte_controller_constructor(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
-    Err(ctx.throw_type_error("ReadableByteStreamController cannot be constructed directly"))
-}
-
-fn js_byte_controller_desired_size(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let this = cc.this();
-    let p = JSReadableByteStreamController::payload_of(&this)
-        .ok_or_else(|| ctx.throw_type_error("not a ReadableByteStreamController"))?;
-    // Spec: errored -> null, closed -> 0, else highWaterMark - queueTotalSize.
-    if let Some(s) = p.stream
-        && let Some(sp) = s.payload()
-    {
-        match sp.state {
-            RsState::Errored => return Ok(JSValue::NULL),
-            RsState::Closed => return Ok(JSValue::from(0.0)),
-            RsState::Readable => {}
-        }
-    }
-    let total = p.queue_total_size.get();
-    Ok(JSValue::from(p.high_water_mark - total))
-}
-
-fn js_byte_controller_byob_request(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let this = cc.this();
-    let p = JSReadableByteStreamController::payload_of(&this)
-        .ok_or_else(|| ctx.throw_type_error("not a ReadableByteStreamController"))?;
-    // Minimal build: no pending BYOB request is tracked.
-    Ok(p.byob_request.borrow().unwrap_or(JSValue::UNDEFINED))
-}
-
-fn js_byte_controller_enqueue(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let this = cc.this();
-    let chunk = cc.arg(0);
-    let p = JSReadableByteStreamController::payload_of(&this)
-        .ok_or_else(|| ctx.throw_type_error("not a ReadableByteStreamController"))?;
-
-    if p.close_requested.get() {
-        return Err(ctx.throw_type_error("cannot enqueue after close"));
-    }
-
-    // Minimal build: enqueue the chunk with unit size. Full byte-stream size
-    // accounting (byte length) is not wired up yet.
-    p.queue.borrow_mut().push(QueueEntry { chunk, size: 1.0 });
-    p.queue_total_size.set(p.queue_total_size.get() + 1.0);
-
-    Ok(JSValue::UNDEFINED)
-}
-
-fn js_byte_controller_close(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let this = cc.this();
-    let p = JSReadableByteStreamController::payload_of(&this)
-        .ok_or_else(|| ctx.throw_type_error("not a ReadableByteStreamController"))?;
-
-    p.close_requested.set(true);
-
-    if p.queue.borrow().is_empty() {
-        if let Some(stream_val) = p.stream {
-            settle_stream_state(ctx, stream_val.into(), RsState::Closed, None);
-        }
-    }
-
-    Ok(JSValue::UNDEFINED)
-}
-
-fn js_byte_controller_error(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let this = cc.this();
-    let e = cc.arg(0);
-    let p = JSReadableByteStreamController::payload_of(&this)
-        .ok_or_else(|| ctx.throw_type_error("not a ReadableByteStreamController"))?;
-
-    if let Some(stream_val) = p.stream {
-        settle_stream_state(ctx, stream_val.into(), RsState::Errored, Some(e));
-    }
-
-    Ok(JSValue::UNDEFINED)
-}
-
-def_native_object!(
-    "ReadableByteStreamController",
-    JSReadableByteStreamController,
-    ReadableByteStreamControllerPayload,
-    BYTE_CONTROLLER_PROTO,
-    Some(ClassCtorDef::new(js_byte_controller_constructor, 0, false).expose_to_global()),
-    on_payload_gc: ReadableByteStreamControllerPayload::gc_trace
-);
-
 // ============================================================================
 // Registration
 // ============================================================================
@@ -2995,19 +2265,4 @@ pub(crate) fn install_readable_stream_statics(
         ctor.define_property_value_str(ctx, "from", from_fn.into(), zuqe::JS_PROP_C_W_E)?;
     }
     Ok(())
-}
-
-#[distributed_slice(USER_CLASS_DEFS)]
-fn register_readable_stream_default_reader(rt: &mut Runtime) -> Result<ClassID, i32> {
-    JSReadableStreamDefaultReader::register(rt)
-}
-
-#[distributed_slice(USER_CLASS_DEFS)]
-fn register_readable_stream_default_controller(rt: &mut Runtime) -> Result<ClassID, i32> {
-    JSReadableStreamDefaultController::register(rt)
-}
-
-#[distributed_slice(USER_CLASS_DEFS)]
-fn register_readable_byte_stream_controller(rt: &mut Runtime) -> Result<ClassID, i32> {
-    JSReadableByteStreamController::register(rt)
 }

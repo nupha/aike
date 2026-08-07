@@ -6,22 +6,29 @@
 //! Implements ReadableStream, WritableStream, TransformStream and related
 //! classes per the [WHATWG Streams specification](https://streams.spec.whatwg.org/).
 //!
-//! Split by class family: `readable`, `writable`, `transform`. Shared items
+//! Split one class per file, named after the class in snake case. Shared items
 //! (stream state, queue entry, pending-read slot, queuing strategies) live here.
 
-mod readable;
-mod transform;
-mod writable;
+mod readable_byte_stream_controller;
+mod readable_stream;
+mod readable_stream_default_controller;
+mod readable_stream_default_reader;
+mod transform_stream;
+mod transform_stream_default_controller;
+mod writable_stream;
+mod writable_stream_default_controller;
+mod writable_stream_default_writer;
 
 pub(crate) use {
-    readable::{
-        JSReadableByteStreamController, JSReadableStream, JSReadableStreamDefaultController,
-        JSReadableStreamDefaultReader, install_readable_stream_statics,
-    },
-    transform::{JSTransformStream, JSTransformStreamDefaultController},
-    writable::{
-        JSWritableStream, JSWritableStreamDefaultController, JSWritableStreamDefaultWriter,
-    },
+    readable_byte_stream_controller::JSReadableByteStreamController,
+    readable_stream::{JSReadableStream, install_readable_stream_statics},
+    readable_stream_default_controller::JSReadableStreamDefaultController,
+    readable_stream_default_reader::JSReadableStreamDefaultReader,
+    transform_stream::JSTransformStream,
+    transform_stream_default_controller::JSTransformStreamDefaultController,
+    writable_stream::JSWritableStream,
+    writable_stream_default_controller::JSWritableStreamDefaultController,
+    writable_stream_default_writer::JSWritableStreamDefaultWriter,
 };
 
 use linkme::distributed_slice;
@@ -48,7 +55,7 @@ pub(crate) struct QueueEntry {
 
 /// Called by the runtime GC to keep stream-related JSValues alive.
 pub(crate) fn gc_trace_stream(gcx: &mut GcTraceCtx) {
-    readable::CHANNEL_STREAMS.with_borrow(|map| {
+    readable_stream::CHANNEL_STREAMS.with_borrow(|map| {
         for (controller, _, _) in map.values() {
             controller.as_object().trace(gcx);
         }

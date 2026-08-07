@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
+//! The `fetch()` entry point: request construction, the network/cache
+//! pipeline, and installation of the `fetch` global.
+
 use std::{
     cell::{Cell, RefCell},
     collections::HashMap,
@@ -11,6 +14,7 @@ use std::{
 use zuqe::{
     CallContext, Callback, Exception, JSResult, JSValue, JobState, Object, ScopedContext,
     builtins::promise::{Promise, PromiseResultSlot},
+    gc_lite::{GcTrace, GcTraceCtx},
 };
 
 use crate::http::client::{
@@ -29,12 +33,16 @@ use crate::http::client::{
     },
 };
 
-use zuqe::gc_lite::{GcTrace, GcTraceCtx};
-
-use super::{
+use crate::whatwg::{
     abort::{JSAbortSignal, signal_is_aborted, signal_notify, signal_reason},
     dom::make_dom_exception,
-    stream::{JSReadableStream},
+    stream::JSReadableStream,
+};
+
+use super::{
+    headers::{ensure_default_request_headers, strip_forbidden_request_headers},
+    integrity::check_integrity,
+    referrer::compute_request_referrer,
 };
 
 thread_local! {
@@ -83,402 +91,6 @@ pub(crate) fn js_fetch(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             Ok(promise.into())
         }
     }
-}
-
-// Inject Fetch-spec default request headers (`Accept`, `Accept-Language`)
-// when the caller did not supply them. Called after RequestInit/Request
-// inheritance is applied, so explicit headers always win.
-fn ensure_default_request_headers(h: &mut HeaderList) {
-    if !h.has("accept") {
-        h.append("Accept", "*/*");
-    }
-    if !h.has("accept-language") {
-        h.append("Accept-Language", "*");
-    }
-    // Browsers always send a User-Agent; WPT checks for its presence.
-    if !h.has("user-agent") {
-        h.append("User-Agent", "Mozilla/5.0 (aike)");
-    }
-}
-
-/// WHATWG "forbidden request-header" names: a `fetch()` must silently drop any
-/// header whose name (case-insensitively) is in this set, or begins with
-/// `Proxy-` / `Sec-`. The browser (or underlying transport) owns these; a
-/// script must not be able to set them. (Set-Cookie is also forbidden as a
-/// request header but Headers does not expose it for sending anyway.)
-///
-/// The three `x-*` method-override headers are *conditionally* forbidden: only
-/// when their value resolves to a forbidden method (see
-/// `is_forbidden_override_value`).
-fn is_forbidden_request_header(name: &str, value: &str) -> bool {
-    const FORBIDDEN: &[&str] = &[
-        "accept-charset",
-        "accept-encoding",
-        "access-control-request-headers",
-        "access-control-request-method",
-        "connection",
-        "content-length",
-        "cookie",
-        "cookie2",
-        "date",
-        "dnt",
-        "expect",
-        "host",
-        "keep-alive",
-        "origin",
-        "referer",
-        "te",
-        "trailer",
-        "transfer-encoding",
-        "upgrade",
-        "via",
-    ];
-    let lower = name.to_lowercase();
-    if FORBIDDEN.contains(&lower.as_str()) {
-        return true;
-    }
-    if lower.starts_with("proxy-") || lower.starts_with("sec-") {
-        return true;
-    }
-    // `x-http-method` / `x-http-method-override` / `x-method-override`: forbidden
-    // only when the value resolves to a forbidden method (CONNECT/TRACE/TRACK).
-    if matches!(
-        lower.as_str(),
-        "x-http-method" | "x-http-method-override" | "x-method-override"
-    ) {
-        return is_forbidden_override_value(value);
-    }
-    false
-}
-
-/// WHATWG Fetch: the three method-override headers are forbidden when their
-/// value, after "get, decode, and split" (split on commas, with quoted strings
-/// kept intact and each item trimmed), yields a forbidden method
-/// (CONNECT/TRACE/TRACK, byte-case-insensitive). A quoted method like
-/// `"TRACE"` does NOT match (the quotes are part of the token), so a value such
-/// as `",TRACE,"` is permitted.
-/// Compute the outgoing `Referer` value per the Fetch `referrer`/`referrerPolicy`
-/// algorithm.
-///
-/// `referrer` is the explicit `RequestInit.referrer` (or `"about:client"`).
-/// `referrer_policy` is the explicit `referrerPolicy` string (empty = default).
-/// `client_origin`/`client_url` come from the `self.location` shim (browser
-/// document origin / URL). `request_url` is the serialized request URL.
-///
-/// Covers the policies exercised by WPT `referrer.any.js`:
-/// `origin-when-cross-origin` and the implicit default, plus explicit `referrer`
-/// values whose credentials and fragment are stripped to yield the request's
-/// origin (+ trailing slash).
-pub(crate) fn compute_request_referrer(
-    referrer: &str,
-    referrer_policy: &str,
-    client_origin: Option<&str>,
-    client_url: Option<&str>,
-    request_url: &str,
-) -> Option<String> {
-    // Strip any fragment and trailing `#` from a URL string.
-    let strip_fragment = |u: &str| -> String {
-        match u.find('#') {
-            Some(i) => u[..i].to_string(),
-            None => u.to_string(),
-        }
-    };
-    // Origin (scheme://host[:port]) of a URL, or None if unparsable.
-    let origin_of = |u: &str| -> Option<String> {
-        url::Url::parse(u)
-            .ok()
-            .map(|u| u.origin().ascii_serialization())
-    };
-    // Whether a URL is "potentially trustworthy" enough to send a referrer to
-    // over a (non-)downgrade. http://localhost and https are trustworthy.
-    let trustworthy = |u: &str| -> bool {
-        match url::Url::parse(u) {
-            Ok(parsed) => {
-                parsed.scheme() == "https"
-                    || (parsed.scheme() == "http"
-                        && matches!(parsed.host_str(), Some("localhost") | Some("127.0.0.1")))
-            }
-            Err(_) => false,
-        }
-    };
-
-    // `no-referrer` policy always yields an empty referrer.
-    if referrer_policy == "no-referrer" {
-        return Some(String::new());
-    }
-
-    // Resolve the referrer source URL. `"about:client"` (or empty) uses the
-    // document URL; an explicit `referrer` may be absolute or relative and is
-    // resolved against the document URL, then stripped of its fragment.
-    let source: Option<String> = if referrer.is_empty() || referrer == "about:client" {
-        client_url.map(|u| strip_fragment(u))
-    } else {
-        let resolved = if let Ok(u) = url::Url::parse(referrer) {
-            u.to_string()
-        } else if let Some(base) = client_url {
-            url::Url::parse(base)
-                .ok()
-                .and_then(|b| b.join(referrer).ok())
-                .map(|u| u.to_string())
-                .unwrap_or_else(|| referrer.to_string())
-        } else {
-            referrer.to_string()
-        };
-        Some(strip_fragment(&resolved))
-    };
-    let source = source?;
-
-    let req_origin = origin_of(request_url);
-    let same_origin = match (&req_origin, client_origin) {
-        (Some(ro), Some(co)) => ro == co,
-        _ => false,
-    };
-
-    // Helper: origin of `source` with trailing slash (e.g. "http://h:8000/").
-    let source_origin_slash = || -> Option<String> {
-        let o = origin_of(&source)?;
-        Some(if o.ends_with('/') { o } else { format!("{o}/") })
-    };
-
-    // Fetch spec "strip": if the referrer carries credentials (userinfo), it
-    // collapses to its origin (+ trailing slash) regardless of policy.
-    if url::Url::parse(&source)
-        .map(|u| u.username() != "" || u.password().is_some())
-        .unwrap_or(false)
-    {
-        return source_origin_slash();
-    }
-
-    let full = || {
-        url::Url::parse(&source)
-            .map(|u| u.to_string())
-            .unwrap_or(source.clone())
-    };
-
-    // Apply the policy (Fetch spec referrer policy table).
-    match referrer_policy {
-        "origin" => source_origin_slash(),
-        "same-origin" => {
-            if same_origin {
-                Some(source)
-            } else {
-                Some(String::new())
-            }
-        }
-        "origin-when-cross-origin" => {
-            if same_origin {
-                Some(source)
-            } else {
-                source_origin_slash()
-            }
-        }
-        "strict-origin" => {
-            // Send the origin unless this is a downgrade (a trustworthy/encrypted
-            // referrer being sent to a non-trustworthy request target).
-            if trustworthy(&source) && !trustworthy(request_url) {
-                Some(String::new())
-            } else {
-                source_origin_slash()
-            }
-        }
-        "strict-origin-when-cross-origin" => {
-            if same_origin {
-                Some(source)
-            } else if trustworthy(&source) && !trustworthy(request_url) {
-                Some(String::new())
-            } else {
-                source_origin_slash()
-            }
-        }
-        "unsafe-url" => Some(full()),
-        // Implicit default (no explicit `referrerPolicy`): behaves like
-        // `origin-when-cross-origin` (full referrer same-origin, origin-only
-        // cross-origin), which is what WPT's default-policy tests expect.
-        "" => {
-            if same_origin {
-                Some(source)
-            } else {
-                source_origin_slash()
-            }
-        }
-        // `no-referrer-when-downgrade`: send the full referrer unless the
-        // request would be a downgrade (https → http).
-        _ => {
-            let source_trusted = trustworthy(&source);
-            let req_trusted = trustworthy(request_url);
-            if source_trusted && !req_trusted {
-                Some(String::new())
-            } else {
-                Some(full())
-            }
-        }
-    }
-}
-
-fn is_forbidden_override_value(value: &str) -> bool {
-    for method in split_on_commas(value) {
-        if matches!(
-            method.to_ascii_lowercase().as_str(),
-            "connect" | "trace" | "track"
-        ) {
-            return true;
-        }
-    }
-    false
-}
-
-/// Fetch "get, decode, and split" for a header value: split on commas, but a
-/// comma inside an HTTP quoted string (`"..."`) is not a separator, and each
-/// item is trimmed of surrounding whitespace. Quoted strings keep their quote
-/// characters (so `"TRACE"` is a distinct token from `TRACE`). Backslash
-/// escapes inside a quoted string are preserved verbatim.
-fn split_on_commas(value: &str) -> Vec<String> {
-    let chars: Vec<char> = value.chars().collect();
-    let mut pos = 0;
-    let mut out: Vec<String> = Vec::new();
-    let mut temp = String::new();
-    loop {
-        while pos < chars.len() && chars[pos] != '"' && chars[pos] != ',' {
-            temp.push(chars[pos]);
-            pos += 1;
-        }
-        if pos < chars.len() && chars[pos] == '"' {
-            // Collect the HTTP quoted string, keeping the quote characters.
-            temp.push('"');
-            pos += 1;
-            while pos < chars.len() {
-                let c = chars[pos];
-                temp.push(c);
-                pos += 1;
-                if c == '"' {
-                    break;
-                }
-                if c == '\\' && pos < chars.len() {
-                    temp.push(chars[pos]);
-                    pos += 1;
-                }
-            }
-            if pos < chars.len() {
-                continue;
-            }
-        }
-        out.push(temp.trim().to_string());
-        temp.clear();
-        if pos >= chars.len() {
-            return out;
-        }
-        if chars[pos] == ',' {
-            pos += 1;
-        }
-    }
-}
-
-/// Drop all forbidden request headers set by the caller. Called after default
-/// headers are injected (Accept / Accept-Language are not forbidden, so they
-/// survive). The transport layer adds its own Content-Length / Host later.
-fn strip_forbidden_request_headers(h: &mut HeaderList) {
-    let drop: Vec<String> = h
-        .to_vec()
-        .into_iter()
-        .filter(|(k, v)| is_forbidden_request_header(k, v))
-        .map(|(k, _)| k)
-        .collect();
-    for k in drop {
-        h.delete(&k);
-    }
-}
-
-/// Hash algorithm named in a Subresource Integrity metadata entry.
-enum HashAlg {
-    Sha256,
-    Sha384,
-    Sha512,
-}
-
-impl HashAlg {
-    /// Parse the algorithm name (case-insensitive, e.g. "sha256").
-    fn parse(name: &str) -> Option<HashAlg> {
-        match name.to_ascii_lowercase().as_str() {
-            "sha256" => Some(HashAlg::Sha256),
-            "sha384" => Some(HashAlg::Sha384),
-            "sha512" => Some(HashAlg::Sha512),
-            _ => None,
-        }
-    }
-    /// Strength ordering — stronger algorithms win per the SRI spec.
-    fn strength(&self) -> u8 {
-        match self {
-            HashAlg::Sha256 => 0,
-            HashAlg::Sha384 => 1,
-            HashAlg::Sha512 => 2,
-        }
-    }
-}
-
-/// Validate `body` against a Subresource Integrity `integrity` metadata string
-/// (space-separated `alg-base64value` tokens). Returns `Err` with a message if
-/// the body matches none of the (parsable) entries — per spec, the response is
-/// rejected in that case.
-fn check_integrity(body: &[u8], integrity: &str) -> Result<(), String> {
-    use base64::Engine;
-    use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD};
-    use sha2::{Digest, Sha256, Sha384, Sha512};
-
-    // Collect every well-formed (`alg-value`) entry. A value may be base64
-    // (standard, padded or unpadded) or base64url (with or without padding);
-    // try each decoder in turn. Entries are kept with their algorithm strength
-    // so we can try the strongest first, per the SRI spec.
-    let mut entries: Vec<(u8, HashAlg, Vec<u8>)> = Vec::new();
-    for tok in integrity.split_whitespace() {
-        let (alg_name, b64) = match tok.split_once('-') {
-            Some((a, b)) => (a, b),
-            None => continue,
-        };
-        let alg = match HashAlg::parse(alg_name) {
-            Some(a) => a,
-            None => continue,
-        };
-        let expected = STANDARD
-            .decode(b64)
-            .or_else(|_| STANDARD_NO_PAD.decode(b64))
-            .or_else(|_| URL_SAFE.decode(b64))
-            .or_else(|_| URL_SAFE_NO_PAD.decode(b64));
-        let expected = match expected {
-            Ok(bytes) => bytes,
-            Err(_) => continue,
-        };
-        entries.push((alg.strength(), alg, expected));
-    }
-    if entries.is_empty() {
-        return Err(format!(
-            "integrity metadata contained no usable entry: {integrity}"
-        ));
-    }
-
-    // SRI "get the strongest metadata": only entries using the strongest
-    // algorithm present are considered. Weaker entries are discarded, so a
-    // valid sha384 cannot rescue an invalid sha512 in the same metadata set.
-    let strongest = entries.iter().map(|(s, _, _)| *s).max().unwrap_or(0);
-
-    // Within the strongest set any single match is enough to pass.
-    for (strength, alg, expected) in &entries {
-        if *strength != strongest {
-            continue;
-        }
-
-        let actual: Vec<u8> = match alg {
-            HashAlg::Sha256 => Sha256::digest(body).to_vec(),
-            HashAlg::Sha384 => Sha384::digest(body).to_vec(),
-            HashAlg::Sha512 => Sha512::digest(body).to_vec(),
-        };
-        if &actual == expected {
-            return Ok(());
-        }
-    }
-    Err(format!(
-        "subresource integrity check failed: no entry matched for {}",
-        integrity
-    ))
 }
 
 fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -1677,7 +1289,7 @@ pub(crate) fn install_fetch(ctx: &mut ScopedContext, mut global: Object) -> Resu
     global.define_property_value_str(ctx, "fetch", func.into(), zuqe::JS_PROP_C_W_E)?;
 
     // Cache Storage API
-    let caches = super::super::http::client::cache_storage::JSCacheStorage::new_instance(
+    let caches = crate::http::client::cache_storage::JSCacheStorage::new_instance(
         ctx,
         JSValue::UNDEFINED,
         crate::http::client::cache_storage::CacheStoragePayload {
