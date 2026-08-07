@@ -175,7 +175,7 @@ fn tee_pull_fulfilled(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         shared.done.set(true);
         for c in [shared.c1, shared.c2] {
             if !tee_branch_is_final(ctx, c.into()) {
-                c.invoke_str(ctx, "close", &[])?;
+                c.close(ctx)?;
             }
         }
         TEE_STREAMS.with(|m| m.borrow_mut().remove(&tee_id));

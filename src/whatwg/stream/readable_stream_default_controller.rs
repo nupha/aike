@@ -269,38 +269,51 @@ fn js_controller_enqueue(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
 fn js_controller_close(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
-    let p = JSReadableStreamDefaultController::payload_of(&this)
+    let controller = this
+        .as_native_object::<JSReadableStreamDefaultController>()
         .ok_or_else(|| ctx.throw_type_error("not a ReadableStreamDefaultController"))?;
-
-    // Spec: close must throw when the stream is already closed or errored.
-    if let Some(stream_val) = p.stream
-        && let Some(sp) = stream_val.payload()
-    {
-        if sp.state == RsState::Errored {
-            return Err(ctx.throw_type_error("cannot close an errored stream"));
-        }
-        if sp.state == RsState::Closed {
-            return Err(ctx.throw_type_error("cannot close a closed stream"));
-        }
-    }
-
-    p.close_requested.set(true);
-
-    // Every outstanding read() past the queue now resolves as done.
-    while p.resolve_pending_read(ctx, JSValue::UNDEFINED, true) {}
-
-    // Per spec: only transition to closed when queue is empty.
-    // If queue still has items, state stays "readable" until last
-    // item is consumed by read().
-    if p.queue.borrow().is_empty()
-        && let Some(mut rs) = p.stream
-    {
-        rs.payload_mut()
-            .unwrap()
-            .settle_state(ctx, RsState::Closed, None);
-    }
-
+    controller.close(ctx)?;
     Ok(JSValue::UNDEFINED)
+}
+
+impl JSReadableStreamDefaultController {
+    /// Close the controlled stream: throw if already closed/errored, resolve all
+    /// pending reads as done, then settle to Closed once the queue drains.
+    pub(crate) fn close(&self, ctx: &mut ScopedContext) -> Result<(), i32> {
+        let p = self
+            .payload()
+            .ok_or_else(|| ctx.throw_type_error("not a ReadableStreamDefaultController"))?;
+
+        // Spec: close must throw when the stream is already closed or errored.
+        if let Some(stream_val) = p.stream
+            && let Some(sp) = stream_val.payload()
+        {
+            if sp.state == RsState::Errored {
+                return Err(ctx.throw_type_error("cannot close an errored stream"));
+            }
+            if sp.state == RsState::Closed {
+                return Err(ctx.throw_type_error("cannot close a closed stream"));
+            }
+        }
+
+        p.close_requested.set(true);
+
+        // Every outstanding read() past the queue now resolves as done.
+        while p.resolve_pending_read(ctx, JSValue::UNDEFINED, true) {}
+
+        // Per spec: only transition to closed when queue is empty.
+        // If queue still has items, state stays "readable" until last
+        // item is consumed by read().
+        if p.queue.borrow().is_empty()
+            && let Some(mut rs) = p.stream
+        {
+            rs.payload_mut()
+                .unwrap()
+                .settle_state(ctx, RsState::Closed, None);
+        }
+
+        Ok(())
+    }
 }
 
 fn js_controller_error(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
