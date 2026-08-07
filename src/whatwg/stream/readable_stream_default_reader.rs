@@ -22,10 +22,7 @@ use zuqe::{
     gc_lite::{GcTrace, GcTraceCtx},
 };
 
-use crate::{
-    USER_CLASS_DEFS,
-    whatwg::stream::readable_stream::{JSReadableStream, readable_stream_cancel},
-};
+use crate::{USER_CLASS_DEFS, whatwg::stream::readable_stream::JSReadableStream};
 
 use super::{QueueEntry, RsState, make_iterator_result};
 
@@ -140,6 +137,42 @@ impl ReadableStreamDefaultReaderPayload {
         let result = make_iterator_result(ctx, JSValue::UNDEFINED, true)?;
         Promise::from_resolve_value(ctx, result)
     }
+
+    /// Synchronously drain the stream's body into a byte buffer. Valid only
+    /// for already-settled (queue-backed) reads; a pending read cannot be
+    /// waited on synchronously and rejects with a TypeError.
+    pub(crate) fn drain_sync(&self, ctx: &mut ScopedContext) -> Result<Vec<u8>, i32> {
+        let mut buf = Vec::new();
+
+        loop {
+            let pr = self.read(ctx, None)?;
+            match pr.state() {
+                PromiseState::Fulfilled => {
+                    let result = pr.result();
+                    let done = result
+                        .get_property_str(ctx, "done")
+                        .and_then(|d| d.to_bool())
+                        .unwrap_or(false);
+                    if done {
+                        break;
+                    }
+                    let value = result
+                        .get_property_str(ctx, "value")
+                        .map_err(|_| ctx.throw_internal_error("missing read value"))?;
+                    let ta = TypedArray::try_from(value)
+                        .map_err(|_| ctx.throw_type_error("body chunk is not a Uint8Array"))?;
+                    ta.with_bytes(|b| buf.extend_from_slice(b));
+                }
+
+                // A stream that is not synchronously settled cannot be drained here.
+                PromiseState::Pending | PromiseState::Rejected => {
+                    return Err(ctx.throw_type_error("body stream is not synchronously readable"));
+                }
+            }
+        }
+
+        Ok(buf)
+    }
 }
 
 const READER_PROTO: &[FieldDef] = &[
@@ -245,8 +278,13 @@ fn js_reader_cancel(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let reason = cc.arg(0);
     let p = JSReadableStreamDefaultReader::payload_of(&this)
         .ok_or_else(|| ctx.throw_type_error("not a ReadableStreamDefaultReader"))?;
-    match &p.stream {
-        Some(stream_val) => readable_stream_cancel(ctx, &JSValue::from(*stream_val), reason),
+
+    match p.stream {
+        Some(mut rs) => rs
+            .payload_mut()
+            .unwrap()
+            .cancel(ctx, reason)
+            .map(JSValue::from),
         None => Err(ctx.throw_type_error("reader released")),
     }
 }

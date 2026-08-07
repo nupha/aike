@@ -242,53 +242,18 @@ pub(crate) fn make_iterator_result(
     Ok(JSValue::from(obj))
 }
 
-/// Set a stream's state (and `stored_error` when errored), then settle the
-/// peer reader/writer's `closed_promise` accordingly.
-///
-/// `reason`: `None` => `closed_promise.resolve(undefined)`; `Some(r)` =>
-/// `closed_promise.reject(r)` and `stream.stored_error = r`.
-///
-/// `stream` must be a `JSReadableStream` or `JSWritableStream` native object.
-/// Taken by value (Copy) and re-derived inside; the caller keeps its own handle.
-pub(super) fn settle_stream_state(
-    ctx: &mut ScopedContext,
-    stream: JSValue,
-    state: RsState,
-    reason: Option<JSValue>,
-) {
-    let mut stream = stream;
-    if let Some(sp) = JSReadableStream::payload_mut_of(&mut stream) {
-        // A stream can only leave the Readable state once. Re-settling (e.g.
-        // cancel after an error) must not re-settle the peer's closed_promise,
-        // which would violate the Promise contract.
-        if sp.state != RsState::Readable {
-            return;
-        }
-        sp.state = state;
-        if let Some(r) = reason {
-            sp.stored_error = r;
-        }
-        notify_peer_closed(ctx, sp.reader.map(JSValue::from), reason);
-    } else if let Some(sp) = JSWritableStream::payload_mut_of(&mut stream) {
-        if sp.state != RsState::Readable {
-            return;
-        }
-        sp.state = state;
-        if let Some(r) = reason {
-            sp.stored_error = r;
-        }
-        notify_peer_closed(ctx, sp.writer.map(JSValue::from), reason);
-    }
-}
-
 /// Resolve or reject the peer (reader/writer) `closed_promise` if present.
 ///
 /// The `closed_promise` is kept in place so `reader.closed` / `writer.closed`
 /// keeps returning a valid promise; it is settled only while still Pending.
 /// `Promise::settle` must not run on an already-settled promise (debug_assert),
-/// and fetch body teardown can call `settle_stream_state` repeatedly (error then
+/// and fetch body teardown can call `settle_state` repeatedly (error then
 /// cancel) against the same reader.
-fn notify_peer_closed(ctx: &mut ScopedContext, peer: Option<JSValue>, reason: Option<JSValue>) {
+pub(super) fn notify_peer_closed(
+    ctx: &mut ScopedContext,
+    peer: Option<JSValue>,
+    reason: Option<JSValue>,
+) {
     let Some(mut pv) = peer else {
         return;
     };

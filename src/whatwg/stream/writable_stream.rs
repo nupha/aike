@@ -24,7 +24,7 @@ use crate::{
     },
 };
 
-use super::{RsState, settle_stream_state};
+use super::{RsState, notify_peer_closed};
 
 // ============================================================================
 // WritableStream
@@ -55,6 +55,61 @@ impl WritableStreamPayload {
         if let Some(ref c) = self.controller {
             c.trace(gcx);
         }
+    }
+
+    /// Set this stream's state (and `stored_error` when errored), then settle
+    /// the peer writer's `closed_promise` accordingly.
+    ///
+    /// A stream can only leave the Readable state once. Re-settling (e.g. abort
+    /// after an error) must not re-settle the peer's closed_promise, which would
+    /// violate the Promise contract.
+    pub(crate) fn settle_state(
+        &mut self,
+        ctx: &mut ScopedContext,
+        state: RsState,
+        reason: Option<JSValue>,
+    ) {
+        if self.state != RsState::Readable {
+            return;
+        }
+        self.state = state;
+        if let Some(r) = reason {
+            self.stored_error = r;
+        }
+        notify_peer_closed(ctx, self.writer.map(JSValue::from), reason);
+    }
+
+    /// Abort this writable stream: settle it as Errored with `reason`, then
+    /// propagate the underlying sink's `abort()` result (including a rejection)
+    /// to the caller.
+    pub(crate) fn abort(
+        &mut self,
+        ctx: &mut ScopedContext,
+        reason: JSValue,
+    ) -> Result<Promise, i32> {
+        self.settle_state(ctx, RsState::Errored, Some(reason));
+
+        if let Some(controller) = self.controller
+            && let Some(cp) = controller.payload()
+            && let Some(sink) = cp.underlying_sink.as_object()
+        {
+            match sink.invoke_str_callable(ctx, "abort", &[reason]) {
+                Ok(Some(Ok(v))) => {
+                    return if let Ok(p) = Promise::try_from(v) {
+                        Ok(p)
+                    } else {
+                        Promise::from_resolve_value(ctx, v)
+                    };
+                }
+                Ok(None) => {}
+                Ok(Some(Err(_))) | Err(_) => {
+                    let e = ctx.take_exception().to_value(ctx);
+                    return Promise::from_reject_value(ctx, e);
+                }
+            }
+        }
+
+        Promise::from_resolve_value(ctx, JSValue::UNDEFINED)
     }
 }
 
@@ -144,9 +199,13 @@ fn js_writable_stream_get_writer(ctx: &mut ScopedContext, cc: CallContext) -> JS
 
 fn js_writable_stream_abort(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let reason = cc.arg(0);
-    if let Some(stream) = cc.this().as_native_object::<JSWritableStream>() {
-        settle_stream_state(ctx, stream.into(), RsState::Errored, Some(reason));
-
+    // Settle via a mutable this handle, then read the controller through the
+    // immutable native-object API (payload() returns controller handles).
+    let mut this = cc.this();
+    if let Some(sp) = JSWritableStream::payload_mut_of(&mut this) {
+        sp.settle_state(ctx, RsState::Errored, Some(reason));
+    }
+    if let Some(stream) = this.as_native_object::<JSWritableStream>() {
         if let Some(p) = stream.payload()
             && let Some(controller) = p.controller
             && let Some(cp) = controller.payload()
@@ -173,8 +232,9 @@ fn js_writable_stream_abort(ctx: &mut ScopedContext, cc: CallContext) -> JSResul
 }
 
 fn js_writable_stream_close(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    if let Some(stream) = cc.this().as_native_object::<JSWritableStream>() {
-        settle_stream_state(ctx, stream.into(), RsState::Closed, None);
+    let mut this = cc.this();
+    if let Some(stream) = JSWritableStream::payload_mut_of(&mut this) {
+        stream.settle_state(ctx, RsState::Closed, None);
     }
     Promise::from_resolve_value(ctx, JSValue::UNDEFINED).map(JSValue::from)
 }

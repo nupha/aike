@@ -12,17 +12,13 @@ use std::{
 use linkme::distributed_slice;
 use zuqe::{
     CallContext, ClassCtorDef, ClassID, FieldDef, JSResult, JSValue, JobState, Runtime,
-    ScopedContext,
-    def_native_object,
+    ScopedContext, def_native_object,
     gc_lite::{GcTrace, GcTraceCtx},
 };
 
-use crate::{
-    USER_CLASS_DEFS,
-    whatwg::stream::readable_stream::JSReadableStream,
-};
+use crate::{USER_CLASS_DEFS, whatwg::stream::readable_stream::JSReadableStream};
 
-use super::{QueueEntry, RsState, make_iterator_result, settle_stream_state};
+use super::{QueueEntry, RsState, make_iterator_result};
 
 // ============================================================================
 // ReadableStreamDefaultController
@@ -173,20 +169,21 @@ impl ReadableStreamDefaultControllerPayload {
         let controller_val = self
             .controller
             .ok_or_else(|| ctx.throw_internal_error("invalid controller"))?;
+
         // Spec: if the underlying source's pull() throws, error the stream with
         // that value (which rejects any pending reads) rather than swallowing it.
         let pull_res = pull_fn.call(ctx, *source, &[JSValue::from(controller_val)]);
         if pull_res.is_err() {
-            let err = match ctx.take_exception() {
-                zuqe::Exception::Error(v) => v,
-                _ => JSValue::UNDEFINED,
-            };
+            let err = ctx.take_exception().to_value(ctx);
             self.pulling.set(false);
             self.reject_all_pending_reads(ctx, err);
             self.queue.borrow_mut().clear();
             self.queue_total_size.set(0.0);
-            if let Some(stream_val) = self.stream {
-                settle_stream_state(ctx, stream_val.into(), RsState::Errored, Some(err));
+            if let Some(mut stream_val) = self.stream {
+                stream_val
+                    .payload_mut()
+                    .unwrap()
+                    .settle_state(ctx, RsState::Errored, Some(err));
             }
             return Ok(());
         }
@@ -296,9 +293,11 @@ fn js_controller_close(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     // If queue still has items, state stays "readable" until last
     // item is consumed by read().
     if p.queue.borrow().is_empty()
-        && let Some(stream_val) = p.stream
+        && let Some(mut rs) = p.stream
     {
-        settle_stream_state(ctx, stream_val.into(), RsState::Closed, None);
+        rs.payload_mut()
+            .unwrap()
+            .settle_state(ctx, RsState::Closed, None);
     }
 
     Ok(JSValue::UNDEFINED)
@@ -329,8 +328,10 @@ fn js_controller_error(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     p.queue.borrow_mut().clear();
     p.queue_total_size.set(0.0);
 
-    if let Some(stream_val) = p.stream {
-        settle_stream_state(ctx, stream_val.into(), RsState::Errored, Some(e));
+    if let Some(mut rs) = p.stream {
+        rs.payload_mut()
+            .unwrap()
+            .settle_state(ctx, RsState::Errored, Some(e));
     }
 
     Ok(JSValue::UNDEFINED)

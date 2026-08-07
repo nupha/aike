@@ -13,12 +13,9 @@ use zuqe::{
     gc_lite::{GcTrace, GcTraceCtx},
 };
 
-use crate::{
-    USER_CLASS_DEFS,
-    whatwg::stream::writable_stream::JSWritableStream,
-};
+use crate::{USER_CLASS_DEFS, whatwg::stream::writable_stream::JSWritableStream};
 
-use super::{RsState, settle_stream_state};
+use super::RsState;
 
 // ============================================================================
 // WritableStreamDefaultWriter
@@ -345,29 +342,8 @@ fn js_writer_abort(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let p = JSWritableStreamDefaultWriter::payload_of(&this)
         .ok_or_else(|| ctx.throw_type_error("not a WritableStreamDefaultWriter"))?;
 
-    if let Some(stream_val) = p.stream {
-        settle_stream_state(ctx, stream_val.into(), RsState::Errored, Some(reason));
-
-        if let Some(sp) = stream_val.payload()
-            && let Some(controller) = sp.controller
-            && let Some(cp) = controller.payload()
-            && let Some(sink) = cp.underlying_sink.as_object()
-        {
-            match sink.invoke_str_callable(ctx, "abort", &[reason]) {
-                Ok(Some(Ok(v))) => {
-                    return if let Ok(_) = Promise::try_from(v) {
-                        return Ok(v);
-                    } else {
-                        Ok(JSValue::from(Promise::from_resolve_value(ctx, v)?))
-                    };
-                }
-                Ok(None) => {}
-                Ok(Some(Err(_))) | Err(_) => {
-                    let e = ctx.take_exception().to_value(ctx);
-                    return Promise::from_reject_value(ctx, e).map(JSValue::from);
-                }
-            }
-        }
+    if let Some(mut ws) = p.stream {
+        return ws.payload_mut().unwrap().abort(ctx, reason).map(JSValue::from);
     }
 
     Promise::from_resolve_value(ctx, JSValue::UNDEFINED).map(JSValue::from)

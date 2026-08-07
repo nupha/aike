@@ -16,12 +16,9 @@ use zuqe::{
     gc_lite::{GcTrace, GcTraceCtx},
 };
 
-use crate::{
-    USER_CLASS_DEFS,
-    whatwg::stream::readable_stream::JSReadableStream,
-};
+use crate::{USER_CLASS_DEFS, whatwg::stream::readable_stream::JSReadableStream};
 
-use super::{QueueEntry, RsState, settle_stream_state};
+use super::{QueueEntry, RsState};
 
 // ============================================================================
 // ReadableByteStreamController (minimal exposure)
@@ -152,10 +149,12 @@ fn js_byte_controller_close(ctx: &mut ScopedContext, cc: CallContext) -> JSResul
 
     p.close_requested.set(true);
 
-    if p.queue.borrow().is_empty() {
-        if let Some(stream_val) = p.stream {
-            settle_stream_state(ctx, stream_val.into(), RsState::Closed, None);
-        }
+    if p.queue.borrow().is_empty()
+        && let Some(mut rs) = p.stream
+    {
+        rs.payload_mut()
+            .unwrap()
+            .settle_state(ctx, RsState::Closed, None);
     }
 
     Ok(JSValue::UNDEFINED)
@@ -167,8 +166,10 @@ fn js_byte_controller_error(ctx: &mut ScopedContext, cc: CallContext) -> JSResul
     let p = JSReadableByteStreamController::payload_of(&this)
         .ok_or_else(|| ctx.throw_type_error("not a ReadableByteStreamController"))?;
 
-    if let Some(stream_val) = p.stream {
-        settle_stream_state(ctx, stream_val.into(), RsState::Errored, Some(e));
+    if let Some(mut rs) = p.stream {
+        rs.payload_mut()
+            .unwrap()
+            .settle_state(ctx, RsState::Errored, Some(e));
     }
 
     Ok(JSValue::UNDEFINED)

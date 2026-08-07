@@ -19,7 +19,7 @@ use zuqe::{
     JSValue, JobState, Object, Runtime, ScopedContext,
     builtins::{
         iterator::{AsyncIterableIterator, AsyncIteratorFetcher, IterFetchStatus},
-        promise::{Promise, PromiseState},
+        promise::Promise,
         typed_array::TypedArray,
     },
     def_native_object,
@@ -48,7 +48,7 @@ use crate::{
     },
 };
 
-use super::{RsState, settle_stream_state};
+use super::{RsState, notify_peer_closed};
 
 pub(crate) struct ReadableStreamPayload {
     pub(crate) state: RsState,
@@ -101,6 +101,78 @@ impl ReadableStreamPayload {
             });
         }
     }
+
+    /// Set this stream's state (and `stored_error` when errored), then settle
+    /// the peer reader's `closed_promise` accordingly.
+    ///
+    /// A stream can only leave the Readable state once. Re-settling (e.g. cancel
+    /// after an error) must not re-settle the peer's closed_promise, which would
+    /// violate the Promise contract.
+    pub(crate) fn settle_state(
+        &mut self,
+        ctx: &mut ScopedContext,
+        state: RsState,
+        reason: Option<JSValue>,
+    ) {
+        if self.state != RsState::Readable {
+            return;
+        }
+        self.state = state;
+        if let Some(r) = reason {
+            self.stored_error = r;
+        }
+        notify_peer_closed(ctx, self.reader.map(JSValue::from), reason);
+    }
+
+    /// Cancel this stream. Sets `disturbed` and settles the stream as Errored
+    /// with `reason`, then propagates the underlying source's `cancel()` result
+    /// (including a rejection) to the caller.
+    pub(crate) fn cancel(
+        &mut self,
+        ctx: &mut ScopedContext,
+        reason: JSValue,
+    ) -> Result<Promise, i32> {
+        // Spec: cancel() sets disturbed, so the stream is no longer usable as
+        // a body even though no read() ever happened.
+        self.disturbed = true;
+
+        // Spec: reader.cancel() rejects the reader's `closed` promise with
+        // `reason` (which may be undefined for a bare cancel). pipeTo's abort
+        // path relies on this to make reader.closed reject with the abort reason
+        // so all error objects are the same object. We model cancel as an
+        // Errored settlement (not Closed) so a later getReader().closed also
+        // rejects with `reason` per spec.
+        self.settle_state(ctx, RsState::Errored, Some(reason));
+
+        if let Some(controller_val) = self.controller
+            && let Some(cp) = controller_val.payload()
+        {
+            let source = cp.underlying_source;
+            // Propagate the underlying source's cancel() result (including a
+            // rejection) to the reader.cancel() promise — pipeTo relies on this
+            // to surface source cancel errors.
+            return if let Some(o) = source.as_object() {
+                match o.invoke_str_defined(ctx, "cancel", &[reason])? {
+                    Some(Ok(v)) => {
+                        if let Ok(p) = Promise::try_from(v) {
+                            Ok(p)
+                        } else {
+                            Promise::from_resolve_value(ctx, v)
+                        }
+                    }
+                    Some(Err(_)) => {
+                        let e = ctx.take_exception().to_value(ctx);
+                        Promise::from_reject_value(ctx, e)
+                    }
+                    None => Promise::from_resolve_value(ctx, JSValue::UNDEFINED),
+                }
+            } else {
+                Promise::from_resolve_value(ctx, JSValue::UNDEFINED)
+            };
+        }
+
+        Promise::from_resolve_value(ctx, JSValue::UNDEFINED)
+    }
 }
 
 impl JSReadableStream {
@@ -146,50 +218,6 @@ impl JSReadableStream {
 
         Ok(reader)
     }
-
-    /// Synchronously read this stream's body into a byte buffer. Valid only
-    /// for a stream whose data is already queued (e.g. a constructor stream
-    /// populated in `start`); a pending read cannot be waited on synchronously.
-    /// Locks the stream via `acquire_reader` so a later `getReader()` throws.
-    pub(crate) fn drain_sync(&self, ctx: &mut ScopedContext) -> Result<Vec<u8>, i32> {
-        let mut this = *self;
-
-        let reader_obj = this.acquire_reader(ctx, false)?;
-        let p = reader_obj
-            .payload()
-            .ok_or_else(|| ctx.throw_type_error("not a ReadableStreamDefaultReader"))?;
-
-        let mut buf = Vec::new();
-
-        loop {
-            let pv = p.read(ctx, None)?;
-            let pr = Promise::try_from(pv)
-                .map_err(|_| ctx.throw_internal_error("read() returned a non-promise"))?;
-            match pr.state() {
-                PromiseState::Fulfilled => {
-                    let result = pr.result();
-                    let done = result
-                        .get_property_str(ctx, "done")
-                        .and_then(|d| d.to_bool())
-                        .unwrap_or(false);
-                    if done {
-                        break;
-                    }
-                    let value = result
-                        .get_property_str(ctx, "value")
-                        .map_err(|_| ctx.throw_internal_error("missing read value"))?;
-                    let ta = TypedArray::try_from(value)
-                        .map_err(|_| ctx.throw_type_error("body chunk is not a Uint8Array"))?;
-                    ta.with_bytes(|b| buf.extend_from_slice(b));
-                }
-                // A stream that is not synchronously settled cannot be drained here.
-                PromiseState::Pending | PromiseState::Rejected => {
-                    return Err(ctx.throw_type_error("body stream is not synchronously readable"));
-                }
-            }
-        }
-        Ok(buf)
-    }
 }
 
 const READABLE_STREAM_PROTO: &[FieldDef] = &[
@@ -222,6 +250,21 @@ def_native_object!(
         .expose_to_global()),
     on_payload_gc: ReadableStreamPayload::gc_trace
 );
+
+pub(crate) fn get_readable_stream_payload<'a>(
+    ctx: &mut ScopedContext,
+    val: &'a JSValue,
+) -> Result<&'a ReadableStreamPayload, i32> {
+    JSReadableStream::payload_of(val).ok_or_else(|| ctx.throw_type_error("not a ReadableStream"))
+}
+
+pub(crate) fn get_readable_stream_payload_mut<'a>(
+    ctx: &mut ScopedContext,
+    val: &'a mut JSValue,
+) -> Result<&'a mut ReadableStreamPayload, i32> {
+    JSReadableStream::payload_mut_of(val)
+        .ok_or_else(|| ctx.throw_type_error("not a ReadableStream"))
+}
 
 fn js_readable_stream_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let new_target = cc.this();
@@ -284,15 +327,13 @@ fn js_readable_stream_constructor(ctx: &mut ScopedContext, cc: CallContext) -> J
 
 fn js_readable_stream_locked(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
-    let p = JSReadableStream::payload_of(&this)
-        .ok_or_else(|| ctx.throw_type_error("not a ReadableStream"))?;
+    let p = get_readable_stream_payload(ctx, &this)?;
     Ok(JSValue::from(p.reader.is_some()))
 }
 
 fn js_readable_stream_state(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
-    let p = JSReadableStream::payload_of(&this)
-        .ok_or_else(|| ctx.throw_type_error("not a ReadableStream"))?;
+    let p = get_readable_stream_payload(ctx, &this)?;
     let s = match p.state {
         RsState::Readable => "readable",
         RsState::Closed => "closed",
@@ -331,8 +372,11 @@ fn js_readable_stream_get_reader(ctx: &mut ScopedContext, cc: CallContext) -> JS
 }
 
 fn js_readable_stream_cancel(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    readable_stream_cancel(ctx, &cc.this(), cc.arg(0))
+    let mut this = cc.this();
+    let p = get_readable_stream_payload_mut(ctx, &mut this)?;
+    p.cancel(ctx, cc.arg(0)).map(JSValue::from)
 }
+
 // ============================================================================
 // ReadableStream.from(asyncIterable)
 // ============================================================================
@@ -458,10 +502,7 @@ fn from_pump_fulfilled(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     // non-object (e.g. a bare number) errors the stream with a TypeError.
     if result.as_object().is_none() {
         let _ = ctx.throw_type_error("iterator result must be an object");
-        let e = match ctx.take_exception() {
-            zuqe::Exception::Error(v) => v,
-            _ => JSValue::UNDEFINED,
-        };
+        let e = ctx.take_exception().to_value(ctx);
         if !tee_branch_is_final(ctx, controller) {
             let error_fn = controller.get_property_str(ctx, "error")?;
             error_fn.call(ctx, controller, &[e])?;
@@ -797,10 +838,7 @@ fn js_readable_stream_pipe_to(ctx: &mut ScopedContext, cc: CallContext) -> JSRes
             "options.signal must be an AbortSignal"
         };
         let _ = ctx.throw_type_error(msg);
-        let e = match ctx.take_exception() {
-            zuqe::Exception::Error(v) => v,
-            _ => JSValue::UNDEFINED,
-        };
+        let e = ctx.take_exception().to_value(ctx);
         return Promise::from_reject_value(ctx, e).map(JSValue::from);
     }
     let writer = dest
@@ -1559,9 +1597,6 @@ fn pipe_source_is_final(reader: &JSValue) -> bool {
     };
     p.state != super::RsState::Readable
 }
-// ============================================================================
-// Controller setup helpers
-// ============================================================================
 
 fn create_readable_stream_controller(
     ctx: &mut ScopedContext,
@@ -1591,48 +1626,8 @@ fn create_readable_stream_controller(
     Ok(controller)
 }
 // ============================================================================
-// Stream cancel & async iterator
+// Stream async iterator
 // ============================================================================
-
-pub(super) fn readable_stream_cancel(
-    ctx: &mut ScopedContext,
-    stream: &JSValue,
-    reason: JSValue,
-) -> Result<JSValue, i32> {
-    if let Some(mut stream_obj) = stream.as_native_object::<JSReadableStream>() {
-        // Spec: cancel() sets disturbed, so the stream is no longer usable as
-        // a body even though no read() ever happened.
-        if let Some(p) = stream_obj.payload_mut() {
-            p.disturbed = true;
-        }
-
-        // Spec: reader.cancel() rejects the reader's `closed` promise with
-        // `reason` (which may be undefined for a bare cancel). pipeTo's abort
-        // path relies on this to make reader.closed reject with the abort reason
-        // so all error objects are the same object. We model cancel as an
-        // Errored settlement (not Closed) so a later getReader().closed also
-        // rejects with `reason` per spec.
-        settle_stream_state(ctx, (*stream_obj).into(), RsState::Errored, Some(reason));
-
-        if let Some(p) = stream_obj.payload()
-            && let Some(controller_val) = p.controller
-            && let Some(cp) = controller_val.payload()
-        {
-            let source = cp.underlying_source;
-            // Propagate the underlying source's cancel() result (including a
-            // rejection) to the reader.cancel() promise — pipeTo relies on this
-            // to surface source cancel errors.
-            return if let Some(o) = source.as_object() {
-                o.invoke_str_defined(ctx, "cancel", &[reason])?
-                    .unwrap_or(Ok(JSValue::UNDEFINED))
-            } else {
-                Ok(JSValue::UNDEFINED)
-            };
-        }
-    }
-
-    Promise::from_resolve_value(ctx, JSValue::UNDEFINED).map(JSValue::from)
-}
 
 fn create_stream_async_iterator(ctx: &mut ScopedContext, stream_val: &JSValue) -> JSResult {
     // Lock the stream by creating a reader.
@@ -1761,9 +1756,6 @@ fn create_stream_async_iterator(ctx: &mut ScopedContext, stream_val: &JSValue) -
 
     Ok(iter.into())
 }
-// ============================================================================
-// Channel/bytes/text-backed stream constructors
-// ============================================================================
 
 impl JSReadableStream {
     /// Create a `ReadableStream` backed by a `crossbeam::Receiver<Result<Vec<u8>, String>>`.
@@ -1946,9 +1938,14 @@ impl JSReadableStream {
                 let text = String::from_utf8_lossy(&bytes).into_owned();
                 Self::from_text(ctx, text)
             }
-            BodySource::Stream(stream) => {
-                let bytes = stream.drain_sync(ctx)?;
-                let text = String::from_utf8_lossy(&bytes).into_owned();
+            BodySource::Stream(mut stream) => {
+                let reader_obj = stream.acquire_reader(ctx, false)?;
+                let p = reader_obj
+                    .payload()
+                    .ok_or_else(|| ctx.throw_type_error("not a ReadableStreamDefaultReader"))?;
+                let bytes = p.drain_sync(ctx)?;
+                let text = String::from_utf8(bytes)
+                    .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned());
                 Self::from_text(ctx, text)
             }
             BodySource::Channel(rx) => Self::from_text_channel(ctx, rx),
@@ -2087,6 +2084,7 @@ fn start_channel_stream_poller(ctx: &mut ScopedContext) {
         (),
     );
 }
+
 // ============================================================================
 // Registration
 // ============================================================================
