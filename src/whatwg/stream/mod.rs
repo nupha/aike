@@ -10,6 +10,7 @@
 //! (stream state, queue entry, pending-read slot, queuing strategies) live here.
 
 mod readable_byte_stream_controller;
+mod readable_controller;
 mod readable_stream;
 mod readable_stream_default_controller;
 mod readable_stream_default_reader;
@@ -22,6 +23,7 @@ mod writable_stream_default_writer;
 
 pub(crate) use {
     readable_byte_stream_controller::JSReadableByteStreamController,
+    readable_controller::ReadableControllerPayload,
     readable_stream::{JSReadableStream, ReadableStreamPayload, install_readable_stream_statics},
     readable_stream_default_controller::JSReadableStreamDefaultController,
     readable_stream_default_reader::JSReadableStreamDefaultReader,

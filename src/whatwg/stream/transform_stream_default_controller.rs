@@ -92,16 +92,18 @@ fn js_transform_controller_enqueue(ctx: &mut ScopedContext, cc: CallContext) -> 
         .payload()
         .ok_or_else(|| ctx.throw_internal_error("invalid readable controller"))?;
 
-    if rcp.close_requested.get() {
+    if rcp.close_requested() {
         return Err(ctx.throw_type_error("cannot enqueue after close"));
     }
 
     let resolved = rcp.resolve_pending_read(ctx, chunk, false);
 
     if !resolved {
-        rcp.queue.borrow_mut().push(QueueEntry { chunk, size: 1.0 });
-        let total = rcp.queue_total_size.get();
-        rcp.queue_total_size.set(total + 1.0);
+        rcp.queue()
+            .borrow_mut()
+            .push(QueueEntry { chunk, size: 1.0 });
+        let total = rcp.queue_total_size();
+        rcp.set_queue_total_size(total + 1.0);
     }
 
     Ok(JSValue::UNDEFINED)
@@ -117,7 +119,7 @@ fn js_transform_controller_error(ctx: &mut ScopedContext, cc: CallContext) -> JS
     if let Some(rcp) = p.readable_controller.payload() {
         rcp.reject_pending_read(ctx, reason);
 
-        if let Some(mut stream_val) = rcp.stream
+        if let Some(mut stream_val) = rcp.stream()
             && let Some(sp) = stream_val.payload_mut()
         {
             sp.state = RsState::Errored;
@@ -148,12 +150,12 @@ fn js_transform_controller_terminate(ctx: &mut ScopedContext, cc: CallContext) -
 
     // Close the readable side
     if let Some(rcp) = p.readable_controller.payload() {
-        rcp.close_requested.set(true);
+        rcp.set_close_requested(true);
 
         rcp.resolve_pending_read(ctx, JSValue::UNDEFINED, true);
 
-        if rcp.queue.borrow().is_empty()
-            && let Some(mut stream_val) = rcp.stream
+        if rcp.queue().borrow().is_empty()
+            && let Some(mut stream_val) = rcp.stream()
             && let Some(sp) = stream_val.payload_mut()
         {
             sp.state = RsState::Closed;
@@ -165,6 +167,7 @@ fn js_transform_controller_terminate(ctx: &mut ScopedContext, cc: CallContext) -
         .create_string_from_utf8(b"TransformStream terminated".to_vec())
         .map(JSValue::make_string)
         .unwrap_or(JSValue::UNDEFINED);
+
     if let Some(wsp) = p.writable_stream.payload()
         && let Some(wc) = wsp.controller
         && let Some(wcp) = wc.payload()
@@ -186,7 +189,7 @@ fn js_transform_controller_desired_size(ctx: &mut ScopedContext, cc: CallContext
     if let Some(rcp) = p.readable_controller.payload() {
         // Spec: if the readable stream is errored -> null; closed -> 0;
         // else highWaterMark - queueTotalSize.
-        if let Some(s) = rcp.stream
+        if let Some(s) = rcp.stream()
             && let Some(sp) = s.payload()
         {
             match sp.state {
@@ -195,8 +198,8 @@ fn js_transform_controller_desired_size(ctx: &mut ScopedContext, cc: CallContext
                 RsState::Readable => {}
             }
         }
-        let total = rcp.queue_total_size.get();
-        return Ok(JSValue::from(rcp.high_water_mark - total));
+        let total = rcp.queue_total_size();
+        return Ok(JSValue::from(rcp.high_water_mark() - total));
     }
     Ok(JSValue::ZERO)
 }

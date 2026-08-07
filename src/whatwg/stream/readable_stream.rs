@@ -33,12 +33,6 @@ use crate::{
         dom::make_dom_exception,
         stream::{
             extract_high_water_mark,
-            readable_byte_stream_controller::{
-                JSReadableByteStreamController, ReadableByteStreamControllerPayload,
-            },
-            readable_stream_default_controller::{
-                JSReadableStreamDefaultController, ReadableStreamDefaultControllerPayload,
-            },
             readable_stream_default_reader::{
                 JSReadableStreamDefaultReader, ReadableStreamDefaultReaderPayload,
             },
@@ -47,7 +41,10 @@ use crate::{
     },
 };
 
-use super::{RsState, notify_peer_closed};
+use super::{
+    JSReadableByteStreamController, JSReadableStreamDefaultController, ReadableControllerPayload,
+    RsState, notify_peer_closed,
+};
 
 pub(crate) struct ReadableStreamPayload {
     pub(crate) state: RsState,
@@ -146,7 +143,7 @@ impl ReadableStreamPayload {
         if let Some(controller_val) = self.controller
             && let Some(cp) = controller_val.payload()
         {
-            let source = cp.underlying_source;
+            let source = cp.underlying_source();
             // Propagate the underlying source's cancel() result (including a
             // rejection) to the reader.cancel() promise — pipeTo relies on this
             // to surface source cancel errors.
@@ -297,7 +294,7 @@ fn js_readable_stream_constructor(ctx: &mut ScopedContext, cc: CallContext) -> J
         let bc = JSReadableByteStreamController::new_instance(
             ctx,
             JSValue::UNDEFINED,
-            ReadableByteStreamControllerPayload::new(
+            ReadableControllerPayload::new_byte(
                 if underlying_source.is_undefined_or_null() {
                     JSValue::UNDEFINED
                 } else {
@@ -426,14 +423,14 @@ fn js_readable_stream_from_static(ctx: &mut ScopedContext, cc: CallContext) -> J
     let mut controller = JSReadableStreamDefaultController::new_instance(
         ctx,
         JSValue::UNDEFINED,
-        ReadableStreamDefaultControllerPayload::new(source_val, Some(stream), 1.0),
+        ReadableControllerPayload::new_default(source_val, Some(stream), 1.0),
     )?;
     // Wire the controller's self-handle (call_controller_pull needs it).
     let handle = controller;
     controller
         .payload_mut()
         .ok_or_else(|| ctx.throw_internal_error("invalid controller"))?
-        .controller = Some(handle);
+        .set_controller(Some(handle));
     stream.payload_mut().unwrap().controller = Some(controller);
     Ok(JSValue::from(stream))
 }
@@ -529,7 +526,7 @@ fn from_pump_fulfilled(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     }
     // Pull the next value only if a read is still waiting (avoid over-pulling).
     let more = JSReadableStreamDefaultController::payload_of(&controller)
-        .map(|cp| !cp.pending_read.borrow().is_empty())
+        .map(|cp| !cp.pending_read().borrow().is_empty())
         .unwrap_or(false);
     if more {
         let ctrl = controller;
@@ -537,7 +534,7 @@ fn from_pump_fulfilled(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             move |cx| {
                 let p = JSReadableStreamDefaultController::payload_of(&ctrl)
                     .ok_or_else(|| cx.throw_internal_error("invalid controller"))?;
-                p.call_controller_pull(cx)?;
+                p.call_pull(cx)?;
                 Ok(JobState::Done)
             },
             (),
@@ -1347,7 +1344,7 @@ fn create_readable_stream_controller(
     let mut controller = JSReadableStreamDefaultController::new_instance(
         ctx,
         JSValue::UNDEFINED,
-        ReadableStreamDefaultControllerPayload::new(
+        ReadableControllerPayload::new_default(
             if underlying_source.is_undefined_or_null() {
                 JSValue::UNDEFINED
             } else {
@@ -1361,9 +1358,10 @@ fn create_readable_stream_controller(
     controller
         .payload_mut()
         .ok_or_else(|| ctx.throw_internal_error("invalid controller"))?
-        .controller = Some(handle);
+        .set_controller(Some(handle));
     Ok(controller)
 }
+
 // ============================================================================
 // Stream async iterator
 // ============================================================================
@@ -1516,7 +1514,7 @@ impl JSReadableStream {
         let controller = JSReadableStreamDefaultController::new_instance(
             ctx,
             JSValue::UNDEFINED,
-            ReadableStreamDefaultControllerPayload::new(JSValue::from(source), Some(stream), 1.0),
+            ReadableControllerPayload::new_default(JSValue::from(source), Some(stream), 1.0),
         )?;
         stream.payload_mut().unwrap().controller = Some(controller);
 
@@ -1559,7 +1557,7 @@ impl JSReadableStream {
         let controller = JSReadableStreamDefaultController::new_instance(
             ctx,
             JSValue::UNDEFINED,
-            ReadableStreamDefaultControllerPayload::new(JSValue::from(source), Some(stream), 1.0),
+            ReadableControllerPayload::new_default(JSValue::from(source), Some(stream), 1.0),
         )?;
         let controller_val = JSValue::from(controller);
 
@@ -1587,7 +1585,7 @@ impl JSReadableStream {
         let controller = JSReadableStreamDefaultController::new_instance(
             ctx,
             JSValue::UNDEFINED,
-            ReadableStreamDefaultControllerPayload::new(JSValue::from(source), Some(stream), 1.0),
+            ReadableControllerPayload::new_default(JSValue::from(source), Some(stream), 1.0),
         )?;
         let controller_val = JSValue::from(controller);
         stream.payload_mut().unwrap().controller = Some(controller);
@@ -1618,7 +1616,7 @@ impl JSReadableStream {
         let controller = JSReadableStreamDefaultController::new_instance(
             ctx,
             JSValue::UNDEFINED,
-            ReadableStreamDefaultControllerPayload::new(JSValue::from(source), Some(stream), 1.0),
+            ReadableControllerPayload::new_default(JSValue::from(source), Some(stream), 1.0),
         )?;
         stream.payload_mut().unwrap().controller = Some(controller);
 
@@ -1721,7 +1719,7 @@ fn start_channel_stream_poller(ctx: &mut ScopedContext) {
                                 let maybe_signal = JSReadableStreamDefaultController::payload_of(
                                     &JSValue::from(*ctrl),
                                 )
-                                .and_then(|cp| cp.stream)
+                                .and_then(|cp| cp.stream())
                                 .and_then(|stream| {
                                     JSReadableStream::payload_of(&JSValue::from(stream))
                                         .map(|sp| sp.signal)

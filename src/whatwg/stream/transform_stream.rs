@@ -13,11 +13,8 @@ use zuqe::{
 use crate::{
     USER_CLASS_DEFS,
     whatwg::stream::{
-        extract_high_water_mark,
+        JSReadableStreamDefaultController, ReadableControllerPayload, extract_high_water_mark,
         readable_stream::{JSReadableStream, ReadableStreamPayload},
-        readable_stream_default_controller::{
-            JSReadableStreamDefaultController, ReadableStreamDefaultControllerPayload,
-        },
         transform_stream_default_controller::{
             JSTransformStreamDefaultController, TransformStreamDefaultControllerPayload,
         },
@@ -91,11 +88,7 @@ fn js_transform_stream_constructor(ctx: &mut ScopedContext, cc: CallContext) -> 
     let rc = JSReadableStreamDefaultController::new_instance(
         ctx,
         JSValue::UNDEFINED,
-        ReadableStreamDefaultControllerPayload::new(
-            JSValue::UNDEFINED,
-            Some(readable),
-            readable_hwm,
-        ),
+        ReadableControllerPayload::new_default(JSValue::UNDEFINED, Some(readable), readable_hwm),
     )?;
     readable.payload_mut().unwrap().controller.replace(rc);
 

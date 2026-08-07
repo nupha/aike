@@ -240,10 +240,10 @@ fn js_writer_close(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             if flush_promise.is_none()
                 && let Some(rcp) = tcp.readable_controller.payload()
             {
-                rcp.close_requested.set(true);
+                rcp.set_close_requested(true);
                 rcp.resolve_pending_read(ctx, JSValue::UNDEFINED, true);
-                if rcp.queue.borrow().is_empty()
-                    && let Some(mut rs_val) = rcp.stream
+                if rcp.queue().borrow().is_empty()
+                    && let Some(mut rs_val) = rcp.stream()
                     && let Some(rsp) = rs_val.payload_mut()
                 {
                     rsp.state = RsState::Closed;
@@ -306,10 +306,10 @@ fn flush_close_ok(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         && let Some(tcp) = tc.payload()
         && let Some(rcp) = tcp.readable_controller.payload()
     {
-        rcp.close_requested.set(true);
+        rcp.set_close_requested(true);
         rcp.resolve_pending_read(ctx, JSValue::UNDEFINED, true);
-        if rcp.queue.borrow().is_empty()
-            && let Some(mut rs_val) = rcp.stream
+        if rcp.queue().borrow().is_empty()
+            && let Some(mut rs_val) = rcp.stream()
             && let Some(rsp) = rs_val.payload_mut()
         {
             rsp.state = RsState::Closed;
@@ -343,7 +343,11 @@ fn js_writer_abort(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         .ok_or_else(|| ctx.throw_type_error("not a WritableStreamDefaultWriter"))?;
 
     if let Some(mut ws) = p.stream {
-        return ws.payload_mut().unwrap().abort(ctx, reason).map(JSValue::from);
+        return ws
+            .payload_mut()
+            .unwrap()
+            .abort(ctx, reason)
+            .map(JSValue::from);
     }
 
     Promise::from_resolve_value(ctx, JSValue::UNDEFINED).map(JSValue::from)

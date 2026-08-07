@@ -18,11 +18,8 @@ use zuqe::{
 use crate::whatwg::stream::readable_stream::get_readable_stream_payload;
 
 use super::{
-    JSReadableStream, ReadableStreamPayload, RsState,
-    readable_stream_default_controller::{
-        JSReadableStreamDefaultController, ReadableStreamDefaultControllerPayload,
-    },
-    readable_stream_default_reader::JSReadableStreamDefaultReader,
+    JSReadableStream, JSReadableStreamDefaultController, ReadableControllerPayload,
+    ReadableStreamPayload, RsState, readable_stream_default_reader::JSReadableStreamDefaultReader,
 };
 
 /// Shared state for a `tee()` split: one source reader feeding two branch
@@ -114,7 +111,7 @@ pub(crate) fn js_readable_stream_tee(ctx: &mut ScopedContext, cc: CallContext) -
         let mut controller = JSReadableStreamDefaultController::new_instance(
             ctx,
             JSValue::UNDEFINED,
-            ReadableStreamDefaultControllerPayload::new(JSValue::from(source), Some(stream), 1.0),
+            ReadableControllerPayload::new_default(JSValue::from(source), Some(stream), 1.0),
         )?;
 
         // Wire the controller's self-handle (call_controller_pull needs it).
@@ -122,7 +119,7 @@ pub(crate) fn js_readable_stream_tee(ctx: &mut ScopedContext, cc: CallContext) -
         controller
             .payload_mut()
             .ok_or_else(|| ctx.throw_internal_error("invalid controller"))?
-            .controller = Some(handle);
+            .set_controller(Some(handle));
         stream.payload_mut().unwrap().controller = Some(controller);
 
         Ok(( stream , controller) )
@@ -175,7 +172,7 @@ fn tee_pull_fulfilled(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         shared.done.set(true);
         for c in [shared.c1, shared.c2] {
             if !tee_branch_is_final(ctx, c.into()) {
-                c.close(ctx)?;
+                c.payload().unwrap().close(ctx)?;
             }
         }
         TEE_STREAMS.with(|m| m.borrow_mut().remove(&tee_id));
@@ -218,7 +215,7 @@ fn tee_has_pending_read(_ctx: &mut ScopedContext, c: JSValue) -> bool {
     let Some(cp) = JSReadableStreamDefaultController::payload_of(&c) else {
         return false;
     };
-    !cp.pending_read.borrow().is_empty()
+    !cp.pending_read().borrow().is_empty()
 }
 
 // Perform the shared pull: read one source chunk and fan it out to both branches.
@@ -278,7 +275,7 @@ pub(crate) fn tee_branch_is_final(_ctx: &mut ScopedContext, c: JSValue) -> bool 
     let Some(cp) = JSReadableStreamDefaultController::payload_of(&c) else {
         return true;
     };
-    let Some(s) = cp.stream else {
+    let Some(s) = cp.stream() else {
         return true;
     };
     let Some(sp) = s.payload() else {

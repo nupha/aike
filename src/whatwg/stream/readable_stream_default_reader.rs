@@ -86,11 +86,11 @@ impl ReadableStreamDefaultReaderPayload {
                 .payload()
                 .ok_or_else(|| ctx.throw_internal_error("invalid controller"))?;
 
-            if !cp.queue.borrow().is_empty() {
-                let mut q = cp.queue.borrow_mut();
+            if !cp.queue().borrow().is_empty() {
+                let mut q = cp.queue().borrow_mut();
                 let entry = q.remove(0);
-                let total = cp.queue_total_size.get();
-                cp.queue_total_size.set(total - entry.size);
+                let total = cp.queue_total_size();
+                cp.set_queue_total_size(total - entry.size);
 
                 // BYOB: copy as much of the chunk as fits into the caller's view
                 // and push the remainder back so the next read continues where
@@ -99,7 +99,7 @@ impl ReadableStreamDefaultReaderPayload {
                 let chunk = if let Some(view) = byob_view {
                     let filled = byob_fill_view(ctx, view, entry.chunk, &mut q)?;
                     if !q.is_empty() {
-                        cp.queue_total_size.set(cp.queue_total_size.get() + 1.0);
+                        cp.set_queue_total_size(cp.queue_total_size() + 1.0);
                     }
                     filled
                 } else {
@@ -109,7 +109,7 @@ impl ReadableStreamDefaultReaderPayload {
                 // Per spec: after draining last item, if close_requested,
                 // transition stream to closed state.
                 if q.is_empty()
-                    && cp.close_requested.get()
+                    && cp.close_requested()
                     && let Some(sp) = stream_val.payload_mut()
                 {
                     sp.state = RsState::Closed;
@@ -119,7 +119,7 @@ impl ReadableStreamDefaultReaderPayload {
                 return Promise::from_resolve_value(ctx, result);
             }
 
-            if cp.close_requested.get() {
+            if cp.close_requested() {
                 let result = make_iterator_result(ctx, JSValue::UNDEFINED, true)?;
                 return Promise::from_resolve_value(ctx, result);
             }
@@ -128,8 +128,8 @@ impl ReadableStreamDefaultReaderPayload {
             // later enqueue()/close()/error() can resolve it. Stored per-controller
             // (not globally) so concurrent/sequential streams don't steal chunks.
             let (promise, rr) = Promise::create(ctx)?;
-            cp.pending_read.borrow_mut().push([rr[0], rr[1]]);
-            cp.call_controller_pull(ctx)?;
+            cp.pending_read().borrow_mut().push([rr[0], rr[1]]);
+            cp.call_pull(ctx)?;
             return Ok(promise.into());
         }
 
