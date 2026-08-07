@@ -19,7 +19,8 @@ use zuqe::{
 };
 
 use super::{
-    JSReadableStream, JSReadableStreamDefaultController, QueueEntry, RsState, make_iterator_result,
+    JSReadableByteStreamController, JSReadableStream, JSReadableStreamDefaultController,
+    QueueEntry, RsState, make_iterator_result,
 };
 
 /// Fields that differ between the default and byte controller kinds. Common
@@ -39,6 +40,7 @@ pub(crate) enum ReadableControllerKind {
         /// (not globally) so concurrent/sequential streams do not steal chunks.
         pending_read: Rc<RefCell<Vec<[JSValue; 2]>>>,
     },
+
     /// Minimal byte controller (constructor + toStringTag only in this build).
     Byte {
         /// Pending BYOB request view, if any. Left `None` in this minimal build.
@@ -376,7 +378,7 @@ impl ReadableControllerPayload {
         self.close_requested.set(true);
 
         match &self.kind {
-            ReadableControllerKind::Default { pending_read, .. } => {
+            ReadableControllerKind::Default { .. } => {
                 while self.resolve_pending_read(ctx, JSValue::UNDEFINED, true) {}
                 if self.queue.borrow().is_empty()
                     && let Some(mut rs) = self.stream
@@ -402,16 +404,17 @@ impl ReadableControllerPayload {
 
     /// Error the controlled stream with `e`.
     pub(crate) fn error(&self, ctx: &mut ScopedContext, e: JSValue) -> Result<(), i32> {
-        if let Some(stream_val) = self.stream {
-            if let Some(sp) = stream_val.payload() {
-                if sp.state == RsState::Errored {
-                    return Err(ctx.throw_type_error("cannot error an errored stream"));
-                }
-                if sp.state == RsState::Closed {
-                    return Err(ctx.throw_type_error("cannot error a closed stream"));
-                }
+        if let Some(rs) = self.stream
+            && let Some(sp) = rs.payload()
+        {
+            if sp.state == RsState::Errored {
+                return Err(ctx.throw_type_error("cannot error an errored stream"));
+            }
+            if sp.state == RsState::Closed {
+                return Err(ctx.throw_type_error("cannot error a closed stream"));
             }
         }
+
         match &self.kind {
             ReadableControllerKind::Default { .. } => {
                 self.reject_all_pending_reads(ctx, e);
@@ -460,4 +463,20 @@ impl ReadableControllerPayload {
             }
         }
     }
+}
+
+/// Fetch the shared `ReadableControllerPayload` from a controller `this` value,
+/// accepting either the default or byte controller native type. The returned
+/// borrow is tied to `this`'s lifetime.
+pub(super) fn get_readable_controller<'a>(
+    ctx: &mut ScopedContext,
+    this: &'a JSValue,
+) -> Result<&'a ReadableControllerPayload, i32> {
+    if let Some(p) = JSReadableStreamDefaultController::payload_of(this) {
+        return Ok(p);
+    }
+    if let Some(p) = JSReadableByteStreamController::payload_of(this) {
+        return Ok(p);
+    }
+    Err(ctx.throw_type_error("not a ReadableStream controller"))
 }

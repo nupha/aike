@@ -1,15 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-//! ReadableByteStreamController.
-//!
-//! This is a minimal implementation: it exists so that `ReadableByteStreamController`
-//! is a visible global constructor and so that `new ReadableStream({ type:
-//! "bytes" }, strategy)` passes a `ReadableByteStreamController` instance to
-//! the user's `start(controller)` callback (per WPT construct-byob-request).
-//! Methods reuse the shared stream-state transitions; end-to-end byte transfer
-//! through `read()` is intentionally not wired up yet.
-
 use linkme::distributed_slice;
 use zuqe::{
     CallContext, ClassCtorDef, ClassID, FieldDef, JSResult, JSValue, Runtime, ScopedContext,
@@ -18,7 +9,7 @@ use zuqe::{
 
 use crate::USER_CLASS_DEFS;
 
-use super::{ReadableControllerPayload, RsState};
+use super::{ReadableControllerPayload, readable_controller::get_readable_controller};
 
 const BYTE_CONTROLLER_PROTO: &[FieldDef] = &[
     FieldDef::FUNC("enqueue", 1, js_byte_controller_enqueue, 0),
@@ -49,8 +40,7 @@ fn js_byte_controller_constructor(ctx: &mut ScopedContext, _cc: CallContext) -> 
 
 fn js_byte_controller_desired_size(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
-    let p = JSReadableByteStreamController::payload_of(&this)
-        .ok_or_else(|| ctx.throw_type_error("not a ReadableByteStreamController"))?;
+    let p = get_readable_controller(ctx, &this)?;
     let size = p.desired_size(ctx)?;
     if size == u32::MAX {
         Ok(JSValue::NULL)
@@ -61,24 +51,20 @@ fn js_byte_controller_desired_size(ctx: &mut ScopedContext, cc: CallContext) -> 
 
 fn js_byte_controller_byob_request(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
-    let p = JSReadableByteStreamController::payload_of(&this)
-        .ok_or_else(|| ctx.throw_type_error("not a ReadableByteStreamController"))?;
-    // Minimal build: no pending BYOB request is tracked.
+    let p = get_readable_controller(ctx, &this)?;
     Ok(p.byob_request())
 }
 
 fn js_byte_controller_enqueue(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let chunk = cc.arg(0);
-    let p = JSReadableByteStreamController::payload_of(&this)
-        .ok_or_else(|| ctx.throw_type_error("not a ReadableByteStreamController"))?;
+    let p = get_readable_controller(ctx, &this)?;
     p.enqueue(ctx, chunk)
 }
 
 fn js_byte_controller_close(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
-    let p = JSReadableByteStreamController::payload_of(&this)
-        .ok_or_else(|| ctx.throw_type_error("not a ReadableByteStreamController"))?;
+    let p = get_readable_controller(ctx, &this)?;
     p.close(ctx)?;
     Ok(JSValue::UNDEFINED)
 }
@@ -86,8 +72,7 @@ fn js_byte_controller_close(ctx: &mut ScopedContext, cc: CallContext) -> JSResul
 fn js_byte_controller_error(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let e = cc.arg(0);
-    let p = JSReadableByteStreamController::payload_of(&this)
-        .ok_or_else(|| ctx.throw_type_error("not a ReadableByteStreamController"))?;
+    let p = get_readable_controller(ctx, &this)?;
     p.error(ctx, e)?;
     Ok(JSValue::UNDEFINED)
 }

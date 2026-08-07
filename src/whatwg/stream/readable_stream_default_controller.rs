@@ -1,9 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-//! ReadableStreamDefaultController: the controller handed to an underlying
-//! source's `start()`/`pull()` callbacks.
-
 use linkme::distributed_slice;
 use zuqe::{
     CallContext, ClassCtorDef, ClassID, FieldDef, JSResult, JSValue, Runtime, ScopedContext,
@@ -12,7 +9,7 @@ use zuqe::{
 
 use crate::USER_CLASS_DEFS;
 
-use super::{ReadableControllerPayload, RsState};
+use super::{ReadableControllerPayload, readable_controller::get_readable_controller};
 
 const CONTROLLER_PROTO: &[FieldDef] = &[
     FieldDef::FUNC("enqueue", 1, js_controller_enqueue, 0),
@@ -42,15 +39,13 @@ def_native_object!(
 fn js_controller_enqueue(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let chunk = cc.arg(0);
-    let p = JSReadableStreamDefaultController::payload_of(&this)
-        .ok_or_else(|| ctx.throw_type_error("not a ReadableStreamDefaultController"))?;
+    let p = get_readable_controller(ctx, &this)?;
     p.enqueue(ctx, chunk)
 }
 
 fn js_controller_close(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
-    let p = JSReadableStreamDefaultController::payload_of(&this)
-        .ok_or_else(|| ctx.throw_type_error("not a ReadableStreamDefaultController"))?;
+    let p = get_readable_controller(ctx, &this)?;
     p.close(ctx)?;
     Ok(JSValue::UNDEFINED)
 }
@@ -58,16 +53,15 @@ fn js_controller_close(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 fn js_controller_error(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let e = cc.arg(0);
-    let p = JSReadableStreamDefaultController::payload_of(&this)
-        .ok_or_else(|| ctx.throw_type_error("not a ReadableStreamDefaultController"))?;
+    let p = get_readable_controller(ctx, &this)?;
     p.error(ctx, e)?;
     Ok(JSValue::UNDEFINED)
 }
 
 fn js_controller_desired_size(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
-    let p = JSReadableStreamDefaultController::payload_of(&this)
-        .ok_or_else(|| ctx.throw_type_error("not a ReadableStreamDefaultController"))?;
+    let p = get_readable_controller(ctx, &this)?;
+
     // Spec: errored -> null, closed -> 0, else highWaterMark - queueTotalSize.
     let size = p.desired_size(ctx)?;
     if size == u32::MAX {

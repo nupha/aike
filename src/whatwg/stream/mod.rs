@@ -226,10 +226,6 @@ fn js_count_size(_ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
     Ok(JSValue::from(1.0))
 }
 
-// ============================================================================
-// Helpers shared by readable/writable/transform
-// ============================================================================
-
 pub(crate) fn make_iterator_result(
     ctx: &mut ScopedContext,
     value: JSValue,
@@ -292,10 +288,6 @@ pub(super) fn notify_peer_closed(
         }
     }
 }
-
-// ============================================================================
-// Registration
-// ============================================================================
 
 #[distributed_slice(USER_CLASS_DEFS)]
 fn register_byte_length_queuing_strategy(rt: &mut Runtime) -> Result<ClassID, i32> {
