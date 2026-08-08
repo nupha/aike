@@ -1209,7 +1209,8 @@ def_native_object!(
     ResponsePayload,
     HTTP_RESPONSE_PROTO,
     Some(ClassCtorDef::new(js_http_response_constructor, 0, false)),
-    extends: JSResponse::class_id
+    extends: JSResponse::class_id,
+    on_payload_gc: ResponsePayload::gc_trace
 );
 
 #[distributed_slice(USER_CLASS_DEFS)]

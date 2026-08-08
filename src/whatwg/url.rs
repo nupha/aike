@@ -18,6 +18,7 @@ use url::Url;
 use zuqe::{
     Array, CallContext, ClassCtorDef, ClassID, FieldDef, JSResult, JSValue, Object, Runtime,
     ScopedContext, def_native_object,
+    gc_lite::{GcTrace, GcTraceCtx},
 };
 
 use crate::{USER_CLASS_DEFS, whatwg::blob::BlobPayload};
@@ -42,6 +43,15 @@ pub(crate) struct UrlPayload {
     shared: Rc<RefCell<Url>>,
     /// Lazily created URLSearchParams tied to this URL.
     search_params: RefCell<Option<Object>>,
+}
+
+impl UrlPayload {
+    /// Keep the lazily-created URLSearchParams object alive across GC.
+    fn gc_trace(&self, gcx: &mut GcTraceCtx) {
+        if let Some(ref sp) = *self.search_params.borrow() {
+            sp.trace(gcx);
+        }
+    }
 }
 
 fn get_url<'a>(ctx: &mut ScopedContext, val: &'a JSValue) -> Result<&'a UrlPayload, i32> {
@@ -616,7 +626,8 @@ def_native_object!(
     JSURL,
     UrlPayload,
     CLASS_URL_PROTO,
-    Some(ClassCtorDef::new(js_url_constructor, 2, true).expose_to_global())
+    Some(ClassCtorDef::new(js_url_constructor, 2, true).expose_to_global()),
+    on_payload_gc: UrlPayload::gc_trace
 );
 
 #[distributed_slice(USER_CLASS_DEFS)]
