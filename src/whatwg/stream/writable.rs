@@ -16,9 +16,7 @@ use crate::{
     whatwg::stream::{
         extract_high_water_mark,
         writable_controller::{JSWritableStreamDefaultController, WritableControllerPayload},
-        writable_stream_default_writer::{
-            JSWritableStreamDefaultWriter, WritableStreamDefaultWriterPayload,
-        },
+        writer::{JSWritableStreamDefaultWriter, WriterPayload},
     },
 };
 
@@ -91,7 +89,7 @@ impl WritableStreamPayload {
             && let Some(cp) = controller.payload()
             && let Some(sink) = cp.underlying_sink.as_object()
         {
-            match sink.invoke_str_callable(ctx, "abort", &[reason]) {
+            match sink.invoke_str_defined(ctx, "abort", &[reason]) {
                 Ok(Some(Ok(v))) => {
                     return if let Ok(p) = Promise::try_from(v) {
                         Ok(p)
@@ -132,6 +130,48 @@ def_native_object!(
     on_payload_gc: WritableStreamPayload::gc_trace
 );
 
+impl JSWritableStream {
+    /// Lock this stream by creating and installing a default writer.
+    ///
+    /// Errors with TypeError if the stream is already locked. The returned
+    /// writer settles its `closed_promise` from the current `state`
+    /// (`stored_error` on Errored).
+    pub(crate) fn acquire_writer(
+        &mut self,
+        ctx: &mut ScopedContext,
+    ) -> Result<JSWritableStreamDefaultWriter, i32> {
+        let handle = *self;
+
+        let sp = self
+            .payload_mut()
+            .ok_or_else(|| ctx.throw_type_error("not a WritableStream"))?;
+
+        if sp.writer.is_some() {
+            return Err(ctx.throw_type_error("WritableStream is already locked"));
+        }
+
+        let mut closed_promise = Promise::create(ctx)?.0;
+        match sp.state {
+            RsState::Closed => closed_promise.resolve(ctx, JSValue::UNDEFINED),
+            RsState::Errored => closed_promise.reject(ctx, sp.stored_error),
+            RsState::Readable => {}
+        }
+
+        let writer = JSWritableStreamDefaultWriter::new_instance(
+            ctx,
+            JSValue::UNDEFINED,
+            WriterPayload {
+                stream: Some(handle),
+                closed_promise: Some(closed_promise),
+            },
+        )?;
+
+        sp.writer = Some(writer);
+
+        Ok(writer)
+    }
+}
+
 fn js_writable_stream_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let new_target = cc.this();
     let underlying_sink = cc.arg(0);
@@ -165,68 +205,22 @@ fn js_writable_stream_locked(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
 }
 
 fn js_writable_stream_get_writer(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let this = cc.this();
-    let mut stream = this
+    let mut stream = cc
+        .this()
         .as_native_object::<JSWritableStream>()
         .ok_or_else(|| ctx.throw_type_error("not a WritableStream"))?;
 
-    let p = stream.payload_mut().unwrap();
-    if p.writer.is_some() {
-        return Err(ctx.throw_type_error("WritableStream is already locked"));
-    }
-
-    let mut closed_promise = Promise::create(ctx)?.0;
-    match p.state {
-        RsState::Closed => closed_promise.resolve(ctx, JSValue::UNDEFINED),
-        RsState::Errored => closed_promise.reject(ctx, p.stored_error),
-        RsState::Readable => {}
-    }
-
-    let writer = JSWritableStreamDefaultWriter::new_instance(
-        ctx,
-        JSValue::UNDEFINED,
-        WritableStreamDefaultWriterPayload {
-            stream: Some(JSWritableStream::try_from(this)?),
-            closed_promise: Some(closed_promise),
-        },
-    )?;
-
-    p.writer = Some(writer);
-    Ok(JSValue::from(writer))
+    stream.acquire_writer(ctx).map(JSValue::from)
 }
 
 fn js_writable_stream_abort(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let reason = cc.arg(0);
-    // Settle via a mutable this handle, then read the controller through the
-    // immutable native-object API (payload() returns controller handles).
     let mut this = cc.this();
-    if let Some(sp) = JSWritableStream::payload_mut_of(&mut this) {
-        sp.settle_state(ctx, RsState::Errored, Some(reason));
-    }
-    if let Some(stream) = this.as_native_object::<JSWritableStream>() {
-        if let Some(p) = stream.payload()
-            && let Some(controller) = p.controller
-            && let Some(cp) = controller.payload()
-            && let Some(sink) = cp.underlying_sink.as_object()
-        {
-            match sink.invoke_str_callable(ctx, "abort", &[reason]) {
-                Ok(None) => {}
-                Ok(Some(Ok(v))) => {
-                    return if let Ok(_) = Promise::try_from(v) {
-                        Ok(v)
-                    } else {
-                        Ok(JSValue::from(Promise::from_resolve_value(ctx, v)?))
-                    };
-                }
-                Ok(Some(Err(_))) | Err(_) => {
-                    let e = ctx.take_exception().to_value(ctx);
-                    return Promise::from_reject_value(ctx, e).map(JSValue::from);
-                }
-            }
-        }
-    }
+    let reason = cc.arg(0);
 
-    Promise::from_resolve_value(ctx, JSValue::UNDEFINED).map(JSValue::from)
+    let sp = JSWritableStream::payload_mut_of(&mut this)
+        .ok_or_else(|| ctx.throw_type_error("not a WritableStream"))?;
+
+    sp.abort(ctx, reason).map(JSValue::from)
 }
 
 fn js_writable_stream_close(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {

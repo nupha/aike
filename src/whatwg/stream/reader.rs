@@ -70,20 +70,19 @@ impl ReaderPayload {
         ctx: &mut ScopedContext,
         byob_view: Option<TypedArray>,
     ) -> Result<Promise, i32> {
-        let mut stream_val = self
+        let mut stream = self
             .stream
             .ok_or_else(|| ctx.throw_type_error("reader released"))?;
 
         // Mark disturbed before any early return: even a read on a closed or
         // errored stream counts as consuming it.
-        if let Some(sp) = stream_val.payload_mut() {
+        if let Some(sp) = stream.payload_mut() {
             sp.disturbed = true;
         }
 
         // Copy to decouple borrow: stream_p borrows sv, leaving stream_val free
         // for mutable access later.
-        let sv = stream_val;
-        let stream_p = sv
+        let stream_p = stream
             .payload()
             .ok_or_else(|| ctx.throw_internal_error("invalid stream"))?;
 
@@ -127,7 +126,7 @@ impl ReaderPayload {
                 // transition stream to closed state.
                 if q.is_empty()
                     && cp.close_requested()
-                    && let Some(sp) = stream_val.payload_mut()
+                    && let Some(sp) = stream.payload_mut()
                 {
                     sp.state = RsState::Closed;
                 }
@@ -147,7 +146,8 @@ impl ReaderPayload {
             let (promise, rr) = Promise::create(ctx)?;
             cp.pending_read().borrow_mut().push([rr[0], rr[1]]);
             cp.call_pull(ctx)?;
-            return Ok(promise.into());
+
+            return Ok(promise);
         }
 
         // No controller (e.g. detached) — nothing to read.

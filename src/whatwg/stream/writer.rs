@@ -17,22 +17,44 @@ use crate::{USER_CLASS_DEFS, whatwg::stream::writable::JSWritableStream};
 
 use super::RsState;
 
-// ============================================================================
-// WritableStreamDefaultWriter
-// ============================================================================
-
-pub(crate) struct WritableStreamDefaultWriterPayload {
+pub(crate) struct WriterPayload {
     pub(super) stream: Option<JSWritableStream>,
     pub(crate) closed_promise: Option<Promise>,
 }
 
-impl WritableStreamDefaultWriterPayload {
+impl WriterPayload {
     fn gc_trace(&self, gcx: &mut GcTraceCtx) {
         if let Some(ref s) = self.stream {
             s.trace(gcx);
         }
         if let Some(ref cp) = self.closed_promise {
             cp.trace(gcx);
+        }
+    }
+
+    /// Abort the stream this writer is locked to, forwarding `reason`.
+    ///
+    /// Returns the underlying stream's abort result. If the writer is not
+    /// locked to any stream, resolves with `undefined`.
+    pub(crate) fn abort(
+        &mut self,
+        ctx: &mut ScopedContext,
+        reason: JSValue,
+    ) -> Result<Promise, i32> {
+        if let Some(mut ws) = self.stream {
+            return ws.payload_mut().unwrap().abort(ctx, reason);
+        }
+
+        Promise::from_resolve_value(ctx, JSValue::UNDEFINED)
+    }
+
+    /// Release this writer's lock on its stream: detach the stream and clear
+    /// the stream's back-reference to this writer.
+    pub(crate) fn release_lock(&mut self) {
+        if let Some(mut stream_val) = self.stream.take() {
+            if let Some(sp) = stream_val.payload_mut() {
+                sp.writer = None;
+            }
         }
     }
 }
@@ -92,10 +114,10 @@ fn js_writer_constructor(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult 
 def_native_object!(
     "WritableStreamDefaultWriter",
     JSWritableStreamDefaultWriter,
-    WritableStreamDefaultWriterPayload,
+    WriterPayload,
     WRITER_PROTO,
     Some(ClassCtorDef::new(js_writer_constructor, 0, false).expose_to_global()),
-    on_payload_gc: WritableStreamDefaultWriterPayload::gc_trace
+    on_payload_gc: WriterPayload::gc_trace
 );
 
 fn js_writer_write(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -324,6 +346,7 @@ fn flush_close_ok(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 fn flush_close_err(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut stream_val = cc.data(0);
     let err = cc.arg(0);
+
     if let Some(sp) = JSWritableStream::payload_mut_of(&mut stream_val)
         && let Some(controller) = sp.controller
         && let Some(cp) = controller.payload()
@@ -336,30 +359,19 @@ fn flush_close_err(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 }
 
 fn js_writer_abort(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let mut this = cc.this();
     let reason = cc.arg(0);
-    let this = cc.this();
 
-    let p = JSWritableStreamDefaultWriter::payload_of(&this)
-        .ok_or_else(|| ctx.throw_type_error("not a WritableStreamDefaultWriter"))?;
-
-    if let Some(mut ws) = p.stream {
-        return ws
-            .payload_mut()
-            .unwrap()
-            .abort(ctx, reason)
-            .map(JSValue::from);
-    }
-
-    Promise::from_resolve_value(ctx, JSValue::UNDEFINED).map(JSValue::from)
+    JSWritableStreamDefaultWriter::payload_mut_of(&mut this)
+        .ok_or_else(|| ctx.throw_type_error("not a WritableStreamDefaultWriter"))?
+        .abort(ctx, reason)
+        .map(JSValue::from)
 }
 
 fn js_writer_release_lock(_: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut this = cc.this();
-    if let Some(p) = JSWritableStreamDefaultWriter::payload_mut_of(&mut this)
-        && let Some(mut stream_val) = p.stream.take()
-        && let Some(sp) = stream_val.payload_mut()
-    {
-        sp.writer = None;
+    if let Some(p) = JSWritableStreamDefaultWriter::payload_mut_of(&mut this) {
+        p.release_lock();
     }
     Ok(JSValue::UNDEFINED)
 }

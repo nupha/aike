@@ -15,9 +15,7 @@ use crate::{
     whatwg::stream::{
         JSReadableStreamDefaultController, ReadableControllerPayload, extract_high_water_mark,
         readable::{JSReadableStream, ReadableStreamPayload},
-        transform_stream_default_controller::{
-            JSTransformStreamDefaultController, TransformStreamDefaultControllerPayload,
-        },
+        transform_controller::{JSTransformStreamDefaultController, TransformControllerPayload},
         writable::{JSWritableStream, WritableStreamPayload},
         writable_controller::{JSWritableStreamDefaultController, WritableControllerPayload},
     },
@@ -111,7 +109,7 @@ fn js_transform_stream_constructor(ctx: &mut ScopedContext, cc: CallContext) -> 
     let tc = JSTransformStreamDefaultController::new_instance(
         ctx,
         JSValue::UNDEFINED,
-        TransformStreamDefaultControllerPayload::new(rc, writable, transformer),
+        TransformControllerPayload::new(rc, writable, transformer),
     )?;
 
     // Wire the transform controller into the writable controller

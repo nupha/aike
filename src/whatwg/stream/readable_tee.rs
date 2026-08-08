@@ -10,12 +10,7 @@ use std::{
     rc::Rc,
 };
 
-use zuqe::{
-    Array, CallContext, Callback, JSResult, JSValue, JobState, ScopedContext,
-    builtins::promise::Promise,
-};
-
-use crate::whatwg::stream::readable::get_readable_stream_payload;
+use zuqe::{Array, CallContext, Callback, JSResult, JSValue, JobState, ScopedContext};
 
 use super::{
     JSReadableStream, JSReadableStreamDefaultController, ReadableControllerPayload,
@@ -38,6 +33,95 @@ thread_local! {
     static NEXT_TEE_ID: Cell<u32> = const { Cell::new(1) };
 }
 
+impl JSReadableStreamDefaultReader {
+    /// Tee this reader's stream into two branches.
+    ///
+    /// Consumes the source reader's `closed` rejection (created by getReader)
+    /// so an errored source does not leak an unhandled rejection from this
+    /// internal reader, then builds two branch streams each driven by the
+    /// shared on-demand tee pull, registers the shared state, and returns the
+    /// two branch streams.
+    pub(crate) fn tee(&mut self, ctx: &mut ScopedContext) -> Result<[JSReadableStream; 2], i32> {
+        // Consume the source reader's `closed` rejection (created by getReader) so an
+        // errored source does not leak an unhandled rejection from this internal reader.
+        if let Some(mut closed_p) = self.payload_mut().and_then(|p| p.closed_promise) {
+            let noop = ctx
+                .create_native_function(
+                    zuqe::Callback::Func(|_, _| Ok(JSValue::UNDEFINED)),
+                    "teeIgnore",
+                    0,
+                    0,
+                )?
+                .into();
+            closed_p.then(ctx, noop, noop)?;
+        }
+
+        // Each branch's underlying source `pull` is the shared on-demand tee pull,
+        // keyed by a tee id that resolves to the shared state (source reader + both
+        // branch controllers). Pull only fires when a branch actually needs data, so
+        // an infinite source is never drained unless a branch asks for it.
+        let tee_id = NEXT_TEE_ID.with(|c| {
+            let id = c.get();
+            c.set(id + 1);
+            id
+        });
+
+        // Create two branch streams, each with its own default controller whose
+        // underlying-source pull drives the shared tee pull.
+        let make_branch = |ctx: &mut ScopedContext| -> Result<
+            (JSReadableStream, JSReadableStreamDefaultController),
+            i32,
+        > {
+            let pull_fn = ctx
+                .create_native_function_with_data(
+                    Callback::Func(tee_pull),
+                    "teePull",
+                    1,
+                    0,
+                    [JSValue::from(tee_id)].into(),
+                )?
+                .into();
+            let mut source = ctx.create_base_object()?;
+            source.define_property_value_str(ctx, "pull", pull_fn, zuqe::JS_PROP_C_W_E)?;
+
+            let mut stream2 = JSReadableStream::new_instance(
+                ctx,
+                JSValue::UNDEFINED,
+                ReadableStreamPayload::new(),
+            )?;
+            let mut controller = JSReadableStreamDefaultController::new_instance(
+                ctx,
+                JSValue::UNDEFINED,
+                ReadableControllerPayload::new_default(JSValue::from(source), Some(stream2), 1),
+            )?;
+
+            // Wire the controller's self-handle (call_controller_pull needs it).
+            let handle = controller;
+            controller
+                .payload_mut()
+                .ok_or_else(|| ctx.throw_internal_error("invalid controller"))?
+                .set_controller(Some(handle));
+            stream2.payload_mut().unwrap().controller = Some(controller);
+
+            Ok((stream2, controller))
+        };
+
+        let (b1, c1) = make_branch(ctx)?;
+        let (b2, c2) = make_branch(ctx)?;
+
+        let shared = Rc::new(TeeShared {
+            reader: *self,
+            c1,
+            c2,
+            pulling: Cell::new(false),
+            done: Cell::new(false),
+        });
+        TEE_STREAMS.with(|map| map.borrow_mut().insert(tee_id, shared));
+
+        Ok([b1, b2])
+    }
+}
+
 // ReadableStream.prototype.tee()
 // ============================================================================
 // Returns [branch1, branch2], two ReadableStreams that both receive every chunk
@@ -54,84 +138,13 @@ pub(crate) fn js_readable_stream_tee(ctx: &mut ScopedContext, cc: CallContext) -
         .as_native_object::<JSReadableStream>()
         .ok_or_else(|| ctx.throw_type_error("not a ReadableStream"))?;
 
-    let reader = stream.acquire_reader(ctx, false)?;
-    let p = get_readable_stream_payload(ctx, &this)?;
+    let mut reader = stream.acquire_reader(ctx, false)?;
 
-    // Consume the source reader's `closed` rejection (created by getReader) so an
-    // errored source does not leak an unhandled rejection from this internal reader.
-
-    if let Ok(closed) = reader.get_property_str(ctx, "closed")
-        && let Ok(mut closed_p) = Promise::try_from(closed)
-    {
-        let noop = ctx
-            .create_native_function(
-                zuqe::Callback::Func(|_, _| Ok(JSValue::UNDEFINED)),
-                "teeIgnore",
-                0,
-                0,
-            )?
-            .into();
-        closed_p.then(ctx, noop, noop)?;
-    }
-
-    // Each branch's underlying source `pull` is the shared on-demand tee pull,
-    // keyed by a tee id that resolves to the shared state (source reader + both
-    // branch controllers). Pull only fires when a branch actually needs data, so
-    // an infinite source is never drained unless a branch asks for it.
-    let tee_id = NEXT_TEE_ID.with(|c| {
-        let id = c.get();
-        c.set(id + 1);
-        id
-    });
-
-    // Create two branch streams, each with its own default controller whose
-    // underlying-source pull drives the shared tee pull.
-    let make_branch = |ctx: &mut ScopedContext| -> Result<(JSReadableStream,JSReadableStreamDefaultController ), i32> {
-        let pull_fn = ctx
-            .create_native_function_with_data(
-                Callback::Func(tee_pull),
-                "teePull",
-                1,
-                0,
-                [JSValue::from(tee_id)].into(),
-            )?
-            .into();
-        let mut source = ctx.create_base_object()?;
-        source.define_property_value_str(ctx, "pull", pull_fn, zuqe::JS_PROP_C_W_E)?;
-
-        let mut stream =
-            JSReadableStream::new_instance(ctx, JSValue::UNDEFINED, ReadableStreamPayload::new())?;
-        let mut controller = JSReadableStreamDefaultController::new_instance(
-            ctx,
-            JSValue::UNDEFINED,
-            ReadableControllerPayload::new_default(JSValue::from(source), Some(stream), 1),
-        )?;
-
-        // Wire the controller's self-handle (call_controller_pull needs it).
-        let handle = controller;
-        controller
-            .payload_mut()
-            .ok_or_else(|| ctx.throw_internal_error("invalid controller"))?
-            .set_controller(Some(handle));
-        stream.payload_mut().unwrap().controller = Some(controller);
-
-        Ok(( stream , controller) )
-    };
-
-    let (branch1_val, c1) = make_branch(ctx)?;
-    let (branch2_val, c2) = make_branch(ctx)?;
-
-    let shared = Rc::new(TeeShared {
-        reader,
-        c1,
-        c2,
-        pulling: Cell::new(false),
-        done: Cell::new(false),
-    });
-    TEE_STREAMS.with(|map| map.borrow_mut().insert(tee_id, shared));
+    // `tee` returns the two branch streams directly.
+    let branches = reader.tee(ctx)?;
 
     // The branches are exposed in a new array.
-    Array::from_values(ctx, vec![branch1_val.into(), branch2_val.into()]).map(JSValue::from)
+    Array::from_values(ctx, vec![branches[0].into(), branches[1].into()]).map(JSValue::from)
 }
 
 // On-demand tee pull: driven by a branch controller's `pull` (fired only when a
@@ -182,9 +195,11 @@ fn tee_pull_fulfilled(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     // If any branch still has an outstanding read waiting for data, keep pulling
     // (concurrent reads on a branch produce multiple pending reads; one source
     // chunk only satisfies one of them).
-    let need_more = [shared.c1, shared.c2]
-        .iter()
-        .any(|&c| !tee_branch_is_final(ctx, c.into()) && tee_has_pending_read(ctx, c.into()));
+    let need_more = [shared.c1, shared.c2].iter().any(|&c| {
+        !tee_branch_is_final(ctx, c.into())
+            && JSReadableStreamDefaultController::payload_of(&c.into())
+                .is_some_and(|cp| !cp.pending_read().borrow().is_empty())
+    });
 
     if need_more {
         let id = tee_id;
@@ -200,15 +215,6 @@ fn tee_pull_fulfilled(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     }
 
     Ok(JSValue::UNDEFINED)
-}
-
-// True when the branch controller has an outstanding pending read waiting for
-// a chunk to be enqueued.
-fn tee_has_pending_read(_ctx: &mut ScopedContext, c: JSValue) -> bool {
-    let Some(cp) = JSReadableStreamDefaultController::payload_of(&c) else {
-        return false;
-    };
-    !cp.pending_read().borrow().is_empty()
 }
 
 // Perform the shared pull: read one source chunk and fan it out to both branches.

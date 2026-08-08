@@ -16,10 +16,10 @@ mod readable_controller_default;
 mod readable_tee;
 mod reader;
 mod transform;
-mod transform_stream_default_controller;
+mod transform_controller;
 mod writable;
 mod writable_controller;
-mod writable_stream_default_writer;
+mod writer;
 
 pub(crate) use {
     readable::{JSReadableStream, ReadableStreamPayload, install_readable_stream_statics},
@@ -28,10 +28,10 @@ pub(crate) use {
     readable_controller_default::JSReadableStreamDefaultController,
     reader::JSReadableStreamDefaultReader,
     transform::JSTransformStream,
-    transform_stream_default_controller::JSTransformStreamDefaultController,
+    transform_controller::JSTransformStreamDefaultController,
     writable::JSWritableStream,
     writable_controller::JSWritableStreamDefaultController,
-    writable_stream_default_writer::JSWritableStreamDefaultWriter,
+    writer::JSWritableStreamDefaultWriter,
 };
 
 use linkme::distributed_slice;
@@ -225,7 +225,7 @@ fn js_byte_length_size(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 }
 
 fn js_count_size(_ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
-    Ok(JSValue::from(1.0))
+    Ok(JSValue::from(1))
 }
 
 pub(crate) fn make_iterator_result(

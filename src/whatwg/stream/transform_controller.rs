@@ -20,17 +20,13 @@ use crate::{
 
 use super::{QueueEntry, RsState};
 
-// ============================================================================
-// TransformStreamDefaultController
-// ============================================================================
-
-pub(crate) struct TransformStreamDefaultControllerPayload {
+pub(crate) struct TransformControllerPayload {
     pub(crate) readable_controller: JSReadableStreamDefaultController,
     pub(crate) writable_stream: JSWritableStream,
     pub(crate) transformer: JSValue,
 }
 
-impl TransformStreamDefaultControllerPayload {
+impl TransformControllerPayload {
     pub(super) fn new(
         readable_controller: JSReadableStreamDefaultController,
         writable_stream: JSWritableStream,
@@ -74,10 +70,10 @@ fn js_transform_controller_constructor(ctx: &mut ScopedContext, _cc: CallContext
 def_native_object!(
     "TransformStreamDefaultController",
     JSTransformStreamDefaultController,
-    TransformStreamDefaultControllerPayload,
+    TransformControllerPayload,
     TRANSFORM_CONTROLLER_PROTO,
     Some(ClassCtorDef::new(js_transform_controller_constructor, 0, false).expose_to_global()),
-    on_payload_gc: TransformStreamDefaultControllerPayload::gc_trace
+    on_payload_gc: TransformControllerPayload::gc_trace
 );
 
 fn js_transform_controller_enqueue(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
