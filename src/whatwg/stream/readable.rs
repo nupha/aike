@@ -1235,17 +1235,27 @@ fn js_readable_stream_pipe_through(ctx: &mut ScopedContext, cc: CallContext) -> 
     }
 
     let options = cc.arg(1);
-    // Extract and validate `signal`: it must be undefined or an AbortSignal.
-    let signal = if options.is_undefined_or_null() {
-        JSValue::UNDEFINED
-    } else if let Some(obj) = options.as_object() {
-        obj.get_property_str(ctx, "signal")?
-    } else {
-        JSValue::UNDEFINED
-    };
+    // Spec: read every option before touching the streams, so a property
+    // getter runs in order and may lock a stream (making the acquire below
+    // throw). Extract and validate `signal` too.
+    let mut prevent_close = false;
+    let mut prevent_abort = false;
+    let mut prevent_cancel = false;
+    let mut signal = JSValue::UNDEFINED;
+    if !options.is_undefined_or_null()
+        && let Some(obj) = options.as_object()
+    {
+        prevent_close = obj.get_property_str(ctx, "preventClose")?.to_bool()?;
+        prevent_abort = obj.get_property_str(ctx, "preventAbort")?.to_bool()?;
+        prevent_cancel = obj.get_property_str(ctx, "preventCancel")?.to_bool()?;
+        signal = obj.get_property_str(ctx, "signal")?;
+    }
     if !signal.is_undefined() && JSAbortSignal::payload_of(&signal).is_none() {
         return Err(ctx.throw_type_error("options.signal must be an AbortSignal"));
     }
+    // Option values were read for their getter side effects (they can lock a
+    // stream); the driver re-reads them from `options` for its shutdown logic.
+    let _ = (prevent_close, prevent_abort, prevent_cancel);
 
     // pipeThrough = pipe this into transform.writable, then return transform.readable.
     // Use the shared driver directly (NOT this.pipeTo) so a monkey-patched
