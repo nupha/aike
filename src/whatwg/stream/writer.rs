@@ -183,12 +183,26 @@ fn js_writer_write(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             }
 
             // Normal writable path
-            if let Some(sink) = cp.underlying_sink.as_object()
-                && let Some(Ok(result)) =
-                    sink.invoke_str_callable(ctx, "write", &[chunk, controller.into()])?
-            {
-                if result.is_object() {
-                    return Ok(result);
+            let Some(sink) = cp.underlying_sink.as_object() else {
+                return Promise::from_resolve_value(ctx, JSValue::UNDEFINED).map(JSValue::from);
+            };
+            match sink.invoke_str_callable(ctx, "write", &[chunk, controller.into()])? {
+                Some(Ok(v)) => {
+                    if v.is_object() {
+                        return Ok(v);
+                    }
+                    // Non-promise result: the write fulfilled immediately.
+                    return Promise::from_resolve_value(ctx, JSValue::UNDEFINED).map(JSValue::from);
+                }
+                Some(Err(_)) => {
+                    // Sink write threw — reject the write with the thrown value
+                    // (must take the exception so it does not poison later calls).
+                    let e = ctx.take_exception().to_value(ctx);
+                    return Promise::from_reject_value(ctx, e).map(JSValue::from);
+                }
+                None => {
+                    // No write method on the sink: write is a fulfilled no-op.
+                    return Promise::from_resolve_value(ctx, JSValue::UNDEFINED).map(JSValue::from);
                 }
             }
         }

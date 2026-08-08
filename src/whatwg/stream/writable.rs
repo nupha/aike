@@ -77,12 +77,16 @@ impl WritableStreamPayload {
 
     /// Abort this writable stream: settle it as Errored with `reason`, then
     /// propagate the underlying sink's `abort()` result (including a rejection)
-    /// to the caller.
+    /// to the caller. Per spec `WritableStreamAbort`, aborting an already
+    /// errored/closed stream is a no-op that resolves with undefined.
     pub(crate) fn abort(
         &mut self,
         ctx: &mut ScopedContext,
         reason: JSValue,
     ) -> Result<Promise, i32> {
+        if self.state != RsState::Readable {
+            return Promise::from_resolve_value(ctx, JSValue::UNDEFINED);
+        }
         self.settle_state(ctx, RsState::Errored, Some(reason));
 
         if let Some(controller) = self.controller
@@ -182,7 +186,7 @@ fn js_writable_stream_constructor(ctx: &mut ScopedContext, cc: CallContext) -> J
     let controller = JSWritableStreamDefaultController::new_instance(
         ctx,
         JSValue::UNDEFINED,
-        WritableControllerPayload::new(underlying_sink, Some(stream), hwm as u32),
+        WritableControllerPayload::new(underlying_sink, Some(stream), hwm),
     )?;
 
     if let Some(o) = underlying_sink.as_object()

@@ -192,7 +192,7 @@ fn js_transform_controller_desired_size(ctx: &mut ScopedContext, cc: CallContext
             }
         }
         let total = rcp.queue_total_size();
-        return Ok(JSValue::from(rcp.high_water_mark() - total));
+        return Ok(JSValue::from(rcp.high_water_mark() - total as f64));
     }
     Ok(JSValue::ZERO)
 }

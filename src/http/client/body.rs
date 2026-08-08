@@ -4,7 +4,10 @@
 use std::{
     cell::RefCell,
     rc::Rc,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -220,11 +223,31 @@ pub(crate) fn drain_body(
         }
         BodySource::Channel(rx) => {
             let buf = Arc::new(Mutex::new(Some(Vec::new())));
+            // Set once the body is committed (success, error, or timeout). The
+            // commit happens from this polling job, which then must KEEP its
+            // strong reference to `result_slot` alive until the result-slot
+            // polling job (which holds only a `Weak`) has taken the data —
+            // otherwise `weak.upgrade()` fails and panics on the very next
+            // tick even though the data was committed.
+            let committed = Arc::new(AtomicBool::new(false));
             let start = Instant::now();
             ctx.queue_job(
                 move |_cx| {
+                    if committed.load(Ordering::SeqCst) {
+                        // Stay queued (holding the strong ref) until the
+                        // result-slot job consumed the committed value.
+                        return if result_slot.is_empty() {
+                            Ok(JobState::Done)
+                        } else {
+                            Ok(JobState::Again)
+                        };
+                    }
                     let mut guard = buf.lock().unwrap();
                     let inner = guard.as_mut().unwrap();
+                    let mut finish = |guard: &mut std::sync::MutexGuard<Option<Vec<u8>>>| {
+                        guard.take();
+                        committed.store(true, Ordering::SeqCst);
+                    };
                     match rx.try_recv() {
                         Ok(Ok(chunk)) => {
                             inner.extend_from_slice(&chunk);
@@ -232,20 +255,21 @@ pub(crate) fn drain_body(
                         }
                         // A network error mid-body: reject the buffered read.
                         Ok(Err(msg)) => {
-                            guard.take();
+                            finish(&mut guard);
                             let _ = result_slot.commit(Err(msg));
-                            Ok(JobState::Done)
+                            Ok(JobState::Again)
                         }
                         Err(TryRecvError::Disconnected) => {
                             let full = guard.take().unwrap();
+                            committed.store(true, Ordering::SeqCst);
                             let _ = result_slot.commit(Ok(full));
-                            Ok(JobState::Done)
+                            Ok(JobState::Again)
                         }
                         Err(TryRecvError::Empty) => {
                             if start.elapsed() > BODY_TIMEOUT {
-                                guard.take();
+                                finish(&mut guard);
                                 let _ = result_slot.commit(Err("body read timeout".into()));
-                                Ok(JobState::Done)
+                                Ok(JobState::Again)
                             } else {
                                 Ok(JobState::Again)
                             }

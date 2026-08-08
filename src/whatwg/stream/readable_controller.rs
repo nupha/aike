@@ -54,7 +54,7 @@ pub(crate) struct ReadableControllerPayload {
     pub(crate) underlying_source: JSValue,
     pub(crate) queue: Rc<RefCell<Vec<QueueEntry>>>,
     pub(crate) queue_total_size: Rc<Cell<i32>>,
-    pub(crate) high_water_mark: i32,
+    pub(crate) high_water_mark: f64,
     pub(crate) close_requested: Cell<bool>,
     pub(crate) kind: ReadableControllerKind,
 }
@@ -63,7 +63,7 @@ impl ReadableControllerPayload {
     pub(crate) fn new_default(
         underlying_source: JSValue,
         stream: Option<JSReadableStream>,
-        high_water_mark: i32,
+        high_water_mark: f64,
     ) -> Self {
         Self {
             stream,
@@ -85,7 +85,7 @@ impl ReadableControllerPayload {
     pub(crate) fn new_byte(
         underlying_source: JSValue,
         stream: Option<JSReadableStream>,
-        high_water_mark: i32,
+        high_water_mark: f64,
     ) -> Self {
         Self {
             stream,
@@ -153,7 +153,7 @@ impl ReadableControllerPayload {
         }
     }
 
-    pub(crate) fn high_water_mark(&self) -> i32 {
+    pub(crate) fn high_water_mark(&self) -> f64 {
         self.high_water_mark
     }
 
@@ -326,21 +326,12 @@ impl ReadableControllerPayload {
         Ok(())
     }
 
-    /// Enqueue a chunk, throwing if the stream is already closed/errored.
+    /// Enqueue a chunk. Per the current spec, a non-readable stream or a
+    /// close-requested controller makes this a silent no-op
+    /// (`CanCloseOrEnqueue` returns false), not a throw.
     pub(crate) fn enqueue(&self, ctx: &mut ScopedContext, chunk: JSValue) -> JSResult {
-        if let Some(rs) = self.stream
-            && let Some(sp) = rs.payload()
-        {
-            if sp.state == RsState::Errored {
-                return Err(ctx.throw_type_error("cannot enqueue to an errored stream"));
-            }
-            if sp.state == RsState::Closed {
-                return Err(ctx.throw_type_error("cannot enqueue to a closed stream"));
-            }
-        }
-
-        if self.close_requested.get() {
-            return Err(ctx.throw_type_error("cannot enqueue after close"));
+        if self.close_requested.get() || !self.can_close_or_enqueue() {
+            return Ok(JSValue::UNDEFINED);
         }
 
         match &self.kind {
@@ -360,17 +351,27 @@ impl ReadableControllerPayload {
         }
     }
 
-    /// Close the controlled stream.
+    /// Spec `ReadableStreamDefaultControllerCanCloseOrEnqueue`: false once the
+    /// stream has left the readable state or close has been requested.
+    fn can_close_or_enqueue(&self) -> bool {
+        if self.close_requested.get() {
+            return false;
+        }
+        let readable = match self.stream {
+            Some(rs) => match rs.payload() {
+                Some(sp) => sp.state == RsState::Readable,
+                None => false,
+            },
+            None => false,
+        };
+        readable
+    }
+
+    /// Close the controlled stream. Per the current spec, closing an already
+    /// closed/errored (or close-requested) stream is a silent no-op, not a throw.
     pub(crate) fn close(&self, ctx: &mut ScopedContext) -> Result<(), i32> {
-        if let Some(rs) = self.stream {
-            if let Some(sp) = rs.payload() {
-                if sp.state == RsState::Errored {
-                    return Err(ctx.throw_type_error("cannot close an errored stream"));
-                }
-                if sp.state == RsState::Closed {
-                    return Err(ctx.throw_type_error("cannot close a closed stream"));
-                }
-            }
+        if !self.can_close_or_enqueue() {
+            return Ok(());
         }
 
         self.close_requested.set(true);
@@ -400,17 +401,12 @@ impl ReadableControllerPayload {
         Ok(())
     }
 
-    /// Error the controlled stream with `e`.
+    /// Error the controlled stream with `e`. Per the current spec this is a
+    /// silent no-op once the stream has left the readable state
+    /// (`CanCloseOrEnqueue` is false), not a throw.
     pub(crate) fn error(&self, ctx: &mut ScopedContext, e: JSValue) -> Result<(), i32> {
-        if let Some(rs) = self.stream
-            && let Some(sp) = rs.payload()
-        {
-            if sp.state == RsState::Errored {
-                return Err(ctx.throw_type_error("cannot error an errored stream"));
-            }
-            if sp.state == RsState::Closed {
-                return Err(ctx.throw_type_error("cannot error a closed stream"));
-            }
+        if !self.can_close_or_enqueue() {
+            return Ok(());
         }
 
         match &self.kind {
@@ -436,21 +432,23 @@ impl ReadableControllerPayload {
         Ok(())
     }
 
-    /// Spec: errored -> null (signalled as `i32::MAX`), closed -> 0, else
+    /// Spec: errored -> null (signalled as `f64::NAN`), closed -> 0, else
     /// highWaterMark - queueTotalSize. The result can be negative when the
     /// queue is over-full; that is the spec-mandated backpressure signal.
-    pub(crate) fn desired_size(&self, _: &mut ScopedContext) -> Result<i32, i32> {
+    /// A NaN highWaterMark is impossible (rejected at extraction), so NaN is a
+    /// safe sentinel for the errored state.
+    pub(crate) fn desired_size(&self, _: &mut ScopedContext) -> Result<f64, i32> {
         if let Some(s) = self.stream
             && let Some(sp) = s.payload()
         {
             match sp.state {
-                RsState::Errored => return Ok(i32::MAX),
-                RsState::Closed => return Ok(0),
+                RsState::Errored => return Ok(f64::NAN),
+                RsState::Closed => return Ok(0.0),
                 RsState::Readable => {}
             }
         }
 
-        Ok(self.high_water_mark - self.queue_total_size.get())
+        Ok(self.high_water_mark - self.queue_total_size.get() as f64)
     }
 
     /// Pending BYOB request view, or undefined. Only meaningful for byte streams.

@@ -31,6 +31,7 @@ use crate::{
             extract_high_water_mark,
             reader::{JSReadableStreamDefaultReader, ReaderPayload},
             writable::JSWritableStream,
+            writer::JSWritableStreamDefaultWriter,
         },
     },
 };
@@ -416,7 +417,7 @@ fn js_readable_stream_from_static(ctx: &mut ScopedContext, cc: CallContext) -> J
     let mut controller = JSReadableStreamDefaultController::new_instance(
         ctx,
         JSValue::UNDEFINED,
-        ReadableControllerPayload::new_default(source_val, Some(stream), 1),
+        ReadableControllerPayload::new_default(source_val, Some(stream), 1.0),
     )?;
     // Wire the controller's self-handle (call_controller_pull needs it).
     let handle = controller;
@@ -635,6 +636,10 @@ fn run_pipe_driver(
     state.set_property_str(ctx, "abortErr", JSValue::UNDEFINED)?;
     state.set_property_str(ctx, "cancelErr", JSValue::UNDEFINED)?;
     state.set_property_str(ctx, "fallbackReason", JSValue::UNDEFINED)?;
+    // Backpressure-aware loop state: writes in flight and whether the source
+    // has been fully read (so the destination is closed once writes drain).
+    state.set_property_str(ctx, "pendingWrites", 0.into())?;
+    state.set_property_str(ctx, "readDone", false.into())?;
 
     // Uniform data layout threaded through every async pipe callback:
     //   [0] state, [1] resolve, [2] reject, [3] reader, [4] writer,
@@ -726,6 +731,16 @@ fn pipe_to_read(ctx: &mut ScopedContext, data: &[JSValue]) -> JSResult {
     if pipe_is_shutting_down(ctx, &data[0])? {
         return Ok(JSValue::UNDEFINED);
     }
+    let state_obj = data[0].as_object().unwrap();
+    if state_obj.get_property_str(ctx, "readDone")?.to_bool()? {
+        return Ok(JSValue::UNDEFINED);
+    }
+    // Backpressure: do not read while the destination does not desire chunks.
+    // The destination's queue may hold writes from this pipe, so desiredSize
+    // is writable hwm minus the writes this pipe still has in flight.
+    if !pipe_wants_read(ctx, data)? {
+        return Ok(JSValue::UNDEFINED);
+    }
     let reader = data[3];
     let p = JSReadableStreamDefaultReader::payload_of(&reader)
         .ok_or_else(|| ctx.throw_type_error("not a ReadableStreamDefaultReader"))?;
@@ -750,6 +765,117 @@ fn pipe_to_read(ctx: &mut ScopedContext, data: &[JSValue]) -> JSResult {
         )?
         .into();
     read_promise.then(ctx, step, step_fail)?;
+    Ok(JSValue::UNDEFINED)
+}
+
+// True if the destination currently desires another chunk: its highWaterMark
+// minus the writes this pipe has in flight is positive. An errored destination
+// reports `null` desiredSize but the pipe still performs one read first (aike
+// has no creation-time pull, so the read is what surfaces the source's pull);
+// the errored destination then rejects the write and shuts the pipe down.
+fn pipe_wants_read(ctx: &mut ScopedContext, data: &[JSValue]) -> Result<bool, i32> {
+    let state_obj = data[0].as_object().unwrap();
+    let pending = state_obj
+        .get_property_str(ctx, "pendingWrites")?
+        .to_number(ctx)?
+        .to_f64() as i32;
+    let writer = data[4];
+    let ds = writer.get_property_str(ctx, "desiredSize")?;
+    if ds.is_null() {
+        return Ok(true);
+    }
+    if ds.is_undefined() {
+        return Ok(false);
+    }
+    let desired = ds.to_number(ctx)?.to_f64() - pending as f64;
+    Ok(desired > 0.0)
+}
+
+fn pipe_source_errored(reader: &JSValue) -> Option<JSValue> {
+    let r = JSReadableStreamDefaultReader::payload_of(reader)?;
+    let stream = r.stream?;
+    let sp = stream.payload()?;
+    if sp.state == RsState::Errored {
+        Some(sp.stored_error)
+    } else {
+        None
+    }
+}
+
+fn pipe_dest_errored(writer: &JSValue) -> Option<JSValue> {
+    let wp = JSWritableStreamDefaultWriter::payload_of(writer)?;
+    let stream = wp.stream?;
+    let sp = stream.payload()?;
+    if sp.state == RsState::Errored {
+        Some(sp.stored_error)
+    } else {
+        None
+    }
+}
+
+fn pipe_set_state_num(ctx: &mut ScopedContext, state: &JSValue, key: &str, n: f64) -> Result<(), i32> {
+    state
+        .as_object()
+        .unwrap()
+        .set_property_str(ctx, key, JSValue::from(n))?;
+    Ok(())
+}
+
+// Add `delta` to a numeric state field.
+fn pipe_bump_state_num(
+    ctx: &mut ScopedContext,
+    state: &JSValue,
+    key: &str,
+    delta: i32,
+) -> Result<(), i32> {
+    let mut state_obj = state.as_object().unwrap();
+    let n = state_obj.get_property_str(ctx, key)?.to_number(ctx)?.to_f64();
+    state_obj.set_property_str(ctx, key, JSValue::from(n + delta as f64))?;
+    Ok(())
+}
+
+// Close the destination (unless preventClose), settling the pipe when done.
+// Called once the source is fully read and all writes have drained.
+fn pipe_close_dest(ctx: &mut ScopedContext, data: &[JSValue]) -> JSResult {
+    if pipe_is_shutting_down(ctx, &data[0])? {
+        return Ok(JSValue::UNDEFINED);
+    }
+    let prevent_close = pipe_option_bool(ctx, &data[6], "preventClose")?;
+    let writer = data[4];
+    if prevent_close {
+        return pipe_resolve(ctx, data);
+    }
+    // Close the destination; resolve the pipe promise when done. A close
+    // that throws synchronously (e.g. destination already errored) must
+    // not crash the driver — reject the pipe promise instead.
+    let close_fn = writer.get_property_str(ctx, "close")?;
+    let close_js = match close_fn.call(ctx, writer, &[]) {
+        Ok(v) => v,
+        Err(_) => {
+            let err = ctx.take_exception().to_value(ctx);
+            return pipe_reject(ctx, data, err);
+        }
+    };
+    let mut close_promise: Promise = Promise::try_from(close_js)?;
+    let settle_ok = ctx
+        .create_native_function_with_data(
+            Callback::Func(pipe_to_settle_ok),
+            "pipeToSettleOk",
+            0,
+            0,
+            data.into(),
+        )?
+        .into();
+    let settle_err = ctx
+        .create_native_function_with_data(
+            Callback::Func(pipe_to_settle_err),
+            "pipeToSettleErr",
+            1,
+            0,
+            data.into(),
+        )?
+        .into();
+    close_promise.then(ctx, settle_ok, settle_err)?;
     Ok(JSValue::UNDEFINED)
 }
 
@@ -786,6 +912,17 @@ fn pipe_to_on_abort(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     ];
     if pipe_is_shutting_down(ctx, &data[0])? {
         return Ok(JSValue::UNDEFINED);
+    }
+    // An already-errored source/destination takes precedence over the abort
+    // ("abort should do nothing after the readable/writable is errored"): the
+    // existing error must be the pipe's rejection, not the abort reason.
+    if let Some(err) = pipe_source_errored(&data[3]) {
+        set_state_bool(ctx, &data[0], "shuttingDown", true)?;
+        return pipe_shutdown_with_error(ctx, &data, err);
+    }
+    if let Some(err) = pipe_dest_errored(&data[4]) {
+        set_state_bool(ctx, &data[0], "shuttingDown", true)?;
+        return pipe_shutdown_with_error(ctx, &data, err);
     }
     set_state_bool(ctx, &data[0], "shuttingDown", true)?;
     pipe_to_perform_abort(ctx, &data)
@@ -829,8 +966,12 @@ fn pipe_to_perform_abort(ctx: &mut ScopedContext, data: &[JSValue]) -> JSResult 
 
     // The abort shutdown only waits for cleanup actions that must run. If both
     // are prevented (or both already moot), reject directly with the reason.
+    // Per the spec abortAlgorithm, the abort action is only meaningful when the
+    // destination is still writable (an errored/closed destination yields a
+    // resolved action, i.e. nothing to wait for).
+    let dest_writable = pipe_dest_is_writable(&data[4]);
     let mut pending = 0;
-    if !prevent_abort {
+    if !prevent_abort && dest_writable {
         pending += 1;
     }
     if !prevent_cancel && !pipe_source_is_final(&reader) {
@@ -857,7 +998,7 @@ fn pipe_to_perform_abort(ctx: &mut ScopedContext, data: &[JSValue]) -> JSResult 
         .unwrap()
         .set_property_str(ctx, "fallbackReason", reason)?;
 
-    if !prevent_abort {
+    if !prevent_abort && dest_writable {
         pipe_run_shutdown_action(ctx, data, ShutdownAction::Abort, reason)?;
     }
     if !prevent_cancel && !pipe_source_is_final(&reader) {
@@ -865,6 +1006,20 @@ fn pipe_to_perform_abort(ctx: &mut ScopedContext, data: &[JSValue]) -> JSResult 
     }
 
     Ok(JSValue::UNDEFINED)
+}
+
+// True if the stream behind this pipe's writer is still writable.
+fn pipe_dest_is_writable(writer: &JSValue) -> bool {
+    let Some(wp) = JSWritableStreamDefaultWriter::payload_of(writer) else {
+        return false;
+    };
+    let Some(stream) = wp.stream else {
+        return false;
+    };
+    let Some(sp) = stream.payload() else {
+        return false;
+    };
+    sp.state == RsState::Readable
 }
 
 fn set_state_num(ctx: &mut ScopedContext, state: &JSValue, key: &str, n: u32) -> Result<(), i32> {
@@ -1069,7 +1224,9 @@ fn js_readable_stream_pipe_through(ctx: &mut ScopedContext, cc: CallContext) -> 
     Ok(readable)
 }
 
-// A chunk was read: close on done, otherwise write and continue the loop.
+// A chunk was read: on done, record it and close the destination once pending
+// writes drain; otherwise write the chunk and keep reading while the
+// destination desires chunks (backpressure-aware read-ahead).
 // `data` layout: [0] state, [1] resolve, [2] reject, [3] reader, [4] writer,
 // [5] signal.
 fn pipe_to_on_read(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -1089,42 +1246,18 @@ fn pipe_to_on_read(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let result = cc.arg(0);
     let done = result.get_property_str(ctx, "done")?.to_bool()?;
     if done {
-        let prevent_close = pipe_option_bool(ctx, &data[6], "preventClose")?;
-        let writer = data[4];
-        if prevent_close {
-            return pipe_resolve(ctx, &data);
+        // Source fully read: mark it and close the destination once every
+        // already-read chunk has finished writing.
+        pipe_set_state_num(ctx, &data[0], "readDone", 1.0)?;
+        let pending = data[0]
+            .as_object()
+            .unwrap()
+            .get_property_str(ctx, "pendingWrites")?
+            .to_number(ctx)?
+            .to_f64() as i32;
+        if pending == 0 {
+            return pipe_close_dest(ctx, &data);
         }
-        // Close the destination; resolve the pipe promise when done. A close
-        // that throws synchronously (e.g. destination already errored) must
-        // not crash the driver — reject the pipe promise instead.
-        let close_fn = writer.get_property_str(ctx, "close")?;
-        let close_js = match close_fn.call(ctx, writer, &[]) {
-            Ok(v) => v,
-            Err(_) => {
-                let err = ctx.take_exception().to_value(ctx);
-                return pipe_reject(ctx, &data, err);
-            }
-        };
-        let mut close_promise: Promise = Promise::try_from(close_js)?;
-        let settle_ok = ctx
-            .create_native_function_with_data(
-                Callback::Func(pipe_to_settle_ok),
-                "pipeToSettleOk",
-                0,
-                0,
-                data.into(),
-            )?
-            .into();
-        let settle_err = ctx
-            .create_native_function_with_data(
-                Callback::Func(pipe_to_settle_err),
-                "pipeToSettleErr",
-                1,
-                0,
-                data.into(),
-            )?
-            .into();
-        close_promise.then(ctx, settle_ok, settle_err)?;
         return Ok(JSValue::UNDEFINED);
     }
     let value = result.get_property_str(ctx, "value")?;
@@ -1133,6 +1266,7 @@ fn pipe_to_on_read(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         .get_property_str(ctx, "write")?
         .call(ctx, writer, &[value])?;
     let mut write_promise: Promise = Promise::try_from(write_js)?;
+    pipe_bump_state_num(ctx, &data[0], "pendingWrites", 1)?;
     let loop_fn = ctx
         .create_native_function_with_data(
             Callback::Func(pipe_to_on_write_done),
@@ -1152,10 +1286,24 @@ fn pipe_to_on_read(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         )?
         .into();
     write_promise.then(ctx, loop_fn, write_fail)?;
+
+    // The write's sink may have errored the source synchronously (e.g.
+    // `write()` calling `controller.error()`). Per the spec that error takes
+    // precedence over any further reads — shut the pipe down with it.
+    if let Some(err) = pipe_source_errored(&data[3]) {
+        set_state_bool(ctx, &data[0], "shuttingDown", true)?;
+        return pipe_shutdown_with_error(ctx, &data, err);
+    }
+
+    // Read-ahead: keep reading while the destination desires chunks. This
+    // lets a high-water-mark destination receive multiple chunks in flight.
+    pipe_to_read(ctx, &data)?;
     Ok(JSValue::UNDEFINED)
 }
 
-// A write fulfilled: continue the read loop (unless shutdown began meanwhile).
+// A write fulfilled: drop it from the in-flight count, then continue reading
+// if the destination still desires chunks, or close the destination once the
+// source is fully read and all writes have drained.
 fn pipe_to_on_write_done(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let data = [
         cc.data(0),
@@ -1166,10 +1314,20 @@ fn pipe_to_on_write_done(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         cc.data(5),
         cc.data(6),
     ];
+    pipe_bump_state_num(ctx, &data[0], "pendingWrites", -1)?;
     if pipe_is_shutting_down(ctx, &data[0])? {
         return Ok(JSValue::UNDEFINED);
     }
-    pipe_to_read(ctx, &data)
+    let state_obj = data[0].as_object().unwrap();
+    let pending = state_obj
+        .get_property_str(ctx, "pendingWrites")?
+        .to_number(ctx)?
+        .to_f64() as i32;
+    if state_obj.get_property_str(ctx, "readDone")?.to_bool()? && pending == 0 {
+        pipe_close_dest(ctx, &data)
+    } else {
+        pipe_to_read(ctx, &data)
+    }
 }
 
 // Source read failed: shut the pipe down with the read error. Per spec the
@@ -1507,7 +1665,7 @@ impl JSReadableStream {
         let controller = JSReadableStreamDefaultController::new_instance(
             ctx,
             JSValue::UNDEFINED,
-            ReadableControllerPayload::new_default(JSValue::from(source), Some(stream), 1),
+            ReadableControllerPayload::new_default(JSValue::from(source), Some(stream), 1.0),
         )?;
         stream.payload_mut().unwrap().controller = Some(controller);
 
@@ -1550,7 +1708,7 @@ impl JSReadableStream {
         let controller = JSReadableStreamDefaultController::new_instance(
             ctx,
             JSValue::UNDEFINED,
-            ReadableControllerPayload::new_default(JSValue::from(source), Some(stream), 1),
+            ReadableControllerPayload::new_default(JSValue::from(source), Some(stream), 1.0),
         )?;
         let controller_val = JSValue::from(controller);
 
@@ -1578,7 +1736,7 @@ impl JSReadableStream {
         let controller = JSReadableStreamDefaultController::new_instance(
             ctx,
             JSValue::UNDEFINED,
-            ReadableControllerPayload::new_default(JSValue::from(source), Some(stream), 1),
+            ReadableControllerPayload::new_default(JSValue::from(source), Some(stream), 1.0),
         )?;
         let controller_val = JSValue::from(controller);
         stream.payload_mut().unwrap().controller = Some(controller);
@@ -1609,7 +1767,7 @@ impl JSReadableStream {
         let controller = JSReadableStreamDefaultController::new_instance(
             ctx,
             JSValue::UNDEFINED,
-            ReadableControllerPayload::new_default(JSValue::from(source), Some(stream), 1),
+            ReadableControllerPayload::new_default(JSValue::from(source), Some(stream), 1.0),
         )?;
         stream.payload_mut().unwrap().controller = Some(controller);
 

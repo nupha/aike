@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     rc::Rc,
     time::{Duration, Instant},
 };
@@ -379,8 +379,23 @@ impl JSReadableStreamDefaultReader {
         let buf = Rc::new(RefCell::new(Vec::<u8>::new()));
         let start = Instant::now();
 
+        // Set once the drain has committed the slot. The result-slot polling
+        // job (created by `create_with_result_slot`) holds only a `Weak`, so
+        // this job must keep its strong reference to `slot` alive until that
+        // job has consumed the committed value — otherwise `weak.upgrade()`
+        // fails and panics on the next tick even though the data was committed.
+        let committed = Rc::new(Cell::new(false));
+        let committed_ref = committed.clone();
+
         ctx.queue_job(
             move |cx| {
+                if committed_ref.get() {
+                    return if slot.is_empty() {
+                        Ok(JobState::Done)
+                    } else {
+                        Ok(JobState::Again)
+                    };
+                }
                 // Start a new read() unless one is already in flight.
                 if pending.borrow().is_none() {
                     let p = reader
@@ -391,8 +406,9 @@ impl JSReadableStreamDefaultReader {
                         Ok(pv) => match Promise::try_from(pv) {
                             Ok(p) => *pending.borrow_mut() = Some(p),
                             Err(_) => {
+                                committed_ref.set(true);
                                 let _ = slot.commit(Err("read() did not return a promise".into()));
-                                return Ok(JobState::Done);
+                                return Ok(JobState::Again);
                             }
                         },
                         Err(_) => {
@@ -401,8 +417,9 @@ impl JSReadableStreamDefaultReader {
                             if let Exception::Error(v) = cx.take_exception() {
                                 *raw_err.borrow_mut() = Some(v);
                             }
+                            committed_ref.set(true);
                             let _ = slot.commit(Err("stream read failed".into()));
-                            return Ok(JobState::Done);
+                            return Ok(JobState::Again);
                         }
                     }
                 }
@@ -411,8 +428,9 @@ impl JSReadableStreamDefaultReader {
                 match p.state() {
                     PromiseState::Pending => {
                         if start.elapsed() > timeout {
+                            committed_ref.set(true);
                             let _ = slot.commit(Err("body read timeout".into()));
-                            return Ok(JobState::Done);
+                            return Ok(JobState::Again);
                         }
                         Ok(JobState::Again)
                     }
@@ -421,8 +439,9 @@ impl JSReadableStreamDefaultReader {
                         // a stringified copy) so identity is preserved, as
                         // `promise_rejects_exactly` and user `catch` blocks expect.
                         *raw_err.borrow_mut() = Some(p.result());
+                        committed_ref.set(true);
                         let _ = slot.commit(Err("stream errored".into()));
-                        Ok(JobState::Done)
+                        Ok(JobState::Again)
                     }
                     PromiseState::Fulfilled => {
                         *pending.borrow_mut() = None;
@@ -433,8 +452,9 @@ impl JSReadableStreamDefaultReader {
                             .unwrap_or(false);
                         if done {
                             let full = std::mem::take(&mut *buf.borrow_mut());
+                            committed_ref.set(true);
                             let _ = slot.commit(Ok(full));
-                            return Ok(JobState::Done);
+                            return Ok(JobState::Again);
                         }
                         let value = match result.get_property_str(cx, "value") {
                             Ok(v) => v,
@@ -447,8 +467,9 @@ impl JSReadableStreamDefaultReader {
                                         false,
                                     )
                                     .map(Into::into);
+                                committed_ref.set(true);
                                 let _ = slot.commit(Err("body chunk is not a Uint8Array".into()));
-                                return Ok(JobState::Done);
+                                return Ok(JobState::Again);
                             }
                         };
 
@@ -464,8 +485,9 @@ impl JSReadableStreamDefaultReader {
                                     false,
                                 )
                                 .map(Into::into);
+                            committed_ref.set(true);
                             let _ = slot.commit(Err("body chunk is not a Uint8Array".into()));
-                            return Ok(JobState::Done);
+                            return Ok(JobState::Again);
                         };
                         ta.with_bytes(|b| buf.borrow_mut().extend_from_slice(b));
 

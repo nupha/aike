@@ -130,14 +130,15 @@ fn queuing_strategy_init<'a>(
 ///
 /// Validates the strategy as the spec requires:
 /// - `size`, when present, must be a callable; otherwise a TypeError is thrown.
-/// - `highWaterMark`, when present, must be a non-NaN, finite, non-negative
-///   number; otherwise a RangeError is thrown.
+/// - `highWaterMark`, when present, must be a non-NaN, non-negative number;
+///   otherwise a RangeError is thrown. Infinity and fractional values are
+///   legal (`ExtractHighWaterMark` only rejects NaN and negatives).
 pub(crate) fn extract_high_water_mark(
     ctx: &mut ScopedContext,
     strategy: JSValue,
-) -> Result<i32, i32> {
+) -> Result<f64, i32> {
     if strategy.is_undefined() || strategy.is_null() {
-        return Ok(1);
+        return Ok(1.0);
     }
     let obj = queuing_strategy_init(ctx, strategy)?;
     // `size` must be a function when provided.
@@ -147,26 +148,16 @@ pub(crate) fn extract_high_water_mark(
     }
     let hwm = obj.get_property_str(ctx, "highWaterMark")?;
     if hwm.is_undefined() {
-        return Ok(1);
+        return Ok(1.0);
     }
-    // Only non-negative integers are accepted; NaN/Infinity/fractional/negative
-    // values are rejected (u32 cannot represent them).
-    let hwm_i = match hwm.to_number(ctx)? {
-        IntOrFloat::Int64(i) => i,
-        IntOrFloat::Float64(f) => {
-            if f.is_nan() || f.is_infinite() || f.fract() != 0.0 {
-                return Err(ctx.throw_range_error("highWaterMark must be a non-negative integer"));
-            }
-            f as i64
-        }
+    let hwm = match hwm.to_number(ctx)? {
+        IntOrFloat::Int64(i) => i as f64,
+        IntOrFloat::Float64(f) => f,
     };
-    if hwm_i < 0 {
-        return Err(ctx.throw_range_error("highWaterMark must be non-negative"));
+    if hwm.is_nan() || hwm < 0.0 {
+        return Err(ctx.throw_range_error("highWaterMark must be a non-negative number"));
     }
-    if hwm_i > i32::MAX as i64 {
-        return Err(ctx.throw_range_error("highWaterMark must fit in i32"));
-    }
-    Ok(hwm_i as i32)
+    Ok(hwm)
 }
 
 // ============================================================================

@@ -65,7 +65,7 @@ fn js_controller_desired_size(ctx: &mut ScopedContext, cc: CallContext) -> JSRes
     // Spec: errored -> null, closed -> 0, else highWaterMark - queueTotalSize
     // (can be negative when the queue is over-full).
     let size = p.desired_size(ctx)?;
-    if size == i32::MAX {
+    if size.is_nan() {
         Ok(JSValue::NULL)
     } else {
         Ok(JSValue::from(size))

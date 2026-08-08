@@ -92,7 +92,7 @@ fn js_transform_stream_constructor(ctx: &mut ScopedContext, cc: CallContext) -> 
     let mut writable =
         JSWritableStream::new_instance(ctx, JSValue::UNDEFINED, WritableStreamPayload::new())?;
     let wc_payload =
-        WritableControllerPayload::new(transformer, Some(writable), writable_hwm as u32);
+        WritableControllerPayload::new(transformer, Some(writable), writable_hwm);
     let wcv = JSWritableStreamDefaultController::new_instance(ctx, JSValue::UNDEFINED, wc_payload)?;
     writable.payload_mut().unwrap().controller.replace(wcv);
 
