@@ -587,23 +587,50 @@ fn js_readable_stream_pipe_to(ctx: &mut ScopedContext, cc: CallContext) -> JSRes
         let e = ctx.take_exception().to_value(ctx);
         return Promise::from_reject_value(ctx, e).map(JSValue::from);
     }
+
+    // Spec: a locked source or destination rejects the pipe promise (never
+    // throws synchronously) and must not lock the other stream. Check both
+    // before acquiring the writer/reader below.
+    let src_locked = JSReadableStream::payload_of(&this).map(|p| p.reader.is_some());
+    let dest_locked = JSWritableStream::payload_of(&dest).map(|p| p.writer.is_some());
+    if src_locked == Some(true) || dest_locked == Some(true) {
+        let msg = if src_locked == Some(true) {
+            "ReadableStream is already locked"
+        } else {
+            "WritableStream is already locked"
+        };
+        let _ = ctx.throw_type_error(msg);
+        let e = ctx.take_exception().to_value(ctx);
+        return Promise::from_reject_value(ctx, e).map(JSValue::from);
+    }
+
+    // Lock the destination synchronously via the native API (like the reader
+    // below) instead of calling the JS-layer `getWriter`, which a monkey-patched
+    // prototype could redirect. `dest` is already a WritableStream (checked
+    // above), and the locked check above guarantees acquire_writer succeeds.
     let writer = dest
-        .get_property_str(ctx, "getWriter")?
-        .call(ctx, dest, &[])?;
+        .as_native_object::<JSWritableStream>()
+        .ok_or_else(|| ctx.throw_type_error("pipeTo: dest must be a WritableStream"))?
+        .acquire_writer(ctx)?;
+
     // Acquire a reader on the source synchronously: this locks (disturbs) the
     // stream immediately so `locked` is true and a later getReader() throws.
     // `this` is already a ReadableStream (checked above): acquire its reader via
-    // the Rust-side API instead of the JS-layer `getReader`.
-    let mut src_stream = JSReadableStream::try_from(this)?;
-    let reader = src_stream.acquire_reader(ctx, false)?;
+    // the native API instead of the JS-layer `getReader`.
+    let mut this_stream = this
+        .as_native_object::<JSReadableStream>()
+        .ok_or_else(|| ctx.throw_type_error("pipeTo: this must be a ReadableStream"))?;
+    let reader = this_stream.acquire_reader(ctx, false)?;
 
-    run_pipe_driver(ctx, reader, writer, signal, options)
+    // `signal` is undefined (no signal) or a validated AbortSignal (checked
+    // above); hand the driver the native handle.
+    run_pipe_driver(ctx, reader, writer, signal.as_native_object(), options)
 }
 
 // Shared pipe driver: drives `reader` -> `writer` microtask-by-microtask.
 // Called by both pipeTo (after brand checks + signal validation) and pipeThrough
-// (with duck-typed transform's reader/writer). `signal` is undefined or a valid
-// AbortSignal. `options` drives the abort reaction flags.
+// (with duck-typed transform's reader/writer). `signal` is None (no signal) or
+// a validated AbortSignal. `options` drives the abort reaction flags.
 //
 // Coordination: all state that async pipe callbacks need (resolve/reject fns,
 // reader/writer/signal/options, and the `settled` / `shutting_down` / abort
@@ -623,8 +650,8 @@ fn js_readable_stream_pipe_to(ctx: &mut ScopedContext, cc: CallContext) -> JSRes
 fn run_pipe_driver(
     ctx: &mut ScopedContext,
     reader: JSReadableStreamDefaultReader,
-    writer: JSValue,
-    signal: JSValue,
+    writer: JSWritableStreamDefaultWriter,
+    signal: Option<JSAbortSignal>,
     options: JSValue,
 ) -> JSResult {
     let (promise, rr) = Promise::create(ctx)?;
@@ -644,25 +671,26 @@ fn run_pipe_driver(
     // Uniform data layout threaded through every async pipe callback:
     //   [0] state, [1] resolve, [2] reject, [3] reader, [4] writer,
     //   [5] signal, [6] options
+    let signal_val = signal.map(JSValue::from).unwrap_or(JSValue::UNDEFINED);
     let data = [
         state.into(),
         rr[0],
         rr[1],
         JSValue::from(reader),
-        writer,
-        signal,
+        JSValue::from(writer),
+        signal_val,
         options,
     ];
 
     // Synchronous abort check: a signal already aborted must reject the pipe
     // promise without doing any reads.
-    if !signal.is_undefined() && crate::whatwg::abort::signal_is_aborted(&signal) {
+    if signal.is_some() && crate::whatwg::abort::signal_is_aborted(&signal_val) {
         pipe_to_perform_abort(ctx, &data)?;
         return Ok(JSValue::from(promise));
     }
 
     // Register an abort listener when a live signal is present.
-    if !signal.is_undefined() && signal.as_object().is_some() {
+    if signal.is_some() {
         let abort_handler = ctx
             .create_native_function_with_data(
                 Callback::Func(pipe_to_on_abort),
@@ -673,7 +701,7 @@ fn run_pipe_driver(
             )?
             .into();
         let abort_name = JSValue::make_string(ctx.create_string_from_utf8(b"abort".to_vec())?);
-        let add_listener = signal.get_property_str(ctx, "addEventListener")?;
+        let add_listener = signal_val.get_property_str(ctx, "addEventListener")?;
 
         // The signal is already brand-checked by pipeTo, so addEventListener
         // won't throw here; if it somehow does, ignore it rather than turn the
@@ -683,13 +711,14 @@ fn run_pipe_driver(
         // addEventListener fires the handler synchronously; its Err is swallowed
         // by addEventListener (which returns Ok), so clean cur_exception
         // unconditionally rather than only on is_err().
-        add_listener.call(ctx, signal, &[abort_name, abort_handler])?;
+        add_listener.call(ctx, signal_val, &[abort_name, abort_handler])?;
         if ctx.rt().exception() != Exception::No {
             ctx.take_exception();
         }
     }
 
     pipe_to_read(ctx, &data)?;
+
     Ok(JSValue::from(promise))
 }
 
@@ -813,7 +842,12 @@ fn pipe_dest_errored(writer: &JSValue) -> Option<JSValue> {
     }
 }
 
-fn pipe_set_state_num(ctx: &mut ScopedContext, state: &JSValue, key: &str, n: f64) -> Result<(), i32> {
+fn pipe_set_state_num(
+    ctx: &mut ScopedContext,
+    state: &JSValue,
+    key: &str,
+    n: f64,
+) -> Result<(), i32> {
     state
         .as_object()
         .unwrap()
@@ -829,7 +863,10 @@ fn pipe_bump_state_num(
     delta: i32,
 ) -> Result<(), i32> {
     let mut state_obj = state.as_object().unwrap();
-    let n = state_obj.get_property_str(ctx, key)?.to_number(ctx)?.to_f64();
+    let n = state_obj
+        .get_property_str(ctx, key)?
+        .to_number(ctx)?
+        .to_f64();
     state_obj.set_property_str(ctx, key, JSValue::from(n + delta as f64))?;
     Ok(())
 }
@@ -1177,10 +1214,9 @@ fn pipe_resolve(ctx: &mut ScopedContext, data: &[JSValue]) -> JSResult {
 fn js_readable_stream_pipe_through(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
 
-    let mut this_stream = JSReadableStream::try_from(this).map_err(|e| {
-        let _ = ctx.throw_type_error("pipeThrough: this must be a ReadableStream");
-        e
-    })?;
+    let mut this_stream = this
+        .as_native_object::<JSReadableStream>()
+        .ok_or_else(|| ctx.throw_type_error("pipeThrough: this must be a ReadableStream"))?;
 
     let transform = cc.arg(0);
     // `transform` is duck-typed: `{ readable, writable }`. Brand-check `readable`
@@ -1214,12 +1250,15 @@ fn js_readable_stream_pipe_through(ctx: &mut ScopedContext, cc: CallContext) -> 
     // pipeThrough = pipe this into transform.writable, then return transform.readable.
     // Use the shared driver directly (NOT this.pipeTo) so a monkey-patched
     // pipeTo on the prototype/instance is not invoked.
-    let writer = writable
-        .get_property_str(ctx, "getWriter")?
-        .call(ctx, writable, &[])?;
+    let mut writable_stream = writable
+        .as_native_object::<JSWritableStream>()
+        .ok_or_else(|| {
+            ctx.throw_type_error("pipeThrough: transform.writable must be a WritableStream")
+        })?;
+    let writer = writable_stream.acquire_writer(ctx)?;
 
     let reader = this_stream.acquire_reader(ctx, false)?;
-    run_pipe_driver(ctx, reader, writer, signal, options)?;
+    run_pipe_driver(ctx, reader, writer, signal.as_native_object(), options)?;
 
     Ok(readable)
 }
