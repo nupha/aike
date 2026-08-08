@@ -114,9 +114,10 @@ impl ReadableStreamPayload {
         notify_peer_closed(ctx, self.reader.map(JSValue::from), reason);
     }
 
-    /// Cancel this stream. Sets `disturbed` and settles the stream as Errored
-    /// with `reason`, then propagates the underlying source's `cancel()` result
-    /// (including a rejection) to the caller.
+    /// Cancel this stream. Sets `disturbed` and settles the stream as Closed
+    /// (per spec `ReadableStreamCancel` -> `ReadableStreamClose`, so the peer
+    /// reader's `closed` promise resolves), then propagates the underlying
+    /// source's `cancel()` result (including a rejection) to the caller.
     pub(crate) fn cancel(
         &mut self,
         ctx: &mut ScopedContext,
@@ -126,13 +127,11 @@ impl ReadableStreamPayload {
         // a body even though no read() ever happened.
         self.disturbed = true;
 
-        // Spec: reader.cancel() rejects the reader's `closed` promise with
-        // `reason` (which may be undefined for a bare cancel). pipeTo's abort
-        // path relies on this to make reader.closed reject with the abort reason
-        // so all error objects are the same object. We model cancel as an
-        // Errored settlement (not Closed) so a later getReader().closed also
-        // rejects with `reason` per spec.
-        self.settle_state(ctx, RsState::Errored, Some(reason));
+        // Spec: cancel() closes the stream, not errors it — reader.closed must
+        // resolve, and a later getReader().closed resolves too. Only a stream
+        // error rejects `closed`. The cancel reason is forwarded to the
+        // underlying source's cancel() below, not stored as the stream error.
+        self.settle_state(ctx, RsState::Closed, None);
 
         if let Some(controller_val) = self.controller
             && let Some(cp) = controller_val.payload()
