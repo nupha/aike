@@ -201,8 +201,7 @@ fn is_valid_header_name(name: &str) -> bool {
 /// WHATWG valid header value at the *Headers* layer: the value must be a
 /// sequence of code points whose code units are all ≤ U+00FF (i.e. it can be
 /// represented as a byte sequence). Code points above U+00FF (e.g. "\uFFFF")
-/// are rejected here; control characters (including NUL/LF/CR) are accepted and
-/// only normalized/rejected later, when a request is actually built.
+/// are rejected here.
 fn is_valid_header_value(value: &str) -> bool {
     value.chars().all(|c| (c as u32) <= 0xFF)
 }
@@ -221,7 +220,15 @@ fn check_header_name(ctx: &mut ScopedContext, name: &str) -> JSResult {
 }
 
 fn check_header_value(ctx: &mut ScopedContext, value: &str) -> JSResult {
-    if !is_valid_header_value(value) {
+    // A value is normalized (leading/trailing HTTP whitespace stripped) before
+    // it is validated; NUL/LF/CR anywhere in the *normalized* value are a
+    // TypeError (WPT header-values: only 0x00, 0x0A, 0x0D are forbidden, all
+    // other bytes 0x01..0xFF are valid).
+    let norm = normalize_header_value(value);
+    if norm.contains('\u{0000}') || norm.contains('\u{000a}') || norm.contains('\u{000d}') {
+        return Err(ctx.throw_type_error("Invalid header value"));
+    }
+    if !is_valid_header_value(norm) {
         return Err(ctx.throw_type_error("Invalid header value"));
     }
     Ok(JSValue::UNDEFINED)

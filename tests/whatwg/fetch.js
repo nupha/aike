@@ -177,7 +177,7 @@ function testRequest() {
     req.redirect === "follow",
     `got ${req.redirect}`,
   );
-  check("Request signal null (no signal)", req.signal === null);
+  check("Request signal default AbortSignal", req.signal instanceof AbortSignal);
   check("Request bodyUsed pre", req.bodyUsed === false);
 
   // RequestInit 字段透传
@@ -406,17 +406,22 @@ function testResponse() {
     )
     .then(() =>
       new Response("blobby").blob().then((b) => {
-        check("Response.blob() length", b.length === 6, `got ${b.length}`);
+        check("Response.blob() size", b.size === 6, `got ${b.size}`);
       }),
     )
     .then(() => {
-      let threw = false;
-      try {
-        new Response("x").formData();
-      } catch (e) {
-        threw = true;
-      }
-      check("Response.formData throws", threw);
+      // formData() returns a promise; a non-form body rejects with TypeError.
+      return new Response("x")
+        .formData()
+        .then(
+          () => check("Response.formData rejects", false, "unexpectedly resolved"),
+          (e) =>
+            check(
+              "Response.formData rejects with TypeError",
+              e instanceof TypeError,
+              `got ${e}`,
+            ),
+        );
     })
     .then(() => {
       const r = new Response("hello");
@@ -526,7 +531,7 @@ function testFetchWithRequest() {
 }
 
 // ===================================================================
-// 6. AbortError — 标准规定 name="AbortError" 的 TypeError
+// 6. AbortError — 标准规定 name="AbortError" 的 DOMException
 // ===================================================================
 function testAbortError() {
   console.log("\n=== AbortError ===");
@@ -542,8 +547,8 @@ function testAbortError() {
         `got ${e.name}`,
       );
       check(
-        "pre-aborted -> TypeError kind",
-        e.constructor.name === "TypeError",
+        "pre-aborted -> DOMException kind",
+        e instanceof DOMException && e.constructor.name === "DOMException",
         `got ${e.constructor.name}`,
       );
     })

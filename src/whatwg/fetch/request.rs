@@ -661,6 +661,137 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let rc_referrer = referrer.clone();
     let rc_policy = referrer_policy.clone();
 
+    // Argument validation (method/mode/cache/referrer etc.) must take priority
+    // over an already-aborted signal: WPT "TypeError from request constructor
+    // takes priority" expects the `TypeError` to surface before the `AbortError`.
+    // This must run before the result-slot promise/job below is created: a throw
+    // here (or in the aborted-signal early return) must not leave a polling job
+    // waiting forever on a slot that is never committed, which would keep the
+    // event loop alive after the script finished.
+    validate_request_init_options(
+        ctx,
+        &url_str,
+        &method,
+        &mode,
+        &cache_mode,
+        &credentials,
+        &redirect,
+        &referrer,
+        &referrer_policy,
+    )?;
+
+    if already_aborted {
+        // An already-aborted signal must reject on a microtask, *before* any
+        // `Promise.resolve().then` callback (WPT "already aborted signal rejects
+        // immediately"). Skip the thread/event-loop hop and reject synchronously
+        // as a (microtask) job via the promise machinery.
+        // Consuming a Request whose signal is already aborted marks its body as
+        // used (Fetch spec): `request.bodyUsed` must become true.
+        if input.as_native_object::<JSRequest>().is_some() {
+            if let Ok(p) = get_request_payload_mut(ctx, &mut input.clone()) {
+                p.body_consumed = true;
+            }
+        }
+        return Promise::from_reject_value(ctx, abort_reason).map(JSValue::from);
+    }
+
+    // Per-host TLS escape hatch: skip cert validation only for hosts listed in
+    // AIKE_TLS_INSECURE_HOSTS (self-signed dev/WPT servers). All other hosts
+    // keep strict validation.
+    let insecure = url::Url::parse(&url_str)
+        .ok()
+        .and_then(|u| u.host_str().map(|h| (h.to_string(), u.port())))
+        .map(|(h, p)| crate::http::client::config::tls_insecure_for_host(&h, p))
+        .unwrap_or(false);
+
+    // Fetch spec "HTTP defaults": a request carries default `Accept` and
+    // `Accept-Language` headers unless the caller overrides them. reqwest's
+    // own defaults are wiped by `perform_request` (it sets each header
+    // explicitly), so we must supply them here.
+    ensure_default_request_headers(&mut header_list);
+    // WHATWG: silently drop forbidden request headers the caller tried to set.
+    strip_forbidden_request_headers(&mut header_list);
+    // Validate header names/values per the Fetch spec. Must run on the JS
+    // thread so a violation rejects the returned promise with a `TypeError`
+    // (WPT header-values expects `promise_rejects_js(t, TypeError, ...)`).
+    validate_header_list_for_fetch(ctx, &header_list)?;
+
+    // `Origin` is a forbidden request header (scripts cannot set it), so it is
+    // added here *after* the forbidden-header strip. Per the Fetch spec an
+    // `Origin` header is appended when the method is not GET/HEAD, OR when the
+    // request is CORS-tainted. The value is the client's origin, or the
+    // literal `null` when the client origin is opaque.
+    if should_append_origin(&method, cors_tainted) {
+        header_list.set("Origin", &serialized_origin(req_origin.as_deref()));
+    }
+
+    // `Content-Length` is likewise forbidden for scripts, so it too is derived
+    // here from the actual payload. With no body only POST/PUT still report 0
+    // (they normally carry one); other methods send no length at all.
+    let implies_body = method.eq_ignore_ascii_case("POST") || method.eq_ignore_ascii_case("PUT");
+
+    if let Some(b) = &body_bytes {
+        header_list.set("Content-Length", &b.len().to_string());
+    } else if implies_body {
+        header_list.set("Content-Length", "0");
+    }
+
+    // Snapshot after the HTTP-default and forbidden-header passes so the
+    // conditional-revalidation headers added below ride on the final list.
+    let mut req_headers = header_list.to_vec();
+    // Apply conditional-revalidation validators (from the HTTP cache) to the
+    // finalized request headers; this must run after the forbidden-header
+    // strip above so it cannot revive a dropped header.
+    if let Some(validators) = &cached_validators {
+        http_cache::add_conditional_headers(&mut req_headers, validators.clone());
+    }
+
+    // Whether a CORS preflight is *ever* needed for this request (non-safelisted
+    // method or header). This is independent of CORS tainting: even a same-origin
+    // request needs a preflight once a redirect makes it cross-origin, so the
+    // preflight decision must be made per hop in the transport layer (see
+    // `TransportRequest::preflight`).
+    let preflight_possible = needs_preflight(&method, &req_headers, true);
+
+    // Always follow redirects manually when `redirect == "follow"`. Every hop
+    // must recompute the outgoing `Referer` (per the hop's referrer policy) and,
+    // for cors-mode, the `Origin` header; a cross-origin redirect also makes the
+    // origin opaque. reqwest's auto-follow replays the *initial* headers verbatim
+    // and would (a) leak the full referrer on cross-origin hops (WPT
+    // `redirect-referrer`), (b) wrongly send a `Referer` under `no-referrer`
+    // after a redirect, and (c) never re-run a CORS preflight for the new URL
+    // (Fetch spec: a redirect re-enters HTTP-network-or-cache fetch). Manual
+    // following is the only path that honors the per-hop recomputation.
+    //
+    // For `manual`/`error` we also must *not* let reqwest auto-follow: the spec
+    // wants the first 3xx response surfaced as an `opaqueredirect` (status 0) or
+    // a TypeError, which the dispatch below handles. So reqwest's auto-follow is
+    // disabled in every case — the redirect handling is fully owned here.
+    let manual_redirect = redirect == "follow";
+
+    // Per-host TLS escape hatch: `insecure` skips cert validation for this
+    // request's host (AIKE_TLS_INSECURE_HOSTS).
+    let mut cfg = crate::http::client::config::HttpClientConfig::default();
+    cfg.protocol = crate::http::client::config::ProtocolMode::Http1Only;
+    // WHATWG `fetch` manages cookies itself via the shared global jar (driven
+    // by the `credentials` mode), so disable reqwest's automatic store which
+    // would otherwise send cookies unconditionally.
+    cfg.cookie_jar = false;
+    // Disable reqwest's auto-follow in all redirect modes: `follow` is handled
+    // manually here (per-hop referrer/origin recomputation); `manual`/`error`
+    // must surface the first 3xx response rather than following it.
+    cfg.follow_redirects = false;
+
+    // Build the client *before* the result-slot promise below: a client-build
+    // failure must reject (via the caller) without leaving the polling job
+    // behind. The `client` is only consumed by the spawned transport task.
+    let client = match cfg.build_http_client_ex(insecure) {
+        Ok(c) => c,
+        Err(e) => {
+            return Err(ctx.throw_internal_error(&format!("failed to build HTTP client: {e}")));
+        }
+    };
+
     // Captured into the result closure so an *in-flight* abort (one that fires
     // while the request is on the network) rejects with the signal's live
     // reason — including any custom reason passed to `abort()` — exactly like
@@ -933,130 +1064,6 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             build_response_from_transport(cx, tr, resp_type, &final_url, redirected, signal_val)
         },
     )?;
-
-    // Argument validation (method/mode/cache/referrer etc.) must take priority
-    // over an already-aborted signal: WPT "TypeError from request constructor
-    // takes priority" expects the `TypeError` to surface before the `AbortError`.
-    validate_request_init_options(
-        ctx,
-        &url_str,
-        &method,
-        &mode,
-        &cache_mode,
-        &credentials,
-        &redirect,
-        &referrer,
-        &referrer_policy,
-    )?;
-
-    if already_aborted {
-        // An already-aborted signal must reject on a microtask, *before* any
-        // `Promise.resolve().then` callback (WPT "already aborted signal rejects
-        // immediately"). Skip the thread/event-loop hop and reject synchronously
-        // as a (microtask) job via the promise machinery.
-        // Consuming a Request whose signal is already aborted marks its body as
-        // used (Fetch spec): `request.bodyUsed` must become true.
-        if input.as_native_object::<JSRequest>().is_some() {
-            if let Ok(p) = get_request_payload_mut(ctx, &mut input.clone()) {
-                p.body_consumed = true;
-            }
-        }
-        return Promise::from_reject_value(ctx, abort_reason).map(JSValue::from);
-    }
-
-    // Per-host TLS escape hatch: skip cert validation only for hosts listed in
-    // AIKE_TLS_INSECURE_HOSTS (self-signed dev/WPT servers). All other hosts
-    // keep strict validation.
-    let insecure = url::Url::parse(&url_str)
-        .ok()
-        .and_then(|u| u.host_str().map(|h| (h.to_string(), u.port())))
-        .map(|(h, p)| crate::http::client::config::tls_insecure_for_host(&h, p))
-        .unwrap_or(false);
-
-    // Fetch spec "HTTP defaults": a request carries default `Accept` and
-    // `Accept-Language` headers unless the caller overrides them. reqwest's
-    // own defaults are wiped by `perform_request` (it sets each header
-    // explicitly), so we must supply them here.
-    ensure_default_request_headers(&mut header_list);
-    // WHATWG: silently drop forbidden request headers the caller tried to set.
-    strip_forbidden_request_headers(&mut header_list);
-    // Validate header names/values per the Fetch spec. Must run on the JS
-    // thread so a violation rejects the returned promise with a `TypeError`
-    // (WPT header-values expects `promise_rejects_js(t, TypeError, ...)`).
-    validate_header_list_for_fetch(ctx, &header_list)?;
-
-    // `Origin` is a forbidden request header (scripts cannot set it), so it is
-    // added here *after* the forbidden-header strip. Per the Fetch spec an
-    // `Origin` header is appended when the method is not GET/HEAD, OR when the
-    // request is CORS-tainted. The value is the client's origin, or the
-    // literal `null` when the client origin is opaque.
-    if should_append_origin(&method, cors_tainted) {
-        header_list.set("Origin", &serialized_origin(req_origin.as_deref()));
-    }
-
-    // `Content-Length` is likewise forbidden for scripts, so it too is derived
-    // here from the actual payload. With no body only POST/PUT still report 0
-    // (they normally carry one); other methods send no length at all.
-    let implies_body = method.eq_ignore_ascii_case("POST") || method.eq_ignore_ascii_case("PUT");
-
-    if let Some(b) = &body_bytes {
-        header_list.set("Content-Length", &b.len().to_string());
-    } else if implies_body {
-        header_list.set("Content-Length", "0");
-    }
-
-    // Snapshot after the HTTP-default and forbidden-header passes so the
-    // conditional-revalidation headers added below ride on the final list.
-    let mut req_headers = header_list.to_vec();
-    // Apply conditional-revalidation validators (from the HTTP cache) to the
-    // finalized request headers; this must run after the forbidden-header
-    // strip above so it cannot revive a dropped header.
-    if let Some(validators) = &cached_validators {
-        http_cache::add_conditional_headers(&mut req_headers, validators.clone());
-    }
-
-    // Whether a CORS preflight is *ever* needed for this request (non-safelisted
-    // method or header). This is independent of CORS tainting: even a same-origin
-    // request needs a preflight once a redirect makes it cross-origin, so the
-    // preflight decision must be made per hop in the transport layer (see
-    // `TransportRequest::preflight`).
-    let preflight_possible = needs_preflight(&method, &req_headers, true);
-
-    // Always follow redirects manually when `redirect == "follow"`. Every hop
-    // must recompute the outgoing `Referer` (per the hop's referrer policy) and,
-    // for cors-mode, the `Origin` header; a cross-origin redirect also makes the
-    // origin opaque. reqwest's auto-follow replays the *initial* headers verbatim
-    // and would (a) leak the full referrer on cross-origin hops (WPT
-    // `redirect-referrer`), (b) wrongly send a `Referer` under `no-referrer`
-    // after a redirect, and (c) never re-run a CORS preflight for the new URL
-    // (Fetch spec: a redirect re-enters HTTP-network-or-cache fetch). Manual
-    // following is the only path that honors the per-hop recomputation.
-    //
-    // For `manual`/`error` we also must *not* let reqwest auto-follow: the spec
-    // wants the first 3xx response surfaced as an `opaqueredirect` (status 0) or
-    // a TypeError, which the dispatch below handles. So reqwest's auto-follow is
-    // disabled in every case — the redirect handling is fully owned here.
-    let manual_redirect = redirect == "follow";
-
-    // Per-host TLS escape hatch: `insecure` skips cert validation for this
-    // request's host (AIKE_TLS_INSECURE_HOSTS).
-    let mut cfg = crate::http::client::config::HttpClientConfig::default();
-    cfg.protocol = crate::http::client::config::ProtocolMode::Http1Only;
-    // WHATWG `fetch` manages cookies itself via the shared global jar (driven
-    // by the `credentials` mode), so disable reqwest's automatic store which
-    // would otherwise send cookies unconditionally.
-    cfg.cookie_jar = false;
-    // Disable reqwest's auto-follow in all redirect modes: `follow` is handled
-    // manually here (per-hop referrer/origin recomputation); `manual`/`error`
-    // must surface the first 3xx response rather than following it.
-    cfg.follow_redirects = false;
-
-    let client = match cfg.build_http_client_ex(insecure) {
-        Ok(c) => c,
-        Err(e) => {
-            return Err(ctx.throw_internal_error(&format!("failed to build HTTP client: {e}")));
-        }
-    };
 
     let referrer_ctx = manual_redirect.then(|| ReferrerCtx {
         referrer: rc_referrer,

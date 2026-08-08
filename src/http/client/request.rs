@@ -297,6 +297,7 @@ fn js_request_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
     let mut stream_body: Option<JSValue> = None;
     let mut redirect = String::from("follow");
     let mut signal: Option<JSValue> = None;
+    let mut integrity = String::new();
     // Track the effective `mode`/`cache`/`credentials`/`referrer`/`referrerPolicy`
     // and `duplex`/navigation flags so validation and defaults can be applied
     // after the input-Request and RequestInit layers are merged.
@@ -337,6 +338,7 @@ fn js_request_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
         credentials = p.credentials.clone();
         referrer = p.referrer.clone();
         referrer_policy = p.referrer_policy.clone();
+        integrity = p.integrity.clone();
         is_reload_navigation = p.is_reload_navigation;
         is_history_navigation = p.is_history_navigation;
     } else if !input.is_undefined_or_null() {
@@ -461,6 +463,10 @@ fn js_request_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
             if let Some(v) = read_str(o, "referrerPolicy")? {
                 referrer_policy = v;
             }
+            // SRI metadata string, echoed verbatim by `Request.integrity`.
+            if let Some(v) = read_str(o, "integrity")? {
+                integrity = v;
+            }
             if let Some(v) = read_str(o, "priority")? {
                 // Validate eagerly: any invalid RequestInit member value must
                 // throw a TypeError (WPT request-init-priority).
@@ -573,7 +579,7 @@ fn js_request_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
         credentials,
         cache,
         redirect,
-        integrity: String::new(),
+        integrity,
         keepalive,
         duplex: duplex.unwrap_or_else(|| "half".to_string()),
         is_reload_navigation,
