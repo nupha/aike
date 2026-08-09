@@ -20,7 +20,9 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 use zuqe::{
     Array, CallContext, ClassCtorDef, ClassID, Exception, FieldDef, JSResult, JSValue, Object,
-    Runtime, ScopedContext, builtins::typed_array::{DataView, TypedArray}, def_native_object,
+    Runtime, ScopedContext,
+    builtins::typed_array::{DataView, TypedArray},
+    def_native_object,
     gc_lite::{GcTrace, GcTraceCtx},
 };
 
@@ -53,23 +55,21 @@ pub(crate) fn get_buffer_source_bytes(
 ) -> Result<Vec<u8>, i32> {
     let mut out = Vec::new();
     if let Some(mut ab) = val.as_object_ArrayBuffer() {
-        ab.validate_attached(ctx)?;
+        ab.ensure_attached(ctx)?;
         ab.payload_mut().with_bytes_mut(|b| out = b.to_vec());
         return Ok(out);
     }
     if let Ok(ta) = TypedArray::try_from(*val) {
-        ta.validate_attached(ctx)?;
+        ta.ensure_attached(ctx)?;
         ta.with_bytes(|b| out = b.to_vec());
         return Ok(out);
     }
     if let Ok(dv) = DataView::try_from(*val) {
-        dv.validate_attached(ctx)?;
+        dv.ensure_attached(ctx)?;
         dv.payload().with_bytes(|b| out = b.to_vec());
         return Ok(out);
     }
-    Err(ctx.throw_type_error(
-        "expected a BufferSource (ArrayBuffer or ArrayBufferView)",
-    ))
+    Err(ctx.throw_type_error("expected a BufferSource (ArrayBuffer or ArrayBufferView)"))
 }
 
 /// Encode bytes as lowercase hexadecimal.
@@ -95,9 +95,9 @@ pub(crate) fn algorithm_name(ctx: &mut ScopedContext, alg: &JSValue) -> Result<S
         }
         n.to_string(ctx)?.content().encode_utf8(false).to_string()
     } else {
-        return Err(ctx.throw_type_error(
-            "algorithm must be a string or an object with a name member",
-        ));
+        return Err(
+            ctx.throw_type_error("algorithm must be a string or an object with a name member")
+        );
     };
     Ok(name.to_ascii_uppercase())
 }
@@ -182,9 +182,7 @@ pub(crate) struct CryptoKeyPayload {
 
 /// Per WebCrypto, `CryptoKey` cannot be constructed from JS.
 fn js_key_constructor(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
-    Err(ctx.throw_type_error(
-        "Illegal constructor: 'CryptoKey' is not constructable",
-    ))
+    Err(ctx.throw_type_error("Illegal constructor: 'CryptoKey' is not constructable"))
 }
 
 fn js_key_type_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -309,9 +307,8 @@ fn js_crypto_subtle_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
 /// DataView and `QuotaExceededError` above 65536 bytes (per spec).
 fn js_crypto_get_random_values(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let arr_val = cc.arg(0);
-    let mut ta = TypedArray::try_from(arr_val).map_err(|_| {
-        ctx.throw_type_error("getRandomValues expects an integer typed array")
-    })?;
+    let mut ta = TypedArray::try_from(arr_val)
+        .map_err(|_| ctx.throw_type_error("getRandomValues expects an integer typed array"))?;
     // Spec: only the integer typed array types are accepted.
     let cid = ta.class_id();
     if cid == zuqe::JS_CLASS_FLOAT16_ARRAY
@@ -328,7 +325,10 @@ fn js_crypto_get_random_values(ctx: &mut ScopedContext, cc: CallContext) -> JSRe
             "getRandomValues() request exceeds 65536 bytes",
         ));
     }
-    if ta.with_bytes_mut(|bytes| rand::rngs::OsRng.try_fill_bytes(bytes)).is_err() {
+    if ta
+        .with_bytes_mut(|bytes| rand::rngs::OsRng.try_fill_bytes(bytes))
+        .is_err()
+    {
         return Err(ctx.throw_internal_error("failed to obtain random bytes"));
     }
     Ok(arr_val)

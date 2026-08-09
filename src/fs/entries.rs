@@ -16,6 +16,7 @@ use super::{
         js_fs_replaceText, js_fs_sha256, js_fs_write, js_fs_write_auto, js_fs_writeJSON,
     },
     glob::js_fs_glob,
+    grep::js_fs_grep,
 };
 
 const MOD_FS_ENTRIES: &[FieldDef] = &[
@@ -28,6 +29,7 @@ const MOD_FS_ENTRIES: &[FieldDef] = &[
     FieldDef::FUNC("realpath", 1, js_fs_realpath, 0),
     FieldDef::FUNC("sha256", 1, js_fs_sha256, 0),
     FieldDef::FUNC("glob", 1, js_fs_glob, 0),
+    FieldDef::FUNC("grep", 1, js_fs_grep, 0),
     FieldDef::FUNC("readText", 1, js_fs_read, FS_READ_TEXT as i16),
     FieldDef::FUNC("readJSON", 1, js_fs_readJSON, 0),
     FieldDef::FUNC("readBytes", 1, js_fs_read, FS_READ_BYTES as i16),
@@ -42,8 +44,18 @@ const MOD_FS_ENTRIES: &[FieldDef] = &[
     ),
     FieldDef::FUNC("writeBytes", 2, js_fs_write, FS_WRITE_BYTES as i16),
     FieldDef::FUNC("appendText", 2, js_fs_appendText, 0),
-    FieldDef::FUNC("replaceTextUnique", 3, js_fs_replaceText, FS_REPLACE_UNIQUE as i16),
-    FieldDef::FUNC("replaceTextAll", 3, js_fs_replaceText, FS_REPLACE_ALL as i16),
+    FieldDef::FUNC(
+        "replaceTextUnique",
+        3,
+        js_fs_replaceText,
+        FS_REPLACE_UNIQUE as i16,
+    ),
+    FieldDef::FUNC(
+        "replaceTextAll",
+        3,
+        js_fs_replaceText,
+        FS_REPLACE_ALL as i16,
+    ),
     FieldDef::FUNC("write", 2, js_fs_write_auto, 0),
     FieldDef::FUNC("exists", 1, js_fs_exists, 0),
     FieldDef::FUNC("remove", 1, js_fs_remove, 0),
