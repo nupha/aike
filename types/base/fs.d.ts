@@ -57,6 +57,53 @@ declare module "fs" {
     },
   ): Promise<string[]>;
 
+  /** A single grep match (one matching line). */
+  interface GrepHit {
+    /** File path (relative to `cwd` unless `absolute`). */
+    file: string;
+    /** 1-based line number of the match. */
+    lineNumber: number;
+    /** Full text of the matching line. */
+    line: string;
+    /** Byte offset of the first match's start within `line`. */
+    start: number;
+    /** Byte offset of the first match's end within `line`. */
+    end: number;
+    /** Every match on the line, each as `{ start, end }` byte offsets within `line`. */
+    ranges: { start: number; end: number }[];
+  }
+
+  /**
+   * Search file contents for a regex `pattern` (ripgrep-style), traversing a
+   * directory tree. Honors `.gitignore`/`.ignore`/hidden rules by default.
+   * Returns an array of match objects; capped at `maxResults`.
+   *
+   * Throws SyntaxError if `pattern` is not a valid regex.
+   */
+  function grep(
+    pattern: string,
+    options?: {
+      /** Base directory for the search. Default: process cwd. */
+      cwd?: string;
+      /** Comma-separated glob(s) restricting which files to search. Default: "**\/\*" (all files). */
+      paths?: string;
+      /** Only search files matching these glob(s). */
+      include?: string[];
+      /** Skip files matching these glob(s). */
+      exclude?: string[];
+      /** Match case-sensitively. Default: false (case-insensitive). */
+      caseSensitive?: boolean;
+      /** Include hidden files/dirs (names starting with `.`). Default: false. */
+      dot?: boolean;
+      /** Honor `.gitignore`/`.ignore`/hidden rules. Default: true. */
+      respectIgnore?: boolean;
+      /** Return absolute file paths instead of cwd-relative ones. Default: false. */
+      absolute?: boolean;
+      /** Maximum number of matches to return. Default: 1000. */
+      maxResults?: number;
+    },
+  ): Promise<GrepHit[]>;
+
   // Write
 
   /** Write a UTF-8 string to a file (overwrites). */
