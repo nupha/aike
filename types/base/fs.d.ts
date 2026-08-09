@@ -73,10 +73,27 @@ declare module "fs" {
     ranges: { start: number; end: number }[];
   }
 
+  /** A per-file match count (for `mode: "count"`). */
+  interface GrepCount {
+    /** File path (relative to `cwd` unless `absolute`). */
+    file: string;
+    /** Number of retained lines in this file. */
+    count: number;
+  }
+
   /**
    * Search file contents for a regex `pattern` (ripgrep-style), traversing a
    * directory tree. Honors `.gitignore`/`.ignore`/hidden rules by default.
-   * Returns an array of match objects; capped at `maxResults`.
+   *
+   * Result shape depends on `mode`:
+   * - `"content"` (default): `GrepHit[]` — one entry per retained line.
+   * - `"files"`: `string[]` — distinct files with at least one retained line
+   *   (`-l`). With `invert`, files with NO match (`--files-without-match`).
+   * - `"count"`: `GrepCount[]` — retained-line count per file (`-c`). With
+   *   `invert`, the count of non-matching lines.
+   *
+   * `invert` (`-v`) keeps lines that do NOT contain the pattern; it is
+   * orthogonal to `mode`, so the two combine freely.
    *
    * Throws SyntaxError if `pattern` is not a valid regex.
    */
@@ -99,10 +116,14 @@ declare module "fs" {
       respectIgnore?: boolean;
       /** Return absolute file paths instead of cwd-relative ones. Default: false. */
       absolute?: boolean;
-      /** Maximum number of matches to return. Default: 1000. */
+      /** Maximum number of retained lines to return (content mode). Default: 1000. */
       maxResults?: number;
+      /** Result shape: `"content"` (default), `"files"` (-l), `"count"` (-c). */
+      mode?: "content" | "files" | "count";
+      /** Keep lines that do NOT match (grep `-v`). Default: false. */
+      invert?: boolean;
     },
-  ): Promise<GrepHit[]>;
+  ): Promise<GrepHit[] | string[] | GrepCount[]>;
 
   // Write
 

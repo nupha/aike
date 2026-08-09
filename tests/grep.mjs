@@ -100,6 +100,57 @@ console.log("\n=== 基础匹配 ===");
   );
 }
 
+// 无匹配边界
+{
+  const r = await fs.grep("zzz_no_such_pattern_xyz", cwd);
+  check(
+    "无匹配返回空数组",
+    Array.isArray(r) && r.length === 0,
+    JSON.stringify(r),
+  );
+}
+
+// 多文件各自 lineNumber 正确
+{
+  const r = await fs.grep("hello", cwd);
+  // a.txt 第 1 行、第 3 行(HELLO) 各命中一次
+  const aLines = r
+    .filter((m) => m.file === "a.txt")
+    .map((m) => m.lineNumber)
+    .sort();
+  check(
+    "a.txt 在第 1、3 行各命中（lineNumber 各自正确）",
+    eq(aLines, [1, 3]),
+    JSON.stringify(aLines),
+  );
+}
+
+// 正则锚点 / 字符类（验证 regex 引擎能力）
+{
+  const r = await fs.grep("^foo", { ...cwd, caseSensitive: true });
+  check(
+    "行首锚点 ^foo 只命中 'foo bar'",
+    r.length === 1 && r[0].line.trim() === "foo bar",
+    JSON.stringify(r.map((m) => m.line.trim())),
+  );
+}
+{
+  const r = await fs.grep("bar$", { ...cwd, caseSensitive: true });
+  check(
+    "行尾锚点 bar$ 只命中 'foo bar'（多行模式下 $ 匹配行尾）",
+    r.length === 1 && r[0].line.trim() === "foo bar",
+    JSON.stringify(r.map((m) => m.line.trim())),
+  );
+}
+{
+  const r = await fs.grep("\\w+", {
+    ...cwd,
+    caseSensitive: true,
+    maxResults: 1,
+  });
+  check("字符类 \\w+ 正常匹配", r.length === 1, JSON.stringify(r.length));
+}
+
 // ===================================================================
 // caseSensitive
 // ===================================================================
@@ -196,11 +247,7 @@ console.log("\n=== paths / include / exclude ===");
 {
   const r = await fs.grep("hello", { ...cwd, paths: "*.txt" });
   const files = Array.from(new Set(r.map((m) => m.file))).sort();
-  check(
-    "paths=*.txt 只搜 a.txt",
-    eq(files, ["a.txt"]),
-    JSON.stringify(files),
-  );
+  check("paths=*.txt 只搜 a.txt", eq(files, ["a.txt"]), JSON.stringify(files));
 }
 {
   const r = await fs.grep("hello", { ...cwd, include: ["*.rs"] });
@@ -215,6 +262,44 @@ console.log("\n=== paths / include / exclude ===");
   check(
     "exclude=a.txt 排除该文件",
     !r.some((m) => m.file === "a.txt"),
+    JSON.stringify(r.map((m) => m.file)),
+  );
+}
+{
+  // 多模式逗号分隔（实现按逗号拆分 paths）。
+  // 注意：b.rs 内容不含 "hello"，故不会出现在结果里；改用两个都含 "hello"
+  // 的文件：a.txt（含 hello）与 ignored.txt（需关闭 ignore 才会被搜到）。
+  const r = await fs.grep("hello", {
+    ...cwd,
+    respectIgnore: false,
+    paths: "a.txt,ignored.txt",
+  });
+  const files = Array.from(new Set(r.map((m) => m.file))).sort();
+  check(
+    "paths 逗号分隔多模式 'a.txt,ignored.txt'（关闭 ignore）",
+    eq(files, ["a.txt", "ignored.txt"]),
+    JSON.stringify(files),
+  );
+}
+{
+  // 递归 include：*.rs 命中 src/lib.rs；隐藏 .hidden.rs 需 dot
+  const r = await fs.grep("nothing", { ...cwd, include: ["**/*.rs"] });
+  check(
+    "include=**/*.rs 递归命中 src/lib.rs",
+    r.some((m) => m.file === "src/lib.rs"),
+    JSON.stringify(r.map((m) => m.file)),
+  );
+}
+{
+  // respectIgnore + exclude 组合
+  const r = await fs.grep("hello", {
+    ...cwd,
+    respectIgnore: true,
+    exclude: ["*.txt"],
+  });
+  check(
+    "respectIgnore + exclude=*.txt 只剩非 txt（ignored.txt 本就被 ignore）",
+    !r.some((m) => m.file.endsWith(".txt")),
     JSON.stringify(r.map((m) => m.file)),
   );
 }
@@ -239,6 +324,86 @@ console.log("\n=== maxResults ===");
 {
   const r = await fs.grep("hello", { ...cwd, maxResults: 1 });
   check("maxResults=1 限制返回条数", r.length <= 1, "len=" + r.length);
+}
+{
+  // 跨文件截断：a.txt 有 2 行匹配、b.rs 1 行、ignored.txt(关 ignore)不计
+  // src/lib.rs 无匹配。总命中 > 1，设 maxResults=2 验证跨文件截断生效。
+  const r = await fs.grep("hello", { ...cwd, maxResults: 2 });
+  check("maxResults=2 跨文件截断", r.length <= 2, "len=" + r.length);
+}
+
+// ===================================================================
+// mode: "files" (-l) / "count" (-c) 与 invert (-v) 组合
+// ===================================================================
+console.log("\n=== mode: files / count / invert ===");
+
+// -l: 含匹配的文件
+{
+  const r = await fs.grep("hello", {
+    ...cwd,
+    respectIgnore: false,
+    mode: "files",
+  });
+  check(
+    "mode=files (-l) 列出含匹配的文件",
+    eq(sort(r), ["a.txt", "ignored.txt"]),
+    JSON.stringify(r),
+  );
+}
+// -c: 每文件匹配行数
+{
+  const r = await fs.grep("hello", {
+    ...cwd,
+    respectIgnore: false,
+    mode: "count",
+  });
+  const map = Object.fromEntries(r.map((c) => [c.file, c.count]));
+  check(
+    "mode=count (-c) a.txt 命中 2 行、ignored.txt 命中 1 行",
+    map["a.txt"] === 2 && map["ignored.txt"] === 1,
+    JSON.stringify(map),
+  );
+}
+// -v: 反向匹配（content 模式）
+{
+  const r = await fs.grep("hello", { ...cwd, invert: true });
+  // a.txt 三行中第 1、3 行含 hello，仅第 2 行 "foo bar" 反向保留
+  const aLines = r.filter((m) => m.file === "a.txt").map((m) => m.line.trim());
+  check(
+    "invert=true (-v) 仅保留不含匹配的行",
+    eq(aLines, ["foo bar"]),
+    JSON.stringify(aLines),
+  );
+}
+// -l -v: 不含匹配的文件（--files-without-match）
+{
+  const r = await fs.grep("hello", { ...cwd, mode: "files", invert: true });
+  // dot 默认 false，sub/.hidden.rs 不在；b.rs/src/lib.rs 无 hello
+  check(
+    "mode=files + invert (--files-without-match)",
+    eq(sort(r), ["b.rs", "src/lib.rs"]),
+    JSON.stringify(r),
+  );
+}
+// -c -v: 每文件非匹配行数
+{
+  const r = await fs.grep("hello", { ...cwd, mode: "count", invert: true });
+  const map = Object.fromEntries(r.map((c) => [c.file, c.count]));
+  // a.txt 3 行 - 2 命中 = 1 非匹配；src/lib.rs 1 行非匹配；b.rs 1 行非匹配
+  check(
+    "mode=count + invert 统计非匹配行数",
+    map["a.txt"] === 1 && map["src/lib.rs"] === 1 && map["b.rs"] === 1,
+    JSON.stringify(map),
+  );
+}
+// invert 反向模式下不含匹配偏移（ranges 为空数组）
+{
+  const r = await fs.grep("hello", { ...cwd, invert: true, maxResults: 1 });
+  check(
+    "invert 模式返回行 ranges 为空数组",
+    r.length >= 1 && Array.isArray(r[0].ranges) && r[0].ranges.length === 0,
+    JSON.stringify(r[0]),
+  );
 }
 
 // ===================================================================
