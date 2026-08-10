@@ -955,14 +955,14 @@ fn pipe_to_on_abort(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     // existing error must be the pipe's rejection, not the abort reason.
     if let Some(err) = pipe_source_errored(&data[3]) {
         set_state_bool(ctx, &data[0], "shuttingDown", true)?;
-        return pipe_shutdown_with_error(ctx, &data, err);
+        return pipe_shutdown_with_error(ctx, &data, err).map(|_| JSValue::UNDEFINED);
     }
     if let Some(err) = pipe_dest_errored(&data[4]) {
         set_state_bool(ctx, &data[0], "shuttingDown", true)?;
-        return pipe_shutdown_with_error(ctx, &data, err);
+        return pipe_shutdown_with_error(ctx, &data, err).map(|_| JSValue::UNDEFINED);
     }
     set_state_bool(ctx, &data[0], "shuttingDown", true)?;
-    pipe_to_perform_abort(ctx, &data)
+    pipe_to_perform_abort(ctx, &data).map(|_| JSValue::UNDEFINED)
 }
 
 fn set_state_bool(ctx: &mut ScopedContext, state: &JSValue, key: &str, v: bool) -> Result<(), i32> {
@@ -993,7 +993,7 @@ fn pipe_signal_reason(_ctx: &mut ScopedContext, signal: &JSValue) -> JSValue {
 // Both cleanup calls use the same `reason` object so the writer's `closed` and
 // the reader's `closed` reject with the same object the pipe promise rejects
 // with (WPT: "all the error objects should be the same object").
-fn pipe_to_perform_abort(ctx: &mut ScopedContext, data: &[JSValue]) -> JSResult {
+fn pipe_to_perform_abort(ctx: &mut ScopedContext, data: &[JSValue]) -> Result<(), i32> {
     let state = data[0];
     let reader = data[3];
     let options = data[6];
@@ -1015,7 +1015,8 @@ fn pipe_to_perform_abort(ctx: &mut ScopedContext, data: &[JSValue]) -> JSResult 
         pending += 1;
     }
     if pending == 0 {
-        return pipe_reject(ctx, data, reason);
+        pipe_reject(ctx, data, reason)?;
+        return Ok(());
     }
 
     // Aggregation state across the action settle callbacks: remaining actions
@@ -1042,7 +1043,7 @@ fn pipe_to_perform_abort(ctx: &mut ScopedContext, data: &[JSValue]) -> JSResult 
         pipe_run_shutdown_action(ctx, data, ShutdownAction::Cancel, reason)?;
     }
 
-    Ok(JSValue::UNDEFINED)
+    Ok(())
 }
 
 // True if the stream behind this pipe's writer is still writable.
@@ -1341,7 +1342,7 @@ fn pipe_to_on_read(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     // precedence over any further reads — shut the pipe down with it.
     if let Some(err) = pipe_source_errored(&data[3]) {
         set_state_bool(ctx, &data[0], "shuttingDown", true)?;
-        return pipe_shutdown_with_error(ctx, &data, err);
+        return pipe_shutdown_with_error(ctx, &data, err).map(|_| JSValue::UNDEFINED);
     }
 
     // Read-ahead: keep reading while the destination desires chunks. This
@@ -1399,7 +1400,7 @@ fn pipe_to_on_read_error(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     }
     set_state_bool(ctx, &data[0], "shuttingDown", true)?;
     let reason = cc.arg(0);
-    pipe_shutdown_with_error(ctx, &data, reason)
+    pipe_shutdown_with_error(ctx, &data, reason).map(|_| JSValue::UNDEFINED)
 }
 
 // Write failed: shut the pipe down with the write error.
@@ -1418,7 +1419,7 @@ fn pipe_to_on_write_error(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
     }
     set_state_bool(ctx, &data[0], "shuttingDown", true)?;
     let reason = cc.arg(0);
-    pipe_shutdown_with_error(ctx, &data, reason)
+    pipe_shutdown_with_error(ctx, &data, reason).map(|_| JSValue::UNDEFINED)
 }
 
 // Shut a pipe down after a read/write error: abort the writer (unless
@@ -1430,7 +1431,7 @@ fn pipe_shutdown_with_error(
     ctx: &mut ScopedContext,
     data: &[JSValue],
     reason: JSValue,
-) -> JSResult {
+) -> Result<(), i32> {
     let state = data[0];
     let prevent_abort = pipe_option_bool(ctx, &data[6], "preventAbort")?;
     let prevent_cancel = pipe_option_bool(ctx, &data[6], "preventCancel")?;
@@ -1443,7 +1444,8 @@ fn pipe_shutdown_with_error(
         pending += 1;
     }
     if pending == 0 {
-        return pipe_reject(ctx, data, reason);
+        pipe_reject(ctx, data, reason)?;
+        return Ok(());
     }
 
     // For an error shutdown the fallback reason is the original error (not the
@@ -1469,7 +1471,7 @@ fn pipe_shutdown_with_error(
     if !prevent_cancel && !pipe_source_is_final(&data[3]) {
         pipe_run_shutdown_action(ctx, data, ShutdownAction::Cancel, reason)?;
     }
-    Ok(JSValue::UNDEFINED)
+    Ok(())
 }
 
 // Settle the pipe promise once the destination close finishes.
