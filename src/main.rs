@@ -54,9 +54,9 @@ use crate::{
     mcp::init_mod_mcp,
     path::init_mod_path,
     process::gc_trace_next_tick,
+    whatwg::fetch::gc_trace_fetch,
     whatwg::stream::gc_trace_stream,
     whatwg::timeout::gc_trace_timeout,
-    whatwg::fetch::gc_trace_fetch,
     yaml::init_mod_yaml,
 };
 
@@ -499,6 +499,18 @@ async fn main() -> ExitCode {
     }
 }
 
+/// Extract the `type` value from import attributes, returning `None` if
+/// the attrs object is absent or has no `type` property.
+fn get_attr_type(ctx: &mut ScopedContext, attrs: JSValue) -> Option<String> {
+    if !attrs.is_object() {
+        return None;
+    }
+    attrs.get_property_str(ctx, "type").ok().and_then(|v| {
+        v.as_string(true)
+            .map(|s| s.content().encode_utf8(false).to_string())
+    })
+}
+
 fn js_module_loader(
     ctx: &mut ScopedContext,
     file_name: &url::Url,
@@ -512,57 +524,63 @@ fn js_module_loader(
         )));
     };
 
-    let file_path_str = file_path.to_string_lossy().to_string();
+    let is_native_lib = file_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| matches!(e, "dylib" | "so" | "dll"));
 
-    if file_path_str.ends_with(".dylib")
-        || file_path_str.ends_with(".so")
-        || file_path_str.ends_with(".dll")
-    {
-        // Native extension: load the cdylib via the zapi ABI and publish its
-        // exports as an ES module namespace (see zuqe::zapi::load_extension).
-        zuqe::zapi::load_extension(ctx, &file_path)
-    } else {
-        // Check for import attributes: type: "json"
-        let is_json = attrs.is_object()
-            && attrs
-                .get_property_str(ctx, "type")
-                .map(|v| {
-                    v.as_string(true)
-                        .is_some_and(|s| s.content().encode_utf8(false).as_ref() == "json")
-                })
-                .unwrap_or(false);
+    if is_native_lib {
+        return ctx.load_zapi_extension(&file_path);
+    }
 
-        // Use resolved filename (may be .ts fallback from .js)
-        let resolved = read_script(&file_path_str);
-        let (buf, resolved_name) = match resolved {
-            Ok((b, n)) => (b, n),
-            Err(e) => {
-                return Err(
-                    ctx.throw_reference_error(&format!("could not load module '{file_name}'. {e}"))
-                );
-            }
-        };
+    let attr_type = get_attr_type(ctx, attrs);
 
-        // `resolved_name` is the path actually read from disk; it differs from
-        // `file_path_str` only when a `.js` import falls back to `.ts` (or
-        // `.mjs`→`.mts` / `.cjs`→`.cts`). That fallback is expected and legal —
-        // the canonical module name stays `file_name` (used below in
-        // `compile_module`), so `resolved_name` must never be used as the key.
-        // Assert agreement only when no fallback happened, which still guards
-        // against accidentally using `resolved_name` as the canonical name.
-        #[cfg(debug_assertions)]
-        if ts_fallback(&file_path_str).as_deref() != Some(resolved_name.as_str()) {
-            debug_assert_eq!(resolved_name, file_path_str);
+    // Use resolved filename (may be .ts fallback from .js)
+    let file_path_str = file_path.as_os_str().to_str().unwrap();
+    let resolved = read_script(file_path_str);
+    let (buf, resolved_name) = match resolved {
+        Ok((b, n)) => (b, n),
+        Err(e) => {
+            return Err(
+                ctx.throw_reference_error(&format!("could not load module '{file_name}'. {e}"))
+            );
         }
+    };
 
-        if is_json {
+    // `resolved_name` is the path actually read from disk; it differs from
+    // `file_path_str` only when a `.js` import falls back to `.ts` (or
+    // `.mjs`→`.mts` / `.cjs`→`.cts`). That fallback is expected and legal —
+    // the canonical module name stays `file_name` (used below in
+    // `compile_module`), so `resolved_name` must never be used as the key.
+    // Assert agreement only when no fallback happened, which still guards
+    // against accidentally using `resolved_name` as the canonical name.
+    #[cfg(debug_assertions)]
+    if ts_fallback(file_path_str).as_deref() != Some(resolved_name.as_str()) {
+        debug_assert_eq!(resolved_name, file_path_str);
+    }
+
+    // Import-attribute `type` dispatch (mirrors zjs): `json` / `text` wrap the
+    // content as a default export; any other type errors; `None` falls through
+    // to normal compilation.
+    match attr_type.as_deref() {
+        Some("json") => {
             // JSON module: wrap as `export default <json>;\n`
             let content = String::from_utf8_lossy(&buf);
             let mut src = String::from("export default ");
             src.push_str(&content);
             src.push('\n');
             ctx.compile_module(src.as_bytes(), file_name, false)
-        } else {
+        }
+        Some("text") => {
+            // Text module: wrap as `export default "<escaped>";\n`
+            let content = String::from_utf8_lossy(&buf);
+            let mut src = String::from("export default \"");
+            src.push_str(&escape_js_string(&content));
+            src.push_str("\";\n");
+            ctx.compile_module(src.as_bytes(), file_name, false)
+        }
+        Some(a) => Err(ctx.throw_type_error(&format!("unsupported import attribute type '{a}'"))),
+        None => {
             let code = if transpile::needs_transpile(&resolved_name) {
                 if resolved_name.ends_with(".d.ts") {
                     return ctx.compile_module(b"export {}", file_name, false);
@@ -585,6 +603,23 @@ fn js_module_loader(
             ctx.compile_module(&code, file_name, false)
         }
     }
+}
+
+/// Escape a string for embedding inside a JS double-quoted string literal.
+fn escape_js_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    for ch in s.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\x00'..='\x1f' => out.push_str(&format!("\\x{:02x}", ch as u8)),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 /// Read file with JS → TS fallback.
