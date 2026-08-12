@@ -518,7 +518,9 @@ fn js_module_loader(
         || file_path_str.ends_with(".so")
         || file_path_str.ends_with(".dll")
     {
-        Err(ctx.throw_internal_error("dynamic library loading not implemented"))
+        // Native extension: load the cdylib via the zapi ABI and publish its
+        // exports as an ES module namespace (see zuqe::zapi::load_extension).
+        zuqe::zapi::load_extension(ctx, &file_path)
     } else {
         // Check for import attributes: type: "json"
         let is_json = attrs.is_object()
