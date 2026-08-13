@@ -271,10 +271,14 @@ const READER_PROTO: &[FieldDef] = &[
     ),
 ];
 
-fn js_reader_constructor(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
-    Err(ctx.throw_type_error(
-        "ReadableStreamDefaultReader must be obtained via ReadableStream.getReader()",
-    ))
+fn js_reader_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    // Spec: `new ReadableStreamDefaultReader(stream)` is a public constructor
+    // that locks the stream (throwing TypeError if it is already locked).
+    let stream_val = cc.arg(0);
+    let mut stream = JSReadableStream::try_from(stream_val)
+        .map_err(|_| ctx.throw_type_error("stream must be a ReadableStream"))?;
+    let reader = stream.acquire_reader(ctx, false)?;
+    Ok(reader.into())
 }
 
 def_native_object!(
