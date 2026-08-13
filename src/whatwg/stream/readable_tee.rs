@@ -123,6 +123,11 @@ impl JSReadableStreamDefaultReader {
                 .payload_mut()
                 .ok_or_else(|| ctx.throw_internal_error("invalid controller"))?
                 .set_controller(Some(handle));
+            // Register the branch's pump pull/cancel callbacks (captured once).
+            controller
+                .payload_mut()
+                .ok_or_else(|| ctx.throw_internal_error("invalid controller"))?
+                .set_algorithms(pull_fn, cancel_fn, JSValue::UNDEFINED);
             stream2.payload_mut().unwrap().controller = Some(controller);
 
             Ok((stream2, controller))

@@ -55,7 +55,9 @@ pub(crate) enum RsState {
 
 pub(crate) struct QueueEntry {
     pub(crate) chunk: JSValue,
-    pub(crate) size: i32,
+    /// Strategy `size` of the chunk (default 1); can be fractional or large, so
+    /// stored as f64.
+    pub(crate) size: f64,
 }
 
 /// Called by the runtime GC to keep stream-related JSValues alive.

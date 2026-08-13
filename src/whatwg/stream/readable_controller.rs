@@ -14,7 +14,7 @@ use std::{
 };
 
 use zuqe::{
-    CallContext, Callback, JSResult, JSValue, ScopedContext,
+    CallContext, Callback, ErrorKind, Exception, JSResult, JSValue, ScopedContext,
     builtins::promise::Promise,
     gc_lite::{GcTrace, GcTraceCtx},
 };
@@ -56,9 +56,16 @@ pub(crate) struct ReadableControllerPayload {
     pub(crate) stream: Option<JSReadableStream>,
     pub(crate) underlying_source: JSValue,
     pub(crate) queue: Rc<RefCell<Vec<QueueEntry>>>,
-    pub(crate) queue_total_size: Rc<Cell<i32>>,
+    pub(crate) queue_total_size: Rc<Cell<f64>>,
     pub(crate) high_water_mark: f64,
     pub(crate) close_requested: Cell<bool>,
+    /// Captured at stream setup (spec `SetUpReadableStreamDefaultController`):
+    /// the underlying source's `pull`/`cancel` and the strategy's `size`
+    /// callbacks. `undefined` means "absent". Capturing once avoids re-running
+    /// the property getters on every pull/cancel/enqueue.
+    pub(crate) pull_algorithm: JSValue,
+    pub(crate) cancel_algorithm: JSValue,
+    pub(crate) size_algorithm: JSValue,
     pub(crate) kind: ReadableControllerKind,
 }
 
@@ -72,9 +79,12 @@ impl ReadableControllerPayload {
             stream,
             underlying_source,
             queue: Rc::new(RefCell::new(Vec::new())),
-            queue_total_size: Rc::new(Cell::new(0)),
+            queue_total_size: Rc::new(Cell::new(0.0)),
             high_water_mark,
             close_requested: Cell::new(false),
+            pull_algorithm: JSValue::UNDEFINED,
+            cancel_algorithm: JSValue::UNDEFINED,
+            size_algorithm: JSValue::UNDEFINED,
             kind: ReadableControllerKind::Default {
                 controller: None,
                 started: Cell::new(false),
@@ -94,9 +104,12 @@ impl ReadableControllerPayload {
             stream,
             underlying_source,
             queue: Rc::new(RefCell::new(Vec::new())),
-            queue_total_size: Rc::new(Cell::new(0)),
+            queue_total_size: Rc::new(Cell::new(0.0)),
             high_water_mark,
             close_requested: Cell::new(false),
+            pull_algorithm: JSValue::UNDEFINED,
+            cancel_algorithm: JSValue::UNDEFINED,
+            size_algorithm: JSValue::UNDEFINED,
             kind: ReadableControllerKind::Byte {
                 byob_request: Rc::new(RefCell::new(None)),
             },
@@ -105,6 +118,9 @@ impl ReadableControllerPayload {
 
     pub(crate) fn gc_trace(&self, gcx: &mut GcTraceCtx) {
         self.underlying_source.trace(gcx);
+        self.pull_algorithm.trace(gcx);
+        self.cancel_algorithm.trace(gcx);
+        self.size_algorithm.trace(gcx);
         if let Some(ref s) = self.stream {
             s.trace(gcx);
         }
@@ -128,6 +144,24 @@ impl ReadableControllerPayload {
     /// The controlled readable stream, if attached.
     pub(crate) fn stream(&self) -> Option<JSReadableStream> {
         self.stream
+    }
+
+    /// Underlying source algorithms captured during setup
+    /// (`SetUpReadableStreamDefaultControllerFromUnderlyingSource`): `pull`,
+    /// `cancel`, and the strategy's `size`. Undefined means absent.
+    pub(crate) fn set_algorithms(
+        &mut self,
+        pull: JSValue,
+        cancel: JSValue,
+        size: JSValue,
+    ) {
+        self.pull_algorithm = pull;
+        self.cancel_algorithm = cancel;
+        self.size_algorithm = size;
+    }
+
+    pub(crate) fn cancel_algorithm(&self) -> JSValue {
+        self.cancel_algorithm
     }
 
     /// The underlying source object handed to `start()`/`pull()`.
@@ -180,11 +214,11 @@ impl ReadableControllerPayload {
         &self.queue
     }
 
-    pub(crate) fn queue_total_size(&self) -> i32 {
+    pub(crate) fn queue_total_size(&self) -> f64 {
         self.queue_total_size.get()
     }
 
-    pub(crate) fn set_queue_total_size(&self, v: i32) {
+    pub(crate) fn set_queue_total_size(&self, v: f64) {
         self.queue_total_size.set(v);
     }
 
@@ -291,49 +325,25 @@ impl ReadableControllerPayload {
 
         pulling.set(true);
 
-        let source = &self.underlying_source;
-        if source.is_undefined() {
+        let pull_fn = self.pull_algorithm;
+        if !pull_fn.is_callable() {
+            // No pull callback (push-style source) — nothing to ask for.
             pulling.set(false);
             return Ok(());
         }
-
-        let obj = match source.ensure_object(ctx) {
-            Ok(o) => o,
-            Err(_) => {
-                // Non-object source — no pull possible. Swallow the throw so no
-                // exception leaks out of this native call.
-                let _ = ctx.take_exception();
-                pulling.set(false);
-                return Ok(());
-            }
-        };
-
-        let pull_fn = match obj.get_property_str(ctx, "pull") {
-            Ok(v) if v.is_callable() => v,
-            Ok(_) => {
-                pulling.set(false);
-                return Ok(());
-            }
-            Err(_) => {
-                // pull getter threw — swallow it (this stream simply won't pull).
-                let _ = ctx.take_exception();
-                pulling.set(false);
-                return Ok(());
-            }
-        };
 
         let controller_val =
             controller.ok_or_else(|| ctx.throw_internal_error("invalid controller"))?;
 
         // Spec: if the underlying source's pull() throws, error the stream with
         // that value (which rejects any pending reads) rather than swallowing it.
-        let pull_res = pull_fn.call(ctx, *source, &[JSValue::from(controller_val)]);
+        let pull_res = pull_fn.call(ctx, self.underlying_source, &[JSValue::from(controller_val)]);
         if pull_res.is_err() {
             let err = ctx.take_exception().to_value(ctx);
             pulling.set(false);
             self.reject_all_pending_reads(ctx, err);
             self.queue.borrow_mut().clear();
-            self.queue_total_size.set(0);
+            self.queue_total_size.set(0.0);
             if let Some(mut stream_val) = self.stream {
                 stream_val
                     .payload_mut()
@@ -380,21 +390,57 @@ impl ReadableControllerPayload {
         match &self.kind {
             ReadableControllerKind::Default { .. } => {
                 let resolved = self.resolve_pending_read(ctx, chunk, false);
-                if !resolved {
-                    self.queue.borrow_mut().push(QueueEntry { chunk, size: 1 });
-                    self.queue_total_size.set(self.queue_total_size.get() + 1);
-                } else {
+                if resolved {
                     // A pending read consumed this chunk and the queue is still
                     // below the high water mark — pull again to refill.
                     if self.should_call_pull(ctx)? {
                         self.call_pull(ctx)?;
                     }
+                    return Ok(JSValue::UNDEFINED);
                 }
+
+                // No pending read: compute the chunk's size via the strategy's
+                // size algorithm. A throwing size() errors the stream and
+                // re-throws; an invalid size (NaN/±Infinity/negative) is a
+                // RangeError that also errors the stream.
+                let size = if self.size_algorithm.is_callable() {
+                    match self.size_algorithm.call(ctx, JSValue::UNDEFINED, &[chunk]) {
+                        Ok(v) => v.to_number(ctx)?.to_f64(),
+                        Err(_) => {
+                            let e = ctx.take_exception().to_value(ctx);
+                            self.error(ctx, e)?;
+                            // Re-throw the same value so `enqueue()` surfaces it.
+                            ctx.throw(Exception::Error(e));
+                            return Err(-1);
+                        }
+                    }
+                } else {
+                    1.0
+                };
+                if size.is_nan() || size.is_infinite() || size < 0.0 {
+                    let e = ctx
+                        .create_error_object(
+                            ErrorKind::Range,
+                            "strategy.size must return a finite non-negative number",
+                            false,
+                        )
+                        .ok_or(-1)?;
+                    let e = e.into();
+                    self.error(ctx, e)?;
+                    ctx.throw(Exception::Error(e));
+                    return Err(-1);
+                }
+
+                self.queue.borrow_mut().push(QueueEntry {
+                    chunk,
+                    size,
+                });
+                self.queue_total_size.set(self.queue_total_size.get() + size);
                 Ok(JSValue::UNDEFINED)
             }
             ReadableControllerKind::Byte { .. } => {
-                self.queue.borrow_mut().push(QueueEntry { chunk, size: 1 });
-                self.queue_total_size.set(self.queue_total_size.get() + 1);
+                self.queue.borrow_mut().push(QueueEntry { chunk, size: 1.0 });
+                self.queue_total_size.set(self.queue_total_size.get() + 1.0);
                 Ok(JSValue::UNDEFINED)
             }
         }
@@ -402,7 +448,7 @@ impl ReadableControllerPayload {
 
     /// Spec `ReadableStreamDefaultControllerCanCloseOrEnqueue`: false once the
     /// stream has left the readable state or close has been requested.
-    fn can_close_or_enqueue(&self) -> bool {
+    pub(crate) fn can_close_or_enqueue(&self) -> bool {
         if self.close_requested.get() {
             return false;
         }
@@ -462,7 +508,7 @@ impl ReadableControllerPayload {
             ReadableControllerKind::Default { .. } => {
                 self.reject_all_pending_reads(ctx, e);
                 self.queue.borrow_mut().clear();
-                self.queue_total_size.set(0);
+                self.queue_total_size.set(0.0);
                 if let Some(mut rs) = self.stream {
                     rs.payload_mut()
                         .unwrap()
@@ -497,7 +543,7 @@ impl ReadableControllerPayload {
             }
         }
 
-        Ok(self.high_water_mark - self.queue_total_size.get() as f64)
+        Ok(self.high_water_mark - self.queue_total_size.get())
     }
 
     /// Pending BYOB request view, or undefined. Only meaningful for byte streams.

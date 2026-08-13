@@ -94,9 +94,9 @@ fn js_transform_controller_enqueue(ctx: &mut ScopedContext, cc: CallContext) -> 
     let resolved = rcp.resolve_pending_read(ctx, chunk, false);
 
     if !resolved {
-        rcp.queue().borrow_mut().push(QueueEntry { chunk, size: 1 });
+        rcp.queue().borrow_mut().push(QueueEntry { chunk, size: 1.0 });
         let total = rcp.queue_total_size();
-        rcp.set_queue_total_size(total + 1);
+        rcp.set_queue_total_size(total + 1.0);
     }
 
     Ok(JSValue::UNDEFINED)
@@ -192,7 +192,7 @@ fn js_transform_controller_desired_size(ctx: &mut ScopedContext, cc: CallContext
             }
         }
         let total = rcp.queue_total_size();
-        return Ok(JSValue::from(rcp.high_water_mark() - total as f64));
+        return Ok(JSValue::from(rcp.high_water_mark() - total));
     }
     Ok(JSValue::ZERO)
 }

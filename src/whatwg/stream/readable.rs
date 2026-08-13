@@ -136,23 +136,23 @@ impl ReadableStreamPayload {
             && let Some(cp) = controller_val.payload()
         {
             let source = cp.underlying_source();
+            let cancel_fn = cp.cancel_algorithm();
             // Propagate the underlying source's cancel() result (including a
             // rejection) to the reader.cancel() promise — pipeTo relies on this
             // to surface source cancel errors.
-            return if let Some(o) = source.as_object() {
-                match o.invoke_str_defined(ctx, "cancel", &[reason])? {
-                    Some(Ok(v)) => {
+            return if cancel_fn.is_callable() {
+                match cancel_fn.call(ctx, source, &[reason]) {
+                    Ok(v) => {
                         if let Ok(p) = Promise::try_from(v) {
                             Ok(p)
                         } else {
                             Promise::from_resolve_value(ctx, v)
                         }
                     }
-                    Some(Err(_)) => {
+                    Err(_) => {
                         let e = ctx.take_exception().to_value(ctx);
                         Promise::from_reject_value(ctx, e)
                     }
-                    None => Promise::from_resolve_value(ctx, JSValue::UNDEFINED),
                 }
             } else {
                 Promise::from_resolve_value(ctx, JSValue::UNDEFINED)
@@ -287,6 +287,39 @@ fn js_readable_stream_constructor(ctx: &mut ScopedContext, cc: CallContext) -> J
         create_readable_stream_controller(ctx, &instance, &underlying_source, &queuing_strategy)?;
     instance.payload_mut().unwrap().controller = Some(default_controller);
 
+    // SetUpReadableStreamDefaultControllerFromUnderlyingSource: capture the
+    // source's `pull`/`cancel` and the strategy's `size` callbacks once, so a
+    // throwing getter re-throws from the constructor and later pulls/cancels
+    // do not re-run the getter.
+    if !is_bytes {
+        let mut pull_fn = JSValue::UNDEFINED;
+        let mut cancel_fn = JSValue::UNDEFINED;
+        if let Some(o) = underlying_source.as_object() {
+            let pull = o.get_property_str(ctx, "pull")?;
+            if pull.is_callable() {
+                pull_fn = pull;
+            }
+            let cancel = o.get_property_str(ctx, "cancel")?;
+            if cancel.is_callable() {
+                cancel_fn = cancel;
+            }
+        }
+        let size_fn = if let Some(o) = queuing_strategy.as_object() {
+            let size = o.get_property_str(ctx, "size")?;
+            if size.is_callable() {
+                size
+            } else {
+                JSValue::UNDEFINED
+            }
+        } else {
+            JSValue::UNDEFINED
+        };
+        let mut dc = default_controller;
+        dc.payload_mut()
+            .ok_or_else(|| ctx.throw_internal_error("invalid controller"))?
+            .set_algorithms(pull_fn, cancel_fn, size_fn);
+    }
+
     let start_controller: JSValue = if is_bytes {
         let hwm = extract_high_water_mark(ctx, queuing_strategy)?;
         let bc = JSReadableByteStreamController::new_instance(
@@ -307,21 +340,26 @@ fn js_readable_stream_constructor(ctx: &mut ScopedContext, cc: CallContext) -> J
         default_controller.into()
     };
 
-    // Spec: a throwing underlying start() errors the stream's controller (the
-    // constructor itself does not throw); reject any read against it.
-    if let Some(o) = underlying_source.as_object()
-        && let Some(Err(_)) = o.invoke_str_defined(ctx, "start", &[start_controller])?
-    {
-        let e = ctx.take_exception().to_value(ctx);
-        start_controller.invoke_str_defined(ctx, "error", &[e])?;
+    // Spec: a throwing underlying start() is re-thrown by the constructor (per
+    // "Any thrown exceptions will be re-thrown by the ReadableStream()
+    // constructor"); a start() returning a rejected promise errors the stream
+    // asynchronously instead.
+    if let Some(o) = underlying_source.as_object() {
+        match o.invoke_str_defined(ctx, "start", &[start_controller]) {
+            Ok(Some(Err(_))) => {
+                // start() threw synchronously — leave the exception set and
+                // re-throw from the constructor.
+                return Err(-1);
+            }
+            Ok(_) => {}
+            Err(_) => return Err(-1),
+        }
     }
 
-    // Spec: once start() completes (the start promise fulfills), pull() fires
-    // when the stream needs data — but asynchronously, so sources can observe
-    // the stream fully constructed. This lets a pull-only source push its first
-    // chunk (or error the stream) without an explicit read. If a read already
-    // issued its own pull synchronously (e.g. pipeTo's first read), skip so we
-    // do not pull twice.
+    // Spec: once start() completes, pull() fires when the stream needs data.
+    // This lets a pull-only source push its first chunk (or error the stream)
+    // without an explicit read. If a read already issued its own pull
+    // synchronously (e.g. pipeTo's first read), skip so we do not pull twice.
     if !is_bytes {
         let controller_val = JSValue::from(default_controller);
         ctx.queue_job(
@@ -453,11 +491,15 @@ fn js_readable_stream_from_static(ctx: &mut ScopedContext, cc: CallContext) -> J
         .ok_or_else(|| ctx.throw_internal_error("invalid controller"))?
         .set_controller(Some(handle));
     // No user `start()` runs for ReadableStream.from — treat it as started so
-    // the pull-driven iterator feeding begins.
+    // the pull-driven iterator feeding begins, and register the pull callback.
     controller
         .payload()
         .ok_or_else(|| ctx.throw_internal_error("invalid controller"))?
         .set_started(true);
+    controller
+        .payload_mut()
+        .ok_or_else(|| ctx.throw_internal_error("invalid controller"))?
+        .set_algorithms(pull_fn, JSValue::UNDEFINED, JSValue::UNDEFINED);
     stream.payload_mut().unwrap().controller = Some(controller);
     Ok(JSValue::from(stream))
 }

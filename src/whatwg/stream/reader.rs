@@ -107,7 +107,10 @@ impl ReaderPayload {
                     let mut q = cp.queue().borrow_mut();
                     let entry = q.remove(0);
                     let total = cp.queue_total_size();
-                    cp.set_queue_total_size(total.saturating_sub(entry.size));
+                    // Spec `DequeueValue`: clamp to 0 if floating-point drift makes
+                    // the running total slightly negative.
+                    let new_total = total - entry.size;
+                    cp.set_queue_total_size(if new_total < 0.0 { 0.0 } else { new_total });
 
                     // BYOB: copy as much of the chunk as fits into the caller's view
                     // and push the remainder back so the next read continues where
@@ -116,7 +119,7 @@ impl ReaderPayload {
                     chunk = if let Some(view) = byob_view {
                         let filled = byob_fill_view(ctx, view, entry.chunk, &mut q)?;
                         if !q.is_empty() {
-                            cp.set_queue_total_size(cp.queue_total_size() + 1);
+                            cp.set_queue_total_size(cp.queue_total_size() + 1.0);
                         }
                         filled
                     } else {
@@ -227,7 +230,7 @@ fn byob_fill_view(
             0,
             QueueEntry {
                 chunk: JSValue::from(rest),
-                size: 1,
+                size: 1.0,
             },
         );
     }
