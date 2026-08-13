@@ -9,6 +9,7 @@
 //! Split one class per file, named after the class in snake case. Shared items
 //! (stream state, queue entry, pending-read slot, queuing strategies) live here.
 
+mod pipe;
 mod readable;
 mod readable_controller;
 mod readable_controller_byte;
