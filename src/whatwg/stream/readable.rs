@@ -265,6 +265,12 @@ fn js_readable_stream_constructor(ctx: &mut ScopedContext, cc: CallContext) -> J
     let underlying_source = cc.arg(0);
     let queuing_strategy = cc.arg(1);
 
+    // WebIDL `optional object underlyingSource`: an explicit null is not an
+    // object and must throw; undefined/missing (the common case) is fine.
+    if underlying_source.is_null() {
+        return Err(ctx.throw_type_error("underlyingSource must be an object"));
+    }
+
     let payload = ReadableStreamPayload::new();
     let mut instance = JSReadableStream::new_instance(ctx, new_target, payload)?;
 
@@ -276,11 +282,20 @@ fn js_readable_stream_constructor(ctx: &mut ScopedContext, cc: CallContext) -> J
             .as_object()
             .and_then(|o| o.get_property_str(ctx, "type").ok())
             .unwrap_or(JSValue::UNDEFINED);
-        !ty.is_undefined()
-            && ty
-                .to_string(ctx)
-                .map(|s| s.to_string() == "bytes")
-                .unwrap_or(false)
+        if ty.is_undefined() {
+            false
+        } else {
+            // Spec: `type` must be "bytes"; anything else (incl. null, empty
+            // string, a ToString-throwing value) throws from the constructor.
+            let s = ty.to_string(ctx)?.to_string();
+            if s == "bytes" {
+                true
+            } else {
+                return Err(ctx.throw_type_error(
+                    "ReadableStream type must be undefined or \"bytes\"",
+                ));
+            }
+        }
     };
 
     let default_controller =
@@ -298,10 +313,15 @@ fn js_readable_stream_constructor(ctx: &mut ScopedContext, cc: CallContext) -> J
             let pull = o.get_property_str(ctx, "pull")?;
             if pull.is_callable() {
                 pull_fn = pull;
+            } else if !pull.is_undefined() {
+                // WebIDL: a present but non-callable callback member throws.
+                return Err(ctx.throw_type_error("pull must be a function"));
             }
             let cancel = o.get_property_str(ctx, "cancel")?;
             if cancel.is_callable() {
                 cancel_fn = cancel;
+            } else if !cancel.is_undefined() {
+                return Err(ctx.throw_type_error("cancel must be a function"));
             }
         }
         let size_fn = if let Some(o) = queuing_strategy.as_object() {
@@ -409,6 +429,11 @@ fn js_readable_stream_get_reader(ctx: &mut ScopedContext, cc: CallContext) -> JS
     // options.mode: undefined -> default reader, "byob" -> BYOB reader,
     // anything else -> TypeError (the spec converts mode to a fixed enum).
     let options = cc.arg(0);
+    // WebIDL `optional ReadableStreamGetReaderOptions options = {}`: a
+    // non-object (other than undefined/null) throws a TypeError.
+    if !options.is_undefined_or_null() && options.as_object().is_none() {
+        return Err(ctx.throw_type_error("options must be an object"));
+    }
     let byob = if options.is_undefined_or_null() {
         false
     } else {
