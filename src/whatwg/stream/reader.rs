@@ -43,21 +43,67 @@ impl ReaderPayload {
     }
 
     /// Release the lock on the underlying stream: detach the reader so the
-    /// stream can be acquired again. No-op if the reader is already released.
-    pub(crate) fn release_lock(&mut self) {
-        if let Some(mut rs) = self.stream.take()
-            && let Some(sp) = rs.payload_mut()
-        {
-            sp.reader = None;
+    /// stream can be acquired again, and reject `closed` plus any pending read
+    /// requests with a TypeError (spec `ReadableStreamReaderGenericRelease` /
+    /// `ReadableStreamDefaultReaderRelease`). No-op if the reader is already
+    /// released.
+    pub(crate) fn release_lock(&mut self, ctx: &mut ScopedContext) {
+        // Spec `ReadableStreamReaderGenericRelease`: a readable stream rejects
+        // the existing closedPromise in place; a closed/errored stream replaces
+        // it with a fresh rejected promise (so `closed` changes identity).
+        let stream_readable = self
+            .stream
+            .map(|rs| {
+                rs.payload()
+                    .is_some_and(|sp| sp.state == super::RsState::Readable)
+            })
+            .unwrap_or(false);
+        if stream_readable {
+            if let Some(mut cp) = self.closed_promise {
+                // Reject the same promise in place, keeping `closed`'s identity.
+                if cp.state() == PromiseState::Pending
+                    && let Some(e) =
+                        ctx.create_error_object(ErrorKind::Type, "Reader released", false)
+                {
+                    cp.reject(ctx, e.into());
+                }
+            }
+        } else if let Some(e) = ctx.create_error_object(ErrorKind::Type, "Reader released", false) {
+            if let Ok((mut np, _rr)) = Promise::create(ctx) {
+                np.reject(ctx, e.into());
+                self.closed_promise = Some(np);
+            }
+        }
+        if let Some(mut rs) = self.stream.take() {
+            if let Some(sp) = rs.payload_mut() {
+                sp.reader = None;
+                // Spec: reject all pending read requests with a TypeError.
+                if let Some(controller_val) = sp.controller
+                    && let Some(cp) = controller_val.payload()
+                {
+                    if let Some(e) =
+                        ctx.create_error_object(ErrorKind::Type, "Reader released", false)
+                    {
+                        cp.reject_all_pending_reads(ctx, e.into());
+                    }
+                }
+            }
         }
     }
 
-    /// Cancel the underlying stream with `reason`. Errors if the reader has
-    /// already been released (no stream attached).
+    /// Cancel the underlying stream with `reason`. A released reader's
+    /// `cancel()` rejects with a TypeError (spec
+    /// `ReadableStreamDefaultReader.cancel(reason)` step 1).
     pub(crate) fn cancel(&self, ctx: &mut ScopedContext, reason: JSValue) -> Result<Promise, i32> {
         match self.stream {
             Some(mut rs) => rs.payload_mut().unwrap().cancel(ctx, reason),
-            None => Err(ctx.throw_type_error("reader released")),
+            None => {
+                if let Some(e) = ctx.create_error_object(ErrorKind::Type, "reader released", false)
+                {
+                    return Promise::from_reject_value(ctx, e.into());
+                }
+                Err(ctx.throw_internal_error("failed to create TypeError"))
+            }
         }
     }
 
@@ -70,9 +116,15 @@ impl ReaderPayload {
         ctx: &mut ScopedContext,
         byob_view: Option<TypedArray>,
     ) -> Result<Promise, i32> {
-        let mut stream = self
-            .stream
-            .ok_or_else(|| ctx.throw_type_error("reader released"))?;
+        let Some(mut stream) = self.stream else {
+            // Spec: reading from a released reader returns a promise rejected
+            // with a TypeError (not a thrown exception).
+            if let Some(e) = ctx.create_error_object(ErrorKind::Type, "reader released", false) {
+                return Promise::from_reject_value(ctx, e.into());
+            } else {
+                return Err(ctx.throw_internal_error("failed to create TypeError"));
+            }
+        };
 
         // Mark disturbed before any early return: even a read on a closed or
         // errored stream counts as consuming it.
@@ -321,7 +373,7 @@ fn js_reader_cancel(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 fn js_reader_release_lock(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut this = cc.this();
     let p = get_read_payload_mut(ctx, &mut this)?;
-    p.release_lock();
+    p.release_lock(ctx);
     Ok(JSValue::UNDEFINED)
 }
 

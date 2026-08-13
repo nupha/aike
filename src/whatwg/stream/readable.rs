@@ -127,6 +127,9 @@ impl ReadableStreamPayload {
         //   - a closed stream resolves immediately;
         //   - an errored stream rejects with the stored error (no cancelAlgorithm);
         //   - a readable stream closes and invokes the source's cancelAlgorithm.
+        // Note: the locked-stream TypeError is checked in the public
+        // `cancel()` method steps, not here — reader.cancel() also funnels
+        // through this and must succeed while the stream is locked.
         self.disturbed = true;
         match self.state {
             RsState::Closed => {
@@ -466,6 +469,14 @@ fn js_readable_stream_get_reader(ctx: &mut ScopedContext, cc: CallContext) -> JS
 fn js_readable_stream_cancel(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut this = cc.this();
     let p = get_readable_stream_payload_mut(ctx, &mut this)?;
+    // Spec `ReadableStream.cancel(reason)` step 1: canceling a locked stream
+    // rejects with a TypeError (the cancelAlgorithm must not run).
+    if p.reader.is_some() {
+        if let Some(e) = ctx.create_error_object(ErrorKind::Type, "Cannot cancel a locked stream", false) {
+            return Promise::from_reject_value(ctx, e.into()).map(JSValue::from);
+        }
+        return Err(ctx.throw_internal_error("failed to create TypeError"));
+    }
     p.cancel(ctx, cc.arg(0)).map(JSValue::from)
 }
 
@@ -869,12 +880,13 @@ fn create_stream_async_iterator(
     }
 
     impl ReaderFetcher {
-        /// Release the reader lock (ReadableStreamReaderGenericRelease), so the
-        /// stream can be locked again by a later getReader()/values().
-        fn release_lock(&self) {
+        /// Release the reader lock (ReadableStreamDefaultReaderRelease), so the
+        /// stream can be locked again by a later getReader()/values() and any
+        /// pending read rejects with a TypeError.
+        fn release_lock(&self, ctx: &mut ScopedContext) {
             let mut rv = JSValue::from(self.reader_val);
             if let Some(rp) = JSReadableStreamDefaultReader::payload_mut_of(&mut rv) {
-                rp.release_lock();
+                rp.release_lock(ctx);
             }
             *self.cached_promise.borrow_mut() = None;
         }
@@ -910,7 +922,7 @@ fn create_stream_async_iterator(
                             // Stream exhausted: release the lock so a later
                             // getReader() works (spec: the iterator releases the
                             // reader when it completes).
-                            self.release_lock();
+                            self.release_lock(ctx);
                             return Ok(IterFetchStatus::Done);
                         }
                         if let Ok(value) = result.get_property_str(ctx, "value") {
@@ -924,7 +936,7 @@ fn create_stream_async_iterator(
                         // returns {done: true}.
                         let reason = promise.result();
                         self.closed.set(true);
-                        self.release_lock();
+                        self.release_lock(ctx);
                         ctx.throw(Exception::Error(reason));
                         return Err(-1);
                     }
@@ -951,7 +963,7 @@ fn create_stream_async_iterator(
                     if let Ok(done_val) = result.get_property_str(ctx, "done")
                         && done_val.to_bool()?
                     {
-                        self.release_lock();
+                        self.release_lock(ctx);
                         return Ok(IterFetchStatus::Done);
                     }
                     if let Ok(value) = result.get_property_str(ctx, "value") {
@@ -962,7 +974,7 @@ fn create_stream_async_iterator(
                 zuqe::builtins::promise::PromiseState::Rejected => {
                     let reason = promise.result();
                     self.closed.set(true);
-                    self.release_lock();
+                    self.release_lock(ctx);
                     ctx.throw(Exception::Error(reason));
                     Err(-1)
                 }
@@ -989,14 +1001,14 @@ fn create_stream_async_iterator(
             // error (releasing the reader synchronously first).
             if state == RsState::Errored {
                 let err = stored_error;
-                self.release_lock();
+                self.release_lock(ctx);
                 self.closed.set(true);
                 return Promise::from_reject_value(ctx, err).map(Some);
             }
 
             // Closed stream or preventCancel: release and resolve {value, done}.
             if state == RsState::Closed || self.prevent_cancel {
-                self.release_lock();
+                self.release_lock(ctx);
                 self.closed.set(true);
                 return iterator_result_promise(ctx, value, true).map(Some);
             }
@@ -1011,19 +1023,19 @@ fn create_stream_async_iterator(
                     Ok(p) => p,
                     Err(_) => {
                         let e = ctx.take_exception().to_value(ctx);
-                        self.release_lock();
+                        self.release_lock(ctx);
                         self.closed.set(true);
                         return Promise::from_reject_value(ctx, e).map(Some);
                     }
                 },
                 None => {
-                    self.release_lock();
+                    self.release_lock(ctx);
                     self.closed.set(true);
                     return iterator_result_promise(ctx, value, true).map(Some);
                 }
             };
 
-            self.release_lock();
+            self.release_lock(ctx);
             self.closed.set(true);
 
             let result = make_iterator_result(ctx, value, true)?;

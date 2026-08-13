@@ -564,7 +564,12 @@ fn controller_refill_pull(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
     let controller_val = cc.data(0);
     let cp = JSReadableStreamDefaultController::payload_of(&controller_val)
         .ok_or_else(|| ctx.throw_internal_error("invalid controller"))?;
-    cp.call_pull(ctx)?;
+    // Spec `CallPullIfNeeded`: the pullAgain follow-up runs through
+    // ShouldCallPull, so a stream that closed/errored meanwhile does not pull
+    // again.
+    if cp.should_call_pull(ctx)? {
+        cp.call_pull(ctx)?;
+    }
     Ok(JSValue::UNDEFINED)
 }
 
