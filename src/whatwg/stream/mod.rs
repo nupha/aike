@@ -228,20 +228,23 @@ pub(crate) fn make_iterator_result(
     let mut obj = ctx.create_base_object()?;
     obj.define_property_value_str(ctx, "value", value, zuqe::JS_PROP_C_W_E)?;
     obj.define_property_value_str(ctx, "done", JSValue::from(done), zuqe::JS_PROP_C_W_E)?;
-    // The iterator result `{value, done}` is an internal object. An injected
-    // `Object.prototype.then` must not make it look like a thenable when the
-    // reader's read promise is resolved with it (WPT forbids intercepting the
-    // body conversion this way). Shadow `then` with a non-callable own property
-    // so the promise resolution settles with the object directly. The property
-    // is non-enumerable so structure comparisons (assert_object_equals /
-    // Object.keys) don't see it.
-    obj.define_property_value_str(
-        ctx,
-        "then",
-        JSValue::UNDEFINED,
-        zuqe::JS_PROP_CONFIGURABLE | zuqe::JS_PROP_WRITABLE,
-    )?;
     Ok(JSValue::from(obj))
+}
+
+/// Build a fresh promise settled directly with an iterator result `{value, done}`.
+///
+/// Settles without thenable assimilation so an injected `Object.prototype.then`
+/// cannot intercept the read result (WPT `then-interception`), while keeping the
+/// result object structurally clean (`Object.getOwnPropertyNames` == `[done, value]`).
+pub(crate) fn iterator_result_promise(
+    ctx: &mut ScopedContext,
+    value: JSValue,
+    done: bool,
+) -> Result<Promise, i32> {
+    let result = make_iterator_result(ctx, value, done)?;
+    let (mut promise, _rr) = Promise::create(ctx)?;
+    promise.resolve(ctx, result);
+    Ok(promise)
 }
 
 /// Resolve or reject the peer (reader/writer) `closed_promise` if present.

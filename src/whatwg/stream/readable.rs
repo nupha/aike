@@ -10,7 +10,7 @@ use std::{
 use crossbeam::channel::{Receiver, TryRecvError};
 use linkme::distributed_slice;
 use zuqe::{
-    CallContext, Callback, ClassCtorDef, ClassID, ErrorKind, FieldDef, JSResult,
+    CallContext, Callback, ClassCtorDef, ClassID, ErrorKind, Exception, FieldDef, JSResult,
     JSValue, JobState, Object, Runtime, ScopedContext,
     builtins::{
         iterator::{AsyncIterableIterator, AsyncIteratorFetcher, IterFetchStatus},
@@ -36,7 +36,7 @@ use crate::{
 
 use super::{
     JSReadableByteStreamController, JSReadableStreamDefaultController, ReadableControllerPayload,
-    RsState, notify_peer_closed,
+    RsState, iterator_result_promise, make_iterator_result, notify_peer_closed,
 };
 
 pub(crate) struct ReadableStreamPayload {
@@ -214,12 +214,18 @@ const READABLE_STREAM_PROTO: &[FieldDef] = &[
     FieldDef::FUNC("getReader", 0, js_readable_stream_get_reader, 0),
     FieldDef::FUNC("cancel", 1, js_readable_stream_cancel, 0),
     FieldDef::FUNC("pipeTo", 1, super::pipe::js_readable_stream_pipe_to, 0),
-    FieldDef::FUNC("pipeThrough", 1, super::pipe::js_readable_stream_pipe_through, 0),
-    FieldDef::FUNC("tee", 0, super::readable_tee::js_readable_stream_tee, 0),
     FieldDef::FUNC(
-        "[Symbol.asyncIterator]",
+        "pipeThrough",
+        1,
+        super::pipe::js_readable_stream_pipe_through,
         0,
-        js_readable_stream_async_iterator,
+    ),
+    FieldDef::FUNC("tee", 0, super::readable_tee::js_readable_stream_tee, 0),
+    FieldDef::FUNC("values", 0, js_readable_stream_async_iterator, 0),
+    FieldDef::GETSET(
+        "[Symbol.asyncIterator]",
+        Some(js_readable_stream_async_iterator_getter),
+        None,
         0,
     ),
     FieldDef::STR(
@@ -308,6 +314,29 @@ fn js_readable_stream_constructor(ctx: &mut ScopedContext, cc: CallContext) -> J
     {
         let e = ctx.take_exception().to_value(ctx);
         start_controller.invoke_str_defined(ctx, "error", &[e])?;
+    }
+
+    // Spec: once start() completes (the start promise fulfills), pull() fires
+    // when the stream needs data — but asynchronously, so sources can observe
+    // the stream fully constructed. This lets a pull-only source push its first
+    // chunk (or error the stream) without an explicit read. If a read already
+    // issued its own pull synchronously (e.g. pipeTo's first read), skip so we
+    // do not pull twice.
+    if !is_bytes {
+        let controller_val = JSValue::from(default_controller);
+        ctx.queue_job(
+            move |cx| {
+                let cp = JSReadableStreamDefaultController::payload_of(&controller_val)
+                    .ok_or_else(|| cx.throw_internal_error("invalid controller"))?;
+                cp.set_started(true);
+                let has_pending_read = cp.pending_read().borrow().is_empty() == false;
+                if !has_pending_read && cp.should_call_pull(cx)? {
+                    cp.call_pull(cx)?;
+                }
+                Ok(zuqe::JobState::Done)
+            },
+            controller_val,
+        );
     }
 
     Ok(instance.into())
@@ -423,6 +452,12 @@ fn js_readable_stream_from_static(ctx: &mut ScopedContext, cc: CallContext) -> J
         .payload_mut()
         .ok_or_else(|| ctx.throw_internal_error("invalid controller"))?
         .set_controller(Some(handle));
+    // No user `start()` runs for ReadableStream.from — treat it as started so
+    // the pull-driven iterator feeding begins.
+    controller
+        .payload()
+        .ok_or_else(|| ctx.throw_internal_error("invalid controller"))?
+        .set_started(true);
     stream.payload_mut().unwrap().controller = Some(controller);
     Ok(JSValue::from(stream))
 }
@@ -549,7 +584,12 @@ fn from_pump_rejected(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 }
 
 fn js_readable_stream_async_iterator(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    create_stream_async_iterator(ctx, &cc.this())
+    create_stream_async_iterator(ctx, &cc.this(), cc.arg(0))
+}
+
+// Spec: `get [Symbol.asyncIterator]() { return this.values; }`.
+fn js_readable_stream_async_iterator_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    cc.this().get_property_str(ctx, "values")
 }
 thread_local! {
     /// Channel-backed streams being polled: id -> (controller, receiver, idle deadline).
@@ -594,7 +634,18 @@ fn create_readable_stream_controller(
 // Stream async iterator
 // ============================================================================
 
-fn create_stream_async_iterator(ctx: &mut ScopedContext, stream_val: &JSValue) -> JSResult {
+fn create_stream_async_iterator(
+    ctx: &mut ScopedContext,
+    stream_val: &JSValue,
+    options: JSValue,
+) -> JSResult {
+    // `values({ preventCancel })` drives the return() behavior.
+    let prevent_cancel = if let Some(obj) = options.as_object() {
+        obj.get_property_str(ctx, "preventCancel")?.to_bool()?
+    } else {
+        false
+    };
+
     // Lock the stream by creating a reader.
     let reader_val = {
         let p = JSReadableStream::payload_of(stream_val)
@@ -623,11 +674,33 @@ fn create_stream_async_iterator(ctx: &mut ScopedContext, stream_val: &JSValue) -
 
     struct ReaderFetcher {
         reader_val: JSReadableStreamDefaultReader,
+        prevent_cancel: bool,
         closed: Cell<bool>,
         // Cache the promise from reader.read() so we don't call reader.read()
         // again on every tick, which would create a new PENDING_READ and lose
         // the value committed by a previous enqueue().
         cached_promise: RefCell<Option<Promise>>,
+    }
+
+    impl ReaderFetcher {
+        /// Release the reader lock (ReadableStreamReaderGenericRelease), so the
+        /// stream can be locked again by a later getReader()/values().
+        fn release_lock(&self) {
+            let mut rv = JSValue::from(self.reader_val);
+            if let Some(rp) = JSReadableStreamDefaultReader::payload_mut_of(&mut rv) {
+                rp.release_lock();
+            }
+            *self.cached_promise.borrow_mut() = None;
+        }
+
+        /// (state, stored_error) of the stream behind this iterator's reader.
+        fn stream_state(&self) -> Option<(RsState, JSValue)> {
+            let rv = JSValue::from(self.reader_val);
+            let rp = JSReadableStreamDefaultReader::payload_of(&rv)?;
+            let stream = rp.stream?;
+            let sp = stream.payload()?;
+            Some((sp.state, sp.stored_error))
+        }
     }
 
     impl AsyncIteratorFetcher for ReaderFetcher {
@@ -648,6 +721,10 @@ fn create_stream_async_iterator(ctx: &mut ScopedContext, stream_val: &JSValue) -
                         if let Ok(done_val) = result.get_property_str(ctx, "done")
                             && done_val.to_bool()?
                         {
+                            // Stream exhausted: release the lock so a later
+                            // getReader() works (spec: the iterator releases the
+                            // reader when it completes).
+                            self.release_lock();
                             return Ok(IterFetchStatus::Done);
                         }
                         if let Ok(value) = result.get_property_str(ctx, "value") {
@@ -656,7 +733,14 @@ fn create_stream_async_iterator(ctx: &mut ScopedContext, stream_val: &JSValue) -
                         return Ok(IterFetchStatus::Value(result));
                     }
                     zuqe::builtins::promise::PromiseState::Rejected => {
-                        return Err(ctx.throw_type_error("stream read rejected"));
+                        // Reject with the stream's real error, not a generic
+                        // wrapper, and finish the iterator: a later next()
+                        // returns {done: true}.
+                        let reason = promise.result();
+                        self.closed.set(true);
+                        self.release_lock();
+                        ctx.throw(Exception::Error(reason));
+                        return Err(-1);
                     }
                     zuqe::builtins::promise::PromiseState::Pending => {
                         // Still pending — put it back and wait. Borrow is now
@@ -681,6 +765,7 @@ fn create_stream_async_iterator(ctx: &mut ScopedContext, stream_val: &JSValue) -
                     if let Ok(done_val) = result.get_property_str(ctx, "done")
                         && done_val.to_bool()?
                     {
+                        self.release_lock();
                         return Ok(IterFetchStatus::Done);
                     }
                     if let Ok(value) = result.get_property_str(ctx, "value") {
@@ -689,7 +774,11 @@ fn create_stream_async_iterator(ctx: &mut ScopedContext, stream_val: &JSValue) -
                     Ok(IterFetchStatus::Value(result))
                 }
                 zuqe::builtins::promise::PromiseState::Rejected => {
-                    Err(ctx.throw_type_error("stream read rejected"))
+                    let reason = promise.result();
+                    self.closed.set(true);
+                    self.release_lock();
+                    ctx.throw(Exception::Error(reason));
+                    Err(-1)
                 }
                 zuqe::builtins::promise::PromiseState::Pending => {
                     // Cache the pending promise and wait for enqueue() to resolve it
@@ -697,6 +786,94 @@ fn create_stream_async_iterator(ctx: &mut ScopedContext, stream_val: &JSValue) -
                     Ok(IterFetchStatus::Wait)
                 }
             }
+        }
+
+        fn on_return(
+            &self,
+            ctx: &mut ScopedContext,
+            value: JSValue,
+        ) -> Result<Option<Promise>, i32> {
+            // Reader/stream already detached: nothing to cancel or release.
+            let Some((state, stored_error)) = self.stream_state() else {
+                self.closed.set(true);
+                return iterator_result_promise(ctx, value, true).map(Some);
+            };
+
+            // Per spec, return() on an errored stream rejects with the stored
+            // error (releasing the reader synchronously first).
+            if state == RsState::Errored {
+                let err = stored_error;
+                self.release_lock();
+                self.closed.set(true);
+                return Promise::from_reject_value(ctx, err).map(Some);
+            }
+
+            // Closed stream or preventCancel: release and resolve {value, done}.
+            if state == RsState::Closed || self.prevent_cancel {
+                self.release_lock();
+                self.closed.set(true);
+                return iterator_result_promise(ctx, value, true).map(Some);
+            }
+
+            // Cancellable path: cancel the reader, release the lock, and resolve
+            // {value, done} once the cancel promise settles (rejecting with the
+            // cancel error if it rejects). The lock release stays synchronous so
+            // getReader() works immediately after return().
+            let rv = JSValue::from(self.reader_val);
+            let mut cancel_promise = match JSReadableStreamDefaultReader::payload_of(&rv) {
+                Some(rp) => match rp.cancel(ctx, value) {
+                    Ok(p) => p,
+                    Err(_) => {
+                        let e = ctx.take_exception().to_value(ctx);
+                        self.release_lock();
+                        self.closed.set(true);
+                        return Promise::from_reject_value(ctx, e).map(Some);
+                    }
+                },
+                None => {
+                    self.release_lock();
+                    self.closed.set(true);
+                    return iterator_result_promise(ctx, value, true).map(Some);
+                }
+            };
+
+            self.release_lock();
+            self.closed.set(true);
+
+            let result = make_iterator_result(ctx, value, true)?;
+            let (mut output, _rr) = Promise::create(ctx)?;
+
+            // If the cancel settled synchronously, resolve the return() promise
+            // right away so a next() issued in the same tick (which resolves
+            // immediately on a completed iterator) settles after return()
+            // (WPT: "next() resolves after return()").
+            if cancel_promise.state() == zuqe::builtins::promise::PromiseState::Fulfilled {
+                output.resolve(ctx, result);
+                return Ok(Some(output));
+            }
+
+            let data = [JSValue::from(output), result];
+            let on_ok = ctx
+                .create_native_function_with_data(
+                    Callback::Func(stream_iter_return_cancel_ok),
+                    "returnCancelOk",
+                    0,
+                    0,
+                    data.into(),
+                )?
+                .into();
+            let on_err = ctx
+                .create_native_function_with_data(
+                    Callback::Func(stream_iter_return_cancel_err),
+                    "returnCancelErr",
+                    1,
+                    0,
+                    data.into(),
+                )?
+                .into();
+            cancel_promise.then(ctx, on_ok, on_err)?;
+
+            Ok(Some(output))
         }
 
         fn close(&self) {
@@ -713,6 +890,7 @@ fn create_stream_async_iterator(ctx: &mut ScopedContext, stream_val: &JSValue) -
         ctx,
         ReaderFetcher {
             reader_val: JSReadableStreamDefaultReader::try_from(reader_val).map_err(|_| -1i32)?,
+            prevent_cancel,
             closed: Cell::new(false),
             cached_promise: RefCell::new(None),
         },
@@ -720,6 +898,25 @@ fn create_stream_async_iterator(ctx: &mut ScopedContext, stream_val: &JSValue) -
     .map_err(|_| -1i32)?;
 
     Ok(iter.into())
+}
+
+// The async cancel initiated by return() settled: resolve the return() promise
+// with the prebuilt `{value, done: true}` result.
+fn stream_iter_return_cancel_ok(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let output = Promise::try_from(cc.data(0)).map_err(|_| -1)?;
+    let result = cc.data(1);
+    let mut p = output;
+    p.resolve(ctx, result);
+    Ok(JSValue::UNDEFINED)
+}
+
+// The async cancel initiated by return() rejected: reject the return() promise
+// with the cancel error.
+fn stream_iter_return_cancel_err(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let output = Promise::try_from(cc.data(0)).map_err(|_| -1)?;
+    let mut p = output;
+    p.reject(ctx, cc.arg(0));
+    Ok(JSValue::UNDEFINED)
 }
 
 impl JSReadableStream {

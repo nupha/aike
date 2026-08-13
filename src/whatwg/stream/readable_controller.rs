@@ -14,7 +14,8 @@ use std::{
 };
 
 use zuqe::{
-    JSResult, JSValue, ScopedContext,
+    CallContext, Callback, JSResult, JSValue, ScopedContext,
+    builtins::promise::Promise,
     gc_lite::{GcTrace, GcTraceCtx},
 };
 
@@ -34,11 +35,13 @@ pub(crate) enum ReadableControllerKind {
         started: Cell<bool>,
         pulling: Cell<bool>,
         pull_again: Cell<bool>,
-        /// Queue of in-flight read() resolvers awaiting data (each is [resolve,
-        /// reject]). Kept as a queue so concurrent read() calls each get their own
-        /// resolver instead of clobbering the previous one. Stored per-controller
-        /// (not globally) so concurrent/sequential streams do not steal chunks.
-        pending_read: Rc<RefCell<Vec<[JSValue; 2]>>>,
+        /// Queue of in-flight read() promises awaiting data. Kept as a queue so
+        /// concurrent read() calls each get their own promise instead of
+        /// clobbering the previous one. Settled directly (no thenable
+        /// assimilation), so an injected Object.prototype.then cannot intercept
+        /// read results. Stored per-controller (not globally) so
+        /// concurrent/sequential streams do not steal chunks.
+        pending_read: Rc<RefCell<Vec<Promise>>>,
     },
 
     /// Minimal byte controller (constructor + toStringTag only in this build).
@@ -110,9 +113,8 @@ impl ReadableControllerPayload {
         }
         match &self.kind {
             ReadableControllerKind::Default { pending_read, .. } => {
-                for rr in pending_read.borrow().iter() {
-                    rr[0].trace(gcx);
-                    rr[1].trace(gcx);
+                for p in pending_read.borrow().iter() {
+                    p.trace(gcx);
                 }
             }
             ReadableControllerKind::Byte { byob_request } => {
@@ -133,9 +135,9 @@ impl ReadableControllerPayload {
         self.underlying_source
     }
 
-    /// Pending read resolvers (read() callbacks awaiting a chunk). Byte streams
+    /// Pending read promises (read() calls awaiting a chunk). Byte streams
     /// have no pending read concept, so this is unreachable there.
-    pub(crate) fn pending_read(&self) -> &Rc<RefCell<Vec<[JSValue; 2]>>> {
+    pub(crate) fn pending_read(&self) -> &Rc<RefCell<Vec<Promise>>> {
         match &self.kind {
             ReadableControllerKind::Default { pending_read, .. } => pending_read,
             ReadableControllerKind::Byte { .. } => {
@@ -165,6 +167,14 @@ impl ReadableControllerPayload {
         self.close_requested.set(v);
     }
 
+    /// Whether `start()` has completed (the start promise fulfilled). Pull is
+    /// only allowed once started (spec `[[started]]`).
+    pub(crate) fn set_started(&self, v: bool) {
+        if let ReadableControllerKind::Default { started, .. } = &self.kind {
+            started.set(v);
+        }
+    }
+
     /// Queue of buffered chunks.
     pub(crate) fn queue(&self) -> &Rc<RefCell<Vec<QueueEntry>>> {
         &self.queue
@@ -190,15 +200,13 @@ impl ReadableControllerPayload {
             ReadableControllerKind::Default { pending_read, .. } => pending_read,
             ReadableControllerKind::Byte { .. } => return false,
         };
-        let rr = pending_read.borrow_mut().first().copied();
-        if let Some([resolve, _reject]) = rr {
+        let promise = pending_read.borrow_mut().first().copied();
+        if let Some(mut p) = promise {
             if let Ok(result) = make_iterator_result(ctx, value, done) {
                 pending_read.borrow_mut().remove(0);
-                if resolve.call(ctx, JSValue::UNDEFINED, &[result]).is_err() {
-                    let _e = ctx.take_exception();
-                    #[cfg(debug_assertions)]
-                    eprintln!("[swallow-exc] {}:{}: {:?}", file!(), line!(), _e);
-                }
+                // Settle directly so an injected Object.prototype.then cannot
+                // intercept the read result.
+                p.resolve(ctx, result);
                 true
             } else {
                 false
@@ -214,15 +222,10 @@ impl ReadableControllerPayload {
             ReadableControllerKind::Default { pending_read, .. } => pending_read,
             ReadableControllerKind::Byte { .. } => return,
         };
-        let rr = pending_read.borrow_mut().first().copied();
-        if let Some([_resolve, reject]) = rr {
+        let promise = pending_read.borrow_mut().first().copied();
+        if let Some(mut p) = promise {
             pending_read.borrow_mut().remove(0);
-            // fn returns (); a throwing resolver is abnormal, drop its exception.
-            if reject.call(ctx, JSValue::UNDEFINED, &[reason]).is_err() {
-                let _e = ctx.take_exception();
-                #[cfg(debug_assertions)]
-                eprintln!("[swallow-exc] {}:{}: {:?}", file!(), line!(), _e);
-            }
+            p.reject(ctx, reason);
         }
     }
 
@@ -233,36 +236,60 @@ impl ReadableControllerPayload {
             ReadableControllerKind::Byte { .. } => return,
         };
         let reads = pending_read.borrow_mut().drain(..).collect::<Vec<_>>();
-        for [_, reject] in reads {
-            if reject.call(ctx, JSValue::UNDEFINED, &[reason]).is_err() {
-                let _e = ctx.take_exception();
-                #[cfg(debug_assertions)]
-                eprintln!("[swallow-exc] {}:{}: {:?}", file!(), line!(), _e);
-            }
+        for mut p in reads {
+            p.reject(ctx, reason);
         }
+    }
+
+    /// ReadableStreamDefaultControllerShouldCallPull: pull only when the stream
+    /// can still produce data, the queue is empty, and the desired size is
+    /// positive. aike models "started" via `call_pull` itself, so it is not
+    /// checked here.
+    pub(crate) fn should_call_pull(&self, ctx: &mut ScopedContext) -> Result<bool, i32> {
+        if self.close_requested() {
+            return Ok(false);
+        }
+        let readable = match self.stream {
+            Some(rs) => match rs.payload() {
+                Some(sp) => sp.state == RsState::Readable,
+                None => false,
+            },
+            None => false,
+        };
+        if !readable {
+            return Ok(false);
+        }
+        if !self.queue().borrow().is_empty() {
+            return Ok(false);
+        }
+        Ok(self.desired_size(ctx)? > 0.0)
     }
 
     /// Ask the underlying source to pull one more chunk. Byte streams do not
     /// use pull-based filling yet, so this is a no-op there.
     pub(crate) fn call_pull(&self, ctx: &mut ScopedContext) -> Result<(), i32> {
-        let (pulling, started, pull_again, controller, pending_read) = match &self.kind {
+        let (pulling, started, pull_again, controller) = match &self.kind {
             ReadableControllerKind::Default {
                 pulling,
                 started,
                 pull_again,
                 controller,
-                pending_read,
-            } => (pulling, started, pull_again, controller, pending_read),
+                ..
+            } => (pulling, started, pull_again, controller),
             ReadableControllerKind::Byte { .. } => return Ok(()),
         };
 
+        // Spec: pull() never runs before start() completes. aike approximates
+        // this by treating `started` as set once pulling begins.
+        if !started.get() {
+            started.set(true);
+        }
         if pulling.get() {
             pull_again.set(true);
             return Ok(());
         }
 
         pulling.set(true);
-        started.set(true);
 
         let source = &self.underlying_source;
         if source.is_undefined() {
@@ -273,6 +300,9 @@ impl ReadableControllerPayload {
         let obj = match source.ensure_object(ctx) {
             Ok(o) => o,
             Err(_) => {
+                // Non-object source — no pull possible. Swallow the throw so no
+                // exception leaks out of this native call.
+                let _ = ctx.take_exception();
                 pulling.set(false);
                 return Ok(());
             }
@@ -280,7 +310,13 @@ impl ReadableControllerPayload {
 
         let pull_fn = match obj.get_property_str(ctx, "pull") {
             Ok(v) if v.is_callable() => v,
-            _ => {
+            Ok(_) => {
+                pulling.set(false);
+                return Ok(());
+            }
+            Err(_) => {
+                // pull getter threw — swallow it (this stream simply won't pull).
+                let _ = ctx.take_exception();
                 pulling.set(false);
                 return Ok(());
             }
@@ -311,16 +347,23 @@ impl ReadableControllerPayload {
 
         if pull_again.get() {
             pull_again.set(false);
-            ctx.queue_job(
-                move |cx| {
-                    let p = controller_val
-                        .payload()
-                        .ok_or_else(|| cx.throw_internal_error("invalid controller"))?;
-                    p.call_pull(cx)?;
-                    Ok(zuqe::JobState::Done)
-                },
-                (),
-            );
+            // Run the follow-up pull as a promise reaction (not a polling job),
+            // so it settles before later await continuations — a read that
+            // drains the last queued chunk must re-pull before the caller's next
+            // microtask observes the queue.
+            let (mut ready, _rr) = Promise::create(ctx)?;
+            let data = [JSValue::from(controller_val)].into();
+            let follow_up = ctx
+                .create_native_function_with_data(
+                    Callback::Func(controller_refill_pull),
+                    "refillPull",
+                    0,
+                    0,
+                    data,
+                )?
+                .into();
+            ready.resolve(ctx, JSValue::UNDEFINED);
+            ready.then(ctx, follow_up, follow_up)?;
         }
 
         Ok(())
@@ -340,6 +383,12 @@ impl ReadableControllerPayload {
                 if !resolved {
                     self.queue.borrow_mut().push(QueueEntry { chunk, size: 1 });
                     self.queue_total_size.set(self.queue_total_size.get() + 1);
+                } else {
+                    // A pending read consumed this chunk and the queue is still
+                    // below the high water mark — pull again to refill.
+                    if self.should_call_pull(ctx)? {
+                        self.call_pull(ctx)?;
+                    }
                 }
                 Ok(JSValue::UNDEFINED)
             }
@@ -460,6 +509,17 @@ impl ReadableControllerPayload {
             }
         }
     }
+}
+
+// Follow-up pull scheduled by `call_pull` when a concurrent pull was requested
+// while the source was already pulling (the `pullAgain` flag). Runs as a promise
+// reaction so a queue drained by a read is refilled before later await steps.
+fn controller_refill_pull(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let controller_val = cc.data(0);
+    let cp = JSReadableStreamDefaultController::payload_of(&controller_val)
+        .ok_or_else(|| ctx.throw_internal_error("invalid controller"))?;
+    cp.call_pull(ctx)?;
+    Ok(JSValue::UNDEFINED)
 }
 
 /// Fetch the shared `ReadableControllerPayload` from a controller `this` value,

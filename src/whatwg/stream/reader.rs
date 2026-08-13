@@ -21,7 +21,7 @@ use zuqe::{
 
 use crate::{USER_CLASS_DEFS, whatwg::stream::readable::JSReadableStream};
 
-use super::{QueueEntry, RsState, make_iterator_result};
+use super::{QueueEntry, RsState, iterator_result_promise};
 
 /// Unified reader for ReadableStreamDefaultReaderPayload, ReadableStreamBYOBReaderPayload
 pub(crate) struct ReaderPayload {
@@ -91,8 +91,7 @@ impl ReaderPayload {
                 return Promise::from_reject_value(ctx, stream_p.stored_error);
             }
             RsState::Closed => {
-                let result = make_iterator_result(ctx, JSValue::UNDEFINED, true)?;
-                return Promise::from_resolve_value(ctx, result);
+                return iterator_result_promise(ctx, JSValue::UNDEFINED, true);
             }
             RsState::Readable => {}
         }
@@ -103,56 +102,62 @@ impl ReaderPayload {
                 .ok_or_else(|| ctx.throw_internal_error("invalid controller"))?;
 
             if !cp.queue().borrow().is_empty() {
-                let mut q = cp.queue().borrow_mut();
-                let entry = q.remove(0);
-                let total = cp.queue_total_size();
-                cp.set_queue_total_size(total.saturating_sub(entry.size));
-
-                // BYOB: copy as much of the chunk as fits into the caller's view
-                // and push the remainder back so the next read continues where
-                // this one stopped. Done before the close transition so a
-                // partially consumed chunk keeps the stream readable.
-                let chunk = if let Some(view) = byob_view {
-                    let filled = byob_fill_view(ctx, view, entry.chunk, &mut q)?;
-                    if !q.is_empty() {
-                        cp.set_queue_total_size(cp.queue_total_size() + 1);
-                    }
-                    filled
-                } else {
-                    entry.chunk
-                };
-
-                // Per spec: after draining last item, if close_requested,
-                // transition stream to closed state.
-                if q.is_empty()
-                    && cp.close_requested()
-                    && let Some(sp) = stream.payload_mut()
+                let chunk;
                 {
-                    sp.state = RsState::Closed;
+                    let mut q = cp.queue().borrow_mut();
+                    let entry = q.remove(0);
+                    let total = cp.queue_total_size();
+                    cp.set_queue_total_size(total.saturating_sub(entry.size));
+
+                    // BYOB: copy as much of the chunk as fits into the caller's view
+                    // and push the remainder back so the next read continues where
+                    // this one stopped. Done before the close transition so a
+                    // partially consumed chunk keeps the stream readable.
+                    chunk = if let Some(view) = byob_view {
+                        let filled = byob_fill_view(ctx, view, entry.chunk, &mut q)?;
+                        if !q.is_empty() {
+                            cp.set_queue_total_size(cp.queue_total_size() + 1);
+                        }
+                        filled
+                    } else {
+                        entry.chunk
+                    };
+
+                    // Per spec: after draining last item, if close_requested,
+                    // transition stream to closed state.
+                    if q.is_empty()
+                        && cp.close_requested()
+                        && let Some(sp) = stream.payload_mut()
+                    {
+                        sp.state = RsState::Closed;
+                    }
                 }
 
-                let result = make_iterator_result(ctx, chunk, false)?;
-                return Promise::from_resolve_value(ctx, result);
+                // Refill: once the last queued chunk is consumed and the queue
+                // drops below the high water mark, ask the source for more.
+                if cp.should_call_pull(ctx)? {
+                    cp.call_pull(ctx)?;
+                }
+
+                return iterator_result_promise(ctx, chunk, false);
             }
 
             if cp.close_requested() {
-                let result = make_iterator_result(ctx, JSValue::UNDEFINED, true)?;
-                return Promise::from_resolve_value(ctx, result);
+                return iterator_result_promise(ctx, JSValue::UNDEFINED, true);
             }
 
             // No data in queue — register a pending read on this controller so a
             // later enqueue()/close()/error() can resolve it. Stored per-controller
             // (not globally) so concurrent/sequential streams don't steal chunks.
-            let (promise, rr) = Promise::create(ctx)?;
-            cp.pending_read().borrow_mut().push([rr[0], rr[1]]);
+            let (promise, _rr) = Promise::create(ctx)?;
+            cp.pending_read().borrow_mut().push(promise);
             cp.call_pull(ctx)?;
 
             return Ok(promise);
         }
 
         // No controller (e.g. detached) — nothing to read.
-        let result = make_iterator_result(ctx, JSValue::UNDEFINED, true)?;
-        Promise::from_resolve_value(ctx, result)
+        iterator_result_promise(ctx, JSValue::UNDEFINED, true)
     }
 
     /// Synchronously drain the stream's body into a byte buffer. Valid only
