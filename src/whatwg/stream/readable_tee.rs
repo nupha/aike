@@ -11,8 +11,9 @@ use std::{
 };
 
 use zuqe::{
-    Array, CallContext, Callback, JSResult, JSValue, JobState, ScopedContext,
+    Array, CallContext, Callback, JSResult, JSValue, ScopedContext,
     builtins::promise::Promise,
+    gc_lite::{GcTrace, GcTraceCtx},
 };
 
 use super::{
@@ -36,13 +37,39 @@ struct TeeShared {
     cancel1: Cell<bool>,
     cancel2: Cell<bool>,
     cancel_started: Cell<bool>,
-    cancel_reason: RefCell<Option<JSValue>>,
+    /// Per-branch cancel reasons (indexed by branch). The composite reason is
+    /// `[reason1, reason2]` in branch order (a single reason if both agree).
+    cancel_reason1: RefCell<Option<JSValue>>,
+    cancel_reason2: RefCell<Option<JSValue>>,
     cancel_promise: RefCell<Option<Promise>>,
 }
 
 thread_local! {
     static TEE_STREAMS: RefCell<HashMap<u32, Rc<TeeShared>>> = RefCell::new(HashMap::new());
     static NEXT_TEE_ID: Cell<u32> = const { Cell::new(1) };
+}
+
+/// GC-trace the shared tee state so the branch controllers/reader stay alive
+/// while a tee is active. `TEE_STREAMS` is a plain RefCell the GC does not
+/// scan, so without this the branch controllers are reclaimed mid-tee and the
+/// stored `GcRef`s become dangling (a `payload_of` class-id assertion panics).
+pub(crate) fn gc_trace_tee_streams(gcx: &mut GcTraceCtx) {
+    TEE_STREAMS.with_borrow(|map| {
+        for shared in map.values() {
+            shared.c1.as_object().trace(gcx);
+            shared.c2.as_object().trace(gcx);
+            shared.reader.as_object().trace(gcx);
+            if let Some(reason) = *shared.cancel_reason1.borrow() {
+                reason.trace(gcx);
+            }
+            if let Some(reason) = *shared.cancel_reason2.borrow() {
+                reason.trace(gcx);
+            }
+            if let Some(p) = *shared.cancel_promise.borrow() {
+                JSValue::from(p).trace(gcx);
+            }
+        }
+    });
 }
 
 impl JSReadableStreamDefaultReader {
@@ -80,7 +107,9 @@ impl JSReadableStreamDefaultReader {
 
         // Create two branch streams, each with its own default controller whose
         // underlying-source pull drives the shared tee pull.
-        let make_branch = |ctx: &mut ScopedContext, branch: u32| -> Result<
+        let make_branch = |ctx: &mut ScopedContext,
+                           branch: u32|
+         -> Result<
             (JSReadableStream, JSReadableStreamDefaultController),
             i32,
         > {
@@ -146,7 +175,8 @@ impl JSReadableStreamDefaultReader {
             cancel1: Cell::new(false),
             cancel2: Cell::new(false),
             cancel_started: Cell::new(false),
-            cancel_reason: RefCell::new(None),
+            cancel_reason1: RefCell::new(None),
+            cancel_reason2: RefCell::new(None),
             cancel_promise: RefCell::new(Some(cancel_promise)),
         });
         TEE_STREAMS.with(|map| map.borrow_mut().insert(tee_id, shared));
@@ -171,24 +201,25 @@ fn tee_cancel(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     if branch == 0 {
         shared.cancel1.set(true);
+        *shared.cancel_reason1.borrow_mut() = Some(reason);
     } else {
         shared.cancel2.set(true);
+        *shared.cancel_reason2.borrow_mut() = Some(reason);
     }
-
-    // Composite reason: the shared reason if both cancels agree, else an
-    // AggregateError (spec: name "Multiple errors").
-    let mut cr = shared.cancel_reason.borrow_mut();
-    let composite = match &*cr {
-        None => reason,
-        Some(prev) if *prev == reason => reason,
-        Some(prev) => tee_aggregate_error(ctx, *prev, reason)?,
-    };
-    *cr = Some(composite);
-    drop(cr);
 
     if shared.cancel1.get() && shared.cancel2.get() && !shared.cancel_started.get() {
         shared.cancel_started.set(true);
-        let composite = shared.cancel_reason.borrow().unwrap();
+        let r1 = shared.cancel_reason1.borrow().unwrap();
+        let r2 = shared.cancel_reason2.borrow().unwrap();
+        // Composite reason: the single reason if both branches agree
+        // (SameValue), else [reason1, reason2] in branch order (spec: the
+        // composite reason is an array, in this case of the two cancel reasons).
+        let composite = if r1 == r2 {
+            r1
+        } else {
+            let arr = Array::from_values(ctx, vec![r1, r2])?;
+            JSValue::from(arr)
+        };
         // Cancel the real source (via the tee reader); mirror its settlement
         // into the shared cancel promise both branches already returned.
         let reader = shared.reader;
@@ -237,26 +268,6 @@ fn tee_cancel_settle(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         p.resolve(ctx, JSValue::UNDEFINED);
     }
     Ok(JSValue::UNDEFINED)
-}
-
-// Build an AggregateError composite reason, falling back to a plain error if
-// the AggregateError constructor is unavailable.
-fn tee_aggregate_error(
-    ctx: &mut ScopedContext,
-    a: JSValue,
-    b: JSValue,
-) -> Result<JSValue, i32> {
-    if let Ok(agg) = ctx.global_obj().get_property_str(ctx, "AggregateError") {
-        if agg.is_callable() {
-            let arr = Array::from_values(ctx, vec![a, b])?;
-            let msg = ctx.create_string_from_utf8(b"Multiple errors".to_vec())?;
-            if let Ok(res) = agg.call_ctor(ctx, &[arr.into(), JSValue::make_string(msg)]) {
-                return Ok(res);
-            }
-        }
-    }
-    let msg = ctx.create_string_from_utf8(b"Multiple errors".to_vec())?;
-    Ok(JSValue::make_string(msg))
 }
 
 // ReadableStream.prototype.tee()
@@ -329,28 +340,50 @@ fn tee_pull_fulfilled(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         }
     }
 
-    // If any branch still has an outstanding read waiting for data, keep pulling
-    // (concurrent reads on a branch produce multiple pending reads; one source
-    // chunk only satisfies one of them).
+    // If a branch still wants data (a pending read, or an empty queue below the
+    // high water mark per `ShouldCallPull`), keep pulling the source — this is
+    // what surfaces a source error after the buffered chunks are consumed.
     let need_more = [shared.c1, shared.c2].iter().any(|&c| {
-        !tee_branch_is_final(ctx, c.into())
-            && JSReadableStreamDefaultController::payload_of(&c.into())
-                .is_some_and(|cp| !cp.pending_read().borrow().is_empty())
+        if tee_branch_is_final(ctx, c.into()) {
+            return false;
+        }
+        match JSReadableStreamDefaultController::payload_of(&c.into()) {
+            Some(cp) if !cp.pending_read().borrow().is_empty() => true,
+            Some(cp) => cp.should_call_pull(ctx).unwrap_or(false),
+            None => false,
+        }
     });
 
     if need_more {
         let id = tee_id;
-        ctx.queue_job(
-            move |cx| {
-                if let Some(shared) = TEE_STREAMS.with(|m| m.borrow().get(&id).cloned()) {
-                    tee_do_pull(cx, id, &shared)?;
-                }
-                Ok(JobState::Done)
-            },
-            (),
-        );
+        // Follow up as a promise reaction (not a polling job, which runs after
+        // later await continuations): the source error must surface and error
+        // the branches *before* a branch can drain a buffered chunk.
+        let (mut ready, _rr) = Promise::create(ctx)?;
+        let data = [JSValue::from(id)].into();
+        let follow = ctx
+            .create_native_function_with_data(
+                Callback::Func(tee_pull_continue),
+                "teePullMore",
+                0,
+                0,
+                data,
+            )?
+            .into();
+        ready.resolve(ctx, JSValue::UNDEFINED);
+        ready.then(ctx, follow, follow)?;
     }
 
+    Ok(JSValue::UNDEFINED)
+}
+
+// Continue the shared tee pull (scheduled as a promise reaction after a chunk
+// was fanned out, when a branch still wants data).
+fn tee_pull_continue(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let tee_id = cc.data(0).to_number(ctx)?.to_u32();
+    if let Some(shared) = TEE_STREAMS.with(|m| m.borrow().get(&tee_id).cloned()) {
+        tee_do_pull(ctx, tee_id, &shared)?;
+    }
     Ok(JSValue::UNDEFINED)
 }
 

@@ -122,9 +122,21 @@ impl ReadableStreamPayload {
         ctx: &mut ScopedContext,
         reason: JSValue,
     ) -> Result<Promise, i32> {
-        // Spec: cancel() sets disturbed, so the stream is no longer usable as
-        // a body even though no read() ever happened.
+        // Spec `ReadableStreamCancel`:
+        //   - sets disturbed (stream is no longer usable as a body);
+        //   - a closed stream resolves immediately;
+        //   - an errored stream rejects with the stored error (no cancelAlgorithm);
+        //   - a readable stream closes and invokes the source's cancelAlgorithm.
         self.disturbed = true;
+        match self.state {
+            RsState::Closed => {
+                return Promise::from_resolve_value(ctx, JSValue::UNDEFINED);
+            }
+            RsState::Errored => {
+                return Promise::from_reject_value(ctx, self.stored_error);
+            }
+            RsState::Readable => {}
+        }
 
         // Spec: cancel() closes the stream, not errors it — reader.closed must
         // resolve, and a later getReader().closed resolves too. Only a stream
@@ -291,9 +303,9 @@ fn js_readable_stream_constructor(ctx: &mut ScopedContext, cc: CallContext) -> J
             if s == "bytes" {
                 true
             } else {
-                return Err(ctx.throw_type_error(
-                    "ReadableStream type must be undefined or \"bytes\"",
-                ));
+                return Err(
+                    ctx.throw_type_error("ReadableStream type must be undefined or \"bytes\"")
+                );
             }
         }
     };

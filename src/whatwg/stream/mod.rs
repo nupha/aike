@@ -67,6 +67,7 @@ pub(crate) fn gc_trace_stream(gcx: &mut GcTraceCtx) {
             c.as_object().trace(gcx);
         }
     });
+    readable_tee::gc_trace_tee_streams(gcx);
 }
 
 // ============================================================================
