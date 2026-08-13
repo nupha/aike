@@ -1,7 +1,7 @@
 {
     "compilerOptions": {
         "lib": [
-            "ES2022",
+            "ES2024",
         ],
         "module": "ES2022",
     },

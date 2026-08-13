@@ -500,14 +500,20 @@ fn js_readable_stream_from_static(ctx: &mut ScopedContext, cc: CallContext) -> J
         return Err(ctx.throw_type_error("ReadableStream.from: iterator has no callable next()"));
     }
 
-    // Underlying source whose `pull` drives the iterator on demand.
+    // Underlying source whose `pull` drives the iterator on demand. The
+    // in-flight counter guards against re-entrant pulls calling next() again
+    // before the previous next() has settled (e.g. a reader.read() issued from
+    // inside next()).
+    let mut in_flight = ctx.create_base_object()?;
+    in_flight.define_property_value_str(ctx, "n", JSValue::ZERO, zuqe::JS_PROP_C_W_E)?;
+    let in_flight_val = JSValue::from(in_flight);
     let pull_fn = ctx
         .create_native_function_with_data(
             Callback::Func(from_pump_step),
             "fromPull",
             1,
             0,
-            [JSValue::from(iterator), next_fn].into(),
+            [JSValue::from(iterator), next_fn, in_flight_val].into(),
         )?
         .into();
     let mut source_obj = ctx.create_base_object()?;
@@ -528,17 +534,113 @@ fn js_readable_stream_from_static(ctx: &mut ScopedContext, cc: CallContext) -> J
         .ok_or_else(|| ctx.throw_internal_error("invalid controller"))?
         .set_controller(Some(handle));
     // No user `start()` runs for ReadableStream.from — treat it as started so
-    // the pull-driven iterator feeding begins, and register the pull callback.
+    // the pull-driven iterator feeding begins, and register the pull/cancel
+    // callbacks (cancel drives the iterator's return()).
     controller
         .payload()
         .ok_or_else(|| ctx.throw_internal_error("invalid controller"))?
         .set_started(true);
+    let iterator_val = JSValue::from(iterator);
+    let return_fn = iterator_val.get_property_str(ctx, "return")?;
+    let cancel_fn = ctx
+        .create_native_function_with_data(
+            Callback::Func(from_cancel),
+            "fromCancel",
+            1,
+            0,
+            [iterator_val, return_fn].into(),
+        )?
+        .into();
     controller
         .payload_mut()
         .ok_or_else(|| ctx.throw_internal_error("invalid controller"))?
-        .set_algorithms(pull_fn, JSValue::UNDEFINED, JSValue::UNDEFINED);
+        .set_algorithms(pull_fn, cancel_fn, JSValue::UNDEFINED);
     stream.payload_mut().unwrap().controller = Some(controller);
     Ok(JSValue::from(stream))
+}
+
+// Controller `cancel` entry (spec `ReadableStreamFromIterable` cancelAlgorithm):
+// call the iterator's `return(reason)`, awaiting its result. A missing return()
+// resolves; a non-callable return(), a thrown/rejected return(), or a return()
+// fulfilling with a non-object rejects the cancel promise.
+// `data`: [0] = iterator, [1] = iterator.return (or undefined).
+fn from_cancel(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let iterator = cc.data(0);
+    let return_fn = cc.data(1);
+    let reason = cc.arg(0);
+
+    if return_fn.is_undefined() {
+        return Promise::from_resolve_value(ctx, JSValue::UNDEFINED).map(JSValue::from);
+    }
+    if !return_fn.is_callable() {
+        let e = ctx
+            .create_error_object(ErrorKind::Type, "return is not a function", false)
+            .ok_or(-1)?;
+        return Promise::from_reject_value(ctx, e.into()).map(JSValue::from);
+    }
+
+    let return_res = return_fn.call(ctx, iterator, &[reason]);
+    let mut return_promise = match return_res {
+        Ok(v) => match Promise::try_from(v) {
+            Ok(p) => p,
+            Err(_) => {
+                let (mut p, _rr) = Promise::create(ctx)?;
+                p.resolve(ctx, v);
+                p
+            }
+        },
+        Err(_) => {
+            // return() threw synchronously — reject with the thrown value.
+            let e = ctx.take_exception().to_value(ctx);
+            return Promise::from_reject_value(ctx, e).map(JSValue::from);
+        }
+    };
+
+    let (output, _rr) = Promise::create(ctx)?;
+    let ok = ctx
+        .create_native_function_with_data(
+            Callback::Func(from_cancel_ok),
+            "fromCancelOk",
+            1,
+            0,
+            [JSValue::from(output)].into(),
+        )?
+        .into();
+    let err = ctx
+        .create_native_function_with_data(
+            Callback::Func(from_cancel_err),
+            "fromCancelErr",
+            1,
+            0,
+            [JSValue::from(output)].into(),
+        )?
+        .into();
+    return_promise.then(ctx, ok, err)?;
+    Ok(output.into())
+}
+
+// return() fulfilled: a non-object result rejects with a TypeError, otherwise
+// the cancel resolves.
+fn from_cancel_ok(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let output = Promise::try_from(cc.data(0)).map_err(|_| -1)?;
+    let mut p = output;
+    if cc.arg(0).as_object().is_none() {
+        let e = ctx
+            .create_error_object(ErrorKind::Type, "return() must fulfill with an object", false)
+            .ok_or(-1)?;
+        p.reject(ctx, e.into());
+    } else {
+        p.resolve(ctx, JSValue::UNDEFINED);
+    }
+    Ok(JSValue::UNDEFINED)
+}
+
+// return() rejected: propagate the rejection to the cancel promise.
+fn from_cancel_err(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let output = Promise::try_from(cc.data(0)).map_err(|_| -1)?;
+    let mut p = output;
+    p.reject(ctx, cc.arg(0));
+    Ok(JSValue::UNDEFINED)
 }
 
 // Controller `pull` entry: fetch at most one value from the iterator and enqueue
@@ -547,8 +649,24 @@ fn js_readable_stream_from_static(ctx: &mut ScopedContext, cc: CallContext) -> J
 fn from_pump_step(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let iterator = Object::try_from(cc.data(0)).map_err(|_| -1)?;
     let next_fn = cc.data(1);
+    let mut in_flight = cc.data(2);
     let controller = cc.arg(0);
-    from_pull_next(ctx, iterator, next_fn, controller)
+    // Only fetch when a read is actually waiting, and never while a previous
+    // next() is still in flight. Without these guards the controller's
+    // post-enqueue refill (or a re-entrant read from inside next()) would call
+    // next() repeatedly even though no consumer asked for more data.
+    let has_pending = JSReadableStreamDefaultController::payload_of(&controller)
+        .map(|cp| !cp.pending_read().borrow().is_empty())
+        .unwrap_or(false);
+    if !has_pending {
+        return Ok(JSValue::UNDEFINED);
+    }
+    let in_fly = in_flight.get_property_str(ctx, "n")?.to_number(ctx)?.to_f64() as i32;
+    if in_fly > 0 {
+        return Ok(JSValue::UNDEFINED);
+    }
+    in_flight.set_property_str(ctx, "n", JSValue::from(1))?;
+    from_pull_next(ctx, iterator, next_fn, in_flight, controller)
 }
 
 // Call iterator.next(), await the result, and branch into
@@ -557,6 +675,7 @@ fn from_pull_next(
     ctx: &mut ScopedContext,
     iterator: Object,
     next_fn: JSValue,
+    in_flight: JSValue,
     controller: JSValue,
 ) -> JSResult {
     let next_promise = next_fn.call(ctx, JSValue::from(iterator), &[])?;
@@ -577,7 +696,7 @@ fn from_pull_next(
             "fromPump",
             1,
             0,
-            [JSValue::from(iterator), next_fn, controller].into(),
+            [JSValue::from(iterator), next_fn, controller, in_flight].into(),
         )?
         .into();
     let fail = ctx
@@ -586,7 +705,7 @@ fn from_pull_next(
             "fromPumpErr",
             1,
             0,
-            [JSValue::from(iterator), next_fn, controller].into(),
+            [JSValue::from(iterator), next_fn, controller, in_flight].into(),
         )?
         .into();
     promise.then(ctx, step, fail)?;
@@ -599,7 +718,9 @@ fn from_pump_fulfilled(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let _iterator = Object::try_from(cc.data(0)).map_err(|_| -1)?;
     let _next_fn = cc.data(1);
     let controller = cc.data(2);
+    let mut in_flight = cc.data(3);
     let result = cc.arg(0);
+    in_flight.set_property_str(ctx, "n", JSValue::ZERO)?;
     // Spec: iterator.next() must fulfill with an iterator result object; a
     // non-object (e.g. a bare number) errors the stream with a TypeError.
     if result.as_object().is_none() {
@@ -630,22 +751,6 @@ fn from_pump_fulfilled(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         let enqueue_fn = controller.get_property_str(ctx, "enqueue")?;
         enqueue_fn.call(ctx, controller, &[value])?;
     }
-    // Pull the next value only if a read is still waiting (avoid over-pulling).
-    let more = JSReadableStreamDefaultController::payload_of(&controller)
-        .map(|cp| !cp.pending_read().borrow().is_empty())
-        .unwrap_or(false);
-    if more {
-        let ctrl = controller;
-        ctx.queue_job(
-            move |cx| {
-                let p = JSReadableStreamDefaultController::payload_of(&ctrl)
-                    .ok_or_else(|| cx.throw_internal_error("invalid controller"))?;
-                p.call_pull(cx)?;
-                Ok(JobState::Done)
-            },
-            (),
-        );
-    }
     Ok(JSValue::UNDEFINED)
 }
 
@@ -653,6 +758,8 @@ fn from_pump_fulfilled(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 // Guard so error() is not called on an already-terminated controller.
 fn from_pump_rejected(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let controller = cc.data(2);
+    let mut in_flight = cc.data(3);
+    in_flight.set_property_str(ctx, "n", JSValue::ZERO)?;
     // Skip error() if the controller already errored; otherwise error() errors
     // propagate via `?` (the promise-reaction job takes and rejects with it).
     if !super::readable_tee::tee_branch_is_final(ctx, controller) {
