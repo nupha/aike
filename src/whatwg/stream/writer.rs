@@ -13,12 +13,7 @@ use zuqe::{
     gc_lite::{GcTrace, GcTraceCtx},
 };
 
-use crate::{
-    USER_CLASS_DEFS,
-    whatwg::stream::{
-        writable::JSWritableStream, writable_controller::JSWritableStreamDefaultController,
-    },
-};
+use crate::{USER_CLASS_DEFS, whatwg::stream::writable::JSWritableStream};
 
 use super::RsState;
 
@@ -73,27 +68,15 @@ impl WriterPayload {
         Promise::from_resolve_value(ctx, JSValue::UNDEFINED)
     }
 
-    /// Reject `writer.ready` per the Streams spec. The pending promise (if
-    /// still pending) is rejected in place; an already-settled `ready` is
-    /// replaced by a fresh rejected promise.
+    /// Reject `writer.ready` per the Streams spec. `ready` is a single
+    /// persistent promise that is settled (rejected) in place; it is never
+    /// replaced. If the stream was already settled earlier, the rejection is a
+    /// no-op (already-settled promises ignore further settle calls — see
+    /// `Promise::settle`), keeping the object identity stable for callers that
+    /// captured `writer.ready` before the abort.
     pub(crate) fn reject_ready(&mut self, ctx: &mut ScopedContext, reason: JSValue) {
-        if self
-            .ready_promise
-            .as_ref()
-            .map(|p| p.state() == zuqe::builtins::promise::PromiseState::Pending)
-            .unwrap_or(false)
-        {
-            // Reject the pending `ready` in place (same reference observed by
-            // readers that captured it before the abort).
-            if let Some(p) = self.ready_promise.as_mut() {
-                p.reject(ctx, reason);
-            }
-        } else {
-            // Already settled (or absent): spec says reset to a *new* rejected
-            // promise so that a later read of `writer.ready` observes rejection.
-            if let Ok(p) = Promise::from_reject_value(ctx, reason) {
-                self.ready_promise = Some(p);
-            }
+        if let Some(p) = self.ready_promise.as_mut() {
+            p.reject(ctx, reason);
         }
     }
 
@@ -231,9 +214,10 @@ fn js_writer_write(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     let wp = JSWritableStreamDefaultWriter::payload_mut_of(&mut this)
         .ok_or_else(|| ctx.throw_type_error("not a WritableStreamDefaultWriter"))?;
-    let stream_val = wp
-        .stream
-        .ok_or_else(|| ctx.throw_type_error("writer released"))?;
+    let mut stream_val = JSValue::from(
+        wp.stream
+            .ok_or_else(|| ctx.throw_type_error("writer released"))?,
+    );
 
     // The promise returned by `write()`, kept on the payload so an abort/error
     // can reject any outstanding (in-flight) write.
@@ -261,154 +245,60 @@ fn js_writer_write(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             _ => {}
         }
 
-        if let Some(controller) = sp.controller {
-            let cp = controller
-                .payload()
-                .ok_or_else(|| ctx.throw_internal_error("invalid controller"))?;
+        // TransformStream path: use transformer.transform(chunk, transformController)
+        if let Some(controller) = sp.controller
+            && let Some(cp) = controller.payload()
+            && let Some(tc) = cp.transform_controller
+            && let Some(tcp) = tc.payload()
+            && let Some(obj) = tcp.transformer.as_object()
+        {
+            let has_transform = obj
+                .get_property_str(ctx, "transform")
+                .map(|v| v.is_callable())
+                .unwrap_or(false);
 
-            // TransformStream path: use transformer.transform(chunk, transformController)
-            if let Some(tc) = cp.transform_controller
-                && let Some(tcp) = tc.payload()
-                && let Some(obj) = tcp.transformer.as_object()
-            {
-                // Default transform: chunk → readable (pass-through) if no transform fn
-                let has_transform = obj
-                    .get_property_str(ctx, "transform")
-                    .map(|v| v.is_callable())
-                    .unwrap_or(false);
-
-                let mut finish = |ctx: &mut ScopedContext, v: JSValue| -> JSResult {
-                    if v.is_object() {
-                        // Chain the transform result onto the write promise.
-                        let then_fn = v.get_property_str(ctx, "then")?;
-                        then_fn.call(ctx, v, &[write_funcs[0], write_funcs[1]])?;
-                    } else {
-                        write_funcs[0].call(ctx, JSValue::UNDEFINED, &[JSValue::UNDEFINED])?;
-                    }
-                    Ok(JSValue::from(write_p))
-                };
-
-                if has_transform {
-                    let transform_fn = obj.get_property_str(ctx, "transform").unwrap();
-                    let result =
-                        transform_fn.call(ctx, tcp.transformer, &[chunk, JSValue::from(tc)])?;
-                    return finish(ctx, result);
-                } else {
-                    // No user-defined transform → pass through: enqueue chunk directly
-                    let enqueue_fn =
-                        JSValue::from(tcp.readable_controller).get_property_str(ctx, "enqueue")?;
-                    enqueue_fn.call(ctx, JSValue::from(tcp.readable_controller), &[chunk])?;
-                    write_funcs[0].call(ctx, JSValue::UNDEFINED, &[JSValue::UNDEFINED])?;
-                    return Ok(JSValue::from(write_p));
-                }
-            }
-
-            // Normal writable path. Per the Streams spec, `write()` puts
-            // `writer.ready` into a pending state for the duration of the
-            // underlying sink write, so that callers observe backpressure. The
-            // actual sink `write()` call is deferred to a microtask: if the
-            // stream is aborted/errored before that microtask runs (e.g. a
-            // synchronous `abort()` right after `write()`), the write is
-            // discarded and the sink's `write()` is never invoked.
-            let (ready, ready_funcs) = Promise::create(ctx)?;
-            wp.ready_promise = Some(ready);
-
-            // Capture what the deferred runner needs. The runner re-borrows the
-            // controller to re-check the stream state at call time.
-            let sink_val = JSValue::from(cp.underlying_sink);
-            let runner = ctx.create_native_function_with_data(
-                Callback::Func(write_runner),
-                "writeRunner",
-                0,
-                0,
-                [
-                    chunk,
-                    controller.into(),
-                    sink_val,
-                    write_funcs[0],
-                    write_funcs[1],
-                    ready_funcs[0],
-                    ready_funcs[1],
-                ]
-                .into(),
-            )?;
-
-            // Schedule the sink write on a microtask (Promise.resolve().then).
-            let resolved = Promise::from_resolve_value(ctx, JSValue::UNDEFINED)?;
-            let then_fn = JSValue::from(resolved).get_property_str(ctx, "then")?;
-            then_fn.call(ctx, JSValue::from(resolved), &[runner.into()])?;
-            return Ok(JSValue::from(write_p));
-        }
-    }
-
-    write_funcs[0].call(ctx, JSValue::UNDEFINED, &[JSValue::UNDEFINED])?;
-    Ok(JSValue::from(write_p))
-}
-
-/// Deferred sink `write()` runner. Re-checks the stream state before invoking
-/// the sink: if the stream was aborted/errored in the interim (a synchronous
-/// `abort()` after `write()`), the write is discarded. Otherwise the sink
-/// `write()` result is chained onto both `writer.write`'s promise and `ready`.
-fn write_runner(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let chunk = cc.data(0);
-    let controller_val = cc.data(1);
-    let sink_val = cc.data(2);
-    let write_resolve = cc.data(3);
-    let write_reject = cc.data(4);
-    let ready_resolve = cc.data(5);
-    let ready_reject = cc.data(6);
-
-    let p = JSWritableStreamDefaultController::payload_of(&controller_val);
-    let Some(cp) = p else {
-        // Controller gone: reject both promises.
-        write_reject.call(ctx, JSValue::UNDEFINED, &[JSValue::UNDEFINED])?;
-        ready_reject.call(ctx, JSValue::UNDEFINED, &[JSValue::UNDEFINED])?;
-        return Ok(JSValue::UNDEFINED);
-    };
-    let Some(stream) = cp.stream else {
-        write_reject.call(ctx, JSValue::UNDEFINED, &[JSValue::UNDEFINED])?;
-        ready_reject.call(ctx, JSValue::UNDEFINED, &[JSValue::UNDEFINED])?;
-        return Ok(JSValue::UNDEFINED);
-    };
-
-    // If the stream left the writable state, the write is discarded. The
-    // writer's write/ready promises were already rejected by abort/error.
-    if let Some(sp) = stream.payload() {
-        if sp.state != RsState::Readable {
-            return Ok(JSValue::UNDEFINED);
-        }
-    } else {
-        return Ok(JSValue::UNDEFINED);
-    }
-
-    if let Some(sink) = sink_val.as_object() {
-        match sink.invoke_str_callable(ctx, "write", &[chunk, controller_val])? {
-            Some(Ok(v)) => {
+            let finish = |ctx: &mut ScopedContext, v: JSValue| -> JSResult {
                 if v.is_object() {
                     let then_fn = v.get_property_str(ctx, "then")?;
-                    then_fn.call(ctx, v, &[write_resolve, write_reject])?;
-                    let then_fn2 = v.get_property_str(ctx, "then")?;
-                    then_fn2.call(ctx, v, &[ready_resolve, ready_reject])?;
+                    then_fn.call(ctx, v, &[write_funcs[0], write_funcs[1]])?;
                 } else {
-                    write_resolve.call(ctx, JSValue::UNDEFINED, &[JSValue::UNDEFINED])?;
-                    ready_resolve.call(ctx, JSValue::UNDEFINED, &[JSValue::UNDEFINED])?;
+                    write_funcs[0].call(ctx, JSValue::UNDEFINED, &[JSValue::UNDEFINED])?;
                 }
-            }
-            Some(Err(_)) => {
-                let e = ctx.take_exception().to_value(ctx);
-                write_reject.call(ctx, JSValue::UNDEFINED, &[e])?;
-                ready_reject.call(ctx, JSValue::UNDEFINED, &[e])?;
-            }
-            None => {
-                write_resolve.call(ctx, JSValue::UNDEFINED, &[JSValue::UNDEFINED])?;
-                ready_resolve.call(ctx, JSValue::UNDEFINED, &[JSValue::UNDEFINED])?;
+                Ok(JSValue::from(write_p))
+            };
+
+            if has_transform {
+                let transform_fn = obj.get_property_str(ctx, "transform").unwrap();
+                let result =
+                    transform_fn.call(ctx, tcp.transformer, &[chunk, JSValue::from(tc)])?;
+                return finish(ctx, result);
+            } else {
+                // No user-defined transform → pass through: enqueue chunk directly
+                let enqueue_fn =
+                    JSValue::from(tcp.readable_controller).get_property_str(ctx, "enqueue")?;
+                enqueue_fn.call(ctx, JSValue::from(tcp.readable_controller), &[chunk])?;
+                write_funcs[0].call(ctx, JSValue::UNDEFINED, &[JSValue::UNDEFINED])?;
+                return Ok(JSValue::from(write_p));
             }
         }
-    } else {
-        write_resolve.call(ctx, JSValue::UNDEFINED, &[JSValue::UNDEFINED])?;
-        ready_resolve.call(ctx, JSValue::UNDEFINED, &[JSValue::UNDEFINED])?;
     }
-    Ok(JSValue::UNDEFINED)
+
+    // Normal writable path. Enqueue the chunk + its `write()` promise and
+    // advance the queue. Per spec, the sink `write()` is only invoked once
+    // the stream has `started` (see `WritableStreamPayload::advance_queue`).
+    // A `write()` issued before `start` is queued and runs after start;
+    // `abort`/`error` before start rejects the queued write without calling
+    // the sink. A `write()` issued while a previous write is in flight is
+    // also queued and runs after the in-flight one settles.
+    if let Some(sp) = JSWritableStream::payload_mut_of(&mut stream_val) {
+        sp.write_queue.push(chunk);
+        sp.write_requests.push(write_p);
+        sp.advance_queue(ctx)?;
+    }
+
+    // `advance_queue` may have consumed the promise (turned it into the
+    // in-flight write). `write_p` (Copy) is the same handle, so return it.
+    Ok(JSValue::from(write_p))
 }
 
 fn js_writer_close(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -485,13 +375,6 @@ fn js_writer_close(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                     rsp.state = RsState::Closed;
                 }
             }
-        } else if let Some(sink) = cp.underlying_sink.as_object()
-            && matches!(
-                sink.invoke_str_callable(ctx, "close", &[]),
-                Ok(Some(Err(_))) | Err(_)
-            )
-        {
-            close_err = Some(ctx.take_exception().to_value(ctx));
         }
 
         if let Some(e) = close_err {
@@ -525,7 +408,14 @@ fn js_writer_close(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             return Ok(JSValue::from(fp));
         }
 
-        sp.state = RsState::Closed;
+        // Plain WritableStream: request a deferred close. The sink's `close()` is
+        // only invoked once all queued/in-flight writes have drained (spec
+        // WritableStreamClose); `try_close` performs it now if already drained.
+        let (close_p, _close_funcs) = Promise::create(ctx)?;
+        sp.close_requested = true;
+        sp.close_promise = Some(close_p);
+        sp.try_close(ctx)?;
+        return Ok(JSValue::from(close_p));
     }
 
     Promise::from_resolve_value(ctx, JSValue::UNDEFINED).map(JSValue::from)
@@ -605,25 +495,42 @@ fn js_writer_abort(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     // Per spec, `writer.abort()` always fulfills with `undefined`, regardless
     // of what the underlying sink's `abort()` returns.
     let sp = stream.payload_mut().unwrap();
-    let sink_abort = sp.abort(ctx, reason)?;
-    let (abort_p, abort_funcs) = Promise::create(ctx)?;
-    p.abort_promise = Some(abort_p);
-    let then_fn = JSValue::from(sink_abort).get_property_str(ctx, "then")?;
+    let mut sink_abort = sp.abort(ctx, reason)?;
+    // Per spec, `writer.abort()` always *fulfills* with `undefined`, regardless
+    // of what the underlying sink's `abort()` returns, and *rejects* with the
+    // sink's error if the sink's `abort()` throws. We chain onto `sink_abort`
+    // via `then`, which yields a fresh wrapper promise `W`. The reaction job
+    // (job.rs:128) invokes the handler with ONLY the value/reason and uses the
+    // handler's *return value* to settle `W` (throwing rejects). So `ok_fn`
+    // returns `undefined` (fulfills `W` with undefined) and `err_fn` throws the
+    // sink's error (rejects `W` with it).
     let ok_fn = ctx
         .create_native_function_with_data(
-            Callback::Func(|ctx, cc| {
-                // Always fulfill with undefined. `.then` passes (value, resolve, reject).
-                let resolve = cc.arg(1);
-                resolve.call(ctx, JSValue::UNDEFINED, &[JSValue::UNDEFINED])?;
-                Ok(JSValue::UNDEFINED)
-            }),
-            "abortThen",
+            Callback::Func(|_ctx, _cc| Ok(JSValue::UNDEFINED)),
+            "abortThenOk",
             0,
             0,
             [].into(),
         )?
         .into();
-    then_fn.call(ctx, JSValue::from(sink_abort), &[ok_fn, abort_funcs[1]])?;
+    let err_fn = ctx
+        .create_native_function_with_data(
+            Callback::Func(|ctx, cc| {
+                // fail: return a rejected promise with the sink's error, so the
+                // wrapper adopts the rejection (job.rs uses the handler's return
+                // value to settle `W`).
+                let p = Promise::from_reject_value(ctx, cc.arg(0))?;
+                Ok(JSValue::from(p))
+            }),
+            "abortThenErr",
+            0,
+            0,
+            [].into(),
+        )?
+        .into();
+    let abort_p_obj = sink_abort.then(ctx, ok_fn, err_fn)?;
+    let abort_p = Promise::try_from(abort_p_obj).map_err(|_| -1)?;
+    p.abort_promise = Some(abort_p);
     Ok(JSValue::from(abort_p))
 }
 
