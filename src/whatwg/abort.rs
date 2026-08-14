@@ -515,6 +515,28 @@ fn propagate_abort(ctx: &mut ScopedContext, inner: &Rc<RefCell<SignalInner>>, re
     }
 }
 
+/// Mark a (non-aborted) `AbortSignal` value as aborted with `reason`:
+/// set `aborted`/`reason`, notify waiters, and fire `abort` event listeners.
+/// Used by `WritableStream`/`WritableStreamDefaultWriter` `abort()` to
+/// synchronously signal the controller's `signal` per the Streams spec.
+pub(crate) fn abort_signal(
+    ctx: &mut ScopedContext,
+    signal_val: JSValue,
+    reason: JSValue,
+) -> Result<(), i32> {
+    if let Some(payload) = JSAbortSignal::payload_of(&signal_val) {
+        let inner = payload.inner.clone();
+        {
+            let mut gi = inner.borrow_mut();
+            gi.aborted = true;
+            gi.reason = reason;
+            gi.notify.notify_waiters();
+        }
+        fire_abort_events(ctx, &inner);
+    }
+    Ok(())
+}
+
 /// Create a fresh, non-aborted `AbortSignal` value. Used as the default
 /// `request.signal` when none is supplied to `Request`.
 pub(crate) fn make_default_signal(ctx: &mut ScopedContext) -> JSResult {

@@ -13,8 +13,11 @@ use zuqe::{
 
 use crate::{
     USER_CLASS_DEFS,
-    whatwg::stream::{
-        transform_controller::JSTransformStreamDefaultController, writable::JSWritableStream,
+    whatwg::{
+        abort::make_default_signal,
+        stream::{
+            transform_controller::JSTransformStreamDefaultController, writable::JSWritableStream,
+        },
     },
 };
 
@@ -25,6 +28,10 @@ pub(crate) struct WritableControllerPayload {
     pub(crate) underlying_sink: JSValue,
     pub(crate) transform_controller: Option<JSTransformStreamDefaultController>,
     pub(crate) high_water_mark: f64,
+    /// The `AbortSignal` exposed as `controller.signal`. Aborted synchronously
+    /// when the stream is aborted (per the Streams spec). Created lazily via
+    /// `ensure_signal`.
+    pub(crate) signal: Option<JSValue>,
 }
 
 impl WritableControllerPayload {
@@ -38,7 +45,17 @@ impl WritableControllerPayload {
             underlying_sink,
             transform_controller: None,
             high_water_mark,
+            signal: None,
         }
+    }
+
+    /// Lazily create (once) and return this controller's `AbortSignal`.
+    pub(crate) fn ensure_signal(&mut self, ctx: &mut ScopedContext) -> Result<JSValue, i32> {
+        if self.signal.is_none() {
+            let s = make_default_signal(ctx)?;
+            self.signal = Some(s);
+        }
+        Ok(self.signal.unwrap())
     }
 
     fn gc_trace(&self, gcx: &mut GcTraceCtx) {
@@ -49,11 +66,15 @@ impl WritableControllerPayload {
         if let Some(ref tc) = self.transform_controller {
             tc.trace(gcx);
         }
+        if let Some(ref sig) = self.signal {
+            sig.trace(gcx);
+        }
     }
 }
 
 const WRITABLE_CONTROLLER_PROTO: &[FieldDef] = &[
     FieldDef::FUNC("error", 1, js_writable_controller_error, 0),
+    FieldDef::GETSET("signal", Some(js_writable_controller_signal), None, 0),
     FieldDef::STR(
         "[Symbol.toStringTag]",
         "WritableStreamDefaultController",
@@ -91,6 +112,13 @@ fn js_writable_controller_error(_ctx: &mut ScopedContext, cc: CallContext) -> JS
     }
 
     Ok(JSValue::UNDEFINED)
+}
+
+fn js_writable_controller_signal(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let mut this = cc.this();
+    let mut p = JSWritableStreamDefaultController::payload_mut_of(&mut this)
+        .ok_or_else(|| ctx.throw_type_error("not a WritableStreamDefaultController"))?;
+    p.ensure_signal(ctx)
 }
 
 #[distributed_slice(USER_CLASS_DEFS)]

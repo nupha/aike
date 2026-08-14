@@ -89,6 +89,23 @@ impl WritableStreamPayload {
         }
         self.settle_state(ctx, RsState::Errored, Some(reason));
 
+        // Per the Streams spec, aborting a WritableStream synchronously signals
+        // the controller's `signal` and rejects the writer's `ready` promise.
+        // This must happen before invoking the underlying sink's `abort()` so
+        // observers see a consistent state.
+        if let Some(controller) = self.controller
+            && let Some(cp) = controller.payload()
+        {
+            if let Some(signal) = cp.signal {
+                crate::whatwg::abort::abort_signal(ctx, signal, reason)?;
+            }
+        }
+        if let Some(mut writer) = self.writer
+            && let Some(mut wp) = writer.payload_mut()
+        {
+            wp.reject_ready(ctx, reason);
+        }
+
         if let Some(controller) = self.controller
             && let Some(cp) = controller.payload()
             && let Some(sink) = cp.underlying_sink.as_object()
@@ -161,12 +178,24 @@ impl JSWritableStream {
             RsState::Readable => {}
         }
 
+        // `writer.ready` starts fulfilled while the stream is writable, and is
+        // rejected when the stream is aborted/errored.
+        let mut ready_promise = Promise::create(ctx)?.0;
+        match sp.state {
+            RsState::Readable => ready_promise.resolve(ctx, JSValue::UNDEFINED),
+            RsState::Errored => ready_promise.reject(ctx, sp.stored_error),
+            RsState::Closed => ready_promise.resolve(ctx, JSValue::UNDEFINED),
+        }
+
         let writer = JSWritableStreamDefaultWriter::new_instance(
             ctx,
             JSValue::UNDEFINED,
             WriterPayload {
                 stream: Some(handle),
                 closed_promise: Some(closed_promise),
+                ready_promise: Some(ready_promise),
+                write_promise: None,
+                abort_promise: None,
             },
         )?;
 

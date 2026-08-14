@@ -286,6 +286,19 @@ pub(super) fn notify_peer_closed(
         if let Some(cp) = wp.closed_promise.as_mut() {
             settle(cp);
         }
+        // When the stream is errored/aborted (a `reason` is present), any
+        // outstanding `write()` promise must also reject with that reason
+        // (spec: outstanding write() promises reject). `ready` is rejected
+        // separately by `WritableStreamPayload::abort`'s `reject_ready` so it
+        // stays a single in-place rejection (no reference change).
+        if reason.is_some() {
+            if let Some(wp_promise) = wp.write_promise.as_mut() {
+                if wp_promise.state() == PromiseState::Pending {
+                    let r = reason.unwrap();
+                    wp_promise.reject(ctx, r);
+                }
+            }
+        }
     }
 }
 
