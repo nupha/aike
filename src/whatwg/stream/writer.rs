@@ -56,16 +56,75 @@ impl WriterPayload {
     ///
     /// Returns the underlying stream's abort result. If the writer is not
     /// locked to any stream, resolves with `undefined`.
+    /// `writer.abort(reason)` — per spec `WritableStreamDefaultWriterAbort`.
+    ///
+    /// A released writer returns a rejected promise (TypeError), not a throw.
+    /// Repeated `writer.abort()` calls return the *same* memoized promise. The
+    /// underlying stream's abort is then wrapped so the result always
+    /// *fulfills* with `undefined`, regardless of what the sink's `abort()`
+    /// returns, and *rejects* with the sink's error if the sink's `abort()`
+    /// throws.
     pub(crate) fn abort(
         &mut self,
         ctx: &mut ScopedContext,
         reason: JSValue,
     ) -> Result<Promise, i32> {
-        if let Some(mut ws) = self.stream {
-            return ws.payload_mut().unwrap().abort(ctx, reason);
+        // Released writer: abort returns a rejected promise (spec), not a throw.
+        let Some(mut stream) = self.stream else {
+            let err = Self::released_error(ctx);
+            return Promise::from_reject_value(ctx, err);
+        };
+
+        // Memoize: repeated `writer.abort()` calls return the *same* promise.
+        if let Some(ap) = self.abort_promise {
+            return Ok(ap);
         }
 
-        Promise::from_resolve_value(ctx, JSValue::UNDEFINED)
+        // `stream.abort()` (below) already rejects `writer.ready` in place, so we
+        // must NOT call `reject_ready` again here — a second call would replace the
+        // (now-already-rejected) `ready` with a *new* promise, changing the
+        // reference observed by an in-flight `writer.ready` capture.
+
+        // Per spec, `writer.abort()` always fulfills with `undefined`, regardless
+        // of what the underlying sink's `abort()` returns.
+        let sp = stream.payload_mut().unwrap();
+        let mut sink_abort = sp.abort(ctx, reason)?;
+        // Per spec, `writer.abort()` always *fulfills* with `undefined`, regardless
+        // of what the underlying sink's `abort()` returns, and *rejects* with the
+        // sink's error if the sink's `abort()` throws. We chain onto `sink_abort`
+        // via `then`, which yields a fresh wrapper promise `W`. The reaction job
+        // (job.rs:128) invokes the handler with ONLY the value/reason and uses the
+        // handler's *return value* to settle `W` (throwing rejects). So `ok_fn`
+        // returns `undefined` (fulfills `W` with undefined) and `err_fn` throws the
+        // sink's error (rejects `W` with it).
+        let ok_fn = ctx
+            .create_native_function_with_data(
+                Callback::Func(|_ctx, _cc| Ok(JSValue::UNDEFINED)),
+                "abortThenOk",
+                0,
+                0,
+                [].into(),
+            )?
+            .into();
+        let err_fn = ctx
+            .create_native_function_with_data(
+                Callback::Func(|ctx, cc| {
+                    // fail: return a rejected promise with the sink's error, so the
+                    // wrapper adopts the rejection (job.rs uses the handler's return
+                    // value to settle `W`).
+                    let p = Promise::from_reject_value(ctx, cc.arg(0))?;
+                    Ok(JSValue::from(p))
+                }),
+                "abortThenErr",
+                0,
+                0,
+                [].into(),
+            )?
+            .into();
+        let abort_p_obj = sink_abort.then(ctx, ok_fn, err_fn)?;
+        let abort_p = Promise::try_from(abort_p_obj).map_err(|_| -1)?;
+        self.abort_promise = Some(abort_p);
+        Ok(abort_p)
     }
 
     /// Reject `writer.ready` per the Streams spec. `ready` is a single
@@ -469,68 +528,7 @@ fn js_writer_abort(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let p = JSWritableStreamDefaultWriter::payload_mut_of(&mut this)
         .ok_or_else(|| ctx.throw_type_error("not a WritableStreamDefaultWriter"))?;
 
-    // Released writer: abort returns a rejected promise (spec), not a throw.
-    let Some(mut stream) = p.stream else {
-        let err = ctx
-            .create_error_object(
-                zuqe::ErrorKind::Type,
-                "Writer is released and cannot be aborted",
-                false,
-            )
-            .map(JSValue::from)
-            .unwrap_or(JSValue::UNDEFINED);
-        return Promise::from_reject_value(ctx, err).map(JSValue::from);
-    };
-
-    // Memoize: repeated `writer.abort()` calls return the *same* promise.
-    if let Some(ap) = p.abort_promise {
-        return Ok(JSValue::from(ap));
-    }
-
-    // `stream.abort()` (below) already rejects `writer.ready` in place, so we
-    // must NOT call `reject_ready` again here — a second call would replace the
-    // (now-already-rejected) `ready` with a *new* promise, changing the
-    // reference observed by an in-flight `writer.ready` capture.
-
-    // Per spec, `writer.abort()` always fulfills with `undefined`, regardless
-    // of what the underlying sink's `abort()` returns.
-    let sp = stream.payload_mut().unwrap();
-    let mut sink_abort = sp.abort(ctx, reason)?;
-    // Per spec, `writer.abort()` always *fulfills* with `undefined`, regardless
-    // of what the underlying sink's `abort()` returns, and *rejects* with the
-    // sink's error if the sink's `abort()` throws. We chain onto `sink_abort`
-    // via `then`, which yields a fresh wrapper promise `W`. The reaction job
-    // (job.rs:128) invokes the handler with ONLY the value/reason and uses the
-    // handler's *return value* to settle `W` (throwing rejects). So `ok_fn`
-    // returns `undefined` (fulfills `W` with undefined) and `err_fn` throws the
-    // sink's error (rejects `W` with it).
-    let ok_fn = ctx
-        .create_native_function_with_data(
-            Callback::Func(|_ctx, _cc| Ok(JSValue::UNDEFINED)),
-            "abortThenOk",
-            0,
-            0,
-            [].into(),
-        )?
-        .into();
-    let err_fn = ctx
-        .create_native_function_with_data(
-            Callback::Func(|ctx, cc| {
-                // fail: return a rejected promise with the sink's error, so the
-                // wrapper adopts the rejection (job.rs uses the handler's return
-                // value to settle `W`).
-                let p = Promise::from_reject_value(ctx, cc.arg(0))?;
-                Ok(JSValue::from(p))
-            }),
-            "abortThenErr",
-            0,
-            0,
-            [].into(),
-        )?
-        .into();
-    let abort_p_obj = sink_abort.then(ctx, ok_fn, err_fn)?;
-    let abort_p = Promise::try_from(abort_p_obj).map_err(|_| -1)?;
-    p.abort_promise = Some(abort_p);
+    let abort_p = p.abort(ctx, reason)?;
     Ok(JSValue::from(abort_p))
 }
 
