@@ -267,9 +267,7 @@ impl WritableStreamPayload {
                 }
                 if let Some(mut w) = self.writer {
                     let mut wv = JSValue::from(w);
-                    if let Some(mut wp) =
-                        JSWritableStreamDefaultWriter::payload_mut_of(&mut wv)
-                    {
+                    if let Some(mut wp) = JSWritableStreamDefaultWriter::payload_mut_of(&mut wv) {
                         wp.reject_ready(ctx, e);
                     }
                 }
@@ -402,8 +400,7 @@ impl WritableStreamPayload {
         // `data` layout: [resolve, reject, stream_val, ok_flag].
         // ok_flag is `undefined` for the success path (ok); a non-undefined value
         // (here 1) marks the error path, whose reason comes from `cc.arg(0)`.
-        let mut data: Vec<JSValue> =
-            [resolve, reject, stream_val, JSValue::UNDEFINED].to_vec();
+        let mut data: Vec<JSValue> = [resolve, reject, stream_val, JSValue::UNDEFINED].to_vec();
         let mut data_err = data.clone();
         data_err[3] = JSValue::from(1);
         if let Some(sink) = sink_val.as_object() {
@@ -622,16 +619,32 @@ fn js_writable_stream_constructor(ctx: &mut ScopedContext, cc: CallContext) -> J
         WritableControllerPayload::new(underlying_sink, Some(stream), hwm),
     )?;
 
+    // SetUpWritableStreamDefaultControllerFromUnderlyingSink: capture the sink's
+    // `write`/`close`/`abort` callbacks once, so a throwing getter re-throws from
+    // the constructor and later writes/closes/aborts do not re-run the getter. A
+    // present but non-callable callback member throws TypeError (WebIDL).
+    if let Some(o) = underlying_sink.as_object() {
+        for method in ["write", "close", "abort"] {
+            let v = o.get_property_str(ctx, method)?;
+            if !v.is_undefined() && !v.is_callable() {
+                let msg = [method, " must be a function"].concat();
+                return Err(ctx.throw_type_error(&msg));
+            }
+        }
+    }
+
     // Invoke the sink `start(controller)` **synchronously** so the controller is
     // observable immediately (e.g. `start(c) { ctrl = c }`). Per spec the stream
     // is only considered "started" (`_started === true`) after a microtask, so
     // `write()`s issued before that point are enqueued rather than invoking the
-    // sink. A thrown `start()` errors the stream.
-    if let Some(o) = underlying_sink.as_object()
-        && let Some(Err(_)) = o.invoke_str_defined(ctx, "start", &[JSValue::from(controller)])?
-    {
-        let e = ctx.take_exception().to_value(ctx);
-        JSValue::from(controller).invoke_str(ctx, "error", &[e])?;
+    // sink. A thrown `start()` is re-thrown by the WritableStream() constructor
+    // (spec: "Any exceptions thrown by start will be re-thrown by the
+    // WritableStream() constructor"). `invoke_str_defined` returns `Ok(Some(Err))`
+    // when start throws, so the inner JSResult must be unwrapped via `?`.
+    if let Some(o) = underlying_sink.as_object() {
+        if let Some(r) = o.invoke_str_defined(ctx, "start", &[JSValue::from(controller)])? {
+            r?;
+        }
     }
 
     // Defer `started = true` + queue advance to a microtask, so a `write()`
