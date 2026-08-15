@@ -654,11 +654,11 @@ fn js_writable_stream_constructor(ctx: &mut ScopedContext, cc: CallContext) -> J
     let start_fn = ctx.create_native_function_with_data(
         Callback::Func(|_ctx, cc| {
             let mut stream_val = cc.data(0);
-            if let Some(mut sp) = JSWritableStream::payload_mut_of(&mut stream_val) {
+            if let Some(sp) = JSWritableStream::payload_mut_of(&mut stream_val) {
                 sp.started = true;
                 // The stream is now ready to accept writes: resolve writer.ready.
                 if let Some(mut w) = sp.writer
-                    && let Some(mut wp) = w.payload_mut()
+                    && let Some(wp) = w.payload_mut()
                     && let Some(mut rp) = wp.ready_promise
                 {
                     rp.resolve(_ctx, JSValue::UNDEFINED);
