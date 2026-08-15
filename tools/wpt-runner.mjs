@@ -588,6 +588,15 @@ async function runOneFile(file) {
   // complete the run via notify_result's all_done() check.
   G.__wpt_allow_complete = true;
   if (typeof G.__wpt_on_loaded === "function") G.__wpt_on_loaded();
+  // ShellTestEnvironment fires the on_loaded -> complete() callback from a
+  // Promise.resolve().then() during harness init, i.e. *before* this file has
+  // finished executing. At that point __wpt_allow_complete is still false, so
+  // the guarded Tests.prototype.complete() returns early and is never called
+  // again. Drive completion explicitly now that the flag is set, so the harness
+  // settles into its COMPLETE phase and any completion-dependent flush happens.
+  if (typeof G.done === "function") {
+    G.done();
+  }
 
   // Let synchronous tests and any promise_test callbacks settle. testharness
   // fires add_completion_callback once the last test finishes, so poll until

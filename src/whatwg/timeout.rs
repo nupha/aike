@@ -179,11 +179,19 @@ fn start_timer_task(ctx: &mut ScopedContext) {
                 };
 
                 if cb.call(cx, JSValue::UNDEFINED, &[]).is_err() {
-                    let msg = cx.rt().exception().to_text(cx);
-                    eprintln!("timer callback error: {}", msg.message);
-                    let _e = cx.take_exception();
+                    // Take the exception FIRST so cur_exception is cleared before we
+                    // run any more JS (to_text below executes JS to format the message).
+                    // Leaving the exception set while calling to_text() would let that
+                    // inner call trip zhuque's "call returned Ok but left an exception
+                    // set" debug_assert. The error is reported and then discarded — a
+                    // timer callback throwing must not reject/crash the event loop.
+                    let _exc = cx.take_exception();
+
                     #[cfg(debug_assertions)]
-                    eprintln!("[swallow-exc] timeout.rs:{}: {:?}", line!(), _e);
+                    {
+                        let msg = _exc.to_text(cx);
+                        eprintln!("timer callback error: {}", msg.message);
+                    }
                 }
 
                 if let Some(ms) = interval_ms {

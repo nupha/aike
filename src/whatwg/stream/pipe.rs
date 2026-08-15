@@ -185,6 +185,22 @@ fn run_pipe_driver(
         }
     }
 
+    // Already-errored source *and* a still-writable destination: shut the pipe
+    // down synchronously (before any read microtask). This honors the spec rule
+    // that a destination `close()` requested before `start()` finished is
+    // superseded by the abort the errored source triggers: the destination's
+    // `close_requested` is cleared here, so its start-completion close never
+    // runs. A non-writable destination is left to the normal path (which must
+    // not reject a closed→closed pipe), so the synchronous check is gated on
+    // `dest_writable`.
+    if pipe_dest_is_writable(&data[4]) {
+        if let Some(err) = pipe_source_errored(&data[3]) {
+            set_state_bool(ctx, &data[0], "shuttingDown", true)?;
+            pipe_shutdown_with_error(ctx, &data, err)?;
+            return Ok(JSValue::from(promise));
+        }
+    }
+
     pipe_to_read(ctx, &data)?;
 
     Ok(JSValue::from(promise))

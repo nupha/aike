@@ -164,6 +164,29 @@ pub(crate) fn extract_high_water_mark(
     Ok(hwm)
 }
 
+/// Extract the `size` algorithm from a `QueuingStrategy`-like init object.
+/// Returns `undefined` when the strategy is null/undefined or has no `size`
+/// member (the default chunk size is then 1.0). A present but non-callable
+/// `size` throws TypeError. This mirrors `ExtractSizeAlgorithm` in the spec.
+pub(crate) fn extract_size_algorithm(
+    ctx: &mut ScopedContext,
+    strategy: JSValue,
+) -> Result<JSValue, i32> {
+    if strategy.is_undefined() || strategy.is_null() {
+        return Ok(JSValue::UNDEFINED);
+    }
+    let obj = queuing_strategy_init(ctx, strategy)?;
+    let size = obj.get_property_str(ctx, "size")?;
+    if size.is_undefined() {
+        return Ok(JSValue::UNDEFINED);
+    }
+    if size.is_callable() {
+        Ok(size)
+    } else {
+        Err(ctx.throw_type_error("QueuingStrategy.size must be a function"))
+    }
+}
+
 // ============================================================================
 // CountQueuingStrategy
 // ============================================================================

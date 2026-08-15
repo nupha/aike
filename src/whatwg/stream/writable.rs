@@ -15,7 +15,7 @@ use zuqe::{
 use crate::{
     USER_CLASS_DEFS,
     whatwg::stream::{
-        extract_high_water_mark,
+        extract_high_water_mark, extract_size_algorithm,
         writable_controller::{JSWritableStreamDefaultController, WritableControllerPayload},
         writer::{JSWritableStreamDefaultWriter, WriterPayload},
     },
@@ -43,6 +43,15 @@ pub(crate) struct WritableStreamPayload {
     pub(crate) write_queue: Vec<JSValue>,
     /// The `write()` promises corresponding 1:1 to `write_queue` entries.
     pub(crate) write_requests: Vec<Promise>,
+    /// The `size` of each queued chunk (1:1 with `write_queue`), per the
+    /// queuing strategy's `size` algorithm. Used to compute `desiredSize`.
+    pub(crate) write_queue_sizes: Vec<f64>,
+    /// Running total of queued chunk sizes; `desiredSize = highWaterMark −
+    /// queue_total_size`. Mirrors the readable controller's `queue_total_size`.
+    pub(crate) queue_total_size: f64,
+    /// Size of the currently in-flight write; counted within `queue_total_size`
+    /// until the write settles.
+    pub(crate) in_flight_write_size: f64,
     /// The write promise currently in flight (sink `write()` called but not yet
     /// settled). Per spec, an in-flight write is NOT rejected by a later abort.
     pub(crate) in_flight_write_request: Option<Promise>,
@@ -64,6 +73,9 @@ impl WritableStreamPayload {
             started: false,
             write_queue: Vec::new(),
             write_requests: Vec::new(),
+            write_queue_sizes: Vec::new(),
+            queue_total_size: 0.0,
+            in_flight_write_size: 0.0,
             in_flight_write_request: None,
             close_requested: false,
             close_promise: None,
@@ -131,6 +143,9 @@ impl WritableStreamPayload {
             req.reject(ctx, reason);
         }
         self.write_queue.clear();
+        self.write_queue_sizes.clear();
+        self.queue_total_size = 0.0;
+        self.in_flight_write_size = 0.0;
     }
 
     /// Mirror of WHATWG `WritableStreamDefaultControllerAdvanceQueueIfNeeded`.
@@ -156,6 +171,11 @@ impl WritableStreamPayload {
         }
         let chunk = self.write_queue.remove(0);
         let write_promise = self.write_requests.remove(0);
+        // The dequeued chunk becomes the in-flight write: its size stays counted
+        // toward `queue_total_size` (mirrors the spec, where desiredSize includes
+        // the in-flight write) until the write settles in `finish_in_flight_write`.
+        let size = self.write_queue_sizes.remove(0);
+        self.in_flight_write_size = size;
         self.in_flight_write_request = Some(write_promise);
         self.process_write(ctx, chunk)
     }
@@ -284,7 +304,8 @@ impl WritableStreamPayload {
     /// If a `close()` was requested and there are no pending/in-flight writes,
     /// perform it now; otherwise it will run once the last write settles.
     pub(crate) fn try_close(&mut self, ctx: &mut ScopedContext) -> Result<(), i32> {
-        if self.close_requested
+        if self.started
+            && self.close_requested
             && self.write_queue.is_empty()
             && self.in_flight_write_request.is_none()
         {
@@ -373,6 +394,12 @@ impl WritableStreamPayload {
         }
         if let Some(mut sp) = JSWritableStream::payload_mut_of(&mut stream_val) {
             sp.in_flight_write_request = None;
+            // The in-flight write has settled; its size now leaves the total.
+            sp.queue_total_size -= sp.in_flight_write_size;
+            if sp.queue_total_size < 0.0 {
+                sp.queue_total_size = 0.0;
+            }
+            sp.in_flight_write_size = 0.0;
             // Stream is ready again: resolve writer.ready in place.
             if let Some(mut w) = sp.writer
                 && let Some(mut wp) = w.payload_mut()
@@ -494,6 +521,15 @@ impl WritableStreamPayload {
         }
         self.settle_state(ctx, RsState::Errored, Some(reason));
 
+        // Spec WritableStreamDefaultWriterAbort: a pending close is superseded by
+        // the abort — clear the close request and reject its promise with `reason`.
+        if self.close_requested {
+            self.close_requested = false;
+            if let Some(mut cp) = self.close_promise.take() {
+                cp.reject(ctx, reason);
+            }
+        }
+
         // Per the Streams spec, aborting a WritableStream synchronously signals
         // the controller's `signal` and rejects the writer's `ready` promise.
         // This must happen before invoking the underlying sink's `abort()` so
@@ -612,11 +648,24 @@ fn js_writable_stream_constructor(ctx: &mut ScopedContext, cc: CallContext) -> J
     let queuing_strategy = cc.arg(1);
     let hwm = extract_high_water_mark(ctx, queuing_strategy)?;
 
+    // WritableStreamInit: any non-undefined `type` (e.g. "bytes") is unsupported
+    // by this engine and must throw RangeError ("is not a supported type").
+    if let Some(o) = underlying_sink.as_object() {
+        let t = o.get_property_str(ctx, "type")?;
+        if !t.is_undefined() && !t.is_null() {
+            return Err(ctx.throw_range_error(
+                "WritableStream with the given type is not supported: 'bytes' streams are not implemented",
+            ));
+        }
+    }
+
+    let size_algo = extract_size_algorithm(ctx, queuing_strategy)?;
+
     let mut stream = JSWritableStream::new_instance(ctx, new_target, WritableStreamPayload::new())?;
     let controller = JSWritableStreamDefaultController::new_instance(
         ctx,
         JSValue::UNDEFINED,
-        WritableControllerPayload::new(underlying_sink, Some(stream), hwm),
+        WritableControllerPayload::new(underlying_sink, Some(stream), hwm, size_algo),
     )?;
 
     // SetUpWritableStreamDefaultControllerFromUnderlyingSink: capture the sink's
@@ -635,35 +684,54 @@ fn js_writable_stream_constructor(ctx: &mut ScopedContext, cc: CallContext) -> J
 
     // Invoke the sink `start(controller)` **synchronously** so the controller is
     // observable immediately (e.g. `start(c) { ctrl = c }`). Per spec the stream
-    // is only considered "started" (`_started === true`) after a microtask, so
-    // `write()`s issued before that point are enqueued rather than invoking the
-    // sink. A thrown `start()` is re-thrown by the WritableStream() constructor
-    // (spec: "Any exceptions thrown by start will be re-thrown by the
-    // WritableStream() constructor"). `invoke_str_defined` returns `Ok(Some(Err))`
-    // when start throws, so the inner JSResult must be unwrapped via `?`.
-    if let Some(o) = underlying_sink.as_object() {
-        if let Some(r) = o.invoke_str_defined(ctx, "start", &[JSValue::from(controller)])? {
-            r?;
+    // is only considered "started" (`_started === true`) after `start` finishes:
+    // writes/closes issued before that point are enqueued (and count toward
+    // `desiredSize`) but not handed to the sink until `start` resolves. A thrown
+    // `start()` is re-thrown by the WritableStream() constructor.
+    // `invoke_str_defined` returns `Ok(Some(Err))` when start throws, so the
+    // inner JSResult must be unwrapped via `?`.
+    let start_val = if let Some(o) = underlying_sink.as_object() {
+        match o.invoke_str_defined(ctx, "start", &[JSValue::from(controller)])? {
+            Some(r) => r?,
+            None => JSValue::UNDEFINED,
         }
-    }
+    } else {
+        JSValue::UNDEFINED
+    };
 
-    // Defer `started = true` + queue advance to a microtask, so a `write()`
-    // issued synchronously after construction is enqueued (matching spec
-    // `_started` gating) and a following synchronous `abort()` can reject it
-    // before the sink `write()` is ever called.
+    // Defer `started = true` + queue advance to after `start` settles, so a
+    // `write()` issued synchronously after construction is enqueued (matching
+    // spec `_started` gating) and a following synchronous `abort()` can reject
+    // it before the sink `write()` is ever called. For a synchronous `start`
+    // (no promise returned) this runs on the next microtask; for an async
+    // `start` it runs when the returned promise fulfills.
     let start_fn = ctx.create_native_function_with_data(
         Callback::Func(|_ctx, cc| {
             let mut stream_val = cc.data(0);
             if let Some(sp) = JSWritableStream::payload_mut_of(&mut stream_val) {
                 sp.started = true;
-                // The stream is now ready to accept writes: resolve writer.ready.
-                if let Some(mut w) = sp.writer
-                    && let Some(wp) = w.payload_mut()
-                    && let Some(mut rp) = wp.ready_promise
-                {
-                    rp.resolve(_ctx, JSValue::UNDEFINED);
-                }
                 sp.advance_queue(_ctx)?;
+                sp.try_close(_ctx)?;
+                // `writer.ready` resolves once the stream is started and not
+                // backpressured. Deferring past `try_close` lets a `close()` that
+                // throws (errored state) reject `ready` instead of leaving it
+                // resolved. It is only resolved when `desiredSize > 0` (queue
+                // empty / no in-flight write), mirroring spec backpressure.
+                if sp.state == RsState::Readable {
+                    let ds = sp
+                        .controller
+                        .as_ref()
+                        .and_then(|c| c.payload())
+                        .map(|cp| cp.high_water_mark - sp.queue_total_size)
+                        .unwrap_or(1.0);
+                    if ds > 0.0
+                        && let Some(mut w) = sp.writer
+                        && let Some(wp) = w.payload_mut()
+                        && let Some(mut rp) = wp.ready_promise
+                    {
+                        rp.resolve(_ctx, JSValue::UNDEFINED);
+                    }
+                }
             }
             Ok(JSValue::UNDEFINED)
         }),
@@ -672,9 +740,40 @@ fn js_writable_stream_constructor(ctx: &mut ScopedContext, cc: CallContext) -> J
         0,
         [JSValue::from(stream)].into(),
     )?;
-    let resolved = Promise::from_resolve_value(ctx, JSValue::UNDEFINED)?;
-    let then_fn = JSValue::from(resolved).get_property_str(ctx, "then")?;
-    then_fn.call(ctx, JSValue::from(resolved), &[start_fn.into()])?;
+    let start_err_fn = ctx.create_native_function_with_data(
+        Callback::Func(|_ctx, cc| {
+            let mut stream_val = cc.data(0);
+            let e = cc.arg(0);
+            if let Some(sp) = JSWritableStream::payload_mut_of(&mut stream_val) {
+                sp.state = RsState::Errored;
+                sp.stored_error = e;
+                if let Some(mut cp) = sp.close_promise.take() {
+                    cp.reject(_ctx, e);
+                }
+                if let Some(mut w) = sp.writer {
+                    let mut wv = JSValue::from(w);
+                    if let Some(mut wp) = JSWritableStreamDefaultWriter::payload_mut_of(&mut wv) {
+                        wp.reject_ready(_ctx, e);
+                    }
+                }
+            }
+            Ok(JSValue::UNDEFINED)
+        }),
+        "writableStartErr",
+        1,
+        0,
+        [JSValue::from(stream)].into(),
+    )?;
+
+    if let Ok(mut p) = Promise::try_from(start_val) {
+        p.then(ctx, start_fn.into(), start_err_fn.into())?;
+    } else {
+        // Synchronous start (undefined / non-thenable): arm via a resolved
+        // promise so it still defers past construction.
+        let resolved = Promise::from_resolve_value(ctx, JSValue::UNDEFINED)?;
+        let then_fn = JSValue::from(resolved).get_property_str(ctx, "then")?;
+        then_fn.call(ctx, JSValue::from(resolved), &[start_fn.into()])?;
+    }
 
     stream.payload_mut().unwrap().controller = Some(controller);
 

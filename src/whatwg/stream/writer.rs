@@ -13,7 +13,12 @@ use zuqe::{
     gc_lite::{GcTrace, GcTraceCtx},
 };
 
-use crate::{USER_CLASS_DEFS, whatwg::stream::writable::JSWritableStream};
+use crate::{
+    USER_CLASS_DEFS,
+    whatwg::stream::{
+        writable::JSWritableStream, writable_controller::JSWritableStreamDefaultController,
+    },
+};
 
 use super::RsState;
 
@@ -139,6 +144,16 @@ impl WriterPayload {
         }
     }
 
+    /// Reject this writer's `closed` promise with `reason` (used when the stream
+    /// becomes errored so `writer.closed` settles with the error).
+    pub(crate) fn reject_closed(&mut self, ctx: &mut ScopedContext, reason: JSValue) {
+        if let Some(p) = self.closed_promise.as_mut() {
+            p.reject(ctx, reason);
+        } else if let Ok(mut p) = Promise::from_reject_value(ctx, reason) {
+            self.closed_promise = Some(p);
+        }
+    }
+
     /// The error used when a writer is released and a monitoring getter
     /// (`closed`/`ready`/`desiredSize`) is accessed. Per the Streams spec
     /// (`defaultWriterLockException`), this is a TypeError: a released writer
@@ -245,7 +260,8 @@ fn js_writer_desired_size(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
         }
         if let Some(ctrl) = sp.controller {
             if let Some(cp) = ctrl.payload() {
-                return Ok(JSValue::from(cp.high_water_mark));
+                // Spec: desiredSize = highWaterMark − total queued chunk size.
+                return Ok(JSValue::from(cp.high_water_mark - sp.queue_total_size));
             }
         }
     }
@@ -280,7 +296,7 @@ fn js_writer_write(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     // The promise returned by `write()`, kept on the payload so an abort/error
     // can reject any outstanding (in-flight) write.
-    let (write_p, write_funcs) = Promise::create(ctx)?;
+    let (mut write_p, write_funcs) = Promise::create(ctx)?;
     wp.write_promise = Some(write_p);
 
     if let Some(stream) = stream_val.as_native_object::<JSWritableStream>()
@@ -350,9 +366,48 @@ fn js_writer_write(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     // the sink. A `write()` issued while a previous write is in flight is
     // also queued and runs after the in-flight one settles.
     if let Some(sp) = JSWritableStream::payload_mut_of(&mut stream_val) {
+        // Compute the chunk's size via the strategy's `size` algorithm (default 1).
+        let size = if let Some(cp) = sp.controller.as_ref().and_then(|c| c.payload()) {
+            if cp.size_algorithm.is_callable() {
+                match cp.size_algorithm.call(ctx, JSValue::UNDEFINED, &[chunk]) {
+                    Ok(v) => v.to_number(ctx)?.to_f64(),
+                    Err(_) => {
+                        let e = ctx.take_exception().to_value(ctx);
+                        // Per spec, a throwing `size()` algorithm errors the
+                        // stream; `write()` must *return* a rejecting promise
+                        // (not throw), and `writer.closed` must also reject.
+                        sp.state = RsState::Errored;
+                        sp.stored_error = e;
+                        if let Some(mut w) = sp.writer {
+                            let mut wv = JSValue::from(w);
+                            if let Some(mut wp) =
+                                JSWritableStreamDefaultWriter::payload_mut_of(&mut wv)
+                            {
+                                wp.reject_ready(ctx, e);
+                                wp.reject_closed(ctx, e);
+                            }
+                        }
+                        write_p.reject(ctx, e);
+                        return Ok(JSValue::from(write_p));
+                    }
+                }
+            } else {
+                1.0
+            }
+        } else {
+            1.0
+        };
         sp.write_queue.push(chunk);
+        sp.write_queue_sizes.push(size);
+        sp.queue_total_size += size;
         sp.write_requests.push(write_p);
-        sp.advance_queue(ctx)?;
+        // Spec: writes issued before `start()` resolves are queued (and count
+        // toward `desiredSize`) but not handed to the sink until `started` is
+        // set true (when `start`'s promise fulfills). `advance_queue` is only
+        // invoked after that point.
+        if sp.started {
+            sp.advance_queue(ctx)?;
+        }
     }
 
     // `advance_queue` may have consumed the promise (turned it into the

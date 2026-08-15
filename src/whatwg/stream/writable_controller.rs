@@ -32,6 +32,9 @@ pub(crate) struct WritableControllerPayload {
     /// when the stream is aborted (per the Streams spec). Created lazily via
     /// `ensure_signal`.
     pub(crate) signal: Option<JSValue>,
+    /// The queuing strategy's `size` algorithm (a JS function), or `undefined`
+    /// when no strategy was supplied (default chunk size is 1.0).
+    pub(crate) size_algorithm: JSValue,
 }
 
 impl WritableControllerPayload {
@@ -39,6 +42,7 @@ impl WritableControllerPayload {
         underlying_sink: JSValue,
         stream: Option<JSWritableStream>,
         high_water_mark: f64,
+        size_algorithm: JSValue,
     ) -> Self {
         Self {
             stream,
@@ -46,6 +50,7 @@ impl WritableControllerPayload {
             transform_controller: None,
             high_water_mark,
             signal: None,
+            size_algorithm,
         }
     }
 
@@ -69,6 +74,7 @@ impl WritableControllerPayload {
         if let Some(ref sig) = self.signal {
             sig.trace(gcx);
         }
+        self.size_algorithm.trace(gcx);
     }
 }
 
