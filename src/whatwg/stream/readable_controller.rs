@@ -149,12 +149,7 @@ impl ReadableControllerPayload {
     /// Underlying source algorithms captured during setup
     /// (`SetUpReadableStreamDefaultControllerFromUnderlyingSource`): `pull`,
     /// `cancel`, and the strategy's `size`. Undefined means absent.
-    pub(crate) fn set_algorithms(
-        &mut self,
-        pull: JSValue,
-        cancel: JSValue,
-        size: JSValue,
-    ) {
+    pub(crate) fn set_algorithms(&mut self, pull: JSValue, cancel: JSValue, size: JSValue) {
         self.pull_algorithm = pull;
         self.cancel_algorithm = cancel;
         self.size_algorithm = size;
@@ -275,10 +270,10 @@ impl ReadableControllerPayload {
         }
     }
 
-    /// ReadableStreamDefaultControllerShouldCallPull: pull only when the stream
-    /// can still produce data, the queue is empty, and the desired size is
-    /// positive. aike models "started" via `call_pull` itself, so it is not
-    /// checked here.
+    /// ReadableStreamDefaultControllerShouldCallPull: pull when the stream
+    /// can still produce data, the queue is empty, and either the desired size
+    /// is positive or the stream has a pending read (consumer demand).
+    /// aike models "started" via `call_pull` itself, so it is not checked here.
     pub(crate) fn should_call_pull(&self, ctx: &mut ScopedContext) -> Result<bool, i32> {
         if self.close_requested() {
             return Ok(false);
@@ -337,7 +332,11 @@ impl ReadableControllerPayload {
 
         // Spec: if the underlying source's pull() throws, error the stream with
         // that value (which rejects any pending reads) rather than swallowing it.
-        let pull_res = pull_fn.call(ctx, self.underlying_source, &[JSValue::from(controller_val)]);
+        let pull_res = pull_fn.call(
+            ctx,
+            self.underlying_source,
+            &[JSValue::from(controller_val)],
+        );
         if pull_res.is_err() {
             let err = ctx.take_exception().to_value(ctx);
             pulling.set(false);
@@ -431,15 +430,15 @@ impl ReadableControllerPayload {
                     return Err(-1);
                 }
 
-                self.queue.borrow_mut().push(QueueEntry {
-                    chunk,
-                    size,
-                });
-                self.queue_total_size.set(self.queue_total_size.get() + size);
+                self.queue.borrow_mut().push(QueueEntry { chunk, size });
+                self.queue_total_size
+                    .set(self.queue_total_size.get() + size);
                 Ok(JSValue::UNDEFINED)
             }
             ReadableControllerKind::Byte { .. } => {
-                self.queue.borrow_mut().push(QueueEntry { chunk, size: 1.0 });
+                self.queue
+                    .borrow_mut()
+                    .push(QueueEntry { chunk, size: 1.0 });
                 self.queue_total_size.set(self.queue_total_size.get() + 1.0);
                 Ok(JSValue::UNDEFINED)
             }

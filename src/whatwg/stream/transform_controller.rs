@@ -4,6 +4,8 @@
 //! TransformStreamDefaultController: the controller handed to a transformer's
 //! `start()`/`transform()`/`flush()` callbacks.
 
+use std::{cell::Cell, rc::Rc};
+
 use linkme::distributed_slice;
 use zuqe::{
     CallContext, ClassCtorDef, ClassID, FieldDef, JSResult, JSValue, Runtime, ScopedContext,
@@ -14,16 +16,35 @@ use zuqe::{
 use crate::{
     USER_CLASS_DEFS,
     whatwg::stream::{
-        readable_controller_default::JSReadableStreamDefaultController, writable::JSWritableStream,
+        readable_controller_default::JSReadableStreamDefaultController,
+        transform::JSTransformStream, writable::JSWritableStream,
     },
 };
 
 use super::{QueueEntry, RsState};
 
 pub(crate) struct TransformControllerPayload {
+    /// Back-reference to the controlling TransformStream (spec `[[stream]]`).
+    pub(crate) stream: Option<JSTransformStream>,
     pub(crate) readable_controller: JSReadableStreamDefaultController,
     pub(crate) writable_stream: JSWritableStream,
     pub(crate) transformer: JSValue,
+    /// Captured `transformer.cancel` algorithm (spec `[[cancelAlgorithm]]`).
+    pub(crate) cancel_algorithm: JSValue,
+    /// Captured `transformer.flush` algorithm (spec `[[flushAlgorithm]]`).
+    pub(crate) flush_algorithm: JSValue,
+    /// Captured `transformer.transform` algorithm (spec `[[transformAlgorithm]]`).
+    pub(crate) transform_algorithm: JSValue,
+    /// Set once cancel/flush is invoked; subsequent calls return this promise
+    /// (spec `[[finishPromise]]`).
+    pub(crate) finish_promise: Option<zuqe::builtins::promise::Promise>,
+    /// Shared `[[backpressure]]` — must be `Rc<Cell>` because `def_native_object!`
+    /// payloads are Copy, so each `payload()` call returns a fresh copy.
+    /// Writing to one copy doesn't affect others; an `Rc<Cell>` ensures all
+    /// copies share the same state.
+    pub(crate) backpressure: Rc<Cell<bool>>,
+    /// Shared `[[backpressureChangePromise]]`.
+    pub(crate) backpressure_change_promise: Rc<Cell<Option<zuqe::builtins::promise::Promise>>>,
 }
 
 impl TransformControllerPayload {
@@ -33,16 +54,35 @@ impl TransformControllerPayload {
         transformer: JSValue,
     ) -> Self {
         Self {
+            stream: None,
             readable_controller,
             writable_stream,
             transformer,
+            cancel_algorithm: JSValue::UNDEFINED,
+            flush_algorithm: JSValue::UNDEFINED,
+            transform_algorithm: JSValue::UNDEFINED,
+            finish_promise: None,
+            backpressure: Rc::new(Cell::new(true)),
+            backpressure_change_promise: Rc::new(Cell::new(None)),
         }
     }
 
     fn gc_trace(&self, gcx: &mut GcTraceCtx) {
+        if let Some(ref s) = self.stream {
+            s.trace(gcx);
+        }
         self.readable_controller.trace(gcx);
         self.writable_stream.trace(gcx);
         self.transformer.trace(gcx);
+        self.cancel_algorithm.trace(gcx);
+        self.flush_algorithm.trace(gcx);
+        self.transform_algorithm.trace(gcx);
+        if let Some(ref p) = self.finish_promise {
+            p.trace(gcx);
+        }
+        if let Some(p) = self.backpressure_change_promise.get() {
+            p.trace(gcx);
+        }
     }
 }
 
@@ -94,9 +134,22 @@ fn js_transform_controller_enqueue(ctx: &mut ScopedContext, cc: CallContext) -> 
     let resolved = rcp.resolve_pending_read(ctx, chunk, false);
 
     if !resolved {
-        rcp.queue().borrow_mut().push(QueueEntry { chunk, size: 1.0 });
+        rcp.queue()
+            .borrow_mut()
+            .push(QueueEntry { chunk, size: 1.0 });
         let total = rcp.queue_total_size();
         rcp.set_queue_total_size(total + 1.0);
+    }
+
+    // Propagate backpressure: if the readable side's desiredSize ≤ 0, the
+    // TransformStream should block further writes (spec §6.4.2
+    // TransformStreamDefaultControllerEnqueue step 7).
+    if let Some(stream_handle) = p.stream {
+        let stream_val = JSValue::from(stream_handle);
+        let readable_full = rcp.desired_size(ctx)? <= 0.0;
+        if readable_full && !p.backpressure.get() {
+            super::transform::transform_stream_set_backpressure(ctx, &stream_val, true)?;
+        }
     }
 
     Ok(JSValue::UNDEFINED)

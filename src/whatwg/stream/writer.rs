@@ -12,10 +12,7 @@ use zuqe::{
     gc_lite::{GcTrace, GcTraceCtx},
 };
 
-use crate::{
-    USER_CLASS_DEFS,
-    whatwg::stream::writable::JSWritableStream,
-};
+use crate::{USER_CLASS_DEFS, whatwg::stream::writable::JSWritableStream};
 
 use super::RsState;
 pub(crate) struct WriterPayload {
@@ -229,7 +226,9 @@ fn js_writer_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut stream = cc
         .arg(0)
         .as_native_object::<JSWritableStream>()
-        .ok_or_else(|| ctx.throw_type_error("WritableStreamDefaultWriter requires a WritableStream"))?;
+        .ok_or_else(|| {
+            ctx.throw_type_error("WritableStreamDefaultWriter requires a WritableStream")
+        })?;
     let handle = stream;
 
     // Per spec `SetUpWritableStreamDefaultWriter`: the stream must not be
@@ -315,47 +314,6 @@ fn js_writer_write(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         return Ok(JSValue::from(write_p));
     };
     let mut stream_val = JSValue::from(stream_handle);
-
-    // TransformStream path: use transformer.transform(chunk, transformController)
-    if let Some(stream) = stream_val.as_native_object::<JSWritableStream>()
-        && let Some(sp) = stream.payload()
-    {
-        if let Some(controller) = sp.controller
-            && let Some(cp) = controller.payload()
-            && let Some(tc) = cp.transform_controller
-            && let Some(tcp) = tc.payload()
-            && let Some(obj) = tcp.transformer.as_object()
-        {
-            let has_transform = obj
-                .get_property_str(ctx, "transform")
-                .map(|v| v.is_callable())
-                .unwrap_or(false);
-
-            let finish = |ctx: &mut ScopedContext, v: JSValue| -> JSResult {
-                if v.is_object() {
-                    let then_fn = v.get_property_str(ctx, "then")?;
-                    then_fn.call(ctx, v, &[write_funcs[0], write_funcs[1]])?;
-                } else {
-                    write_funcs[0].call(ctx, JSValue::UNDEFINED, &[JSValue::UNDEFINED])?;
-                }
-                Ok(JSValue::from(write_p))
-            };
-
-            if has_transform {
-                let transform_fn = obj.get_property_str(ctx, "transform").unwrap();
-                let result =
-                    transform_fn.call(ctx, tcp.transformer, &[chunk, JSValue::from(tc)])?;
-                return finish(ctx, result);
-            } else {
-                // No user-defined transform → pass through: enqueue chunk directly
-                let enqueue_fn =
-                    JSValue::from(tcp.readable_controller).get_property_str(ctx, "enqueue")?;
-                enqueue_fn.call(ctx, JSValue::from(tcp.readable_controller), &[chunk])?;
-                write_funcs[0].call(ctx, JSValue::UNDEFINED, &[JSValue::UNDEFINED])?;
-                return Ok(JSValue::from(write_p));
-            }
-        }
-    }
 
     // Normal writable path. Per spec `WritableStreamDefaultWriterWrite`: the
     // chunk size is computed FIRST (a throwing/invalid size errors the stream),
@@ -473,11 +431,7 @@ fn js_writer_close(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     // Released writer: close() returns a rejected promise (spec).
     let Some(mut stream) = p.stream else {
         let err = ctx
-            .create_error_object(
-                zuqe::ErrorKind::Type,
-                "Writer is released",
-                false,
-            )
+            .create_error_object(zuqe::ErrorKind::Type, "Writer is released", false)
             .map(JSValue::from)
             .unwrap_or(JSValue::UNDEFINED);
         return Promise::from_reject_value(ctx, err).map(JSValue::from);
