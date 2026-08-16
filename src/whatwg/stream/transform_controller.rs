@@ -186,7 +186,8 @@ fn js_transform_controller_desired_size(ctx: &mut ScopedContext, cc: CallContext
             && let Some(sp) = s.payload()
         {
             match sp.state {
-                RsState::Errored => return Ok(JSValue::NULL),
+                // Readable streams never enter the Erroring state.
+                RsState::Errored | RsState::Erroring => return Ok(JSValue::NULL),
                 RsState::Closed => return Ok(JSValue::ZERO),
                 RsState::Readable => {}
             }

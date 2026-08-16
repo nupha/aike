@@ -139,7 +139,8 @@ impl ReaderPayload {
             .ok_or_else(|| ctx.throw_internal_error("invalid stream"))?;
 
         match stream_p.state {
-            RsState::Errored => {
+            // Readable streams never enter the Erroring state.
+            RsState::Errored | RsState::Erroring => {
                 return Promise::from_reject_value(ctx, stream_p.stored_error);
             }
             RsState::Closed => {

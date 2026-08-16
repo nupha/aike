@@ -109,16 +109,25 @@ declare namespace process {
     listener: (...args: unknown[]) => void,
   ): typeof process;
   /** Alias for addListener. */
-  function on(event: string, listener: (...args: unknown[]) => void): typeof process;
+  function on(
+    event: string,
+    listener: (...args: unknown[]) => void,
+  ): typeof process;
   /** Add a one-time listener. */
-  function once(event: string, listener: (...args: unknown[]) => void): typeof process;
+  function once(
+    event: string,
+    listener: (...args: unknown[]) => void,
+  ): typeof process;
   /** Remove a listener. */
   function removeListener(
     event: string,
     listener: (...args: unknown[]) => void,
   ): typeof process;
   /** Alias for removeListener. */
-  function off(event: string, listener: (...args: unknown[]) => void): typeof process;
+  function off(
+    event: string,
+    listener: (...args: unknown[]) => void,
+  ): typeof process;
   /** Emit an event; returns false when no listener handled it. */
   function emit(event: string, ...args: unknown[]): boolean;
   /** Remove all listeners for an event, or all events when omitted. */
@@ -498,4 +507,13 @@ declare namespace Aike {
    * @param ms - Milliseconds to wait (clamped to >= 0).
    */
   function sleep(ms: number): Promise<void>;
+}
+
+// ---------------------------------------------------------------------------
+// ImportMeta  —  the import.meta object available in every ES module
+// ---------------------------------------------------------------------------
+// ES modules expose `import.meta`; `url` is the module's absolute file URL
+// (e.g. "file:///abs/path/mod.ts"). aike resolves it against the base URL.
+interface ImportMeta {
+  url: string;
 }

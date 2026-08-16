@@ -135,7 +135,9 @@ impl ReadableStreamPayload {
             RsState::Closed => {
                 return Promise::from_resolve_value(ctx, JSValue::UNDEFINED);
             }
-            RsState::Errored => {
+            // Readable streams never enter the Erroring state; treat it as
+            // errored for exhaustiveness.
+            RsState::Errored | RsState::Erroring => {
                 return Promise::from_reject_value(ctx, self.stored_error);
             }
             RsState::Readable => {}
@@ -205,7 +207,9 @@ impl JSReadableStream {
         let mut closed_promise = Promise::create(ctx)?.0;
         match sp.state {
             RsState::Closed => closed_promise.resolve(ctx, JSValue::UNDEFINED),
-            RsState::Errored => closed_promise.reject(ctx, sp.stored_error),
+            // Readable streams never enter the Erroring state; treat it as
+            // errored for exhaustiveness.
+            RsState::Errored | RsState::Erroring => closed_promise.reject(ctx, sp.stored_error),
             RsState::Readable => {}
         }
         let reader = JSReadableStreamDefaultReader::new_instance(
@@ -427,7 +431,8 @@ fn js_readable_stream_state(ctx: &mut ScopedContext, cc: CallContext) -> JSResul
     let s = match p.state {
         RsState::Readable => "readable",
         RsState::Closed => "closed",
-        RsState::Errored => "errored",
+        // Readable streams never enter the Erroring state.
+        RsState::Errored | RsState::Erroring => "errored",
     };
     let sref = ctx
         .create_string_from_utf8(s.as_bytes().to_vec())

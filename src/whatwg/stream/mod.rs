@@ -49,6 +49,10 @@ use crate::USER_CLASS_DEFS;
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum RsState {
     Readable,
+    /// The stream is erroring (per the Streams spec): `stored_error` is set and
+    /// the writer's `ready` has been rejected, but queued writes/close are only
+    /// settled once the in-flight operation finishes (`finish_erroring`).
+    Erroring,
     Closed,
     Errored,
 }
@@ -311,9 +315,8 @@ pub(super) fn notify_peer_closed(
         }
         // When the stream is errored/aborted (a `reason` is present), any
         // outstanding `write()` promise must also reject with that reason
-        // (spec: outstanding write() promises reject). `ready` is rejected
-        // separately by `WritableStreamPayload::abort`'s `reject_ready` so it
-        // stays a single in-place rejection (no reference change).
+        // (spec: outstanding write() promises reject). The writer's `ready` is
+        // handled by `WritableStreamPayload::start_erroring` instead.
         if reason.is_some() {
             if let Some(wp_promise) = wp.write_promise.as_mut() {
                 if wp_promise.state() == PromiseState::Pending {

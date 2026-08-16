@@ -20,9 +20,6 @@ use crate::{
         },
     },
 };
-
-use super::RsState;
-
 pub(crate) struct WritableControllerPayload {
     pub(crate) stream: Option<JSWritableStream>,
     pub(crate) underlying_sink: JSValue,
@@ -105,16 +102,14 @@ fn js_writable_controller_error(_ctx: &mut ScopedContext, cc: CallContext) -> JS
     let e = cc.arg(0);
     let this = cc.this();
 
+    // Per spec `WritableStreamDefaultControllerError`: error the stream,
+    // rejecting the writer's `ready`/`closed`, queued writes, and a pending
+    // close request. An in-flight write keeps running and settles on its own.
     if let Some(p) = JSWritableStreamDefaultController::payload_of(&this)
         && let Some(mut stream_val) = p.stream
         && let Some(sp) = stream_val.payload_mut()
     {
-        // Spec: error() is a no-op once the stream has left the writable state.
-        if sp.state != RsState::Readable {
-            return Ok(JSValue::UNDEFINED);
-        }
-        sp.state = RsState::Errored;
-        sp.stored_error = e;
+        sp.start_erroring(_ctx, e)?;
     }
 
     Ok(JSValue::UNDEFINED)

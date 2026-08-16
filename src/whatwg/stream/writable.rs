@@ -7,7 +7,7 @@ use linkme::distributed_slice;
 use zuqe::{
     CallContext, Callback, ClassCtorDef, ClassID, FieldDef, JSResult, JSValue, Runtime,
     ScopedContext,
-    builtins::promise::Promise,
+    builtins::promise::{Promise, PromiseState},
     def_native_object,
     gc_lite::{GcTrace, GcTraceCtx},
 };
@@ -21,7 +21,7 @@ use crate::{
     },
 };
 
-use super::{RsState, notify_peer_closed};
+use super::RsState;
 
 // ============================================================================
 // WritableStream
@@ -61,6 +61,25 @@ pub(crate) struct WritableStreamPayload {
     /// The promise returned by `writer.close()`, resolved once the sink's
     /// `close()` completes.
     pub(crate) close_promise: Option<Promise>,
+    /// Mirrors WHATWG `backpressure` (desiredSize ≤ 0). Drives the writer's
+    /// `ready` promise: entering backpressure replaces it with a fresh pending
+    /// promise, leaving it resolves the current one in place.
+    pub(crate) backpressure: bool,
+    /// A sink `close()` is currently in flight (the sink's `close()` has been
+    /// invoked but not yet settled). Mirrors WHATWG `inFlightCloseRequest`.
+    pub(crate) in_flight_close: bool,
+    /// A pending abort request (spec `pendingAbortRequest`), settled once the
+    /// stream finishes erroring and the sink's `abort()` (if any) settles.
+    pub(crate) pending_abort: Option<PendingAbort>,
+}
+
+/// A pending `abort()` request (spec `WritableStreamAbort`): the promise to
+/// settle, the reason to forward to the sink's `abort()`, and whether the
+/// stream was already erroring when the abort was issued.
+pub(crate) struct PendingAbort {
+    pub(crate) promise: Promise,
+    pub(crate) reason: JSValue,
+    pub(crate) was_already_erroring: bool,
 }
 
 impl WritableStreamPayload {
@@ -79,6 +98,9 @@ impl WritableStreamPayload {
             in_flight_write_request: None,
             close_requested: false,
             close_promise: None,
+            backpressure: false,
+            in_flight_close: false,
+            pending_abort: None,
         }
     }
 
@@ -102,50 +124,213 @@ impl WritableStreamPayload {
         if let Some(ref p) = self.close_promise {
             p.trace(gcx);
         }
+        if let Some(ref req) = self.pending_abort {
+            req.promise.trace(gcx);
+            req.reason.trace(gcx);
+        }
     }
 
-    /// Set this stream's state (and `stored_error` when errored), then settle
-    /// the peer writer's `closed_promise` accordingly.
-    ///
-    /// A stream can only leave the Readable state once. Re-settling (e.g. abort
-    /// after an error) must not re-settle the peer's closed_promise, which would
-    /// violate the Promise contract.
-    pub(crate) fn settle_state(
+    /// Mirror of WHATWG `WritableStreamStartErroring`: transition to the
+    /// Erroring state, reject the writer's `ready`, and finish erroring
+    /// immediately when no operation is in flight (and the stream is started).
+    /// The in-flight write, if any, is NOT rejected — it keeps running and
+    /// settles with its own result.
+    pub(crate) fn start_erroring(
         &mut self,
         ctx: &mut ScopedContext,
-        state: RsState,
-        reason: Option<JSValue>,
-    ) {
+        error: JSValue,
+    ) -> Result<(), i32> {
         if self.state != RsState::Readable {
-            return;
+            return Ok(());
         }
-        self.state = state;
-        if let Some(r) = reason {
-            self.stored_error = r;
+        self.state = RsState::Erroring;
+        self.stored_error = error;
+        // writer.ready rejects (or is replaced when already settled).
+        if let Some(w) = self.writer {
+            let mut wv = JSValue::from(w);
+            if let Some(mut wp) = JSWritableStreamDefaultWriter::payload_mut_of(&mut wv) {
+                wp.ensure_ready_rejected(ctx, error);
+            }
         }
-        // Per spec `WritableStreamFinishErroring`: queued (not yet in-flight)
-        // writes are rejected with the stored error. The in-flight write keeps
-        // running and is settled by its own sink result.
-        let queued = std::mem::take(&mut self.write_requests);
-        for mut req in queued {
-            req.reject(ctx, reason.unwrap_or(JSValue::UNDEFINED));
+        if self.started && !self.has_operation_in_flight() {
+            self.finish_erroring(ctx)?;
         }
-        notify_peer_closed(ctx, self.writer.map(JSValue::from), reason);
+        Ok(())
     }
 
-    /// Reject every queued `write()` promise (those not yet in flight) with
-    /// `reason`. Used when the stream errors/aborts before start completes, so a
-    /// `write()` issued before start is rejected rather than hanging or calling
-    /// the sink.
-    pub(crate) fn reject_queued_writes(&mut self, ctx: &mut ScopedContext, reason: JSValue) {
+    fn has_operation_in_flight(&self) -> bool {
+        self.in_flight_write_request.is_some() || self.in_flight_close
+    }
+
+    /// Mirror of WHATWG `WritableStreamFinishErroring`: transition to the
+    /// Errored state, reject queued writes, settle the pending abort request
+    /// (invoking the sink's `abort()` as needed) and reject the writer's
+    /// `closed` / pending close request with the stored error.
+    pub(crate) fn finish_erroring(&mut self, ctx: &mut ScopedContext) -> Result<(), i32> {
+        if self.state != RsState::Erroring {
+            return Ok(());
+        }
+        self.state = RsState::Errored;
+        let stored = self.stored_error;
+        // Queued (not in-flight) writes reject with the stored error.
         let queued = std::mem::take(&mut self.write_requests);
         for mut req in queued {
-            req.reject(ctx, reason);
+            req.reject(ctx, stored);
         }
         self.write_queue.clear();
         self.write_queue_sizes.clear();
         self.queue_total_size = 0.0;
         self.in_flight_write_size = 0.0;
+
+        // Pending abort request (spec WritableStreamFinishErroring).
+        if let Some(req) = self.pending_abort.take() {
+            if req.was_already_erroring {
+                let mut p = req.promise;
+                p.reject(ctx, stored);
+                self.reject_close_and_closed(ctx);
+            } else {
+                // AbortSteps: invoke the sink's `abort()`, then settle the abort
+                // promise and reject `closed` once that settles.
+                let abort_result = self.abort_steps(ctx, req.reason)?;
+                let stream_val = self.stream_value();
+                let on_ok = ctx.create_native_function_with_data(
+                    Callback::Func(|ctx, cc| {
+                        let mut sv = cc.data(0);
+                        if let Ok(mut p) = Promise::try_from(cc.data(1)) {
+                            p.resolve(ctx, JSValue::UNDEFINED);
+                        }
+                        if let Some(sp) = JSWritableStream::payload_mut_of(&mut sv) {
+                            sp.reject_close_and_closed(ctx);
+                        }
+                        Ok(JSValue::UNDEFINED)
+                    }),
+                    "abortStepsOk",
+                    0,
+                    0,
+                    [stream_val, JSValue::from(req.promise)].into(),
+                )?;
+                let on_err = ctx.create_native_function_with_data(
+                    Callback::Func(|ctx, cc| {
+                        let mut sv = cc.data(0);
+                        if let Ok(mut p) = Promise::try_from(cc.data(1)) {
+                            p.reject(ctx, cc.arg(0));
+                        }
+                        if let Some(sp) = JSWritableStream::payload_mut_of(&mut sv) {
+                            sp.reject_close_and_closed(ctx);
+                        }
+                        Ok(JSValue::UNDEFINED)
+                    }),
+                    "abortStepsErr",
+                    1,
+                    0,
+                    [stream_val, JSValue::from(req.promise)].into(),
+                )?;
+                let mut abort_result = abort_result;
+                abort_result.then(ctx, on_ok.into(), on_err.into())?;
+            }
+        } else {
+            self.reject_close_and_closed(ctx);
+        }
+        Ok(())
+    }
+
+    /// Invoke the underlying sink's `abort(reason)` and return its result as a
+    /// promise (a resolved promise when the sink has no `abort` method). Per
+    /// spec `WritableStreamDefaultController[[AbortSteps]]`.
+    fn abort_steps(&self, ctx: &mut ScopedContext, reason: JSValue) -> Result<Promise, i32> {
+        if let Some(controller) = self.controller
+            && let Some(cp) = controller.payload()
+            && let Some(sink) = cp.underlying_sink.as_object()
+        {
+            match sink.invoke_str_defined(ctx, "abort", &[reason]) {
+                Ok(Some(Ok(v))) => {
+                    if let Ok(p) = Promise::try_from(v) {
+                        Ok(p)
+                    } else {
+                        Promise::from_resolve_value(ctx, v)
+                    }
+                }
+                Ok(None) => Promise::from_resolve_value(ctx, JSValue::UNDEFINED),
+                Ok(Some(Err(_))) | Err(_) => {
+                    let e = ctx.take_exception().to_value(ctx);
+                    Promise::from_reject_value(ctx, e)
+                }
+            }
+        } else {
+            Promise::from_resolve_value(ctx, JSValue::UNDEFINED)
+        }
+    }
+
+    /// Mirror of `WritableStreamRejectCloseAndClosedPromiseIfNeeded`: reject the
+    /// pending close request and the writer's `closed` promise with the stored
+    /// error. Only meaningful once the stream is Errored.
+    pub(crate) fn reject_close_and_closed(&mut self, ctx: &mut ScopedContext) {
+        let stored = self.stored_error;
+        if self.close_requested {
+            self.close_requested = false;
+            if let Some(mut cp) = self.close_promise.take() {
+                cp.reject(ctx, stored);
+            }
+        }
+        if let Some(w) = self.writer {
+            let mut wv = JSValue::from(w);
+            if let Some(mut wp) = JSWritableStreamDefaultWriter::payload_mut_of(&mut wv) {
+                wp.ensure_closed_rejected(ctx, stored);
+            }
+        }
+    }
+
+    /// The stream handle (as a JSValue), recovered via the controller's
+    /// back-reference; `undefined` when unavailable.
+    fn stream_value(&self) -> JSValue {
+        match self.controller {
+            Some(c) => {
+                let cv = JSValue::from(c);
+                match JSWritableStreamDefaultController::payload_of(&cv) {
+                    Some(cp) => match cp.stream {
+                        Some(s) => JSValue::from(s),
+                        None => JSValue::UNDEFINED,
+                    },
+                    None => JSValue::UNDEFINED,
+                }
+            }
+            None => JSValue::UNDEFINED,
+        }
+    }
+
+    /// Current backpressure: `desiredSize = highWaterMark − queue_total_size`
+    /// is ≤ 0. Mirrors `WritableStreamDefaultControllerGetBackpressure`.
+    pub(crate) fn current_backpressure(&self) -> bool {
+        self.controller
+            .as_ref()
+            .and_then(|c| c.payload())
+            .map(|cp| cp.high_water_mark - self.queue_total_size <= 0.0)
+            .unwrap_or(false)
+    }
+
+    /// Mirror of `WritableStreamUpdateBackpressure`: when backpressure changes,
+    /// entering it replaces the writer's `ready` promise with a fresh pending
+    /// promise, leaving it resolves the current one in place.
+    pub(crate) fn update_backpressure(&mut self, ctx: &mut ScopedContext) {
+        let bp = self.current_backpressure();
+        if bp == self.backpressure {
+            return;
+        }
+        if let Some(mut w) = self.writer {
+            let mut wv = JSValue::from(w);
+            if let Some(mut wp) = JSWritableStreamDefaultWriter::payload_mut_of(&mut wv) {
+                if bp {
+                    if let Ok((ready, _)) = Promise::create(ctx) {
+                        wp.ready_promise = Some(ready);
+                    }
+                } else if let Some(mut rp) = wp.ready_promise
+                    && rp.state() == PromiseState::Pending
+                {
+                    rp.resolve(ctx, JSValue::UNDEFINED);
+                }
+            }
+        }
+        self.backpressure = bp;
     }
 
     /// Mirror of WHATWG `WritableStreamDefaultControllerAdvanceQueueIfNeeded`.
@@ -158,8 +343,15 @@ impl WritableStreamPayload {
         if !self.started {
             return Ok(());
         }
-        if self.state != RsState::Readable {
-            return Ok(());
+        match self.state {
+            RsState::Erroring => {
+                // Per spec: an erroring stream with no in-flight op finishes
+                // erroring here (rejects queued writes, close and closed).
+                self.finish_erroring(ctx)?;
+                return Ok(());
+            }
+            RsState::Closed | RsState::Errored => return Ok(()),
+            RsState::Readable => {}
         }
         if self.write_queue.is_empty() {
             // No more writes: if a close was requested, perform it now (the sink's
@@ -176,35 +368,67 @@ impl WritableStreamPayload {
         // the in-flight write) until the write settles in `finish_in_flight_write`.
         let size = self.write_queue_sizes.remove(0);
         self.in_flight_write_size = size;
-        self.in_flight_write_request = Some(write_promise);
-        self.process_write(ctx, chunk)
+        // `process_write` creates a new in-flight promise that settles when the
+        // sink write completes. The original `write_promise` returned to JS by
+        // `writer.write()` is settled directly (before `ready`) so its reactions
+        // run before the writer's `ready` reactions, per the spec ordering.
+        self.process_write(ctx, chunk, write_promise)?;
+        Ok(())
     }
 
-    /// Settle the stream's deferred close promise. On success resolve it; on
-    /// failure mark the stream Errored with `reason` and reject it.
+    /// Settle the stream's deferred close promise. On success resolve it (and
+    /// the writer's `closed`); on failure error the stream, reject the close
+    /// promise, and settle the writer's `ready`/`closed`.
     fn finish_close(
         ctx: &mut ScopedContext,
         stream_val: &mut JSValue,
         ok: bool,
         value: JSValue,
     ) -> JSResult {
-        if let Some(mut sp) = JSWritableStream::payload_mut_of(stream_val) {
+        if let Some(sp) = JSWritableStream::payload_mut_of(stream_val) {
+            sp.in_flight_close = false;
             if ok {
+                // Per spec `WritableStreamFinishInFlightClose`: resolve the close
+                // request first, then (when the stream was erroring, e.g. aborted
+                // during the close) discard the error and resolve a pending abort
+                // request, then close the stream.
                 if let Some(mut cp) = sp.close_promise.take() {
                     let _ = cp.resolve(ctx, JSValue::UNDEFINED);
                 }
+                if sp.state == RsState::Erroring {
+                    sp.stored_error = JSValue::UNDEFINED;
+                    if let Some(req) = sp.pending_abort.take() {
+                        let mut p = req.promise;
+                        p.resolve(ctx, JSValue::UNDEFINED);
+                    }
+                }
+                sp.state = RsState::Closed;
+                // The writer's `closed` promise resolves once the stream closes.
+                if let Some(w) = sp.writer {
+                    let mut wv = JSValue::from(w);
+                    if let Some(wp) = JSWritableStreamDefaultWriter::payload_mut_of(&mut wv)
+                        && let Some(mut cp) = wp.closed_promise
+                        && cp.state() == PromiseState::Pending
+                    {
+                        cp.resolve(ctx, JSValue::UNDEFINED);
+                    }
+                }
             } else {
-                sp.state = RsState::Errored;
-                sp.stored_error = value;
+                // Per spec `WritableStreamFinishInFlightCloseWithError`: reject the
+                // close request, reject a pending abort request with the same error,
+                // then `DealWithRejection` (writable -> start erroring, erroring ->
+                // finish erroring with the existing stored error).
                 if let Some(mut cp) = sp.close_promise.take() {
                     let _ = cp.reject(ctx, value);
                 }
-                // The stream is now errored: reject writer.ready with the error.
-                if let Some(mut w) = sp.writer {
-                    let mut wv = JSValue::from(w);
-                    if let Some(mut wp) = JSWritableStreamDefaultWriter::payload_mut_of(&mut wv) {
-                        wp.reject_ready(ctx, value);
-                    }
+                if let Some(req) = sp.pending_abort.take() {
+                    let mut p = req.promise;
+                    p.reject(ctx, value);
+                }
+                match sp.state {
+                    RsState::Readable => sp.start_erroring(ctx, value)?,
+                    RsState::Erroring => sp.finish_erroring(ctx)?,
+                    _ => {}
                 }
             }
         }
@@ -213,16 +437,18 @@ impl WritableStreamPayload {
 
     /// Perform the underlying sink `close()` now (all writes have drained), and
     /// settle the close promise. Per spec `WritableStreamClose`, `close()` is
-    /// only invoked once the stream is no longer writable/backpressured.
+    /// only invoked once the stream is no longer writable/backpressured. The
+    /// stream transitions to Closed only once the sink `close()` settles
+    /// (`finish_close`).
     fn perform_close(&mut self, ctx: &mut ScopedContext) -> Result<(), i32> {
-        self.state = RsState::Closed;
+        self.close_requested = false;
         // `stream_val` is needed by the async close handlers; recover it via the
-        // writer's back-reference.
-        let stream_val = match self.writer {
-            Some(w) => {
-                let wv = JSValue::from(w);
-                match JSWritableStreamDefaultWriter::payload_of(&wv) {
-                    Some(wp) => match wp.stream {
+        // controller's back-reference.
+        let stream_val = match self.controller {
+            Some(c) => {
+                let cv = JSValue::from(c);
+                match JSWritableStreamDefaultController::payload_of(&cv) {
+                    Some(cp) => match cp.stream {
                         Some(s) => JSValue::from(s),
                         None => JSValue::UNDEFINED,
                     },
@@ -241,74 +467,71 @@ impl WritableStreamPayload {
             }
             None => None,
         };
-        let sink_close = match sink_close {
-            Some(s) => s,
-            None => {
-                if let Some(mut cp) = self.close_promise.take() {
-                    cp.resolve(ctx, JSValue::UNDEFINED);
-                }
-                return Ok(());
-            }
-        };
-        match sink_close.invoke_str_callable(ctx, "close", &[]) {
-            Ok(Some(Ok(v))) => {
-                if let Ok(mut p) = Promise::try_from(v) {
-                    let on_ok = ctx.create_native_function_with_data(
-                        Callback::Func(|ctx, cc| {
-                            let mut sv = cc.data(0);
-                            Self::finish_close(ctx, &mut sv, true, JSValue::UNDEFINED)
-                        }),
-                        "closeOk",
-                        0,
-                        0,
-                        [stream_val].into(),
-                    )?;
-                    let on_err = ctx.create_native_function_with_data(
-                        Callback::Func(|ctx, cc| {
-                            let mut sv = cc.data(0);
-                            Self::finish_close(ctx, &mut sv, false, cc.arg(0))
-                        }),
-                        "closeErr",
-                        0,
-                        0,
-                        [stream_val].into(),
-                    )?;
-                    p.then(ctx, on_ok.into(), on_err.into())?;
-                } else if let Some(mut cp) = self.close_promise.take() {
-                    cp.resolve(ctx, JSValue::UNDEFINED);
-                }
-            }
-            Ok(Some(Err(_))) => {
-                let e = ctx.take_exception().to_value(ctx);
-                self.state = RsState::Errored;
-                self.stored_error = e;
-                if let Some(mut cp) = self.close_promise.take() {
-                    cp.reject(ctx, e);
-                }
-                if let Some(mut w) = self.writer {
-                    let mut wv = JSValue::from(w);
-                    if let Some(mut wp) = JSWritableStreamDefaultWriter::payload_mut_of(&mut wv) {
-                        wp.reject_ready(ctx, e);
+        // The sink's `close()` result is always treated as a promise (spec
+        // `uponPromise`), so even a synchronous/non-thenable return (or a missing
+        // sink close) settles the close on a microtask and a thenable is
+        // assimilated.
+        let mut close_result = match sink_close {
+            Some(s) => match s.invoke_str_callable(ctx, "close", &[]) {
+                Ok(Some(Ok(v))) => {
+                    if let Ok(mut p) = Promise::try_from(v) {
+                        p
+                    } else {
+                        Promise::from_resolve_value(ctx, v)?
                     }
                 }
-            }
-            _ => {
-                if let Some(mut cp) = self.close_promise.take() {
-                    cp.resolve(ctx, JSValue::UNDEFINED);
+                Ok(Some(Err(_))) | Err(_) => {
+                    let e = ctx.take_exception().to_value(ctx);
+                    Promise::from_reject_value(ctx, e)?
                 }
-            }
-        }
+                _ => Promise::from_resolve_value(ctx, JSValue::UNDEFINED)?,
+            },
+            None => Promise::from_resolve_value(ctx, JSValue::UNDEFINED)?,
+        };
+        let on_ok = ctx.create_native_function_with_data(
+            Callback::Func(|ctx, cc| {
+                let mut sv = cc.data(0);
+                Self::finish_close(ctx, &mut sv, true, JSValue::UNDEFINED)
+            }),
+            "closeOk",
+            0,
+            0,
+            [stream_val].into(),
+        )?;
+        let on_err = ctx.create_native_function_with_data(
+            Callback::Func(|ctx, cc| {
+                let mut sv = cc.data(0);
+                Self::finish_close(ctx, &mut sv, false, cc.arg(0))
+            }),
+            "closeErr",
+            0,
+            0,
+            [stream_val].into(),
+        )?;
+        close_result.then(ctx, on_ok.into(), on_err.into())?;
         Ok(())
     }
 
     /// If a `close()` was requested and there are no pending/in-flight writes,
-    /// perform it now; otherwise it will run once the last write settles.
+    /// perform it now; otherwise it will run once the last write settles. An
+    /// erroring stream with no in-flight operation finishes erroring here (per
+    /// spec `WritableStreamDefaultControllerAdvanceQueueIfNeeded`).
     pub(crate) fn try_close(&mut self, ctx: &mut ScopedContext) -> Result<(), i32> {
-        if self.started
+        if self.state == RsState::Erroring
+            && !self.has_operation_in_flight()
+        {
+            self.finish_erroring(ctx)?;
+            return Ok(());
+        }
+        if self.state == RsState::Readable
+            && self.started
             && self.close_requested
             && self.write_queue.is_empty()
             && self.in_flight_write_request.is_none()
+            && !self.in_flight_close
         {
+            self.close_requested = false;
+            self.in_flight_close = true;
             self.perform_close(ctx)?;
         }
         Ok(())
@@ -316,8 +539,15 @@ impl WritableStreamPayload {
 
     /// Mirror of WHATWG `WritableStreamDefaultControllerProcessWrite`: invoke the
     /// sink's `write(chunk)` synchronously and chain its result onto the
-    /// in-flight write promise (and the writer's `ready` promise).
-    fn process_write(&mut self, ctx: &mut ScopedContext, chunk: JSValue) -> Result<(), i32> {
+    /// in-flight write promise. `original_promise` is the promise returned to JS
+    /// by `writer.write()`; it is settled directly (before `ready`) when the
+    /// sink write completes.
+    fn process_write(
+        &mut self,
+        ctx: &mut ScopedContext,
+        chunk: JSValue,
+        original_promise: Promise,
+    ) -> Result<(), i32> {
         let controller_val = match self.controller {
             Some(c) => JSValue::from(c),
             None => {
@@ -350,49 +580,61 @@ impl WritableStreamPayload {
             }
         };
 
-        // writer.ready goes pending (backpressure) for the duration of the
-        // in-flight write: replace it with a fresh pending promise. `finish` and
-        // `reject_ready` settle the current `ready_promise` in place.
-        if let Some(mut writer) = self.writer
-            && let Some(mut wp) = writer.payload_mut()
-        {
-            let (ready, _ready_funcs) = Promise::create(ctx)?;
-            wp.ready_promise = Some(ready);
-            let (write_p, write_funcs) = Promise::create(ctx)?;
-            // Swap the placeholder in_flight_write_request with the real promise.
-            let _ = self.in_flight_write_request.replace(write_p);
-            let resolve = write_funcs[0];
-            let reject = write_funcs[1];
-            Self::chain_write_result(
-                ctx,
-                sink_val,
-                chunk,
-                controller_val,
-                stream_val,
-                resolve,
-                reject,
-            )?;
-        }
+        // Create a fresh promise + resolve/reject pair for the in-flight sink
+        // write. When it settles, `finish_in_flight_write` settles this promise
+        // via the resolve/reject functions embedded in its binding data, and
+        // settles `original_promise` directly (before `ready`).
+        let (write_p, write_funcs) = Promise::create(ctx)?;
+        let _ = self.in_flight_write_request.replace(write_p);
+        let resolve = write_funcs[0];
+        let reject = write_funcs[1];
+        Self::chain_write_result(
+            ctx,
+            sink_val,
+            chunk,
+            controller_val,
+            stream_val,
+            resolve,
+            reject,
+            original_promise,
+        )?;
         Ok(())
     }
 
-    /// Resolve/reject the in-flight write & ready promises, clear the in-flight
-    /// slot, then advance the queue. Handles (resolve, reject, stream_val) live
-    /// in `cc.data(0..2)`; `cc.data(3)` is the ok flag (`undefined` = ok, anything
-    /// else = error); the value/reason is `cc.arg(0)`. On success the writer's
-    /// current `ready_promise` is resolved in place (stream ready again).
+    /// Settle the in-flight write and clear the in-flight slot, then error the
+    /// stream on rejection or advance the queue on success.
+    ///
+    /// Handles `(resolve, reject, stream_val)` live in `cc.data(0..2)`;
+    /// `cc.data(3)` is the ok flag (`undefined` = ok, anything else = error);
+    /// `cc.data(4)` is the original `write()` promise; the value/reason is
+    /// `cc.arg(0)`. On success the original write promise is resolved BEFORE the
+    /// writer's `ready` (via backpressure), so its reactions run first (spec
+    /// ordering). On failure the stream is errored when still writable.
     fn finish_in_flight_write(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         let ok = cc.data(3).is_undefined();
         let value = cc.arg(0);
         let resolve = cc.data(0);
         let reject = cc.data(1);
         let mut stream_val = cc.data(2);
+        let orig = cc.data(4);
+
         if ok {
             resolve.call(ctx, JSValue::UNDEFINED, &[JSValue::UNDEFINED])?;
+            if let Ok(mut op) = Promise::try_from(orig)
+                && op.state() == PromiseState::Pending
+            {
+                op.resolve(ctx, JSValue::UNDEFINED);
+            }
         } else {
             reject.call(ctx, JSValue::UNDEFINED, &[value])?;
+            if let Ok(mut op) = Promise::try_from(orig)
+                && op.state() == PromiseState::Pending
+            {
+                op.reject(ctx, value);
+            }
         }
-        if let Some(mut sp) = JSWritableStream::payload_mut_of(&mut stream_val) {
+
+        if let Some(sp) = JSWritableStream::payload_mut_of(&mut stream_val) {
             sp.in_flight_write_request = None;
             // The in-flight write has settled; its size now leaves the total.
             sp.queue_total_size -= sp.in_flight_write_size;
@@ -400,21 +642,33 @@ impl WritableStreamPayload {
                 sp.queue_total_size = 0.0;
             }
             sp.in_flight_write_size = 0.0;
-            // Stream is ready again: resolve writer.ready in place.
-            if let Some(mut w) = sp.writer
-                && let Some(mut wp) = w.payload_mut()
-                && let Some(mut rp) = wp.ready_promise
-            {
-                rp.resolve(ctx, JSValue::UNDEFINED);
+            if ok {
+                // Per spec `WritableStreamDefaultControllerProcessWrite` cleanup:
+                // recompute backpressure (resolves `ready` when it drops) unless a
+                // close is queued/in flight.
+                if sp.state == RsState::Readable && !sp.close_requested {
+                    sp.update_backpressure(ctx);
+                }
+                sp.advance_queue(ctx)?;
+            } else {
+                // A rejected sink write errors the stream (spec
+                // `WritableStreamDealWithRejection`): a writable stream starts
+                // erroring, an erroring one finishes erroring (rejecting queued
+                // writes, the pending close, `ready` and `closed`). An
+                // already-errored stream keeps its stored error.
+                match sp.state {
+                    RsState::Readable => sp.start_erroring(ctx, value)?,
+                    RsState::Erroring => sp.finish_erroring(ctx)?,
+                    _ => {}
+                }
             }
-            sp.advance_queue(ctx)?;
         }
         Ok(JSValue::UNDEFINED)
     }
 
     /// Call `sink.write(chunk)` and chain its outcome onto the in-flight write
-    /// promise (`resolve`/`reject`). On completion, advance the queue for the
-    /// next queued chunk.
+    /// promise (`resolve`/`reject`) and the original `write()` promise. On
+    /// completion, advance the queue for the next queued chunk.
     fn chain_write_result(
         ctx: &mut ScopedContext,
         sink_val: JSValue,
@@ -423,11 +677,19 @@ impl WritableStreamPayload {
         stream_val: JSValue,
         resolve: JSValue,
         reject: JSValue,
+        original_promise: Promise,
     ) -> Result<(), i32> {
-        // `data` layout: [resolve, reject, stream_val, ok_flag].
+        // `data` layout: [resolve, reject, stream_val, ok_flag, original_promise].
         // ok_flag is `undefined` for the success path (ok); a non-undefined value
         // (here 1) marks the error path, whose reason comes from `cc.arg(0)`.
-        let mut data: Vec<JSValue> = [resolve, reject, stream_val, JSValue::UNDEFINED].to_vec();
+        let mut data: Vec<JSValue> = [
+            resolve,
+            reject,
+            stream_val,
+            JSValue::UNDEFINED,
+            JSValue::from(original_promise),
+        ]
+        .to_vec();
         let mut data_err = data.clone();
         data_err[3] = JSValue::from(1);
         if let Some(sink) = sink_val.as_object() {
@@ -516,59 +778,227 @@ impl WritableStreamPayload {
         ctx: &mut ScopedContext,
         reason: JSValue,
     ) -> Result<Promise, i32> {
-        if self.state != RsState::Readable {
+        // Per spec `WritableStreamAbort`: aborting a closed/errored stream is a
+        // no-op that resolves with undefined.
+        if self.state == RsState::Closed || self.state == RsState::Errored {
             return Promise::from_resolve_value(ctx, JSValue::UNDEFINED);
         }
-        self.settle_state(ctx, RsState::Errored, Some(reason));
-
-        // Spec WritableStreamDefaultWriterAbort: a pending close is superseded by
-        // the abort — clear the close request and reject its promise with `reason`.
-        if self.close_requested {
-            self.close_requested = false;
-            if let Some(mut cp) = self.close_promise.take() {
-                cp.reject(ctx, reason);
-            }
-        }
-
-        // Per the Streams spec, aborting a WritableStream synchronously signals
-        // the controller's `signal` and rejects the writer's `ready` promise.
-        // This must happen before invoking the underlying sink's `abort()` so
-        // observers see a consistent state.
+        // Signal abort synchronously on the controller's signal, before any
+        // state change, so observers see a consistent state.
         if let Some(controller) = self.controller
             && let Some(cp) = controller.payload()
+            && let Some(signal) = cp.signal
         {
-            if let Some(signal) = cp.signal {
-                crate::whatwg::abort::abort_signal(ctx, signal, reason)?;
-            }
+            crate::whatwg::abort::abort_signal(ctx, signal, reason)?;
         }
-        if let Some(mut writer) = self.writer
-            && let Some(mut wp) = writer.payload_mut()
-        {
-            wp.reject_ready(ctx, reason);
+        // Re-check the state: signaling abort runs author code that may have
+        // changed it.
+        if self.state == RsState::Closed || self.state == RsState::Errored {
+            return Promise::from_resolve_value(ctx, JSValue::UNDEFINED);
         }
-
-        if let Some(controller) = self.controller
-            && let Some(cp) = controller.payload()
-            && let Some(sink) = cp.underlying_sink.as_object()
-        {
-            match sink.invoke_str_defined(ctx, "abort", &[reason]) {
-                Ok(Some(Ok(v))) => {
-                    return if let Ok(p) = Promise::try_from(v) {
-                        Ok(p)
-                    } else {
-                        Promise::from_resolve_value(ctx, v)
-                    };
-                }
-                Ok(None) => {}
-                Ok(Some(Err(_))) | Err(_) => {
-                    let e = ctx.take_exception().to_value(ctx);
-                    return Promise::from_reject_value(ctx, e);
-                }
-            }
+        // Repeated aborts return the same pending promise.
+        if let Some(req) = &self.pending_abort {
+            return Ok(req.promise);
         }
-
-        Promise::from_resolve_value(ctx, JSValue::UNDEFINED)
+        // When already erroring, the abort's reason is ignored.
+        let was_already_erroring = self.state == RsState::Erroring;
+        let reason = if was_already_erroring {
+            JSValue::UNDEFINED
+        } else {
+            reason
+        };
+        let (promise, _rr) = Promise::create(ctx)?;
+        self.pending_abort = Some(PendingAbort {
+            promise,
+            reason,
+            was_already_erroring,
+        });
+        if !was_already_erroring {
+            self.start_erroring(ctx, reason)?;
+        }
+        Ok(promise)
     }
+
+    /// Shared close logic for `WritableStream.close()` / `writer.close()`.
+    /// Per spec `WritableStreamClose`: rejects with TypeError when the stream is
+    /// already closed/errored or a close is queued/in flight; otherwise requests
+    /// a deferred close that runs the sink's `close()` (or a transform's
+    /// `flush`) once all writes drain.
+    pub(crate) fn close(&mut self, ctx: &mut ScopedContext) -> Result<Promise, i32> {
+        // Spec: state "closed" or "errored" -> rejected TypeError.
+        if self.state == RsState::Closed || self.state == RsState::Errored {
+            let err = ctx
+                .create_error_object(
+                    zuqe::ErrorKind::Type,
+                    "Cannot close a WritableStream that is already closed or errored",
+                    false,
+                )
+                .map(JSValue::from)
+                .unwrap_or(JSValue::UNDEFINED);
+            return Promise::from_reject_value(ctx, err);
+        }
+        // Spec: CloseQueuedOrInFlight -> rejected TypeError.
+        if self.close_requested || self.in_flight_close {
+            let err = ctx
+                .create_error_object(
+                    zuqe::ErrorKind::Type,
+                    "Cannot close a WritableStream while a close is already pending",
+                    false,
+                )
+                .map(JSValue::from)
+                .unwrap_or(JSValue::UNDEFINED);
+            return Promise::from_reject_value(ctx, err);
+        }
+
+        // `stream_val` is handed to the async flush handlers; recover it via the
+        // controller's back-reference.
+        let stream_val = match self.controller {
+            Some(c) => {
+                let cv = JSValue::from(c);
+                match JSWritableStreamDefaultController::payload_of(&cv) {
+                    Some(cp) => match cp.stream {
+                        Some(s) => JSValue::from(s),
+                        None => JSValue::UNDEFINED,
+                    },
+                    None => JSValue::UNDEFINED,
+                }
+            }
+            None => JSValue::UNDEFINED,
+        };
+
+        let mut close_err: Option<JSValue> = None;
+        let mut flush_promise: Option<Promise> = None;
+
+        // TransformStream: closing the writable side runs the transformer's
+        // `flush`, then closes the readable side.
+        if let Some(controller) = self.controller
+            && let Some(cp) = controller.payload()
+        {
+            if let Some(tc) = cp.transform_controller
+                && let Some(tcp) = tc.payload()
+                && let Some(tr) = tcp.transformer.as_object()
+            {
+                // If flush() throws synchronously or returns a rejected promise
+                // that is already settled, the close promise must reject with it.
+                match tr.invoke_str_callable(ctx, "flush", &[tc.into()]) {
+                    Ok(Some(Err(_))) | Err(_) => {
+                        close_err = Some(ctx.take_exception().to_value(ctx));
+                    }
+                    Ok(Some(Ok(v))) => {
+                        // flush may return a promise: await it so an async
+                        // rejection also rejects the close promise.
+                        if let Ok(p) = Promise::try_from(v) {
+                            flush_promise = Some(p);
+                        }
+                    }
+                    _ => {}
+                }
+
+                // Synchronous flush (no promise returned): close the readable side.
+                if flush_promise.is_none()
+                    && let Some(rcp) = tcp.readable_controller.payload()
+                {
+                    rcp.set_close_requested(true);
+                    rcp.resolve_pending_read(ctx, JSValue::UNDEFINED, true);
+                    if rcp.queue().borrow().is_empty()
+                        && let Some(mut rs_val) = rcp.stream()
+                        && let Some(rsp) = rs_val.payload_mut()
+                    {
+                        rsp.state = RsState::Closed;
+                    }
+                }
+            }
+        }
+
+        if let Some(e) = close_err {
+            self.start_erroring(ctx, e)?;
+            return Promise::from_reject_value(ctx, e);
+        }
+
+        // flush returned a promise: the close promise settles with it, and the
+        // readable side / state are only finalized after flush fulfills.
+        if let Some(mut fp) = flush_promise {
+            let ok = ctx
+                .create_native_function_with_data(
+                    Callback::Func(flush_close_ok),
+                    "flushCloseOk",
+                    0,
+                    0,
+                    [stream_val].into(),
+                )?
+                .into();
+            let err = ctx
+                .create_native_function_with_data(
+                    Callback::Func(flush_close_err),
+                    "flushCloseErr",
+                    1,
+                    0,
+                    [stream_val].into(),
+                )?
+                .into();
+            fp.then(ctx, ok, err)?;
+            return Ok(fp);
+        }
+
+        // Plain WritableStream: request a deferred close. The sink's `close()`
+        // is only invoked once all queued/in-flight writes have drained (spec
+        // WritableStreamClose); `try_close` performs it now if already drained.
+        let (close_p, _close_funcs) = Promise::create(ctx)?;
+        self.close_requested = true;
+        self.close_promise = Some(close_p);
+        // Spec WritableStreamClose: if backpressured, resolve `ready` in place.
+        if self.backpressure
+            && let Some(mut w) = self.writer
+            && let Some(mut wp) = w.payload_mut()
+            && let Some(mut rp) = wp.ready_promise
+            && rp.state() == PromiseState::Pending
+        {
+            rp.resolve(ctx, JSValue::UNDEFINED);
+        }
+        self.try_close(ctx)?;
+        Ok(close_p)
+    }
+}
+
+// flush fulfilled: close the readable side of the transform stream and mark
+// the writable stream closed, per spec (close after flush resolves).
+fn flush_close_ok(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let mut stream_val = cc.data(0);
+    if let Some(sp) = JSWritableStream::payload_mut_of(&mut stream_val)
+        && let Some(controller) = sp.controller
+        && let Some(cp) = controller.payload()
+        && let Some(tc) = cp.transform_controller
+        && let Some(tcp) = tc.payload()
+        && let Some(rcp) = tcp.readable_controller.payload()
+    {
+        rcp.set_close_requested(true);
+        rcp.resolve_pending_read(ctx, JSValue::UNDEFINED, true);
+        if rcp.queue().borrow().is_empty()
+            && let Some(mut rs_val) = rcp.stream()
+            && let Some(rsp) = rs_val.payload_mut()
+        {
+            rsp.state = RsState::Closed;
+        }
+        sp.state = RsState::Closed;
+    }
+    Ok(JSValue::UNDEFINED)
+}
+
+// flush rejected: error the writable stream with the flush error. Returning a
+// rejected promise makes the close promise reject with that error.
+fn flush_close_err(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let mut stream_val = cc.data(0);
+    let err = cc.arg(0);
+
+    if let Some(sp) = JSWritableStream::payload_mut_of(&mut stream_val)
+        && let Some(controller) = sp.controller
+        && let Some(cp) = controller.payload()
+        && let Some(_tc) = cp.transform_controller
+    {
+        sp.state = RsState::Errored;
+        sp.stored_error = err;
+    }
+    Promise::from_reject_value(ctx, err).map(JSValue::from)
 }
 
 const WRITABLE_STREAM_PROTO: &[FieldDef] = &[
@@ -612,17 +1042,37 @@ impl JSWritableStream {
             return Err(ctx.throw_type_error("WritableStream is already locked"));
         }
 
-        let mut closed_promise = Promise::create(ctx)?.0;
-        match sp.state {
-            RsState::Closed => closed_promise.resolve(ctx, JSValue::UNDEFINED),
-            RsState::Errored => closed_promise.reject(ctx, sp.stored_error),
-            RsState::Readable => {}
-        }
-
-        // `writer.ready` is a single persistent promise. It starts pending and
-        // is resolved once the stream is ready to accept writes (after start,
-        // and after each in-flight write completes), and rejected on abort.
-        let ready_promise = Promise::create(ctx)?.0;
+        // Per spec `SetUpWritableStreamDefaultWriter`, the writer's promises
+        // depend on the current state:
+        //  - writable, not backpressured: `ready` is a resolved promise;
+        //  - writable, backpressured (or close pending): `ready` is a fresh
+        //    pending promise;
+        //  - erroring/errored: `ready` rejected with the stored error;
+        //  - closed: `ready`/`closed` resolved; errored: both rejected.
+        let (ready_promise, closed_promise) = match sp.state {
+            RsState::Readable => {
+                let backpressured = sp.close_requested || sp.current_backpressure();
+                sp.backpressure = backpressured;
+                let ready = if backpressured {
+                    Promise::create(ctx)?.0
+                } else {
+                    Promise::from_resolve_value(ctx, JSValue::UNDEFINED)?
+                };
+                let closed = Promise::create(ctx)?.0;
+                (ready, closed)
+            }
+            RsState::Closed => (
+                Promise::from_resolve_value(ctx, JSValue::UNDEFINED)?,
+                Promise::from_resolve_value(ctx, JSValue::UNDEFINED)?,
+            ),
+            RsState::Erroring | RsState::Errored => {
+                let e = sp.stored_error;
+                (
+                    Promise::from_reject_value(ctx, e)?,
+                    Promise::from_reject_value(ctx, e)?,
+                )
+            }
+        };
 
         let writer = JSWritableStreamDefaultWriter::new_instance(
             ctx,
@@ -712,26 +1162,8 @@ fn js_writable_stream_constructor(ctx: &mut ScopedContext, cc: CallContext) -> J
                 sp.started = true;
                 sp.advance_queue(_ctx)?;
                 sp.try_close(_ctx)?;
-                // `writer.ready` resolves once the stream is started and not
-                // backpressured. Deferring past `try_close` lets a `close()` that
-                // throws (errored state) reject `ready` instead of leaving it
-                // resolved. It is only resolved when `desiredSize > 0` (queue
-                // empty / no in-flight write), mirroring spec backpressure.
-                if sp.state == RsState::Readable {
-                    let ds = sp
-                        .controller
-                        .as_ref()
-                        .and_then(|c| c.payload())
-                        .map(|cp| cp.high_water_mark - sp.queue_total_size)
-                        .unwrap_or(1.0);
-                    if ds > 0.0
-                        && let Some(mut w) = sp.writer
-                        && let Some(wp) = w.payload_mut()
-                        && let Some(mut rp) = wp.ready_promise
-                    {
-                        rp.resolve(_ctx, JSValue::UNDEFINED);
-                    }
-                }
+                // `writer.ready` is driven by backpressure (`update_backpressure`
+                // on enqueue/settle); no explicit resolution needed here.
             }
             Ok(JSValue::UNDEFINED)
         }),
@@ -744,18 +1176,12 @@ fn js_writable_stream_constructor(ctx: &mut ScopedContext, cc: CallContext) -> J
         Callback::Func(|_ctx, cc| {
             let mut stream_val = cc.data(0);
             let e = cc.arg(0);
+            // Per spec `SetUpWritableStreamDefaultController`: a rejected start
+            // marks the stream started, then errors it (`DealWithRejection`),
+            // rejecting queued writes, `ready` and `closed`.
             if let Some(sp) = JSWritableStream::payload_mut_of(&mut stream_val) {
-                sp.state = RsState::Errored;
-                sp.stored_error = e;
-                if let Some(mut cp) = sp.close_promise.take() {
-                    cp.reject(_ctx, e);
-                }
-                if let Some(mut w) = sp.writer {
-                    let mut wv = JSValue::from(w);
-                    if let Some(mut wp) = JSWritableStreamDefaultWriter::payload_mut_of(&mut wv) {
-                        wp.reject_ready(_ctx, e);
-                    }
-                }
+                sp.started = true;
+                sp.start_erroring(_ctx, e)?;
             }
             Ok(JSValue::UNDEFINED)
         }),
@@ -809,9 +1235,22 @@ fn js_writable_stream_abort(ctx: &mut ScopedContext, cc: CallContext) -> JSResul
 fn js_writable_stream_close(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut this = cc.this();
     if let Some(stream) = JSWritableStream::payload_mut_of(&mut this) {
-        stream.settle_state(ctx, RsState::Closed, None);
+        // Per spec `WritableStream.close`: closing a locked stream rejects with
+        // a TypeError.
+        if stream.writer.is_some() {
+            let err = ctx
+                .create_error_object(
+                    zuqe::ErrorKind::Type,
+                    "Cannot close a locked WritableStream",
+                    false,
+                )
+                .map(JSValue::from)
+                .unwrap_or(JSValue::UNDEFINED);
+            return Promise::from_reject_value(ctx, err).map(JSValue::from);
+        }
+        return stream.close(ctx).map(JSValue::from);
     }
-    Promise::from_resolve_value(ctx, JSValue::UNDEFINED).map(JSValue::from)
+    Err(ctx.throw_type_error("not a WritableStream"))
 }
 
 #[distributed_slice(USER_CLASS_DEFS)]

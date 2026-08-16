@@ -537,7 +537,8 @@ impl ReadableControllerPayload {
             && let Some(sp) = s.payload()
         {
             match sp.state {
-                RsState::Errored => return Ok(f64::NAN),
+                // Readable streams never enter the Erroring state.
+                RsState::Errored | RsState::Erroring => return Ok(f64::NAN),
                 RsState::Closed => return Ok(0.0),
                 RsState::Readable => {}
             }
