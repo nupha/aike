@@ -5,7 +5,7 @@ mod control;
 mod info;
 mod sys;
 
-pub(crate) use control::gc_trace_next_tick;
+pub(crate) use {control::gc_trace_next_tick, sys::PROCESS_EXIT_CODE};
 
 use zuqe::{Array, FieldDef, JS_PROP_ENUMERABLE, JSValue, ScopedContext};
 
@@ -51,8 +51,18 @@ pub fn init_process(
     }
 
     // pid / ppid — computed once at init
-    ns.define_property_value_str(ctx, "pid", JSValue::from(std::process::id() as i32), JS_PROP_ENUMERABLE)?;
-    ns.define_property_value_str(ctx, "ppid", JSValue::from(info::get_ppid()), JS_PROP_ENUMERABLE)?;
+    ns.define_property_value_str(
+        ctx,
+        "pid",
+        JSValue::from(std::process::id() as i32),
+        JS_PROP_ENUMERABLE,
+    )?;
+    ns.define_property_value_str(
+        ctx,
+        "ppid",
+        JSValue::from(info::get_ppid()),
+        JS_PROP_ENUMERABLE,
+    )?;
 
     let entries: &[FieldDef] = &[
         // --- proc ---
@@ -85,7 +95,12 @@ pub fn init_process(
         FieldDef::STR("arch", info::arch_str(), JS_PROP_ENUMERABLE),
         FieldDef::STR("version", info::version_str(), JS_PROP_ENUMERABLE),
         FieldDef::LAZY_VALUE("versions", info::js_versions, JS_PROP_ENUMERABLE),
-        FieldDef::GETSET("title", Some(info::js_title_get), Some(info::js_title_set), 0),
+        FieldDef::GETSET(
+            "title",
+            Some(info::js_title_get),
+            Some(info::js_title_set),
+            0,
+        ),
         FieldDef::FUNC("uptime", 0, info::js_uptime, 0),
         // --- control ---
         FieldDef::FUNC("chdir", 1, control::js_chdir, 0),

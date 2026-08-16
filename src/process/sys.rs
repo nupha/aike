@@ -1,9 +1,18 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-use std::process::ExitCode;
+use std::{
+    process::ExitCode,
+    sync::atomic::{AtomicI32, Ordering},
+};
 
 use zuqe::{CallContext, JSResult, JSValue, ScopedContext};
+
+/// Raw exit code set by `process.exit`, read by main to exit the process
+/// directly (bypassing tokio runtime shutdown that would otherwise wait on
+/// orphaned background tasks). ExitCode is opaque and has no stable extraction,
+/// so we capture the i32 code here.
+pub(crate) static PROCESS_EXIT_CODE: AtomicI32 = AtomicI32::new(0);
 
 pub(super) fn js_cwd(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
     match std::env::current_dir() {
@@ -21,10 +30,12 @@ pub(super) fn js_exit(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         0
     };
 
-    // Set the runtime interrupt flag rather than calling `std::process::exit`:
-    // the latter skips destructors and leaks GC nodes. The interrupt makes
-    // `run_async` return `Interrupted` on the next tick, so `main.rs` exits
-    // through the normal path and finalizes GC nodes.
+    // Capture the raw code so main can `std::process::exit` with it (ExitCode is
+    // opaque). Then set the runtime interrupt flag rather than calling
+    // `std::process::exit` directly: the latter skips destructors and leaks GC
+    // nodes. The interrupt makes `run_async` return `Interrupted` on the next
+    // tick, so `main.rs` finalizes GC nodes (drop(rt)) and then exits.
+    PROCESS_EXIT_CODE.store(code, Ordering::SeqCst);
     ctx.rt_mut().interrupt(ExitCode::from(code as u8));
 
     // Return Ok instead of Err: interrupt flag is set on runtime, tick() detects

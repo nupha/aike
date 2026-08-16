@@ -470,8 +470,16 @@ async fn main() -> ExitCode {
         )
         .await;
 
-    match result {
-        ExitStatus::Value(_) => ExitCode::SUCCESS,
+    // Resolve the process exit code. We exit explicitly (not by returning an
+    // `ExitCode` from main) because `#[tokio::main]` would otherwise block in
+    // tokio's graceful runtime shutdown waiting for spawned background tasks
+    // that never end (e.g. a `process.stdin.onData` read loop whose pipe never
+    // hits EOF). That hang is exactly why `process.exit` did not terminate a
+    // process that had registered stdin readers. Each arm yields the proper i32
+    // code; the interrupt arm reads the code captured by `process.exit`
+    // (ExitCode itself is opaque and not extractable).
+    let exit_code: i32 = match result {
+        ExitStatus::Value(_) => 0,
         ExitStatus::Exception(Exception::Error(err)) => {
             ctx.root_scope().with_new_scope(|cx| {
                 let text = Exception::Error(err).to_text(cx);
@@ -480,23 +488,29 @@ async fn main() -> ExitCode {
                     eprintln!("{}", tb);
                 }
             });
-            ExitCode::FAILURE
+            1
         }
-        ExitStatus::Interrupted(code) => {
+        ExitStatus::Interrupted(_) => {
             #[cfg(debug_assertions)]
-            log::debug!("Process interrupted with code {:?}", code);
-            code
+            log::debug!("Process interrupted");
+            crate::process::PROCESS_EXIT_CODE.load(std::sync::atomic::Ordering::SeqCst)
         }
         ExitStatus::Exception(Exception::OutOfMemory) => {
             colorize_println("out of memory", RedFg);
-            ExitCode::FAILURE
+            1
         }
         ExitStatus::Exception(
             Exception::No | Exception::TooManyClasses | Exception::TooManyAtoms,
         ) => {
             unreachable!();
         }
-    }
+    };
+
+    // Drop the engine runtime BEFORE exiting so GC nodes are finalized, then
+    // exit without waiting on orphaned tokio tasks. (`ctx` is a Copy handle, so
+    // only `rt` holds the heap that needs finalizing.)
+    drop(rt);
+    std::process::exit(exit_code);
 }
 
 /// Extract the `type` value from import attributes, returning `None` if
