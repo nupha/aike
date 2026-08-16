@@ -8,7 +8,8 @@ use std::{cell::Cell, rc::Rc};
 
 use linkme::distributed_slice;
 use zuqe::{
-    CallContext, ClassCtorDef, ClassID, FieldDef, JSResult, JSValue, Runtime, ScopedContext,
+    CallContext, ClassCtorDef, ClassID, Exception, FieldDef, JSResult, JSValue, Runtime,
+    ScopedContext,
     def_native_object,
     gc_lite::{GcTrace, GcTraceCtx},
 };
@@ -21,7 +22,7 @@ use crate::{
     },
 };
 
-use super::{QueueEntry, RsState};
+use super::RsState;
 
 pub(crate) struct TransformControllerPayload {
     /// Back-reference to the controlling TransformStream (spec `[[stream]]`).
@@ -127,23 +128,39 @@ fn js_transform_controller_enqueue(ctx: &mut ScopedContext, cc: CallContext) -> 
         .payload()
         .ok_or_else(|| ctx.throw_internal_error("invalid readable controller"))?;
 
-    if rcp.close_requested() {
-        return Err(ctx.throw_type_error("cannot enqueue after close"));
+    // Spec §6.4.2 step 3: once the readable side is errored or close has been
+    // requested, enqueue throws a TypeError.
+    if !rcp.can_close_or_enqueue() {
+        return Err(ctx.throw_type_error("cannot enqueue on a closed or errored stream"));
     }
 
-    let resolved = rcp.resolve_pending_read(ctx, chunk, false);
-
-    if !resolved {
-        rcp.queue()
-            .borrow_mut()
-            .push(QueueEntry { chunk, size: 1.0 });
-        let total = rcp.queue_total_size();
-        rcp.set_queue_total_size(total + 1.0);
+    // Spec §6.4.2 steps 4-5: delegate to the readable controller (which runs the
+    // strategy's size algorithm). When that throws, error the writable side,
+    // unblock write, and re-throw the readable side's stored error — the first
+    // error wins over a later one thrown by size().
+    if rcp.enqueue(ctx, chunk).is_err() {
+        let e = ctx.take_exception().to_value(ctx);
+        if let Some(stream_handle) = p.stream {
+            let stream_val = JSValue::from(stream_handle);
+            super::transform::transform_stream_error_writable_and_unblock_write(
+                ctx, &stream_val, e,
+            )?;
+        }
+        let stored = match rcp.stream() {
+            Some(s) => {
+                let sv = JSValue::from(s);
+                super::JSReadableStream::payload_of(&sv)
+                    .map(|sp| sp.stored_error)
+                    .unwrap_or(e)
+            }
+            None => e,
+        };
+        ctx.throw(Exception::Error(stored));
+        return Err(-1);
     }
 
     // Propagate backpressure: if the readable side's desiredSize ≤ 0, the
-    // TransformStream should block further writes (spec §6.4.2
-    // TransformStreamDefaultControllerEnqueue step 7).
+    // TransformStream should block further writes (spec §6.4.2 step 7).
     if let Some(stream_handle) = p.stream {
         let stream_val = JSValue::from(stream_handle);
         let readable_full = rcp.desired_size(ctx)? <= 0.0;
@@ -194,7 +211,8 @@ fn js_transform_controller_terminate(ctx: &mut ScopedContext, cc: CallContext) -
     let p = JSTransformStreamDefaultController::payload_of(&this)
         .ok_or_else(|| ctx.throw_type_error("not a TransformStreamDefaultController"))?;
 
-    // Close the readable side
+    // Spec `TransformStreamDefaultControllerTerminate` step 3: close the
+    // readable side.
     if let Some(rcp) = p.readable_controller.payload() {
         rcp.set_close_requested(true);
 
@@ -208,20 +226,18 @@ fn js_transform_controller_terminate(ctx: &mut ScopedContext, cc: CallContext) -
         }
     }
 
-    // Error the writable side
+    // Spec step 4-5: error the writable with a TypeError and unblock any write
+    // waiting on backpressure (`TransformStreamErrorWritableAndUnblockWrite`).
     let err = ctx
-        .create_string_from_utf8(b"TransformStream terminated".to_vec())
-        .map(JSValue::make_string)
+        .create_error_object(zuqe::ErrorKind::Type, "TransformStream terminated", false)
+        .map(JSValue::from)
         .unwrap_or(JSValue::UNDEFINED);
 
-    if let Some(wsp) = p.writable_stream.payload()
-        && let Some(wc) = wsp.controller
-        && let Some(wcp) = wc.payload()
-        && let Some(mut ws) = wcp.stream
-        && let Some(wsp_mut) = ws.payload_mut()
-    {
-        wsp_mut.state = RsState::Errored;
-        wsp_mut.stored_error = err;
+    if let Some(stream_handle) = p.stream {
+        let stream_val = JSValue::from(stream_handle);
+        super::transform::transform_stream_error_writable_and_unblock_write(
+            ctx, &stream_val, err,
+        )?;
     }
 
     Ok(JSValue::UNDEFINED)

@@ -532,7 +532,117 @@ impl WritableStreamPayload {
         {
             self.close_requested = false;
             self.in_flight_close = true;
-            self.perform_close(ctx)?;
+            // A TransformStream closes by running the transformer's `flush()`
+            // (then closing the readable side) once writes have drained; a plain
+            // stream closes by invoking the sink's `close()`.
+            let is_transform = self
+                .controller
+                .as_ref()
+                .and_then(|c| c.payload())
+                .map(|cp| cp.transform_controller.is_some())
+                .unwrap_or(false);
+            if is_transform {
+                self.perform_transform_flush(ctx)?;
+            } else {
+                self.perform_close(ctx)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Run a TransformStream's close algorithm (spec
+    /// `TransformStreamDefaultSinkCloseAlgorithm`): invoke the transformer's
+    /// `flush()`, then close the readable side and the writable. Called from
+    /// `try_close` once all queued/in-flight writes have drained.
+    fn perform_transform_flush(&mut self, ctx: &mut ScopedContext) -> Result<(), i32> {
+        let Some(controller) = self.controller else {
+            return self.finish_transform_close(ctx, JSValue::UNDEFINED, false);
+        };
+        let cp = match controller.payload() {
+            Some(p) => p,
+            None => return self.finish_transform_close(ctx, JSValue::UNDEFINED, false),
+        };
+        let Some(tc) = cp.transform_controller else {
+            return self.finish_transform_close(ctx, JSValue::UNDEFINED, false);
+        };
+        let tcp = match tc.payload() {
+            Some(p) => p,
+            None => return self.finish_transform_close(ctx, JSValue::UNDEFINED, false),
+        };
+        let Some(tr) = tcp.transformer.as_object() else {
+            return self.finish_transform_close(ctx, JSValue::UNDEFINED, false);
+        };
+
+        // flush() may throw synchronously: error the stream and reject the close.
+        let mut flush_promise = match tr.invoke_str_callable(ctx, "flush", &[tc.into()]) {
+            Ok(Some(Err(_))) | Err(_) => {
+                let e = ctx.take_exception().to_value(ctx);
+                return self.finish_transform_close(ctx, e, true);
+            }
+            Ok(Some(Ok(v))) => match Promise::try_from(v) {
+                Ok(p) => p,
+                Err(_) => Promise::from_resolve_value(ctx, v)?,
+            },
+            _ => Promise::from_resolve_value(ctx, JSValue::UNDEFINED)?,
+        };
+
+        // The readable side is closed only once flush settles (spec:
+        // TransformStreamDefaultSinkCloseAlgorithm step 7 reacts to the flush
+        // promise), so an enqueue whose size() triggered this close can still
+        // push its chunk into the readable queue.
+        let stream_val = self.stream_value();
+        let ok = ctx
+            .create_native_function_with_data(
+                Callback::Func(flush_close_ok),
+                "flushCloseOk",
+                0,
+                0,
+                [stream_val].into(),
+            )?
+            .into();
+        let err = ctx
+            .create_native_function_with_data(
+                Callback::Func(flush_close_err),
+                "flushCloseErr",
+                1,
+                0,
+                [stream_val].into(),
+            )?
+            .into();
+        flush_promise.then(ctx, ok, err)?;
+        Ok(())
+    }
+
+    /// Settle a TransformStream close: on success close the writable and resolve
+    /// the close promise; on `err` error the writable and reject it.
+    fn finish_transform_close(
+        &mut self,
+        ctx: &mut ScopedContext,
+        err: JSValue,
+        is_err: bool,
+    ) -> Result<(), i32> {
+        self.in_flight_close = false;
+        if is_err {
+            if let Some(mut cp) = self.close_promise.take() {
+                cp.reject(ctx, err);
+            }
+            if self.state == RsState::Readable {
+                self.start_erroring(ctx, err)?;
+            }
+            return Ok(());
+        }
+        if let Some(mut cp) = self.close_promise.take() {
+            cp.resolve(ctx, JSValue::UNDEFINED);
+        }
+        self.state = RsState::Closed;
+        if let Some(w) = self.writer {
+            let mut wv = JSValue::from(w);
+            if let Some(mut wp) = JSWritableStreamDefaultWriter::payload_mut_of(&mut wv)
+                && let Some(mut c) = wp.closed_promise
+                && c.state() == PromiseState::Pending
+            {
+                c.resolve(ctx, JSValue::UNDEFINED);
+            }
         }
         Ok(())
     }
@@ -850,99 +960,10 @@ impl WritableStreamPayload {
             return Promise::from_reject_value(ctx, err);
         }
 
-        // `stream_val` is handed to the async flush handlers; recover it via the
-        // controller's back-reference.
-        let stream_val = match self.controller {
-            Some(c) => {
-                let cv = JSValue::from(c);
-                match JSWritableStreamDefaultController::payload_of(&cv) {
-                    Some(cp) => match cp.stream {
-                        Some(s) => JSValue::from(s),
-                        None => JSValue::UNDEFINED,
-                    },
-                    None => JSValue::UNDEFINED,
-                }
-            }
-            None => JSValue::UNDEFINED,
-        };
-
-        let mut close_err: Option<JSValue> = None;
-        let mut flush_promise: Option<Promise> = None;
-
-        // TransformStream: closing the writable side runs the transformer's
-        // `flush`, then closes the readable side.
-        if let Some(controller) = self.controller
-            && let Some(cp) = controller.payload()
-        {
-            if let Some(tc) = cp.transform_controller
-                && let Some(tcp) = tc.payload()
-                && let Some(tr) = tcp.transformer.as_object()
-            {
-                // If flush() throws synchronously or returns a rejected promise
-                // that is already settled, the close promise must reject with it.
-                match tr.invoke_str_callable(ctx, "flush", &[tc.into()]) {
-                    Ok(Some(Err(_))) | Err(_) => {
-                        close_err = Some(ctx.take_exception().to_value(ctx));
-                    }
-                    Ok(Some(Ok(v))) => {
-                        // flush may return a promise: await it so an async
-                        // rejection also rejects the close promise.
-                        if let Ok(p) = Promise::try_from(v) {
-                            flush_promise = Some(p);
-                        }
-                    }
-                    _ => {}
-                }
-
-                // Synchronous flush (no promise returned): close the readable side.
-                if flush_promise.is_none()
-                    && let Some(rcp) = tcp.readable_controller.payload()
-                {
-                    rcp.set_close_requested(true);
-                    rcp.resolve_pending_read(ctx, JSValue::UNDEFINED, true);
-                    if rcp.queue().borrow().is_empty()
-                        && let Some(mut rs_val) = rcp.stream()
-                        && let Some(rsp) = rs_val.payload_mut()
-                    {
-                        rsp.state = RsState::Closed;
-                    }
-                }
-            }
-        }
-
-        if let Some(e) = close_err {
-            self.start_erroring(ctx, e)?;
-            return Promise::from_reject_value(ctx, e);
-        }
-
-        // flush returned a promise: the close promise settles with it, and the
-        // readable side / state are only finalized after flush fulfills.
-        if let Some(mut fp) = flush_promise {
-            let ok = ctx
-                .create_native_function_with_data(
-                    Callback::Func(flush_close_ok),
-                    "flushCloseOk",
-                    0,
-                    0,
-                    [stream_val].into(),
-                )?
-                .into();
-            let err = ctx
-                .create_native_function_with_data(
-                    Callback::Func(flush_close_err),
-                    "flushCloseErr",
-                    1,
-                    0,
-                    [stream_val].into(),
-                )?
-                .into();
-            fp.then(ctx, ok, err)?;
-            return Ok(fp);
-        }
-
-        // Plain WritableStream: request a deferred close. The sink's `close()`
-        // is only invoked once all queued/in-flight writes have drained (spec
-        // WritableStreamClose); `try_close` performs it now if already drained.
+        // Request a deferred close. For a TransformStream the transformer's
+        // `flush()` (then the readable close) runs from `try_close` once all
+        // queued/in-flight writes have drained; for a plain stream the sink's
+        // `close()` runs there. `try_close` performs it now if already drained.
         let (close_p, _close_funcs) = Promise::create(ctx)?;
         self.close_requested = true;
         self.close_promise = Some(close_p);
@@ -964,41 +985,48 @@ impl WritableStreamPayload {
 // the writable stream closed, per spec (close after flush resolves).
 fn flush_close_ok(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut stream_val = cc.data(0);
-    if let Some(sp) = JSWritableStream::payload_mut_of(&mut stream_val)
-        && let Some(controller) = sp.controller
-        && let Some(cp) = controller.payload()
-        && let Some(tc) = cp.transform_controller
-        && let Some(tcp) = tc.payload()
-        && let Some(rcp) = tcp.readable_controller.payload()
     {
-        rcp.set_close_requested(true);
-        rcp.resolve_pending_read(ctx, JSValue::UNDEFINED, true);
-        if rcp.queue().borrow().is_empty()
-            && let Some(mut rs_val) = rcp.stream()
-            && let Some(rsp) = rs_val.payload_mut()
+        if let Some(sp) = JSWritableStream::payload_mut_of(&mut stream_val)
+            && let Some(controller) = sp.controller
+            && let Some(cp) = controller.payload()
+            && let Some(tc) = cp.transform_controller
+            && let Some(tcp) = tc.payload()
+            && let Some(rcp) = tcp.readable_controller.payload()
         {
-            rsp.state = RsState::Closed;
+            rcp.set_close_requested(true);
+            rcp.resolve_pending_read(ctx, JSValue::UNDEFINED, true);
+            if rcp.queue().borrow().is_empty()
+                && let Some(mut rs_val) = rcp.stream()
+                && let Some(rsp) = rs_val.payload_mut()
+            {
+                rsp.state = RsState::Closed;
+            }
         }
-        sp.state = RsState::Closed;
     }
-    Ok(JSValue::UNDEFINED)
+    WritableStreamPayload::finish_close(ctx, &mut stream_val, true, JSValue::UNDEFINED)
 }
 
-// flush rejected: error the writable stream with the flush error. Returning a
-// rejected promise makes the close promise reject with that error.
+// flush rejected: error the writable stream with the flush error and reject the
+// close promise.
 fn flush_close_err(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut stream_val = cc.data(0);
     let err = cc.arg(0);
 
-    if let Some(sp) = JSWritableStream::payload_mut_of(&mut stream_val)
-        && let Some(controller) = sp.controller
-        && let Some(cp) = controller.payload()
-        && let Some(_tc) = cp.transform_controller
-    {
+    if let Some(sp) = JSWritableStream::payload_mut_of(&mut stream_val) {
+        sp.in_flight_close = false;
+        if let Some(mut cp) = sp.close_promise.take() {
+            cp.reject(ctx, err);
+        }
         sp.state = RsState::Errored;
         sp.stored_error = err;
+        if let Some(w) = sp.writer {
+            let mut wv = JSValue::from(w);
+            if let Some(mut wp) = JSWritableStreamDefaultWriter::payload_mut_of(&mut wv) {
+                wp.ensure_closed_rejected(ctx, err);
+            }
+        }
     }
-    Promise::from_reject_value(ctx, err).map(JSValue::from)
+    Ok(JSValue::UNDEFINED)
 }
 
 const WRITABLE_STREAM_PROTO: &[FieldDef] = &[

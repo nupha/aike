@@ -129,7 +129,8 @@ struct Args {
     #[arg(
         long,
         value_name = "n",
-        help = "set C-stack recursion limit to n (default: 512k)"
+        default_value = "2m",
+        help = "set C-stack recursion limit to n (default: 2m)"
     )]
     stack_overflow: Option<String>,
 
@@ -306,7 +307,7 @@ async fn main() -> ExitCode {
         }
     }
 
-    // stack-overflow (default: 256k)
+    // stack-overflow (default: 2m)
     if let Some(ref ss) = args.stack_overflow {
         if let Some(size) = parse_byte_size(ss) {
             rt.set_stack_overflow(size);

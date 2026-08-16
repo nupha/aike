@@ -15,7 +15,7 @@ use crate::{
     USER_CLASS_DEFS,
     whatwg::stream::{
         JSReadableStreamDefaultController, ReadableControllerPayload, extract_high_water_mark,
-        readable::{JSReadableStream, ReadableStreamPayload},
+        extract_size_algorithm, readable::{JSReadableStream, ReadableStreamPayload},
         transform_controller::{JSTransformStreamDefaultController, TransformControllerPayload},
         writable::{JSWritableStream, WritableStreamPayload},
         writable_controller::{JSWritableStreamDefaultController, WritableControllerPayload},
@@ -92,6 +92,10 @@ fn js_transform_stream_constructor(ctx: &mut ScopedContext, cc: CallContext) -> 
     // Spec §6.2.4: default writable HWM = 1, readable HWM = 0.
     let writable_hwm = extract_high_water_mark(ctx, writable_strategy)?;
     let readable_hwm = extract_high_water_mark(ctx, readable_strategy)?;
+    // The readable side uses the readable strategy's `size` algorithm; a
+    // throwing size() inside start()/transform() errors the stream (spec
+    // `CreateReadableStream` -> `SetUpReadableStreamDefaultController`).
+    let readable_size = extract_size_algorithm(ctx, readable_strategy)?;
 
     // Readable side — created first so the TransformStream can reference it.
     let mut readable =
@@ -159,8 +163,14 @@ fn js_transform_stream_constructor(ctx: &mut ScopedContext, cc: CallContext) -> 
     // Initialize backpressure (spec §6.4.1 step 10).
     // Use Rc<Cell> shared between all copies of the controller payload
     // (payload() returns &T to heap-allocated storage, so Rc<Cell> works).
+    // The promise is stored on BOTH the transform payload (read by the write
+    // path) and the controller's Rc<Cell> (read by the backpressure fast path).
     {
         let (new_promise, _rr) = Promise::create(ctx)?;
+        let ts_val = JSValue::from(instance);
+        if let Some(tsp_mut) = JSTransformStream::payload_mut_of(&mut JSValue::from(ts_val)) {
+            tsp_mut.backpressure_change_promise = Some(new_promise);
+        }
         if let Some(ctrl_handle) = instance.payload().and_then(|p| p.controller) {
             let mut ctrl = ctrl_handle;
             if let Some(tcp) = ctrl.payload_mut() {
@@ -243,7 +253,7 @@ fn js_transform_stream_constructor(ctx: &mut ScopedContext, cc: CallContext) -> 
     };
     // Set pull/cancel on the readable controller so they fire on read/cancel.
     if let Some(rcp) = rc.payload_mut() {
-        rcp.set_algorithms(pull_fn.into(), cancel_fn.into(), JSValue::UNDEFINED);
+        rcp.set_algorithms(pull_fn.into(), cancel_fn.into(), readable_size);
     }
 
     // Call transformer.start(transformController) if present. A throw propagates
@@ -309,14 +319,9 @@ fn ts_sink_write(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         .map(|v| v.is_callable())
         .unwrap_or(false);
 
-    if !has_transform {
-        let enqueue_fn =
-            JSValue::from(tcp.readable_controller).get_property_str(ctx, "enqueue")?;
-        enqueue_fn.call(ctx, JSValue::from(tcp.readable_controller), &[chunk])?;
-        return Ok(JSValue::UNDEFINED);
-    }
-
-    // Check backpressure via the TransformStream.
+    // Spec `TransformStreamDefaultSinkWriteAlgorithm` step 3: while backpressured,
+    // the transform (identity or explicit) waits for the backpressure change
+    // promise before running.
     let backpressured = tcp.stream
         .and_then(|h| {
             let sv = JSValue::from(h);
@@ -339,16 +344,7 @@ fn ts_sink_write(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             let data_ok = data.clone();
             let data_err = data;
             let on_ok = ctx.create_native_function_with_data(
-                zuqe::Callback::Func(|ctx, cc| {
-                    let transformer_val = cc.data(0);
-                    let tc_val = cc.data(1);
-                    let chunk = cc.data(2);
-                    if let Some(obj) = transformer_val.as_object() {
-                        let transform_fn = obj.get_property_str(ctx, "transform")?;
-                        transform_fn.call(ctx, transformer_val, &[chunk, tc_val])?;
-                    }
-                    Ok(JSValue::UNDEFINED)
-                }),
+                zuqe::Callback::Func(ts_perform_transform_cb),
                 "tsSinkWriteAfterBP",
                 0,
                 0,
@@ -361,15 +357,58 @@ fn ts_sink_write(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 0,
                 data_err.into(),
             )?;
-            bp.then(ctx, on_ok.into(), on_err.into())?;
-            return Ok(JSValue::from(bp));
+            // The write settles with the transform's own outcome: the wrapper
+            // promise rejects when the transform (or a terminated writable)
+            // fails, not merely when backpressure clears.
+            let wrapper = bp.then(ctx, on_ok.into(), on_err.into())?;
+            return Ok(wrapper.into());
         }
     }
 
-    let transform_fn = transformer_obj.get_property_str(ctx, "transform")?;
-    let tc_val = JSValue::from(tc_handle);
-    let result = transform_fn.call(ctx, tcp.transformer, &[chunk, tc_val])?;
-    Ok(result)
+    // Not backpressured: perform the transform now.
+    let data: Vec<JSValue> = [tcp.transformer, JSValue::from(tc_handle), chunk].into();
+    ts_perform_transform_values(ctx, data[0], data[1], data[2])
+}
+
+/// `TransformStreamDefaultControllerPerformTransform` (spec §6.4.3): for an
+/// identity transformer enqueue the chunk on the readable controller; otherwise
+/// invoke `transformer.transform(chunk, controller)`.
+fn ts_perform_transform_values(
+    ctx: &mut ScopedContext,
+    transformer_val: JSValue,
+    tc_val: JSValue,
+    chunk: JSValue,
+) -> JSResult {
+    let Some(obj) = transformer_val.as_object() else {
+        return Ok(JSValue::UNDEFINED);
+    };
+    let transform_fn = obj.get_property_str(ctx, "transform")?;
+    if transform_fn.is_callable() {
+        return transform_fn.call(ctx, transformer_val, &[chunk, tc_val]);
+    }
+    // Identity transform: forward the chunk to the readable side.
+    let enqueue_fn = tc_val.get_property_str(ctx, "enqueue")?;
+    enqueue_fn.call(ctx, tc_val, &[chunk])
+}
+
+// Backpressure-gated write reaction: run the pending transform.
+// `cc.data`: [0] = transformer, [1] = transform controller, [2] = chunk.
+fn ts_perform_transform_cb(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let tc_val = cc.data(1);
+    // Spec `TransformStreamDefaultSinkWriteAlgorithm` step 3.1.3: once
+    // backpressure clears, an erroring writable rejects the pending write with
+    // its stored error (e.g. after `controller.terminate()`).
+    if let Some(tc_handle) = JSTransformStreamDefaultController::try_from(tc_val).ok()
+        && let Some(tcp) = tc_handle.payload()
+        && let Some(wsp) = tcp.writable_stream.payload()
+        && (wsp.state == crate::whatwg::stream::RsState::Erroring
+            || wsp.state == crate::whatwg::stream::RsState::Errored)
+    {
+        let e = wsp.stored_error;
+        ctx.throw(zuqe::Exception::Error(e));
+        return Err(-1);
+    }
+    ts_perform_transform_values(ctx, cc.data(0), cc.data(1), cc.data(2))
 }
 
 /// TransformStreamDefaultSourcePullAlgorithm (spec §6.4.4).
@@ -547,13 +586,37 @@ pub(super) fn transform_stream_set_backpressure(
 
 /// TransformStreamUnblockWrite (spec §6.4.1).
 /// If backpressure is true, set it to false.
-fn transform_stream_unblock_write(ctx: &mut ScopedContext, stream_val: &JSValue) -> JSResult {
+pub(super) fn transform_stream_unblock_write(ctx: &mut ScopedContext, stream_val: &JSValue) -> JSResult {
     let needs_unblock = JSTransformStream::payload_of(stream_val)
         .map(|p| p.backpressure)
         .unwrap_or(false);
     if needs_unblock {
         transform_stream_set_backpressure(ctx, stream_val, false)?;
     }
+    Ok(JSValue::UNDEFINED)
+}
+
+/// TransformStreamErrorWritableAndUnblockWrite (spec §6.4.2).
+/// Error the writable side with `e` and relieve backpressure — the step
+/// `TransformStreamDefaultControllerEnqueue` runs when the readable side's
+/// enqueue (including the strategy's `size` algorithm) throws.
+pub(super) fn transform_stream_error_writable_and_unblock_write(
+    ctx: &mut ScopedContext,
+    stream_val: &JSValue,
+    e: JSValue,
+) -> JSResult {
+    if let Some(tsp) = JSTransformStream::payload_of(stream_val)
+        && let Some(w) = tsp.writable
+        && let Some(wsp) = w.payload()
+        && wsp.state == crate::whatwg::stream::RsState::Readable
+        && let Some(mut wc) = wsp.controller
+        && let Some(wcp) = wc.payload()
+        && let Some(mut ws) = wcp.stream
+        && let Some(ws_payload) = ws.payload_mut()
+    {
+        ws_payload.start_erroring(ctx, e)?;
+    }
+    transform_stream_unblock_write(ctx, stream_val)?;
     Ok(JSValue::UNDEFINED)
 }
 
