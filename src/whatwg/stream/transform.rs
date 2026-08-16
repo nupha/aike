@@ -85,6 +85,18 @@ fn js_transform_stream_constructor(ctx: &mut ScopedContext, cc: CallContext) -> 
         transformer
     };
 
+    // Spec §6.2.4 steps 3-4: a defined readableType/writableType is rejected.
+    if let Some(tobj) = transformer.as_object() {
+        let readable_type = tobj.get_property_str(ctx, "readableType")?;
+        if !readable_type.is_undefined() {
+            return Err(ctx.throw_range_error("readableType must be undefined"));
+        }
+        let writable_type = tobj.get_property_str(ctx, "writableType")?;
+        if !writable_type.is_undefined() {
+            return Err(ctx.throw_range_error("writableType must be undefined"));
+        }
+    }
+
     // Per the WHATWG spec the second/third arguments are the writable and
     // readable queuing strategies respectively.
     let writable_strategy = cc.arg(1);
