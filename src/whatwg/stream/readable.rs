@@ -110,6 +110,16 @@ impl ReadableStreamPayload {
         if let Some(r) = reason {
             self.stored_error = r;
         }
+        // Spec ReadableStreamClose: for each pending readRequest, perform its
+        // close steps ({done:true}). Must happen before notify_peer_closed so
+        // read results settle before reader.closed resolves.
+        if state == RsState::Closed {
+            if let Some(controller_val) = self.controller
+                && let Some(cp) = controller_val.payload()
+            {
+                while cp.resolve_pending_read(ctx, JSValue::UNDEFINED, true) {}
+            }
+        }
         notify_peer_closed(ctx, self.reader.map(JSValue::from), reason);
     }
 

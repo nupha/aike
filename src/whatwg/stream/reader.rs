@@ -77,18 +77,11 @@ impl ReaderPayload {
         if let Some(mut rs) = self.stream.take() {
             if let Some(sp) = rs.payload_mut() {
                 sp.reader = None;
-                // Spec: reject all pending read requests with a TypeError.
-                if let Some(controller_val) = sp.controller
-                    && let Some(cp) = controller_val.payload()
-                {
-                    if let Some(e) =
-                        ctx.create_error_object(ErrorKind::Type, "Reader released", false)
-                    {
-                        cp.reject_all_pending_reads(ctx, e.into());
-                    }
-                    // spec ReleaseSteps for default controller is a no-op;
-                    // no pull trigger here.
-                }
+                // spec ReleaseSteps for default controller is a no-op;
+                // no pull trigger here.
+                // Note: spec does NOT reject pending read() promises on
+                // release — they remain pending and are eventually resolved
+                // when the stream closes or errors.
             }
         }
     }
