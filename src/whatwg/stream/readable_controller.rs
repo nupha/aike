@@ -352,27 +352,41 @@ impl ReadableControllerPayload {
             return Ok(());
         }
 
+        // Capture the pull result before clearing pulling, so we can check
+        // whether pull() returned a Thenable (promise).
+        let pull_val = pull_res?;
+
         pulling.set(false);
 
         if pull_again.get() {
             pull_again.set(false);
-            // Run the follow-up pull as a promise reaction (not a polling job),
-            // so it settles before later await continuations — a read that
-            // drains the last queued chunk must re-pull before the caller's next
-            // microtask observes the queue.
-            let (mut ready, _rr) = Promise::create(ctx)?;
-            let data = [JSValue::from(controller_val)].into();
-            let follow_up = ctx
-                .create_native_function_with_data(
-                    Callback::Func(controller_refill_pull),
-                    "refillPull",
-                    0,
-                    0,
-                    data,
-                )?
-                .into();
-            ready.resolve(ctx, JSValue::UNDEFINED);
-            ready.then(ctx, follow_up, follow_up)?;
+            // Spec CallPullIfNeeded step 7: "Upon fulfillment of pullPromise".
+            // When pull() returns a non-thenable (synchronous completion,
+            // e.g. undefined), the fulfillment is immediate — run the
+            // follow-up pull synchronously.  When pull() returns a Thenable,
+            // defer to a microtask so the promise can settle first.
+            let is_thenable = pull_val.is_object()
+                && pull_val
+                    .get_property_str(ctx, "then")
+                    .map(|t| t.is_callable())
+                    .unwrap_or(false);
+            if is_thenable {
+                let (mut ready, _rr) = Promise::create(ctx)?;
+                let data = [JSValue::from(controller_val)].into();
+                let follow_up = ctx
+                    .create_native_function_with_data(
+                        Callback::Func(controller_refill_pull),
+                        "refillPull",
+                        0,
+                        0,
+                        data,
+                    )?
+                    .into();
+                ready.resolve(ctx, JSValue::UNDEFINED);
+                ready.then(ctx, follow_up, follow_up)?;
+            } else if self.should_call_pull(ctx)? {
+                self.call_pull(ctx)?;
+            }
         }
 
         Ok(())

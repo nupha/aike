@@ -86,6 +86,8 @@ impl ReaderPayload {
                     {
                         cp.reject_all_pending_reads(ctx, e.into());
                     }
+                    // spec ReleaseSteps for default controller is a no-op;
+                    // no pull trigger here.
                 }
             }
         }
@@ -189,8 +191,8 @@ impl ReaderPayload {
                     }
                 }
 
-                // Refill: once the last queued chunk is consumed and the queue
-                // drops below the high water mark, ask the source for more.
+                // Spec PullSteps step 2.3: after dequeue, if stream is not
+                // closed, call CallPullIfNeeded to refill the queue.
                 if cp.should_call_pull(ctx)? {
                     cp.call_pull(ctx)?;
                 }
