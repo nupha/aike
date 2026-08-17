@@ -495,11 +495,24 @@ impl ReadableControllerPayload {
         Ok(())
     }
 
-    /// Error the controlled stream with `e`. Per the current spec this is a
-    /// silent no-op once the stream has left the readable state
-    /// (`CanCloseOrEnqueue` is false), not a throw.
+    /// Error the controlled stream with `e`. Per WHATWG
+    /// `ReadableStreamDefaultControllerError`, the guard is
+    /// `stream.[[state]]` only (not `CanCloseOrEnqueue`):
+    ///   1. Let stream be controller.[[stream]].
+    ///   2. If stream.[[state]] is not "readable", return.
+    /// This means `controller.error()` still works after
+    /// `controller.terminate()` as long as the readable side hasn't
+    /// transitioned away from "readable" (i.e. the queue was non-empty
+    /// when terminate closed it).
     pub(crate) fn error(&self, ctx: &mut ScopedContext, e: JSValue) -> Result<(), i32> {
-        if !self.can_close_or_enqueue() {
+        let is_readable = match self.stream {
+            Some(rs) => match rs.payload() {
+                Some(sp) => sp.state == RsState::Readable,
+                None => false,
+            },
+            None => false,
+        };
+        if !is_readable {
             return Ok(());
         }
 

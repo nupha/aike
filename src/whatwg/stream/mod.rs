@@ -144,9 +144,10 @@ fn queuing_strategy_init<'a>(
 pub(crate) fn extract_high_water_mark(
     ctx: &mut ScopedContext,
     strategy: JSValue,
+    default_hwm: f64,
 ) -> Result<f64, i32> {
     if strategy.is_undefined() || strategy.is_null() {
-        return Ok(1.0);
+        return Ok(default_hwm);
     }
     let obj = queuing_strategy_init(ctx, strategy)?;
     // `size` must be a function when provided.
@@ -156,7 +157,7 @@ pub(crate) fn extract_high_water_mark(
     }
     let hwm = obj.get_property_str(ctx, "highWaterMark")?;
     if hwm.is_undefined() {
-        return Ok(1.0);
+        return Ok(default_hwm);
     }
     let hwm = match hwm.to_number(ctx)? {
         IntOrFloat::Int64(i) => i as f64,
@@ -284,6 +285,10 @@ pub(crate) fn iterator_result_promise(
 /// `Promise::settle` must not run on an already-settled promise (debug_assert),
 /// and fetch body teardown can call `settle_state` repeatedly (error then
 /// cancel) against the same reader.
+///
+/// Per WHATWG, the reader/writer's `closed` promise must have
+/// `[[PromiseIsHandled]] = true` set after rejection to avoid unhandled
+/// rejection reports. We mark it handled by attaching a no-op `.catch()`.
 pub(super) fn notify_peer_closed(
     ctx: &mut ScopedContext,
     peer: Option<JSValue>,
@@ -293,6 +298,16 @@ pub(super) fn notify_peer_closed(
         return;
     };
 
+    let noop = ctx
+        .create_native_function(
+            zuqe::Callback::Func(|_, _| Ok(JSValue::UNDEFINED)),
+            "closedPromiseNoop",
+            0,
+            0,
+        )
+        .map(JSValue::from)
+        .unwrap_or(JSValue::UNDEFINED);
+
     let mut settle = |cp: &mut Promise| {
         // Only settle a still-pending promise; repeated teardown calls no-op.
         if cp.state() != PromiseState::Pending {
@@ -300,6 +315,9 @@ pub(super) fn notify_peer_closed(
         }
         if let Some(r) = reason {
             cp.reject(ctx, r);
+            // Mark `[[PromiseIsHandled]] = true` so the host rejection
+            // tracker does not flag this as an unhandled rejection.
+            let _ = cp.then(ctx, noop, noop);
         } else {
             cp.resolve(ctx, JSValue::UNDEFINED);
         }

@@ -1162,7 +1162,7 @@ fn js_writable_stream_constructor(ctx: &mut ScopedContext, cc: CallContext) -> J
     let new_target = cc.this();
     let underlying_sink = cc.arg(0);
     let queuing_strategy = cc.arg(1);
-    let hwm = extract_high_water_mark(ctx, queuing_strategy)?;
+    let hwm = extract_high_water_mark(ctx, queuing_strategy, 1.0)?;
 
     // WritableStreamInit: any non-undefined `type` (e.g. "bytes") is unsupported
     // by this engine and must throw RangeError ("is not a supported type").

@@ -360,7 +360,7 @@ fn js_readable_stream_constructor(ctx: &mut ScopedContext, cc: CallContext) -> J
     }
 
     let start_controller: JSValue = if is_bytes {
-        let hwm = extract_high_water_mark(ctx, queuing_strategy)?;
+        let hwm = extract_high_water_mark(ctx, queuing_strategy, 1.0)?;
         let bc = JSReadableByteStreamController::new_instance(
             ctx,
             JSValue::UNDEFINED,
@@ -810,7 +810,7 @@ fn create_readable_stream_controller(
     underlying_source: &JSValue,
     queuing_strategy: &JSValue,
 ) -> Result<JSReadableStreamDefaultController, i32> {
-    let hwm = extract_high_water_mark(ctx, *queuing_strategy)?;
+    let hwm = extract_high_water_mark(ctx, *queuing_strategy, 1.0)?;
     let mut controller = JSReadableStreamDefaultController::new_instance(
         ctx,
         JSValue::UNDEFINED,

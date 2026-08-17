@@ -103,12 +103,14 @@ fn js_transform_stream_constructor(ctx: &mut ScopedContext, cc: CallContext) -> 
     let writable_strategy = cc.arg(1);
     let readable_strategy = cc.arg(2);
     // Spec §6.2.4: default writable HWM = 1, readable HWM = 0.
-    let writable_hwm = extract_high_water_mark(ctx, writable_strategy)?;
-    let readable_hwm = extract_high_water_mark(ctx, readable_strategy)?;
+    let writable_hwm = extract_high_water_mark(ctx, writable_strategy, 1.0)?;
+    let readable_hwm = extract_high_water_mark(ctx, readable_strategy, 0.0)?;
     // The readable side uses the readable strategy's `size` algorithm; a
     // throwing size() inside start()/transform() errors the stream (spec
     // `CreateReadableStream` -> `SetUpReadableStreamDefaultController`).
     let readable_size = extract_size_algorithm(ctx, readable_strategy)?;
+    // The writable side uses the writable strategy's `size` algorithm.
+    let writable_size = extract_size_algorithm(ctx, writable_strategy)?;
 
     // Readable side — created first so the TransformStream can reference it.
     let mut readable =
@@ -132,7 +134,7 @@ fn js_transform_stream_constructor(ctx: &mut ScopedContext, cc: CallContext) -> 
         transformer,
         Some(writable),
         writable_hwm,
-        JSValue::UNDEFINED,
+        writable_size,
     );
     let wcv = JSWritableStreamDefaultController::new_instance(ctx, JSValue::UNDEFINED, wc_payload)?;
     writable.payload_mut().unwrap().controller.replace(wcv);
