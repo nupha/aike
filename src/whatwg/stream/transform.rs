@@ -300,17 +300,22 @@ fn js_transform_stream_constructor(ctx: &mut ScopedContext, cc: CallContext) -> 
         start_fn.call(ctx, transformer, &[JSValue::from(ctrl)])?;
     }
 
-    // Schedule a microtask to set started on both readable and writable
-    // controllers and trigger pull if appropriate. The streams were created
-    // outside js_readable_stream_constructor / js_writable_stream_constructor
-    // so the normal start→pull microtasks were never scheduled.
+    // Set started on both readable/writable controllers and trigger pull.
+    // The streams were created outside js_readable_stream_constructor /
+    // js_writable_stream_constructor so the normal start→pull microtasks
+    // were never scheduled.  Use a resolved-promise .then() chain so the
+    // init runs as a microtask (oneshot drain, step 1) rather than a
+    // polling job (step 2).  Timer-driven tests depend on this ordering:
+    // setTimeout(0) queued during construction must fire *after* the
+    // constructor finishes setting up both sides.
     {
         let rc_handle = rc;
         let ws_handle = writable;
-        ctx.queue_job(
-            move |cx| {
+        let init_fn = ctx.create_native_function_with_data(
+            zuqe::Callback::Func(|cx, cc| {
+                let rc_val = cc.data(0);
+                let ws_val = cc.data(1);
                 // Set started on the readable controller and pull if needed.
-                let rc_val = JSValue::from(rc_handle);
                 if let Some(rcp) = JSReadableStreamDefaultController::payload_of(&rc_val) {
                     rcp.set_started(true);
                     if rcp.should_call_pull(cx)? {
@@ -318,15 +323,22 @@ fn js_transform_stream_constructor(ctx: &mut ScopedContext, cc: CallContext) -> 
                     }
                 }
                 // Set started on the writable side and advance the queue.
-                if let Some(wsp) = JSWritableStream::payload_mut_of(&mut JSValue::from(ws_handle)) {
+                let mut ws = ws_val;
+                if let Some(wsp) = JSWritableStream::payload_mut_of(&mut ws) {
                     wsp.started = true;
                     wsp.advance_queue(cx)?;
                     wsp.try_close(cx)?;
                 }
-                Ok(zuqe::JobState::Done)
-            },
-            JSValue::from(rc_handle),
-        );
+                Ok(JSValue::UNDEFINED)
+            }),
+            "tsInit",
+            0,
+            0,
+            [JSValue::from(rc_handle), JSValue::from(ws_handle)].into(),
+        )?;
+        let resolved = Promise::from_resolve_value(ctx, JSValue::UNDEFINED)?;
+        let then_fn = JSValue::from(resolved).get_property_str(ctx, "then")?;
+        then_fn.call(ctx, JSValue::from(resolved), &[JSValue::from(init_fn)])?;
     }
 
     Ok(instance.into())
@@ -365,6 +377,9 @@ fn ts_sink_abort(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     }
 
     // Call controller.[[cancelAlgorithm]](reason) — i.e. transformer.cancel(reason).
+    // Per spec the cancelAlgorithm always returns a promise (a resolved one
+    // when the transformer has no cancel method), so the readable side is
+    // always errored asynchronously via the .then() chain.
     let cancel_result = if let Some(tcp) = controller.payload()
         && let Some(transformer_obj) = tcp.transformer.as_object()
         && let Ok(cancel_fn) = transformer_obj.get_property_str(ctx, "cancel")
@@ -372,7 +387,7 @@ fn ts_sink_abort(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     {
         cancel_fn.call(ctx, tcp.transformer, &[reason])
     } else {
-        Ok(JSValue::UNDEFINED)
+        Promise::from_resolve_value(ctx, JSValue::UNDEFINED).map(JSValue::from)
     };
 
     // Clear algorithms.
