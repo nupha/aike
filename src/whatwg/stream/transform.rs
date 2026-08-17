@@ -15,7 +15,8 @@ use crate::{
     USER_CLASS_DEFS,
     whatwg::stream::{
         JSReadableStreamDefaultController, ReadableControllerPayload, extract_high_water_mark,
-        extract_size_algorithm, readable::{JSReadableStream, ReadableStreamPayload},
+        extract_size_algorithm, readable_controller::get_readable_controller,
+        readable::{JSReadableStream, ReadableStreamPayload},
         transform_controller::{JSTransformStreamDefaultController, TransformControllerPayload},
         writable::{JSWritableStream, WritableStreamPayload},
         writable_controller::{JSWritableStreamDefaultController, WritableControllerPayload},
@@ -220,15 +221,34 @@ fn js_transform_stream_constructor(ctx: &mut ScopedContext, cc: CallContext) -> 
             JSValue::from(write_fn),
             zuqe::JS_PROP_C_W_E,
         )?;
-        // Copy start/close/abort from the original transformer.
+        // Copy start/close from the original transformer.
         if let Some(tobj) = transformer.as_object() {
-            for method in ["start", "close", "abort"] {
+            for method in ["start", "close"] {
                 if let Ok(v) = tobj.get_property_str(ctx, method) {
                     if !v.is_undefined() {
                         wrapper.define_property_value_str(ctx, method, v, zuqe::JS_PROP_C_W_E)?;
                     }
                 }
             }
+        }
+        // TransformStreamDefaultSinkAbortAlgorithm (spec §6.4.3): abort
+        // propagates via readable.cancel(reason) → transformer.cancel(reason),
+        // NOT via transformer.abort().
+        {
+            let ts_val = JSValue::from(instance);
+            let abort_fn = ctx.create_native_function_with_data(
+                zuqe::Callback::Func(ts_sink_abort),
+                "tsSinkAbort",
+                1,
+                0,
+                [ts_val].into(),
+            )?;
+            wrapper.define_property_value_str(
+                ctx,
+                "abort",
+                JSValue::from(abort_fn),
+                zuqe::JS_PROP_C_W_E,
+            )?;
         }
         // Update the writable controller's underlying_sink to be the wrapper.
         let ws_val = JSValue::from(writable);
@@ -308,6 +328,177 @@ fn js_transform_stream_constructor(ctx: &mut ScopedContext, cc: CallContext) -> 
     }
 
     Ok(instance.into())
+}
+
+/// TransformStreamDefaultSinkAbortAlgorithm (spec §6.4.3).
+/// Abort propagates by calling transformer.cancel() directly, then
+/// erroring the readable side with the cancel reason.
+fn ts_sink_abort(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let reason = cc.arg(0);
+    let ts_val = cc.data(0);
+
+    let Some(tsp) = JSTransformStream::payload_of(&ts_val) else {
+        return Promise::from_resolve_value(ctx, JSValue::UNDEFINED).map(JSValue::from);
+    };
+    let mut controller = match tsp.controller {
+        Some(c) => c,
+        None => return Promise::from_resolve_value(ctx, JSValue::UNDEFINED).map(JSValue::from),
+    };
+    let readable = match tsp.readable {
+        Some(r) => r,
+        None => return Promise::from_resolve_value(ctx, JSValue::UNDEFINED).map(JSValue::from),
+    };
+
+    // If finishPromise is already set, return it.
+    if let Some(tcp) = controller.payload() {
+        if let Some(fp) = tcp.finish_promise {
+            return Ok(JSValue::from(fp));
+        }
+    }
+
+    // Create finishPromise.
+    let (finish_promise, _finish_funcs) = Promise::create(ctx)?;
+    if let Some(tcp) = controller.payload_mut() {
+        tcp.finish_promise = Some(finish_promise);
+    }
+
+    // Call controller.[[cancelAlgorithm]](reason) — i.e. transformer.cancel(reason).
+    let cancel_result = if let Some(tcp) = controller.payload()
+        && let Some(transformer_obj) = tcp.transformer.as_object()
+        && let Ok(cancel_fn) = transformer_obj.get_property_str(ctx, "cancel")
+        && cancel_fn.is_callable()
+    {
+        cancel_fn.call(ctx, tcp.transformer, &[reason])
+    } else {
+        Ok(JSValue::UNDEFINED)
+    };
+
+    // Clear algorithms.
+    if let Some(tcp) = controller.payload_mut() {
+        tcp.cancel_algorithm = JSValue::UNDEFINED;
+        tcp.transform_algorithm = JSValue::UNDEFINED;
+        tcp.flush_algorithm = JSValue::UNDEFINED;
+    }
+
+    // React to cancel result.
+    match cancel_result {
+        Ok(v) => {
+            if let Ok(mut cancel_promise) = Promise::try_from(v) {
+                // Async: chain .then()
+                let on_ok = ctx.create_native_function_with_data(
+                    zuqe::Callback::Func(ts_sink_abort_ok),
+                    "tsSinkAbortOk",
+                    1,
+                    0,
+                    [JSValue::from(controller), readable.into(), reason].into(),
+                )?;
+                let on_err = ctx.create_native_function_with_data(
+                    zuqe::Callback::Func(ts_sink_abort_err),
+                    "tsSinkAbortErr",
+                    1,
+                    0,
+                    [JSValue::from(controller), readable.into()].into(),
+                )?;
+                cancel_promise.then(ctx, on_ok.into(), on_err.into())?;
+            } else {
+                // Sync non-promise result: treat as fulfilled.
+                ts_sink_abort_fulfill(ctx, &mut controller, readable, reason)?;
+            }
+        }
+        Err(_) => {
+            let e = ctx.take_exception().to_value(ctx);
+            ts_sink_abort_reject(ctx, &mut controller, readable, e)?;
+        }
+    }
+
+    if let Some(tcp) = controller.payload() {
+        if let Some(fp) = tcp.finish_promise {
+            return Ok(JSValue::from(fp));
+        }
+    }
+    Ok(JSValue::UNDEFINED)
+}
+
+/// Promise reaction: async transformer.cancel() fulfilled (sink abort path).
+fn ts_sink_abort_ok(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let mut controller = cc.data(0)
+        .as_native_object::<JSTransformStreamDefaultController>()
+        .ok_or_else(|| ctx.throw_internal_error("invalid controller"))?;
+    let readable = cc.data(1).as_native_object::<JSReadableStream>()
+        .ok_or_else(|| ctx.throw_internal_error("invalid readable"))?;
+    let reason = cc.data(2);
+    ts_sink_abort_fulfill(ctx, &mut controller, readable, reason)
+}
+
+/// Promise reaction: async transformer.cancel() rejected (sink abort path).
+fn ts_sink_abort_err(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let mut controller = cc.data(0)
+        .as_native_object::<JSTransformStreamDefaultController>()
+        .ok_or_else(|| ctx.throw_internal_error("invalid controller"))?;
+    let readable = cc.data(1).as_native_object::<JSReadableStream>()
+        .ok_or_else(|| ctx.throw_internal_error("invalid readable"))?;
+    let error = cc.arg(0);
+    ts_sink_abort_reject(ctx, &mut controller, readable, error)
+}
+
+/// Fulfilled branch of sink abort: if readable errored → reject
+/// finishPromise; otherwise error readable with cancel reason and
+/// resolve finishPromise.
+fn ts_sink_abort_fulfill(
+    ctx: &mut ScopedContext,
+    controller: &mut JSTransformStreamDefaultController,
+    readable: JSReadableStream,
+    reason: JSValue,
+) -> JSResult {
+    // If readable is errored, reject finishPromise with its storedError.
+    if let Some(rp) = readable.payload()
+        && rp.state == crate::whatwg::stream::RsState::Errored
+    {
+        let error = rp.stored_error;
+        if let Some(tcp) = controller.payload_mut()
+            && let Some(mut fp) = tcp.finish_promise
+        {
+            fp.reject(ctx, error);
+        }
+        return Ok(JSValue::UNDEFINED);
+    }
+
+    // Error readable with the cancel reason.
+    if let Some(tcp) = controller.payload() {
+        let rcv = JSValue::from(tcp.readable_controller);
+        if let Ok(rcp) = get_readable_controller(ctx, &rcv) {
+            rcp.error(ctx, reason)?;
+        }
+    }
+    // Resolve finishPromise.
+    if let Some(tcp) = controller.payload_mut()
+        && let Some(mut fp) = tcp.finish_promise
+    {
+        fp.resolve(ctx, JSValue::UNDEFINED);
+    }
+    Ok(JSValue::UNDEFINED)
+}
+
+/// Rejected branch of sink abort: error readable with rejection reason,
+/// reject finishPromise.
+fn ts_sink_abort_reject(
+    ctx: &mut ScopedContext,
+    controller: &mut JSTransformStreamDefaultController,
+    readable: JSReadableStream,
+    error: JSValue,
+) -> JSResult {
+    if let Some(tcp) = controller.payload() {
+        let rcv = JSValue::from(tcp.readable_controller);
+        if let Ok(rcp) = get_readable_controller(ctx, &rcv) {
+            rcp.error(ctx, error)?;
+        }
+    }
+    if let Some(tcp) = controller.payload_mut()
+        && let Some(mut fp) = tcp.finish_promise
+    {
+        fp.reject(ctx, error);
+    }
+    Ok(JSValue::UNDEFINED)
 }
 
 /// TransformStreamDefaultSinkWriteAlgorithm (spec §6.4.3).
@@ -496,48 +687,34 @@ fn ts_source_cancel(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     // React to cancel result (spec step 7).
     match cancel_result {
-        Ok(_v) => {
-            // Fulfilled: error the writable with reason, unblock write,
-            // resolve finishPromise.
-            if let Some(wsp) = writable.payload()
-                && let Some(mut wc) = wsp.controller
-                && let Some(wcp) = wc.payload_mut()
-                && let Some(mut ws) = wcp.stream
-                && let Some(ws_payload) = ws.payload_mut()
-            {
-                if ws_payload.state == crate::whatwg::stream::RsState::Readable {
-                    ws_payload.start_erroring(ctx, reason)?;
-                }
-            }
-            // TransformStreamUnblockWrite
-            transform_stream_unblock_write(ctx, &stream_val)?;
-            // Resolve finishPromise
-            if let Some(tcp) = controller.payload_mut()
-                && let Some(mut fp) = tcp.finish_promise
-            {
-                fp.resolve(ctx, JSValue::UNDEFINED);
+        Ok(v) => {
+            // Check if the result is a promise (async cancel).
+            if let Ok(mut cancel_promise) = Promise::try_from(v) {
+                // Async cancel: chain .then() to react on settlement.
+                let on_ok = ctx.create_native_function_with_data(
+                    zuqe::Callback::Func(ts_source_cancel_ok),
+                    "tsSourceCancelOk",
+                    1,
+                    0,
+                    [stream_val, JSValue::from(controller), reason].into(),
+                )?;
+                let on_err = ctx.create_native_function_with_data(
+                    zuqe::Callback::Func(ts_source_cancel_err),
+                    "tsSourceCancelErr",
+                    1,
+                    0,
+                    [stream_val, JSValue::from(controller)].into(),
+                )?;
+                cancel_promise.then(ctx, on_ok.into(), on_err.into())?;
+            } else {
+                // Sync cancel (non-promise result): treat as fulfilled.
+                ts_cancel_fulfill(ctx, &stream_val, &mut controller, writable, reason)?;
             }
         }
         Err(_) => {
             let e = ctx.take_exception().to_value(ctx);
-            // Rejected: error the writable with the thrown error, unblock write,
-            // reject finishPromise.
-            if let Some(wsp) = writable.payload()
-                && let Some(mut wc) = wsp.controller
-                && let Some(wcp) = wc.payload_mut()
-                && let Some(mut ws) = wcp.stream
-                && let Some(ws_payload) = ws.payload_mut()
-            {
-                if ws_payload.state == crate::whatwg::stream::RsState::Readable {
-                    ws_payload.start_erroring(ctx, e)?;
-                }
-            }
-            transform_stream_unblock_write(ctx, &stream_val)?;
-            if let Some(tcp) = controller.payload_mut()
-                && let Some(mut fp) = tcp.finish_promise
-            {
-                fp.reject(ctx, e);
-            }
+            // Sync throw: reject finishPromise.
+            ts_cancel_reject(ctx, &stream_val, &mut controller, writable, e)?;
         }
     }
 
@@ -547,6 +724,106 @@ fn ts_source_cancel(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         }
     }
     Ok(JSValue::UNDEFINED)
+}
+
+/// Fulfilled branch of transformer.cancel() (source cancel path):
+/// if writable is errored, reject finishPromise with its stored error;
+/// otherwise error writable with the cancel reason, unblock write,
+/// and resolve finishPromise.
+fn ts_cancel_fulfill(
+    ctx: &mut ScopedContext,
+    stream_val: &JSValue,
+    controller: &mut JSTransformStreamDefaultController,
+    writable: JSWritableStream,
+    reason: JSValue,
+) -> JSResult {
+    // If writable is already errored, reject finishPromise with its storedError.
+    if let Some(wsp) = writable.payload()
+        && wsp.state == crate::whatwg::stream::RsState::Errored
+    {
+        let error = wsp.stored_error;
+        if let Some(tcp) = controller.payload_mut()
+            && let Some(mut fp) = tcp.finish_promise
+        {
+            fp.reject(ctx, error);
+        }
+        return Ok(JSValue::UNDEFINED);
+    }
+
+    // Error the writable with the cancel reason.
+    if let Some(wsp) = writable.payload()
+        && let Some(mut wc) = wsp.controller
+        && let Some(wcp) = wc.payload_mut()
+        && let Some(mut ws) = wcp.stream
+        && let Some(ws_payload) = ws.payload_mut()
+        && ws_payload.state == crate::whatwg::stream::RsState::Readable
+    {
+        ws_payload.start_erroring(ctx, reason)?;
+    }
+    transform_stream_unblock_write(ctx, stream_val)?;
+    if let Some(tcp) = controller.payload_mut()
+        && let Some(mut fp) = tcp.finish_promise
+    {
+        fp.resolve(ctx, JSValue::UNDEFINED);
+    }
+    Ok(JSValue::UNDEFINED)
+}
+
+/// Rejected branch of transformer.cancel(): error writable with the
+/// rejection reason, unblock write, reject finishPromise.
+fn ts_cancel_reject(
+    ctx: &mut ScopedContext,
+    stream_val: &JSValue,
+    controller: &mut JSTransformStreamDefaultController,
+    writable: JSWritableStream,
+    error: JSValue,
+) -> JSResult {
+    if let Some(wsp) = writable.payload()
+        && let Some(mut wc) = wsp.controller
+        && let Some(wcp) = wc.payload_mut()
+        && let Some(mut ws) = wcp.stream
+        && let Some(ws_payload) = ws.payload_mut()
+        && ws_payload.state == crate::whatwg::stream::RsState::Readable
+    {
+        ws_payload.start_erroring(ctx, error)?;
+    }
+    transform_stream_unblock_write(ctx, stream_val)?;
+    if let Some(tcp) = controller.payload_mut()
+        && let Some(mut fp) = tcp.finish_promise
+    {
+        fp.reject(ctx, error);
+    }
+    Ok(JSValue::UNDEFINED)
+}
+
+/// Promise reaction: async transformer.cancel() fulfilled.
+fn ts_source_cancel_ok(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let stream_val = cc.data(0);
+    let mut controller = cc.data(1)
+        .as_native_object::<JSTransformStreamDefaultController>()
+        .ok_or_else(|| ctx.throw_internal_error("invalid controller"))?;
+    let reason = cc.data(2);
+    let writable = if let Some(tcp) = controller.payload() {
+        tcp.writable_stream
+    } else {
+        return Ok(JSValue::UNDEFINED);
+    };
+    ts_cancel_fulfill(ctx, &stream_val, &mut controller, writable, reason)
+}
+
+/// Promise reaction: async transformer.cancel() rejected.
+fn ts_source_cancel_err(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let stream_val = cc.data(0);
+    let mut controller = cc.data(1)
+        .as_native_object::<JSTransformStreamDefaultController>()
+        .ok_or_else(|| ctx.throw_internal_error("invalid controller"))?;
+    let error = cc.arg(0);
+    let writable = if let Some(tcp) = controller.payload() {
+        tcp.writable_stream
+    } else {
+        return Ok(JSValue::UNDEFINED);
+    };
+    ts_cancel_reject(ctx, &stream_val, &mut controller, writable, error)
 }
 
 /// TransformStreamSetBackpressure (spec §6.4.1).

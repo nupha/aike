@@ -178,29 +178,18 @@ fn js_transform_controller_error(ctx: &mut ScopedContext, cc: CallContext) -> JS
     let p = JSTransformStreamDefaultController::payload_of(&this)
         .ok_or_else(|| ctx.throw_type_error("not a TransformStreamDefaultController"))?;
 
-    // Error the readable side via the readable controller
+    // TransformStreamDefaultControllerError(controller, e) →
+    //   TransformStreamError(controller.[[stream]], e) →
+    //   1. ReadableStreamDefaultControllerError(readable.[[controller]], e)
+    //   2. TransformStreamErrorWritableAndUnblockWrite(stream, e)
     if let Some(rcp) = p.readable_controller.payload() {
-        rcp.reject_pending_read(ctx, reason);
-
-        if let Some(mut stream_val) = rcp.stream()
-            && let Some(sp) = stream_val.payload_mut()
-        {
-            sp.state = RsState::Errored;
-            sp.stored_error = reason;
-        }
+        rcp.error(ctx, reason)?;
     }
-
-    // Error the writable side
-    if let Some(wsp) = p.writable_stream.payload() {
-        // Can't mutate through shared ref; error via the writable controller
-        if let Some(wc) = wsp.controller
-            && let Some(wcp) = wc.payload()
-            && let Some(mut ws) = wcp.stream
-            && let Some(wsp_mut) = ws.payload_mut()
-        {
-            wsp_mut.state = RsState::Errored;
-            wsp_mut.stored_error = reason;
-        }
+    if let Some(stream_handle) = p.stream {
+        let stream_val = JSValue::from(stream_handle);
+        super::transform::transform_stream_error_writable_and_unblock_write(
+            ctx, &stream_val, reason,
+        )?;
     }
 
     Ok(JSValue::UNDEFINED)

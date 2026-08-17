@@ -562,9 +562,47 @@ impl WritableStreamPayload {
             Some(p) => p,
             None => return self.finish_transform_close(ctx, JSValue::UNDEFINED, false),
         };
-        let Some(tc) = cp.transform_controller else {
+        let Some(mut tc) = cp.transform_controller else {
             return self.finish_transform_close(ctx, JSValue::UNDEFINED, false);
         };
+
+        // Spec step 3: if [[finishPromise]] already exists (e.g. a concurrent
+        // readable.cancel()), return it — do not call flush().
+        if let Some(tcp) = tc.payload() {
+            if let Some(fp) = tcp.finish_promise {
+                let stream_val = self.stream_value();
+                let ok = ctx
+                    .create_native_function_with_data(
+                        Callback::Func(flush_close_ok),
+                        "flushCloseOk",
+                        0,
+                        0,
+                        [stream_val].into(),
+                    )?
+                    .into();
+                let err = ctx
+                    .create_native_function_with_data(
+                        Callback::Func(flush_close_err),
+                        "flushCloseErr",
+                        1,
+                        0,
+                        [stream_val].into(),
+                    )?
+                    .into();
+                let mut fp = fp;
+                fp.then(ctx, ok, err)?;
+                return Ok(());
+            }
+        }
+
+        // Spec step 4: create [[finishPromise]] before calling flush.
+        {
+            let (fp, _) = Promise::create(ctx)?;
+            if let Some(tcp) = tc.payload_mut() {
+                tcp.finish_promise = Some(fp);
+            }
+        }
+
         let tcp = match tc.payload() {
             Some(p) => p,
             None => return self.finish_transform_close(ctx, JSValue::UNDEFINED, false),
