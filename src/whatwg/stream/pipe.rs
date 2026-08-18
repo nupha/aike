@@ -277,7 +277,7 @@ fn pipe_to_read(ctx: &mut ScopedContext, data: &[JSValue]) -> JSResult {
             data.into(),
         )?
         .into();
-    read_promise.then(ctx, step, step_fail)?;
+    read_promise.perform_then(ctx, step, step_fail)?;
     Ok(JSValue::UNDEFINED)
 }
 
@@ -396,7 +396,7 @@ fn pipe_close_dest(ctx: &mut ScopedContext, data: &[JSValue]) -> JSResult {
             data.into(),
         )?
         .into();
-    close_promise.then(ctx, settle_ok, settle_err)?;
+    close_promise.perform_then(ctx, settle_ok, settle_err)?;
     Ok(JSValue::UNDEFINED)
 }
 
@@ -616,7 +616,7 @@ fn pipe_run_shutdown_action(
             settle_data.into(),
         )?
         .into();
-    action_promise.then(ctx, settle_fn, settle_fn)?;
+    action_promise.perform_then(ctx, settle_fn, settle_fn)?;
     Ok(JSValue::UNDEFINED)
 }
 
@@ -819,7 +819,7 @@ fn pipe_to_on_read(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             data.into(),
         )?
         .into();
-    write_promise.then(ctx, loop_fn, write_fail)?;
+    write_promise.perform_then(ctx, loop_fn, write_fail)?;
 
     // The write's sink may have errored the source synchronously (e.g.
     // `write()` calling `controller.error()`). Per the spec that error takes

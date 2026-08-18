@@ -226,7 +226,7 @@ impl WritableStreamPayload {
                     [stream_val, JSValue::from(req.promise)].into(),
                 )?;
                 let mut abort_result = abort_result;
-                abort_result.then(ctx, on_ok.into(), on_err.into())?;
+                abort_result.perform_then(ctx, on_ok.into(), on_err.into())?;
             }
         } else {
             self.reject_close_and_closed(ctx);
@@ -508,7 +508,7 @@ impl WritableStreamPayload {
             0,
             [stream_val].into(),
         )?;
-        close_result.then(ctx, on_ok.into(), on_err.into())?;
+        close_result.perform_then(ctx, on_ok.into(), on_err.into())?;
         Ok(())
     }
 
@@ -590,7 +590,7 @@ impl WritableStreamPayload {
                     )?
                     .into();
                 let mut fp = fp;
-                fp.then(ctx, ok, err)?;
+                fp.perform_then(ctx, ok, err)?;
                 return Ok(());
             }
         }
@@ -647,7 +647,7 @@ impl WritableStreamPayload {
                 [stream_val].into(),
             )?
             .into();
-        flush_promise.then(ctx, ok, err)?;
+        flush_promise.perform_then(ctx, ok, err)?;
         Ok(())
     }
 
@@ -868,7 +868,7 @@ impl WritableStreamPayload {
                         0,
                         data_err.into(),
                     )?;
-                    p.then(ctx, on_ok.into(), on_err.into())?;
+                    p.perform_then(ctx, on_ok.into(), on_err.into())?;
                 }
                 Some(Err(_)) => {
                     let e = ctx.take_exception().to_value(ctx);
@@ -888,7 +888,7 @@ impl WritableStreamPayload {
                     )?;
                     // Reject via a microtask so abort can interleave.
                     let mut p = Promise::from_reject_value(ctx, e)?;
-                    p.then(ctx, noop.into(), on_err.into())?;
+                    p.perform_then(ctx, noop.into(), on_err.into())?;
                 }
                 None => {
                     let mut p = Promise::from_resolve_value(ctx, JSValue::UNDEFINED)?;
@@ -899,7 +899,7 @@ impl WritableStreamPayload {
                         0,
                         data.into(),
                     )?;
-                    p.then(ctx, on_ok.into(), on_ok.into())?;
+                    p.perform_then(ctx, on_ok.into(), on_ok.into())?;
                 }
             }
         } else {
@@ -912,7 +912,7 @@ impl WritableStreamPayload {
                 0,
                 data.into(),
             )?;
-            p.then(ctx, on_ok.into(), on_ok.into())?;
+            p.perform_then(ctx, on_ok.into(), on_ok.into())?;
         }
         Ok(())
     }
@@ -1258,13 +1258,13 @@ fn js_writable_stream_constructor(ctx: &mut ScopedContext, cc: CallContext) -> J
     )?;
 
     if let Ok(mut p) = Promise::try_from(start_val) {
-        p.then(ctx, start_fn.into(), start_err_fn.into())?;
+        p.perform_then(ctx, start_fn.into(), start_err_fn.into())?;
     } else {
         // Synchronous start (undefined / non-thenable): arm via a resolved
         // promise so it still defers past construction.
-        let resolved = Promise::from_resolve_value(ctx, JSValue::UNDEFINED)?;
-        let then_fn = JSValue::from(resolved).get_property_str(ctx, "then")?;
-        then_fn.call(ctx, JSValue::from(resolved), &[start_fn.into()])?;
+        // Use perform_then to avoid calling user-visible Promise.prototype.then.
+        let mut resolved = Promise::from_resolve_value(ctx, JSValue::UNDEFINED)?;
+        resolved.perform_then(ctx, start_fn.into(), JSValue::UNDEFINED)?;
     }
 
     stream.payload_mut().unwrap().controller = Some(controller);

@@ -641,7 +641,7 @@ fn from_cancel(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             [JSValue::from(output)].into(),
         )?
         .into();
-    return_promise.then(ctx, ok, err)?;
+    return_promise.perform_then(ctx, ok, err)?;
     Ok(output.into())
 }
 
@@ -734,7 +734,7 @@ fn from_pull_next(
             [JSValue::from(iterator), next_fn, controller, in_flight].into(),
         )?
         .into();
-    promise.then(ctx, step, fail)?;
+    promise.perform_then(ctx, step, fail)?;
     Ok(JSValue::UNDEFINED)
 }
 
@@ -1084,7 +1084,7 @@ fn create_stream_async_iterator(
                     data.into(),
                 )?
                 .into();
-            cancel_promise.then(ctx, on_ok, on_err)?;
+            cancel_promise.perform_then(ctx, on_ok, on_err)?;
 
             Ok(Some(output))
         }

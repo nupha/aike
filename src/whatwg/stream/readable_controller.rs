@@ -383,7 +383,7 @@ impl ReadableControllerPayload {
                     )?
                     .into();
                 ready.resolve(ctx, JSValue::UNDEFINED);
-                ready.then(ctx, follow_up, follow_up)?;
+                ready.perform_then(ctx, follow_up, follow_up)?;
             } else if self.should_call_pull(ctx)? {
                 self.call_pull(ctx)?;
             }

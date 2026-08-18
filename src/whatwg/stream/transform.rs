@@ -336,9 +336,8 @@ fn js_transform_stream_constructor(ctx: &mut ScopedContext, cc: CallContext) -> 
             0,
             [JSValue::from(rc_handle), JSValue::from(ws_handle)].into(),
         )?;
-        let resolved = Promise::from_resolve_value(ctx, JSValue::UNDEFINED)?;
-        let then_fn = JSValue::from(resolved).get_property_str(ctx, "then")?;
-        then_fn.call(ctx, JSValue::from(resolved), &[JSValue::from(init_fn)])?;
+        let mut resolved = Promise::from_resolve_value(ctx, JSValue::UNDEFINED)?;
+        resolved.perform_then(ctx, JSValue::from(init_fn), JSValue::UNDEFINED)?;
     }
 
     Ok(instance.into())
@@ -416,7 +415,7 @@ fn ts_sink_abort(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                     0,
                     [JSValue::from(controller), readable.into()].into(),
                 )?;
-                cancel_promise.then(ctx, on_ok.into(), on_err.into())?;
+                cancel_promise.perform_then(ctx, on_ok.into(), on_err.into())?;
             } else {
                 // Sync non-promise result: treat as fulfilled.
                 ts_sink_abort_fulfill(ctx, &mut controller, readable, reason)?;
@@ -580,7 +579,7 @@ fn ts_sink_write(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             // The write settles with the transform's own outcome: the wrapper
             // promise rejects when the transform (or a terminated writable)
             // fails, not merely when backpressure clears.
-            let wrapper = bp.then(ctx, on_ok.into(), on_err.into())?;
+            let wrapper = bp.perform_then(ctx, on_ok.into(), on_err.into())?;
             return Ok(wrapper.into());
         }
     }
@@ -722,7 +721,7 @@ fn ts_source_cancel(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                     0,
                     [stream_val, JSValue::from(controller)].into(),
                 )?;
-                cancel_promise.then(ctx, on_ok.into(), on_err.into())?;
+                cancel_promise.perform_then(ctx, on_ok.into(), on_err.into())?;
             } else {
                 // Sync cancel (non-promise result): treat as fulfilled.
                 ts_cancel_fulfill(ctx, &stream_val, &mut controller, writable, reason)?;

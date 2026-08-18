@@ -317,7 +317,7 @@ pub(super) fn notify_peer_closed(
             cp.reject(ctx, r);
             // Mark `[[PromiseIsHandled]] = true` so the host rejection
             // tracker does not flag this as an unhandled rejection.
-            let _ = cp.then(ctx, noop, noop);
+            let _ = cp.perform_then(ctx, noop, noop);
         } else {
             cp.resolve(ctx, JSValue::UNDEFINED);
         }

@@ -92,7 +92,7 @@ impl JSReadableStreamDefaultReader {
                     0,
                 )?
                 .into();
-            closed_p.then(ctx, noop, noop)?;
+            closed_p.perform_then(ctx, noop, noop)?;
         }
 
         // Each branch's underlying source `pull` is the shared on-demand tee pull,
@@ -246,7 +246,7 @@ fn tee_cancel(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 [promise_val].into(),
             )?
             .into();
-        src_cancel.then(ctx, ok_fn, err_fn)?;
+        src_cancel.perform_then(ctx, ok_fn, err_fn)?;
     }
 
     match shared.cancel_promise.borrow().as_ref() {
@@ -371,7 +371,7 @@ fn tee_pull_fulfilled(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             )?
             .into();
         ready.resolve(ctx, JSValue::UNDEFINED);
-        ready.then(ctx, follow, follow)?;
+        ready.perform_then(ctx, follow, follow)?;
     }
 
     Ok(JSValue::UNDEFINED)
@@ -415,7 +415,7 @@ fn tee_do_pull(ctx: &mut ScopedContext, tee_id: u32, shared: &TeeShared) -> JSRe
             [JSValue::from(tee_id)].into(),
         )?
         .into();
-    promise.then(ctx, step, fail)?;
+    promise.perform_then(ctx, step, fail)?;
 
     Ok(JSValue::UNDEFINED)
 }
