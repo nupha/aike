@@ -56,6 +56,10 @@ pub(crate) struct ReadableStreamPayload {
     /// RefCell that GC does not scan, so a collected stream would otherwise
     /// leave a dangling controller handle for the poller to trip over.
     pub(crate) channel_id: Option<u64>,
+    /// True when the stream was constructed with `type: 'bytes'`. Used by
+    /// `getReader({mode:'byob'})` and `ReadableStreamBYOBReader` to validate
+    /// that only byte streams support BYOB reading.
+    pub(crate) is_byte_stream: bool,
 }
 
 impl ReadableStreamPayload {
@@ -68,6 +72,7 @@ impl ReadableStreamPayload {
             disturbed: false,
             signal: None,
             channel_id: None,
+            is_byte_stream: false,
         }
     }
 
@@ -214,6 +219,14 @@ impl JSReadableStream {
             return Err(ctx.throw_type_error("ReadableStream is already locked"));
         }
 
+        // WHATWG SetUpReadableStreamBYOBReader step 2: if the stream's
+        // controller is not a ReadableByteStreamController, throw TypeError.
+        if byob && !sp.is_byte_stream {
+            return Err(ctx.throw_type_error(
+                "getReader can only be used on byte streams when mode is \"byob\"",
+            ));
+        }
+
         let mut closed_promise = Promise::create(ctx)?.0;
         match sp.state {
             RsState::Closed => closed_promise.resolve(ctx, JSValue::UNDEFINED),
@@ -326,6 +339,46 @@ fn js_readable_stream_constructor(ctx: &mut ScopedContext, cc: CallContext) -> J
             }
         }
     };
+
+    // Mark the stream as a byte stream so getReader({mode:'byob'}) and
+    // ReadableStreamBYOBReader can validate the stream type.
+    if is_bytes {
+        instance.payload_mut().unwrap().is_byte_stream = true;
+    }
+
+    // WHATWG ReadableStream constructor byte-stream path:
+    // step 4a: If strategy["size"] exists, throw a RangeError exception.
+    if is_bytes {
+        if let Some(o) = queuing_strategy.as_object() {
+            let size = o.get_property_str(ctx, "size")?;
+            if !size.is_undefined() {
+                return Err(ctx.throw_range_error(
+                    "strategy.size must not be defined when type is \"bytes\"",
+                ));
+            }
+        }
+    }
+
+    // WHATWG SetUpReadableByteStreamControllerFromUnderlyingSource:
+    // step 6: if pull exists and is not callable, throw TypeError.
+    // step 9: if autoAllocateChunkSize is 0, throw TypeError.
+    if is_bytes {
+        if let Some(o) = underlying_source.as_object() {
+            let pull = o.get_property_str(ctx, "pull")?;
+            if !pull.is_undefined() && !pull.is_callable() {
+                return Err(ctx.throw_type_error("pull must be a function"));
+            }
+            let auto = o.get_property_str(ctx, "autoAllocateChunkSize")?;
+            if !auto.is_undefined() {
+                let n = auto.to_number(ctx)?.to_f64();
+                if n == 0.0 {
+                    return Err(ctx.throw_type_error(
+                        "autoAllocateChunkSize must be a positive integer",
+                    ));
+                }
+            }
+        }
+    }
 
     let mut default_controller =
         create_readable_stream_controller(ctx, &instance, &underlying_source, &queuing_strategy)?;
@@ -1481,6 +1534,27 @@ fn register_readable_stream(rt: &mut Runtime) -> Result<ClassID, i32> {
     JSReadableStream::register(rt)
 }
 
+/// `new ReadableStreamBYOBReader(stream)` — validates the stream is a byte
+/// stream (WHATWG SetUpReadableStreamBYOBReader step 2), then acquires a BYOB
+/// reader.
+fn js_readable_stream_byob_reader_static(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let stream_val = cc.arg(0);
+    let mut stream = JSReadableStream::try_from(stream_val)
+        .map_err(|_| ctx.throw_type_error("stream must be a ReadableStream"))?;
+    {
+        let sp = stream
+            .payload()
+            .ok_or_else(|| ctx.throw_type_error("not a ReadableStream"))?;
+        if !sp.is_byte_stream {
+            return Err(ctx.throw_type_error(
+                "ReadableStreamBYOBReader requires a ReadableStream with type \"bytes\"",
+            ));
+        }
+    }
+    let reader = stream.acquire_reader(ctx, true)?;
+    Ok(JSValue::from(reader))
+}
+
 /// Register the static `ReadableStream.from()` method on the global constructor.
 pub(crate) fn install_readable_stream_statics(
     ctx: &mut ScopedContext,
@@ -1496,5 +1570,23 @@ pub(crate) fn install_readable_stream_statics(
     if let Some(mut ctor) = ctor_val.as_object() {
         ctor.define_property_value_str(ctx, "from", from_fn.into(), zuqe::JS_PROP_C_W_E)?;
     }
+
+    // Expose ReadableStreamBYOBReader as a proper constructor on the global object.
+    let empty_proto = ctx.create_base_object()?;
+    let byob_ctor = ctx.create_constructor(
+        "ReadableStreamBYOBReader",
+        js_readable_stream_byob_reader_static,
+        1,
+        empty_proto,
+        0,
+        false,
+    )?;
+    global.define_property_value_str(
+        ctx,
+        "ReadableStreamBYOBReader",
+        JSValue::from(byob_ctor),
+        zuqe::JS_PROP_C_W_E,
+    )?;
+
     Ok(())
 }
