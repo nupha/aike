@@ -157,6 +157,10 @@ impl JSReadableStreamDefaultReader {
                 .payload_mut()
                 .ok_or_else(|| ctx.throw_internal_error("invalid controller"))?
                 .set_algorithms(pull_fn, cancel_fn, JSValue::UNDEFINED);
+            controller
+                .payload_mut()
+                .ok_or_else(|| ctx.throw_internal_error("invalid controller"))?
+                .set_in_tee(true);
             stream2.payload_mut().unwrap().controller = Some(controller);
 
             Ok((stream2, controller))
@@ -391,6 +395,27 @@ fn tee_pull_continue(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 fn tee_do_pull(ctx: &mut ScopedContext, tee_id: u32, shared: &TeeShared) -> JSResult {
     if shared.pulling.get() || shared.done.get() {
         return Ok(JSValue::UNDEFINED);
+    }
+    // If the source is already errored, error both branches
+    // immediately (synchronously) so pending reads reject before
+    // any data can be dequeued.
+    {
+        let reader = shared.reader;
+        if let Some(p) = reader.payload()
+            && let Some(stream) = p.stream
+            && let Some(sp) = stream.payload()
+            && sp.state == RsState::Errored
+        {
+            shared.done.set(true);
+            let reason = sp.stored_error;
+            for c in [shared.c1, shared.c2] {
+                if !tee_branch_is_final(ctx, c.into()) {
+                    c.invoke_str(ctx, "error", &[reason])?;
+                }
+            }
+            TEE_STREAMS.with(|m| m.borrow_mut().remove(&tee_id));
+            return Ok(JSValue::UNDEFINED);
+        }
     }
     shared.pulling.set(true);
 

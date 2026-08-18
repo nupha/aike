@@ -29,19 +29,12 @@ use super::{
 /// close_requested) live on `ReadableControllerPayload` directly.
 pub(crate) enum ReadableControllerKind {
     Default {
-        /// Self JS handle, set right after instance creation, used to re-queue
-        /// pull jobs.
         controller: Option<JSReadableStreamDefaultController>,
         started: Cell<bool>,
         pulling: Cell<bool>,
         pull_again: Cell<bool>,
-        /// Queue of in-flight read() promises awaiting data. Kept as a queue so
-        /// concurrent read() calls each get their own promise instead of
-        /// clobbering the previous one. Settled directly (no thenable
-        /// assimilation), so an injected Object.prototype.then cannot intercept
-        /// read results. Stored per-controller (not globally) so
-        /// concurrent/sequential streams do not steal chunks.
         pending_read: Rc<RefCell<Vec<Promise>>>,
+        in_tee: Cell<bool>,
     },
 
     /// Minimal byte controller (constructor + toStringTag only in this build).
@@ -91,6 +84,7 @@ impl ReadableControllerPayload {
                 pulling: Cell::new(false),
                 pull_again: Cell::new(false),
                 pending_read: Rc::new(RefCell::new(Vec::new())),
+                in_tee: Cell::new(false),
             },
         }
     }
@@ -181,6 +175,12 @@ impl ReadableControllerPayload {
             *controller = c;
         } else {
             unreachable!("not for byte streams controller")
+        }
+    }
+
+    pub(crate) fn set_in_tee(&self, v: bool) {
+        if let ReadableControllerKind::Default { in_tee, .. } = &self.kind {
+            in_tee.set(v);
         }
     }
 
@@ -349,7 +349,19 @@ impl ReadableControllerPayload {
                     .unwrap()
                     .settle_state(ctx, RsState::Errored, Some(err));
             }
-            return Ok(());
+            // For tee branches, propagate the pull error so the caller
+            // (tee_do_pull → tee_pull) surfaces it via tee_pull_rejected,
+            // which errors both branches after buffered data is consumed.
+            let in_tee = if let ReadableControllerKind::Default { in_tee, .. } = &self.kind {
+                in_tee.get()
+            } else {
+                false
+            };
+            return if in_tee {
+                Err(ctx.throw_internal_error("pull() threw"))
+            } else {
+                Ok(())
+            };
         }
 
         // Capture the pull result before clearing pulling, so we can check
