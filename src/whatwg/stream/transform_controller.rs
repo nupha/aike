@@ -138,7 +138,7 @@ fn js_transform_controller_enqueue(ctx: &mut ScopedContext, cc: CallContext) -> 
     // strategy's size algorithm). When that throws, error the writable side,
     // unblock write, and re-throw the readable side's stored error — the first
     // error wins over a later one thrown by size().
-    if rcp.enqueue(ctx, chunk).is_err() {
+    if rcp.enqueue(ctx, chunk, JSValue::UNDEFINED).is_err() {
         let e = ctx.take_exception().to_value(ctx);
         if let Some(stream_handle) = p.stream {
             let stream_val = JSValue::from(stream_handle);

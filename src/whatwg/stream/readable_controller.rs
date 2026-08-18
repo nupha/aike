@@ -35,6 +35,8 @@ pub(crate) enum ReadableControllerKind {
         pull_again: Cell<bool>,
         pending_read: Rc<RefCell<Vec<Promise>>>,
         in_tee: Cell<bool>,
+        /// True when the stream was constructed with `type: 'owning'`.
+        owning: Cell<bool>,
     },
 
     /// Minimal byte controller (constructor + toStringTag only in this build).
@@ -85,6 +87,7 @@ impl ReadableControllerPayload {
                 pull_again: Cell::new(false),
                 pending_read: Rc::new(RefCell::new(Vec::new())),
                 in_tee: Cell::new(false),
+                owning: Cell::new(false),
             },
         }
     }
@@ -181,6 +184,12 @@ impl ReadableControllerPayload {
     pub(crate) fn set_in_tee(&self, v: bool) {
         if let ReadableControllerKind::Default { in_tee, .. } = &self.kind {
             in_tee.set(v);
+        }
+    }
+
+    pub(crate) fn set_owning(&self, v: bool) {
+        if let ReadableControllerKind::Default { owning, .. } = &self.kind {
+            owning.set(v);
         }
     }
 
@@ -407,7 +416,20 @@ impl ReadableControllerPayload {
     /// Enqueue a chunk. Per the current spec, a non-readable stream or a
     /// close-requested controller makes this a silent no-op
     /// (`CanCloseOrEnqueue` returns false), not a throw.
-    pub(crate) fn enqueue(&self, ctx: &mut ScopedContext, chunk: JSValue) -> JSResult {
+    /// For `owning` type streams, the options may contain a `transfer` list.
+    pub(crate) fn enqueue(
+        &self,
+        ctx: &mut ScopedContext,
+        chunk: JSValue,
+        options: JSValue,
+    ) -> JSResult {
+        // Handle the `transfer` option for owning-type streams.
+        let chunk = if !options.is_undefined_or_null() {
+            self.handle_transfer(ctx, chunk, options)?
+        } else {
+            chunk
+        };
+
         if self.close_requested.get() || !self.can_close_or_enqueue() {
             return Ok(JSValue::UNDEFINED);
         }
@@ -469,6 +491,136 @@ impl ReadableControllerPayload {
                 Ok(JSValue::UNDEFINED)
             }
         }
+    }
+
+    /// Handle the `transfer` option for owning-type streams.
+    /// Neuters each buffer in the transfer list via `ArrayBuffer.prototype.transfer()`,
+    /// then clones the chunk so it references the transferred data.
+    fn handle_transfer(
+        &self,
+        ctx: &mut ScopedContext,
+        chunk: JSValue,
+        options: JSValue,
+    ) -> Result<JSValue, i32> {
+        // Get the transfer list from options. If the getter throws, propagate.
+        let transfer_list = match options.as_object() {
+            Some(o) => match o.get_property_str(ctx, "transfer") {
+                Ok(v) => v,
+                Err(e) => return Err(e),
+            },
+            None => JSValue::UNDEFINED,
+        };
+
+        if transfer_list.is_undefined_or_null() {
+            return Ok(chunk);
+        }
+
+        // Transfer is only allowed for owning-type streams.
+        let is_owning = if let ReadableControllerKind::Default { owning, .. } = &self.kind {
+            owning.get()
+        } else {
+            false
+        };
+        if !is_owning {
+            return Err(ctx.throw_type_error(
+                "Transfer is only allowed for ReadableStream with type 'owning'",
+            ));
+        }
+
+        // Convert to array and iterate.
+        let len_val = transfer_list.get_property_str(ctx, "length")?;
+        let len = len_val.to_number(ctx)?.to_f64() as i32;
+        if len <= 0 {
+            return Ok(chunk);
+        }
+
+        // Build a map: original buffer → transferred buffer.
+        let mut replacements: Vec<(JSValue, JSValue)> = Vec::new();
+        for i in 0..len {
+            let buf = match transfer_list.get_property_u32(ctx, i as u32) {
+                Ok(v) => v,
+                Err(_) => {
+                    ctx.take_exception();
+                    continue;
+                }
+            };
+            if buf.is_undefined_or_null() {
+                continue;
+            }
+            // Call ArrayBuffer.prototype.transfer() to neuter the original
+            // and get a new buffer with the same data.
+            let transfer_fn = match buf.get_property_str(ctx, "transfer") {
+                Ok(v) => v,
+                Err(_) => {
+                    ctx.take_exception();
+                    continue;
+                }
+            };
+            if !transfer_fn.is_callable() {
+                continue;
+            }
+            let new_buf = match transfer_fn.call(ctx, buf, &[]) {
+                Ok(v) => v,
+                Err(_) => {
+                    ctx.take_exception();
+                    continue;
+                }
+            };
+            replacements.push((buf, new_buf));
+        }
+
+        if replacements.is_empty() {
+            return Ok(chunk);
+        }
+
+        // For TypedArrays: create a new TypedArray backed by the transferred buffer.
+        // For plain ArrayBuffers: return the transferred buffer directly.
+        let is_ta = chunk
+            .get_property_str(ctx, "byteLength")
+            .map(|v| !v.is_undefined())
+            .unwrap_or(false)
+            && chunk
+                .get_property_str(ctx, "buffer")
+                .map(|v| v.is_object())
+                .unwrap_or(false);
+
+        if is_ta {
+            // TypedArray: create a new instance with the transferred buffer.
+            let constructor = chunk.get_property_str(ctx, "constructor")?;
+            if constructor.is_callable() {
+                // Find the replacement buffer for this TypedArray's buffer.
+                let orig_buf = chunk.get_property_str(ctx, "buffer")?;
+                if let Some((_, new_buf)) = replacements.iter().find(|(old, _)| *old == orig_buf) {
+                    let byte_offset = chunk
+                        .get_property_str(ctx, "byteOffset")
+                        .ok()
+                        .map(|v| v.to_number(ctx).ok().map(|n| n.to_f64() as u32))
+                        .flatten()
+                        .unwrap_or(0);
+                    let byte_length = chunk
+                        .get_property_str(ctx, "byteLength")
+                        .ok()
+                        .map(|v| v.to_number(ctx).ok().map(|n| n.to_f64() as u32))
+                        .flatten()
+                        .unwrap_or(0);
+                    // TypedArray(buffer, byteOffset, byteLength)
+                    return constructor.call(
+                        ctx,
+                        JSValue::UNDEFINED,
+                        &[*new_buf, JSValue::from(byte_offset as f64), JSValue::from(byte_length as f64)],
+                    );
+                }
+            }
+            // Fallback: return chunk as-is (transfer didn't match).
+            return Ok(chunk);
+        }
+
+        // Plain ArrayBuffer or other: return the transferred buffer.
+        if let Some((_, new_buf)) = replacements.first() {
+            return Ok(*new_buf);
+        }
+
+        Ok(chunk)
     }
 
     /// Spec `ReadableStreamDefaultControllerCanCloseOrEnqueue`: false once the

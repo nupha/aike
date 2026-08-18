@@ -314,21 +314,33 @@ fn js_readable_stream_constructor(ctx: &mut ScopedContext, cc: CallContext) -> J
         if ty.is_undefined() {
             false
         } else {
-            // Spec: `type` must be "bytes"; anything else (incl. null, empty
-            // string, a ToString-throwing value) throws from the constructor.
             let s = ty.to_string(ctx)?.to_string();
             if s == "bytes" {
                 true
+            } else if s == "owning" {
+                false
             } else {
                 return Err(
-                    ctx.throw_type_error("ReadableStream type must be undefined or \"bytes\"")
+                    ctx.throw_type_error("ReadableStream type must be undefined, \"bytes\", or \"owning\"")
                 );
             }
         }
     };
 
-    let default_controller =
+    let mut default_controller =
         create_readable_stream_controller(ctx, &instance, &underlying_source, &queuing_strategy)?;
+    // Mark the controller as owning if the stream type is 'owning'.
+    if !is_bytes {
+        let ty_str = underlying_source
+            .as_object()
+            .and_then(|o| o.get_property_str(ctx, "type").ok())
+            .and_then(|v| v.to_string(ctx).ok())
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+        if ty_str == "owning" {
+            default_controller.payload_mut().unwrap().set_owning(true);
+        }
+    }
     instance.payload_mut().unwrap().controller = Some(default_controller);
 
     // SetUpReadableStreamDefaultControllerFromUnderlyingSource: capture the

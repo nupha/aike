@@ -39,6 +39,7 @@ def_native_object!(
 fn js_controller_enqueue(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let chunk = cc.arg(0);
+    let options = cc.arg(1);
     let p = get_readable_controller(ctx, &this)?;
     // Spec `enqueue(chunk) method steps`: if CanCloseOrEnqueue is false, throw a
     // TypeError (stream closed/errored or close requested).
@@ -47,7 +48,7 @@ fn js_controller_enqueue(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             "Cannot enqueue on a ReadableStreamDefaultController whose stream is not readable",
         ));
     }
-    p.enqueue(ctx, chunk)
+    p.enqueue(ctx, chunk, options)
 }
 
 fn js_controller_close(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {

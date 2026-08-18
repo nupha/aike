@@ -59,7 +59,7 @@ fn js_byte_controller_enqueue(ctx: &mut ScopedContext, cc: CallContext) -> JSRes
     let this = cc.this();
     let chunk = cc.arg(0);
     let p = get_readable_controller(ctx, &this)?;
-    p.enqueue(ctx, chunk)
+    p.enqueue(ctx, chunk, JSValue::UNDEFINED)
 }
 
 fn js_byte_controller_close(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
