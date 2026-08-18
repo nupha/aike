@@ -4,6 +4,7 @@
 mod class_io_handle;
 mod cron;
 mod download;
+mod persistent;
 mod signal;
 mod spawn;
 mod sys;
@@ -47,6 +48,9 @@ pub fn init_aike(ctx: &mut ScopedContext) -> Result<(), i32> {
         // --- cron / timer ---
         FieldDef::FUNC("schedule", 2, cron::js_schedule, 0),
         FieldDef::FUNC("sleep", 0, crate::whatwg::timeout::js_sleep, 0),
+        // --- persistent ---
+        FieldDef::FUNC("dumpValue", 1, persistent::js_dump_value, 0),
+        FieldDef::FUNC("restoreValue", 1, persistent::js_restore_value, 0),
     ];
 
     ns.install_fields(ctx, entries)?;

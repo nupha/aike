@@ -55,6 +55,7 @@ zuqe = { path = "../../../devel/zhuque", features = [
     "crossbeam_channel",
     "serde_json_support",
     "zapi",
+    "persistent",
 ] }
 crossbeam = "0.8"
 tokio = { version = "1", features = [

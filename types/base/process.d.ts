@@ -507,6 +507,32 @@ declare namespace Aike {
    * @param ms - Milliseconds to wait (clamped to >= 0).
    */
   function sleep(ms: number): Promise<void>;
+
+  // --- persistent ---
+
+  /**
+   * Serialize any JavaScript value into a self-contained bytecode blob and
+   * return it as a `Uint8Array`. The blob can be reloaded in any Runtime
+   * (including a fresh one) via `Aike.restoreValue`.
+   *
+   * Supported value types: undefined, null, booleans, numbers, strings, bigint,
+   * symbols (global/well-known), plain objects, arrays (with cyclic references),
+   * functions (closures, generators, async, arrow), and modules.
+   * Native (C) functions are persisted by name only and must be re-registered
+   * on the target runtime.
+   *
+   * Throws a TypeError when the value cannot be persisted.
+   */
+  function dumpValue(value: unknown): Uint8Array;
+
+  /**
+   * Rebuild the value previously produced by `Aike.dumpValue` from a
+   * `Uint8Array` blob and return it.
+   *
+   * Throws a TypeError when `bytes` is not a `Uint8Array`, the blob is
+   * malformed/truncated, or a referenced value cannot be reconstructed.
+   */
+  function restoreValue(bytes: Uint8Array): unknown;
 }
 
 // ---------------------------------------------------------------------------
