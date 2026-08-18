@@ -475,11 +475,24 @@ impl ReadableControllerPayload {
         readable
     }
 
-    /// Close the controlled stream. Per the current spec, closing an already
-    /// closed/errored (or close-requested) stream is a silent no-op, not a throw.
+    /// Close the controlled stream. Per WHATWG
+    /// `ReadableStreamDefaultControllerClose` step 1, throw a TypeError when
+    /// the stream is not readable or close was already requested.
     pub(crate) fn close(&self, ctx: &mut ScopedContext) -> Result<(), i32> {
-        if !self.can_close_or_enqueue() {
-            return Ok(());
+        // Step 1: If ! ReadableStreamDefaultControllerCanCloseOrEnqueue is false,
+        // throw a TypeError exception.
+        let readable = match self.stream {
+            Some(rs) => match rs.payload() {
+                Some(sp) => sp.state == RsState::Readable,
+                None => false,
+            },
+            None => false,
+        };
+        if !readable {
+            return Err(ctx.throw_type_error("Stream is not readable"));
+        }
+        if self.close_requested.get() {
+            return Err(ctx.throw_type_error("Stream has already been closed"));
         }
 
         self.close_requested.set(true);
