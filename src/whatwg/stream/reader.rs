@@ -139,6 +139,12 @@ impl ReaderPayload {
                 return Promise::from_reject_value(ctx, stream_p.stored_error);
             }
             RsState::Closed => {
+                // BYOB read from a closed stream still transfers the buffer
+                // per WHATWG ReadableByteStreamControllerBYOBRead.
+                if let Some(view) = byob_view {
+                    let transferred = transfer_view_buffer(ctx, view)?;
+                    return iterator_result_promise(ctx, transferred, true);
+                }
                 return iterator_result_promise(ctx, JSValue::UNDEFINED, true);
             }
             RsState::Readable => {}
@@ -246,6 +252,16 @@ impl ReaderPayload {
 
         Ok(buf)
     }
+}
+
+/// Transfer a BYOB view's underlying ArrayBuffer: detach the original, then
+/// return a new empty Uint8Array backed by a fresh buffer. This matches
+/// WHATWG ReadableByteStreamControllerBYOBRead when reading from a closed
+/// or empty stream.
+fn transfer_view_buffer(ctx: &mut ScopedContext, view: TypedArray) -> Result<JSValue, i32> {
+    view.array_buffer().detatch(ctx);
+    let new_ta = TypedArray::create_from_vec_u8(ctx, Vec::new())?;
+    Ok(JSValue::from(new_ta))
 }
 
 /// Copy `chunk` into the BYOB destination `view`, returning the view to hand

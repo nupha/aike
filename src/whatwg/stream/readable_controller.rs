@@ -15,7 +15,7 @@ use std::{
 
 use zuqe::{
     CallContext, Callback, ErrorKind, Exception, JSResult, JSValue, ScopedContext,
-    builtins::promise::Promise,
+    builtins::{promise::Promise, typed_array::TypedArray},
     gc_lite::{GcTrace, GcTraceCtx},
 };
 
@@ -430,12 +430,12 @@ impl ReadableControllerPayload {
             chunk
         };
 
-        if self.close_requested.get() || !self.can_close_or_enqueue() {
-            return Ok(JSValue::UNDEFINED);
-        }
-
         match &self.kind {
             ReadableControllerKind::Default { .. } => {
+                if self.close_requested.get() || !self.can_close_or_enqueue() {
+                    return Ok(JSValue::UNDEFINED);
+                }
+
                 let resolved = self.resolve_pending_read(ctx, chunk, false);
                 if resolved {
                     // A pending read consumed this chunk and the queue is still
@@ -484,6 +484,17 @@ impl ReadableControllerPayload {
                 Ok(JSValue::UNDEFINED)
             }
             ReadableControllerKind::Byte { .. } => {
+                // WHATWG ReadableByteStreamControllerEnqueue steps 2-3:
+                // If closeRequested is true or state is not readable, throw TypeError.
+                if self.close_requested.get() || !self.can_close_or_enqueue() {
+                    return Err(ctx.throw_type_error(
+                        "Cannot enqueue into a closed or errored ReadableStream",
+                    ));
+                }
+
+                // Validate the chunk per WHATWG steps 4-7.
+                let chunk = validate_and_transfer_byte_chunk(ctx, chunk)?;
+
                 self.queue
                     .borrow_mut()
                     .push(QueueEntry { chunk, size: 1.0 });
@@ -493,14 +504,14 @@ impl ReadableControllerPayload {
         }
     }
 
-    /// Handle the `transfer` option for owning-type streams.
-    /// Neuters each buffer in the transfer list via `ArrayBuffer.prototype.transfer()`,
-    /// then clones the chunk so it references the transferred data.
-    fn handle_transfer(
-        &self,
-        ctx: &mut ScopedContext,
-        chunk: JSValue,
-        options: JSValue,
+/// Handle the `transfer` option for owning-type streams.
+/// Neuters each buffer in the transfer list via `ArrayBuffer.prototype.transfer()`,
+/// then clones the chunk so it references the transferred data.
+fn handle_transfer(
+    &self,
+    ctx: &mut ScopedContext,
+    chunk: JSValue,
+    options: JSValue,
     ) -> Result<JSValue, i32> {
         // Get the transfer list from options. If the getter throws, propagate.
         let transfer_list = match options.as_object() {
@@ -757,6 +768,89 @@ impl ReadableControllerPayload {
             ReadableControllerKind::Byte { byob_request } => {
                 byob_request.borrow().unwrap_or(JSValue::UNDEFINED)
             }
+        }
+    }
+}
+
+/// WHATWG `ReadableByteStreamControllerEnqueue` steps 4-7: validate the chunk
+/// and transfer its buffer so the stream takes ownership.
+fn validate_and_transfer_byte_chunk(ctx: &mut ScopedContext, chunk: JSValue) -> Result<JSValue, i32> {
+    // Try TypedArray first (most common case for byte streams).
+    if let Ok(ta) = TypedArray::try_from(chunk) {
+        // Step 4: If chunk.[[ViewedArrayBuffer]] is detached, throw TypeError.
+        if ta.is_detached() {
+            return Err(ctx.throw_type_error(
+                "Cannot enqueue into a byte stream with a detached buffer",
+            ));
+        }
+        // Step 5: If chunk.[[ByteLength]] is 0, throw TypeError.
+        if ta.byte_length() == 0 {
+            return Err(ctx.throw_type_error(
+                "Cannot enqueue into a byte stream with a zero-length view",
+            ));
+        }
+        // Step 6: If chunk.[[ByteOffset]] is not 0, throw RangeError.
+        let byte_offset = chunk
+            .get_property_str(ctx, "byteOffset")
+            .ok()
+            .and_then(|v| v.to_number(ctx).ok())
+            .map(|n| n.to_f64() as u32)
+            .unwrap_or(0);
+        if byte_offset != 0 {
+            return Err(ctx.throw_range_error(
+                "Cannot enqueue into a byte stream with a non-zero byte offset",
+            ));
+        }
+        // Step 7: If chunk.[[BufferByteLength]] != chunk.[[ByteLength]], throw RangeError.
+        let byte_length = ta.byte_length() as u32;
+        let buffer_byte_length = ta.array_buffer().payload().byte_length() as u32;
+        if buffer_byte_length != byte_length {
+            return Err(ctx.throw_range_error(
+                "Cannot enqueue into a byte stream with a misaligned view",
+            ));
+        }
+        // Transfer the buffer: copy bytes, detach original, return fresh array.
+        let bytes = ta.with_bytes(|b| b.to_vec());
+        ta.array_buffer().detatch(ctx);
+        let new_ta = TypedArray::create_from_vec_u8(ctx, bytes)?;
+        return Ok(JSValue::from(new_ta));
+    }
+
+    // Plain ArrayBuffer (no view).
+    if let Some(ab) = chunk.as_object_ArrayBuffer() {
+        if ab.is_detached() {
+            return Err(ctx.throw_type_error(
+                "Cannot enqueue into a byte stream with a detached buffer",
+            ));
+        }
+        if ab.payload().byte_length() == 0 {
+            return Err(ctx.throw_type_error(
+                "Cannot enqueue into a byte stream with a zero-length buffer",
+            ));
+        }
+        return transfer_chunk_buffer(ctx, chunk);
+    }
+
+    Err(ctx.throw_type_error(
+        "chunk must be an ArrayBuffer or a TypedArray",
+    ))
+}
+
+/// Transfer a plain ArrayBuffer: call `ArrayBuffer.prototype.transfer()`
+/// to detach the original, then return the new buffer.
+fn transfer_chunk_buffer(ctx: &mut ScopedContext, chunk: JSValue) -> Result<JSValue, i32> {
+    let transfer_fn = match chunk.get_property_str(ctx, "transfer") {
+        Ok(v) if v.is_callable() => v,
+        _ => {
+            ctx.take_exception();
+            return Ok(chunk);
+        }
+    };
+    match transfer_fn.call(ctx, chunk, &[]) {
+        Ok(v) => Ok(v),
+        Err(_) => {
+            ctx.take_exception();
+            Ok(chunk)
         }
     }
 }
