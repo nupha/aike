@@ -11,6 +11,7 @@
 
 mod pipe;
 mod readable;
+mod readable_byob_request;
 mod readable_controller;
 mod readable_controller_byte;
 mod readable_controller_default;
@@ -24,6 +25,7 @@ mod writer;
 
 pub(crate) use {
     readable::{JSReadableStream, ReadableStreamPayload, install_readable_stream_statics},
+    readable_byob_request::JSReadableStreamBYOBRequest,
     readable_controller::ReadableControllerPayload,
     readable_controller_byte::JSReadableByteStreamController,
     readable_controller_default::JSReadableStreamDefaultController,

@@ -35,6 +35,7 @@ pub(crate) fn install_whatwg(ctx: &mut ScopedContext, mut global: Object) -> Res
         stream::JSReadableStreamDefaultReader::class_id(),
         stream::JSReadableStreamDefaultController::class_id(),
         stream::JSReadableByteStreamController::class_id(),
+        stream::JSReadableStreamBYOBRequest::class_id(),
         stream::JSWritableStream::class_id(),
         stream::JSWritableStreamDefaultWriter::class_id(),
         stream::JSWritableStreamDefaultController::class_id(),

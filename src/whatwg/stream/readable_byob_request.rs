@@ -1,0 +1,154 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
+
+//! `ReadableStreamBYOBRequest` — internal-only class used by byte-stream
+//! controllers to surface pending BYOB pull-into descriptors to user code.
+//!
+//! Per WHATWG Streams §4.8, the constructor is **not** publicly invocable;
+//! instances are created only by the engine via
+//! `ReadableByteStreamControllerGetBYOBRequest`.
+
+use linkme::distributed_slice;
+use zuqe::{
+    CallContext, ClassCtorDef, ClassID, FieldDef, JSResult, JSValue, Runtime, ScopedContext,
+    def_native_object,
+    gc_lite::{GcTrace, GcTraceCtx},
+};
+
+use crate::USER_CLASS_DEFS;
+
+/// Payload stored on each `ReadableStreamBYOBRequest` instance.
+pub(crate) struct ByobRequestPayload {
+    /// Back-reference to the owning `ReadableByteStreamController`.
+    controller: JSValue,
+    /// The destination view the pull-into descriptor refers to.
+    view: JSValue,
+}
+
+impl ByobRequestPayload {
+    pub(crate) fn new(controller: JSValue, view: JSValue) -> Self {
+        Self { controller, view }
+    }
+
+    pub(crate) fn controller(&self) -> JSValue {
+        self.controller
+    }
+
+    pub(crate) fn view(&self) -> JSValue {
+        self.view
+    }
+
+    pub(crate) fn set_view(&mut self, view: JSValue) {
+        self.view = view;
+    }
+
+    pub(crate) fn gc_trace(&self, gcx: &mut GcTraceCtx) {
+        self.controller.trace(gcx);
+        self.view.trace(gcx);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Prototype methods / getters
+// ---------------------------------------------------------------------------
+
+fn js_byob_request_constructor(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
+    // Per WHATWG Streams §4.8: the constructor is internal-only.
+    // The WPT test `construct-byob-request.any.js` asserts that `new
+    // ReadableStreamBYOBRequest(controller, view)` always throws TypeError.
+    Err(ctx.throw_type_error(
+        "ReadableStreamBYOBRequest cannot be constructed directly",
+    ))
+}
+
+/// `ReadableStreamBYOBRequest.prototype.view` — readonly getter.
+fn js_byob_request_view(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let this = cc.this();
+    let payload = JSReadableStreamBYOBRequest::payload_of(&this)
+        .ok_or_else(|| ctx.throw_type_error("not a ReadableStreamBYOBRequest"))?;
+    Ok(payload.view())
+}
+
+/// `ReadableStreamBYOBRequest.prototype.respond(bytesWritten)`.
+fn js_byob_request_respond(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let this = cc.this();
+    let payload = JSReadableStreamBYOBRequest::payload_of(&this)
+        .ok_or_else(|| ctx.throw_type_error("not a ReadableStreamBYOBRequest"))?;
+
+    // Step 1: If [[controller]] is undefined, throw TypeError.
+    if payload.controller().is_undefined() {
+        return Err(ctx.throw_type_error(
+            "ReadableStreamBYOBRequest has an invalid controller",
+        ));
+    }
+
+    let bytes_written = cc.arg(0);
+
+    // Delegate to the controller's respond logic.
+    let controller = payload.controller();
+    let respond_fn = controller.get_property_str(ctx, "respond")?;
+    if respond_fn.is_callable() {
+        respond_fn.call(ctx, controller, &[bytes_written])?;
+    }
+
+    Ok(JSValue::UNDEFINED)
+}
+
+/// `ReadableStreamBYOBRequest.prototype.respondWithNewView(view)`.
+fn js_byob_request_respond_with_new_view(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let this = cc.this();
+    let payload = JSReadableStreamBYOBRequest::payload_of(&this)
+        .ok_or_else(|| ctx.throw_type_error("not a ReadableStreamBYOBRequest"))?;
+
+    // Step 1: If [[controller]] is undefined, throw TypeError.
+    if payload.controller().is_undefined() {
+        return Err(ctx.throw_type_error(
+            "ReadableStreamBYOBRequest has an invalid controller",
+        ));
+    }
+
+    let new_view = cc.arg(0);
+
+    // Delegate to the controller's respondWithNewView logic.
+    let controller = payload.controller();
+    let respond_fn = controller.get_property_str(ctx, "respondWithNewView")?;
+    if respond_fn.is_callable() {
+        respond_fn.call(ctx, controller, &[new_view])?;
+    }
+
+    Ok(JSValue::UNDEFINED)
+}
+
+// ---------------------------------------------------------------------------
+// Class definition
+// ---------------------------------------------------------------------------
+
+const BYOB_REQUEST_PROTO: &[FieldDef] = &[
+    FieldDef::GETSET("view", Some(js_byob_request_view), None, 0),
+    FieldDef::FUNC("respond", 1, js_byob_request_respond, 0),
+    FieldDef::FUNC(
+        "respondWithNewView",
+        1,
+        js_byob_request_respond_with_new_view,
+        0,
+    ),
+    FieldDef::STR(
+        "[Symbol.toStringTag]",
+        "ReadableStreamBYOBRequest",
+        zuqe::JS_PROP_CONFIGURABLE,
+    ),
+];
+
+def_native_object!(
+    "ReadableStreamBYOBRequest",
+    JSReadableStreamBYOBRequest,
+    ByobRequestPayload,
+    BYOB_REQUEST_PROTO,
+    Some(ClassCtorDef::new(js_byob_request_constructor, 2, false).expose_to_global()),
+    on_payload_gc: ByobRequestPayload::gc_trace
+);
+
+#[distributed_slice(USER_CLASS_DEFS)]
+fn register_readable_stream_byob_request(rt: &mut Runtime) -> Result<ClassID, i32> {
+    JSReadableStreamBYOBRequest::register(rt)
+}
