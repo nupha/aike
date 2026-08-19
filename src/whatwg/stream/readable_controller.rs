@@ -43,14 +43,18 @@ pub(crate) struct PullIntoDescriptor {
     /// Cached BYOBRequest object wrapping this descriptor. Created at push
     /// time (reader.rs) to avoid `new_instance` scope issues during pull.
     pub(crate) byob_request: Option<JSValue>,
-    /// WHATWG reader type: "byob" for BYOB reader reads, "none" for
-    /// auto-allocated or detached-from-queue descriptors.
+    /// WHATWG reader type: "byob" for BYOB reader reads, "default" for
+    /// auto-allocated descriptors, "none" for detached-from-queue descriptors.
     pub(crate) reader_type: ReaderType,
+    /// Minimum number of bytes that must be filled before the descriptor
+    /// is committed (WHATWG `minimumFill`). 0 means no minimum (fill eagerly).
+    pub(crate) minimum_fill: u32,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ReaderType {
     Byob,
+    Default,
     None,
 }
 
@@ -270,13 +274,18 @@ impl ReadableControllerPayload {
     }
 
     /// WHATWG `ReadableByteStreamControllerRespond` — process a BYOB respond.
+    /// Sets bytesFilled, then commits (shifts + fulfills read) when minimumFill
+    /// is met. When pendingPullIntos is empty, this is a no-op (per spec the
+    /// assertion is debug-only, not a runtime error).
     pub(crate) fn respond(
         &self,
         ctx: &mut ScopedContext,
         bytes_written: JSValue,
     ) -> Result<(), i32> {
         let ReadableControllerKind::Byte {
-            pending_pull_intos, ..
+            pending_pull_intos,
+            pending_read,
+            ..
         } = &self.kind
         else {
             return Err(ctx.throw_type_error("respond() on non-byte controller"));
@@ -285,22 +294,85 @@ impl ReadableControllerPayload {
         if bytes < 0.0 {
             return Err(ctx.throw_range_error("`bytesWritten` must be non-negative"));
         }
-        let mut descs = pending_pull_intos.borrow_mut();
-        let first = descs
-            .first_mut()
-            .ok_or_else(|| ctx.throw_type_error("No pending BYOB read to respond to"))?;
-        // Validate: buffer must not be detached.
-        if first.view.is_detached() {
-            return Err(ctx.throw_type_error(
-                "Cannot respond to a BYOB request whose buffer has been detached",
-            ));
+
+        // Spec assertion: pendingPullIntos should not be empty. When it IS
+        // empty (e.g. respond called after enqueue shifted the descriptor),
+        // treat as a no-op rather than throwing.
+        if pending_pull_intos.borrow().is_empty() {
+            return Ok(());
         }
-        if first.bytes_filled > 0 {
-            return Err(ctx.throw_type_error(
-                "Cannot respond with new data to an already-partially-filled BYOB request",
-            ));
+
+        // WHATWG ReadableByteStreamControllerRespondInReadableState:
+        // Validate and fill the first descriptor, then commit if minimumFill met.
+        {
+            let mut descs = pending_pull_intos.borrow_mut();
+            let first = descs
+                .first_mut()
+                .ok_or_else(|| ctx.throw_type_error("No pending BYOB read to respond to"))?;
+
+            if first.view.is_detached() {
+                return Err(ctx.throw_type_error(
+                    "Cannot respond to a BYOB request whose buffer has been detached",
+                ));
+            }
+            let bytes_u = bytes as u32;
+            if first.bytes_filled + bytes_u > first.element_size {
+                return Err(ctx.throw_range_error(
+                    "respond() would overflow the BYOB request byte length",
+                ));
+            }
+            if bytes_u == 0 {
+                return Err(ctx.throw_type_error(
+                    "`bytesWritten` must be non-zero for a readable stream",
+                ));
+            }
+
+            // FillHeadPullIntoDescriptor: accumulate bytesFilled.
+            first.bytes_filled += bytes_u;
+
+            // If bytesFilled < minimumFill, don't commit yet.
+            if first.bytes_filled < first.minimum_fill {
+                // Clear both controller-level and descriptor-level byob_request
+                // so the next pull() gets a fresh view of the remaining bytes.
+                first.byob_request = None;
+                self.clear_byob_request();
+                return Ok(());
+            }
         }
-        first.bytes_filled = bytes as u32;
+
+        // Commit: shift the descriptor, create a view, fulfill the read.
+        self.commit_pull_into_descriptor(ctx, pending_pull_intos, pending_read)
+    }
+
+    /// WHATWG `ReadableByteStreamControllerCommitPullIntoDescriptor`: shift the
+    /// first descriptor, create a view of its committed bytes, and either fulfill
+    /// a pending read request or enqueue the data.
+    fn commit_pull_into_descriptor(
+        &self,
+        ctx: &mut ScopedContext,
+        pending_pull_intos: &Rc<RefCell<Vec<PullIntoDescriptor>>>,
+        pending_read: &Rc<RefCell<Vec<Promise>>>,
+    ) -> Result<(), i32> {
+        let desc = pending_pull_intos.borrow_mut().remove(0);
+        self.clear_byob_request();
+
+        let committed = desc.view.invoke_str(
+            ctx,
+            "subarray",
+            &[JSValue::ZERO, JSValue::from(desc.bytes_filled)],
+        )?;
+
+        // Try to fulfill a pending non-BYOB read request first.
+        if self.resolve_pending_read(ctx, committed, false) {
+            return Ok(());
+        }
+
+        // No pending read — enqueue the committed data for a future read.
+        self.queue
+            .borrow_mut()
+            .push(QueueEntry { chunk: committed, size: 1.0 });
+        self.queue_total_size
+            .set(self.queue_total_size.get() + 1.0);
         Ok(())
     }
 
@@ -312,13 +384,15 @@ impl ReadableControllerPayload {
         new_view: JSValue,
     ) -> Result<(), i32> {
         let ReadableControllerKind::Byte {
-            pending_pull_intos, ..
+            pending_pull_intos,
+            pending_read,
+            ..
         } = &self.kind
         else {
             return Err(ctx.throw_type_error("respondWithNewView() on non-byte controller"));
         };
         if pending_pull_intos.borrow().is_empty() {
-            return Err(ctx.throw_type_error("No pending BYOB read to respond to"));
+            return Ok(());
         }
         // Validate the new view is not detached.
         let new_ta = TypedArray::try_from(new_view)
@@ -390,8 +464,16 @@ impl ReadableControllerPayload {
         // Update the descriptor's view and bytes filled.
         first.view = new_ta;
         first.bytes_filled = new_byte_length as u32;
-        self.clear_byob_request();
-        Ok(())
+
+        // If bytesFilled < minimumFill, don't commit yet.
+        if first.bytes_filled < first.minimum_fill {
+            self.clear_byob_request();
+            return Ok(());
+        }
+
+        // Commit: shift the descriptor, create a view, fulfill the read.
+        drop(descs);
+        self.commit_pull_into_descriptor(ctx, pending_pull_intos, pending_read)
     }
 
     pub(crate) fn set_in_tee(&self, v: bool) {
@@ -698,7 +780,8 @@ impl ReadableControllerPayload {
                         byte_offset: 0,
                         buffer_byte_length: aacs,
                         byob_request: None,
-                        reader_type: ReaderType::None,
+                        reader_type: ReaderType::Default,
+                        minimum_fill: 1,
                     };
                     pending_pull_intos.borrow_mut().push(desc);
                 }
@@ -860,7 +943,9 @@ impl ReadableControllerPayload {
                 Ok(JSValue::UNDEFINED)
             }
             ReadableControllerKind::Byte {
-                pending_pull_intos, ..
+                pending_pull_intos,
+                pending_read,
+                ..
             } => {
                 // WHATWG ReadableByteStreamControllerEnqueue steps 2-3:
                 // If closeRequested is true or state is not readable, throw TypeError.
@@ -870,30 +955,78 @@ impl ReadableControllerPayload {
                     ));
                 }
 
-                // Validate the chunk per WHATWG steps 3-6.
+                // Validate the chunk per WHATWG steps 3-7.
                 let chunk = validate_and_transfer_byte_chunk(ctx, chunk)?;
 
-                // WHATWG step 8b: if the first pending pull-into's buffer is
-                // detached, throw TypeError.
-                {
-                    let descs = pending_pull_intos.borrow();
-                    if let Some(first) = descs.first() {
-                        if first.view.is_detached() {
-                            return Err(ctx.throw_type_error(
-                                "Cannot enqueue when the pending BYOB request's buffer has been detached",
-                            ));
+                // WHATWG step 8: if there are pending pull-into descriptors,
+                // transfer buffer and handle based on reader type.
+                if !pending_pull_intos.borrow().is_empty() {
+                    // Step 8b: buffer must not be detached.
+                    {
+                        let descs = pending_pull_intos.borrow();
+                        if let Some(first) = descs.first() {
+                            if first.view.is_detached() {
+                                return Err(ctx.throw_type_error(
+                                    "Cannot enqueue when the pending BYOB request's buffer has been detached",
+                                ));
+                            }
                         }
                     }
-                }
 
-                // WHATWG step 8: if there are pending pull-into descriptors,
-                // fill them first before adding to the queue.
-                if !pending_pull_intos.borrow().is_empty() {
-                    let mut q = self.queue.borrow_mut();
-                    self.fill_pending_pull_intos(ctx, pending_pull_intos, &chunk, &mut q)?;
+                    // Step 8c: invalidate BYOBRequest.
+                    self.clear_byob_request();
+
+                    // Step 8d: transfer the first descriptor's buffer.
+                    {
+                        let mut descs = pending_pull_intos.borrow_mut();
+                        let first = &mut descs[0];
+                        let bytes = first.view.with_bytes(|b| b.to_vec());
+                        first.view =
+                            TypedArray::create_from_vec_u8(ctx, bytes)?;
+                        first.byte_offset = 0;
+                        first.buffer_byte_length = first.element_size;
+                    }
+
+                    // Step 8e: if reader type is "none", enqueue detached
+                    // descriptor's bytes to the queue and return.
+                    if pending_pull_intos.borrow()[0].reader_type == ReaderType::None {
+                        let desc = pending_pull_intos.borrow_mut().remove(0);
+                        let ta = TypedArray::create_from_vec_u8(
+                            ctx,
+                            desc.view.with_bytes(|b| b.to_vec()),
+                        )?;
+                        self.queue
+                            .borrow_mut()
+                            .push(QueueEntry { chunk: JSValue::from(ta), size: 1.0 });
+                        self.queue_total_size
+                            .set(self.queue_total_size.get() + 1.0);
+                        return Ok(JSValue::UNDEFINED);
+                    }
+
+                    // For "default" readerType (auto-allocated): shift
+                    // descriptor, fulfill pending read with the chunk directly.
+                    if pending_pull_intos.borrow()[0].reader_type == ReaderType::Default {
+                        let desc = pending_pull_intos.borrow_mut().remove(0);
+                        let _ = desc;
+                        self.resolve_pending_read(ctx, chunk, false);
+                        return Ok(JSValue::UNDEFINED);
+                    }
+
+                    // For "byob" readerType: copy chunk bytes into all
+                    // pending descriptor views (fill + commit each when full).
+                    {
+                        let mut q = self.queue.borrow_mut();
+                        self.fill_pending_pull_intos(
+                            ctx,
+                            pending_pull_intos,
+                            &chunk,
+                            &mut q,
+                        )?;
+                    }
                     return Ok(JSValue::UNDEFINED);
                 }
 
+                // WHATWG step 9: no pending pull-intos — enqueue to queue.
                 self.queue
                     .borrow_mut()
                     .push(QueueEntry { chunk, size: 1.0 });
@@ -1186,7 +1319,8 @@ impl ReadableControllerPayload {
 
     /// WHATWG `ReadableByteStreamControllerGetBYOBRequest`: returns a cached
     /// `ReadableStreamBYOBRequest` wrapping the first pending pull-into
-    /// descriptor's view, or null if there are no pending pull-intos.
+    /// descriptor's view. When `pendingPullIntos` is empty and
+    /// `autoAllocateChunkSize > 0`, auto-allocates a new descriptor.
     pub(crate) fn byob_request(&self, ctx: &mut ScopedContext) -> Result<JSValue, i32> {
         match &self.kind {
             ReadableControllerKind::Default { .. } => Ok(JSValue::UNDEFINED),
@@ -1194,12 +1328,40 @@ impl ReadableControllerPayload {
                 byob_request,
                 pending_pull_intos,
                 self_handle,
+                auto_allocate_chunk_size,
                 ..
             } => {
                 // Controller-level cache (set after respond/respondWithNewView clears it).
                 if let Some(ref cached) = *byob_request.borrow() {
                     return Ok(*cached);
                 }
+
+                // WHATWG ReadableByteStreamControllerGetBYOBRequest:
+                // If pendingPullIntos is empty but autoAllocateChunkSize > 0,
+                // auto-allocate a new descriptor so byobRequest is non-null.
+                if pending_pull_intos.borrow().is_empty() {
+                    let aacs = auto_allocate_chunk_size.get();
+                    if aacs == 0 {
+                        return Ok(JSValue::NULL);
+                    }
+                    // Create auto-allocated descriptor.
+                    let view = TypedArray::create_from_vec_u8(ctx, vec![0u8; aacs as usize])?;
+                    let (promise, resolve_funcs) = Promise::create(ctx)?;
+                    let desc = PullIntoDescriptor {
+                        view,
+                        resolve_fn: JSValue::from(resolve_funcs[0]),
+                        promise,
+                        bytes_filled: 0,
+                        element_size: aacs,
+                        byte_offset: 0,
+                        buffer_byte_length: aacs,
+                        byob_request: None,
+                        reader_type: ReaderType::Default,
+                        minimum_fill: 1,
+                    };
+                    pending_pull_intos.borrow_mut().push(desc);
+                }
+
                 let mut descs = pending_pull_intos.borrow_mut();
                 match descs.first_mut() {
                     Some(d) => {
@@ -1207,13 +1369,24 @@ impl ReadableControllerPayload {
                             return Ok(br);
                         }
                         // WHATWG ReadableByteStreamControllerGetBYOBRequest:
-                        // Lazy creation for auto-allocated descriptors (readerType "none").
-                        // Create a BYOBRequest wrapping the descriptor's view and
-                        // cache it on both the descriptor and the controller.
+                        // Create a BYOBRequest wrapping the remaining unfilled
+                        // portion of the descriptor's view and cache it.
                         let controller_val = self_handle.get().ok_or_else(|| {
                             ctx.throw_internal_error("controller self-handle not set")
                         })?;
-                        let view_val = JSValue::from(d.view);
+                        // View = original view[bytesFilled .. elementSize]
+                        let view_val = if d.bytes_filled > 0 {
+                            d.view.invoke_str(
+                                ctx,
+                                "subarray",
+                                &[
+                                    JSValue::from(d.bytes_filled as i32),
+                                    JSValue::from(d.element_size as i32),
+                                ],
+                            )?
+                        } else {
+                            JSValue::from(d.view)
+                        };
                         let br = super::readable_byob_request::JSReadableStreamBYOBRequest::new_instance(
                             ctx,
                             JSValue::UNDEFINED,

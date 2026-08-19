@@ -110,6 +110,7 @@ impl ReaderPayload {
         &self,
         ctx: &mut ScopedContext,
         byob_view: Option<TypedArray>,
+        min: u32,
     ) -> Result<Promise, i32> {
         let Some(mut stream) = self.stream else {
             // Spec: reading from a released reader returns a promise rejected
@@ -248,6 +249,7 @@ impl ReaderPayload {
                         buffer_byte_length,
                         byob_request: br,
                         reader_type: super::readable_controller::ReaderType::Byob,
+                        minimum_fill: min * if view.length() > 0 { (view.byte_length() / view.length()) as u32 } else { 1 },
                     });
                     cp.call_pull(ctx)?;
                     return Ok(promise);
@@ -272,7 +274,7 @@ impl ReaderPayload {
         let mut buf = Vec::new();
 
         loop {
-            let pr = self.read(ctx, None)?;
+            let pr = self.read(ctx, None, 1)?;
             match pr.state() {
                 PromiseState::Fulfilled => {
                     let result = pr.result();
@@ -409,26 +411,104 @@ fn js_reader_read(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let p = get_read_payload(ctx, &this)?;
 
-    // A BYOB read takes the destination view as its only argument; the chunk is
-    // written into that view's own buffer region rather than a fresh array.
-    let byob_view = if p.byob {
-        let view = cc.arg(0);
-        let ta = TypedArray::try_from(view)
-            .map_err(|_| ctx.throw_type_error("view must be a TypedArray"))?;
-        if ta.length() == 0 {
-            // WHATWG: read(view) with zero-length or detached view rejects the
-            // promise (not a synchronous throw), so promise_rejects_js works.
-            let err = ctx.throw_type_error("view must have non-zero length");
+    if !p.byob {
+        return p.read(ctx, None, 1).map(JSValue::from);
+    }
+
+    // BYOB read: validate view type, then parse + validate options.min.
+    let view_jv = cc.arg(0);
+    let ta = TypedArray::try_from(view_jv);
+    let is_dataview = ta.is_err() && view_jv.as_object_DataView().is_some();
+
+    if ta.is_err() && !is_dataview {
+        return Err(ctx.throw_type_error("view must be a TypedArray or DataView"));
+    }
+
+    // Extract byte_length and element_size for min validation.
+    let (view_byte_length, element_size): (usize, usize) = if let Ok(ref ta) = ta {
+        let bl = ta.byte_length();
+        if bl == 0 {
+            let _ = ctx.throw_type_error("view must have non-zero length");
             let err_val = ctx.take_exception().to_value(ctx);
-            return Promise::from_reject_value(ctx, err_val)
-                .map(|p| JSValue::from(p));
+            return Promise::from_reject_value(ctx, err_val).map(JSValue::from);
         }
-        Some(ta)
+        // elementSize = TypedArrayElementSize = byte_length / length
+        let es = if ta.length() > 0 { bl / ta.length() } else { 1 };
+        (bl, es)
     } else {
-        None
+        // DataView: elementSize is 1.
+        let bl = view_jv
+            .get_property_str(ctx, "byteLength")?
+            .to_number(ctx)?.to_f64() as usize;
+        if bl == 0 {
+            let _ = ctx.throw_type_error("view must have non-zero length");
+            let err_val = ctx.take_exception().to_value(ctx);
+            return Promise::from_reject_value(ctx, err_val).map(JSValue::from);
+        }
+        (bl, 1)
     };
 
-    p.read(ctx, byob_view).map(JSValue::from)
+    // WHATWG: parse options.min, default 1.
+    let min: u32 = {
+        let opts = cc.arg(1);
+        if opts.is_undefined() {
+            1
+        } else {
+            let min_val = opts.get_property_str(ctx, "min")?;
+            if min_val.is_undefined() {
+                1
+            } else {
+                let min_f = min_val.to_number(ctx)?.to_f64();
+                if min_f <= 0.0 {
+                    let _ = ctx.throw_type_error("'min' must be a positive non-zero value");
+                    let err_val = ctx.take_exception().to_value(ctx);
+                    return Promise::from_reject_value(ctx, err_val).map(JSValue::from);
+                }
+                let min_i = min_f as u64;
+                if (min_i as f64) != min_f || min_i == 0 {
+                    let _ = ctx.throw_type_error("'min' must be a non-negative integer");
+                    let err_val = ctx.take_exception().to_value(ctx);
+                    return Promise::from_reject_value(ctx, err_val).map(JSValue::from);
+                }
+                if min_i * element_size as u64 > view_byte_length as u64 {
+                    let _ =
+                        ctx.throw_range_error("'min' option is larger than view's byte length");
+                    let err_val = ctx.take_exception().to_value(ctx);
+                    return Promise::from_reject_value(ctx, err_val).map(JSValue::from);
+                }
+                min_i as u32
+            }
+        }
+    };
+
+    // For DataView, wrap as Uint8Array over the same buffer region so the
+    // existing BYOB descriptor path works. The result will still be a TypedArray;
+    // DataView result-wrapping is handled in commit_pull_into_descriptor.
+    let byob_view = if let Ok(ta) = ta {
+        ta
+    } else {
+        let buf_jv = view_jv.get_property_str(ctx, "buffer")?;
+        let offset = view_jv
+            .get_property_str(ctx, "byteOffset")?
+            .to_number(ctx)?.to_f64() as usize;
+        // Create a Uint8Array(buffer, offset, length) via constructor call.
+        let uint8_ctor = ctx
+            .global_obj()
+            .get_property_str(ctx, "Uint8Array")?
+            .ensure_callable(ctx)?;
+        let new_view = uint8_ctor.call_ctor(
+            ctx,
+            &[
+                buf_jv,
+                JSValue::from(offset as i32),
+                JSValue::from(view_byte_length as i32),
+            ],
+        )?;
+        TypedArray::try_from(new_view)
+            .map_err(|_| ctx.throw_type_error("failed to create Uint8Array view"))?
+    };
+
+    p.read(ctx, Some(byob_view), min).map(JSValue::from)
 }
 
 fn js_reader_cancel(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -534,7 +614,7 @@ impl JSReadableStreamDefaultReader {
                         .payload()
                         .ok_or_else(|| cx.throw_type_error("reader released"))?;
 
-                    match p.read(cx, None) {
+                    match p.read(cx, None, 1) {
                         Ok(pv) => match Promise::try_from(pv) {
                             Ok(p) => *pending.borrow_mut() = Some(p),
                             Err(_) => {

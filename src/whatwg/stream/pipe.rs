@@ -257,7 +257,7 @@ fn pipe_to_read(ctx: &mut ScopedContext, data: &[JSValue]) -> JSResult {
     let reader = data[3];
     let p = JSReadableStreamDefaultReader::payload_of(&reader)
         .ok_or_else(|| ctx.throw_type_error("not a ReadableStreamDefaultReader"))?;
-    let mut read_promise = p.read(ctx, None)?;
+    let mut read_promise = p.read(ctx, None, 1)?;
 
     let step = ctx
         .create_native_function_with_data(

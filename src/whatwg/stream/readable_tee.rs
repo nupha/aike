@@ -467,7 +467,7 @@ fn tee_do_pull(ctx: &mut ScopedContext, tee_id: u32, shared: &TeeShared) -> JSRe
     shared.pulling.set(true);
 
     let p = shared.reader.payload().unwrap();
-    let mut promise = p.read(ctx, None)?;
+    let mut promise = p.read(ctx, None, 1)?;
 
     let step = ctx
         .create_native_function_with_data(

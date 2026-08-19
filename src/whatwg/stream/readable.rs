@@ -260,11 +260,16 @@ impl JSReadableStream {
         // property so that tests which do `new X.constructor(stream)` invoke the
         // correct BYOB constructor (which validates is_byte_stream).
         if byob {
+            // WHATWG: the BYOB reader is a separate class. Our unified
+            // implementation uses JSReadableStreamDefaultReader for both, so
+            // we patch the prototype chain so `instanceof ReadableStreamBYOBReader`
+            // works correctly.
             if let Ok(byob_ctor) = ctx
                 .global_obj()
                 .get_property_str(ctx, "ReadableStreamBYOBReader")
             {
                 let mut rv = JSValue::from(reader);
+                // Set the constructor property on the instance.
                 if let Some(mut obj) = rv.as_object() {
                     let _ = obj.define_property_value_str(
                         ctx,
@@ -272,6 +277,16 @@ impl JSReadableStream {
                         byob_ctor,
                         zuqe::JS_PROP_C_W_E,
                     );
+                }
+                // Set prototype: reader.__proto__ = ReadableStreamBYOBReader.prototype
+                if let Some(byob_proto) = byob_ctor
+                    .get_property_str(ctx, "prototype")
+                    .ok()
+                    .and_then(|p| p.as_object())
+                {
+                    if let Some(mut obj) = rv.as_object() {
+                        let _ = obj.set_prototype(ctx, JSValue::from(byob_proto));
+                    }
                 }
             }
         }
@@ -1107,7 +1122,7 @@ fn create_stream_async_iterator(
                 None => return Ok(IterFetchStatus::Done),
             };
 
-            let promise = p.read(ctx, None)?;
+            let promise = p.read(ctx, None, 1)?;
             match promise.state() {
                 zuqe::builtins::promise::PromiseState::Fulfilled => {
                     let result = promise.result();
@@ -1658,6 +1673,19 @@ pub(crate) fn install_readable_stream_statics(
         JSValue::from(byob_ctor),
         zuqe::JS_PROP_C_W_E,
     )?;
+
+    // Set up prototype chain: ReadableStreamBYOBReader.prototype
+    // inherits from ReadableStreamDefaultReader.prototype so that
+    // BYOB readers get read()/cancel()/releaseLock()/closed.
+    if let Some(byob_proto) = byob_ctor.get_property_str(ctx, "prototype").ok() {
+        if let Some(default_ctor) = global.get_property_str(ctx, "ReadableStreamDefaultReader").ok() {
+            if let Some(default_proto) = default_ctor.get_property_str(ctx, "prototype").ok() {
+                if let Some(mut bp) = byob_proto.as_object() {
+                    let _ = bp.set_prototype(ctx, default_proto);
+                }
+            }
+        }
+    }
 
     Ok(())
 }
