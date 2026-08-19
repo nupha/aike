@@ -17,6 +17,8 @@ use zuqe::{
 
 use crate::USER_CLASS_DEFS;
 
+use super::readable_controller::get_readable_controller;
+
 /// Payload stored on each `ReadableStreamBYOBRequest` instance.
 pub(crate) struct ByobRequestPayload {
     /// Back-reference to the owning `ReadableByteStreamController`.
@@ -56,9 +58,7 @@ fn js_byob_request_constructor(ctx: &mut ScopedContext, _cc: CallContext) -> JSR
     // Per WHATWG Streams §4.8: the constructor is internal-only.
     // The WPT test `construct-byob-request.any.js` asserts that `new
     // ReadableStreamBYOBRequest(controller, view)` always throws TypeError.
-    Err(ctx.throw_type_error(
-        "ReadableStreamBYOBRequest cannot be constructed directly",
-    ))
+    Err(ctx.throw_type_error("ReadableStreamBYOBRequest cannot be constructed directly"))
 }
 
 /// `ReadableStreamBYOBRequest.prototype.view` — readonly getter.
@@ -77,20 +77,13 @@ fn js_byob_request_respond(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
 
     // Step 1: If [[controller]] is undefined, throw TypeError.
     if payload.controller().is_undefined() {
-        return Err(ctx.throw_type_error(
-            "ReadableStreamBYOBRequest has an invalid controller",
-        ));
+        return Err(ctx.throw_type_error("ReadableStreamBYOBRequest has an invalid controller"));
     }
 
     let bytes_written = cc.arg(0);
-
-    // Delegate to the controller's respond logic.
     let controller = payload.controller();
-    let respond_fn = controller.get_property_str(ctx, "respond")?;
-    if respond_fn.is_callable() {
-        respond_fn.call(ctx, controller, &[bytes_written])?;
-    }
-
+    let cp = get_readable_controller(ctx, &controller)?;
+    cp.respond(ctx, bytes_written)?;
     Ok(JSValue::UNDEFINED)
 }
 
@@ -102,20 +95,13 @@ fn js_byob_request_respond_with_new_view(ctx: &mut ScopedContext, cc: CallContex
 
     // Step 1: If [[controller]] is undefined, throw TypeError.
     if payload.controller().is_undefined() {
-        return Err(ctx.throw_type_error(
-            "ReadableStreamBYOBRequest has an invalid controller",
-        ));
+        return Err(ctx.throw_type_error("ReadableStreamBYOBRequest has an invalid controller"));
     }
 
     let new_view = cc.arg(0);
-
-    // Delegate to the controller's respondWithNewView logic.
     let controller = payload.controller();
-    let respond_fn = controller.get_property_str(ctx, "respondWithNewView")?;
-    if respond_fn.is_callable() {
-        respond_fn.call(ctx, controller, &[new_view])?;
-    }
-
+    let cp = get_readable_controller(ctx, &controller)?;
+    cp.respond_with_new_view(ctx, new_view)?;
     Ok(JSValue::UNDEFINED)
 }
 

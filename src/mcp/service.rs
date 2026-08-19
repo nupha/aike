@@ -312,7 +312,7 @@ impl ServerHandler for McpService {
 //               inserted value is validated like any provided value
 //
 // Not yet implemented (standard JSON Schema "Validation" vocabulary; the MCP
-// DSL `McpToolShortArg` does not expose them yet, so they never appear in the
+// DSL `ToolArgDef` does not expose them yet, so they never appear in the
 // schemas `build_input_schema_from_args` produces):
 //   minLength/maxLength (string, Unicode code points)
 //   pattern             (string must match a regex)

@@ -125,7 +125,9 @@ fn js_transform_stream_constructor(ctx: &mut ScopedContext, cc: CallContext) -> 
     if let Some(rcp) = rc.payload_mut() {
         rcp.set_controller(Some(rc_handle));
     }
-    readable.payload_mut().unwrap().controller.replace(rc);
+    // Save a typed copy before storing the JSValue in the stream payload.
+    let mut rc_typed = rc;
+    readable.payload_mut().unwrap().controller = Some(rc.into());
 
     // Writable side — use the original transformer as the underlying_sink.
     let mut writable =
@@ -140,7 +142,6 @@ fn js_transform_stream_constructor(ctx: &mut ScopedContext, cc: CallContext) -> 
     writable.payload_mut().unwrap().controller.replace(wcv);
 
     // Capture rc and writable again after mutable borrow
-    let mut rc = readable.payload().unwrap().controller.unwrap();
     let mut wc = writable.payload().unwrap().controller.unwrap();
     let transformer = if let Some(cp) = wc.payload() {
         cp.underlying_sink
@@ -153,7 +154,7 @@ fn js_transform_stream_constructor(ctx: &mut ScopedContext, cc: CallContext) -> 
     let tc = JSTransformStreamDefaultController::new_instance(
         ctx,
         JSValue::UNDEFINED,
-        TransformControllerPayload::new(rc, writable, transformer),
+        TransformControllerPayload::new(rc_typed, writable, transformer),
     )?;
 
     // Wire the transform controller into the writable controller.
@@ -286,7 +287,7 @@ fn js_transform_stream_constructor(ctx: &mut ScopedContext, cc: CallContext) -> 
         )?
     };
     // Set pull/cancel on the readable controller so they fire on read/cancel.
-    if let Some(rcp) = rc.payload_mut() {
+    if let Some(rcp) = rc_typed.payload_mut() {
         rcp.set_algorithms(pull_fn.into(), cancel_fn.into(), readable_size);
     }
 

@@ -115,7 +115,7 @@ declare module "mcp" {
    * // Enum
    * { desc: "Write mode", type: "string", enum: ["overwrite", "append"], default: "overwrite" }
    */
-  export interface McpToolShortArg {
+  export interface ToolArgDef {
     /** Human-readable description of this argument. */
     desc: string;
     /**
@@ -220,7 +220,7 @@ declare module "mcp" {
     /**
      * Argument DSL — Rust auto-converts this to standard JSON Schema inputSchema.
      */
-    args: Record<string, McpToolShortArg>;
+    args: Record<string, ToolArgDef>;
     /** Optional MCP tool annotations (readOnlyHint / destructiveHint / ...). */
     annotations?: McpToolAnnotations;
   }

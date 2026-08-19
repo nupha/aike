@@ -151,9 +151,7 @@ impl ReaderPayload {
         }
 
         if let Some(controller_val) = stream_p.controller {
-            let cp = controller_val
-                .payload()
-                .ok_or_else(|| ctx.throw_internal_error("invalid controller"))?;
+            let cp = super::readable_controller::get_readable_controller(ctx, &controller_val)?;
 
             if !cp.queue().borrow().is_empty() {
                 let chunk;
@@ -200,12 +198,62 @@ impl ReaderPayload {
             }
 
             if cp.close_requested() {
+                // WHATWG: BYOB read from a closing controller still transfers
+                // the view buffer even when the queue is empty.
+                if let Some(view) = byob_view {
+                    let transferred = transfer_view_buffer(ctx, view)?;
+                    return iterator_result_promise(ctx, transferred, true);
+                }
                 return iterator_result_promise(ctx, JSValue::UNDEFINED, true);
             }
 
             // No data in queue — register a pending read on this controller so a
             // later enqueue()/close()/error() can resolve it. Stored per-controller
             // (not globally) so concurrent/sequential streams don't steal chunks.
+            //
+            // For byte controllers with a BYOB view, create a pull-into
+            // descriptor instead so the controller fills the view when data
+            // arrives.
+            if let Some(view) = byob_view {
+                if let Some(pending) = cp.pending_pull_intos() {
+                    let element_size = view.byte_length() as u32;
+                    // Read byteOffset and buffer.byteLength via JS property access.
+                    let view_jv = JSValue::from(view);
+                    let byte_offset = view_jv
+                        .get_property_str(ctx, "byteOffset")?
+                        .to_number(ctx)?.to_f64() as u32;
+                    let buffer_byte_length = {
+                        let buf_jv = view_jv.get_property_str(ctx, "buffer")?;
+                        buf_jv.get_property_str(ctx, "byteLength")?
+                            .to_number(ctx)?.to_f64() as u32
+                    };
+                    let (promise, resolve_funcs) = Promise::create(ctx)?;
+                    // Create the BYOBRequest eagerly to avoid new_instance scope issues
+                    // during the pull callback (call_pull_inner).
+                    let br = super::readable_byob_request::JSReadableStreamBYOBRequest::new_instance(
+                        ctx,
+                        JSValue::UNDEFINED,
+                        super::readable_byob_request::ByobRequestPayload::new(
+                            controller_val,
+                            JSValue::from(view),
+                        ),
+                    ).ok().map(JSValue::from);
+                    pending.borrow_mut().push(super::readable_controller::PullIntoDescriptor {
+                        view,
+                        resolve_fn: JSValue::from(resolve_funcs[0]),
+                        promise,
+                        bytes_filled: 0,
+                        element_size,
+                        byte_offset,
+                        buffer_byte_length,
+                        byob_request: br,
+                        reader_type: super::readable_controller::ReaderType::Byob,
+                    });
+                    cp.call_pull(ctx)?;
+                    return Ok(promise);
+                }
+            }
+
             let (promise, _rr) = Promise::create(ctx)?;
             cp.pending_read().borrow_mut().push(promise);
             cp.call_pull(ctx)?;
@@ -258,7 +306,7 @@ impl ReaderPayload {
 /// return a new empty Uint8Array backed by a fresh buffer. This matches
 /// WHATWG ReadableByteStreamControllerBYOBRead when reading from a closed
 /// or empty stream.
-fn transfer_view_buffer(ctx: &mut ScopedContext, view: TypedArray) -> Result<JSValue, i32> {
+pub(crate) fn transfer_view_buffer(ctx: &mut ScopedContext, view: TypedArray) -> Result<JSValue, i32> {
     view.array_buffer().detatch(ctx);
     let new_ta = TypedArray::create_from_vec_u8(ctx, Vec::new())?;
     Ok(JSValue::from(new_ta))
@@ -299,10 +347,13 @@ fn byob_fill_view(
         );
     }
 
-    // Return a view over the same buffer covering only the filled range, so the
-    // caller can chain `value.buffer` plus `value.byteLength` as an offset.
-    // `subarray` keeps the underlying buffer shared, unlike a fresh array.
-    view.invoke_str(ctx, "subarray", &[JSValue::ZERO, (n as u32).into()])
+    // WHATWG: transfer (detach) the caller's original buffer and return a
+    // fresh view over a new buffer containing the filled bytes. This matches
+    // the spec's ReadableByteStreamControllerCommitPullIntoDescriptor
+    // which transfers the pull-into descriptor's buffer.
+    view.array_buffer().detatch(ctx);
+    let filled = TypedArray::create_from_vec_u8(ctx, src[..n].to_vec())?;
+    Ok(JSValue::from(filled))
 }
 
 /// Get the `&ReaderPayload` attached to a `ReadableStreamDefaultReader` value.
@@ -365,7 +416,12 @@ fn js_reader_read(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         let ta = TypedArray::try_from(view)
             .map_err(|_| ctx.throw_type_error("view must be a TypedArray"))?;
         if ta.length() == 0 {
-            return Err(ctx.throw_type_error("view must have non-zero length"));
+            // WHATWG: read(view) with zero-length or detached view rejects the
+            // promise (not a synchronous throw), so promise_rejects_js works.
+            let err = ctx.throw_type_error("view must have non-zero length");
+            let err_val = ctx.take_exception().to_value(ctx);
+            return Promise::from_reject_value(ctx, err_val)
+                .map(|p| JSValue::from(p));
         }
         Some(ta)
     } else {

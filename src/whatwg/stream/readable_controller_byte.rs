@@ -52,7 +52,7 @@ fn js_byte_controller_desired_size(ctx: &mut ScopedContext, cc: CallContext) -> 
 fn js_byte_controller_byob_request(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let p = get_readable_controller(ctx, &this)?;
-    Ok(p.byob_request())
+    p.byob_request(ctx)
 }
 
 fn js_byte_controller_enqueue(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {

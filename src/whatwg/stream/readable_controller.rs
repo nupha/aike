@@ -24,6 +24,36 @@ use super::{
     QueueEntry, RsState, make_iterator_result,
 };
 
+/// WHATWG §2.4.3 pull-into descriptor: records a pending BYOB read so the byte
+/// controller can fill the caller-supplied view when data arrives.
+pub(crate) struct PullIntoDescriptor {
+    pub(crate) view: TypedArray,
+    /// Resolve function from `Promise::create` — calling it goes through
+    /// thenable assimilation (checks `value.then`) per spec, unlike
+    /// `Promise::resolve()` which settles directly.
+    pub(crate) resolve_fn: JSValue,
+    /// The promise itself, used for rejection (direct settle is fine there).
+    pub(crate) promise: Promise,
+    pub(crate) bytes_filled: u32,
+    pub(crate) element_size: u32,
+    /// Original byte offset of the view into its ArrayBuffer.
+    pub(crate) byte_offset: u32,
+    /// Byte length of the underlying ArrayBuffer (set once at creation).
+    pub(crate) buffer_byte_length: u32,
+    /// Cached BYOBRequest object wrapping this descriptor. Created at push
+    /// time (reader.rs) to avoid `new_instance` scope issues during pull.
+    pub(crate) byob_request: Option<JSValue>,
+    /// WHATWG reader type: "byob" for BYOB reader reads, "none" for
+    /// auto-allocated or detached-from-queue descriptors.
+    pub(crate) reader_type: ReaderType,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReaderType {
+    Byob,
+    None,
+}
+
 /// Fields that differ between the default and byte controller kinds. Common
 /// fields (stream, underlying_source, queue, queue_total_size, high_water_mark,
 /// close_requested) live on `ReadableControllerPayload` directly.
@@ -39,10 +69,21 @@ pub(crate) enum ReadableControllerKind {
         owning: Cell<bool>,
     },
 
-    /// Minimal byte controller (constructor + toStringTag only in this build).
+    /// Byte stream controller. Maintains a queue of pending pull-into
+    /// descriptors so BYOB reads can be fulfilled when enqueue() provides data.
     Byte {
-        /// Pending BYOB request view, if any. Left `None` in this minimal build.
         byob_request: Rc<RefCell<Option<JSValue>>>,
+        pending_pull_intos: Rc<RefCell<Vec<PullIntoDescriptor>>>,
+        pending_read: Rc<RefCell<Vec<Promise>>>,
+        started: Cell<bool>,
+        pulling: Cell<bool>,
+        pull_again: Cell<bool>,
+        /// Self-handle: the JSValue wrapping the byte controller, so call_pull
+        /// can pass it as the first argument to the underlying source's pull().
+        self_handle: Rc<Cell<Option<JSValue>>>,
+        /// WHATWG autoAllocateChunkSize: when set, default reader reads
+        /// auto-allocate a buffer of this size and expose it via byobRequest.
+        auto_allocate_chunk_size: Cell<u32>,
     },
 }
 
@@ -96,6 +137,7 @@ impl ReadableControllerPayload {
         underlying_source: JSValue,
         stream: Option<JSReadableStream>,
         high_water_mark: f64,
+        auto_allocate_chunk_size: u32,
     ) -> Self {
         Self {
             stream,
@@ -109,6 +151,13 @@ impl ReadableControllerPayload {
             size_algorithm: JSValue::UNDEFINED,
             kind: ReadableControllerKind::Byte {
                 byob_request: Rc::new(RefCell::new(None)),
+                pending_pull_intos: Rc::new(RefCell::new(Vec::new())),
+                pending_read: Rc::new(RefCell::new(Vec::new())),
+                started: Cell::new(false),
+                pulling: Cell::new(false),
+                pull_again: Cell::new(false),
+                self_handle: Rc::new(Cell::new(None)),
+                auto_allocate_chunk_size: Cell::new(auto_allocate_chunk_size),
             },
         }
     }
@@ -130,9 +179,26 @@ impl ReadableControllerPayload {
                     p.trace(gcx);
                 }
             }
-            ReadableControllerKind::Byte { byob_request } => {
+            ReadableControllerKind::Byte {
+                byob_request,
+                pending_pull_intos,
+                pending_read,
+                self_handle,
+                ..
+            } => {
                 if let Some(ref br) = *byob_request.borrow() {
                     br.trace(gcx);
+                }
+                for desc in pending_pull_intos.borrow().iter() {
+                    desc.view.trace(gcx);
+                    desc.resolve_fn.trace(gcx);
+                    desc.promise.trace(gcx);
+                }
+                for p in pending_read.borrow().iter() {
+                    p.trace(gcx);
+                }
+                if let Some(sh) = self_handle.get() {
+                    sh.trace(gcx);
                 }
             }
         }
@@ -166,9 +232,18 @@ impl ReadableControllerPayload {
     pub(crate) fn pending_read(&self) -> &Rc<RefCell<Vec<Promise>>> {
         match &self.kind {
             ReadableControllerKind::Default { pending_read, .. } => pending_read,
-            ReadableControllerKind::Byte { .. } => {
-                unreachable!("byte streams have no pending read queue")
-            }
+            ReadableControllerKind::Byte { pending_read, .. } => pending_read,
+        }
+    }
+
+    /// Pending BYOB pull-into descriptors (byte streams only). Returns `None`
+    /// for default streams.
+    pub(crate) fn pending_pull_intos(&self) -> Option<&Rc<RefCell<Vec<PullIntoDescriptor>>>> {
+        match &self.kind {
+            ReadableControllerKind::Byte {
+                pending_pull_intos, ..
+            } => Some(pending_pull_intos),
+            _ => None,
         }
     }
 
@@ -176,9 +251,147 @@ impl ReadableControllerPayload {
     pub(crate) fn set_controller(&mut self, c: Option<JSReadableStreamDefaultController>) {
         if let ReadableControllerKind::Default { controller, .. } = &mut self.kind {
             *controller = c;
-        } else {
-            unreachable!("not for byte streams controller")
         }
+    }
+
+    /// Set the byte controller's self-handle (its JSValue representation).
+    pub(crate) fn set_byte_self_handle(&self, handle: JSValue) {
+        if let ReadableControllerKind::Byte { self_handle, .. } = &self.kind {
+            self_handle.set(Some(handle));
+        }
+    }
+
+    /// Clear the cached byob_request so the next access re-creates it
+    /// (called after respond/respondWithNewView invalidate the descriptor).
+    pub(crate) fn clear_byob_request(&self) {
+        if let ReadableControllerKind::Byte { byob_request, .. } = &self.kind {
+            *byob_request.borrow_mut() = None;
+        }
+    }
+
+    /// WHATWG `ReadableByteStreamControllerRespond` — process a BYOB respond.
+    pub(crate) fn respond(
+        &self,
+        ctx: &mut ScopedContext,
+        bytes_written: JSValue,
+    ) -> Result<(), i32> {
+        let ReadableControllerKind::Byte {
+            pending_pull_intos, ..
+        } = &self.kind
+        else {
+            return Err(ctx.throw_type_error("respond() on non-byte controller"));
+        };
+        let bytes = bytes_written.to_number(ctx)?.to_f64();
+        if bytes < 0.0 {
+            return Err(ctx.throw_range_error("`bytesWritten` must be non-negative"));
+        }
+        let mut descs = pending_pull_intos.borrow_mut();
+        let first = descs
+            .first_mut()
+            .ok_or_else(|| ctx.throw_type_error("No pending BYOB read to respond to"))?;
+        // Validate: buffer must not be detached.
+        if first.view.is_detached() {
+            return Err(ctx.throw_type_error(
+                "Cannot respond to a BYOB request whose buffer has been detached",
+            ));
+        }
+        if first.bytes_filled > 0 {
+            return Err(ctx.throw_type_error(
+                "Cannot respond with new data to an already-partially-filled BYOB request",
+            ));
+        }
+        first.bytes_filled = bytes as u32;
+        Ok(())
+    }
+
+    /// WHATWG `ReadableByteStreamControllerRespondWithNewView` — process a BYOB
+    /// respond with a new view (validating offset/length match).
+    pub(crate) fn respond_with_new_view(
+        &self,
+        ctx: &mut ScopedContext,
+        new_view: JSValue,
+    ) -> Result<(), i32> {
+        let ReadableControllerKind::Byte {
+            pending_pull_intos, ..
+        } = &self.kind
+        else {
+            return Err(ctx.throw_type_error("respondWithNewView() on non-byte controller"));
+        };
+        if pending_pull_intos.borrow().is_empty() {
+            return Err(ctx.throw_type_error("No pending BYOB read to respond to"));
+        }
+        // Validate the new view is not detached.
+        let new_ta = TypedArray::try_from(new_view)
+            .map_err(|_| ctx.throw_type_error("view is not a TypedArray"))?;
+        if new_ta.is_detached() {
+            return Err(ctx.throw_type_error("Cannot respond with a detached view"));
+        }
+        let new_byte_length = new_view
+            .get_property_str(ctx, "byteLength")?
+            .to_number(ctx)?
+            .to_f64() as i32;
+        // WHATWG: check state-dependent zero-length rules BEFORE buffer checks.
+        let state = match self.stream {
+            Some(rs) => match rs.payload() {
+                Some(sp) => sp.state,
+                None => RsState::Readable,
+            },
+            None => RsState::Readable,
+        };
+        match state {
+            RsState::Closed => {
+                if new_byte_length != 0 {
+                    return Err(ctx.throw_type_error(
+                        "respondWithNewView() view must be zero-length on a closed stream",
+                    ));
+                }
+            }
+            _ => {
+                // readable
+                if new_byte_length == 0 {
+                    return Err(ctx.throw_type_error(
+                        "respondWithNewView() view must not be zero-length on a readable stream",
+                    ));
+                }
+            }
+        }
+        let new_offset = new_view
+            .get_property_str(ctx, "byteOffset")?
+            .to_number(ctx)?
+            .to_f64() as i32;
+        let new_buffer_length = {
+            let buf = new_view.get_property_str(ctx, "buffer")?;
+            buf.get_property_str(ctx, "byteLength")?
+                .to_number(ctx)?
+                .to_f64() as i32
+        };
+        let mut descs = pending_pull_intos.borrow_mut();
+        let first = descs.first_mut().unwrap();
+        // WHATWG step 7: byte offset check.
+        let req_offset = (first.byte_offset + first.bytes_filled) as i32;
+        if new_offset != req_offset {
+            return Err(ctx.throw_range_error(
+                "respondWithNewView() view byte offset does not match the BYOB request",
+            ));
+        }
+        // WHATWG step 8: buffer byte length check.
+        let req_buffer_length = first.buffer_byte_length as i32;
+        if new_buffer_length != req_buffer_length {
+            return Err(ctx.throw_range_error(
+                "respondWithNewView() view buffer length does not match the BYOB request view buffer length",
+            ));
+        }
+        // WHATWG step 9: bytesFilled + viewByteLength > byteLength
+        if first.bytes_filled + new_byte_length as u32 > first.element_size {
+            return Err(ctx.throw_range_error(
+                "respondWithNewView() view would exceed the BYOB request byte length",
+            ));
+        }
+        // Update the descriptor's view and bytes filled.
+        first.view = new_ta;
+        first.bytes_filled = new_byte_length as u32;
+        self.clear_byob_request();
+        Ok(())
     }
 
     pub(crate) fn set_in_tee(&self, v: bool) {
@@ -236,7 +449,7 @@ impl ReadableControllerPayload {
     ) -> bool {
         let pending_read = match &self.kind {
             ReadableControllerKind::Default { pending_read, .. } => pending_read,
-            ReadableControllerKind::Byte { .. } => return false,
+            ReadableControllerKind::Byte { pending_read, .. } => pending_read,
         };
         let promise = pending_read.borrow_mut().first().copied();
         if let Some(mut p) = promise {
@@ -258,7 +471,7 @@ impl ReadableControllerPayload {
     pub(crate) fn reject_pending_read(&self, ctx: &mut ScopedContext, reason: JSValue) {
         let pending_read = match &self.kind {
             ReadableControllerKind::Default { pending_read, .. } => pending_read,
-            ReadableControllerKind::Byte { .. } => return,
+            ReadableControllerKind::Byte { pending_read, .. } => pending_read,
         };
         let promise = pending_read.borrow_mut().first().copied();
         if let Some(mut p) = promise {
@@ -271,11 +484,119 @@ impl ReadableControllerPayload {
     pub(crate) fn reject_all_pending_reads(&self, ctx: &mut ScopedContext, reason: JSValue) {
         let pending_read = match &self.kind {
             ReadableControllerKind::Default { pending_read, .. } => pending_read,
-            ReadableControllerKind::Byte { .. } => return,
+            ReadableControllerKind::Byte { pending_read, .. } => pending_read,
         };
         let reads = pending_read.borrow_mut().drain(..).collect::<Vec<_>>();
         for mut p in reads {
             p.reject(ctx, reason);
+        }
+    }
+
+    /// WHATWG ReadableByteStreamControllerFillPullIntoDescriptor: copy bytes
+    /// from `chunk` into pending pull-into descriptors. Any leftover bytes
+    /// are pushed back to the queue.
+    fn fill_pending_pull_intos(
+        &self,
+        ctx: &mut ScopedContext,
+        pending: &Rc<RefCell<Vec<PullIntoDescriptor>>>,
+        chunk: &JSValue,
+        queue: &mut Vec<QueueEntry>,
+    ) -> Result<(), i32> {
+        let chunk_bytes: Vec<u8> =
+            match chunk.as_object().and_then(|o| TypedArray::try_from(o).ok()) {
+                Some(ta) => ta.with_bytes(|b| b.to_vec()),
+                None => return Ok(()),
+            };
+        let mut src_offset: u32 = 0;
+        // Collect fully-filled descriptors to resolve AFTER the loop,
+        // so byobRequest returns null before any thenable assimilation
+        // triggers the patched Object.prototype.then getter.
+        let mut resolved: Vec<(JSValue, JSValue)> = Vec::new();
+
+        loop {
+            let desc_bytes_needed = {
+                let mut descs = pending.borrow_mut();
+                // Remove detached descriptors at the front (user detached the buffer).
+                while let Some(d) = descs.first() {
+                    if d.view.is_detached() {
+                        descs.remove(0);
+                    } else {
+                        break;
+                    }
+                }
+                match descs.first() {
+                    Some(d) => d.element_size - d.bytes_filled,
+                    None => break,
+                }
+            };
+
+            let available = chunk_bytes.len() as u32 - src_offset;
+            let copy_len = desc_bytes_needed.min(available);
+
+            if copy_len == 0 {
+                break;
+            }
+
+            // Copy bytes into the descriptor's view.
+            {
+                let mut descs = pending.borrow_mut();
+                let desc = &mut descs[0];
+                desc.view.with_bytes_mut(|dest| {
+                    let dest_start = desc.bytes_filled as usize;
+                    dest[dest_start..dest_start + copy_len as usize].copy_from_slice(
+                        &chunk_bytes[src_offset as usize..src_offset as usize + copy_len as usize],
+                    );
+                });
+                desc.bytes_filled += copy_len;
+                src_offset += copy_len;
+
+                if desc.bytes_filled == desc.element_size {
+                    let n = desc.element_size;
+                    let resolve_fn = desc.resolve_fn;
+                    let filled = desc.view.invoke_str(
+                        ctx,
+                        "subarray",
+                        &[JSValue::ZERO, JSValue::from(n)],
+                    )?;
+                    descs.remove(0);
+                    resolved.push((resolve_fn, filled));
+                }
+            }
+        }
+
+        // Resolve fully-filled descriptors now that all pending_pull_intos
+        // updates are complete — byobRequest will see null for consumers.
+        for (mut resolve_fn, filled) in resolved {
+            let result = make_iterator_result(ctx, filled, false)?;
+            resolve_fn.call(ctx, JSValue::UNDEFINED, &[result])?;
+        }
+
+        // Push leftover bytes back to queue.
+        if src_offset < chunk_bytes.len() as u32 {
+            let rest =
+                TypedArray::create_from_vec_u8(ctx, chunk_bytes[src_offset as usize..].to_vec())?;
+            queue.insert(
+                0,
+                QueueEntry {
+                    chunk: JSValue::from(rest),
+                    size: 1.0,
+                },
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Reject all pending pull-into descriptors with `reason`.
+    fn reject_all_pending_pull_intos(
+        &self,
+        ctx: &mut ScopedContext,
+        pending: &Rc<RefCell<Vec<PullIntoDescriptor>>>,
+        reason: JSValue,
+    ) {
+        let descs: Vec<_> = pending.borrow_mut().drain(..).collect();
+        for mut desc in descs {
+            desc.promise.reject(ctx, reason);
         }
     }
 
@@ -303,68 +624,130 @@ impl ReadableControllerPayload {
         Ok(self.desired_size(ctx)? > 0.0)
     }
 
-    /// Ask the underlying source to pull one more chunk. Byte streams do not
-    /// use pull-based filling yet, so this is a no-op there.
+    /// Ask the underlying source to pull one more chunk.
     pub(crate) fn call_pull(&self, ctx: &mut ScopedContext) -> Result<(), i32> {
-        let (pulling, started, pull_again, controller) = match &self.kind {
+        match &self.kind {
             ReadableControllerKind::Default {
                 pulling,
                 started,
                 pull_again,
                 controller,
                 ..
-            } => (pulling, started, pull_again, controller),
-            ReadableControllerKind::Byte { .. } => return Ok(()),
-        };
+            } => {
+                // Spec: pull() never runs before start() completes. aike approximates
+                // this by treating `started` as set once pulling begins.
+                if !started.get() {
+                    started.set(true);
+                }
+                if pulling.get() {
+                    pull_again.set(true);
+                    return Ok(());
+                }
 
-        // Spec: pull() never runs before start() completes. aike approximates
-        // this by treating `started` as set once pulling begins.
-        if !started.get() {
-            started.set(true);
+                pulling.set(true);
+
+                let pull_fn = self.pull_algorithm;
+                if !pull_fn.is_callable() {
+                    pulling.set(false);
+                    return Ok(());
+                }
+
+                let controller_val =
+                    controller.ok_or_else(|| ctx.throw_internal_error("invalid controller"))?;
+
+                self.call_pull_inner(ctx, pulling, pull_again, controller_val.into())
+            }
+            ReadableControllerKind::Byte {
+                pulling,
+                started,
+                pull_again,
+                self_handle,
+                pending_pull_intos,
+                auto_allocate_chunk_size,
+                ..
+            } => {
+                if !started.get() {
+                    started.set(true);
+                }
+                if pulling.get() {
+                    pull_again.set(true);
+                    return Ok(());
+                }
+
+                pulling.set(true);
+
+                let pull_fn = self.pull_algorithm;
+                if !pull_fn.is_callable() {
+                    pulling.set(false);
+                    return Ok(());
+                }
+
+                // WHATWG ReadableByteStreamControllerCallPullIfNeeded steps 5-8:
+                // If pendingPullIntos is empty and autoAllocateChunkSize > 0,
+                // create an auto-allocated pull-into descriptor before calling pull.
+                let aacs = auto_allocate_chunk_size.get();
+                if pending_pull_intos.borrow().is_empty() && aacs > 0 {
+                    let view = TypedArray::create_from_vec_u8(ctx, vec![0u8; aacs as usize])?;
+                    let (promise, resolve_funcs) = Promise::create(ctx)?;
+                    let desc = PullIntoDescriptor {
+                        view,
+                        resolve_fn: JSValue::from(resolve_funcs[0]),
+                        promise,
+                        bytes_filled: 0,
+                        element_size: 1,
+                        byte_offset: 0,
+                        buffer_byte_length: aacs,
+                        byob_request: None,
+                        reader_type: ReaderType::None,
+                    };
+                    pending_pull_intos.borrow_mut().push(desc);
+                }
+
+                let controller_val = self_handle.get().ok_or_else(|| {
+                    ctx.throw_internal_error("byte controller self-handle not set")
+                })?;
+
+                self.call_pull_inner(ctx, pulling, pull_again, controller_val)
+            }
         }
-        if pulling.get() {
-            pull_again.set(true);
-            return Ok(());
-        }
+    }
 
-        pulling.set(true);
-
+    fn call_pull_inner(
+        &self,
+        ctx: &mut ScopedContext,
+        pulling: &Cell<bool>,
+        pull_again: &Cell<bool>,
+        controller_val: JSValue,
+    ) -> Result<(), i32> {
         let pull_fn = self.pull_algorithm;
-        if !pull_fn.is_callable() {
-            // No pull callback (push-style source) — nothing to ask for.
-            pulling.set(false);
-            return Ok(());
-        }
 
-        let controller_val =
-            controller.ok_or_else(|| ctx.throw_internal_error("invalid controller"))?;
-
-        // Spec: if the underlying source's pull() throws, error the stream with
-        // that value (which rejects any pending reads) rather than swallowing it.
-        let pull_res = pull_fn.call(
-            ctx,
-            self.underlying_source,
-            &[JSValue::from(controller_val)],
-        );
+        let pull_res = pull_fn.call(ctx, self.underlying_source, &[controller_val]);
         if pull_res.is_err() {
-            let err = ctx.take_exception().to_value(ctx);
+            let err_val = ctx.take_exception().to_value(ctx);
             pulling.set(false);
-            self.reject_all_pending_reads(ctx, err);
+            self.reject_all_pending_reads(ctx, err_val.clone());
+            self.reject_all_pending_pull_intos(
+                ctx,
+                match &self.kind {
+                    ReadableControllerKind::Byte {
+                        pending_pull_intos, ..
+                    } => pending_pull_intos,
+                    _ => return Ok(()),
+                },
+                err_val.clone(),
+            );
             self.queue.borrow_mut().clear();
             self.queue_total_size.set(0.0);
             if let Some(mut stream_val) = self.stream {
-                stream_val
-                    .payload_mut()
-                    .unwrap()
-                    .settle_state(ctx, RsState::Errored, Some(err));
+                stream_val.payload_mut().unwrap().settle_state(
+                    ctx,
+                    RsState::Errored,
+                    Some(err_val),
+                );
             }
-            // For tee branches, propagate the pull error so the caller
-            // (tee_do_pull → tee_pull) surfaces it via tee_pull_rejected,
-            // which errors both branches after buffered data is consumed.
-            let in_tee = if let ReadableControllerKind::Default { in_tee, .. } = &self.kind {
-                in_tee.get()
-            } else {
-                false
+            let in_tee = match &self.kind {
+                ReadableControllerKind::Default { in_tee, .. } => in_tee.get(),
+                _ => false,
             };
             return if in_tee {
                 Err(ctx.throw_internal_error("pull() threw"))
@@ -373,19 +756,11 @@ impl ReadableControllerPayload {
             };
         }
 
-        // Capture the pull result before clearing pulling, so we can check
-        // whether pull() returned a Thenable (promise).
         let pull_val = pull_res?;
-
         pulling.set(false);
 
         if pull_again.get() {
             pull_again.set(false);
-            // Spec CallPullIfNeeded step 7: "Upon fulfillment of pullPromise".
-            // When pull() returns a non-thenable (synchronous completion,
-            // e.g. undefined), the fulfillment is immediate — run the
-            // follow-up pull synchronously.  When pull() returns a Thenable,
-            // defer to a microtask so the promise can settle first.
             let is_thenable = pull_val.is_object()
                 && pull_val
                     .get_property_str(ctx, "then")
@@ -393,7 +768,8 @@ impl ReadableControllerPayload {
                     .unwrap_or(false);
             if is_thenable {
                 let (mut ready, _rr) = Promise::create(ctx)?;
-                let data = [JSValue::from(controller_val)].into();
+                let controller_clone = controller_val;
+                let data = [controller_clone].into();
                 let follow_up = ctx
                     .create_native_function_with_data(
                         Callback::Func(controller_refill_pull),
@@ -483,7 +859,9 @@ impl ReadableControllerPayload {
                     .set(self.queue_total_size.get() + size);
                 Ok(JSValue::UNDEFINED)
             }
-            ReadableControllerKind::Byte { .. } => {
+            ReadableControllerKind::Byte {
+                pending_pull_intos, ..
+            } => {
                 // WHATWG ReadableByteStreamControllerEnqueue steps 2-3:
                 // If closeRequested is true or state is not readable, throw TypeError.
                 if self.close_requested.get() || !self.can_close_or_enqueue() {
@@ -492,8 +870,29 @@ impl ReadableControllerPayload {
                     ));
                 }
 
-                // Validate the chunk per WHATWG steps 4-7.
+                // Validate the chunk per WHATWG steps 3-6.
                 let chunk = validate_and_transfer_byte_chunk(ctx, chunk)?;
+
+                // WHATWG step 8b: if the first pending pull-into's buffer is
+                // detached, throw TypeError.
+                {
+                    let descs = pending_pull_intos.borrow();
+                    if let Some(first) = descs.first() {
+                        if first.view.is_detached() {
+                            return Err(ctx.throw_type_error(
+                                "Cannot enqueue when the pending BYOB request's buffer has been detached",
+                            ));
+                        }
+                    }
+                }
+
+                // WHATWG step 8: if there are pending pull-into descriptors,
+                // fill them first before adding to the queue.
+                if !pending_pull_intos.borrow().is_empty() {
+                    let mut q = self.queue.borrow_mut();
+                    self.fill_pending_pull_intos(ctx, pending_pull_intos, &chunk, &mut q)?;
+                    return Ok(JSValue::UNDEFINED);
+                }
 
                 self.queue
                     .borrow_mut()
@@ -504,14 +903,14 @@ impl ReadableControllerPayload {
         }
     }
 
-/// Handle the `transfer` option for owning-type streams.
-/// Neuters each buffer in the transfer list via `ArrayBuffer.prototype.transfer()`,
-/// then clones the chunk so it references the transferred data.
-fn handle_transfer(
-    &self,
-    ctx: &mut ScopedContext,
-    chunk: JSValue,
-    options: JSValue,
+    /// Handle the `transfer` option for owning-type streams.
+    /// Neuters each buffer in the transfer list via `ArrayBuffer.prototype.transfer()`,
+    /// then clones the chunk so it references the transferred data.
+    fn handle_transfer(
+        &self,
+        ctx: &mut ScopedContext,
+        chunk: JSValue,
+        options: JSValue,
     ) -> Result<JSValue, i32> {
         // Get the transfer list from options. If the getter throws, propagate.
         let transfer_list = match options.as_object() {
@@ -618,7 +1017,11 @@ fn handle_transfer(
                     return constructor.call(
                         ctx,
                         JSValue::UNDEFINED,
-                        &[*new_buf, JSValue::from(byte_offset as f64), JSValue::from(byte_length as f64)],
+                        &[
+                            *new_buf,
+                            JSValue::from(byte_offset as f64),
+                            JSValue::from(byte_length as f64),
+                        ],
                     );
                 }
             }
@@ -654,8 +1057,6 @@ fn handle_transfer(
     /// `ReadableStreamDefaultControllerClose` step 1, throw a TypeError when
     /// the stream is not readable or close was already requested.
     pub(crate) fn close(&self, ctx: &mut ScopedContext) -> Result<(), i32> {
-        // Step 1: If ! ReadableStreamDefaultControllerCanCloseOrEnqueue is false,
-        // throw a TypeError exception.
         let readable = match self.stream {
             Some(rs) => match rs.payload() {
                 Some(sp) => sp.state == RsState::Readable,
@@ -670,10 +1071,10 @@ fn handle_transfer(
             return Err(ctx.throw_type_error("Stream has already been closed"));
         }
 
-        self.close_requested.set(true);
-
         match &self.kind {
             ReadableControllerKind::Default { .. } => {
+                // WHATWG ReadableStreamDefaultControllerClose
+                self.close_requested.set(true);
                 while self.resolve_pending_read(ctx, JSValue::UNDEFINED, true) {}
                 if self.queue.borrow().is_empty()
                     && let Some(mut rs) = self.stream
@@ -683,10 +1084,29 @@ fn handle_transfer(
                         .settle_state(ctx, RsState::Closed, None);
                 }
             }
-            ReadableControllerKind::Byte { .. } => {
-                if self.queue.borrow().is_empty()
-                    && let Some(mut rs) = self.stream
-                {
+            ReadableControllerKind::Byte {
+                pending_pull_intos, ..
+            } => {
+                // WHATWG ReadableByteStreamControllerClose:
+                // 1. If closeRequested or not readable, return (checked above).
+                // 2. If queueTotalSize > 0: set closeRequested, return.
+                if self.queue_total_size.get() > 0.0 {
+                    self.close_requested.set(true);
+                    return Ok(());
+                }
+                // 3. If pendingPullIntos not empty: check alignment.
+                if !pending_pull_intos.borrow().is_empty() {
+                    let first = &pending_pull_intos.borrow()[0];
+                    if first.bytes_filled % first.element_size != 0 {
+                        let e =
+                            ctx.throw_type_error("bytesFilled is not a multiple of elementSize");
+                        let e_val = ctx.take_exception().to_value(ctx);
+                        self.error(ctx, e_val)?;
+                        return Err(e);
+                    }
+                }
+                // 4. ClearAlgorithms + ReadableStreamClose
+                if let Some(mut rs) = self.stream {
                     rs.payload_mut()
                         .unwrap()
                         .settle_state(ctx, RsState::Closed, None);
@@ -729,7 +1149,10 @@ fn handle_transfer(
                         .settle_state(ctx, RsState::Errored, Some(e));
                 }
             }
-            ReadableControllerKind::Byte { .. } => {
+            ReadableControllerKind::Byte {
+                pending_pull_intos, ..
+            } => {
+                self.reject_all_pending_pull_intos(ctx, pending_pull_intos, e);
                 if let Some(mut rs) = self.stream {
                     rs.payload_mut()
                         .unwrap()
@@ -761,12 +1184,50 @@ fn handle_transfer(
         Ok(self.high_water_mark - self.queue_total_size.get())
     }
 
-    /// Pending BYOB request view, or undefined. Only meaningful for byte streams.
-    pub(crate) fn byob_request(&self) -> JSValue {
+    /// WHATWG `ReadableByteStreamControllerGetBYOBRequest`: returns a cached
+    /// `ReadableStreamBYOBRequest` wrapping the first pending pull-into
+    /// descriptor's view, or null if there are no pending pull-intos.
+    pub(crate) fn byob_request(&self, ctx: &mut ScopedContext) -> Result<JSValue, i32> {
         match &self.kind {
-            ReadableControllerKind::Default { .. } => JSValue::UNDEFINED,
-            ReadableControllerKind::Byte { byob_request } => {
-                byob_request.borrow().unwrap_or(JSValue::UNDEFINED)
+            ReadableControllerKind::Default { .. } => Ok(JSValue::UNDEFINED),
+            ReadableControllerKind::Byte {
+                byob_request,
+                pending_pull_intos,
+                self_handle,
+                ..
+            } => {
+                // Controller-level cache (set after respond/respondWithNewView clears it).
+                if let Some(ref cached) = *byob_request.borrow() {
+                    return Ok(*cached);
+                }
+                let mut descs = pending_pull_intos.borrow_mut();
+                match descs.first_mut() {
+                    Some(d) => {
+                        if let Some(br) = d.byob_request {
+                            return Ok(br);
+                        }
+                        // WHATWG ReadableByteStreamControllerGetBYOBRequest:
+                        // Lazy creation for auto-allocated descriptors (readerType "none").
+                        // Create a BYOBRequest wrapping the descriptor's view and
+                        // cache it on both the descriptor and the controller.
+                        let controller_val = self_handle.get().ok_or_else(|| {
+                            ctx.throw_internal_error("controller self-handle not set")
+                        })?;
+                        let view_val = JSValue::from(d.view);
+                        let br = super::readable_byob_request::JSReadableStreamBYOBRequest::new_instance(
+                            ctx,
+                            JSValue::UNDEFINED,
+                            super::readable_byob_request::ByobRequestPayload::new(
+                                controller_val,
+                                view_val,
+                            ),
+                        )?;
+                        d.byob_request = Some(JSValue::from(br));
+                        *byob_request.borrow_mut() = Some(JSValue::from(br));
+                        Ok(JSValue::from(br))
+                    }
+                    None => Ok(JSValue::NULL),
+                }
             }
         }
     }
@@ -774,20 +1235,23 @@ fn handle_transfer(
 
 /// WHATWG `ReadableByteStreamControllerEnqueue` steps 4-7: validate the chunk
 /// and transfer its buffer so the stream takes ownership.
-fn validate_and_transfer_byte_chunk(ctx: &mut ScopedContext, chunk: JSValue) -> Result<JSValue, i32> {
+fn validate_and_transfer_byte_chunk(
+    ctx: &mut ScopedContext,
+    chunk: JSValue,
+) -> Result<JSValue, i32> {
     // Try TypedArray first (most common case for byte streams).
     if let Ok(ta) = TypedArray::try_from(chunk) {
         // Step 4: If chunk.[[ViewedArrayBuffer]] is detached, throw TypeError.
         if ta.is_detached() {
-            return Err(ctx.throw_type_error(
-                "Cannot enqueue into a byte stream with a detached buffer",
-            ));
+            return Err(
+                ctx.throw_type_error("Cannot enqueue into a byte stream with a detached buffer")
+            );
         }
         // Step 5: If chunk.[[ByteLength]] is 0, throw TypeError.
         if ta.byte_length() == 0 {
-            return Err(ctx.throw_type_error(
-                "Cannot enqueue into a byte stream with a zero-length view",
-            ));
+            return Err(
+                ctx.throw_type_error("Cannot enqueue into a byte stream with a zero-length view")
+            );
         }
         // Step 6: If chunk.[[ByteOffset]] is not 0, throw RangeError.
         let byte_offset = chunk
@@ -805,9 +1269,9 @@ fn validate_and_transfer_byte_chunk(ctx: &mut ScopedContext, chunk: JSValue) -> 
         let byte_length = ta.byte_length() as u32;
         let buffer_byte_length = ta.array_buffer().payload().byte_length() as u32;
         if buffer_byte_length != byte_length {
-            return Err(ctx.throw_range_error(
-                "Cannot enqueue into a byte stream with a misaligned view",
-            ));
+            return Err(
+                ctx.throw_range_error("Cannot enqueue into a byte stream with a misaligned view")
+            );
         }
         // Transfer the buffer: copy bytes, detach original, return fresh array.
         let bytes = ta.with_bytes(|b| b.to_vec());
@@ -819,21 +1283,19 @@ fn validate_and_transfer_byte_chunk(ctx: &mut ScopedContext, chunk: JSValue) -> 
     // Plain ArrayBuffer (no view).
     if let Some(ab) = chunk.as_object_ArrayBuffer() {
         if ab.is_detached() {
-            return Err(ctx.throw_type_error(
-                "Cannot enqueue into a byte stream with a detached buffer",
-            ));
+            return Err(
+                ctx.throw_type_error("Cannot enqueue into a byte stream with a detached buffer")
+            );
         }
         if ab.payload().byte_length() == 0 {
-            return Err(ctx.throw_type_error(
-                "Cannot enqueue into a byte stream with a zero-length buffer",
-            ));
+            return Err(
+                ctx.throw_type_error("Cannot enqueue into a byte stream with a zero-length buffer")
+            );
         }
         return transfer_chunk_buffer(ctx, chunk);
     }
 
-    Err(ctx.throw_type_error(
-        "chunk must be an ArrayBuffer or a TypedArray",
-    ))
+    Err(ctx.throw_type_error("chunk must be an ArrayBuffer or a TypedArray"))
 }
 
 /// Transfer a plain ArrayBuffer: call `ArrayBuffer.prototype.transfer()`
@@ -885,4 +1347,14 @@ pub(super) fn get_readable_controller<'a>(
         return Ok(p);
     }
     Err(ctx.throw_type_error("not a ReadableStream controller"))
+}
+
+/// Extract the self-handle JSValue from a byte controller kind.
+fn self_handle_as_jsvalue(kind: &ReadableControllerKind) -> JSValue {
+    match kind {
+        ReadableControllerKind::Byte { self_handle, .. } => {
+            self_handle.get().unwrap_or(JSValue::UNDEFINED)
+        }
+        _ => JSValue::UNDEFINED,
+    }
 }

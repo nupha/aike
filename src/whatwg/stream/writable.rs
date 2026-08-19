@@ -1267,7 +1267,7 @@ fn js_writable_stream_constructor(ctx: &mut ScopedContext, cc: CallContext) -> J
         resolved.perform_then(ctx, start_fn.into(), JSValue::UNDEFINED)?;
     }
 
-    stream.payload_mut().unwrap().controller = Some(controller);
+    stream.payload_mut().unwrap().controller = Some(controller.into());
 
     Ok(stream.into())
 }

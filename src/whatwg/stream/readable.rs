@@ -43,7 +43,7 @@ pub(crate) struct ReadableStreamPayload {
     pub(crate) state: RsState,
     pub(crate) stored_error: JSValue,
     pub(crate) reader: Option<JSReadableStreamDefaultReader>,
-    pub(crate) controller: Option<JSReadableStreamDefaultController>,
+    pub(crate) controller: Option<JSValue>,
     /// Set once read() is called. Unlike the reader lock this is never
     /// cleared by releaseLock(), so a used stream stays unusable as a body.
     pub(crate) disturbed: bool,
@@ -74,6 +74,16 @@ impl ReadableStreamPayload {
             channel_id: None,
             is_byte_stream: false,
         }
+    }
+
+    /// Extract the shared `ReadableControllerPayload` from the stream's
+    /// controller, which may be either a default or byte controller.
+    pub(crate) fn controller_payload(&self) -> Option<&ReadableControllerPayload> {
+        let cv = self.controller.as_ref()?;
+        if let Some(p) = JSReadableStreamDefaultController::payload_of(cv) {
+            return Some(p);
+        }
+        JSReadableByteStreamController::payload_of(cv)
     }
 
     fn gc_trace(&self, gcx: &mut GcTraceCtx) {
@@ -119,9 +129,7 @@ impl ReadableStreamPayload {
         // close steps ({done:true}). Must happen before notify_peer_closed so
         // read results settle before reader.closed resolves.
         if state == RsState::Closed {
-            if let Some(controller_val) = self.controller
-                && let Some(cp) = controller_val.payload()
-            {
+            if let Some(cp) = self.controller_payload() {
                 while cp.resolve_pending_read(ctx, JSValue::UNDEFINED, true) {}
             }
         }
@@ -164,9 +172,7 @@ impl ReadableStreamPayload {
         // underlying source's cancel() below, not stored as the stream error.
         self.settle_state(ctx, RsState::Closed, None);
 
-        if let Some(controller_val) = self.controller
-            && let Some(cp) = controller_val.payload()
-        {
+        if let Some(cp) = self.controller_payload() {
             let source = cp.underlying_source();
             let cancel_fn = cp.cancel_algorithm();
             // Propagate the underlying source's cancel() result (including a
@@ -245,6 +251,30 @@ impl JSReadableStream {
             },
         )?;
         sp.reader = Some(reader);
+
+        // WHATWG: ReadableStreamBYOBReader.prototype.constructor must point to
+        // the global ReadableStreamBYOBReader constructor.  Instances created by
+        // getReader({mode:'byob'}) are JSReadableStreamDefaultReader (unified
+        // class), so their prototype chain's .constructor resolves to
+        // ReadableStreamDefaultReader.  Patch the instance-level `constructor`
+        // property so that tests which do `new X.constructor(stream)` invoke the
+        // correct BYOB constructor (which validates is_byte_stream).
+        if byob {
+            if let Ok(byob_ctor) = ctx
+                .global_obj()
+                .get_property_str(ctx, "ReadableStreamBYOBReader")
+            {
+                let mut rv = JSValue::from(reader);
+                if let Some(mut obj) = rv.as_object() {
+                    let _ = obj.define_property_value_str(
+                        ctx,
+                        "constructor",
+                        byob_ctor,
+                        zuqe::JS_PROP_C_W_E,
+                    );
+                }
+            }
+        }
 
         Ok(reader)
     }
@@ -333,9 +363,9 @@ fn js_readable_stream_constructor(ctx: &mut ScopedContext, cc: CallContext) -> J
             } else if s == "owning" {
                 false
             } else {
-                return Err(
-                    ctx.throw_type_error("ReadableStream type must be undefined, \"bytes\", or \"owning\"")
-                );
+                return Err(ctx.throw_type_error(
+                    "ReadableStream type must be undefined, \"bytes\", or \"owning\"",
+                ));
             }
         }
     };
@@ -362,6 +392,7 @@ fn js_readable_stream_constructor(ctx: &mut ScopedContext, cc: CallContext) -> J
     // WHATWG SetUpReadableByteStreamControllerFromUnderlyingSource:
     // step 6: if pull exists and is not callable, throw TypeError.
     // step 9: if autoAllocateChunkSize is 0, throw TypeError.
+    let mut auto_chunk_size = 0u32;
     if is_bytes {
         if let Some(o) = underlying_source.as_object() {
             let pull = o.get_property_str(ctx, "pull")?;
@@ -372,10 +403,11 @@ fn js_readable_stream_constructor(ctx: &mut ScopedContext, cc: CallContext) -> J
             if !auto.is_undefined() {
                 let n = auto.to_number(ctx)?.to_f64();
                 if n == 0.0 {
-                    return Err(ctx.throw_type_error(
-                        "autoAllocateChunkSize must be a positive integer",
-                    ));
+                    return Err(
+                        ctx.throw_type_error("autoAllocateChunkSize must be a positive integer")
+                    );
                 }
+                auto_chunk_size = n as u32;
             }
         }
     }
@@ -394,7 +426,7 @@ fn js_readable_stream_constructor(ctx: &mut ScopedContext, cc: CallContext) -> J
             default_controller.payload_mut().unwrap().set_owning(true);
         }
     }
-    instance.payload_mut().unwrap().controller = Some(default_controller);
+    instance.payload_mut().unwrap().controller = Some(default_controller.into());
 
     // SetUpReadableStreamDefaultControllerFromUnderlyingSource: capture the
     // source's `pull`/`cancel` and the strategy's `size` callbacks once, so a
@@ -436,7 +468,7 @@ fn js_readable_stream_constructor(ctx: &mut ScopedContext, cc: CallContext) -> J
 
     let start_controller: JSValue = if is_bytes {
         let hwm = extract_high_water_mark(ctx, queuing_strategy, 1.0)?;
-        let bc = JSReadableByteStreamController::new_instance(
+        let mut bc = JSReadableByteStreamController::new_instance(
             ctx,
             JSValue::UNDEFINED,
             ReadableControllerPayload::new_byte(
@@ -447,9 +479,39 @@ fn js_readable_stream_constructor(ctx: &mut ScopedContext, cc: CallContext) -> J
                 },
                 Some(instance),
                 hwm,
+                auto_chunk_size,
             ),
         )?;
-        bc.into()
+        // Wire up algorithms for the byte controller
+        if let Some(o) = underlying_source.as_object() {
+            let pull = o.get_property_str(ctx, "pull")?;
+            let cancel = o.get_property_str(ctx, "cancel")?;
+            let cp = bc
+                .payload_mut()
+                .ok_or_else(|| ctx.throw_internal_error("invalid byte controller"))?;
+            cp.set_algorithms(
+                if pull.is_callable() {
+                    pull
+                } else {
+                    JSValue::UNDEFINED
+                },
+                if cancel.is_callable() {
+                    cancel
+                } else {
+                    JSValue::UNDEFINED
+                },
+                JSValue::UNDEFINED,
+            );
+        }
+        // Store the byte controller as the stream's controller so reader.read()
+        // can find the pull-into descriptors.
+        let bc_val: JSValue = bc.into();
+        instance.payload_mut().unwrap().controller = Some(bc_val);
+        // Set byte self-handle for call_pull.
+        if let Some(cp) = JSReadableByteStreamController::payload_of(&bc_val) {
+            cp.set_byte_self_handle(bc_val);
+        }
+        bc_val
     } else {
         default_controller.into()
     };
@@ -552,7 +614,9 @@ fn js_readable_stream_cancel(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
     // Spec `ReadableStream.cancel(reason)` step 1: canceling a locked stream
     // rejects with a TypeError (the cancelAlgorithm must not run).
     if p.reader.is_some() {
-        if let Some(e) = ctx.create_error_object(ErrorKind::Type, "Cannot cancel a locked stream", false) {
+        if let Some(e) =
+            ctx.create_error_object(ErrorKind::Type, "Cannot cancel a locked stream", false)
+        {
             return Promise::from_reject_value(ctx, e.into()).map(JSValue::from);
         }
         return Err(ctx.throw_internal_error("failed to create TypeError"));
@@ -646,7 +710,7 @@ fn js_readable_stream_from_static(ctx: &mut ScopedContext, cc: CallContext) -> J
         .payload_mut()
         .ok_or_else(|| ctx.throw_internal_error("invalid controller"))?
         .set_algorithms(pull_fn, cancel_fn, JSValue::UNDEFINED);
-    stream.payload_mut().unwrap().controller = Some(controller);
+    stream.payload_mut().unwrap().controller = Some(controller.into());
     Ok(JSValue::from(stream))
 }
 
@@ -717,7 +781,11 @@ fn from_cancel_ok(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut p = output;
     if cc.arg(0).as_object().is_none() {
         let e = ctx
-            .create_error_object(ErrorKind::Type, "return() must fulfill with an object", false)
+            .create_error_object(
+                ErrorKind::Type,
+                "return() must fulfill with an object",
+                false,
+            )
             .ok_or(-1)?;
         p.reject(ctx, e.into());
     } else {
@@ -752,7 +820,10 @@ fn from_pump_step(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     if !has_pending {
         return Ok(JSValue::UNDEFINED);
     }
-    let in_fly = in_flight.get_property_str(ctx, "n")?.to_number(ctx)?.to_f64() as i32;
+    let in_fly = in_flight
+        .get_property_str(ctx, "n")?
+        .to_number(ctx)?
+        .to_f64() as i32;
     if in_fly > 0 {
         return Ok(JSValue::UNDEFINED);
     }
@@ -1219,7 +1290,7 @@ impl JSReadableStream {
             JSValue::UNDEFINED,
             ReadableControllerPayload::new_default(JSValue::from(source), Some(stream), 1.0),
         )?;
-        stream.payload_mut().unwrap().controller = Some(controller);
+        stream.payload_mut().unwrap().controller = Some(controller.into());
 
         let id = NEXT_STREAM_ID.with(|n| {
             let cur = n.get();
@@ -1264,7 +1335,7 @@ impl JSReadableStream {
         )?;
         let controller_val = JSValue::from(controller);
 
-        stream.payload_mut().unwrap().controller = Some(controller);
+        stream.payload_mut().unwrap().controller = Some(controller.into());
 
         // Enqueue the single chunk as a TypedArray.
         let ta = TypedArray::create_from_vec_u8(ctx, bytes)?;
@@ -1291,7 +1362,7 @@ impl JSReadableStream {
             ReadableControllerPayload::new_default(JSValue::from(source), Some(stream), 1.0),
         )?;
         let controller_val = JSValue::from(controller);
-        stream.payload_mut().unwrap().controller = Some(controller);
+        stream.payload_mut().unwrap().controller = Some(controller.into());
 
         if !text.is_empty() {
             let sval = ctx.create_string_from_utf8(text.into_bytes())?;
@@ -1321,7 +1392,7 @@ impl JSReadableStream {
             JSValue::UNDEFINED,
             ReadableControllerPayload::new_default(JSValue::from(source), Some(stream), 1.0),
         )?;
-        stream.payload_mut().unwrap().controller = Some(controller);
+        stream.payload_mut().unwrap().controller = Some(controller.into());
 
         let ctrl = controller;
         let start = Instant::now();
