@@ -152,10 +152,12 @@ impl WritableStreamPayload {
                 wp.ensure_ready_rejected(ctx, error);
             }
         }
-        // Per spec `FinishErroring` step 2: assert no in-flight operations.
-        // When there IS an in-flight op, defer finish_erroring to
-        // advance_queue() which is called once in-flight ops settle.
-        if !self.has_operation_in_flight() {
+        // Per spec `FinishErroring` step 9: only finish erroring when
+        // there is no in-flight operation AND controller.[[started]] is
+        // true.  Before start resolves the stream stays in "erroring"
+        // state so that close() can still create a close request that
+        // will be settled with the stored error once erroring finishes.
+        if !self.has_operation_in_flight() && self.started {
             self.finish_erroring(ctx)?;
         }
         Ok(())
@@ -1297,6 +1299,20 @@ fn js_writable_stream_abort(ctx: &mut ScopedContext, cc: CallContext) -> JSResul
 
     let sp = JSWritableStream::payload_mut_of(&mut this)
         .ok_or_else(|| ctx.throw_type_error("not a WritableStream"))?;
+
+    // Per spec: "If ! IsWritableStreamLocked(this) is true, return a
+    // promise rejected with a TypeError exception."
+    if sp.writer.is_some() {
+        let err = ctx
+            .create_error_object(
+                zuqe::ErrorKind::Type,
+                "Cannot abort a locked WritableStream",
+                false,
+            )
+            .map(JSValue::from)
+            .unwrap_or(JSValue::UNDEFINED);
+        return Promise::from_reject_value(ctx, err).map(JSValue::from);
+    }
 
     sp.abort(ctx, reason).map(JSValue::from)
 }
