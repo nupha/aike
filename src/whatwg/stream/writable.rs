@@ -152,7 +152,12 @@ impl WritableStreamPayload {
                 wp.ensure_ready_rejected(ctx, error);
             }
         }
-        self.finish_erroring(ctx)?;
+        // Per spec `FinishErroring` step 2: assert no in-flight operations.
+        // When there IS an in-flight op, defer finish_erroring to
+        // advance_queue() which is called once in-flight ops settle.
+        if !self.has_operation_in_flight() {
+            self.finish_erroring(ctx)?;
+        }
         Ok(())
     }
 
