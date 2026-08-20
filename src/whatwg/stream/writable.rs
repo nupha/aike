@@ -152,9 +152,7 @@ impl WritableStreamPayload {
                 wp.ensure_ready_rejected(ctx, error);
             }
         }
-        if self.started && !self.has_operation_in_flight() {
-            self.finish_erroring(ctx)?;
-        }
+        self.finish_erroring(ctx)?;
         Ok(())
     }
 
