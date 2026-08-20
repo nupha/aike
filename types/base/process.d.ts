@@ -1,9 +1,3 @@
-// Type declarations for process and Aike global objects
-
-// ---------------------------------------------------------------------------
-// StdioHandle  —  used by process.stdin/stdout/stderr and Aike.spawn()
-// ---------------------------------------------------------------------------
-
 interface FileStat {
   size: number;
   createdAt?: string;
@@ -71,9 +65,6 @@ interface CronJob {
   /** Cancel this cron job. */
   cancel(): void;
 }
-
-/** Alias for SpawnAsyncResult, returned by Aike.spawn(). */
-type ChildProcess = Aike.SpawnAsyncResult;
 
 /** Signal names supported by Aike.onSignal(). */
 type SignalName =
@@ -241,26 +232,58 @@ declare namespace process {
   const execPath: string;
 }
 
-// ---------------------------------------------------------------------------
-// Aike — Aike-specific namespace
-// ---------------------------------------------------------------------------
-
 declare namespace Aike {
-  // --- spawn ---
+  interface Subprocess {
+    /** Child process PID. */
+    pid: number;
+    /** Writable stdin handle (StdioHandle or null). */
+    stdin: StdioHandle | null;
+    /** Readable stdout handle (StdioHandle or null). */
+    stdout: StdioHandle | null;
+    /** Readable stderr handle (StdioHandle or null). */
+    stderr: StdioHandle | null;
+    /** Promise resolving to the exit code (or -1 on error). */
+    exitCode: Promise<number>;
+    /** Promise resolving to signal name or null. */
+    signalCode: Promise<string | null>;
+    /** Promise resolving to true if the process was killed by `timeout`. */
+    killedByTimeout: Promise<boolean>;
+    /** Send a signal to the child process. Default: SIGTERM. */
+    kill(signal?: string | number): boolean;
+    /** Check if the child process is still running. */
+    isRunning(): boolean;
+  }
+
+  interface SyncSubprocess {
+    /** Child process PID. */
+    pid: number;
+    /** stdout as Uint8Array. */
+    stdout: Uint8Array;
+    /** stderr as Uint8Array. */
+    stderr: Uint8Array;
+    /** Exit code, or null if terminated by signal. */
+    exitCode: number | null;
+    /** Signal name if terminated by signal, or null. */
+    signalCode: string | null;
+    /** Whether the process exited successfully (exitCode 0, no signal). */
+    success: boolean;
+    /** Whether the process was killed because it exceeded `timeout`. */
+    killedByTimeout: boolean;
+  }
 
   /** Spawn a child process synchronously. */
   function spawnSync(
     command: string,
     args?: string[],
     options?: SpawnOptions,
-  ): SpawnSyncResult;
+  ): SyncSubprocess;
 
   /** Spawn a child process asynchronously. */
   function spawn(
     command: string,
     args?: string[],
     options?: SpawnOptions,
-  ): SpawnAsyncResult;
+  ): Subprocess;
 
   interface SpawnOptions {
     /** Working directory for the child process. */
@@ -282,44 +305,19 @@ declare namespace Aike {
      * on the result to detect the timeout.
      */
     timeout?: number;
-  }
-
-  interface SpawnSyncResult {
-    /** Child process PID. */
-    pid: number;
-    /** stdout as Uint8Array. */
-    stdout: Uint8Array;
-    /** stderr as Uint8Array. */
-    stderr: Uint8Array;
-    /** Exit code, or null if terminated by signal. */
-    exitCode: number | null;
-    /** Signal name if terminated by signal, or null. */
-    signalCode: string | null;
-    /** Whether the process exited successfully (exitCode 0, no signal). */
-    success: boolean;
-    /** Whether the process was killed because it exceeded `timeout`. */
-    killedByTimeout: boolean;
-  }
-
-  interface SpawnAsyncResult {
-    /** Child process PID. */
-    pid: number;
-    /** Writable stdin handle (StdioHandle or null). */
-    stdin: StdioHandle | null;
-    /** Readable stdout handle (StdioHandle or null). */
-    stdout: StdioHandle | null;
-    /** Readable stderr handle (StdioHandle or null). */
-    stderr: StdioHandle | null;
-    /** Promise resolving to the exit code (or -1 on error). */
-    exitCode: Promise<number>;
-    /** Promise resolving to signal name or null. */
-    signalCode: Promise<string | null>;
-    /** Promise resolving to true if the process was killed by `timeout`. */
-    killedByTimeout: Promise<boolean>;
-    /** Send a signal to the child process. Default: SIGTERM. */
-    kill(signal?: string | number): boolean;
-    /** Check if the child process is still running. */
-    isRunning(): boolean;
+    /**
+     * When true, the child is killed (whole tree) synchronously when the
+     * aike process exits — normally, via `process.exit`, or on a catchable
+     * signal. Default: false — an unawaited child neither blocks aike from
+     * exiting nor is killed; it is reparented and keeps running.
+     *
+     * On Linux a kernel `PDEATHSIG` additionally covers SIGKILL/crash; on
+     * Windows a kill-on-close job object covers every termination path.
+     *
+     * Ignored by `spawnSync`/`Aike.sh` (the child has already exited by the
+     * time the call returns).
+     */
+    abortOnParentExit?: boolean;
   }
 
   // --- sys ---

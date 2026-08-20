@@ -31,6 +31,41 @@ static SIGNAL_SENDERS: LazyLock<Mutex<HashMap<ThreadId, channel::Sender<u32>>>> 
 static SIGNAL_REFCOUNT: LazyLock<Mutex<HashMap<u32, u32>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
+/// Signals with aike's default cleanup handler (kill `abortOnParentExit`
+/// children, then exit with 128+signal) installed at startup. `uninstall_c_handler`
+/// restores this instead of SIG_DFL so removing a user handler returns to
+/// aike's default cleanup behavior.
+static DEFAULT_HANDLER_SIGS: LazyLock<Mutex<Vec<u32>>> =
+    LazyLock::new(|| Mutex::new(Vec::new()));
+
+/// Kill `abortOnParentExit` children, then exit with the conventional
+/// 128+signal code. Async-signal-safe (libc::kill + _exit only).
+extern "C" fn default_c_signal_handler(sig_num: i32) {
+    super::spawn::kill_all_children();
+    unsafe { libc::_exit(128 + sig_num) }
+}
+
+/// Install the default (kill-children-then-exit) handler for `sig_num`.
+fn install_default_handler(sig_num: u32) {
+    DEFAULT_HANDLER_SIGS.lock().unwrap().push(sig_num);
+    unsafe {
+        libc::signal(sig_num as i32, default_c_signal_handler as *const () as usize);
+    }
+}
+
+/// Called once at startup: install the default cleanup handler for the signals
+/// a parent may want to propagate to its children. User handlers registered via
+/// `Aike.onSignal` take precedence (they overwrite this via `install_c_handler`).
+pub(crate) fn install_default_signal_handlers() {
+    install_default_handler(libc::SIGTERM as u32);
+    install_default_handler(libc::SIGINT as u32);
+    #[cfg(not(windows))]
+    {
+        install_default_handler(libc::SIGHUP as u32);
+        install_default_handler(libc::SIGQUIT as u32);
+    }
+}
+
 /// Signal name -> number mapping
 pub(crate) fn signal_number(name: &str) -> Option<u32> {
     Some(match name {
@@ -184,7 +219,14 @@ fn uninstall_c_handler(sig_num: u32) {
         if *count == 0 {
             refcount.remove(&sig_num);
             unsafe {
-                libc::signal(sig_num as i32, libc::SIG_DFL);
+                // Restore aike's default cleanup handler if one is installed
+                // for this signal, else the OS default.
+                let handler = if DEFAULT_HANDLER_SIGS.lock().unwrap().contains(&sig_num) {
+                    default_c_signal_handler as *const () as usize
+                } else {
+                    libc::SIG_DFL
+                };
+                libc::signal(sig_num as i32, handler);
             }
         }
     }

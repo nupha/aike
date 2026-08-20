@@ -274,6 +274,13 @@ async fn main() -> ExitCode {
     // should install panic handler to ensure gc heap deallocate when panic.
     rt.install_panic_handler();
 
+    // Kill `abortOnParentExit` children on process exit. atexit covers normal
+    // exit and `process.exit`; the default signal handlers cover catchable
+    // signals (which would otherwise terminate without running atexit). On
+    // Windows, kill-on-close job objects + the console-ctrl handler cover the
+    // same ground.
+    install_exit_cleanup();
+
     // memory-limit (default: unlimited)
     if let Some(ref ss) = args.memory_limit {
         if let Some(size) = parse_byte_size(ss) {
@@ -512,6 +519,30 @@ async fn main() -> ExitCode {
     // only `rt` holds the heap that needs finalizing.)
     drop(rt);
     std::process::exit(exit_code);
+}
+
+/// Install exit cleanup for `abortOnParentExit` children.
+///
+/// - Unix: `atexit` runs on normal exit and `std::process::exit` (incl.
+///   `process.exit`); default signal handlers cover SIGTERM/SIGINT/SIGHUP/
+///   SIGQUIT, which the OS would otherwise deliver by terminating without
+///   running atexit.
+/// - Windows: kill-on-close job objects (per child, in `spawn::win_job`) cover
+///   every termination path including crash/TerminateProcess; the console-ctrl
+///   handler additionally kills registered children synchronously on Ctrl-C.
+fn install_exit_cleanup() {
+    #[cfg(not(windows))]
+    {
+        extern "C" fn exit_kill_children() {
+            crate::aike::kill_all_children();
+        }
+        unsafe {
+            libc::atexit(exit_kill_children);
+        }
+    }
+    crate::aike::install_default_signal_handlers();
+    #[cfg(windows)]
+    crate::aike::install_console_ctrl_handler();
 }
 
 /// Extract the `type` value from import attributes, returning `None` if

@@ -12,10 +12,15 @@ mod sys;
 pub(crate) use {
     class_io_handle::{JSFileHandle, JSStdioHandle, gc_trace_io, make_stats},
     cron::{JSCronJob, gc_trace_cron},
-    signal::{gc_trace_signals, register_signal_handler, signal_number},
-    spawn::terminate_process,
+    signal::{
+        gc_trace_signals, install_default_signal_handlers, register_signal_handler, signal_number,
+    },
+    spawn::kill_all_children,
     sys::{get_time_ns, which_executable},
 };
+
+#[cfg(windows)]
+pub(crate) use spawn::install_console_ctrl_handler;
 
 use zuqe::{FieldDef, JS_PROP_ENUMERABLE, ScopedContext};
 

@@ -5,7 +5,7 @@ use std::{
     collections::HashMap,
     io::{Read, Write},
     process::{Command, ExitStatus, Stdio},
-    sync::mpsc,
+    sync::{LazyLock, Mutex, mpsc},
     thread,
     time::Duration,
 };
@@ -14,12 +14,41 @@ use std::{
 use std::os::{fd::AsRawFd, unix::process::CommandExt};
 
 use zuqe::{
-    CallContext, Callback, Exception, ErrorKind, IntOrFloat, JS_GPN_ENUM_ONLY,
+    CallContext, Callback, ErrorKind, Exception, IntOrFloat, JS_GPN_ENUM_ONLY,
     JS_GPN_STR_OR_INT_MASK, JS_PROP_C_W_E, JS_PROP_ENUMERABLE, JSResult, JSValue, Object,
-    ScopedContext, builtins::{promise::Promise, typed_array::TypedArray},
+    ScopedContext,
+    builtins::{promise::Promise, typed_array::TypedArray},
 };
 
 use super::{JSStdioHandle, signal::signal_name};
+
+/// PIDs of children spawned with `abortOnParentExit: true`, killed together
+/// when aike exits (normal exit, `process.exit`, or a catchable signal).
+/// Only populated when the option is set — the default is zero overhead.
+static SPAWNED_PIDS: LazyLock<Mutex<Vec<i32>>> = LazyLock::new(|| Mutex::new(Vec::new()));
+
+fn register_child(pid: i32) {
+    SPAWNED_PIDS.lock().unwrap().push(pid);
+}
+
+fn unregister_child(pid: i32) {
+    SPAWNED_PIDS.lock().unwrap().retain(|&p| p != pid);
+}
+
+/// Kill all registered child process trees. Called from `atexit` and the
+/// default signal handlers; uses `try_lock` so a signal arriving while the
+/// registry is briefly held is skipped rather than deadlocking (best-effort
+/// in that rare race).
+pub(crate) fn kill_all_children() {
+    let pids: Vec<i32> = match SPAWNED_PIDS.try_lock() {
+        Ok(guard) => guard.clone(),
+        Err(_) => return,
+    };
+    for pid in pids {
+        terminate_process_tree(pid);
+    }
+    SPAWNED_PIDS.lock().unwrap().clear();
+}
 
 pub(super) fn js_spawn(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let is_async = cc.magic() == 1;
@@ -52,6 +81,7 @@ pub(super) fn js_spawn(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut cwd = None;
     let mut env_opt: Option<HashMap<String, String>> = None;
     let mut input_data: Option<Vec<u8>> = None;
+    let mut abort_on_parent_exit = false;
 
     // arg 2 (optional): options object
     if cc.length() > 2 {
@@ -68,6 +98,17 @@ pub(super) fn js_spawn(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         // env — object; replaces entire env when provided
         if let Some(env_map) = parse_env_obj_strict(ctx, &opts)? {
             env_opt = Some(env_map);
+        }
+
+        // abortOnParentExit — boolean; when true the child is killed
+        // synchronously when aike exits. Meaningless for spawnSync/sh (the
+        // child is already gone on return) but still validated.
+        let abort_val = opts.get_property_str(ctx, "abortOnParentExit")?;
+        if !abort_val.is_undefined() {
+            if !abort_val.is_bool() {
+                return Err(ctx.throw_type_error("`abortOnParentExit` must be a boolean"));
+            }
+            abort_on_parent_exit = abort_val.to_bool()?;
         }
 
         // input — extract bytes for spawnSync stdin
@@ -107,12 +148,26 @@ pub(super) fn js_spawn(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             cmd_obj.envs(env_map);
         }
 
-        // Run the child in its own process group so a timeout can kill the
-        // whole tree. Only when a timeout is requested, to avoid changing
-        // terminal/foreground semantics for regular spawns.
-        if timeout_limit.is_some() {
+        // Run the child in its own process group so a timeout or
+        // abort-on-parent-exit can kill the whole tree. Only when requested,
+        // to avoid changing terminal/foreground semantics for regular spawns.
+        if timeout_limit.is_some() || abort_on_parent_exit {
             #[cfg(unix)]
             cmd_obj.process_group(0);
+        }
+
+        // Linux: kernel sends SIGKILL to the child when aike dies — covers
+        // SIGKILL/abort/crash that no user-space handler can catch. The child
+        // is reaped by `kill(-pid)` too when aike exits normally; PDEATHSIG is
+        // the fallback for the uncatchable paths.
+        #[cfg(target_os = "linux")]
+        if abort_on_parent_exit {
+            unsafe {
+                cmd_obj.pre_exec(|| {
+                    libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0);
+                    Ok(())
+                });
+            }
         }
 
         let subprocess = cmd_obj
@@ -120,7 +175,7 @@ pub(super) fn js_spawn(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             .map_err(|e| ctx.throw_internal_error(&format!("spawn failed: {e}")))?;
 
         let pid = subprocess.id().map(|id| id as i32).unwrap_or(-1);
-        spawn_async(ctx, subprocess, pid, timeout_limit)
+        spawn_async(ctx, subprocess, pid, timeout_limit, abort_on_parent_exit)
     } else {
         let mut cmd_obj = std::process::Command::new(&cmd_str);
         cmd_obj.args(&args);
@@ -371,10 +426,7 @@ fn collect_child_output(
 
 /// Extract the `input` option (string / TypedArray / ArrayBuffer) as bytes to
 /// write to the child's stdin. Shared by `spawnSync` and `Aike.sh`.
-fn extract_input(
-    ctx: &mut ScopedContext,
-    opts: &Object,
-) -> Result<Option<Vec<u8>>, i32> {
+fn extract_input(ctx: &mut ScopedContext, opts: &Object) -> Result<Option<Vec<u8>>, i32> {
     let input_val = opts
         .get_property_str(ctx, "input")
         .unwrap_or(JSValue::UNDEFINED);
@@ -398,7 +450,7 @@ fn extract_input(
     Err(ctx.throw_type_error("`input` must be a string, TypedArray, or ArrayBuffer"))
 }
 
-/// Build the SpawnSyncResult object from collected child output.
+/// Build the SyncSubprocess object from collected child output.
 fn build_sync_result(
     ctx: &mut ScopedContext,
     pid: i32,
@@ -449,6 +501,7 @@ fn spawn_async(
     mut child: tokio::process::Child,
     pid: i32,
     timeout_ms: Option<u64>,
+    abort_on_parent_exit: bool,
 ) -> JSResult {
     // Take stdin pipe before moving child into async task,
     // so we can create a PipeWrite FileHandle while ScopedContext is available.
@@ -500,29 +553,38 @@ fn spawn_async(
         None => JSValue::NULL,
     };
 
+    // The three result promises keep the event loop alive only while they are
+    // observed (awaited / `.then`-ed), so an unawaited (fire-and-forget) child
+    // does not block aike from exiting; an awaited child still does.
     let (prom_exit, tx_exit) =
-        Promise::create_with_channel::<Result<i32, String>>(ctx, |cx, data| -> JSResult {
-            match data {
-                Ok(code) => Ok(JSValue::from(code)),
-                Err(e) => Err(cx.throw_internal_error(&e)),
-            }
-        })?;
+        Promise::create_with_channel_hold_when_awaited::<Result<i32, String>>(
+            ctx,
+            |cx, data| -> JSResult {
+                match data {
+                    Ok(code) => Ok(JSValue::from(code)),
+                    Err(e) => Err(cx.throw_internal_error(&e)),
+                }
+            },
+        )?;
 
-    let (prom_signal, tx_signal) = Promise::create_with_channel::<Result<Option<String>, String>>(
-        ctx,
-        |cx, data| -> JSResult {
-            match data {
-                Ok(Some(name)) => cx
-                    .create_string_from_utf8(name.into_bytes())
-                    .map(JSValue::make_string),
-                Ok(None) => Ok(JSValue::NULL),
-                Err(e) => Err(cx.throw_internal_error(&e)),
-            }
-        },
-    )?;
+    let (prom_signal, tx_signal) =
+        Promise::create_with_channel_hold_when_awaited::<Result<Option<String>, String>>(
+            ctx,
+            |cx, data| -> JSResult {
+                match data {
+                    Ok(Some(name)) => cx
+                        .create_string_from_utf8(name.into_bytes())
+                        .map(JSValue::make_string),
+                    Ok(None) => Ok(JSValue::NULL),
+                    Err(e) => Err(cx.throw_internal_error(&e)),
+                }
+            },
+        )?;
 
     let (prom_killed, tx_killed) =
-        Promise::create_with_channel::<bool>(ctx, |cx, killed| Ok(JSValue::from(killed)))?;
+        Promise::create_with_channel_hold_when_awaited::<bool>(ctx, |cx, killed| {
+            Ok(JSValue::from(killed))
+        })?;
 
     // Build result object with Promises
     let mut result = ctx.create_base_object()?;
@@ -547,6 +609,14 @@ fn spawn_async(
     // Spawn a pure async task — wait for child exit and resolve
     // exitCode/signalCode/killedByTimeout. stdout/stderr are exposed as
     // FileHandle objects for the consumer to read.
+    if abort_on_parent_exit {
+        register_child(pid);
+        // Windows: put the child in a kill-on-close job so it dies with aike
+        // even on uncatchable termination (crash, TerminateProcess).
+        #[cfg(windows)]
+        win_job::assign_abort_on_exit(pid);
+    }
+
     tokio::spawn(async move {
         let timeout = timeout_ms.map(Duration::from_millis);
         let mut killed = false;
@@ -566,6 +636,12 @@ fn spawn_async(
             },
             None => child.wait().await,
         };
+        // The child has exited; it can no longer be killed on aike exit.
+        if abort_on_parent_exit {
+            unregister_child(pid);
+            #[cfg(windows)]
+            win_job::release(pid);
+        }
         match result {
             Ok(status) => {
                 let code = status.code().unwrap_or(-1);
@@ -810,4 +886,90 @@ fn get_signal_code(status: &ExitStatus) -> Option<i32> {
 #[cfg(not(unix))]
 fn get_signal_code(_status: &ExitStatus) -> Option<i32> {
     None
+}
+
+/// Windows: assign a child to a kill-on-close job object. When aike dies —
+/// normally, via crash, or via TerminateProcess — the OS closes every handle
+/// and kills the child (`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`). This covers
+/// paths no user-space handler can reach (the Windows analogue of Linux
+/// `PR_SET_PDEATHSIG`). Best-effort: failure falls back to the console-ctrl /
+/// atexit kill via the PID registry.
+#[cfg(windows)]
+pub(crate) mod win_job {
+    use std::sync::{LazyLock, Mutex};
+
+    use windows_sys::Win32::{
+        Foundation::{CloseHandle, HANDLE},
+        System::JobObjects::{
+            AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+            SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        },
+        System::Threading::{OpenProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE},
+    };
+
+    static JOBS: LazyLock<Mutex<Vec<(i32, HANDLE)>>> =
+        LazyLock::new(|| Mutex::new(Vec::new()));
+
+    /// Put `pid` in a kill-on-close job object. No-op on failure.
+    pub(crate) fn assign_abort_on_exit(pid: i32) {
+        unsafe {
+            // Anonymous job object (no name).
+            let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+            if job.is_null() {
+                return;
+            }
+            let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            if SetInformationJobObject(
+                job,
+                JobObjectExtendedLimitInformation,
+                &info as *const _ as *const _,
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            ) == 0
+            {
+                CloseHandle(job);
+                return;
+            }
+            let handle = OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, 0, pid as u32);
+            if handle.is_null() {
+                CloseHandle(job);
+                return;
+            }
+            let ok = AssignProcessToJobObject(job, handle);
+            CloseHandle(handle);
+            if ok == 0 {
+                CloseHandle(job);
+                return;
+            }
+            // Keep the job handle alive until process exit (or child exit).
+            JOBS.lock().unwrap().push((pid, job));
+        }
+    }
+
+    /// Drop the job for a child that already exited — no longer needs
+    /// kill-on-close, and avoids leaking job handles on long-running hosts.
+    pub(crate) fn release(pid: i32) {
+        let mut jobs = JOBS.lock().unwrap();
+        if let Some(idx) = jobs.iter().position(|&(p, _)| p == pid) {
+            unsafe { CloseHandle(jobs.remove(idx).1) };
+        }
+    }
+}
+
+/// Windows: console control handler (Ctrl-C / Ctrl-Break) — kill
+/// `abortOnParentExit` children synchronously, then let default handling
+/// terminate aike (which also closes the kill-on-close job handles).
+#[cfg(windows)]
+pub(crate) fn install_console_ctrl_handler() {
+    use windows_sys::Win32::System::Console::SetConsoleCtrlHandler;
+
+    unsafe extern "system" fn handler(_ctrl_type: u32) -> i32 {
+        kill_all_children();
+        // FALSE: continue to the next handler / default termination.
+        0
+    }
+    unsafe {
+        SetConsoleCtrlHandler(Some(handler), 1);
+    }
 }
