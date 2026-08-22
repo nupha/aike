@@ -11,7 +11,9 @@
 
 use zuqe::{Array, CallContext, FieldDef, JSResult, JSValue, ScopedContext};
 
-// ── helpers ──
+use crate::helpers::{
+    json_schema_coerce_or_check, json_schema_example, json_schema_matches_type_field,
+};
 
 /// Convert a serde_json::Value to a JSValue.
 fn to_js(ctx: &mut ScopedContext, v: &serde_json::Value) -> JSResult {
@@ -124,190 +126,8 @@ fn extract_bare_object(text: &str) -> Option<serde_json::Value> {
     None
 }
 
-// ── validate helpers ──
-
-/// Check if a serde_json::Value matches a JSON-Schema type keyword.
-fn matches_type(value: &serde_json::Value, schema_type: &str) -> bool {
-    match schema_type {
-        "string" => value.is_string(),
-        "number" => value.is_f64() || value.is_i64() || value.is_u64(),
-        "integer" => {
-            value.is_i64() || value.is_u64() ||
-            // serde_json doesn't distinguish integer from float, so check
-            // that an f64 value is actually an integer.
-            value.as_f64().map_or(false, |f| f.fract() == 0.0)
-        }
-        "boolean" => value.is_boolean(),
-        "object" => value.is_object(),
-        "array" => value.is_array(),
-        "null" => value.is_null(),
-        _ => true, // unknown keyword → accept
-    }
-}
-
-/// Check if a value matches a type which may be a string or array of strings.
-fn matches_type_field(value: &serde_json::Value, type_field: &serde_json::Value) -> bool {
-    match type_field {
-        serde_json::Value::String(s) => matches_type(value, s),
-        serde_json::Value::Array(arr) => arr.iter().any(|t| {
-            if let serde_json::Value::String(s) = t {
-                matches_type(value, s)
-            } else {
-                false
-            }
-        }),
-        _ => true, // no type specified → accept
-    }
-}
-
-/// Recursively validate a value against a JSON-Schema, optionally coercing.
-/// Returns the (possibly coerced) value and collects errors.
-fn coerce_or_check(
-    value: serde_json::Value,
-    schema: &serde_json::Value,
-    path: &str,
-    errors: &mut Vec<String>,
-    coerce: bool,
-) -> serde_json::Value {
-    let obj = match schema.as_object() {
-        Some(o) => o,
-        None => return value,
-    };
-
-    // Determine the schema type.
-    let schema_type = obj.get("type");
-
-    // Object type: schema declares type:"object", or has properties but no explicit type.
-    let schema_is_object = schema_type.map_or(
-        obj.contains_key("properties"), // no type field → infer object from properties
-        |t| t.as_str() == Some("object"),
-    );
-
-    if schema_is_object {
-        if !value.is_object() {
-            errors.push(format!("{path}: expected object"));
-            return value;
-        }
-        let props = obj.get("properties").and_then(|p| p.as_object());
-        let required = obj.get("required").and_then(|r| r.as_array());
-        if let Some(props) = props {
-            let mut result = value.as_object().cloned().unwrap_or_default();
-            for (k, prop_schema) in props {
-                if let Some(v) = result.get(k) {
-                    let coerced = coerce_or_check(
-                        v.clone(),
-                        prop_schema,
-                        &format!("{path}.{k}"),
-                        errors,
-                        coerce,
-                    );
-                    result.insert(k.clone(), coerced);
-                } else if let Some(req) = required {
-                    if req.iter().any(|r| r.as_str() == Some(k.as_str())) {
-                        errors.push(format!("{path}.{k}: missing required property"));
-                    }
-                }
-            }
-            return serde_json::Value::Object(result);
-        }
-        return value;
-    }
-
-    // Array type
-    let schema_is_array = schema_type.map_or(false, |t| t.as_str() == Some("array"));
-    if schema_is_array || (schema_type.is_none() && !value.is_null() && value.is_array()) {
-        if !value.is_array() {
-            errors.push(format!("{path}: expected array"));
-            return value;
-        }
-        if let Some(items_schema) = obj.get("items") {
-            let arr = value.as_array().cloned().unwrap_or_default();
-            let coerced: Vec<serde_json::Value> = arr
-                .into_iter()
-                .enumerate()
-                .map(|(i, v)| {
-                    coerce_or_check(v, items_schema, &format!("{path}[{i}]"), errors, coerce)
-                })
-                .collect();
-            return serde_json::Value::Array(coerced);
-        }
-        return value;
-    }
-
-    // Primitive types
-    if let Some(type_field) = schema_type {
-        if let Some(type_str) = type_field.as_str() {
-            match type_str {
-                "string" => {
-                    if !matches_type(&value, "string") {
-                        if coerce && (value.is_number() || value.is_boolean()) {
-                            let s = match &value {
-                                serde_json::Value::Number(n) => n.to_string(),
-                                serde_json::Value::Bool(b) => b.to_string(),
-                                _ => String::new(),
-                            };
-                            return serde_json::Value::String(s);
-                        }
-                        errors.push(format!("{path}: expected string"));
-                    }
-                    return value;
-                }
-                "number" | "integer" => {
-                    if !matches_type(&value, type_str) {
-                        if coerce {
-                            let n = match &value {
-                                serde_json::Value::String(s) => s.parse::<f64>().ok(),
-                                serde_json::Value::Bool(true) => Some(1.0),
-                                serde_json::Value::Bool(false) => Some(0.0),
-                                _ => None,
-                            };
-                            if let Some(n) = n {
-                                if type_str == "integer" && n.fract() != 0.0 {
-                                    errors.push(format!("{path}: expected integer"));
-                                }
-                                if let Some(num) = serde_json::Number::from_f64(n) {
-                                    return serde_json::Value::Number(num);
-                                }
-                            }
-                        }
-                        errors.push(format!("{path}: expected {type_str}"));
-                        return value;
-                    }
-                    if type_str == "integer" && !matches_type(&value, "integer") {
-                        errors.push(format!("{path}: expected integer"));
-                    }
-                    return value;
-                }
-                "boolean" => {
-                    if !matches_type(&value, "boolean") {
-                        if coerce {
-                            match &value {
-                                serde_json::Value::String(s) if s == "true" => {
-                                    return serde_json::Value::Bool(true);
-                                }
-                                serde_json::Value::String(s) if s == "false" => {
-                                    return serde_json::Value::Bool(false);
-                                }
-                                _ => {}
-                            }
-                        }
-                        errors.push(format!("{path}: expected boolean"));
-                    }
-                    return value;
-                }
-                "null" => {
-                    if !value.is_null() {
-                        errors.push(format!("{path}: expected null"));
-                    }
-                    return value;
-                }
-                _ => return value, // unknown type → accept
-            }
-        }
-    }
-
-    value
-}
+// Schema type matching, recursive validation/coercion, and example synthesis
+// live in `helpers/json_schema.rs` (shared with the MCP server).
 
 // ── native function callbacks ──
 
@@ -344,7 +164,7 @@ fn js_json_schema_validateSchema(ctx: &mut ScopedContext, cc: CallContext) -> JS
 
     let coerce = mode == "coerce";
     let mut errors: Vec<String> = Vec::new();
-    let out = coerce_or_check(value, &schema, "root", &mut errors, coerce);
+    let out = json_schema_coerce_or_check(value, &schema, "root", &mut errors, coerce);
 
     // Build result object: { ok, value, errors }
     let mut result_obj = ctx.create_base_object()?;
@@ -373,55 +193,8 @@ fn js_json_schema_forExample(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
     let schema: serde_json::Value = from_js(ctx, &cc.arg(0))
         .map_err(|e| ctx.throw_type_error(&format!("jsonSchema.schemaExample: {e}")))?;
 
-    let example = schema_example(&schema);
+    let example = json_schema_example(&schema);
     to_js(ctx, &example)
-}
-
-fn schema_example(schema: &serde_json::Value) -> serde_json::Value {
-    let obj = match schema.as_object() {
-        Some(o) => o,
-        None => return serde_json::Value::Null,
-    };
-
-    // If schema has an explicit example, use it.
-    if let Some(ex) = obj.get("example") {
-        return ex.clone();
-    }
-
-    let type_str = obj.get("type").and_then(|t| t.as_str()).unwrap_or("");
-
-    match type_str {
-        "object" => {
-            let mut map = serde_json::Map::new();
-            if let Some(props) = obj.get("properties").and_then(|p| p.as_object()) {
-                for (k, prop_schema) in props {
-                    map.insert(k.clone(), schema_example(prop_schema));
-                }
-            }
-            serde_json::Value::Object(map)
-        }
-        "array" => {
-            if let Some(items) = obj.get("items") {
-                serde_json::Value::Array(vec![schema_example(items)])
-            } else {
-                serde_json::Value::Array(vec![])
-            }
-        }
-        "string" => serde_json::Value::String("string".into()),
-        "number" => serde_json::Value::Number(serde_json::Number::from(0)),
-        "integer" => serde_json::Value::Number(serde_json::Number::from(0)),
-        "boolean" => serde_json::Value::Bool(true),
-        "null" => serde_json::Value::Null,
-        _ => {
-            // No type — if properties exist, treat as object.
-            if obj.contains_key("properties") {
-                return schema_example(
-                    &serde_json::json!({"type": "object", "properties": obj.get("properties")}),
-                );
-            }
-            serde_json::Value::Null
-        }
-    }
 }
 
 /// `jsonSchema.matchesType(value, type): boolean`
@@ -434,7 +207,7 @@ fn js_json_schema_matchesType(ctx: &mut ScopedContext, cc: CallContext) -> JSRes
     let type_val: serde_json::Value = from_js(ctx, &type_arg)
         .map_err(|e| ctx.throw_type_error(&format!("jsonSchema.matchesType type arg: {e}")))?;
 
-    let ok = matches_type_field(&value, &type_val);
+    let ok = json_schema_matches_type_field(&value, &type_val);
     Ok(JSValue::from(ok))
 }
 
