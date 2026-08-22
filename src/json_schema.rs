@@ -164,12 +164,16 @@ fn js_json_schema_validateSchema(ctx: &mut ScopedContext, cc: CallContext) -> JS
 
     let coerce = mode == "coerce";
     let mut errors: Vec<String> = Vec::new();
-    let out = json_schema_coerce_or_check(value, &schema, "root", &mut errors, coerce);
+    let mut changed = false;
+    let out =
+        json_schema_coerce_or_check(value, &schema, "root", &mut errors, coerce, &mut changed);
 
     // Build result object: { ok, value, errors }
     let mut result_obj = ctx.create_base_object()?;
     let ok = errors.is_empty();
-    let js_value = to_js(ctx, &out)?;
+    // Without coercion the output equals the input — hand back the original
+    // JSValue instead of paying a full serde→JS rebuild.
+    let js_value = if changed { to_js(ctx, &out)? } else { value_arg };
     let js_errors = {
         let js_errs: Vec<JSValue> = errors
             .iter()
@@ -197,10 +201,81 @@ fn js_json_schema_forExample(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
     to_js(ctx, &example)
 }
 
+/// Scalar classification mirroring `to_serde_json`'s scalar mapping, so
+/// type questions about scalars can be answered without conversion.
+/// `None` = not a scalar (object/array/etc.) — caller must fall back.
+enum ScalarKind {
+    /// null / undefined / NaN / ±Infinity all convert to JSON null.
+    NullLike,
+    Bool,
+    Str,
+    Num { integer: bool },
+}
+
+fn scalar_kind(v: &JSValue) -> Option<ScalarKind> {
+    if v.is_undefined() || v.is_null() {
+        return Some(ScalarKind::NullLike);
+    }
+    if v.is_bool() {
+        return Some(ScalarKind::Bool);
+    }
+    if v.is_string() {
+        return Some(ScalarKind::Str);
+    }
+    if v.is_int() {
+        return Some(ScalarKind::Num { integer: true });
+    }
+    if v.is_float64() {
+        let f = v.as_float()?;
+        if !f.is_finite() {
+            return Some(ScalarKind::NullLike);
+        }
+        return Some(ScalarKind::Num {
+            integer: f.fract() == 0.0,
+        });
+    }
+    None
+}
+
+fn kind_accepts(kind: &ScalarKind, kw: &str) -> bool {
+    // Unknown type keywords accept anything (mirrors json_schema_type_matches).
+    match kw {
+        "string" => matches!(kind, ScalarKind::Str),
+        "number" => matches!(kind, ScalarKind::Num { .. }),
+        "integer" => matches!(kind, ScalarKind::Num { integer: true }),
+        "boolean" => matches!(kind, ScalarKind::Bool),
+        "object" | "array" => false,
+        "null" => matches!(kind, ScalarKind::NullLike),
+        _ => true,
+    }
+}
+
+/// Same verdict as `json_schema_matches_type_field` for scalar values.
+fn scalar_matches_type_field(kind: &ScalarKind, type_field: &serde_json::Value) -> bool {
+    match type_field {
+        serde_json::Value::String(s) => kind_accepts(kind, s),
+        serde_json::Value::Array(arr) => arr.iter().any(|t| match t.as_str() {
+            Some(s) => kind_accepts(kind, s),
+            None => false,
+        }),
+        _ => true, // no type specified → accept
+    }
+}
+
 /// `jsonSchema.matchesType(value, type): boolean`
 fn js_json_schema_matchesType(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let value_arg = cc.arg(0);
     let type_arg = cc.arg(1);
+
+    // Scalars never fail nor throw during conversion, so their answer is
+    // decidable from the dtype alone — skipping the serde round-trip that
+    // dominates cost for long strings. Non-scalars take the original path,
+    // preserving its exact error behavior (e.g. circular references).
+    if let Some(kind) = scalar_kind(&value_arg) {
+        let type_val: serde_json::Value = from_js(ctx, &type_arg)
+            .map_err(|e| ctx.throw_type_error(&format!("jsonSchema.matchesType type arg: {e}")))?;
+        return Ok(JSValue::from(scalar_matches_type_field(&kind, &type_val)));
+    }
 
     let value: serde_json::Value = from_js(ctx, &value_arg)
         .map_err(|e| ctx.throw_type_error(&format!("jsonSchema.matchesType: {e}")))?;

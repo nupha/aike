@@ -76,12 +76,16 @@ pub(crate) fn json_schema_matches_type_field(
 
 /// Recursively validate a value against a JSON-Schema, optionally coercing.
 /// Returns the (possibly coerced) value and collects errors.
+///
+/// `changed` is set to true iff at least one coercion produced a new value;
+/// callers use it to skip re-emitting an unchanged value.
 pub(crate) fn json_schema_coerce_or_check(
     value: serde_json::Value,
     schema: &serde_json::Value,
     path: &str,
     errors: &mut Vec<String>,
     coerce: bool,
+    changed: &mut bool,
 ) -> serde_json::Value {
     let obj = match schema.as_object() {
         Some(o) => o,
@@ -114,6 +118,7 @@ pub(crate) fn json_schema_coerce_or_check(
                         &format!("{path}.{k}"),
                         errors,
                         coerce,
+                        changed,
                     );
                     result.insert(k.clone(), coerced);
                 } else if let Some(req) = required {
@@ -140,7 +145,9 @@ pub(crate) fn json_schema_coerce_or_check(
                 .into_iter()
                 .enumerate()
                 .map(|(i, v)| {
-                    json_schema_coerce_or_check(v, items_schema, &format!("{path}[{i}]"), errors, coerce)
+                    json_schema_coerce_or_check(
+                        v, items_schema, &format!("{path}[{i}]"), errors, coerce, changed,
+                    )
                 })
                 .collect();
             return serde_json::Value::Array(coerced);
@@ -160,6 +167,7 @@ pub(crate) fn json_schema_coerce_or_check(
                                 serde_json::Value::Bool(b) => b.to_string(),
                                 _ => String::new(),
                             };
+                            *changed = true;
                             return serde_json::Value::String(s);
                         }
                         errors.push(format!("{path}: expected string"));
@@ -180,6 +188,7 @@ pub(crate) fn json_schema_coerce_or_check(
                                     errors.push(format!("{path}: expected integer"));
                                 }
                                 if let Some(num) = serde_json::Number::from_f64(n) {
+                                    *changed = true;
                                     return serde_json::Value::Number(num);
                                 }
                             }
@@ -197,9 +206,11 @@ pub(crate) fn json_schema_coerce_or_check(
                         if coerce {
                             match &value {
                                 serde_json::Value::String(s) if s == "true" => {
+                                    *changed = true;
                                     return serde_json::Value::Bool(true);
                                 }
                                 serde_json::Value::String(s) if s == "false" => {
+                                    *changed = true;
                                     return serde_json::Value::Bool(false);
                                 }
                                 _ => {}
