@@ -100,77 +100,6 @@ declare module "mcp" {
   }
 
   /**
-   * Simplified argument definition for the DSL format.
-   * Rust auto-converts this to standard JSON Schema `properties` entries.
-   *
-   * @example
-   * // Basic string field
-   * { desc: "File path.", required: true }
-   * // Integer field
-   * { desc: "Start line", type: "integer", default: 0 }
-   * // Boolean field
-   * { desc: "Show hidden files", type: "boolean", default: false }
-   * // Array of strings
-   * { desc: "File patterns", type: "array" }
-   * // Enum
-   * { desc: "Write mode", type: "string", enum: ["overwrite", "append"], default: "overwrite" }
-   */
-  export interface ToolArgDef {
-    /** Human-readable description of this argument. */
-    desc: string;
-    /**
-     * Value type. Defaults to `"string"` when omitted.
-     * Allowed JSON-Schema types (per JSON Schema Validation 2020-12 §6.1.1):
-     * - `"string"` — default
-     * - `"integer"` — integer number (a subtype of `number`, zero fractional part)
-     * - `"number"` — floating-point number (e.g. latitude/longitude)
-     * - `"boolean"` — true/false
-     * - `"array"` — array; use `items` to specify element type
-     * - `"object"` — nested object
-     * - `"null"` — JSON null
-     */
-    type?:
-      | "string"
-      | "integer"
-      | "number"
-      | "boolean"
-      | "array"
-      | "object"
-      | "null";
-    /** Mark as required. */
-    required?: boolean;
-    /** Enum string values. */
-    enum?: string[];
-    /** Default value when not provided. */
-    default?: any;
-    /**
-     * Schema for array items. Only meaningful when `type="array"`.
-     * Defaults to `{ type: "string" }` when omitted.
-     *
-     * @example
-     * // Array of integers
-     * { desc: "Port numbers", type: "array", items: { type: "integer" } }
-     * // Array with element description
-     * { desc: "Tags", type: "array", items: { type: "string", desc: "Tag name" } }
-     */
-    items?: {
-      /** Element type */
-      type:
-        | "string"
-        | "integer"
-        | "number"
-        | "boolean"
-        | "array"
-        | "object"
-        | "null";
-      /** Description of each element. */
-      desc?: string;
-      /** Enum values for elements. */
-      enum?: string[];
-    };
-  }
-
-  /**
    * MCP tool annotations (hints for clients; see the MCP spec `ToolAnnotations`).
    * Only the fields present here are advertised.
    */
@@ -212,15 +141,15 @@ declare module "mcp" {
    *   },
    * };
    */
-  export interface McpToolShortDef {
+  export interface McpToolDef {
     /** Human-readable description of what the tool does. */
     desc: string;
     /** Handler invoked on `tools/call`. */
     handler: McpToolHandler;
     /**
-     * Argument DSL — Rust auto-converts this to standard JSON Schema inputSchema.
+     * Arguments — Rust auto-converts this to standard JSON Schema inputSchema.
      */
-    args: Record<string, ToolArgDef>;
+    args: Record<string, SimpleSchema>;
     /** Optional MCP tool annotations (readOnlyHint / destructiveHint / ...). */
     annotations?: McpToolAnnotations;
   }
@@ -308,13 +237,13 @@ declare module "mcp" {
      * Dynamically add JS tools after construction. Accepts the same object-keyed
      * `tools` DSL as `define`.
      */
-    addTool(tools: Record<string, McpToolShortDef>): this;
+    addTool(tools: Record<string, McpToolDef>): this;
 
     /**
      * Hot-reload: REPLACE all JS tools (native tools are preserved). Accepts the
      * same object-keyed `tools` DSL as `define`.
      */
-    updateTools(tools: Record<string, McpToolShortDef>): this;
+    updateTools(tools: Record<string, McpToolDef>): this;
   }
 
   /**
@@ -326,7 +255,7 @@ declare module "mcp" {
     /** Required: advertised server name. */
     name: string;
     /** Required: object-keyed tool DSL `{ name: { desc, handler, args } }`. */
-    tools: Record<string, McpToolShortDef>;
+    tools: Record<string, McpToolDef>;
     /** Advertised server version. */
     version?: string;
     description?: string;
@@ -508,7 +437,10 @@ declare module "mcp" {
     connect(): Promise<void>;
     readonly serverInfo: McpInitializeResult | null;
     listTools(): Promise<McpToolsListResult>;
-    callTool(name: string, args?: Record<string, unknown>): Promise<McpToolCallResult>;
+    callTool(
+      name: string,
+      args?: Record<string, unknown>,
+    ): Promise<McpToolCallResult>;
     close(): Promise<void>;
   }
 
@@ -531,7 +463,10 @@ declare module "mcp" {
     connect(): Promise<void>;
     readonly serverInfo: McpInitializeResult | null;
     listTools(): Promise<McpToolsListResult>;
-    callTool(name: string, args?: Record<string, unknown>): Promise<McpToolCallResult>;
+    callTool(
+      name: string,
+      args?: Record<string, unknown>,
+    ): Promise<McpToolCallResult>;
     close(): Promise<void>;
   }
 }

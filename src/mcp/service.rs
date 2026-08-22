@@ -668,7 +668,7 @@ fn mcp_reject_catch(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 mod tests {
     use super::*;
 
-    /// Build a schema the same shape `build_input_schema_from_args` emits.
+    /// Build a schema the same shape `simple_schema_from_args` emits.
     fn schema(
         properties: serde_json::Value,
         required: &[&str],

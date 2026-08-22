@@ -13,6 +13,7 @@ use zuqe::{Array, CallContext, FieldDef, JSResult, JSValue, ScopedContext};
 
 use crate::helpers::{
     json_schema_coerce_or_check, json_schema_example, json_schema_matches_type_field,
+    simple_schema_from_args,
 };
 
 /// Convert a serde_json::Value to a JSValue.
@@ -286,6 +287,33 @@ fn js_json_schema_matchesType(ctx: &mut ScopedContext, cc: CallContext) -> JSRes
     Ok(JSValue::from(ok))
 }
 
+/// `jsonSchema.fromSimpleSchema(simple: Record<string, SimpleSchema>): Schema`
+///
+/// Convert a SimpleSchema argument DSL record into a standard JSON Schema
+/// object schema (`{ type: "object", properties, required }`).
+fn js_json_schema_fromSimpleSchema(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let arg = cc.arg(0);
+    let Some(obj) = arg.as_object() else {
+        return Err(ctx.throw_type_error(
+            "jsonSchema.fromSimpleSchema: `simple` must be an object of SimpleSchema defs",
+        ));
+    };
+    let is_array = obj
+        .is_array(ctx)
+        .map_err(|e| ctx.throw_internal_error(&format!("fromSimpleSchema is_array check: {e}")))?;
+    if is_array {
+        return Err(ctx.throw_type_error(
+            "jsonSchema.fromSimpleSchema: `simple` must be an object, not an array",
+        ));
+    }
+
+    let schema_json = match simple_schema_from_args(ctx, obj.clone())? {
+        Some(s) => s,
+        None => serde_json::json!({"type": "object"}),
+    };
+    to_js(ctx, &schema_json)
+}
+
 // ── module registration ──
 
 const JSON_SCHEMA_FUNCS: &[FieldDef] = &[
@@ -293,6 +321,7 @@ const JSON_SCHEMA_FUNCS: &[FieldDef] = &[
     FieldDef::FUNC("validateSchema", 2, js_json_schema_validateSchema, 0),
     FieldDef::FUNC("forExample", 1, js_json_schema_forExample, 0),
     FieldDef::FUNC("matchesType", 2, js_json_schema_matchesType, 0),
+    FieldDef::FUNC("fromSimpleSchema", 1, js_json_schema_fromSimpleSchema, 0),
 ];
 
 const MOD_JSON_SCHEMA_ENTRIES: &[FieldDef] = &[FieldDef::OBJECT(

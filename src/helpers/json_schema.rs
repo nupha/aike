@@ -295,8 +295,8 @@ pub(crate) fn json_schema_example(schema: &serde_json::Value) -> serde_json::Val
 //               then the inserted value is validated like any provided value
 //
 // Not yet implemented (standard JSON Schema "Validation" vocabulary; the MCP
-// DSL `ToolArgDef` does not expose them yet, so they never appear in the
-// schemas `build_input_schema_from_args` produces):
+// DSL `SimpleSchema` (alias `ToolArgDef`) does not expose them yet, so they
+// never appear in the schemas `simple_schema_from_args` produces):
 //   minLength/maxLength (string, Unicode code points)
 //   pattern             (string must match a regex)
 //   minimum/maximum / exclusiveMinimum/exclusiveMaximum (numeric bounds)
@@ -306,13 +306,13 @@ pub(crate) fn json_schema_example(schema: &serde_json::Value) -> serde_json::Val
 //   format              (semantic hint: email/date-time/uri/ipv4… — in
 //                       2020-12 it is Format-Annotation, default non-enforcing)
 // When the DSL is extended, propagate the new fields in
-// `build_input_schema_from_args` (mcp/class_mcp.rs) and add checks here.
+// `simple_schema_from_args` (helpers/simple_schema.rs) and add checks here.
 // Schema matches `memo/mcp-schema-validation.md`.
 
 /// Validate MCP tool-call `arguments` against a tool's `inputSchema` before
 /// dispatch.
 ///
-/// Covers the subset of JSON Schema that `build_input_schema_from_args`
+/// Covers the subset of JSON Schema that `simple_schema_from_args`
 /// produces: an object with `required` and per-property `type`/`enum`
 /// (including array `items`). Types string/integer/number/boolean/object/
 /// null/array are enforced; extra keys are ignored; unknown types pass.
