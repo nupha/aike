@@ -58,8 +58,8 @@ pub(crate) fn init_mod_mcp(ctx: &mut ScopedContext) -> Result<(), i32> {
         JSBaseMcp::class_id(),
         JSStdioMcp::class_id(),
         JSHttpMcp::class_id(),
-        crate::mcp::class_mcp_client::JSStdioMcpClient::class_id(),
-        crate::mcp::class_mcp_client::JSHttpMcpClient::class_id(),
+        JSStdioMcpClient::class_id(),
+        JSHttpMcpClient::class_id(),
     ])?;
 
     ctx.create_module("mcp", MOD_MCP_ENTRIES)?;
