@@ -5,7 +5,11 @@ use std::{
     collections::HashMap,
     io::{Read, Write},
     process::{Command, ExitStatus, Stdio},
-    sync::{LazyLock, Mutex, mpsc},
+    sync::{
+        LazyLock, Mutex,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
     thread,
     time::Duration,
 };
@@ -13,10 +17,16 @@ use std::{
 #[cfg(unix)]
 use std::os::{fd::AsRawFd, unix::process::CommandExt};
 
+use process_wrap::tokio::{ChildWrapper, CommandWrap as TokioCmdWrap};
+#[cfg(unix)]
+use process_wrap::tokio::ProcessGroup;
+#[cfg(windows)]
+use process_wrap::tokio::JobObject;
+
 use zuqe::{
     CallContext, Callback, ErrorKind, Exception, IntOrFloat, JS_GPN_ENUM_ONLY,
     JS_GPN_STR_OR_INT_MASK, JS_PROP_C_W_E, JS_PROP_ENUMERABLE, JSResult, JSValue, Object,
-    ScopedContext,
+    PollSender, ScopedContext,
     builtins::{promise::Promise, typed_array::TypedArray},
 };
 
@@ -48,6 +58,37 @@ pub(crate) fn kill_all_children() {
         terminate_process_tree(pid);
     }
     SPAWNED_PIDS.lock().unwrap().clear();
+}
+
+/// Per-child exit notification state, shared between the exit-wait task and
+/// `shutdown()`. The watch channel retains the final value, so a waiter that
+/// subscribes before or after the exit never misses the transition.
+struct ChildExitState {
+    /// true once the child has been reaped (or its wait errored).
+    exit_tx: tokio::sync::watch::Sender<bool>,
+    /// Guards against concurrent shutdown ladders on one child.
+    shutting_down: AtomicBool,
+}
+
+static CHILD_EXITS: LazyLock<Mutex<HashMap<i32, ChildExitState>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn register_child_exit(pid: i32) {
+    let (exit_tx, _) = tokio::sync::watch::channel(false);
+    CHILD_EXITS.lock().unwrap().insert(
+        pid,
+        ChildExitState {
+            exit_tx,
+            shutting_down: AtomicBool::new(false),
+        },
+    );
+}
+
+/// Signal waiters that `pid` exited and drop its registry entry.
+fn signal_child_exit(pid: i32) {
+    if let Some(state) = CHILD_EXITS.lock().unwrap().remove(&pid) {
+        let _ = state.exit_tx.send(true);
+    }
 }
 
 pub(super) fn js_spawn(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -148,12 +189,18 @@ pub(super) fn js_spawn(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             cmd_obj.envs(env_map);
         }
 
-        // Run the child in its own process group so a timeout or
-        // abort-on-parent-exit can kill the whole tree. Only when requested,
+        // Build the command wrapper: ProcessGroup (unix) gives us killpg
+        // (whole tree); JobObject (Windows) gives kernel-level kill-on-close.
+        // Only wrap when tree-kill is needed (timeout or abortOnParentExit),
         // to avoid changing terminal/foreground semantics for regular spawns.
+        let mut cmd_wrap = TokioCmdWrap::from(cmd_obj);
+        #[cfg(unix)]
         if timeout_limit.is_some() || abort_on_parent_exit {
-            #[cfg(unix)]
-            cmd_obj.process_group(0);
+            cmd_wrap.wrap(ProcessGroup::leader());
+        }
+        #[cfg(windows)]
+        if timeout_limit.is_some() || abort_on_parent_exit {
+            cmd_wrap.wrap(JobObject);
         }
 
         // Linux: kernel sends SIGKILL to the child when aike dies — covers
@@ -163,14 +210,14 @@ pub(super) fn js_spawn(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         #[cfg(target_os = "linux")]
         if abort_on_parent_exit {
             unsafe {
-                cmd_obj.pre_exec(|| {
+                cmd_wrap.command_mut().pre_exec(|| {
                     libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0);
                     Ok(())
                 });
             }
         }
 
-        let subprocess = cmd_obj
+        let mut subprocess = cmd_wrap
             .spawn()
             .map_err(|e| ctx.throw_internal_error(&format!("spawn failed: {e}")))?;
 
@@ -498,7 +545,7 @@ fn build_sync_result(
 
 fn spawn_async(
     ctx: &mut ScopedContext,
-    mut child: tokio::process::Child,
+    mut child: Box<dyn ChildWrapper>,
     pid: i32,
     timeout_ms: Option<u64>,
     abort_on_parent_exit: bool,
@@ -506,7 +553,7 @@ fn spawn_async(
     // Take stdin pipe before moving child into async task,
     // so we can create a PipeWrite FileHandle while ScopedContext is available.
     // When stdin is not piped, this will be None → null.
-    let stdin_val = match child.stdin.take() {
+    let stdin_val = match child.stdin().take() {
         Some(child_stdin) => {
             #[cfg(unix)]
             let fd = child_stdin.as_raw_fd();
@@ -524,7 +571,7 @@ fn spawn_async(
     // Take stdout pipe before moving child into async task,
     // so we can create a PipeRead StdioHandle while ScopedContext is available.
     // When stdout is not piped, this will be None → null.
-    let stdout_val = match child.stdout.take() {
+    let stdout_val = match child.stdout().take() {
         Some(child_stdout) => {
             #[cfg(unix)]
             let fd = child_stdout.as_raw_fd();
@@ -539,7 +586,7 @@ fn spawn_async(
     };
 
     // Take stderr pipe before moving child into async task.
-    let stderr_val = match child.stderr.take() {
+    let stderr_val = match child.stderr().take() {
         Some(child_stderr) => {
             #[cfg(unix)]
             let fd = child_stderr.as_raw_fd();
@@ -556,30 +603,27 @@ fn spawn_async(
     // The three result promises keep the event loop alive only while they are
     // observed (awaited / `.then`-ed), so an unawaited (fire-and-forget) child
     // does not block aike from exiting; an awaited child still does.
-    let (prom_exit, tx_exit) =
-        Promise::create_with_channel_hold_when_awaited::<Result<i32, String>>(
-            ctx,
-            |cx, data| -> JSResult {
-                match data {
-                    Ok(code) => Ok(JSValue::from(code)),
-                    Err(e) => Err(cx.throw_internal_error(&e)),
-                }
-            },
-        )?;
+    let (prom_exit, tx_exit) = Promise::create_with_channel_hold_when_awaited::<Result<i32, String>>(
+        ctx,
+        |cx, data| -> JSResult {
+            match data {
+                Ok(code) => Ok(JSValue::from(code)),
+                Err(e) => Err(cx.throw_internal_error(&e)),
+            }
+        },
+    )?;
 
-    let (prom_signal, tx_signal) =
-        Promise::create_with_channel_hold_when_awaited::<Result<Option<String>, String>>(
-            ctx,
-            |cx, data| -> JSResult {
-                match data {
-                    Ok(Some(name)) => cx
-                        .create_string_from_utf8(name.into_bytes())
-                        .map(JSValue::make_string),
-                    Ok(None) => Ok(JSValue::NULL),
-                    Err(e) => Err(cx.throw_internal_error(&e)),
-                }
-            },
-        )?;
+    let (prom_signal, tx_signal) = Promise::create_with_channel_hold_when_awaited::<
+        Result<Option<String>, String>,
+    >(ctx, |cx, data| -> JSResult {
+        match data {
+            Ok(Some(name)) => cx
+                .create_string_from_utf8(name.into_bytes())
+                .map(JSValue::make_string),
+            Ok(None) => Ok(JSValue::NULL),
+            Err(e) => Err(cx.throw_internal_error(&e)),
+        }
+    })?;
 
     let (prom_killed, tx_killed) =
         Promise::create_with_channel_hold_when_awaited::<bool>(ctx, |cx, killed| {
@@ -606,15 +650,20 @@ fn spawn_async(
         ctx.create_native_function(Callback::Func(js_child_isRunning), "isRunning", 0, 0)?;
     result.define_property_value_str(ctx, "isRunning", is_running_fn.into(), JS_PROP_C_W_E)?;
 
+    // shutdown(options?) — graceful close (EOF → term → SIGKILL)
+    let shutdown_fn =
+        ctx.create_native_function(Callback::Func(js_child_shutdown), "shutdown", 1, 0)?;
+    result.define_property_value_str(ctx, "shutdown", shutdown_fn.into(), JS_PROP_C_W_E)?;
+
+    // Register the exit notification before spawning the waiter task so
+    // shutdown() can subscribe even if the child exits immediately.
+    register_child_exit(pid);
+
     // Spawn a pure async task — wait for child exit and resolve
     // exitCode/signalCode/killedByTimeout. stdout/stderr are exposed as
     // FileHandle objects for the consumer to read.
     if abort_on_parent_exit {
         register_child(pid);
-        // Windows: put the child in a kill-on-close job so it dies with aike
-        // even on uncatchable termination (crash, TerminateProcess).
-        #[cfg(windows)]
-        win_job::assign_abort_on_exit(pid);
     }
 
     tokio::spawn(async move {
@@ -625,12 +674,9 @@ fn spawn_async(
                 Ok(r) => r,
                 Err(_elapsed) => {
                     killed = true;
-                    let pid = child.id().map(|id| id as i32).unwrap_or(-1);
-                    // Kill the whole tree; taskkill on Windows blocks, so run
-                    // it on a blocking thread.
-                    let _ = tokio::task::spawn_blocking(move || terminate_process_tree(pid)).await;
-                    // Reap the (now-killed) child; on Windows this is also the kill.
-                    let _ = child.kill().await;
+                    // Group/job-aware kill: ProcessGroup → killpg(SIGKILL) to
+                    // the whole tree; JobObject → TerminateJobObject.
+                    let _ = Box::into_pin(child.kill()).await;
                     child.wait().await
                 }
             },
@@ -639,9 +685,10 @@ fn spawn_async(
         // The child has exited; it can no longer be killed on aike exit.
         if abort_on_parent_exit {
             unregister_child(pid);
-            #[cfg(windows)]
-            win_job::release(pid);
         }
+        // Wake shutdown() ladders before resolving the JS promises so they
+        // observe a consistent exit state.
+        signal_child_exit(pid);
         match result {
             Ok(status) => {
                 let code = status.code().unwrap_or(-1);
@@ -766,6 +813,179 @@ fn pid_from_this(ctx: &mut ScopedContext, cc: &CallContext) -> i32 {
         .unwrap_or(-1)
 }
 
+/// Read an optional positive-integer millisecond property.
+/// TypeError for non-numbers, RangeError for non-positive or fractional values.
+fn get_pos_ms_prop(ctx: &mut ScopedContext, obj: &Object, key: &str) -> Result<Option<u64>, i32> {
+    let v = obj.get_property_str(ctx, key)?;
+    if v.is_undefined() {
+        return Ok(None);
+    }
+    if !v.is_number() {
+        return Err(ctx.throw_type_error(&format!("`{key}` must be a number")));
+    }
+    let n = v.to_number(ctx)?;
+    match n {
+        IntOrFloat::Int64(i) if i > 0 => Ok(Some(i as u64)),
+        IntOrFloat::Float64(d) if d > 0.0 && d.fract() == 0.0 => Ok(Some(d as u64)),
+        _ => Err(ctx.throw_range_error(&format!("`{key}` must be a positive integer"))),
+    }
+}
+
+/// Wait until the child's exit is signalled or the timeout elapses.
+async fn wait_child_exit(mut rx: tokio::sync::watch::Receiver<bool>, timeout: Duration) -> bool {
+    loop {
+        if *rx.borrow_and_update() {
+            return true;
+        }
+        match tokio::time::timeout(timeout, rx.changed()).await {
+            // changed() errors when the sender is dropped — the state was
+            // removed from the registry, which only happens on exit/cleanup.
+            Ok(Ok(())) => continue,
+            _ => return false,
+        }
+    }
+}
+
+fn send_child_signal(pid: i32, sig: i32) {
+    #[cfg(unix)]
+    unsafe {
+        libc::kill(pid, sig);
+    }
+    #[cfg(windows)]
+    {
+        let _ = sig;
+        unsafe { terminate_process(pid) };
+    }
+}
+
+/// The EOF → term → SIGKILL shutdown ladder. Returns the stage at which the
+/// child exited. Removes the registry entry when done.
+async fn shutdown_ladder(
+    pid: i32,
+    rx: tokio::sync::watch::Receiver<bool>,
+    eof_ms: u64,
+    term_ms: u64,
+    kill_ms: u64,
+    term_sig: i32,
+) -> &'static str {
+    macro_rules! finish {
+        ($stage:expr) => {{
+            signal_child_exit(pid);
+            $stage
+        }};
+    }
+
+    // 1) EOF: stdin was closed; give the child time to exit on its own.
+    if wait_child_exit(rx.clone(), Duration::from_millis(eof_ms)).await {
+        return finish!("eof");
+    }
+
+    // 2) termSignal: gentle request.
+    send_child_signal(pid, term_sig);
+    if wait_child_exit(rx.clone(), Duration::from_millis(term_ms)).await {
+        return finish!("term");
+    }
+
+    // 3) SIGKILL: forced.
+    #[cfg(unix)]
+    send_child_signal(pid, libc::SIGKILL);
+    #[cfg(windows)]
+    send_child_signal(pid, 0);
+    if wait_child_exit(rx, Duration::from_millis(kill_ms)).await {
+        return finish!("kill");
+    }
+
+    finish!("timed_out")
+}
+
+/// shutdown(options?) — gracefully shut the child down:
+/// close stdin (EOF), then `termSignal`, then SIGKILL — each stage bounded by
+/// its timeout. Resolves with the stage at which the child exited:
+/// "eof" | "term" | "kill" | "timed_out" | "already_closed".
+fn js_child_shutdown(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    /// Resolve a promise to a fixed stage string.
+    fn resolved_stage(ctx: &mut ScopedContext, stage: &'static str) -> JSResult {
+        let (promise, tx) = Promise::create_with_channel::<String>(ctx, |cx, stage| {
+            cx.create_string_from_str(&stage).map(JSValue::make_string)
+        })?;
+        let _ = tx.send(stage.to_string());
+        Ok(promise.into())
+    }
+
+    // Strict option parsing (defaults mirror ravenclaw's StdioParentOptions).
+    let mut eof_ms = 2_000u64;
+    let mut term_ms = 2_000u64;
+    let mut kill_ms = 1_000u64;
+    let mut term_sig = libc::SIGTERM;
+    if cc.length() > 0 && !cc.arg(0).is_undefined() {
+        let Some(opts) = cc.arg(0).as_object() else {
+            return Err(ctx.throw_type_error("shutdown options must be an object"));
+        };
+        eof_ms = get_pos_ms_prop(ctx, &opts, "eofTimeoutMs")?.unwrap_or(eof_ms);
+        term_ms = get_pos_ms_prop(ctx, &opts, "termTimeoutMs")?.unwrap_or(term_ms);
+        kill_ms = get_pos_ms_prop(ctx, &opts, "killTimeoutMs")?.unwrap_or(kill_ms);
+
+        let sig_val = opts.get_property_str(ctx, "termSignal")?;
+        if !sig_val.is_undefined() {
+            let Some(s) = sig_val.as_string(true) else {
+                return Err(ctx.throw_type_error("`termSignal` must be a string"));
+            };
+            let name = s.content().encode_utf8(false);
+            match name.as_ref() {
+                "SIGTERM" | "SIGINT" => {
+                    term_sig = crate::aike::signal::signal_number(name.as_ref())
+                        .map(|n| n as i32)
+                        .unwrap_or(libc::SIGTERM)
+                }
+                _ => {
+                    return Err(
+                        ctx.throw_range_error("`termSignal` must be \"SIGTERM\" or \"SIGINT\"")
+                    );
+                }
+            }
+        }
+    }
+
+    let pid = pid_from_this(ctx, &cc);
+
+    // Claim the child's exit state: absent → never spawned by us or already
+    // reaped; already shutting down → report without re-running the ladder.
+    let rx = {
+        let mut map = CHILD_EXITS.lock().unwrap();
+        let Some(state) = map.get_mut(&pid) else {
+            drop(map);
+            return resolved_stage(ctx, "already_closed");
+        };
+        if state.shutting_down.swap(true, Ordering::AcqRel) {
+            drop(map);
+            return resolved_stage(ctx, "already_closed");
+        }
+        state.exit_tx.subscribe()
+    };
+
+    // Close stdin so the child sees EOF (drop closes the pipe fd).
+    {
+        let this = cc.this();
+        if let Some(obj) = this.as_object()
+            && let Ok(stdin_val) = obj.get_property_str(ctx, "stdin")
+        {
+            let mut v = stdin_val;
+            JSStdioHandle::take_payload_of(&mut v);
+        }
+    }
+
+    let (promise, tx) = Promise::create_with_channel::<String>(ctx, |cx, stage| {
+        cx.create_string_from_str(&stage).map(JSValue::make_string)
+    })?;
+
+    tokio::spawn(async move {
+        let stage = shutdown_ladder(pid, rx, eof_ms, term_ms, kill_ms, term_sig).await;
+        let _ = PollSender::from(tx).send_async(stage.to_string()).await;
+    });
+
+    Ok(promise.into())
+}
+
 /// Read a string property strictly; Ok(None) when absent, TypeError when the
 /// value is present but not a string.
 fn get_str_prop_strict(
@@ -851,10 +1071,10 @@ fn parse_env_obj_strict(
     Ok(Some(map))
 }
 
-/// Kill the child and its whole process tree on timeout.
-/// Unix: the child was made a process-group leader via `process_group(0)`, so
-/// `kill(-pid)` takes down all descendants. Windows: `taskkill /T /F` walks
-/// the tree; falls back to TerminateProcess (direct process only).
+/// Kill a single child process. Used by `kill_all_children` (atexit /
+/// signal handler backstop) as a fallback when process-wrap handles are
+/// not available. On unix the child is typically a process-group leader,
+/// so `kill(-pid)` reaches all descendants.
 #[cfg(unix)]
 fn terminate_process_tree(pid: i32) {
     unsafe {
@@ -863,18 +1083,7 @@ fn terminate_process_tree(pid: i32) {
 }
 #[cfg(windows)]
 fn terminate_process_tree(pid: i32) {
-    use std::os::windows::process::CommandExt;
-    // Hide the taskkill console window when aike runs without a console.
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    let ok = std::process::Command::new("taskkill")
-        .args(["/PID", &pid.to_string(), "/T", "/F"])
-        .creation_flags(CREATE_NO_WINDOW)
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
-    if !ok {
-        unsafe { terminate_process(pid) };
-    }
+    unsafe { terminate_process(pid) };
 }
 
 /// Get signal number (Unix-only).
@@ -888,88 +1097,6 @@ fn get_signal_code(_status: &ExitStatus) -> Option<i32> {
     None
 }
 
-/// Windows: assign a child to a kill-on-close job object. When aike dies —
-/// normally, via crash, or via TerminateProcess — the OS closes every handle
-/// and kills the child (`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`). This covers
-/// paths no user-space handler can reach (the Windows analogue of Linux
-/// `PR_SET_PDEATHSIG`). Best-effort: failure falls back to the console-ctrl /
-/// atexit kill via the PID registry.
-#[cfg(windows)]
-pub(crate) mod win_job {
-    use std::sync::{LazyLock, Mutex};
 
-    use windows_sys::Win32::{
-        Foundation::{CloseHandle, HANDLE},
-        System::JobObjects::{
-            AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
-            SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-        },
-        System::Threading::{OpenProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE},
-    };
 
-    static JOBS: LazyLock<Mutex<Vec<(i32, HANDLE)>>> =
-        LazyLock::new(|| Mutex::new(Vec::new()));
 
-    /// Put `pid` in a kill-on-close job object. No-op on failure.
-    pub(crate) fn assign_abort_on_exit(pid: i32) {
-        unsafe {
-            // Anonymous job object (no name).
-            let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
-            if job.is_null() {
-                return;
-            }
-            let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
-            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-            if SetInformationJobObject(
-                job,
-                JobObjectExtendedLimitInformation,
-                &info as *const _ as *const _,
-                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
-            ) == 0
-            {
-                CloseHandle(job);
-                return;
-            }
-            let handle = OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, 0, pid as u32);
-            if handle.is_null() {
-                CloseHandle(job);
-                return;
-            }
-            let ok = AssignProcessToJobObject(job, handle);
-            CloseHandle(handle);
-            if ok == 0 {
-                CloseHandle(job);
-                return;
-            }
-            // Keep the job handle alive until process exit (or child exit).
-            JOBS.lock().unwrap().push((pid, job));
-        }
-    }
-
-    /// Drop the job for a child that already exited — no longer needs
-    /// kill-on-close, and avoids leaking job handles on long-running hosts.
-    pub(crate) fn release(pid: i32) {
-        let mut jobs = JOBS.lock().unwrap();
-        if let Some(idx) = jobs.iter().position(|&(p, _)| p == pid) {
-            unsafe { CloseHandle(jobs.remove(idx).1) };
-        }
-    }
-}
-
-/// Windows: console control handler (Ctrl-C / Ctrl-Break) — kill
-/// `abortOnParentExit` children synchronously, then let default handling
-/// terminate aike (which also closes the kill-on-close job handles).
-#[cfg(windows)]
-pub(crate) fn install_console_ctrl_handler() {
-    use windows_sys::Win32::System::Console::SetConsoleCtrlHandler;
-
-    unsafe extern "system" fn handler(_ctrl_type: u32) -> i32 {
-        kill_all_children();
-        // FALSE: continue to the next handler / default termination.
-        0
-    }
-    unsafe {
-        SetConsoleCtrlHandler(Some(handler), 1);
-    }
-}

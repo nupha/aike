@@ -429,4 +429,109 @@ declare module "mcp" {
     /** The URL mount path this server is served at. */
     readonly mountPath: string;
   }
+
+  // ---------------------------------------------------------------------------
+  // MCP clients
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Result of {@link StdioMcpClient.listTools} / {@link HttpMcpClient.listTools}
+   * — the raw `tools/list` response.
+   */
+  export interface McpToolsListResult {
+    tools: McpToolMeta[];
+    nextCursor?: string;
+  }
+
+  /** Shared client surface: connect → list/call → close. */
+  interface BaseMcpClient {
+    /**
+     * Spawn + initialize handshake (stdio) or open the streamable-HTTP
+     * session (http). Resolves once the connection is ready; rejects on
+     * handshake failure or timeout (`timeoutMs`).
+     */
+    connect(): Promise<void>;
+
+    /**
+     * Server identity captured during `connect()` — null before connecting.
+     */
+    readonly serverInfo: McpInitializeResult | null;
+
+    /** List the tools the server advertises. */
+    listTools(): Promise<McpToolsListResult>;
+
+    /**
+     * Call a tool. Returns the raw tool result envelope; a tool-level error
+     * is reported via `isError: true` (not a rejected promise). Rejects on
+     * transport/timeout errors or when the tool does not exist.
+     */
+    callTool(
+      name: string,
+      args?: Record<string, unknown>,
+    ): Promise<McpToolCallResult>;
+
+    /** Gracefully close the connection (stdio: EOF → SIGKILL ladder). Idempotent. */
+    close(): Promise<void>;
+  }
+
+  /** Config for {@link StdioMcpClient}. */
+  export interface StdioMcpClientConfig {
+    /** Required: executable to spawn. */
+    command: string;
+    /** Command-line arguments. */
+    args?: string[];
+    /** Environment for the child; when provided it REPLACES the entire env. */
+    env?: Record<string, string>;
+    /** Working directory for the child. */
+    cwd?: string;
+    /**
+     * Per-request timeout in milliseconds (applies to connect, listTools,
+     * callTool). Must be a positive integer. Default: 30000.
+     */
+    timeoutMs?: number;
+  }
+
+  /**
+   * MCP client over stdio transport. Spawns `<command> <args...>` and speaks
+   * JSON-RPC over its stdin/stdout. One-shot lifecycle: connect() once,
+   * then close(); create a new instance to reconnect.
+   *
+   * @example
+   * const c = new StdioMcpClient({ command: "aike", args: ["-m", "-e", "..."] });
+   * await c.connect();
+   * const { tools } = await c.listTools();
+   * const r = await c.callTool("add", { a: 1, b: 2 });
+   * await c.close();
+   */
+  export class StdioMcpClient implements BaseMcpClient {
+    constructor(config: StdioMcpClientConfig);
+    connect(): Promise<void>;
+    readonly serverInfo: McpInitializeResult | null;
+    listTools(): Promise<McpToolsListResult>;
+    callTool(name: string, args?: Record<string, unknown>): Promise<McpToolCallResult>;
+    close(): Promise<void>;
+  }
+
+  /** Config for {@link HttpMcpClient}. */
+  export interface HttpMcpClientConfig {
+    /** Required: streamable-HTTP endpoint, e.g. "http://localhost:3456/mcp". */
+    url: string;
+    /** Extra HTTP headers sent with every request. */
+    headers?: Record<string, string>;
+    /** Per-request timeout in milliseconds. Must be a positive integer. Default: 30000. */
+    timeoutMs?: number;
+  }
+
+  /**
+   * MCP client over Streamable HTTP transport. Session management
+   * (`Mcp-Session-Id`) and SSE responses are handled natively.
+   */
+  export class HttpMcpClient implements BaseMcpClient {
+    constructor(config: HttpMcpClientConfig);
+    connect(): Promise<void>;
+    readonly serverInfo: McpInitializeResult | null;
+    listTools(): Promise<McpToolsListResult>;
+    callTool(name: string, args?: Record<string, unknown>): Promise<McpToolCallResult>;
+    close(): Promise<void>;
+  }
 }

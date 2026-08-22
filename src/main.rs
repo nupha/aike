@@ -535,14 +535,13 @@ fn install_exit_cleanup() {
     {
         extern "C" fn exit_kill_children() {
             crate::aike::kill_all_children();
+            crate::mcp::kill_all_mcp_children();
         }
         unsafe {
             libc::atexit(exit_kill_children);
         }
     }
     crate::aike::install_default_signal_handlers();
-    #[cfg(windows)]
-    crate::aike::install_console_ctrl_handler();
 }
 
 /// Extract the `type` value from import attributes, returning `None` if

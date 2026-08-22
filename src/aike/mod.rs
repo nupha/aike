@@ -19,9 +19,6 @@ pub(crate) use {
     sys::{get_time_ns, which_executable},
 };
 
-#[cfg(windows)]
-pub(crate) use spawn::install_console_ctrl_handler;
-
 use zuqe::{FieldDef, JS_PROP_ENUMERABLE, ScopedContext};
 
 /// Build and register the `Aike` global object (Aike-specific APIs).

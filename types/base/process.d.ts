@@ -42,11 +42,31 @@ interface StdioHandle {
   flush(): void;
   /** Close this I/O handle. */
   close(): void;
+
   /**
-   * Register a callback for incoming data (streaming mode).
-   * Pass null to unregister.
+   * Register a callback for incoming raw byte chunks (streaming mode).
+   * One consumer per handle: if an onLine listener is already active, this
+   * registration is IGNORED with a printed warning (first registration
+   * wins). Unsubscribing (`null`) pauses reading — buffered stream data is
+   * preserved for the next subscription.
    */
   onData(callback: ((data: Uint8Array) => void) | null): void;
+  /**
+   * Register a newline-delimited text callback: incremental UTF-8 decoding,
+   * each complete line delivered as a string. Lines split at "\n" with one
+   * trailing "\r" stripped (CRLF handled); empty lines and lines over 1 MiB
+   * are dropped. At EOF any trailing partial line is flushed first, then
+   * `callback(null)` signals end-of-stream.
+   *
+   * One consumer per handle: if an onData listener is already active, this
+   * registration is IGNORED with a printed warning (first registration
+   * wins). Unsubscribing (`null`) pauses reading — data still buffered in
+   * the underlying stream is preserved for the next subscription, but a
+   * partially received line is discarded (an incomplete line belongs to no
+   * one).
+   */
+  onLine(callback: ((line: string) => void) | null): void;
+
   /** Async iterator over data chunks. */
   [Symbol.asyncIterator](): AsyncIterableIterator<Uint8Array>;
 }
@@ -252,7 +272,37 @@ declare namespace Aike {
     kill(signal?: string | number): boolean;
     /** Check if the child process is still running. */
     isRunning(): boolean;
+
+    /**
+     * Graceful shutdown: closes stdin (EOF) and waits `eofTimeoutMs`,
+     * then sends `termSignal` and waits `termTimeoutMs`, then SIGKILL and
+     * waits `killTimeoutMs`. Resolves with the stage at which the child
+     * exited, or "timed_out" if it survived SIGKILL's grace period.
+     * Idempotent — a second call resolves with "already_closed".
+     */
+    shutdown(options?: ShutdownOptions): Promise<ShutdownResult>;
   }
+
+  /** Options for {@link Subprocess.shutdown}. */
+  interface ShutdownOptions {
+    /** Close stdin, wait this long for the child to exit on its own. Default 2000. */
+    eofTimeoutMs?: number;
+    /** Send `termSignal`, wait this long. Default 2000. */
+    termTimeoutMs?: number;
+    /** Send SIGKILL, wait this long. Default 1000. */
+    killTimeoutMs?: number;
+    /** Second-stage signal. Default "SIGTERM". */
+    termSignal?: "SIGTERM" | "SIGINT";
+  }
+
+  /**
+   * The shutdown stage at which the child exited:
+   * - `"eof"` — exited after stdin EOF
+   * - `"term"` — exited after the term signal
+   * - `"kill"` — exited after SIGKILL
+   * - `"timed_out"` — still alive after SIGKILL's grace period
+   */
+  type ShutdownResult = "eof" | "term" | "kill" | "timed_out";
 
   interface SyncSubprocess {
     /** Child process PID. */

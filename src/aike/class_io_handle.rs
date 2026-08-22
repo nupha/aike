@@ -6,8 +6,8 @@ use std::{
     collections::HashMap,
     io::Write,
     sync::{
-        Arc,
-        atomic::{AtomicI32, Ordering},
+        Arc, LazyLock,
+        atomic::{AtomicBool, AtomicI32, Ordering},
     },
 };
 
@@ -116,154 +116,312 @@ impl IoPayload {
     }
 }
 
-enum OnDataMsg {
-    Data(i32, Vec<u8>),
+/// Max bytes of a single line accepted in Line mode — longer lines are dropped
+/// (parity with ravenclaw's NDJSON framing).
+const MAX_LINE_BYTES: usize = 1024 * 1024;
+
+// ---------------------------------------------------------------------------
+// Unified read subscription — ONE consumer per readable handle.
+//
+// A single byte-pump task per fd feeds raw chunks into one channel; framing
+// is applied at dispatch according to the active subscription mode:
+//
+//   onData → Data mode: raw chunks delivered as Uint8Array
+//   onLine → Line mode: split at \n, one trailing \r stripped (CRLF), empty /
+//            >MAX_LINE_BYTES lines dropped; at EOF the partial tail line is
+//            flushed first, then callback(null) signals end-of-stream
+//
+// Registering the other mode while a subscription is active throws TypeError;
+// `null` unsubscribes AND pauses the pump (nothing is consumed while nobody
+// listens, so a later subscriber still sees the buffered data). The pump
+// lives from first subscribe until EOF/error, and is reused across
+// re-subscribes — there are never two concurrent readers on one handle.
+// ---------------------------------------------------------------------------
+
+enum PumpMsg {
+    Chunk(i32, Vec<u8>),
     Eof(i32),
     Error(i32, String),
 }
 
-struct OnDataEntry {
-    callback: Object,
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ReadMode {
+    Data,
+    Line,
 }
 
-struct OnDataState {
-    entries: HashMap<i32, OnDataEntry>,
-    rx: Receiver<OnDataMsg>,
-    tx: Sender<OnDataMsg>,
+impl ReadMode {
+    fn name(self) -> &'static str {
+        match self {
+            ReadMode::Data => "onData",
+            ReadMode::Line => "onLine",
+        }
+    }
+}
+
+struct ReadSlot {
+    mode: ReadMode,
+    callback: Object,
+    /// Line mode: raw bytes not yet terminated by `\n`.
+    line_pending: Vec<u8>,
+}
+
+/// Pause/resume control shared with the pump task. `dead` is written only by
+/// the dispatcher (on Eof/Error) — single writer, no races with re-subscribe.
+#[derive(Clone)]
+struct PumpControl {
+    active: Arc<AtomicBool>,
+    wake: Arc<tokio::sync::Notify>,
+    dead: Arc<AtomicBool>,
+}
+
+impl PumpControl {
+    fn new() -> Self {
+        Self {
+            active: Arc::new(AtomicBool::new(true)),
+            wake: Arc::new(tokio::sync::Notify::new()),
+            dead: Arc::new(AtomicBool::new(false)),
+        }
+    }
 }
 
 thread_local! {
-    static ON_DATA_STATE: RefCell<Option<OnDataState>> = const { RefCell::new(None) };
+    /// Active subscriptions (at most one per fd). Wiped when the poller stops.
+    static READ_SLOTS: RefCell<HashMap<i32, ReadSlot>> = RefCell::new(HashMap::new());
+    /// Pump controls — persist across poller generations so a handle never
+    /// accumulates a second concurrent reader.
+    static PUMPS: RefCell<HashMap<i32, PumpControl>> = RefCell::new(HashMap::new());
 }
 
+/// Process-global pump channel. The poller may stop and restart freely; pump
+/// tasks keep sending into THIS receiver regardless of generation.
+static PUMP_CHANNEL: LazyLock<(Sender<PumpMsg>, Receiver<PumpMsg>)> =
+    LazyLock::new(|| crossbeam::channel::bounded(256));
+
+/// Whether a read-poller microtask is currently queued/running.
+static READ_POLLER_ACTIVE: AtomicBool = AtomicBool::new(false);
+
 pub(crate) fn gc_trace_io(tr: &mut GcTraceCtx) {
-    ON_DATA_STATE.with_borrow(|opt| {
-        if let Some(s) = opt.as_ref() {
-            for entry in s.entries.values() {
-                entry.callback.trace(tr);
-            }
+    READ_SLOTS.with_borrow(|slots| {
+        for slot in slots.values() {
+            slot.callback.trace(tr);
         }
     });
 }
 
-fn start_on_read_microtask(ctx: &mut ScopedContext) {
-    let rx = ON_DATA_STATE.with_borrow(|opt| opt.as_ref().unwrap().rx.clone());
+/// Block until `ctrl.active`. Registers wakeup interest BEFORE re-checking
+/// the flag (Notified::enable) so a concurrent resume can not be missed.
+async fn wait_active(ctrl: &PumpControl) {
+    if ctrl.active.load(Ordering::Acquire) {
+        return;
+    }
+
+    let mut notified = std::pin::pin!(ctrl.wake.notified());
+    loop {
+        notified.as_mut().enable();
+        if ctrl.active.load(Ordering::Acquire) {
+            return;
+        }
+        notified.as_mut().await;
+        notified.set(ctrl.wake.notified());
+    }
+}
+
+/// Pump for an owned reader (Stdin — no locking).
+async fn pump_direct(
+    tx: Sender<PumpMsg>,
+    fd: i32,
+    ctrl: PumpControl,
+    buf_size: usize,
+    mut reader: impl tokio::io::AsyncRead + Unpin + Send + 'static,
+) {
+    let mut buf = vec![0u8; buf_size];
+    loop {
+        wait_active(&ctrl).await;
+        match reader.read(&mut buf).await {
+            Ok(0) => {
+                let _ = tx.send(PumpMsg::Eof(fd));
+                return;
+            }
+            Ok(n) => {
+                let _ = tx.send(PumpMsg::Chunk(fd, buf[..n].to_vec()));
+            }
+            Err(e) => {
+                let _ = tx.send(PumpMsg::Error(fd, e.to_string()));
+                return;
+            }
+        }
+    }
+}
+
+/// Pump for a lock-based reader (File, PipeRead). The Mutex is acquired once
+/// per iteration so other tasks can interleave.
+async fn pump_locked<M: tokio::io::AsyncRead + Unpin + Send + 'static>(
+    tx: Sender<PumpMsg>,
+    fd: i32,
+    ctrl: PumpControl,
+    mutex: Arc<tokio::sync::Mutex<M>>,
+) {
+    let mut buf = vec![0u8; BUF_SIZE_PIPE];
+    loop {
+        wait_active(&ctrl).await;
+        let result = {
+            let mut guard = mutex.lock().await;
+            guard.read(&mut buf).await
+        };
+        match result {
+            Ok(0) => {
+                let _ = tx.send(PumpMsg::Eof(fd));
+                return;
+            }
+            Ok(n) => {
+                let _ = tx.send(PumpMsg::Chunk(fd, buf[..n].to_vec()));
+            }
+            Err(e) => {
+                let _ = tx.send(PumpMsg::Error(fd, e.to_string()));
+                return;
+            }
+        }
+    }
+}
+
+/// Strip ONE trailing `\r` (CRLF handling); a lone `\r` inside the line stays.
+fn strip_trailing_cr(bytes: &[u8]) -> &[u8] {
+    match bytes.last() {
+        Some(b'\r') => &bytes[..bytes.len() - 1],
+        _ => bytes,
+    }
+}
+
+/// One dispatched delivery, extracted under the state borrow and executed
+/// outside it (callbacks may re-enter the state).
+enum Delivery {
+    Data(Object, Vec<u8>),
+    Lines(Object, Vec<String>),
+    Eof(Object, Option<String>, bool), // callback, flushed partial line, was_line_mode
+    Error(Object, String),
+}
+
+fn call_cb(cx: &mut ScopedContext, cb: &Object, arg: JSValue) {
+    // Clear any exception the callback may have thrown (ES §9.5)
+    if cb.call(cx, JSValue::UNDEFINED, &[arg]).is_err() {
+        let _e = cx.take_exception();
+        #[cfg(debug_assertions)]
+        eprintln!("[swallow-exc] class_io_handle.rs:{}: {:?}", line!(), _e);
+    }
+}
+
+fn run_delivery(cx: &mut ScopedContext, d: Delivery) {
+    match d {
+        Delivery::Data(cb, data) => {
+            if let Ok(arg) = TypedArray::create_from_vec_u8(cx, data).map(JSValue::from) {
+                call_cb(cx, &cb, arg);
+            }
+        }
+        Delivery::Lines(cb, lines) => {
+            for line in lines {
+                if let Ok(arg) = cx
+                    .create_string_from_utf8(line.into_bytes())
+                    .map(JSValue::make_string)
+                {
+                    call_cb(cx, &cb, arg);
+                }
+            }
+        }
+        Delivery::Eof(cb, partial, was_line) => {
+            if was_line
+                && let Some(text) = partial
+                && let Ok(arg) = cx
+                    .create_string_from_utf8(text.into_bytes())
+                    .map(JSValue::make_string)
+            {
+                call_cb(cx, &cb, arg);
+            }
+            call_cb(cx, &cb, JSValue::NULL);
+        }
+        Delivery::Error(cb, err_msg) => {
+            if let Some(err_obj) =
+                cx.create_error_object(zuqe::ErrorKind::Internal, &err_msg, false)
+            {
+                call_cb(cx, &cb, err_obj.into());
+            }
+        }
+    }
+}
+
+/// Poller microtask: converts raw pump chunks into mode-framed deliveries.
+fn start_read_microtask(ctx: &mut ScopedContext) {
+    if READ_POLLER_ACTIVE.swap(true, Ordering::AcqRel) {
+        return; // a poller generation is already running
+    }
+    let rx = PUMP_CHANNEL.1.clone();
 
     crate::helpers::start_channel_poller(
         ctx,
         "io_handle",
         rx,
         |msg, cx| {
-            match msg {
-                OnDataMsg::Data(fd, data) => {
-                    let cb = ON_DATA_STATE.with_borrow(|opt| {
-                        opt.as_ref()
-                            .and_then(|s| s.entries.get(&fd).map(|e| e.callback))
-                    });
-                    if let Some(cb) = cb
-                        && let Ok(arg) = TypedArray::create_from_vec_u8(cx, data).map(JSValue::from)
-                    {
-                        // Clear any exception the callback may have thrown (ES §9.5)
-                        if cb.call(cx, JSValue::UNDEFINED, &[arg]).is_err() {
-                            let _e = cx.take_exception();
-                            #[cfg(debug_assertions)]
-                            eprintln!("[swallow-exc] class_io_handle.rs:{}: {:?}", line!(), _e);
+            let delivery = match msg {
+                PumpMsg::Chunk(fd, data) => READ_SLOTS.with_borrow_mut(|slots| {
+                    let slot = slots.get_mut(&fd)?;
+                    Some(match slot.mode {
+                        ReadMode::Data => Delivery::Data(slot.callback, data),
+                        ReadMode::Line => {
+                            slot.line_pending.extend_from_slice(&data);
+                            let mut lines = Vec::new();
+                            while let Some(pos) = slot.line_pending.iter().position(|&b| b == b'\n')
+                            {
+                                let line_bytes: Vec<u8> = slot.line_pending.drain(..=pos).collect();
+                                let line_bytes = &line_bytes[..line_bytes.len() - 1];
+                                let line_bytes = strip_trailing_cr(line_bytes);
+                                if line_bytes.is_empty() || line_bytes.len() > MAX_LINE_BYTES {
+                                    continue;
+                                }
+                                lines.push(String::from_utf8_lossy(line_bytes).into_owned());
+                            }
+                            Delivery::Lines(slot.callback, lines)
                         }
-                    }
-                }
-                OnDataMsg::Eof(fd) => {
-                    let cb = ON_DATA_STATE.with_borrow_mut(|opt| {
-                        opt.as_mut()
-                            .and_then(|s| s.entries.remove(&fd).map(|e| e.callback))
-                    });
-                    if let Some(cb) = cb {
-                        // Clear any exception the callback may have thrown (ES §9.5)
-                        if cb.call(cx, JSValue::UNDEFINED, &[JSValue::NULL]).is_err() {
-                            let _e = cx.take_exception();
-                            #[cfg(debug_assertions)]
-                            eprintln!("[swallow-exc] class_io_handle.rs:{}: {:?}", line!(), _e);
+                    })
+                }),
+                PumpMsg::Eof(fd) => READ_SLOTS.with_borrow_mut(|slots| {
+                    // Mark the pump dead so a later subscribe respawns it.
+                    PUMPS.with_borrow(|pumps| {
+                        if let Some(ctrl) = pumps.get(&fd) {
+                            ctrl.dead.store(true, Ordering::Release);
                         }
-                    }
-                }
-                OnDataMsg::Error(fd, err_msg) => {
-                    let cb = ON_DATA_STATE.with_borrow_mut(|opt| {
-                        opt.as_mut()
-                            .and_then(|s| s.entries.remove(&fd).map(|e| e.callback))
                     });
-                    if let Some(cb) = cb
-                        && let Some(err_obj) =
-                            cx.create_error_object(zuqe::ErrorKind::Internal, &err_msg, false)
-                    {
-                        // Clear any exception the callback may have thrown (ES §9.5)
-                        if cb.call(cx, JSValue::UNDEFINED, &[err_obj.into()]).is_err() {
-                            let _e = cx.take_exception();
-                            #[cfg(debug_assertions)]
-                            eprintln!("[swallow-exc] class_io_handle.rs:{}: {:?}", line!(), _e);
+                    let slot = slots.remove(&fd)?;
+                    let partial = if slot.mode == ReadMode::Line && !slot.line_pending.is_empty() {
+                        let stripped = strip_trailing_cr(&slot.line_pending);
+                        if !stripped.is_empty() && stripped.len() <= MAX_LINE_BYTES {
+                            Some(String::from_utf8_lossy(stripped).into_owned())
+                        } else {
+                            None
                         }
-                    }
-                }
+                    } else {
+                        None
+                    };
+                    let was_line = slot.mode == ReadMode::Line;
+                    Some(Delivery::Eof(slot.callback, partial, was_line))
+                }),
+                PumpMsg::Error(fd, err_msg) => READ_SLOTS.with_borrow_mut(|slots| {
+                    PUMPS.with_borrow(|pumps| {
+                        if let Some(ctrl) = pumps.get(&fd) {
+                            ctrl.dead.store(true, Ordering::Release);
+                        }
+                    });
+                    let slot = slots.remove(&fd)?;
+                    Some(Delivery::Error(slot.callback, err_msg))
+                }),
+            };
+            if let Some(d) = delivery {
+                run_delivery(cx, d);
             }
             true // always continue polling
         },
-        || ON_DATA_STATE.with_borrow(|opt| opt.as_ref().is_some_and(|s| !s.entries.is_empty())),
-        || ON_DATA_STATE.with_borrow_mut(|opt| *opt = None),
+        || READ_SLOTS.with_borrow(|slots| !slots.is_empty()),
+        || READ_POLLER_ACTIVE.store(false, Ordering::Release),
     );
-}
-
-/// Spawn an async read loop for an owned reader (Stdin — no locking).
-fn spawn_direct_read(
-    tx: Sender<OnDataMsg>,
-    fd: i32,
-    buf_size: usize,
-    mut reader: impl tokio::io::AsyncRead + Unpin + Send + 'static,
-) {
-    tokio::spawn(async move {
-        let mut buf = vec![0u8; buf_size];
-        loop {
-            match reader.read(&mut buf).await {
-                Ok(0) => {
-                    let _ = tx.send(OnDataMsg::Eof(fd));
-                    break;
-                }
-                Ok(n) => {
-                    let _ = tx.send(OnDataMsg::Data(fd, buf[..n].to_vec()));
-                }
-                Err(e) => {
-                    let _ = tx.send(OnDataMsg::Error(fd, e.to_string()));
-                    break;
-                }
-            }
-        }
-    });
-}
-
-/// Spawn an async read loop for a lock-based reader (File, PipeRead).
-/// The Mutex is acquired once per iteration so other tasks can interleave.
-fn spawn_locked_read<M: tokio::io::AsyncRead + Unpin + Send + 'static>(
-    tx: Sender<OnDataMsg>,
-    fd: i32,
-    buf_size: usize,
-    mutex: Arc<tokio::sync::Mutex<M>>,
-) {
-    tokio::spawn(async move {
-        let mut buf = vec![0u8; buf_size];
-        loop {
-            let mut guard = mutex.lock().await;
-            match guard.read(&mut buf).await {
-                Ok(0) => {
-                    let _ = tx.send(OnDataMsg::Eof(fd));
-                    break;
-                }
-                Ok(n) => {
-                    let _ = tx.send(OnDataMsg::Data(fd, buf[..n].to_vec()));
-                }
-                Err(e) => {
-                    let _ = tx.send(OnDataMsg::Error(fd, e.to_string()));
-                    break;
-                }
-            }
-        }
-    });
 }
 
 fn get_io<'a>(ctx: &mut ScopedContext, val: &'a JSValue) -> Result<&'a IoPayload, i32> {
@@ -272,7 +430,8 @@ fn get_io<'a>(ctx: &mut ScopedContext, val: &'a JSValue) -> Result<&'a IoPayload
         .ok_or_else(|| ctx.throw_internal_error("invalid IoHandle instance"))
 }
 
-fn js_fh_onData(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+/// Shared implementation of onData / onLine — the mode is the only difference.
+fn fh_subscribe(ctx: &mut ScopedContext, cc: CallContext, mode: ReadMode) -> JSResult {
     let this = cc.this();
     let desc = get_io(ctx, &this)?;
     let raw_fd = desc.as_virt_fd();
@@ -284,56 +443,115 @@ fn js_fh_onData(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     let arg = cc.arg(0);
     if arg.is_null() {
-        ON_DATA_STATE.with_borrow_mut(|opt| {
-            if let Some(s) = opt.as_mut() {
-                s.entries.remove(&raw_fd);
+        // Unsubscribe: drop the slot and pause the pump so nothing is
+        // consumed while nobody listens.
+        READ_SLOTS.with_borrow_mut(|slots| {
+            if slots.remove(&raw_fd).is_none() {
+                return;
             }
+            PUMPS.with_borrow(|pumps| {
+                if let Some(ctrl) = pumps.get(&raw_fd)
+                    && !ctrl.dead.load(Ordering::Acquire)
+                {
+                    ctrl.active.store(false, Ordering::Release);
+                    ctrl.wake.notify_one();
+                }
+            });
         });
         return Ok(JSValue::UNDEFINED);
     }
     let callback = arg.ensure_callable(ctx)?;
 
-    // Initialize state if needed
-    let need_microtask = ON_DATA_STATE.with_borrow(|opt| opt.is_none());
-    if need_microtask {
-        let (tx, rx) = crossbeam::channel::bounded::<OnDataMsg>(256);
-        ON_DATA_STATE.with_borrow_mut(|opt| {
-            *opt = Some(OnDataState {
-                entries: HashMap::new(),
-                rx,
-                tx,
-            });
-        });
+    // Conflict / replace check. First registration wins: a later conflicting
+    // mode is ignored with a warning (not an error), same mode just replaces
+    // the callback.
+    enum SubAction {
+        Replace,
+        WarnIgnore,
+        Subscribe,
     }
-
-    // Replace callback if already registered, don't re-spawn task
-    let already_registered = ON_DATA_STATE.with_borrow(|opt| {
-        opt.as_ref()
-            .is_some_and(|s| s.entries.contains_key(&raw_fd))
-    });
-
-    ON_DATA_STATE.with_borrow_mut(|opt| {
-        if let Some(s) = opt.as_mut() {
-            s.entries.insert(raw_fd, OnDataEntry { callback });
+    let action = READ_SLOTS.with_borrow_mut(|slots| {
+        match slots.get_mut(&raw_fd) {
+            Some(slot) if slot.mode != mode => SubAction::WarnIgnore,
+            Some(slot) => {
+                slot.callback = callback;
+                SubAction::Replace
+            }
+            None => SubAction::Subscribe,
         }
     });
 
-    // Spawn async read loop for new registrations
-    if !already_registered {
-        let tx = ON_DATA_STATE.with_borrow(|opt| opt.as_ref().unwrap().tx.clone());
+    match action {
+        SubAction::Replace => return Ok(JSValue::UNDEFINED),
+        SubAction::WarnIgnore => {
+            let existing = READ_SLOTS.with_borrow(|slots| {
+                slots.get(&raw_fd).map(|slot| slot.mode.name()).unwrap_or("?")
+            });
+            eprintln!(
+                "[aike] warning: {}() ignored — this handle already has an active {} listener (first registration wins). Call {}(null) first to switch modes.",
+                mode.name(),
+                existing,
+                existing,
+            );
+            return Ok(JSValue::UNDEFINED);
+        }
+        SubAction::Subscribe => {}
+    }
 
+    // Fresh subscription: insert the slot and ensure a live pump.
+    let (ctrl, spawn_pump) = {
+        READ_SLOTS.with_borrow_mut(|slots| {
+            slots.insert(
+                raw_fd,
+                ReadSlot {
+                    mode,
+                    callback,
+                    line_pending: Vec::new(),
+                },
+            );
+        });
+        let (ctrl, needs_spawn) = PUMPS.with_borrow_mut(|pumps| match pumps.get(&raw_fd) {
+            // Live pump: reuse and resume.
+            Some(c) if !c.dead.load(Ordering::Acquire) => {
+                c.active.store(true, Ordering::Release);
+                c.wake.notify_one();
+                (c.clone(), false)
+            }
+            // Dead pump (stream ended earlier): reset and spawn a new one.
+            Some(c) => {
+                c.dead.store(false, Ordering::Release);
+                c.active.store(true, Ordering::Release);
+                (c.clone(), true)
+            }
+            None => {
+                let c = PumpControl::new();
+                pumps.insert(raw_fd, c.clone());
+                (c, true)
+            }
+        });
+        (ctrl, needs_spawn)
+    };
+
+    if spawn_pump {
+        let tx = PUMP_CHANNEL.0.clone();
         match desc {
             IoPayload::Stdin => {
-                spawn_direct_read(tx, raw_fd, desc.read_buf_size(), tokio::io::stdin());
+                tokio::spawn(pump_direct(
+                    tx,
+                    raw_fd,
+                    ctrl,
+                    desc.read_buf_size(),
+                    tokio::io::stdin(),
+                ));
             }
             IoPayload::File(fd, _) => {
-                spawn_locked_read(tx, raw_fd, desc.read_buf_size(), fd.clone());
+                tokio::spawn(pump_locked(tx, raw_fd, ctrl, fd.clone()));
             }
             IoPayload::PipeRead(reader, _) => {
-                spawn_locked_read(tx, raw_fd, BUF_SIZE_PIPE, reader.clone());
+                tokio::spawn(pump_locked(tx, raw_fd, ctrl, reader.clone()));
             }
             IoPayload::PipeWrite(..) => {
-                let _ = tx.send(OnDataMsg::Error(
+                let _ = tx.send(PumpMsg::Error(
                     raw_fd,
                     "cannot read from pipe writer".to_string(),
                 ));
@@ -342,12 +560,20 @@ fn js_fh_onData(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         }
     }
 
-    // Start the polling microtask if state was just created
-    if need_microtask {
-        start_on_read_microtask(ctx);
-    }
+    // Ensure a read-poller generation is running (no-op if one already is).
+    start_read_microtask(ctx);
 
     Ok(JSValue::UNDEFINED)
+}
+
+/// onData(callback) — raw chunk delivery (Uint8Array per read), `null` at EOF.
+fn js_fh_onData(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    fh_subscribe(ctx, cc, ReadMode::Data)
+}
+
+/// onLine(callback) — newline-delimited text framing; see module docs above.
+fn js_fh_onLine(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    fh_subscribe(ctx, cc, ReadMode::Line)
 }
 
 /// text() — async read as string via the real fd
@@ -1130,6 +1356,7 @@ const STDIO_HANDLE_PROTO: &[FieldDef] = &[
     FieldDef::FUNC("read", 1, js_fh_read, 0),
     FieldDef::FUNC("stat", 0, js_fh_stat, 0),
     FieldDef::FUNC("onData", 1, js_fh_onData, 0),
+    FieldDef::FUNC("onLine", 1, js_fh_onLine, 0),
     FieldDef::FUNC("[Symbol.asyncIterator]", 0, js_fh_asyncIterator, 0),
 ];
 
@@ -1199,6 +1426,7 @@ const FILE_HANDLE_PROTO: &[FieldDef] = &[
     FieldDef::FUNC("read", 1, js_fh_read, 0),
     FieldDef::FUNC("stat", 0, js_fh_stat, 0),
     FieldDef::FUNC("onData", 1, js_fh_onData, 0),
+    FieldDef::FUNC("onLine", 1, js_fh_onLine, 0),
     FieldDef::FUNC("[Symbol.asyncIterator]", 0, js_fh_asyncIterator, 0),
 ];
 
