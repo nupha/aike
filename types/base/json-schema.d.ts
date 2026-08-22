@@ -42,7 +42,7 @@ declare module "json-schema" {
      * // → { id: 1 }
      * ```
      */
-    extract(text: string): unknown;
+    extractJSON(text: string): unknown;
 
     /**
      * Validate a parsed value against a JSON-Schema, with optional coercion.
@@ -62,7 +62,7 @@ declare module "json-schema" {
      * // → { ok: true, value: { n: 42 }, errors: [] }
      * ```
      */
-    validate(
+    validateSchema(
       value: unknown,
       schema: Schema,
       mode?: "fail" | "coerce" | "best-effort",

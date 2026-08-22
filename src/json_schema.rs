@@ -312,7 +312,7 @@ fn coerce_or_check(
 // ── native function callbacks ──
 
 /// `jsonSchema.extract(text: string): unknown`
-fn js_json_schema_extract(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+fn js_json_schema_extractJSON(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let text = cc.arg(0).to_string(ctx)?;
     let s = text.content().encode_utf8(false).to_string();
 
@@ -322,8 +322,8 @@ fn js_json_schema_extract(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
     }
 }
 
-/// `jsonSchema.validate(value, schema, mode?): { ok, value, errors }`
-fn js_json_schema_validate(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+/// `JSONSchema.validateSchema(value, schema, mode?): { ok, value, errors }`
+fn js_json_schema_validateSchema(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let value_arg = cc.arg(0);
     let schema_arg = cc.arg(1);
 
@@ -335,7 +335,11 @@ fn js_json_schema_validate(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
     let mode: String = if cc.arg(2).is_undefined() {
         "best-effort".into()
     } else {
-        cc.arg(2).to_string(ctx)?.content().encode_utf8(false).to_string()
+        cc.arg(2)
+            .to_string(ctx)?
+            .content()
+            .encode_utf8(false)
+            .to_string()
     };
 
     let coerce = mode == "coerce";
@@ -365,7 +369,7 @@ fn js_json_schema_validate(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
 }
 
 /// `JSONSchema.forExample(schema): unknown`
-fn js_json_schema_for_example(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+fn js_json_schema_forExample(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let schema: serde_json::Value = from_js(ctx, &cc.arg(0))
         .map_err(|e| ctx.throw_type_error(&format!("jsonSchema.schemaExample: {e}")))?;
 
@@ -411,7 +415,9 @@ fn schema_example(schema: &serde_json::Value) -> serde_json::Value {
         _ => {
             // No type — if properties exist, treat as object.
             if obj.contains_key("properties") {
-                return schema_example(&serde_json::json!({"type": "object", "properties": obj.get("properties")}));
+                return schema_example(
+                    &serde_json::json!({"type": "object", "properties": obj.get("properties")}),
+                );
             }
             serde_json::Value::Null
         }
@@ -419,7 +425,7 @@ fn schema_example(schema: &serde_json::Value) -> serde_json::Value {
 }
 
 /// `jsonSchema.matchesType(value, type): boolean`
-fn js_json_schema_matches_type(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+fn js_json_schema_matchesType(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let value_arg = cc.arg(0);
     let type_arg = cc.arg(1);
 
@@ -435,19 +441,17 @@ fn js_json_schema_matches_type(ctx: &mut ScopedContext, cc: CallContext) -> JSRe
 // ── module registration ──
 
 const JSON_SCHEMA_FUNCS: &[FieldDef] = &[
-    FieldDef::FUNC("extract", 1, js_json_schema_extract, 0),
-    FieldDef::FUNC("validate", 2, js_json_schema_validate, 0),
-    FieldDef::FUNC("forExample", 1, js_json_schema_for_example, 0),
-    FieldDef::FUNC("matchesType", 2, js_json_schema_matches_type, 0),
+    FieldDef::FUNC("extractJSON", 1, js_json_schema_extractJSON, 0),
+    FieldDef::FUNC("validateSchema", 2, js_json_schema_validateSchema, 0),
+    FieldDef::FUNC("forExample", 1, js_json_schema_forExample, 0),
+    FieldDef::FUNC("matchesType", 2, js_json_schema_matchesType, 0),
 ];
 
-const MOD_JSON_SCHEMA_ENTRIES: &[FieldDef] = &[
-    FieldDef::OBJECT(
-        "default",
-        JSON_SCHEMA_FUNCS,
-        zuqe::JS_PROP_ENUMERABLE,
-    ),
-];
+const MOD_JSON_SCHEMA_ENTRIES: &[FieldDef] = &[FieldDef::OBJECT(
+    "default",
+    JSON_SCHEMA_FUNCS,
+    zuqe::JS_PROP_ENUMERABLE,
+)];
 
 pub fn init_mod_json_schema(ctx: &mut ScopedContext) -> Result<(), i32> {
     ctx.create_module("json-schema", MOD_JSON_SCHEMA_ENTRIES)?;
