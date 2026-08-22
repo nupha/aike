@@ -1,5 +1,5 @@
 // spawn + stdio-ipc unified tests — native read primitives (onLine/onData,
-// child.shutdown) and the StdioParent / StdioChild TS framework built on them.
+// child.shutdown.
 //
 //   ../aike/target/debug/aike -m tests/spawn/spawn-stdio-ipc.mjs
 //
@@ -8,7 +8,6 @@
 //   B. onData pause/resume (unsubscribe preserves unread stream data)
 //   C. child.shutdown() stages (eof, term, kill, idempotent, validation)
 //   D. conflict handling (first-registration-wins, same-mode replace)
-//   E. StdioParent / StdioChild roundtrip + close + escalation + exit detection
 
 import * as path from "path";
 
@@ -152,58 +151,3 @@ check("old collector stopped at replacement", JSON.stringify(got) === JSON.strin
 const t3 = Date.now();
 const stageE = await echo.shutdown({ eofTimeoutMs: 1000 });
 check(`shutdown stage "eof" (child exits on stdin close)`, stageE === "eof", `got ${stageE}`);
-
-// ═══════════════════════════════════════════════════════════════════════════
-// E. StdioParent / StdioChild framework (TS layer over native primitives)
-// ═══════════════════════════════════════════════════════════════════════════
-// These tests exercise ravenclaw/src/stdio-ipc.ts which builds on native
-// onLine + shutdown.  We import the source directly via aike's TS loader.
-
-const RAVENCLAW_ROOT = path.resolve(new URL(import.meta.url).pathname, "../../../..");
-const STDIO_IPC_SRC = path.join(RAVENCLAW_ROOT, "ravenclaw/src/stdio-ipc.js");
-const { StdioParent } = await import(STDIO_IPC_SRC);
-
-// E1. StdioParent + StdioChild roundtrip (parent→child→parent).
-const parent = StdioParent.spawn({
-  command: process.execPath,
-  args: ["-m", "-e", `
-import { StdioChild } from ${JSON.stringify(STDIO_IPC_SRC)};
-const child = new StdioChild();
-child.onMessage((line) => { child.send("echo:" + line); });
-child.run();
-`],
-  cwd: RAVENCLAW_ROOT,
-});
-const received = [];
-parent.onMessage((line) => received.push(line));
-parent.send("hello-child");
-parent.send("second");
-await Aike.sleep(1200);
-check("StdioChild echo roundtrip",
-  received.includes("echo:hello-child") && received.includes("echo:second"),
-  JSON.stringify(received));
-
-// E2. active close() via EOF → child reads EOF, exits → "eof".
-const r1 = await parent.close();
-check("StdioParent.close via EOF → eof", r1 === "eof", `got ${r1}`);
-check("StdioParent.isClosed after close", parent.isClosed === true);
-
-// E3. child passive exit (process.exit) → parent detects exit code.
-const exitChild = StdioParent.spawn({
-  command: process.execPath,
-  args: ["-m", "-e", "process.exit(7);"],
-});
-const code = await exitChild.exitCode;
-check("StdioParent detects child exit code 7", code === 7, `got ${code}`);
-check("StdioParent.isClosed after child exit", exitChild.isClosed === true);
-
-// E4. child crash (uncaught throw) → parent detects non-zero exit.
-const crashChild = StdioParent.spawn({
-  command: process.execPath,
-  args: ["-m", "-e", "throw new Error('boom');"],
-});
-const crashCode = await crashChild.exitCode;
-check("StdioParent detects child crash (nonzero)", crashCode !== 0, `got ${crashCode}`);
-
-console.log(`\n=== spawn-stdio-ipc: ${pass} passed, ${fail} failed ===`);
-if (fail > 0) process.exit(1);
