@@ -1,19 +1,21 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-use std::{error::Error, time::Duration};
+use std::{error::Error, future::Future, pin::Pin, sync::Arc, time::Duration};
 
 use base64::Engine;
 use reqwest::cookie::CookieStore;
 use zuqe::{ErrorKind, Exception, JSResult, JSValue, ScopedContext};
 
-use super::{
-    cors::{
-        check_preflight, cors_safelisted_method, preflight_cache_hit, preflight_cache_key,
-        preflight_cache_store, should_append_origin,
-    },
-    headers::HeaderList,
-};
+/// Async gate invoked by the redirect loop before each hop that the request
+/// owner flagged as needing one. This is a neutral extension point: the
+/// WHATWG fetch layer installs a CORS-preflight gate here (browser builds);
+/// everything else passes `None`. Arguments: `(client, hop URL, hop referrer,
+/// credentials-stripped flag)`. An `Err(message)` aborts the whole fetch with
+/// that error message.
+pub(crate) type BeforeHopFuture = Pin<Box<dyn Future<Output = Result<(), String>> + Send>>;
+pub(crate) type BeforeHopHook =
+    Arc<dyn Fn(&reqwest::Client, &str, &str, bool) -> BeforeHopFuture + Send + Sync>;
 
 /// Per-request data passed to [`perform_request`].
 ///
@@ -35,13 +37,12 @@ pub(crate) struct TransportRequest {
     /// Whether the body may be sent a second time. False for a stream body,
     /// which the first attempt consumes, disabling the 421 retry.
     pub replayable: bool,
-    /// CORS-preflight inputs. When `Some`, each redirect hop that is CORS-tainted
-    /// runs a fresh OPTIONS preflight against that hop's URL before the actual
-    /// request (Fetch spec: HTTP-redirect-fetch re-enters HTTP-network-or-cache
-    /// fetch, which re-runs CORS-preflight for the new URL).
-    pub preflight: Option<PreflightCtx>,
-    /// Whether the request is `mode: "cors"` (drives per-hop Origin recomputation
-    /// and the opaque-origin rule on cross-origin redirects).
+    /// Per-hop gate (e.g. a CORS preflight), invoked before the initial hop
+    /// and before every redirect hop the request is tainted on. `None` when
+    /// no gate applies.
+    pub before_hop: Option<BeforeHopHook>,
+    /// Whether the request follows the WHATWG cors-mode rules (per-hop Origin
+    /// recomputation and the opaque-origin rule on cross-origin redirects).
     pub cors_mode: bool,
     /// Whether the initial request is CORS-tainted (cors mode + cross-origin).
     pub cors_tainted: bool,
@@ -56,32 +57,6 @@ pub(crate) struct TransportRequest {
     /// (the WHATWG `fetch` path). The low-level HTTP client API keeps reqwest's
     /// own per-client cookie store and does not touch the global jar.
     pub use_shared_cookies: bool,
-}
-
-/// CORS-preflight inputs carried on a `TransportRequest`. The requested-header
-/// names and method are constant across redirect hops; only the target URL and
-/// CORS taint flag vary. `possible` is precomputed: whether this request *would*
-/// need a preflight once it is CORS-tainted (non-safelisted method or header).
-/// A tainted hop runs a preflight iff `possible` is set.
-pub(crate) struct PreflightCtx {
-    /// Whether a preflight is ever needed for this request (method or header
-    /// not CORS-safelisted). Drives the per-hop decision once tainted.
-    pub possible: bool,
-    /// The request's method (for `Access-Control-Request-Method` and method
-    /// checking).
-    pub method: String,
-    /// Sorted, comma-joined non-safelisted request-header names
-    /// (`Access-Control-Request-Headers`).
-    pub request_headers: String,
-    /// Serialized client origin (for the preflight's `Origin` header and the
-    /// `Access-Control-Allow-Origin` comparison).
-    pub client_origin: String,
-    /// Whether the fetch `credentials` mode is "include" (drives the
-    /// credentialed-preflight Allow-Origin/Allow-Credentials rules).
-    pub credentials_include: bool,
-    /// `User-Agent` to send on the preflight (must match the actual request so
-    /// the server can verify it, e.g. WPT `checkUserAgentHeaderInPreflight`).
-    pub user_agent: String,
 }
 
 /// Policy inputs carried across redirects so each hop can recompute its own
@@ -388,7 +363,7 @@ async fn follow_redirects<F, Fut>(
     cors_tainted: bool,
     cors_client_origin: &str,
     client: &reqwest::Client,
-    preflight: Option<&PreflightCtx>,
+    before_hop: Option<&BeforeHopHook>,
     send: F,
 ) -> Result<(reqwest::Response, bool), TransportError>
 where
@@ -434,26 +409,16 @@ where
             credentials_stripped = true;
         }
 
-        // A CORS-tainted hop that needs preflight must complete an OPTIONS
-        // preflight against this hop's URL before the actual request; a failed
-        // preflight is a network error (and the fetch never reaches the target).
-        // Once credentials were stripped on a cross-origin redirect, the
-        // preflight is obsolete when the method is CORS-safelisted and the only
-        // unsafe request headers were the (now removed) credentials headers.
-        let skip_preflight = credentials_stripped
-            && preflight
-                .map(|pf| preflight_obsolete_after_credential_strip(pf))
-                .unwrap_or(false);
+        // A CORS-tainted hop runs the owner's per-hop gate before the actual
+        // request (browser builds: a CORS OPTIONS preflight against this hop's
+        // URL — Fetch spec: a redirect re-enters HTTP-network-or-cache fetch,
+        // which re-runs CORS-preflight for the new URL). A failed gate is a
+        // network error and the fetch never reaches the target.
         if tainted
-            && let Some(pf) = preflight
-            && pf.possible
-            && !skip_preflight
-            && !run_preflight_hop(client, pf, &url, &referrer).await
+            && let Some(hook) = before_hop
+            && let Err(msg) = hook(client, &url, &referrer, credentials_stripped).await
         {
-            return Err(TransportError {
-                code: "cors",
-                message: "request failed: CORS preflight did not succeed".into(),
-            });
+            return Err(TransportError { code: "cors", message: msg });
         }
 
         let resp = send(
@@ -569,77 +534,6 @@ where
     })
 }
 
-/// Run (and validate) a CORS preflight against `url`, consulting the preflight
-/// cache first. Returns `true` on success. A failed preflight — network error,
-/// a redirect/4xx/5xx status, or missing Allow-* headers — returns `false` and
-/// aborts the fetch.
-async fn run_preflight_hop(
-    client: &reqwest::Client,
-    pf: &PreflightCtx,
-    url: &str,
-    referrer: &str,
-) -> bool {
-    let requested_headers: Vec<String> = if pf.request_headers.is_empty() {
-        Vec::new()
-    } else {
-        pf.request_headers
-            .split(',')
-            .map(|s| s.to_string())
-            .collect()
-    };
-    let cache_key = preflight_cache_key(&pf.client_origin, url, &pf.method, &requested_headers);
-    if preflight_cache_hit(&cache_key) {
-        return true;
-    }
-
-    let preflight = PreflightRequest {
-        url: url.to_string(),
-        request_method: pf.method.clone(),
-        request_headers: pf.request_headers.clone(),
-        origin: pf.client_origin.clone(),
-        user_agent: pf.user_agent.clone(),
-        referrer: referrer.to_string(),
-    };
-    let tr = match perform_preflight(client, &preflight).await {
-        Ok(tr) => tr,
-        Err(_) => return false,
-    };
-    let headers = HeaderList::from_vec(tr.headers);
-    if !check_preflight(
-        tr.status,
-        &headers,
-        &pf.client_origin,
-        pf.credentials_include,
-        &pf.method,
-        &requested_headers,
-    ) {
-        return false;
-    }
-    // Cache the successful preflight per `Access-Control-Max-Age`.
-    let max_age = headers
-        .get("Access-Control-Max-Age")
-        .and_then(|v| v.trim().parse::<u64>().ok())
-        .unwrap_or(0);
-    preflight_cache_store(&cache_key, max_age);
-    true
-}
-
-/// Whether a preflight becomes unnecessary once credentials headers were
-/// stripped on a cross-origin redirect. True when the method is CORS-safelisted
-/// and every unsafe request header the preflight was asking about is one of the
-/// credentials headers (`Authorization`/`Proxy-Authorization`/`Cookie`) that a
-/// cross-origin redirect removes. In that case the stripped request no longer
-/// triggers a preflight (Fetch spec re-runs CORS-preflight per hop against the
-/// actual header set).
-fn preflight_obsolete_after_credential_strip(pf: &PreflightCtx) -> bool {
-    if !cors_safelisted_method(&pf.method) {
-        return false;
-    }
-    pf.request_headers.split(',').all(|h| {
-        let h = h.trim().to_ascii_lowercase();
-        h == "authorization" || h == "proxy-authorization" || h == "cookie"
-    })
-}
 
 /// Origin (scheme://host[:port]) of a URL string, or `None` if unparsable.
 fn origin_of(url: &str) -> Option<String> {
@@ -686,76 +580,6 @@ fn redirect_target(resp: &reqwest::Response, current: &str) -> Option<String> {
     Some(joined)
 }
 
-/// Preflight request parameters for a CORS preflight.
-#[derive(Clone)]
-pub(crate) struct PreflightRequest {
-    pub url: String,
-    /// Value of `Access-Control-Request-Method` (the request's method).
-    pub request_method: String,
-    /// Sorted, comma-joined `Access-Control-Request-Headers` value (may be empty).
-    pub request_headers: String,
-    /// The client's serialized origin (for the `Origin` header).
-    pub origin: String,
-    /// `User-Agent` to send on the preflight (must match the actual request so
-    /// the server can verify it, e.g. WPT's `checkUserAgentHeaderInPreflight`).
-    pub user_agent: String,
-    /// `Referer` to send on the preflight (same value as the actual request).
-    /// "about:client" or empty means no `Referer` header.
-    pub referrer: String,
-}
-
-/// Send a CORS preflight (OPTIONS) request and return the response status and
-/// header list for validation. Preflights never follow redirects (a redirect
-/// is a hard failure per the Fetch spec), so this is a single request.
-pub(crate) async fn perform_preflight(
-    client: &reqwest::Client,
-    preflight: &PreflightRequest,
-) -> Result<TransportResponse, TransportError> {
-    let mut rb = client
-        .request(reqwest::Method::OPTIONS, &preflight.url)
-        .header(reqwest::header::ACCEPT, "*/*")
-        .header("Origin", &preflight.origin)
-        .header("Access-Control-Request-Method", &preflight.request_method)
-        .header("User-Agent", &preflight.user_agent);
-
-    if !preflight.request_headers.is_empty() {
-        rb = rb.header("Access-Control-Request-Headers", &preflight.request_headers);
-    }
-    // The preflight carries the same `Referer` as the actual request (the UA
-    // sets it; WPT checks it via `x-preflight-referrer`).
-    if !preflight.referrer.is_empty() && preflight.referrer != "about:client" {
-        rb = rb.header("Referer", &preflight.referrer);
-    }
-
-    let resp = rb.send().await.map_err(|e| TransportError {
-        code: classify(&e),
-        message: format!("preflight failed: {e}"),
-    })?;
-
-    let status = resp.status();
-    let headers: Vec<(String, String)> = resp
-        .headers()
-        .iter()
-        .map(|(k, v)| {
-            let vs = v.as_bytes().iter().map(|&b| b as char).collect::<String>();
-            (k.to_string(), vs)
-        })
-        .collect();
-    let headers = combine_content_length_headers(headers);
-
-    Ok(TransportResponse {
-        status: status.as_u16(),
-        status_text: canonical_status_text(status.as_u16()),
-        headers,
-        content_type: String::new(),
-        content_length: None,
-        http_version: version_str(resp.version()),
-        resp: None,
-        final_url: preflight.url.clone(),
-        synthetic_body: None,
-        origin_opaque: false,
-    })
-}
 
 /// Perform an HTTP request on a pre-built `reqwest::Client`.
 ///
@@ -842,7 +666,7 @@ pub(crate) async fn perform_request(
             headers.retain(|(k, _)| !k.eq_ignore_ascii_case("origin"));
             let origin_value: Option<String> = if origin_opaque {
                 Some("null".to_string())
-            } else if should_append_origin(&method.to_string(), cross_origin_hop) {
+            } else if !method_is_safe(method.as_str()) || cross_origin_hop {
                 Some(req.cors_client_origin.clone())
             } else {
                 None
@@ -931,7 +755,7 @@ pub(crate) async fn perform_request(
     let cors_tainted = req.cors_tainted;
     let cors_client_origin = req.cors_client_origin.clone();
     let cors_mode = req.cors_mode;
-    let preflight = req.preflight.as_ref();
+    let before_hop = req.before_hop.as_ref();
     // Whether the request's origin became opaque (a unique opaque origin) via a
     // cross-origin redirect. Reported on the response so the WHATWG fetch layer
     // can run the final CORS check against the request's actual origin ("null").
@@ -947,7 +771,7 @@ pub(crate) async fn perform_request(
                 cors_tainted,
                 &cors_client_origin,
                 client,
-                preflight,
+                before_hop,
                 send_with_retry,
             )
             .await?;
@@ -956,14 +780,10 @@ pub(crate) async fn perform_request(
         }
         None => {
             if cors_tainted
-                && let Some(pf) = preflight
-                && pf.possible
-                && !run_preflight_hop(client, pf, &req.url, &req.referrer).await
+                && let Some(hook) = before_hop
+                && let Err(msg) = hook(client, &req.url, &req.referrer, false).await
             {
-                return Err(TransportError {
-                    code: "cors",
-                    message: "request failed: CORS preflight did not succeed".into(),
-                });
+                return Err(TransportError { code: "cors", message: msg });
             }
             send_with_retry(
                 req.method.clone(),

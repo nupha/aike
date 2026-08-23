@@ -121,6 +121,16 @@ pub(crate) fn check_request_method(ctx: &mut ScopedContext, method: &str) -> Res
     Ok(())
 }
 
+/// Fetch spec "method normalize": uppercase the method if it is a
+/// byte-case-insensitive match for one of DELETE, GET, HEAD, OPTIONS, POST, PUT.
+/// Any other method (e.g. `patch`, custom verbs) is left as-is.
+pub(crate) fn normalize_method(method: &str) -> String {
+    match method.to_ascii_uppercase().as_str() {
+        "DELETE" | "GET" | "HEAD" | "OPTIONS" | "POST" | "PUT" => method.to_ascii_uppercase(),
+        _ => method.to_string(),
+    }
+}
+
 /// Fetch spec "validate request URL": the URL must resolve to a valid `URL`
 /// (absolute, or relative against the current document base), must not contain
 /// credentials, and must not be `about:blank` or `about:srcdoc`. Returns `Err`
@@ -372,7 +382,7 @@ fn js_request_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
             let m = o.get_property_str(ctx, "method")?;
             if !m.is_undefined() {
                 let raw = m.to_string(ctx)?.content().encode_utf8(false).to_string();
-                method = crate::http::client::cors::normalize_method(&raw);
+                method = normalize_method(&raw);
             }
             let mut h = o.get_property_str(ctx, "headers")?;
             if !h.is_undefined_or_null() {

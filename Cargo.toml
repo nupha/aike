@@ -15,8 +15,13 @@ llama_cpp = ["llama"]
 cuda = ["llama/cuda"]
 metal = ["llama/metal"]
 enable_eval_log = [] # 启用 DeepEval 评估日志采集
+# Browser-security layer of the Fetch API (WHATWG CORS protocol, request
+# modes/tainting, client-origin resolution, referrer policy inputs). Disable
+# (`--no-default-features -F typescript`) for a lean server/general-purpose
+# build where every fetch behaves like a plain HTTP request.
+fetch_browser = []
 
-default = ["typescript"]
+default = ["typescript", "fetch_browser"]
 
 [profile.release]
 panic = "abort"

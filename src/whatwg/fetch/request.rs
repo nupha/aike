@@ -20,16 +20,14 @@ use zuqe::{
 use crate::http::client::{
     body::{BODY_TIMEOUT, body_content_type, body_to_bytes},
     cache as http_cache,
-    cors::{
-        cors_check, cors_filter_response_headers, is_cross_origin, needs_preflight,
-        preflight_request_headers, serialized_origin, should_append_origin,
-    },
     headers::{HeaderList, header_list_from_js, validate_header_list_for_fetch},
-    request::{JSRequest, get_request_payload_mut, validate_request_init_options},
+    request::{
+        JSRequest, get_request_payload_mut, normalize_method, validate_request_init_options,
+    },
     response::{RespType, build_opaque_redirect_response, build_response_from_transport},
     transport::{
-        PreflightCtx, ReferrerCtx, TransportError, TransportRequest, TransportResponse,
-        perform_request, throw_transport_error,
+        ReferrerCtx, TransportError, TransportRequest, TransportResponse, perform_request,
+        throw_transport_error,
     },
 };
 
@@ -40,8 +38,14 @@ use crate::whatwg::{
 };
 
 use super::{
+    cors::{
+        PreflightCtx, check_allow_origin, cors_check, cors_filter_response_headers,
+        is_cross_origin, join_request_headers, make_before_hop_hook, needs_preflight,
+        preflight_request_headers, same_origin_violation, serialized_origin, should_append_origin,
+    },
     headers::{ensure_default_request_headers, strip_forbidden_request_headers},
     integrity::check_integrity,
+    origin::resolve_client_origin,
     referrer::compute_request_referrer,
 };
 
@@ -209,7 +213,7 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             let m = o.get_property_str(ctx, "method")?;
             if !m.is_undefined() {
                 let raw = m.to_string(ctx)?.content().encode_utf8(false).to_string();
-                method = crate::http::client::cors::normalize_method(&raw);
+                method = normalize_method(&raw);
             }
             let mut h = o.get_property_str(ctx, "headers")?;
             if !h.is_undefined_or_null() {
@@ -331,6 +335,14 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         }
     }
 
+    // Server builds (`fetch_browser` off) have no client-origin concept, so
+    // `same-origin` cookie scoping cannot be evaluated; treat it like
+    // `include` so cookies still flow.
+    #[cfg(not(feature = "fetch_browser"))]
+    if credentials == "same-origin" {
+        credentials = String::from("include");
+    }
+
     // A `ReadableStream` body is canceled with the abort reason when the signal
     // aborts (Fetch spec). Attach it to the signal; `js_controller_abort` cancels
     // it synchronously with a live `cx`, avoiding any cross-async JSValue handle.
@@ -348,91 +360,12 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 .unwrap_or(JSValue::UNDEFINED)
         });
 
-    // Client origin for same-origin checks (used by the cache short-circuit and
-    // the response handler below). In a browser this is the document's origin;
-    // here we read the `self.location` shim that WPT runners inject. When absent
-    // treat as a null origin so every URL is cross-origin. A failed property read
-    // is expected and must not leak a pending exception, so it is taken/discarded.
-    let (client_origin, client_url): (Option<String>, Option<String>) = {
-        let loc = ctx
-            .global_obj()
-            .get_property_str(ctx, "self")
-            .ok()
-            .filter(|selfv| !selfv.is_undefined_or_null())
-            .and_then(|selfv| selfv.get_property_str(ctx, "location").ok());
-        let origin = loc
-            .as_ref()
-            .and_then(|loc| loc.get_property_str(ctx, "origin").ok())
-            .and_then(|o| {
-                if o.is_undefined_or_null() {
-                    None
-                } else {
-                    Some(
-                        o.to_string(ctx)
-                            .ok()?
-                            .content()
-                            .encode_utf8(false)
-                            .to_string(),
-                    )
-                }
-            })
-            .filter(|s| !s.is_empty());
-        let url = loc
-            .as_ref()
-            .and_then(|loc| loc.get_property_str(ctx, "href").ok())
-            .and_then(|h| {
-                if h.is_undefined_or_null() {
-                    None
-                } else {
-                    Some(
-                        h.to_string(ctx)
-                            .ok()?
-                            .content()
-                            .encode_utf8(false)
-                            .to_string(),
-                    )
-                }
-            })
-            .filter(|s| !s.is_empty());
-        // WPT runner shim: when the JS `self.location` shim is unavailable (e.g.
-        // the engine's `self` is a native object the runner can't decorate), the
-        // runner injects the document URL/origin here so the default referrer and
-        // client origin resolve to the test document (not `None`).
-        let wpt_url = ctx
-            .global_obj()
-            .get_property_str(ctx, "__wptClientUrl")
-            .ok()
-            .and_then(|v| {
-                if v.is_undefined_or_null() {
-                    None
-                } else {
-                    v.to_string(ctx)
-                        .ok()
-                        .map(|s| s.content().encode_utf8(false).to_string())
-                }
-            })
-            .filter(|s| !s.is_empty());
-        let wpt_origin = ctx
-            .global_obj()
-            .get_property_str(ctx, "__wptClientOrigin")
-            .ok()
-            .and_then(|v| {
-                if v.is_undefined_or_null() {
-                    None
-                } else {
-                    v.to_string(ctx)
-                        .ok()
-                        .map(|s| s.content().encode_utf8(false).to_string())
-                }
-            })
-            .filter(|s| !s.is_empty());
-        // The WPT runner injects `__wptClientUrl` (document URL) and
-        // `__wptClientOrigin` (origin with port) as fallbacks when `self.location`
-        // is unavailable to the engine; otherwise prefer `self.location`.
-        let url = wpt_url.or(url);
-        let origin = origin.or(wpt_origin);
-        (origin, url)
-    };
+    // Client origin/URL for same-origin checks (used by the cache
+    // short-circuit and the response handler below). In a browser this is the
+    // document's origin; resolved from the `self.location` shim / WPT runner
+    // globals. Server builds (`fetch_browser` off) have no location concept
+    // and get a null origin.
+    let (client_origin, client_url) = resolve_client_origin(ctx);
 
     // CORS tainting: a cross-origin request in `cors` mode. These require
     // origin/ACAO handling and (for non-safelisted requests) a preflight.
@@ -750,7 +683,7 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     // method or header). This is independent of CORS tainting: even a same-origin
     // request needs a preflight once a redirect makes it cross-origin, so the
     // preflight decision must be made per hop in the transport layer (see
-    // `TransportRequest::preflight`).
+    // `TransportRequest::before_hop`).
     let preflight_possible = needs_preflight(&method, &req_headers, true);
 
     // Always follow redirects manually when `redirect == "follow"`. Every hop
@@ -916,12 +849,13 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                         .iter()
                         .find(|(k, _)| k.eq_ignore_ascii_case("access-control-allow-origin"))
                         .map(|(_, v)| v.clone());
-                    let allowed = crate::http::client::cors::check_allow_origin(
-                        acao.as_deref(),
-                        client_origin.as_deref().unwrap_or(""),
-                        credentials_include,
-                    )
-                    .is_some();
+                    let allowed =
+                        check_allow_origin(
+                            acao.as_deref(),
+                            client_origin.as_deref().unwrap_or(""),
+                            credentials_include,
+                        )
+                        .is_some();
                     if !allowed {
                         return Err(cx.throw_type_error(
                             "Failed to fetch: redirect response is a cross-origin CORS failure",
@@ -933,32 +867,19 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
             // Fetch spec: `mode: "same-origin"` requires the request (and every
             // redirect hop) to stay same-origin; a cross-origin URL is a network
-            // error. reqwest auto-follows redirects, so we check the *final*
-            // response URL (redirect target otherwise hides the violation).
-            if mode_clone == "same-origin" {
-                let final_url = tr.final_url.clone();
-                // `data:` URLs are same-origin with any client per the Fetch
-                // scheme fetch algorithm, so they never trip the same-origin
-                // check regardless of the client origin.
-                let is_data = final_url.to_ascii_lowercase().starts_with("data:");
-                if !is_data {
-                    let req_origin = url::Url::parse(&final_url)
-                        .map(|u| u.origin().ascii_serialization())
-                        .unwrap_or_default();
-                    let same = client_origin.as_deref() == Some(req_origin.as_str());
-                    if !same {
-                        return throw_transport_error(
-                            cx,
-                            TransportError {
-                                code: "same-origin",
-                                message: format!(
-                                    "request failed: mode 'same-origin' requires a same-origin \
-                                     request, but URL is cross-origin: {final_url}"
-                                ),
-                            },
-                        );
-                    }
-                }
+            // error. Redirects are followed manually, so the *final* response URL
+            // is checked here (the redirect target would otherwise hide the
+            // violation).
+            if mode_clone == "same-origin"
+                && let Some(msg) = same_origin_violation(client_origin.as_deref(), &tr.final_url)
+            {
+                return throw_transport_error(
+                    cx,
+                    TransportError {
+                        code: "same-origin",
+                        message: msg,
+                    },
+                );
             }
 
             // HTTP cache: a `304` we drove via conditional headers becomes the
@@ -1085,16 +1006,16 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     let client_origin_str = serialized_origin(req_origin.as_deref());
 
-    // CORS-preflight inputs for the transport layer. `possible` records whether
-    // this request *would* need a preflight once tainted; the transport runs a
-    // fresh OPTIONS preflight against each CORS-tainted redirect target before
-    // sending the actual request there (Fetch spec). A failed preflight rejects
-    // the fetch with a TypeError.
+    // Per-hop gate for the transport layer (browser builds: a CORS preflight
+    // runner). `possible` records whether this request *would* need a
+    // preflight once tainted; the gate runs a fresh OPTIONS preflight against
+    // each CORS-tainted hop target before sending the actual request there
+    // (Fetch spec). A failed preflight rejects the fetch with a TypeError.
     let requested_headers = preflight_request_headers(&req_headers);
     let preflight = preflight_possible.then(|| PreflightCtx {
         possible: true,
         method: method.clone(),
-        request_headers: crate::http::client::cors::join_request_headers(&requested_headers),
+        request_headers: join_request_headers(&requested_headers),
         client_origin: client_origin_str.clone(),
         credentials_include,
         user_agent,
@@ -1109,8 +1030,10 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         referrer: effective_referrer,
         referrer_ctx,
         replayable: stream_body.is_none(),
-        preflight,
-        cors_mode: mode == "cors",
+        before_hop: make_before_hop_hook(preflight),
+        // Server builds have no origin concept: the transport's cors-mode
+        // rules (per-hop Origin recomputation, opaque-origin rule) never apply.
+        cors_mode: cfg!(feature = "fetch_browser") && mode == "cors",
         cors_tainted,
         cors_client_origin: client_origin_str,
         credentials_mode: credentials.clone(),

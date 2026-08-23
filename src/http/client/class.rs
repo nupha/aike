@@ -213,7 +213,7 @@ fn js_do_request(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             // ── Method ──
             if magic == METHOD_FROM_OPTS {
                 if let Some(m) = read_str_opt(ctx, opts, "method") {
-                    method = crate::http::client::cors::normalize_method(&m);
+                    method = crate::http::client::request::normalize_method(&m);
                 }
             } else {
                 method = match magic {
@@ -285,7 +285,7 @@ fn js_do_request(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         referrer: String::from("about:client"),
         referrer_ctx: None,
         replayable: true,
-        preflight: None,
+        before_hop: None,
         cors_mode: false,
         cors_tainted: false,
         cors_client_origin: "null".to_string(),
