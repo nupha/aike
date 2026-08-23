@@ -1,8 +1,9 @@
 interface FileStat {
   size: number;
-  createdAt?: string;
-  modifiedAt?: string;
-  accessedAt?: string;
+  /** Times in epoch milliseconds. createdAt absent when the platform has no birthtime (e.g. Linux). */
+  createdAt?: number;
+  modifiedAt?: number;
+  accessedAt?: number;
   isFile: boolean;
   isDirectory: boolean;
   isSymbolicLink: boolean;

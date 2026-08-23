@@ -1,3 +1,4 @@
+/// <reference path="./process.d.ts" />
 // Type declarations for the "fs" module
 // import * as fs from "fs";
 
