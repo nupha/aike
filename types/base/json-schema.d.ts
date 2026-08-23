@@ -13,6 +13,65 @@ interface Schema {
   [key: string]: unknown;
 }
 
+/**
+ * Simplified schema definition for argument DSLs (e.g. MCP tool `args`).
+ * Rust auto-converts it to standard JSON Schema `properties` entries.
+ *
+ * @example
+ * // Basic string field
+ * { desc: "File path.", required: true }
+ * // Integer field
+ * { desc: "Start line", type: "integer", default: 0 }
+ * // Boolean field
+ * { desc: "Show hidden files", type: "boolean", default: false }
+ * // Array of strings
+ * { desc: "File patterns", type: "array" }
+ * // Enum
+ * { desc: "Write mode", type: "string", enum: ["overwrite", "append"], default: "overwrite" }
+ * // Array of integers
+ * { desc: "Port numbers", type: "array", items: { type: "integer" } }
+ * // Array with element description
+ * { desc: "Tags", type: "array", items: { type: "string", desc: "Tag name" } }
+ */
+interface SimpleSchema {
+  /** Human-readable description of this argument. */
+  desc: string;
+  /**
+   * Value type. Defaults to `"string"` when omitted.
+   * Allowed JSON-Schema types (per JSON Schema Validation 2020-12 §6.1.1):
+   * - `"string"` — default
+   * - `"integer"` — integer number (a subtype of `number`, zero fractional part)
+   * - `"number"` — floating-point number (e.g. latitude/longitude)
+   * - `"boolean"` — true/false
+   * - `"array"` — array; use `items` to specify element type
+   * - `"object"` — nested object
+   * - `"null"` — JSON null
+   */
+  type?: SchemaType;
+  /** Mark as required. */
+  required?: boolean;
+  /** Enum string values. */
+  enum?: string[];
+  /** Default value when not provided. */
+  default?: any;
+  /**
+   * Schema for array items. Only meaningful when `type="array"`.
+   * Defaults to `{ type: "string" }` when omitted.
+   *
+   * @example
+   * // Array of integers
+   * { desc: "Port numbers", type: "array", items: { type: "integer" } }
+   */
+  items?: {
+    /** Element type */
+    type: SchemaType;
+    /** Description of each element. */
+    desc?: string;
+    /** Enum values for elements. */
+    enum?: string[];
+  };
+}
+
 /** Result of `JSONSchema.validate()`. */
 interface ValidateResult {
   /** `true` when no errors were found. */
@@ -102,6 +161,32 @@ declare module "json-schema" {
      * ```
      */
     matchesType(value: unknown, type: SchemaType | SchemaType[]): boolean;
+
+    /**
+     * Convert a SimpleSchema argument DSL record into a standard JSON Schema
+     * object schema (`{ type: "object", properties, required }`).
+     *
+     * Missing fields follow the SimpleSchema defaults: `type` → `"string"`,
+     * array `items` type → `"string"`. An empty record yields
+     * `{ type: "object" }`.
+     *
+     * @example
+     * ```ts
+     * JSONSchema.fromSimpleSchema({
+     *   path:  { desc: "File path", required: true },
+     *   start: { desc: "Start line", type: "number", default: 0 },
+     * });
+     * // → {
+     * //   type: "object",
+     * //   properties: {
+     * //     path:  { type: "string", description: "File path" },
+     * //     start: { type: "number", description: "Start line", default: 0 },
+     * //   },
+     * //   required: ["path"],
+     * // }
+     * ```
+     */
+    fromSimpleSchema(simple: Record<string, SimpleSchema>): Schema;
   };
 
   export default JSONSchema;

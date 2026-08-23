@@ -191,7 +191,7 @@ fn clone_data_view(
     let payload = dv.payload();
     let buffer = payload.array_buffer();
     let offset = value.get_property_str(ctx, "byteOffset")?.to_number(ctx)?.to_f64() as u32;
-    let byte_length = payload.byte_length();
+    let byte_length = payload.view_byte_length();
     let buffer_clone = clone_value(ctx, buffer.into(), memory, transfer)?;
 
     let ctor = global_ctor(ctx, "DataView")?;
