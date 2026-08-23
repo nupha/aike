@@ -119,8 +119,9 @@ pub(super) fn js_spawn(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut stderr_mode = Stdio::piped();
 
     // Whether each stream was configured as "inherit" (defaults included).
-    #[cfg(windows)]
-    let (mut stdin_inherit, mut stdout_inherit, mut stderr_inherit) = (true, false, false);
+    let mut stdin_inherit = true;
+    let mut stdout_inherit = false;
+    let mut stderr_inherit = false;
 
     let mut cwd = None;
     let mut env_opt: Option<HashMap<String, String>> = None;
@@ -237,7 +238,7 @@ pub(super) fn js_spawn(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             }
         }
 
-        let mut subprocess = {
+        let subprocess = {
             // Guard our own stdio against blanket handle inheritance.
             #[cfg(windows)]
             let saved = clear_own_stdio_inherit(stdin_inherit, stdout_inherit, stderr_inherit);
@@ -688,7 +689,7 @@ fn spawn_async(
     })?;
 
     let (prom_killed, tx_killed) =
-        Promise::create_with_channel_hold_when_awaited::<bool>(ctx, |cx, killed| {
+        Promise::create_with_channel_hold_when_awaited::<bool>(ctx, |_, killed| {
             Ok(JSValue::from(killed))
         })?;
 
@@ -843,7 +844,7 @@ pub(crate) unsafe fn terminate_process(pid: i32) -> bool {
 fn js_child_isRunning(_ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     #[cfg(unix)]
     {
-        let pid = pid_from_this(ctx, &cc);
+        let pid = pid_from_this(_ctx, &cc);
         if pid <= 0 {
             return Ok(JSValue::FALSE);
         }
@@ -1313,7 +1314,7 @@ fn get_signal_code(_status: &ExitStatus) -> Option<i32> {
     #[cfg(unix)]
     {
         use std::os::unix::process::ExitStatusExt;
-        status.signal()
+        _status.signal()
     }
     #[cfg(not(unix))]
     {
