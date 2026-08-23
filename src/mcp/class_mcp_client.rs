@@ -22,6 +22,11 @@ use std::{
 };
 
 use linkme::distributed_slice;
+use process_wrap::tokio::CommandWrap;
+#[cfg(windows)]
+use process_wrap::tokio::JobObject;
+#[cfg(unix)]
+use process_wrap::tokio::ProcessGroup;
 use rmcp::{
     model::{CallToolRequestParams, ClientCapabilities, ClientInfo, Implementation},
     service::{RoleClient, RunningService, ServiceExt},
@@ -32,14 +37,9 @@ use rmcp::{
         },
     },
 };
-use process_wrap::tokio::{CommandWrap as TokioCmdWrap, ProcessGroup};
-#[cfg(windows)]
-use process_wrap::tokio::JobObject;
 use zuqe::{
-    CallContext, ClassCtorDef, ClassID, FieldDef, JSResult, JSValue, Object, PollSender,
-    Runtime, ScopedContext,
-    builtins::promise::Promise,
-    def_native_object,
+    CallContext, ClassCtorDef, ClassID, FieldDef, JSResult, JSValue, Object, PollSender, Runtime,
+    ScopedContext, builtins::promise::Promise, def_native_object,
 };
 
 use crate::USER_CLASS_DEFS;
@@ -80,23 +80,24 @@ pub(crate) fn kill_all_mcp_children() {
     LIVE_SERVER_PIDS.lock().unwrap().clear();
 }
 
-#[cfg(unix)]
 fn force_kill_child(pid: i32) {
+    #[cfg(unix)]
     unsafe {
         libc::kill(pid, libc::SIGKILL);
     }
-}
-#[cfg(windows)]
-fn force_kill_child(pid: i32) {
-    unsafe { crate::aike::spawn::terminate_process(pid) };
+    #[cfg(windows)]
+    unsafe {
+        crate::aike::terminate_process(pid);
+    }
 }
 
-#[cfg(unix)]
 fn child_alive(pid: i32) -> bool {
-    unsafe { libc::kill(pid, 0) == 0 }
-}
-#[cfg(windows)]
-fn child_alive(pid: i32) -> bool {
+    #[cfg(unix)]
+    unsafe {
+        libc::kill(pid, 0) == 0
+    }
+
+    #[cfg(windows)]
     unsafe {
         use windows_sys::Win32::Foundation::{CloseHandle, WAIT_TIMEOUT};
         use windows_sys::Win32::System::Threading::{
@@ -132,8 +133,9 @@ async fn sweep_child(pid: i32) {
     }
     #[cfg(windows)]
     unsafe {
-        crate::aike::spawn::terminate_process(pid);
+        crate::aike::terminate_process(pid);
     }
+
     if !wait_child_gone(pid, Duration::from_secs(2)).await {
         force_kill_child(pid);
         let _ = wait_child_gone(pid, Duration::from_secs(1)).await;
@@ -183,11 +185,7 @@ fn get_payload<'a>(
 }
 
 /// Parse a string prop strictly: TypeError when present but not a string.
-fn str_prop(
-    ctx: &mut ScopedContext,
-    obj: &Object,
-    key: &str,
-) -> Result<Option<String>, i32> {
+fn str_prop(ctx: &mut ScopedContext, obj: &Object, key: &str) -> Result<Option<String>, i32> {
     let v = obj.get_property_str(ctx, key)?;
     if v.is_undefined() {
         return Ok(None);
@@ -211,9 +209,7 @@ fn pos_ms_prop(ctx: &mut ScopedContext, obj: &Object, key: &str) -> Result<Optio
     let ok = matches!(n, zuqe::IntOrFloat::Int64(i) if i > 0)
         || matches!(n, zuqe::IntOrFloat::Float64(d) if d > 0.0 && d.fract() == 0.0);
     if !ok {
-        return Err(ctx.throw_range_error(&format!(
-            "`{key}` must be a positive integer"
-        )));
+        return Err(ctx.throw_range_error(&format!("`{key}` must be a positive integer")));
     }
     Ok(Some(match n {
         zuqe::IntOrFloat::Int64(i) => i as u64,
@@ -274,17 +270,12 @@ fn args_prop(ctx: &mut ScopedContext, obj: &Object, key: &str) -> Result<Vec<Str
 }
 
 /// Shared constructor body: validate config, register client state.
-fn construct_client(
-    ctx: &mut ScopedContext,
-    cc: CallContext,
-    kind: &str,
-) -> JSResult {
+fn construct_client(ctx: &mut ScopedContext, cc: CallContext, kind: &str) -> JSResult {
     let Some(cfg) = cc.arg(0).as_object() else {
         return Err(ctx.throw_type_error(&format!("{kind}(config) — config must be an object")));
     };
 
-    let timeout_ms =
-        pos_ms_prop(ctx, &cfg, "timeoutMs")?.unwrap_or(DEFAULT_TIMEOUT_MS);
+    let timeout_ms = pos_ms_prop(ctx, &cfg, "timeoutMs")?.unwrap_or(DEFAULT_TIMEOUT_MS);
 
     let client_cfg = match kind {
         "StdioMcpClient" => {
@@ -304,9 +295,7 @@ fn construct_client(
             let url = str_prop(ctx, &cfg, "url")?
                 .ok_or_else(|| ctx.throw_type_error("`url` is required"))?;
             if !(url.starts_with("http://") || url.starts_with("https://")) {
-                return Err(ctx.throw_range_error(
-                    "`url` must be an http:// or https:// URL",
-                ));
+                return Err(ctx.throw_range_error("`url` must be an http:// or https:// URL"));
             }
             ClientCfg::Http {
                 url,
@@ -366,42 +355,52 @@ fn make_stdio_transport(cfg: &ClientCfg) -> Result<TokioChildProcess, String> {
     else {
         return Err("not a stdio client".to_string());
     };
+
     let mut cmd = tokio::process::Command::new(command);
     cmd.args(args);
     if let Some(env) = env {
-        // Parity with Aike.spawn: provided env replaces the whole env.
         cmd.env_clear();
         cmd.envs(env);
     }
     if let Some(dir) = cwd {
         cmd.current_dir(dir);
     }
-    let mut wrap = TokioCmdWrap::from(cmd);
+
+    let mut wrap = CommandWrap::from(cmd);
+    #[cfg(unix)]
     wrap.wrap(ProcessGroup::leader());
     #[cfg(windows)]
     wrap.wrap(JobObject);
+
     TokioChildProcess::new(wrap).map_err(|e| format!("spawn failed: {e}"))
 }
 
 /// Build the streamable-http transport; custom headers ride on the reqwest
 /// client's default header map.
-fn make_http_transport(cfg: &ClientCfg) -> Result<StreamableHttpClientTransport<reqwest::Client>, String> {
+fn make_http_transport(
+    cfg: &ClientCfg,
+) -> Result<StreamableHttpClientTransport<reqwest::Client>, String> {
     let ClientCfg::Http { url, headers } = cfg else {
         return Err("not an http client".to_string());
     };
+
     let mut builder = reqwest::Client::builder();
+
     if let Some(headers) = headers {
         let mut hm = reqwest::header::HeaderMap::new();
         for (k, v) in headers {
             let name: reqwest::header::HeaderName =
                 k.parse().map_err(|_| format!("invalid header name: {k}"))?;
-            let value: reqwest::header::HeaderValue =
-                v.parse().map_err(|_| format!("invalid header value: {v}"))?;
+            let value: reqwest::header::HeaderValue = v
+                .parse()
+                .map_err(|_| format!("invalid header value: {v}"))?;
             hm.insert(name, value);
         }
         builder = builder.default_headers(hm);
     }
+
     let http = builder.build().map_err(|e| format!("http client: {e}"))?;
+
     Ok(StreamableHttpClientTransport::with_client(
         http,
         StreamableHttpClientTransportConfig::with_uri(url.clone()),
@@ -421,7 +420,12 @@ fn js_connect(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let (state, timeout_ms, cfg) = payload_state;
 
     // Reject double-connect early (the task below would also overwrite).
-    if state.service.try_lock().map(|g| g.is_some()).unwrap_or(false) {
+    if state
+        .service
+        .try_lock()
+        .map(|g| g.is_some())
+        .unwrap_or(false)
+    {
         return Err(ctx.throw_type_error("client is already connected"));
     }
 
@@ -513,7 +517,11 @@ async fn run_connect(
 async fn with_peer<T>(
     state: &std::sync::Arc<ClientState>,
     timeout_ms: u64,
-    f: impl FnOnce(&rmcp::service::Peer<RoleClient>) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<T, rmcp::service::ServiceError>> + Send + '_>>,
+    f: impl FnOnce(
+        &rmcp::service::Peer<RoleClient>,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<T, rmcp::service::ServiceError>> + Send + '_>,
+    >,
 ) -> Result<T, String> {
     let guard = state.service.lock().await;
     let Some(svc) = guard.as_ref() else {
@@ -544,11 +552,9 @@ fn js_list_tools(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     )?;
 
     tokio::spawn(async move {
-        let result = with_peer(&state, timeout_ms, |peer| {
-            Box::pin(peer.list_tools(None))
-        })
-        .await
-        .and_then(|r| serde_json::to_value(&r).map_err(|e| e.to_string()));
+        let result = with_peer(&state, timeout_ms, |peer| Box::pin(peer.list_tools(None)))
+            .await
+            .and_then(|r| serde_json::to_value(&r).map_err(|e| e.to_string()));
         let _ = PollSender::from(tx).send_async(result).await;
     });
 
@@ -565,13 +571,17 @@ fn js_call_tool(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     };
 
     // Strict args validation on the JS thread.
-    let name = cc.arg(0).to_string(ctx)?.content().encode_utf8(false).to_string();
+    let name = cc
+        .arg(0)
+        .to_string(ctx)?
+        .content()
+        .encode_utf8(false)
+        .to_string();
     if name.is_empty() {
         return Err(ctx.throw_type_error("`name` must not be empty"));
     }
     let args_val = cc.arg(1);
-    let arguments: Option<serde_json::Map<String, serde_json::Value>> = if args_val.is_undefined()
-    {
+    let arguments: Option<serde_json::Map<String, serde_json::Value>> = if args_val.is_undefined() {
         None
     } else {
         let v = args_val
@@ -623,15 +633,13 @@ fn js_close(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         }
     };
 
-    let (promise, tx) = Promise::create_with_channel::<Result<(), String>>(
-        ctx,
-        |cx, payload| -> JSResult {
+    let (promise, tx) =
+        Promise::create_with_channel::<Result<(), String>>(ctx, |cx, payload| -> JSResult {
             match payload {
                 Ok(()) => Ok(JSValue::UNDEFINED),
                 Err(e) => Err(cx.throw_internal_error(&e)),
             }
-        },
-    )?;
+        })?;
 
     tokio::spawn(async move {
         // Take the service out first so concurrent calls see "not connected".
@@ -683,8 +691,7 @@ const CLIENT_PROTO: &[FieldDef] = &[
     FieldDef::GETSET("serverInfo", Some(js_server_info), None, 0),
 ];
 
-const STDIO_CLIENT_CTOR: ClassCtorDef =
-    ClassCtorDef::new(js_stdio_ctor, 1, true);
+const STDIO_CLIENT_CTOR: ClassCtorDef = ClassCtorDef::new(js_stdio_ctor, 1, true);
 const HTTP_CLIENT_CTOR: ClassCtorDef = ClassCtorDef::new(js_http_ctor, 1, true);
 
 def_native_object!(

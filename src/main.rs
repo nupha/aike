@@ -520,18 +520,23 @@ async fn main() -> ExitCode {
     // exit without waiting on orphaned tokio tasks. (`ctx` is a Copy handle, so
     // only `rt` holds the heap that needs finalizing.)
     drop(rt);
+
+    // Kill `abortOnParentExit` children synchronously: every script exit
+    // (normal end, process.exit, engine error) funnels through here.
+    // std::process::exit maps to ExitProcess on Windows, which skips CRT
+    // atexit entirely, so this must happen explicitly before it.
+    crate::aike::kill_all_children();
+    crate::mcp::kill_all_mcp_children();
     std::process::exit(exit_code);
 }
 
 /// Install exit cleanup for `abortOnParentExit` children.
 ///
-/// - Unix: `atexit` runs on normal exit and `std::process::exit` (incl.
-///   `process.exit`); default signal handlers cover SIGTERM/SIGINT/SIGHUP/
-///   SIGQUIT, which the OS would otherwise deliver by terminating without
-///   running atexit.
-/// - Windows: kill-on-close job objects (per child, in `spawn::win_job`) cover
-///   every termination path including crash/TerminateProcess; the console-ctrl
-///   handler additionally kills registered children synchronously on Ctrl-C.
+/// Unix: `atexit` runs on normal exit and `std::process::exit` (libc::exit),
+/// covering paths that bypass main's epilogue; default signal handlers cover
+/// SIGTERM/SIGINT/SIGHUP/SIGQUIT. Windows: main's epilogue kills explicitly
+/// (ExitProcess skips atexit), plus the console-ctrl handler covers Ctrl-C;
+/// kill-on-close job objects remain as crash-path backstop.
 fn install_exit_cleanup() {
     #[cfg(not(windows))]
     {

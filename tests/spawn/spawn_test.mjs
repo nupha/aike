@@ -4,6 +4,7 @@
 // fixtures so each has a clean parent whose exit path we control.
 
 import { sleepCmd, echoCmd } from "./fixtures/platform.mjs";
+import * as path from "path";
 
 let pass = 0;
 let fail = 0;
@@ -40,7 +41,9 @@ function spawnC(tuple, opts) {
     : Aike.spawn(tuple[0], tuple[1], opts);
 }
 
-const FIXTURES = new URL("./fixtures/", import.meta.url).pathname;
+// fileURLToPath, not URL.pathname — pathname keeps the leading "/C:/" on
+// Windows, which Win32 APIs reject (os error 123).
+const FIXTURES = path.fileURLToPath(new URL("./fixtures/", import.meta.url));
 function runFixture(flags, { timeout } = {}) {
   return Aike.spawnSync(process.execPath, ["-m", `${FIXTURES}child.mjs`, ...flags], { timeout });
 }

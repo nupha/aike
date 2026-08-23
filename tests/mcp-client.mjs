@@ -22,6 +22,7 @@ function check(label, condition, detail) {
 const { StdioMcp, HttpMcp, StdioMcpClient, HttpMcpClient } = await import("mcp");
 const { HttpServer } = await import("http");
 const fs = await import("fs");
+const path = await import("path");
 
 // ── stdio round trip ──
 
@@ -54,10 +55,13 @@ export default server;
 
 const scriptPath = Aike.tmpdir() + "/mcp-client-test-server.mjs";
 await fs.writeText(scriptPath, serverScript);
+// pathToFileURL, not the raw path: embedding a Windows path in module source
+// would eat "\U" etc. as escape sequences.
+const scriptUrl = path.pathToFileURL(scriptPath).href;
 
 const client = new StdioMcpClient({
   command: process.execPath,
-  args: ["-m", "-e", `import md from '${scriptPath}'; await md.run();`],
+  args: ["-m", "-e", `import md from '${scriptUrl}'; await md.run();`],
 });
 check("serverInfo null before connect", client.serverInfo === null);
 
@@ -111,7 +115,7 @@ await httpServer.shutdown();
 
 // ── engine exit without close() must not orphan the server child ──
 // Parent script connects, then exits WITHOUT calling close(). The engine's
-// atexit cleanup (kill_all_mcp_children) has to take the spawned server down.
+// exit cleanup (kill_all_mcp_children) has to take the spawned server down.
 {
   const markerPath = Aike.tmpdir() + "/mcp-exit-kill-marker-" + Date.now() + ".mjs";
   await fs.writeText(
@@ -127,7 +131,7 @@ await httpServer.shutdown();
     `const { StdioMcpClient } = await import("mcp");
      const c = new StdioMcpClient({
        command: process.execPath,
-       args: ["-m", "-e", "import md from '${markerPath}'; await md.run();"],
+       args: ["-m", "-e", "import md from '${path.pathToFileURL(markerPath).href}'; await md.run();"],
      });
      await c.connect();
      // deliberately NO close(): simulate forgotten cleanup / abrupt exit
@@ -135,7 +139,7 @@ await httpServer.shutdown();
   );
 
   const parent = Aike.spawn(process.execPath, ["-m", "-e",
-    `await import('${parentScript}');`], { stdin: "pipe", stdout: "pipe", stderr: "inherit" });
+    `await import('${path.pathToFileURL(parentScript).href}');`], { stdin: "pipe", stdout: "pipe", stderr: "inherit" });
 
   const out = [];
   const dec = new TextDecoder();

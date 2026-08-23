@@ -15,7 +15,7 @@ pub(crate) use {
     signal::{
         gc_trace_signals, install_default_signal_handlers, register_signal_handler, signal_number,
     },
-    spawn::kill_all_children,
+    spawn::{kill_all_children, terminate_process},
     sys::{get_time_ns, which_executable},
 };
 

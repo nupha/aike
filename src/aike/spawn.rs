@@ -17,12 +17,11 @@ use std::{
 #[cfg(unix)]
 use std::os::{fd::AsRawFd, unix::process::CommandExt};
 
-use process_wrap::tokio::{ChildWrapper, CommandWrap as TokioCmdWrap};
 #[cfg(unix)]
 use process_wrap::tokio::ProcessGroup;
+use process_wrap::tokio::{ChildWrapper, CommandWrap as TokioCmdWrap};
 #[cfg(windows)]
-use process_wrap::tokio::JobObject;
-
+use process_wrap::tokio::{JobObject, KillOnDrop};
 use zuqe::{
     CallContext, Callback, ErrorKind, Exception, IntOrFloat, JS_GPN_ENUM_ONLY,
     JS_GPN_STR_OR_INT_MASK, JS_PROP_C_W_E, JS_PROP_ENUMERABLE, JSResult, JSValue, Object,
@@ -34,7 +33,7 @@ use super::{JSStdioHandle, signal::signal_name};
 
 /// PIDs of children spawned with `abortOnParentExit: true`, killed together
 /// when aike exits (normal exit, `process.exit`, or a catchable signal).
-/// Only populated when the option is set — the default is zero overhead.
+/// Only populated when the option is set �?the default is zero overhead.
 static SPAWNED_PIDS: LazyLock<Mutex<Vec<i32>>> = LazyLock::new(|| Mutex::new(Vec::new()));
 
 fn register_child(pid: i32) {
@@ -119,6 +118,10 @@ pub(super) fn js_spawn(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut stdout_mode = Stdio::piped();
     let mut stderr_mode = Stdio::piped();
 
+    // Whether each stream was configured as "inherit" (defaults included).
+    #[cfg(windows)]
+    let (mut stdin_inherit, mut stdout_inherit, mut stderr_inherit) = (true, false, false);
+
     let mut cwd = None;
     let mut env_opt: Option<HashMap<String, String>> = None;
     let mut input_data: Option<Vec<u8>> = None;
@@ -131,17 +134,17 @@ pub(super) fn js_spawn(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             return Err(ctx.throw_type_error("spawn options must be an object"));
         };
 
-        // cwd — string
+        // cwd �?string
         if let Some(dir) = get_str_prop_strict(ctx, &opts, "cwd")? {
             cwd = Some(dir);
         }
 
-        // env — object; replaces entire env when provided
+        // env �?object; replaces entire env when provided
         if let Some(env_map) = parse_env_obj_strict(ctx, &opts)? {
             env_opt = Some(env_map);
         }
 
-        // abortOnParentExit — boolean; when true the child is killed
+        // abortOnParentExit �?boolean; when true the child is killed
         // synchronously when aike exits. Meaningless for spawnSync/sh (the
         // child is already gone on return) but still validated.
         let abort_val = opts.get_property_str(ctx, "abortOnParentExit")?;
@@ -152,23 +155,35 @@ pub(super) fn js_spawn(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             abort_on_parent_exit = abort_val.to_bool()?;
         }
 
-        // input — extract bytes for spawnSync stdin
+        // input �?extract bytes for spawnSync stdin
         if !is_async {
             input_data = extract_input(ctx, &opts)?;
         }
 
         // stdio modes
-        stdin_mode = parse_stdio_mode_strict(ctx, &opts, "stdin", stdin_mode)?;
-        stdout_mode = parse_stdio_mode_strict(ctx, &opts, "stdout", stdout_mode)?;
-        stderr_mode = parse_stdio_mode_strict(ctx, &opts, "stderr", stderr_mode)?;
+        (stdin_mode, stdin_inherit) = parse_stdio_mode_strict(ctx, &opts, "stdin", true)?;
+        #[cfg(windows)]
+        {
+            (stdout_mode, stdout_inherit) = parse_stdio_mode_strict(ctx, &opts, "stdout", false)?;
+            (stderr_mode, stderr_inherit) = parse_stdio_mode_strict(ctx, &opts, "stderr", false)?;
+        }
+        #[cfg(not(windows))]
+        {
+            stdout_mode = parse_stdio_mode_strict(ctx, &opts, "stdout", false)?.0;
+            stderr_mode = parse_stdio_mode_strict(ctx, &opts, "stderr", false)?.0;
+        }
     }
 
     // input implies stdin=pipe
     if input_data.is_some() {
         stdin_mode = Stdio::piped();
+        #[cfg(windows)]
+        {
+            stdin_inherit = false;
+        }
     }
 
-    // timeout (ms) — positive integer; kill the child if it runs longer than this.
+    // timeout (ms) �?positive integer; kill the child if it runs longer than this.
     let timeout_limit: Option<u64> = match cc.arg(2).as_object() {
         Some(opts) => get_timeout_prop(ctx, &opts)?,
         None => None,
@@ -200,10 +215,15 @@ pub(super) fn js_spawn(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         }
         #[cfg(windows)]
         if timeout_limit.is_some() || abort_on_parent_exit {
+            // JobObject alone does NOT set JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            // that flag is only enabled when the KillOnDrop wrapper is present
+            // too. Without it, exiting aike closes its job handle but leaves
+            // abortOnParentExit children running.
             cmd_wrap.wrap(JobObject);
+            cmd_wrap.wrap(KillOnDrop);
         }
 
-        // Linux: kernel sends SIGKILL to the child when aike dies — covers
+        // Linux: kernel sends SIGKILL to the child when aike dies �?covers
         // SIGKILL/abort/crash that no user-space handler can catch. The child
         // is reaped by `kill(-pid)` too when aike exits normally; PDEATHSIG is
         // the fallback for the uncatchable paths.
@@ -217,9 +237,15 @@ pub(super) fn js_spawn(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             }
         }
 
-        let mut subprocess = cmd_wrap
-            .spawn()
-            .map_err(|e| ctx.throw_internal_error(&format!("spawn failed: {e}")))?;
+        let mut subprocess = {
+            // Guard our own stdio against blanket handle inheritance.
+            #[cfg(windows)]
+            let saved = clear_own_stdio_inherit(stdin_inherit, stdout_inherit, stderr_inherit);
+            let res = cmd_wrap.spawn();
+            #[cfg(windows)]
+            restore_own_stdio_inherit(&saved);
+            res.map_err(|e| ctx.throw_internal_error(&format!("spawn failed: {e}")))?
+        };
 
         let pid = subprocess.id().map(|id| id as i32).unwrap_or(-1);
         spawn_async(ctx, subprocess, pid, timeout_limit, abort_on_parent_exit)
@@ -243,16 +269,22 @@ pub(super) fn js_spawn(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             cmd_obj.process_group(0);
         }
 
-        let subprocess = cmd_obj
-            .spawn()
-            .map_err(|e| ctx.throw_internal_error(&format!("spawn failed: {e}")))?;
+        let subprocess = {
+            // Guard our own stdio against blanket handle inheritance.
+            #[cfg(windows)]
+            let saved = clear_own_stdio_inherit(stdin_inherit, stdout_inherit, stderr_inherit);
+            let res = cmd_obj.spawn();
+            #[cfg(windows)]
+            restore_own_stdio_inherit(&saved);
+            res.map_err(|e| ctx.throw_internal_error(&format!("spawn failed: {e}")))?
+        };
 
         let pid = subprocess.id() as i32;
         spawn_sync(ctx, subprocess, pid, input_data, timeout_limit)
     }
 }
 
-/// `Aike.sh(command, options?)` → `{ stdout, stderr, exitCode }`.
+/// `Aike.sh(command, options?)` �?`{ stdout, stderr, exitCode }`.
 ///
 /// Run a command through the platform shell and capture its output. A
 /// convenience sugar over `spawnSync` (memo §5.4): the command string is
@@ -275,7 +307,7 @@ pub(super) fn js_sh(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut timeout_ms = None;
     let mut check = false;
 
-    // options (optional object) — strict parsing, same schema as spawnSync
+    // options (optional object) �?strict parsing, same schema as spawnSync
     if cc.length() > 1 {
         let opts_val = cc.arg(1);
         let Some(opts) = opts_val.as_object() else {
@@ -416,6 +448,18 @@ fn collect_with_timeout(
     input: Option<Vec<u8>>,
     timeout_ms: Option<u64>,
 ) -> Result<(Vec<u8>, Vec<u8>, ExitStatus, bool), String> {
+    // Windows: TerminateProcess only kills the direct child; surviving
+    // grandchildren keep the inherited pipe write ends open and block the
+    // collector until they exit naturally. Wrap the child in a kill-on-close
+    // job so a timeout can take down the whole tree (the async path gets this
+    // from process_wrap's JobObject wrapper).
+    #[cfg(windows)]
+    let job = if timeout_ms.is_some() {
+        job_assign_child(&child)
+    } else {
+        std::ptr::null_mut()
+    };
+
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
         let _ = tx.send(collect_child_output(child, input));
@@ -425,7 +469,16 @@ fn collect_with_timeout(
         Some(ms) => match rx.recv_timeout(Duration::from_millis(ms)) {
             Ok(r) => (r, false),
             Err(_) => {
+                #[cfg(windows)]
+                if !job.is_null() {
+                    use windows_sys::Win32::System::JobObjects::TerminateJobObject;
+                    unsafe { TerminateJobObject(job, 1) };
+                } else {
+                    terminate_process_tree(pid);
+                }
+                #[cfg(unix)]
                 terminate_process_tree(pid);
+
                 // Killing closes the child's pipes, so the worker finishes.
                 let r = rx.recv().expect("collect thread must finish after kill");
                 (r, true)
@@ -434,10 +487,19 @@ fn collect_with_timeout(
         None => (rx.recv().expect("collect thread must send"), false),
     };
 
+    // KILL_ON_JOB_CLOSE makes closing safe either way: after natural
+    // completion every job member has exited, so nothing gets killed.
+    #[cfg(windows)]
+    if !job.is_null() {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        unsafe { CloseHandle(job) };
+    }
+
     let (stdout_buf, stderr_buf, exit_status) = match collected {
         Ok(t) => t,
         Err(e) => return Err(e),
     };
+
     Ok((stdout_buf, stderr_buf, exit_status, killed_by_timeout))
 }
 
@@ -552,7 +614,7 @@ fn spawn_async(
 ) -> JSResult {
     // Take stdin pipe before moving child into async task,
     // so we can create a PipeWrite FileHandle while ScopedContext is available.
-    // When stdin is not piped, this will be None → null.
+    // When stdin is not piped, this will be None �?null.
     let stdin_val = match child.stdin().take() {
         Some(child_stdin) => {
             #[cfg(unix)]
@@ -570,7 +632,7 @@ fn spawn_async(
 
     // Take stdout pipe before moving child into async task,
     // so we can create a PipeRead StdioHandle while ScopedContext is available.
-    // When stdout is not piped, this will be None → null.
+    // When stdout is not piped, this will be None �?null.
     let stdout_val = match child.stdout().take() {
         Some(child_stdout) => {
             #[cfg(unix)]
@@ -641,16 +703,16 @@ fn spawn_async(
     result.define_property_value_str(ctx, "signalCode", prom_signal.into(), JS_PROP_C_W_E)?;
     result.define_property_value_str(ctx, "killedByTimeout", prom_killed.into(), JS_PROP_C_W_E)?;
 
-    // kill(signal?) — send signal to child process, default SIGTERM
+    // kill(signal?) �?send signal to child process, default SIGTERM
     let kill_fn = ctx.create_native_function(Callback::Func(js_child_kill), "kill", 1, 0)?;
     result.define_property_value_str(ctx, "kill", kill_fn.into(), JS_PROP_C_W_E)?;
 
-    // isRunning() — check if child process is still alive
+    // isRunning() �?check if child process is still alive
     let is_running_fn =
         ctx.create_native_function(Callback::Func(js_child_isRunning), "isRunning", 0, 0)?;
     result.define_property_value_str(ctx, "isRunning", is_running_fn.into(), JS_PROP_C_W_E)?;
 
-    // shutdown(options?) — graceful close (EOF → term → SIGKILL)
+    // shutdown(options?) �?graceful close (EOF �?term �?SIGKILL)
     let shutdown_fn =
         ctx.create_native_function(Callback::Func(js_child_shutdown), "shutdown", 1, 0)?;
     result.define_property_value_str(ctx, "shutdown", shutdown_fn.into(), JS_PROP_C_W_E)?;
@@ -659,7 +721,7 @@ fn spawn_async(
     // shutdown() can subscribe even if the child exits immediately.
     register_child_exit(pid);
 
-    // Spawn a pure async task — wait for child exit and resolve
+    // Spawn a pure async task �?wait for child exit and resolve
     // exitCode/signalCode/killedByTimeout. stdout/stderr are exposed as
     // FileHandle objects for the consumer to read.
     if abort_on_parent_exit {
@@ -674,8 +736,8 @@ fn spawn_async(
                 Ok(r) => r,
                 Err(_elapsed) => {
                     killed = true;
-                    // Group/job-aware kill: ProcessGroup → killpg(SIGKILL) to
-                    // the whole tree; JobObject → TerminateJobObject.
+                    // Group/job-aware kill: ProcessGroup �?killpg(SIGKILL) to
+                    // the whole tree; JobObject �?TerminateJobObject.
                     let _ = Box::into_pin(child.kill()).await;
                     child.wait().await
                 }
@@ -711,96 +773,104 @@ fn spawn_async(
     Ok(result.into())
 }
 
-/// kill(signal?) — send signal to child process.
-/// Reads `pid` from `this`, sends signal via libc::kill().
-#[cfg(unix)]
+/// kill(signal?)
+/// �?Windows: terminate process by pid (ignores signal arg).
+/// �?Unix: send signal to child process.
 fn js_child_kill(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let pid = pid_from_this(ctx, &cc);
-    if pid <= 0 {
-        return Ok(JSValue::FALSE);
-    }
-
-    let sig = if cc.length() > 0 && !cc.arg(0).is_undefined() {
-        let arg = cc.arg(0);
-        if let Some(s) = arg.as_string(true) {
-            let name = s.content().encode_utf8(false);
-            super::signal::signal_number(&name)
-                .map(|n| n as i32)
-                .unwrap_or(libc::SIGTERM)
-        } else {
-            arg.to_number(ctx)?.to_i32()
-        }
-    } else {
-        libc::SIGTERM
-    };
-
-    let ret = unsafe { libc::kill(pid, sig) };
-    Ok(JSValue::from(ret == 0))
-}
-
-/// kill(signal?) — Windows: terminate process by pid (ignores signal arg).
-#[cfg(windows)]
-fn js_child_kill(_ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let pid = pid_from_this(_ctx, &cc);
-    if pid <= 0 {
-        return Ok(JSValue::FALSE);
-    }
-    Ok(JSValue::from(unsafe { terminate_process(pid) }))
-}
-
-/// Force-kill process by pid (SIGKILL). Unix equivalent of Windows TerminateProcess.
-#[cfg(unix)]
-pub(crate) unsafe fn terminate_process(pid: i32) -> bool {
-    unsafe { libc::kill(pid, libc::SIGKILL) == 0 }
-}
-/// Windows: terminate process by pid (ignores signal arg).
-#[cfg(windows)]
-pub(crate) unsafe fn terminate_process(pid: i32) -> bool {
-    use windows_sys::Win32::Foundation::CloseHandle;
-    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_TERMINATE, TerminateProcess};
-
-    // SAFETY: pid is a valid process id from a spawned child process.
-    let handle = unsafe { OpenProcess(PROCESS_TERMINATE, 0, pid as u32) };
-    if handle.is_null() {
-        return false;
-    }
-    let ok = unsafe { TerminateProcess(handle, 1) != 0 };
-    unsafe { CloseHandle(handle) };
-    ok
-}
-
-/// isRunning() — check if child process is still alive using kill(pid, 0).
-#[cfg(unix)]
-fn js_child_isRunning(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let pid = pid_from_this(ctx, &cc);
-    if pid <= 0 {
-        return Ok(JSValue::FALSE);
-    }
-    let running = unsafe { libc::kill(pid, 0) == 0 };
-    Ok(JSValue::from(running))
-}
-
-/// isRunning() — Windows: check if process is alive via WaitForSingleObject.
-#[cfg(windows)]
-fn js_child_isRunning(_ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let pid = pid_from_this(_ctx, &cc);
-    if pid <= 0 {
-        return Ok(JSValue::FALSE);
-    }
-    unsafe {
-        use windows_sys::Win32::Foundation::{CloseHandle, WAIT_TIMEOUT};
-        use windows_sys::Win32::System::Threading::{
-            OpenProcess, PROCESS_QUERY_INFORMATION, WaitForSingleObject,
-        };
-
-        let handle = OpenProcess(PROCESS_QUERY_INFORMATION, 0, pid as u32);
-        if handle.is_null() {
+    #[cfg(unix)]
+    {
+        let pid = pid_from_this(ctx, &cc);
+        if pid <= 0 {
             return Ok(JSValue::FALSE);
         }
-        let status = WaitForSingleObject(handle, 0);
-        CloseHandle(handle);
-        // WAIT_TIMEOUT = process still running
-        Ok(JSValue::from(status == WAIT_TIMEOUT))
+
+        let sig = if cc.length() > 0 && !cc.arg(0).is_undefined() {
+            let arg = cc.arg(0);
+            if let Some(s) = arg.as_string(true) {
+                let name = s.content().encode_utf8(false);
+                super::signal::signal_number(&name)
+                    .map(|n| n as i32)
+                    .unwrap_or(libc::SIGTERM)
+            } else {
+                arg.to_number(ctx)?.to_i32()
+            }
+        } else {
+            libc::SIGTERM
+        };
+
+        let ret = unsafe { libc::kill(pid, sig) };
+        Ok(JSValue::from(ret == 0))
+    }
+
+    #[cfg(windows)]
+    {
+        let pid = pid_from_this(ctx, &cc);
+        if pid <= 0 {
+            return Ok(JSValue::FALSE);
+        }
+        Ok(JSValue::from(unsafe { terminate_process(pid) }))
+    }
+}
+
+/// Terminate process by pid
+pub(crate) unsafe fn terminate_process(pid: i32) -> bool {
+    #[cfg(unix)]
+    unsafe {
+        libc::kill(pid, libc::SIGKILL) == 0
+    }
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, PROCESS_TERMINATE, TerminateProcess,
+        };
+
+        // SAFETY: pid is a valid process id from a spawned child process.
+        let handle = unsafe { OpenProcess(PROCESS_TERMINATE, 0, pid as u32) };
+        if handle.is_null() {
+            return false;
+        }
+
+        let ok = unsafe { TerminateProcess(handle, 1) != 0 };
+        unsafe { CloseHandle(handle) };
+        ok
+    }
+}
+
+/// isRunning()
+/// �?Unix: check if child process is still alive using kill(pid, 0).
+/// �?Windows: check if process is alive via WaitForSingleObject.
+fn js_child_isRunning(_ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    #[cfg(unix)]
+    {
+        let pid = pid_from_this(ctx, &cc);
+        if pid <= 0 {
+            return Ok(JSValue::FALSE);
+        }
+        let running = unsafe { libc::kill(pid, 0) == 0 };
+        Ok(JSValue::from(running))
+    }
+    #[cfg(windows)]
+    {
+        let pid = pid_from_this(_ctx, &cc);
+        if pid <= 0 {
+            return Ok(JSValue::FALSE);
+        }
+        unsafe {
+            use windows_sys::Win32::Foundation::{CloseHandle, WAIT_TIMEOUT};
+            use windows_sys::Win32::System::Threading::{
+                OpenProcess, PROCESS_QUERY_INFORMATION, WaitForSingleObject,
+            };
+
+            let handle = OpenProcess(PROCESS_QUERY_INFORMATION, 0, pid as u32);
+            if handle.is_null() {
+                return Ok(JSValue::FALSE);
+            }
+            let status = WaitForSingleObject(handle, 0);
+            CloseHandle(handle);
+            // WAIT_TIMEOUT = process still running
+            Ok(JSValue::from(status == WAIT_TIMEOUT))
+        }
     }
 }
 
@@ -838,7 +908,7 @@ async fn wait_child_exit(mut rx: tokio::sync::watch::Receiver<bool>, timeout: Du
             return true;
         }
         match tokio::time::timeout(timeout, rx.changed()).await {
-            // changed() errors when the sender is dropped — the state was
+            // changed() errors when the sender is dropped �?the state was
             // removed from the registry, which only happens on exit/cleanup.
             Ok(Ok(())) => continue,
             _ => return false,
@@ -858,7 +928,7 @@ fn send_child_signal(pid: i32, sig: i32) {
     }
 }
 
-/// The EOF → term → SIGKILL shutdown ladder. Returns the stage at which the
+/// The EOF �?term �?SIGKILL shutdown ladder. Returns the stage at which the
 /// child exited. Removes the registry entry when done.
 async fn shutdown_ladder(
     pid: i32,
@@ -898,8 +968,8 @@ async fn shutdown_ladder(
     finish!("timed_out")
 }
 
-/// shutdown(options?) — gracefully shut the child down:
-/// close stdin (EOF), then `termSignal`, then SIGKILL — each stage bounded by
+/// shutdown(options?) �?gracefully shut the child down:
+/// close stdin (EOF), then `termSignal`, then SIGKILL �?each stage bounded by
 /// its timeout. Resolves with the stage at which the child exited:
 /// "eof" | "term" | "kill" | "timed_out" | "already_closed".
 fn js_child_shutdown(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -948,8 +1018,8 @@ fn js_child_shutdown(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     let pid = pid_from_this(ctx, &cc);
 
-    // Claim the child's exit state: absent → never spawned by us or already
-    // reaped; already shutting down → report without re-running the ladder.
+    // Claim the child's exit state: absent �?never spawned by us or already
+    // reaped; already shutting down �?report without re-running the ladder.
     let rx = {
         let mut map = CHILD_EXITS.lock().unwrap();
         let Some(state) = map.get_mut(&pid) else {
@@ -1022,19 +1092,27 @@ fn get_timeout_prop(ctx: &mut ScopedContext, obj: &Object) -> Result<Option<u64>
 }
 
 /// Parse a stdio mode property strictly: "pipe" | "inherit" | "ignore".
+/// Returns the mode plus whether the effective mode is "inherit" (used by
+/// the Windows spawn guard to know which of our own handles must stay
+/// inheritable).
 fn parse_stdio_mode_strict(
     ctx: &mut ScopedContext,
     opts: &Object,
     key: &str,
-    default: Stdio,
-) -> Result<Stdio, i32> {
+    default_inherit: bool,
+) -> Result<(Stdio, bool), i32> {
     let Some(mode) = get_str_prop_strict(ctx, opts, key)? else {
-        return Ok(default);
+        let stdio = if default_inherit {
+            Stdio::inherit()
+        } else {
+            Stdio::piped()
+        };
+        return Ok((stdio, default_inherit));
     };
     match mode.as_str() {
-        "pipe" => Ok(Stdio::piped()),
-        "inherit" => Ok(Stdio::inherit()),
-        "ignore" => Ok(Stdio::null()),
+        "pipe" => Ok((Stdio::piped(), false)),
+        "inherit" => Ok((Stdio::inherit(), true)),
+        "ignore" => Ok((Stdio::null(), false)),
         _ => Err(ctx.throw_range_error(&format!(
             "`{key}` must be \"pipe\", \"inherit\", or \"ignore\""
         ))),
@@ -1071,32 +1149,174 @@ fn parse_env_obj_strict(
     Ok(Some(map))
 }
 
+/// Windows: create a kill-on-close job object and assign a sync-spawned child
+/// to it, so killing the job takes down descendant processes too. Returns a
+/// null handle on failure (caller falls back to killing only the direct child).
+#[cfg(windows)]
+fn job_assign_child(child: &std::process::Child) -> windows_sys::Win32::Foundation::HANDLE {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+        SetInformationJobObject,
+    };
+
+    // SAFETY: handles are freshly created or belong to a live spawned child;
+    // each failure path closes the job and degrades to the null handle.
+    unsafe {
+        let job: HANDLE = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+        if job.is_null() {
+            return std::ptr::null_mut();
+        }
+        let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        let ok = SetInformationJobObject(
+            job,
+            JobObjectExtendedLimitInformation,
+            &limits as *const _ as *const core::ffi::c_void,
+            std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+        ) != 0
+            && AssignProcessToJobObject(job, child.as_raw_handle()) != 0;
+        if !ok {
+            CloseHandle(job);
+            return std::ptr::null_mut();
+        }
+        job
+    }
+}
+
+/// Windows std spawns cannot limit handle inheritance on stable Rust (no
+/// stable PROC_THREAD_ATTRIBUTE_HANDLE_LIST), so CreateProcess duplicates
+/// every inheritable handle into the child �?including our own stdio. A
+/// detached grandchild then keeps our stdout/stderr pipes open forever,
+/// hanging read-to-EOF collectors (spawnSync/sh). Temporarily clearing the
+/// inherit bit on the streams a spawn does NOT pass as "inherit" closes that
+/// leak.
+///
+/// ponytail: flip/restore races with concurrent spawns from other threads;
+/// acceptable because aike spawns from its single JS thread.
+#[cfg(windows)]
+fn clear_own_stdio_inherit(
+    keep_stdin: bool,
+    keep_stdout: bool,
+    keep_stderr: bool,
+) -> [Option<u32>; 3] {
+    use windows_sys::Win32::System::Console::{
+        STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+    };
+    [
+        (!keep_stdin)
+            .then(|| std_handle_set_inherit(STD_INPUT_HANDLE, false))
+            .flatten(),
+        (!keep_stdout)
+            .then(|| std_handle_set_inherit(STD_OUTPUT_HANDLE, false))
+            .flatten(),
+        (!keep_stderr)
+            .then(|| std_handle_set_inherit(STD_ERROR_HANDLE, false))
+            .flatten(),
+    ]
+}
+
+/// Re-apply the flags saved by `clear_own_stdio_inherit`.
+#[cfg(windows)]
+fn restore_own_stdio_inherit(saved: &[Option<u32>; 3]) {
+    use windows_sys::Win32::System::Console::{
+        STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+    };
+    const WHICH: [windows_sys::Win32::System::Console::STD_HANDLE; 3] =
+        [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE];
+    for (which, flags) in WHICH.iter().zip(saved.iter()) {
+        if let Some(flags) = flags {
+            std_handle_set_flags(*which, *flags);
+        }
+    }
+}
+
+/// Set (inherit=true) or clear (inherit=false) HANDLE_FLAG_INHERIT on one
+/// standard handle. Returns the full previous flag word, or None when there
+/// is no such handle or the call failed.
+#[cfg(windows)]
+fn std_handle_set_inherit(
+    which: windows_sys::Win32::System::Console::STD_HANDLE,
+    inherit: bool,
+) -> Option<u32> {
+    use windows_sys::Win32::Foundation::HANDLE_FLAG_INHERIT;
+
+    let old = std_handle_get_flags(which)?;
+    let new = if inherit {
+        old | HANDLE_FLAG_INHERIT
+    } else {
+        old & !HANDLE_FLAG_INHERIT
+    };
+    std_handle_set_flags(which, new).then_some(old)
+}
+
+#[cfg(windows)]
+fn std_handle_get_flags(which: windows_sys::Win32::System::Console::STD_HANDLE) -> Option<u32> {
+    use windows_sys::Win32::Foundation::{GetHandleInformation, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Console::GetStdHandle;
+
+    unsafe {
+        // SAFETY: plain handle queries; failures degrade to None.
+        let h = GetStdHandle(which);
+        if h.is_null() || h == INVALID_HANDLE_VALUE {
+            return None;
+        }
+        let mut flags: u32 = 0;
+        if GetHandleInformation(h, &mut flags) == 0 {
+            return None;
+        }
+        Some(flags)
+    }
+}
+
+#[cfg(windows)]
+fn std_handle_set_flags(
+    which: windows_sys::Win32::System::Console::STD_HANDLE,
+    flags: u32,
+) -> bool {
+    use windows_sys::Win32::Foundation::{
+        HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, SetHandleInformation,
+    };
+    use windows_sys::Win32::System::Console::GetStdHandle;
+
+    unsafe {
+        // SAFETY: plain handle update; failure is reported to the caller.
+        let h = GetStdHandle(which);
+        if h.is_null() || h == INVALID_HANDLE_VALUE {
+            return false;
+        }
+        // Only touch the INHERIT bit �?never other flag bits (e.g. protect-
+        // from-close) that may be present in `flags`.
+        SetHandleInformation(h, HANDLE_FLAG_INHERIT, flags & HANDLE_FLAG_INHERIT) != 0
+    }
+}
+
 /// Kill a single child process. Used by `kill_all_children` (atexit /
 /// signal handler backstop) as a fallback when process-wrap handles are
 /// not available. On unix the child is typically a process-group leader,
 /// so `kill(-pid)` reaches all descendants.
-#[cfg(unix)]
 fn terminate_process_tree(pid: i32) {
+    #[cfg(unix)]
     unsafe {
         libc::kill(-pid, libc::SIGKILL);
     }
-}
-#[cfg(windows)]
-fn terminate_process_tree(pid: i32) {
-    unsafe { terminate_process(pid) };
+    #[cfg(windows)]
+    unsafe {
+        terminate_process(pid)
+    };
 }
 
 /// Get signal number (Unix-only).
-#[cfg(unix)]
-fn get_signal_code(status: &ExitStatus) -> Option<i32> {
-    use std::os::unix::process::ExitStatusExt;
-    status.signal()
-}
-#[cfg(not(unix))]
 fn get_signal_code(_status: &ExitStatus) -> Option<i32> {
-    None
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        status.signal()
+    }
+    #[cfg(not(unix))]
+    {
+        None
+    }
 }
-
-
-
-
