@@ -522,12 +522,11 @@ impl WritableStreamPayload {
     /// erroring stream with no in-flight operation finishes erroring here (per
     /// spec `WritableStreamDefaultControllerAdvanceQueueIfNeeded`).
     pub(crate) fn try_close(&mut self, ctx: &mut ScopedContext) -> Result<(), i32> {
-        if self.state == RsState::Erroring
-            && !self.has_operation_in_flight()
-        {
+        if self.state == RsState::Erroring && !self.has_operation_in_flight() {
             self.finish_erroring(ctx)?;
             return Ok(());
         }
+
         if self.state == RsState::Readable
             && self.started
             && self.close_requested
@@ -854,7 +853,7 @@ impl WritableStreamPayload {
                     // lets a synchronous `abort()` (issued right after `write()`)
                     // take effect before the write completes, so queued writes
                     // are rejected instead of invoking the sink.
-                    let mut p = if let Ok(mut p) = Promise::try_from(v) {
+                    let mut p = if let Ok(p) = Promise::try_from(v) {
                         p
                     } else {
                         Promise::from_resolve_value(ctx, v)?

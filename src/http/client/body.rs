@@ -244,7 +244,7 @@ pub(crate) fn drain_body(
                     }
                     let mut guard = buf.lock().unwrap();
                     let inner = guard.as_mut().unwrap();
-                    let mut finish = |guard: &mut std::sync::MutexGuard<Option<Vec<u8>>>| {
+                    let finish = |guard: &mut std::sync::MutexGuard<Option<Vec<u8>>>| {
                         guard.take();
                         committed.store(true, Ordering::SeqCst);
                     };

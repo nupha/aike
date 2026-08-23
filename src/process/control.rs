@@ -64,7 +64,6 @@ pub(super) fn js_kill(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             )));
         }
     }
-
     #[cfg(windows)]
     {
         let _ = sig; // Windows only supports terminate

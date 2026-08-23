@@ -20,6 +20,7 @@ use crate::{
         },
     },
 };
+
 pub(crate) struct WritableControllerPayload {
     pub(crate) stream: Option<JSWritableStream>,
     pub(crate) underlying_sink: JSValue,
@@ -117,7 +118,7 @@ fn js_writable_controller_error(_ctx: &mut ScopedContext, cc: CallContext) -> JS
 
 fn js_writable_controller_signal(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut this = cc.this();
-    let mut p = JSWritableStreamDefaultController::payload_mut_of(&mut this)
+    let p = JSWritableStreamDefaultController::payload_mut_of(&mut this)
         .ok_or_else(|| ctx.throw_type_error("not a WritableStreamDefaultController"))?;
     p.ensure_signal(ctx)
 }
