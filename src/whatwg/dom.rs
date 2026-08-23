@@ -89,27 +89,24 @@ fn js_dom_exception_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSR
 
 fn js_dom_exception_name_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
-    let p = JSDOMException::payload_of(&this).ok_or_else(|| {
-        ctx.throw_type_error("Illegal invocation: not a DOMException instance")
-    })?;
+    let p = JSDOMException::payload_of(&this)
+        .ok_or_else(|| ctx.throw_type_error("Illegal invocation: not a DOMException instance"))?;
     ctx.create_string_from_utf8(p.name.as_bytes().to_vec())
         .map(JSValue::make_string)
 }
 
 fn js_dom_exception_message_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
-    let p = JSDOMException::payload_of(&this).ok_or_else(|| {
-        ctx.throw_type_error("Illegal invocation: not a DOMException instance")
-    })?;
+    let p = JSDOMException::payload_of(&this)
+        .ok_or_else(|| ctx.throw_type_error("Illegal invocation: not a DOMException instance"))?;
     ctx.create_string_from_utf8(p.message.as_bytes().to_vec())
         .map(JSValue::make_string)
 }
 
 fn js_dom_exception_code_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
-    let p = JSDOMException::payload_of(&this).ok_or_else(|| {
-        ctx.throw_type_error("Illegal invocation: not a DOMException instance")
-    })?;
+    let p = JSDOMException::payload_of(&this)
+        .ok_or_else(|| ctx.throw_type_error("Illegal invocation: not a DOMException instance"))?;
     Ok(JSValue::from(p.code))
 }
 
@@ -136,11 +133,7 @@ fn register_class_dom_exception(rt: &mut Runtime) -> Result<ClassID, i32> {
 ///
 /// Used by abort/fetch to produce a real `AbortError`/`TimeoutError` whose
 /// `code`, `name` and `constructor` satisfy WPT's DOMException assertions.
-pub(crate) fn make_dom_exception(
-    ctx: &mut ScopedContext,
-    name: &str,
-    message: &str,
-) -> JSResult {
+pub(crate) fn make_dom_exception(ctx: &mut ScopedContext, name: &str, message: &str) -> JSResult {
     let payload = DOMExceptionPayload {
         code: dom_exception_code(name),
         message: message.to_string(),

@@ -52,9 +52,7 @@ pub(crate) fn resolve_client_origin(ctx: &mut ScopedContext) -> (Option<String>,
 /// Server build: no location/origin concept — every fetch runs origin-less
 /// (null origin).
 #[cfg(not(feature = "fetch_browser"))]
-pub(crate) fn resolve_client_origin(
-    _ctx: &mut ScopedContext,
-) -> (Option<String>, Option<String>) {
+pub(crate) fn resolve_client_origin(_ctx: &mut ScopedContext) -> (Option<String>, Option<String>) {
     (None, None)
 }
 

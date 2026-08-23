@@ -222,35 +222,48 @@ impl ReaderPayload {
                     let view_jv = JSValue::from(view);
                     let byte_offset = view_jv
                         .get_property_str(ctx, "byteOffset")?
-                        .to_number(ctx)?.to_f64() as u32;
+                        .to_number(ctx)?
+                        .to_f64() as u32;
                     let buffer_byte_length = {
                         let buf_jv = view_jv.get_property_str(ctx, "buffer")?;
-                        buf_jv.get_property_str(ctx, "byteLength")?
-                            .to_number(ctx)?.to_f64() as u32
+                        buf_jv
+                            .get_property_str(ctx, "byteLength")?
+                            .to_number(ctx)?
+                            .to_f64() as u32
                     };
                     let (promise, resolve_funcs) = Promise::create(ctx)?;
                     // Create the BYOBRequest eagerly to avoid new_instance scope issues
                     // during the pull callback (call_pull_inner).
-                    let br = super::readable_byob_request::JSReadableStreamBYOBRequest::new_instance(
-                        ctx,
-                        JSValue::UNDEFINED,
-                        super::readable_byob_request::ByobRequestPayload::new(
-                            controller_val,
-                            JSValue::from(view),
-                        ),
-                    ).ok().map(JSValue::from);
-                    pending.borrow_mut().push(super::readable_controller::PullIntoDescriptor {
-                        view,
-                        resolve_fn: JSValue::from(resolve_funcs[0]),
-                        promise,
-                        bytes_filled: 0,
-                        element_size,
-                        byte_offset,
-                        buffer_byte_length,
-                        byob_request: br,
-                        reader_type: super::readable_controller::ReaderType::Byob,
-                        minimum_fill: min * if view.length() > 0 { (view.byte_length() / view.length()) as u32 } else { 1 },
-                    });
+                    let br =
+                        super::readable_byob_request::JSReadableStreamBYOBRequest::new_instance(
+                            ctx,
+                            JSValue::UNDEFINED,
+                            super::readable_byob_request::ByobRequestPayload::new(
+                                controller_val,
+                                JSValue::from(view),
+                            ),
+                        )
+                        .ok()
+                        .map(JSValue::from);
+                    pending
+                        .borrow_mut()
+                        .push(super::readable_controller::PullIntoDescriptor {
+                            view,
+                            resolve_fn: JSValue::from(resolve_funcs[0]),
+                            promise,
+                            bytes_filled: 0,
+                            element_size,
+                            byte_offset,
+                            buffer_byte_length,
+                            byob_request: br,
+                            reader_type: super::readable_controller::ReaderType::Byob,
+                            minimum_fill: min
+                                * if view.length() > 0 {
+                                    (view.byte_length() / view.length()) as u32
+                                } else {
+                                    1
+                                },
+                        });
                     cp.call_pull(ctx)?;
                     return Ok(promise);
                 }
@@ -308,7 +321,10 @@ impl ReaderPayload {
 /// return a new empty Uint8Array backed by a fresh buffer. This matches
 /// WHATWG ReadableByteStreamControllerBYOBRead when reading from a closed
 /// or empty stream.
-pub(crate) fn transfer_view_buffer(ctx: &mut ScopedContext, view: TypedArray) -> Result<JSValue, i32> {
+pub(crate) fn transfer_view_buffer(
+    ctx: &mut ScopedContext,
+    view: TypedArray,
+) -> Result<JSValue, i32> {
     view.array_buffer().detatch(ctx);
     let new_ta = TypedArray::create_from_vec_u8(ctx, Vec::new())?;
     Ok(JSValue::from(new_ta))
@@ -439,7 +455,8 @@ fn js_reader_read(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         // DataView: elementSize is 1.
         let bl = view_jv
             .get_property_str(ctx, "byteLength")?
-            .to_number(ctx)?.to_f64() as usize;
+            .to_number(ctx)?
+            .to_f64() as usize;
         if bl == 0 {
             let _ = ctx.throw_type_error("view must have non-zero length");
             let err_val = ctx.take_exception().to_value(ctx);
@@ -471,8 +488,7 @@ fn js_reader_read(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                     return Promise::from_reject_value(ctx, err_val).map(JSValue::from);
                 }
                 if min_i * element_size as u64 > view_byte_length as u64 {
-                    let _ =
-                        ctx.throw_range_error("'min' option is larger than view's byte length");
+                    let _ = ctx.throw_range_error("'min' option is larger than view's byte length");
                     let err_val = ctx.take_exception().to_value(ctx);
                     return Promise::from_reject_value(ctx, err_val).map(JSValue::from);
                 }
@@ -490,7 +506,8 @@ fn js_reader_read(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         let buf_jv = view_jv.get_property_str(ctx, "buffer")?;
         let offset = view_jv
             .get_property_str(ctx, "byteOffset")?
-            .to_number(ctx)?.to_f64() as usize;
+            .to_number(ctx)?
+            .to_f64() as usize;
         // Create a Uint8Array(buffer, offset, length) via constructor call.
         let uint8_ctor = ctx
             .global_obj()

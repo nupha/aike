@@ -115,9 +115,8 @@ fn parse_split_mode(ctx: &mut ScopedContext, val: &JSValue) -> Result<SplitMode,
     }
 
     let n = val.to_number(ctx)?.to_i32();
-    SplitMode::from_i32(n).ok_or_else(|| {
-        ctx.throw_type_error("splitMode must be 0..3 or none/layer/row/tensor") 
-    })
+    SplitMode::from_i32(n)
+        .ok_or_else(|| ctx.throw_type_error("splitMode must be 0..3 or none/layer/row/tensor"))
 }
 
 fn parse_model_options(ctx: &mut ScopedContext, cc: &CallContext) -> Result<ModelOptions, i32> {
@@ -127,9 +126,11 @@ fn parse_model_options(ctx: &mut ScopedContext, cc: &CallContext) -> Result<Mode
         return Ok(out);
     }
 
-    let opts = cc.arg(1).as_object().copied().ok_or_else(|| {
-        ctx.throw_type_error("model options must be object")
-    })?;
+    let opts = cc
+        .arg(1)
+        .as_object()
+        .copied()
+        .ok_or_else(|| ctx.throw_type_error("model options must be object"))?;
 
     let v = opts.get_property_str(ctx, "gpuLayers")?;
     if !v.is_undefined() {
@@ -523,7 +524,7 @@ pub(super) fn parse_context_params(
             .ok_or_else(|| {
                 ctx.throw_type_error(
                     "poolingType must be one of: unspecified | none | mean | cls | last | rank",
-                ) 
+                )
             })?;
             ctx_params.pooling_type = t as _;
         }
@@ -536,9 +537,9 @@ pub(super) fn parse_context_params(
         // --- RoPE & YaRN (nested under "rope") ---
         let rope_val = opts.get_property_str(ctx, "rope")?;
         if !rope_val.is_undefined() {
-            let rope = rope_val.as_object().ok_or_else(|| {
-                ctx.throw_type_error("rope should be an object") 
-            })?;
+            let rope = rope_val
+                .as_object()
+                .ok_or_else(|| ctx.throw_type_error("rope should be an object"))?;
 
             let v = rope.get_property_str(ctx, "scalingType")?;
             if !v.is_undefined() {
@@ -603,9 +604,9 @@ pub(super) fn parse_context_params(
         // --- KV Cache (nested under "cache") ---
         let cache_val = opts.get_property_str(ctx, "cache")?;
         if !cache_val.is_undefined() {
-            let cache = cache_val.as_object().ok_or_else(|| {
-                ctx.throw_type_error("cache should be an object") 
-            })?;
+            let cache = cache_val
+                .as_object()
+                .ok_or_else(|| ctx.throw_type_error("cache should be an object"))?;
 
             let v = cache.get_property_str(ctx, "k")?;
             if !v.is_undefined() {
@@ -614,9 +615,7 @@ pub(super) fn parse_context_params(
                     .content()
                     .encode_utf8(false)
                     .parse::<KVCacheType>()
-                    .map_err(|e| {
-                        ctx.throw_type_error(&e) 
-                    })?;
+                    .map_err(|e| ctx.throw_type_error(&e))?;
                 ctx_params.type_k = t as _;
             }
 
@@ -627,9 +626,7 @@ pub(super) fn parse_context_params(
                     .content()
                     .encode_utf8(false)
                     .parse::<KVCacheType>()
-                    .map_err(|e| {
-                        ctx.throw_type_error(&e) 
-                    })?;
+                    .map_err(|e| ctx.throw_type_error(&e))?;
                 ctx_params.type_v = t as _;
             }
         }
@@ -705,9 +702,7 @@ fn js_model_tokenize(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     let tokens = llm_model.tokenize(
         CString::new(text.content().encode_utf8(false).as_ref())
-            .map_err(|_| {
-                ctx.throw_internal_error("invalid text") 
-            })?
+            .map_err(|_| ctx.throw_internal_error("invalid text"))?
             .as_c_str(),
         false,
         false,
@@ -766,9 +761,8 @@ fn js_model_getMeta(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let model = get_llama_model(ctx, &this)?;
     let key = cc.arg(0).to_string(ctx)?;
-    let key = CString::new(key.content().encode_utf8(false).as_ref()).map_err(|_| {
-        ctx.throw_type_error("invalid meta key") 
-    })?;
+    let key = CString::new(key.content().encode_utf8(false).as_ref())
+        .map_err(|_| ctx.throw_type_error("invalid meta key"))?;
 
     if let Some(val) = model.meta_val_str(key.as_c_str()) {
         ctx.create_string_from_utf8(val.into_bytes())
@@ -813,23 +807,24 @@ fn js_model_renderTemplate(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
     let this = cc.this();
     let model = get_llama_model(ctx, &this)?;
 
-    let msgs_arr = cc.arg(0).as_object_Array().copied().ok_or_else(|| {
-        ctx.throw_type_error("messages must be array") 
-    })?;
+    let msgs_arr = cc
+        .arg(0)
+        .as_object_Array()
+        .copied()
+        .ok_or_else(|| ctx.throw_type_error("messages must be array"))?;
 
     let mut messages: Vec<JinjaMessage> = Vec::with_capacity(msgs_arr.payload().len());
     for item in msgs_arr.payload().values() {
-        let obj = item.as_object().copied().ok_or_else(|| {
-            ctx.throw_type_error("messages[] item must be object") 
-        })?;
+        let obj = item
+            .as_object()
+            .copied()
+            .ok_or_else(|| ctx.throw_type_error("messages[] item must be object"))?;
 
         let role_v = obj.get_property_str(ctx, "role")?;
         let role = role_v
             .as_string(true)
             .map(|x| x.content().encode_utf8(false).to_string())
-            .ok_or_else(|| {
-                ctx.throw_type_error("messages[].role must be string") 
-            })?;
+            .ok_or_else(|| ctx.throw_type_error("messages[].role must be string"))?;
 
         let content_v = obj.get_property_str(ctx, "content")?;
         let content = if content_v.is_undefined() || content_v.is_null() {
@@ -857,9 +852,10 @@ fn js_model_renderTemplate(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
 
     let val = cc.arg(1);
     if !val.is_undefined() {
-        let opts = val.as_object().copied().ok_or_else(|| {
-            ctx.throw_type_error("options must be object") 
-        })?;
+        let opts = val
+            .as_object()
+            .copied()
+            .ok_or_else(|| ctx.throw_type_error("options must be object"))?;
 
         let json = ctx.with_new_scope(|scope| {
             scope.json_stringify(opts.into(), JSValue::UNDEFINED, JSValue::UNDEFINED)
@@ -879,11 +875,9 @@ fn js_model_renderTemplate(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
             ) -> Result<bool, i32> {
                 match m.remove(key) {
                     Some(serde_json::Value::Bool(b)) => Ok(b),
-                    Some(_) => {
-                        Err(ctx.throw_type_error(&format!(
-                            "renderTemplate options.{key} must be boolean"
-                        )) )
-                    }
+                    Some(_) => Err(ctx.throw_type_error(&format!(
+                        "renderTemplate options.{key} must be boolean"
+                    ))),
                     None => Ok(default),
                 }
             }
@@ -896,11 +890,8 @@ fn js_model_renderTemplate(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
             ) -> Result<String, i32> {
                 match m.remove(key) {
                     Some(serde_json::Value::String(s)) => Ok(s),
-                    Some(_) => {
-                        Err(ctx.throw_type_error(&format!(
-                            "renderTemplate options.{key} must be string"
-                        )))
-                    }
+                    Some(_) => Err(ctx
+                        .throw_type_error(&format!("renderTemplate options.{key} must be string"))),
                     None => Ok(default),
                 }
             }
@@ -1008,9 +999,7 @@ fn js_model_load(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let (promise, tx) = Promise::create_with_channel(
         ctx,
         |cx, payload: Result<(LlamaModel, String), String>| -> JSResult {
-            let (model, file_name) = payload.map_err(|e| {
-                cx.throw_internal_error(&e)
-            })?;
+            let (model, file_name) = payload.map_err(|e| cx.throw_internal_error(&e))?;
             let mut obj = JSLlmModel::new_instance(cx, JSValue::UNDEFINED, model)?;
             let path = cx
                 .create_string_from_utf8(file_name.into_bytes())

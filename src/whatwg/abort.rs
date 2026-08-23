@@ -122,9 +122,9 @@ fn fire_abort_events(ctx: &mut ScopedContext, inner: &Rc<RefCell<SignalInner>>) 
 
     for cb in listeners {
         if cb.is_callable() && cb.call(ctx, JSValue::UNDEFINED, &[event.into()]).is_err() {
-            let _e = ctx.take_exception();
+            let exc = ctx.take_exception();
             #[cfg(debug_assertions)]
-            eprintln!("[swallow-exc] {}:{}: {:?}", file!(), line!(), _e);
+            crate::helpers::print_exc(ctx, exc);
         }
     }
 }
@@ -339,9 +339,9 @@ fn js_controller_abort(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             .filter(|v| v.is_callable())
         {
             if cancel_fn.call(ctx, body, &[reason]).is_err() {
-                let _e = ctx.take_exception();
+                let exc = ctx.take_exception();
                 #[cfg(debug_assertions)]
-                eprintln!("[swallow-exc] {}:{}: {:?}", file!(), line!(), _e);
+                crate::helpers::print_exc(ctx, exc);
             }
         }
     }

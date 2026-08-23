@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-use std::{collections::HashSet, path::{Path, PathBuf}};
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+};
 
 use zuqe::{Array, CallContext, JSResult, JSValue, ScopedContext};
 
@@ -30,17 +33,15 @@ fn glob_abs(
 }
 
 /// Read an optional string property from the JS options object argument.
-fn opt_str(
-    ctx: &mut ScopedContext,
-    cc: &CallContext,
-    name: &str,
-) -> Result<Option<PathBuf>, i32> {
+fn opt_str(ctx: &mut ScopedContext, cc: &CallContext, name: &str) -> Result<Option<PathBuf>, i32> {
     let v = cc.arg(1).get_property_str(ctx, name)?;
     if v.is_undefined() {
         Ok(None)
     } else {
         let s = v.to_string(ctx)?;
-        Ok(Some(PathBuf::from(s.content().encode_utf8(false).to_string())))
+        Ok(Some(PathBuf::from(
+            s.content().encode_utf8(false).to_string(),
+        )))
     }
 }
 
@@ -60,10 +61,7 @@ fn read_bool(
 }
 
 /// Read the `exclude` string array from a JS options object.
-fn opt_excludes(
-    ctx: &mut ScopedContext,
-    cc: &CallContext,
-) -> Result<Vec<String>, i32> {
+fn opt_excludes(ctx: &mut ScopedContext, cc: &CallContext) -> Result<Vec<String>, i32> {
     let v = cc.arg(1).get_property_str(ctx, "exclude")?;
     let mut out = Vec::new();
     if let Some(arr) = v.as_object_Array() {

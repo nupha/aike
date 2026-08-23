@@ -305,9 +305,9 @@ enum Delivery {
 fn call_cb(cx: &mut ScopedContext, cb: &Object, arg: JSValue) {
     // Clear any exception the callback may have thrown (ES §9.5)
     if cb.call(cx, JSValue::UNDEFINED, &[arg]).is_err() {
-        let _e = cx.take_exception();
+        let exc = cx.take_exception();
         #[cfg(debug_assertions)]
-        eprintln!("[swallow-exc] class_io_handle.rs:{}: {:?}", line!(), _e);
+        crate::helpers::print_exc(cx, exc);
     }
 }
 
@@ -470,22 +470,23 @@ fn fh_subscribe(ctx: &mut ScopedContext, cc: CallContext, mode: ReadMode) -> JSR
         WarnIgnore,
         Subscribe,
     }
-    let action = READ_SLOTS.with_borrow_mut(|slots| {
-        match slots.get_mut(&raw_fd) {
-            Some(slot) if slot.mode != mode => SubAction::WarnIgnore,
-            Some(slot) => {
-                slot.callback = callback;
-                SubAction::Replace
-            }
-            None => SubAction::Subscribe,
+    let action = READ_SLOTS.with_borrow_mut(|slots| match slots.get_mut(&raw_fd) {
+        Some(slot) if slot.mode != mode => SubAction::WarnIgnore,
+        Some(slot) => {
+            slot.callback = callback;
+            SubAction::Replace
         }
+        None => SubAction::Subscribe,
     });
 
     match action {
         SubAction::Replace => return Ok(JSValue::UNDEFINED),
         SubAction::WarnIgnore => {
             let existing = READ_SLOTS.with_borrow(|slots| {
-                slots.get(&raw_fd).map(|slot| slot.mode.name()).unwrap_or("?")
+                slots
+                    .get(&raw_fd)
+                    .map(|slot| slot.mode.name())
+                    .unwrap_or("?")
             });
             eprintln!(
                 "[aike] warning: {}() ignored — this handle already has an active {} listener (first registration wins). Call {}(null) first to switch modes.",

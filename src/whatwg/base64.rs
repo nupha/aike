@@ -121,11 +121,7 @@ fn forgiving_base64_decode(data: &str) -> Option<Vec<u8>> {
         2 => accumulated == 4,
         _ => false,
     };
-    if padding_ok {
-        Some(output)
-    } else {
-        None
-    }
+    if padding_ok { Some(output) } else { None }
 }
 
 /// `atob(data: string) -> string`: decode a base64 string back to Latin-1.
@@ -190,9 +186,7 @@ fn js_hex_to_bytes(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         .to_string();
 
     if s.len() % 2 != 0 {
-        return Err(ctx.throw_range_error(
-            "`data` must have an even number of hex digits",
-        ));
+        return Err(ctx.throw_range_error("`data` must have an even number of hex digits"));
     }
 
     let nibble = |c: u8| -> Option<u8> {
@@ -207,12 +201,10 @@ fn js_hex_to_bytes(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut bytes = Vec::with_capacity(s.len() / 2);
     let raw = s.as_bytes();
     for i in (0..raw.len()).step_by(2) {
-        let hi = nibble(raw[i]).ok_or_else(|| {
-            ctx.throw_range_error("`data` must be a hexadecimal string")
-        })?;
-        let lo = nibble(raw[i + 1]).ok_or_else(|| {
-            ctx.throw_range_error("`data` must be a hexadecimal string")
-        })?;
+        let hi = nibble(raw[i])
+            .ok_or_else(|| ctx.throw_range_error("`data` must be a hexadecimal string"))?;
+        let lo = nibble(raw[i + 1])
+            .ok_or_else(|| ctx.throw_range_error("`data` must be a hexadecimal string"))?;
         bytes.push((hi << 4) | lo);
     }
     TypedArray::create_from_vec_u8(ctx, bytes).map(JSValue::from)
@@ -225,9 +217,11 @@ pub(crate) fn install_encoding(ctx: &mut ScopedContext, mut global: Object) -> R
     global.define_property_value_str(ctx, "btoa", btoa.into(), zuqe::JS_PROP_C_W_E)?;
     let atob = ctx.create_native_function(Callback::Func(js_atob), "atob", 1, 0)?;
     global.define_property_value_str(ctx, "atob", atob.into(), zuqe::JS_PROP_C_W_E)?;
-    let enc = ctx.create_native_function(Callback::Func(js_bytes_to_base64), "bytesToBase64", 1, 0)?;
+    let enc =
+        ctx.create_native_function(Callback::Func(js_bytes_to_base64), "bytesToBase64", 1, 0)?;
     global.define_property_value_str(ctx, "bytesToBase64", enc.into(), zuqe::JS_PROP_C_W_E)?;
-    let dec = ctx.create_native_function(Callback::Func(js_base64_to_bytes), "base64ToBytes", 1, 0)?;
+    let dec =
+        ctx.create_native_function(Callback::Func(js_base64_to_bytes), "base64ToBytes", 1, 0)?;
     global.define_property_value_str(ctx, "base64ToBytes", dec.into(), zuqe::JS_PROP_C_W_E)?;
     let hex = ctx.create_native_function(Callback::Func(js_bytes_to_hex), "bytesToHex", 1, 0)?;
     global.define_property_value_str(ctx, "bytesToHex", hex.into(), zuqe::JS_PROP_C_W_E)?;

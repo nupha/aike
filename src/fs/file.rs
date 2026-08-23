@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-use std::{future::Future, io::SeekFrom, path::{Path, PathBuf}};
+use std::{
+    future::Future,
+    io::SeekFrom,
+    path::{Path, PathBuf},
+};
 
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
@@ -123,7 +127,10 @@ pub(super) fn js_fs_read(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                     .read_to_end(&mut bytes)
                     .await
                     .map_err(|e| e.to_string())?,
-                None => file.read_to_end(&mut bytes).await.map_err(|e| e.to_string())?,
+                None => file
+                    .read_to_end(&mut bytes)
+                    .await
+                    .map_err(|e| e.to_string())?,
             };
             Ok(bytes)
         },
@@ -331,7 +338,10 @@ pub(super) fn js_fs_sha256(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
             let data = tokio::fs::read(&path).await.map_err(|e| e.to_string())?;
             use sha2::Digest;
             let digest = sha2::Sha256::digest(&data);
-            Ok(digest.iter().map(|b| format!("{b:02x}")).collect::<String>())
+            Ok(digest
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>())
         },
         |cx, s| cx.create_string_from_str(&s).map(JSValue::make_string),
     )
@@ -370,7 +380,9 @@ pub(super) fn js_fs_appendText(ctx: &mut ScopedContext, cc: CallContext) -> JSRe
             .open(&path)
             .await
             .map_err(|e| e.to_string())?;
-        f.write_all(data.as_bytes()).await.map_err(|e| e.to_string())
+        f.write_all(data.as_bytes())
+            .await
+            .map_err(|e| e.to_string())
     })
     .map(JSValue::from)
 }
@@ -604,7 +616,7 @@ async fn count_all_matches(path: &Path, needle: &[u8]) -> std::io::Result<i32> {
         let drop = win.len() - keep.min(win.len());
         carry.drain(..drop);
     }
-    
+
     Ok(count)
 }
 
@@ -647,7 +659,11 @@ async fn copy_replace_all(
         // Positions up to `commit_end` are safe to emit; positions at/after
         // `commit_end` may be the start of a match that needs data from the
         // *next* chunk to confirm.  On EOF everything is safe.
-        let commit_end = if eof { win.len() } else { win.len() - carry_len };
+        let commit_end = if eof {
+            win.len()
+        } else {
+            win.len() - carry_len
+        };
 
         // On non‑EOF, require a full match to fit in the committed zone
         // before we start writing — otherwise we might emit the first byte
@@ -735,9 +751,7 @@ pub(super) fn js_fs_open(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             }
             opts.open(&path).await.map_err(|e| e.to_string())
         },
-        |cx, file| {
-            JSFileHandle::new_instance_file(cx, JSValue::UNDEFINED, file).map(JSValue::from)
-        },
+        |cx, file| JSFileHandle::new_instance_file(cx, JSValue::UNDEFINED, file).map(JSValue::from),
     )
     .map(JSValue::from)
 }

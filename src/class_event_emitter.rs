@@ -152,9 +152,10 @@ fn js_emit(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     for i in start..start + n {
         let (_, cb) = emitter.dispatching.borrow()[i].clone();
         if cb.call(ctx, JSValue::UNDEFINED, args).is_err() {
-            let _e = ctx.take_exception();
+            // Ignore listener errors
+            let exc = ctx.take_exception();
             #[cfg(debug_assertions)]
-            eprintln!("[swallow-exc] {}:{}: {:?}", file!(), line!(), _e); // Ignore listener errors
+            crate::helpers::print_exc(ctx, exc);
         }
     }
 

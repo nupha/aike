@@ -212,9 +212,7 @@ pub(super) fn js_fs_stat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let path = get_path_arg(ctx, &cc)?;
     spawn_fs_op(
         ctx,
-        async move {
-            tokio::fs::metadata(&path).await.map_err(|e| e.to_string())
-        },
+        async move { tokio::fs::metadata(&path).await.map_err(|e| e.to_string()) },
         |cx, meta| make_stats(cx, &meta),
     )
     .map(JSValue::from)

@@ -1678,7 +1678,10 @@ pub(crate) fn install_readable_stream_statics(
     // inherits from ReadableStreamDefaultReader.prototype so that
     // BYOB readers get read()/cancel()/releaseLock()/closed.
     if let Some(byob_proto) = byob_ctor.get_property_str(ctx, "prototype").ok() {
-        if let Some(default_ctor) = global.get_property_str(ctx, "ReadableStreamDefaultReader").ok() {
+        if let Some(default_ctor) = global
+            .get_property_str(ctx, "ReadableStreamDefaultReader")
+            .ok()
+        {
             if let Some(default_proto) = default_ctor.get_property_str(ctx, "prototype").ok() {
                 if let Some(mut bp) = byob_proto.as_object() {
                     let _ = bp.set_prototype(ctx, default_proto);

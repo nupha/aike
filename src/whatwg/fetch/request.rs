@@ -575,13 +575,9 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     // The probing above intentionally tolerates missing properties; clear any
     // exception it may have left behind so the caller does not observe a stale
     // pending error. (In practice the probe returns Ok/None and there is none.)
-    if let zuqe::Exception::Error(_) = ctx.take_exception() {
-        #[cfg(debug_assertions)]
-        eprintln!(
-            "[swallow-exc] fetch.rs:{}: (probe left an exception)",
-            line!()
-        );
-    }
+    let exc = ctx.take_exception();
+    #[cfg(debug_assertions)]
+    crate::helpers::print_exc(ctx, exc);
 
     // Clone the client origin for request-header injection; the original is
     // moved into the response callback closure below.
@@ -849,13 +845,12 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                         .iter()
                         .find(|(k, _)| k.eq_ignore_ascii_case("access-control-allow-origin"))
                         .map(|(_, v)| v.clone());
-                    let allowed =
-                        check_allow_origin(
-                            acao.as_deref(),
-                            client_origin.as_deref().unwrap_or(""),
-                            credentials_include,
-                        )
-                        .is_some();
+                    let allowed = check_allow_origin(
+                        acao.as_deref(),
+                        client_origin.as_deref().unwrap_or(""),
+                        credentials_include,
+                    )
+                    .is_some();
                     if !allowed {
                         return Err(cx.throw_type_error(
                             "Failed to fetch: redirect response is a cross-origin CORS failure",

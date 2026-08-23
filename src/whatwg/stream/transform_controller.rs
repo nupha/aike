@@ -9,8 +9,7 @@ use std::{cell::Cell, rc::Rc};
 use linkme::distributed_slice;
 use zuqe::{
     CallContext, ClassCtorDef, ClassID, Exception, FieldDef, JSResult, JSValue, Runtime,
-    ScopedContext,
-    def_native_object,
+    ScopedContext, def_native_object,
     gc_lite::{GcTrace, GcTraceCtx},
 };
 
@@ -143,7 +142,9 @@ fn js_transform_controller_enqueue(ctx: &mut ScopedContext, cc: CallContext) -> 
         if let Some(stream_handle) = p.stream {
             let stream_val = JSValue::from(stream_handle);
             super::transform::transform_stream_error_writable_and_unblock_write(
-                ctx, &stream_val, e,
+                ctx,
+                &stream_val,
+                e,
             )?;
         }
         let stored = match rcp.stream() {
@@ -188,7 +189,9 @@ fn js_transform_controller_error(ctx: &mut ScopedContext, cc: CallContext) -> JS
     if let Some(stream_handle) = p.stream {
         let stream_val = JSValue::from(stream_handle);
         super::transform::transform_stream_error_writable_and_unblock_write(
-            ctx, &stream_val, reason,
+            ctx,
+            &stream_val,
+            reason,
         )?;
     }
 
@@ -224,9 +227,7 @@ fn js_transform_controller_terminate(ctx: &mut ScopedContext, cc: CallContext) -
 
     if let Some(stream_handle) = p.stream {
         let stream_val = JSValue::from(stream_handle);
-        super::transform::transform_stream_error_writable_and_unblock_write(
-            ctx, &stream_val, err,
-        )?;
+        super::transform::transform_stream_error_writable_and_unblock_write(ctx, &stream_val, err)?;
     }
 
     Ok(JSValue::UNDEFINED)

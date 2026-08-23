@@ -427,7 +427,6 @@ fn register_base_mcp(rt: &mut Runtime) -> Result<ClassID, i32> {
     JSBaseMcp::register(rt)
 }
 
-
 /// Shared config parsing for `StdioMcp.define` / `HttpMcp.define`.
 ///
 /// Parses the common fields (`name` (required, non-empty), `version`,

@@ -146,7 +146,12 @@ pub(crate) fn json_schema_coerce_or_check(
                 .enumerate()
                 .map(|(i, v)| {
                     json_schema_coerce_or_check(
-                        v, items_schema, &format!("{path}[{i}]"), errors, coerce, changed,
+                        v,
+                        items_schema,
+                        &format!("{path}[{i}]"),
+                        errors,
+                        coerce,
+                        changed,
                     )
                 })
                 .collect();

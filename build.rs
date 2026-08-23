@@ -4,7 +4,7 @@
 //! - `types/base/*.d.ts`          — always included (base types)
 //! - `types/features/llama_cpp/*.d.ts` — only included when feature "llama_cpp" is enabled
 
-use std::{env, fs, path::Path, io};
+use std::{env, fs, io, path::Path};
 
 /// Recursively collect `.d.ts` files under `dir`.
 fn collect_dts(dir: impl AsRef<Path>, out: &mut Vec<fs::DirEntry>) -> io::Result<()> {
@@ -28,12 +28,12 @@ fn main() {
     let base_dir = types_dir.join("base");
     let mut parts: Vec<(String, String)> = Vec::new();
     let mut base_entries = Vec::new();
-    collect_dts(base_dir.clone(), &mut base_entries)
-        .expect("failed to scan types/base/");
+    collect_dts(base_dir.clone(), &mut base_entries).expect("failed to scan types/base/");
     base_entries.sort_by_key(|e| e.path().to_string_lossy().to_string());
     for entry in &base_entries {
         let path = entry.path();
-        let relative = path.strip_prefix(&base_dir)
+        let relative = path
+            .strip_prefix(&base_dir)
             .unwrap_or(&path)
             .to_string_lossy()
             .to_string();

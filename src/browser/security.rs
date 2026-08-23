@@ -154,9 +154,9 @@ pub(crate) fn js_browser_handle_certificate_error(
                 if let Some(o) = obj
                     && cb.call(cx, JSValue::UNDEFINED, &[o.into()]).is_err()
                 {
-                    let _e = cx.take_exception();
+                    let exc = cx.take_exception();
                     #[cfg(debug_assertions)]
-                    eprintln!("[swallow-exc] security.rs:{}: {:?}", line!(), _e);
+                    crate::helpers::print_exc(cx, exc);
                 }
                 CERT_EVENT_ID.with(|e| *e.borrow_mut() = None);
             }

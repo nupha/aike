@@ -25,7 +25,7 @@ use zuqe::{
     def_native_object,
 };
 
-use crate::{USER_CLASS_DEFS};
+use crate::USER_CLASS_DEFS;
 
 use super::{
     CryptoKeyPayload, JSCryptoKey, algorithm_name, get_buffer_source_bytes, get_key_usages,

@@ -909,9 +909,9 @@ fn js_response_body_as(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                     // cached body the lock won't fail, but if it does, drop
                     // the error rather than failing the consumer.
                     if s.acquire_reader(ctx, false).is_err() {
-                        let _e = ctx.take_exception();
+                        let exc = ctx.take_exception();
                         #[cfg(debug_assertions)]
-                        eprintln!("[swallow-exc] response.rs:{}: {:?}", line!(), _e);
+                        crate::helpers::print_exc(ctx, exc);
                     }
                 }
             }

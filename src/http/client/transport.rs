@@ -418,7 +418,10 @@ where
             && let Some(hook) = before_hop
             && let Err(msg) = hook(client, &url, &referrer, credentials_stripped).await
         {
-            return Err(TransportError { code: "cors", message: msg });
+            return Err(TransportError {
+                code: "cors",
+                message: msg,
+            });
         }
 
         let resp = send(
@@ -534,7 +537,6 @@ where
     })
 }
 
-
 /// Origin (scheme://host[:port]) of a URL string, or `None` if unparsable.
 fn origin_of(url: &str) -> Option<String> {
     url::Url::parse(url)
@@ -579,7 +581,6 @@ fn redirect_target(resp: &reqwest::Response, current: &str) -> Option<String> {
     let joined = joined.to_string();
     Some(joined)
 }
-
 
 /// Perform an HTTP request on a pre-built `reqwest::Client`.
 ///
@@ -783,7 +784,10 @@ pub(crate) async fn perform_request(
                 && let Some(hook) = before_hop
                 && let Err(msg) = hook(client, &req.url, &req.referrer, false).await
             {
-                return Err(TransportError { code: "cors", message: msg });
+                return Err(TransportError {
+                    code: "cors",
+                    message: msg,
+                });
             }
             send_with_retry(
                 req.method.clone(),

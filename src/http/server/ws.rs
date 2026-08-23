@@ -278,9 +278,9 @@ pub(crate) fn dispatch_ws_open(
             if let Some(cb) = p.on_open.clone()
                 && cb.call(cx, ov, &[]).is_err()
             {
-                let _e = cx.take_exception();
+                let exc = cx.take_exception();
                 #[cfg(debug_assertions)]
-                eprintln!("[swallow-exc] ws.rs:{}: {:?}", line!(), _e);
+                crate::helpers::print_exc(cx, exc);
             }
         }
     }
@@ -320,9 +320,9 @@ pub(crate) fn dispatch_ws_data(
                     Err(_) => return,
                 };
                 if cb.call(cx, ov, &[JSValue::make_string(s)]).is_err() {
-                    let _e = cx.take_exception();
+                    let exc = cx.take_exception();
                     #[cfg(debug_assertions)]
-                    eprintln!("[swallow-exc] ws.rs:{}: {:?}", line!(), _e);
+                    crate::helpers::print_exc(cx, exc);
                 }
             } else if let Some(tx) = &p.read_tx {
                 // pull mode: forward to the async iterator's channel
@@ -341,11 +341,12 @@ pub(crate) fn dispatch_ws_data(
                 if let Some(cb) = p.on_close.clone()
                     && cb.call(cx, ov, &[]).is_err()
                 {
-                    let _e = cx.take_exception();
+                    let exc = cx.take_exception();
                     #[cfg(debug_assertions)]
-                    eprintln!("[swallow-exc] ws.rs:{}: {:?}", line!(), _e);
+                    crate::helpers::print_exc(cx, exc);
                 }
             }
+
             // Now re-borrow the payload to drop the connection from the registry.
             if let Ok(server) = get_server_payload_mut(cx, server_val) {
                 server.stream_registry.borrow_mut().remove(&id);

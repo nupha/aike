@@ -209,10 +209,10 @@ impl Hinter for AikeHelper {
         // hint() call, the redraw was triggered by a navigation command
         // (PreviousHistory/NextHistory); otherwise by a user keystroke.
         let nav = self.completion_state.nav_event.load(Ordering::Acquire);
-        let seen =
-            self.completion_state
-                .hint_nav_seen
-                .swap(nav, Ordering::AcqRel);
+        let seen = self
+            .completion_state
+            .hint_nav_seen
+            .swap(nav, Ordering::AcqRel);
         if nav == seen && self.completion_state.nav_active.load(Ordering::Acquire) {
             // No new nav event since last hint → user typed.
             self.completion_state

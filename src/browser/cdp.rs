@@ -179,7 +179,10 @@ impl CdpClient {
                     .unwrap_or("CDP error")
                     .to_string())
             } else {
-                Ok(val.get("result").cloned().unwrap_or(serde_json::Value::Null))
+                Ok(val
+                    .get("result")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null))
             };
             let _ = tx.send(result);
         }
@@ -195,7 +198,10 @@ impl CdpClient {
             Some(m) => m.to_string(),
             None => return,
         };
-        let params = val.get("params").cloned().unwrap_or(serde_json::Value::Null);
+        let params = val
+            .get("params")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
         let session_id = val
             .get("sessionId")
             .and_then(|v| v.as_str())
@@ -208,7 +214,12 @@ impl CdpClient {
     }
 
     /// Build a CDP JSON-RPC command message string.
-    fn build_msg(method: &str, params: Option<serde_json::Value>, session_id: Option<&str>, id: u64) -> String {
+    fn build_msg(
+        method: &str,
+        params: Option<serde_json::Value>,
+        session_id: Option<&str>,
+        id: u64,
+    ) -> String {
         let mut msg = serde_json::json!({
             "id": id,
             "method": method,

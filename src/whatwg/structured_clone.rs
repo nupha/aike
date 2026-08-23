@@ -15,12 +15,11 @@
 use std::collections::{HashMap, HashSet};
 
 use zuqe::{
-    Array, CallContext, Callback, Exception, JSResult, JSValue, Object, ScopedContext,
-    JS_CLASS_ARRAY, JS_CLASS_ARRAY_BUFFER, JS_CLASS_BOOLEAN, JS_CLASS_DATE, JS_CLASS_ERROR,
-    JS_CLASS_MAP, JS_CLASS_NUMBER, JS_CLASS_OBJECT, JS_CLASS_REGEXP, JS_CLASS_SET,
-    JS_CLASS_SHARED_ARRAY_BUFFER, JS_CLASS_STRING, JS_CLASS_WEAKMAP, JS_CLASS_WEAKSET,
-    JS_GPN_ENUM_ONLY, JS_GPN_STR_OR_INT_MASK, JS_PROP_C_W_E,
-    builtins::array_buffer::ArrayBuffer,
+    Array, CallContext, Callback, Exception, JS_CLASS_ARRAY, JS_CLASS_ARRAY_BUFFER,
+    JS_CLASS_BOOLEAN, JS_CLASS_DATE, JS_CLASS_ERROR, JS_CLASS_MAP, JS_CLASS_NUMBER,
+    JS_CLASS_OBJECT, JS_CLASS_REGEXP, JS_CLASS_SET, JS_CLASS_SHARED_ARRAY_BUFFER, JS_CLASS_STRING,
+    JS_CLASS_WEAKMAP, JS_CLASS_WEAKSET, JS_GPN_ENUM_ONLY, JS_GPN_STR_OR_INT_MASK, JS_PROP_C_W_E,
+    JSResult, JSValue, Object, ScopedContext, builtins::array_buffer::ArrayBuffer,
 };
 
 use super::dom::make_dom_exception;
@@ -38,7 +37,9 @@ fn throw_data_clone(ctx: &mut ScopedContext, message: &str) -> i32 {
 
 /// Fetch a global constructor (e.g. `Date`, `Map`) and return it as a callable.
 fn global_ctor(ctx: &mut ScopedContext, name: &str) -> Result<Object, i32> {
-    ctx.global_obj().get_property_str(ctx, name)?.ensure_callable(ctx)
+    ctx.global_obj()
+        .get_property_str(ctx, name)?
+        .ensure_callable(ctx)
 }
 
 /// `structuredClone(value, options?)` — deep clone via the structured clone
@@ -95,7 +96,9 @@ fn clone_value(
         return Ok(*clone);
     }
 
-    let mut obj = value.as_object().ok_or_else(|| ctx.throw_internal_error("not an object"))?;
+    let mut obj = value
+        .as_object()
+        .ok_or_else(|| ctx.throw_internal_error("not an object"))?;
 
     if let Some(ab) = value.as_object_ArrayBuffer() {
         let clone = clone_array_buffer(ctx, value, ab, transfer)?;
@@ -135,7 +138,10 @@ fn clone_array_buffer(
     transfer: &HashSet<JSValue>,
 ) -> Result<JSValue, i32> {
     if ab.class_id() == JS_CLASS_SHARED_ARRAY_BUFFER {
-        return Err(throw_data_clone(ctx, "A SharedArrayBuffer cannot be cloned."));
+        return Err(throw_data_clone(
+            ctx,
+            "A SharedArrayBuffer cannot be cloned.",
+        ));
     }
 
     let len = ab.payload().byte_length();
@@ -169,14 +175,24 @@ fn clone_typed_array(
     let buffer = payload.array_buffer();
     // Read offset/count *before* cloning the buffer: a transferred buffer is
     // detached, which zeroes this view's length.
-    let offset = value.get_property_str(ctx, "byteOffset")?.to_number(ctx)?.to_f64() as u32;
+    let offset = value
+        .get_property_str(ctx, "byteOffset")?
+        .to_number(ctx)?
+        .to_f64() as u32;
     let count = payload.count();
     let buffer_clone = clone_value(ctx, buffer.into(), memory, transfer)?;
 
     // Same element type via the global constructor, e.g. `new Uint8Array(buf, o, n)`.
     let type_name = obj_class_name(ctx, value)?;
     let ctor = global_ctor(ctx, &type_name)?;
-    let clone = ctor.call_ctor(ctx, &[buffer_clone, JSValue::from(offset as i32), JSValue::from(count as i32)])?;
+    let clone = ctor.call_ctor(
+        ctx,
+        &[
+            buffer_clone,
+            JSValue::from(offset as i32),
+            JSValue::from(count as i32),
+        ],
+    )?;
     memory.insert(value, clone);
     Ok(clone)
 }
@@ -190,7 +206,10 @@ fn clone_data_view(
 ) -> Result<JSValue, i32> {
     let payload = dv.payload();
     let buffer = payload.array_buffer();
-    let offset = value.get_property_str(ctx, "byteOffset")?.to_number(ctx)?.to_f64() as u32;
+    let offset = value
+        .get_property_str(ctx, "byteOffset")?
+        .to_number(ctx)?
+        .to_f64() as u32;
     let byte_length = payload.view_byte_length();
     let buffer_clone = clone_value(ctx, buffer.into(), memory, transfer)?;
 
@@ -223,7 +242,11 @@ fn clone_date(ctx: &mut ScopedContext, value: JSValue) -> Result<JSValue, i32> {
         .payload()
         .and_then(|p| p.datetime())
         .ok_or_else(|| ctx.throw_internal_error("not a Date"))?;
-    let ts = if dt.is_invalid() { f64::NAN } else { dt.timestamp() as f64 };
+    let ts = if dt.is_invalid() {
+        f64::NAN
+    } else {
+        dt.timestamp() as f64
+    };
     let ctor = global_ctor(ctx, "Date")?;
     ctor.call_ctor(ctx, &[JSValue::from(ts)])
 }
@@ -270,7 +293,9 @@ fn clone_error(ctx: &mut ScopedContext, value: JSValue) -> Result<JSValue, i32> 
             return ctor.call_ctor(ctx, &[JSValue::make_string(msg_js)]);
         }
     };
-    clone.map(JSValue::from).ok_or_else(|| ctx.throw_internal_error("failed to clone error"))
+    clone
+        .map(JSValue::from)
+        .ok_or_else(|| ctx.throw_internal_error("failed to clone error"))
 }
 
 /// Clone a Boolean/Number/String wrapper object via its constructor.
@@ -298,7 +323,9 @@ fn clone_map(
     // Register before recursing so cycles resolve to this clone.
     memory.insert(value, clone);
 
-    let clone_obj = clone.as_object().ok_or_else(|| ctx.throw_internal_error("not a Map"))?;
+    let clone_obj = clone
+        .as_object()
+        .ok_or_else(|| ctx.throw_internal_error("not a Map"))?;
     let set_fn = clone_obj.get_property_str(ctx, "set")?;
     for (k, v) in entries {
         let ck = clone_value(ctx, k, memory, transfer)?;
@@ -325,7 +352,9 @@ fn clone_set(
     let clone = ctor.call_ctor(ctx, &[])?;
     memory.insert(value, clone);
 
-    let clone_obj = clone.as_object().ok_or_else(|| ctx.throw_internal_error("not a Set"))?;
+    let clone_obj = clone
+        .as_object()
+        .ok_or_else(|| ctx.throw_internal_error("not a Set"))?;
     let add_fn = clone_obj.get_property_str(ctx, "add")?;
     for e in elements {
         let ce = clone_value(ctx, e, memory, transfer)?;
@@ -344,7 +373,9 @@ fn clone_container(
     transfer: &HashSet<JSValue>,
     is_array: bool,
 ) -> Result<JSValue, i32> {
-    let mut obj = value.as_object().ok_or_else(|| ctx.throw_internal_error("not an object"))?;
+    let mut obj = value
+        .as_object()
+        .ok_or_else(|| ctx.throw_internal_error("not an object"))?;
 
     let clone: JSValue = if is_array {
         let mut arr = Array::create(ctx)?;
@@ -371,8 +402,12 @@ fn clone_container(
 }
 
 /// Install the global `structuredClone`.
-pub(crate) fn install_structured_clone(ctx: &mut ScopedContext, mut global: Object) -> Result<(), i32> {
-    let f = ctx.create_native_function(Callback::Func(js_structured_clone), "structuredClone", 2, 0)?;
+pub(crate) fn install_structured_clone(
+    ctx: &mut ScopedContext,
+    mut global: Object,
+) -> Result<(), i32> {
+    let f =
+        ctx.create_native_function(Callback::Func(js_structured_clone), "structuredClone", 2, 0)?;
     global.define_property_value_str(ctx, "structuredClone", f.into(), zuqe::JS_PROP_C_W_E)?;
     Ok(())
 }

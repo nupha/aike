@@ -317,14 +317,14 @@ impl ReadableControllerPayload {
             }
             let bytes_u = bytes as u32;
             if first.bytes_filled + bytes_u > first.element_size {
-                return Err(ctx.throw_range_error(
-                    "respond() would overflow the BYOB request byte length",
-                ));
+                return Err(
+                    ctx.throw_range_error("respond() would overflow the BYOB request byte length")
+                );
             }
             if bytes_u == 0 {
-                return Err(ctx.throw_type_error(
-                    "`bytesWritten` must be non-zero for a readable stream",
-                ));
+                return Err(
+                    ctx.throw_type_error("`bytesWritten` must be non-zero for a readable stream")
+                );
             }
 
             // FillHeadPullIntoDescriptor: accumulate bytesFilled.
@@ -368,11 +368,11 @@ impl ReadableControllerPayload {
         }
 
         // No pending read — enqueue the committed data for a future read.
-        self.queue
-            .borrow_mut()
-            .push(QueueEntry { chunk: committed, size: 1.0 });
-        self.queue_total_size
-            .set(self.queue_total_size.get() + 1.0);
+        self.queue.borrow_mut().push(QueueEntry {
+            chunk: committed,
+            size: 1.0,
+        });
+        self.queue_total_size.set(self.queue_total_size.get() + 1.0);
         Ok(())
     }
 
@@ -981,8 +981,7 @@ impl ReadableControllerPayload {
                         let mut descs = pending_pull_intos.borrow_mut();
                         let first = &mut descs[0];
                         let bytes = first.view.with_bytes(|b| b.to_vec());
-                        first.view =
-                            TypedArray::create_from_vec_u8(ctx, bytes)?;
+                        first.view = TypedArray::create_from_vec_u8(ctx, bytes)?;
                         first.byte_offset = 0;
                         first.buffer_byte_length = first.element_size;
                     }
@@ -995,11 +994,11 @@ impl ReadableControllerPayload {
                             ctx,
                             desc.view.with_bytes(|b| b.to_vec()),
                         )?;
-                        self.queue
-                            .borrow_mut()
-                            .push(QueueEntry { chunk: JSValue::from(ta), size: 1.0 });
-                        self.queue_total_size
-                            .set(self.queue_total_size.get() + 1.0);
+                        self.queue.borrow_mut().push(QueueEntry {
+                            chunk: JSValue::from(ta),
+                            size: 1.0,
+                        });
+                        self.queue_total_size.set(self.queue_total_size.get() + 1.0);
                         return Ok(JSValue::UNDEFINED);
                     }
 
@@ -1016,12 +1015,7 @@ impl ReadableControllerPayload {
                     // pending descriptor views (fill + commit each when full).
                     {
                         let mut q = self.queue.borrow_mut();
-                        self.fill_pending_pull_intos(
-                            ctx,
-                            pending_pull_intos,
-                            &chunk,
-                            &mut q,
-                        )?;
+                        self.fill_pending_pull_intos(ctx, pending_pull_intos, &chunk, &mut q)?;
                     }
                     return Ok(JSValue::UNDEFINED);
                 }

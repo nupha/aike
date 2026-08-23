@@ -203,7 +203,10 @@ pub(crate) fn cors_check(
 /// `data:` URLs are same-origin with any client per the Fetch scheme fetch
 /// algorithm, so they never trip the check regardless of the client origin.
 #[cfg(feature = "fetch_browser")]
-pub(crate) fn same_origin_violation(client_origin: Option<&str>, final_url: &str) -> Option<String> {
+pub(crate) fn same_origin_violation(
+    client_origin: Option<&str>,
+    final_url: &str,
+) -> Option<String> {
     if final_url.to_ascii_lowercase().starts_with("data:") {
         return None;
     }
@@ -364,10 +367,7 @@ mod preflight {
             // `Send`.
             let pf = Arc::new(pf);
             Arc::new(
-                move |client: &reqwest::Client,
-                      url: &str,
-                      referrer: &str,
-                      creds_stripped: bool| {
+                move |client: &reqwest::Client, url: &str, referrer: &str, creds_stripped: bool| {
                     let pf = Arc::clone(&pf);
                     let client = client.clone();
                     let url = url.to_string();
@@ -385,9 +385,9 @@ mod preflight {
                         }
                         match run_preflight_hop(&client, &pf, &url, &referrer).await {
                             true => Ok(()),
-                            false => Err(
-                                "request failed: CORS preflight did not succeed".to_string()
-                            ),
+                            false => {
+                                Err("request failed: CORS preflight did not succeed".to_string())
+                            }
                         }
                     }) as BeforeHopFuture
                 },
@@ -408,10 +408,12 @@ mod preflight {
         let requested_headers: Vec<String> = if pf.request_headers.is_empty() {
             Vec::new()
         } else {
-            pf.request_headers.split(',').map(|s| s.to_string()).collect()
+            pf.request_headers
+                .split(',')
+                .map(|s| s.to_string())
+                .collect()
         };
-        let cache_key =
-            preflight_cache_key(&pf.client_origin, url, &pf.method, &requested_headers);
+        let cache_key = preflight_cache_key(&pf.client_origin, url, &pf.method, &requested_headers);
         if preflight_cache_hit(&cache_key) {
             return true;
         }
@@ -725,7 +727,8 @@ pub(crate) use preflight::make_before_hop_hook;
 
 /// Server build: no client-origin concept exists, so no hop ever needs a gate.
 #[cfg(not(feature = "fetch_browser"))]
-pub(crate) fn make_before_hop_hook(_pf: Option<PreflightCtx>) -> Option<crate::http::client::transport::BeforeHopHook> {
+pub(crate) fn make_before_hop_hook(
+    _pf: Option<PreflightCtx>,
+) -> Option<crate::http::client::transport::BeforeHopHook> {
     None
 }
-

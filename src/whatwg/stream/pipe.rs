@@ -13,8 +13,7 @@
 //!   [3] writer, [4] signal (UNDEFINED if none)
 
 use zuqe::{
-    CallContext, Callback, Exception, JSResult, JSValue, ScopedContext,
-    builtins::promise::Promise,
+    CallContext, Callback, Exception, JSResult, JSValue, ScopedContext, builtins::promise::Promise,
 };
 
 use crate::whatwg::{
@@ -410,9 +409,9 @@ fn release_pipe_locks(ctx: &mut ScopedContext, reader: JSValue, writer: JSValue)
         if let Ok(rel) = target.get_property_str(ctx, "releaseLock")
             && rel.call(ctx, target, &[]).is_err()
         {
-            let _e = ctx.take_exception();
+            let exc = ctx.take_exception();
             #[cfg(debug_assertions)]
-            eprintln!("[swallow-exc] {}:{}: {:?}", file!(), line!(), _e);
+            crate::helpers::print_exc(ctx, exc);
         }
     }
 }
@@ -696,7 +695,10 @@ fn pipe_resolve(ctx: &mut ScopedContext, data: &[JSValue]) -> JSResult {
     res
 }
 
-pub(super) fn js_readable_stream_pipe_through(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+pub(super) fn js_readable_stream_pipe_through(
+    ctx: &mut ScopedContext,
+    cc: CallContext,
+) -> JSResult {
     let this = cc.this();
 
     let mut this_stream = this

@@ -15,8 +15,9 @@ use crate::{
     USER_CLASS_DEFS,
     whatwg::stream::{
         JSReadableStreamDefaultController, ReadableControllerPayload, extract_high_water_mark,
-        extract_size_algorithm, readable_controller::get_readable_controller,
+        extract_size_algorithm,
         readable::{JSReadableStream, ReadableStreamPayload},
+        readable_controller::get_readable_controller,
         transform_controller::{JSTransformStreamDefaultController, TransformControllerPayload},
         writable::{JSWritableStream, WritableStreamPayload},
         writable_controller::{JSWritableStreamDefaultController, WritableControllerPayload},
@@ -132,12 +133,8 @@ fn js_transform_stream_constructor(ctx: &mut ScopedContext, cc: CallContext) -> 
     // Writable side — use the original transformer as the underlying_sink.
     let mut writable =
         JSWritableStream::new_instance(ctx, JSValue::UNDEFINED, WritableStreamPayload::new())?;
-    let wc_payload = WritableControllerPayload::new(
-        transformer,
-        Some(writable),
-        writable_hwm,
-        writable_size,
-    );
+    let wc_payload =
+        WritableControllerPayload::new(transformer, Some(writable), writable_hwm, writable_size);
     let wcv = JSWritableStreamDefaultController::new_instance(ctx, JSValue::UNDEFINED, wc_payload)?;
     writable.payload_mut().unwrap().controller.replace(wcv);
 
@@ -206,10 +203,7 @@ fn js_transform_stream_constructor(ctx: &mut ScopedContext, cc: CallContext) -> 
     // Create a wrapper as underlying_sink with a `write` method for the
     // normal writable path (invoke_str_callable finds it).
     {
-        let tc_handle = instance
-            .payload()
-            .and_then(|p| p.controller)
-            .unwrap();
+        let tc_handle = instance.payload().and_then(|p| p.controller).unwrap();
         let mut wrapper = ctx.create_base_object()?;
         let write_fn = ctx.create_native_function_with_data(
             zuqe::Callback::Func(ts_sink_write),
@@ -438,10 +432,13 @@ fn ts_sink_abort(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
 /// Promise reaction: async transformer.cancel() fulfilled (sink abort path).
 fn ts_sink_abort_ok(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let mut controller = cc.data(0)
+    let mut controller = cc
+        .data(0)
         .as_native_object::<JSTransformStreamDefaultController>()
         .ok_or_else(|| ctx.throw_internal_error("invalid controller"))?;
-    let readable = cc.data(1).as_native_object::<JSReadableStream>()
+    let readable = cc
+        .data(1)
+        .as_native_object::<JSReadableStream>()
         .ok_or_else(|| ctx.throw_internal_error("invalid readable"))?;
     let reason = cc.data(2);
     ts_sink_abort_fulfill(ctx, &mut controller, readable, reason)
@@ -449,10 +446,13 @@ fn ts_sink_abort_ok(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
 /// Promise reaction: async transformer.cancel() rejected (sink abort path).
 fn ts_sink_abort_err(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let mut controller = cc.data(0)
+    let mut controller = cc
+        .data(0)
         .as_native_object::<JSTransformStreamDefaultController>()
         .ok_or_else(|| ctx.throw_internal_error("invalid controller"))?;
-    let readable = cc.data(1).as_native_object::<JSReadableStream>()
+    let readable = cc
+        .data(1)
+        .as_native_object::<JSReadableStream>()
         .ok_or_else(|| ctx.throw_internal_error("invalid readable"))?;
     let error = cc.arg(0);
     ts_sink_abort_reject(ctx, &mut controller, readable, error)
@@ -542,21 +542,20 @@ fn ts_sink_write(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     // Spec `TransformStreamDefaultSinkWriteAlgorithm` step 3: while backpressured,
     // the transform (identity or explicit) waits for the backpressure change
     // promise before running.
-    let backpressured = tcp.stream
+    let backpressured = tcp
+        .stream
         .and_then(|h| {
             let sv = JSValue::from(h);
-            super::transform::JSTransformStream::payload_of(&sv)
-                .map(|tsp| tsp.backpressure)
+            super::transform::JSTransformStream::payload_of(&sv).map(|tsp| tsp.backpressure)
         })
         .unwrap_or(false);
 
     if backpressured {
-        let bp = tcp.stream
-            .and_then(|h| {
-                let sv = JSValue::from(h);
-                super::transform::JSTransformStream::payload_of(&sv)
-                    .and_then(|tsp| tsp.backpressure_change_promise)
-            });
+        let bp = tcp.stream.and_then(|h| {
+            let sv = JSValue::from(h);
+            super::transform::JSTransformStream::payload_of(&sv)
+                .and_then(|tsp| tsp.backpressure_change_promise)
+        });
         if let Some(mut bp) = bp {
             let tc_val = JSValue::from(tc_handle);
             let transformer_val = tcp.transformer;
@@ -816,7 +815,8 @@ fn ts_cancel_reject(
 /// Promise reaction: async transformer.cancel() fulfilled.
 fn ts_source_cancel_ok(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let stream_val = cc.data(0);
-    let mut controller = cc.data(1)
+    let mut controller = cc
+        .data(1)
         .as_native_object::<JSTransformStreamDefaultController>()
         .ok_or_else(|| ctx.throw_internal_error("invalid controller"))?;
     let reason = cc.data(2);
@@ -831,7 +831,8 @@ fn ts_source_cancel_ok(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 /// Promise reaction: async transformer.cancel() rejected.
 fn ts_source_cancel_err(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let stream_val = cc.data(0);
-    let mut controller = cc.data(1)
+    let mut controller = cc
+        .data(1)
         .as_native_object::<JSTransformStreamDefaultController>()
         .ok_or_else(|| ctx.throw_internal_error("invalid controller"))?;
     let error = cc.arg(0);
@@ -892,7 +893,10 @@ pub(super) fn transform_stream_set_backpressure(
 
 /// TransformStreamUnblockWrite (spec §6.4.1).
 /// If backpressure is true, set it to false.
-pub(super) fn transform_stream_unblock_write(ctx: &mut ScopedContext, stream_val: &JSValue) -> JSResult {
+pub(super) fn transform_stream_unblock_write(
+    ctx: &mut ScopedContext,
+    stream_val: &JSValue,
+) -> JSResult {
     let needs_unblock = JSTransformStream::payload_of(stream_val)
         .map(|p| p.backpressure)
         .unwrap_or(false);

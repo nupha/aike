@@ -109,7 +109,8 @@ impl JSReadableStreamDefaultReader {
 
         // Check if the source stream is a byte stream so branches use
         // byte controllers when needed (WHATWG: tee branches mirror source type).
-        let is_byte_stream = self.payload()
+        let is_byte_stream = self
+            .payload()
             .and_then(|p| {
                 let s = p.stream?;
                 let sp = s.payload()?;
@@ -119,89 +120,88 @@ impl JSReadableStreamDefaultReader {
 
         // Create two branch streams, each with its own controller whose
         // underlying-source pull drives the shared tee pull.
-        let make_branch = |ctx: &mut ScopedContext,
-                           branch: u32|
-         -> Result<(JSReadableStream, JSValue), i32> {
-            let pull_fn = ctx
-                .create_native_function_with_data(
-                    Callback::Func(tee_pull),
-                    "teePull",
-                    1,
-                    0,
-                    [JSValue::from(tee_id)].into(),
-                )?
-                .into();
-            let cancel_fn = ctx
-                .create_native_function_with_data(
-                    Callback::Func(tee_cancel),
-                    "teeCancel",
-                    1,
-                    0,
-                    [JSValue::from(tee_id), JSValue::from(branch)].into(),
-                )?
-                .into();
-            let mut source = ctx.create_base_object()?;
-            source.define_property_value_str(ctx, "pull", pull_fn, zuqe::JS_PROP_C_W_E)?;
-            source.define_property_value_str(ctx, "cancel", cancel_fn, zuqe::JS_PROP_C_W_E)?;
-
-            let mut stream2 = JSReadableStream::new_instance(
-                ctx,
-                JSValue::UNDEFINED,
-                ReadableStreamPayload::new(),
-            )?;
-
-            let controller_js: JSValue = if is_byte_stream {
-                stream2.payload_mut().unwrap().is_byte_stream = true;
-                let mut bc = JSReadableByteStreamController::new_instance(
-                    ctx,
-                    JSValue::UNDEFINED,
-                    ReadableControllerPayload::new_byte(
-                        JSValue::from(source),
-                        Some(stream2),
-                        1.0,
+        let make_branch =
+            |ctx: &mut ScopedContext, branch: u32| -> Result<(JSReadableStream, JSValue), i32> {
+                let pull_fn = ctx
+                    .create_native_function_with_data(
+                        Callback::Func(tee_pull),
+                        "teePull",
+                        1,
                         0,
-                    ),
-                )?;
-                bc.payload_mut()
-                    .ok_or_else(|| ctx.throw_internal_error("invalid byte controller"))?
-                    .set_algorithms(pull_fn, cancel_fn, JSValue::UNDEFINED);
-                let bc_val: JSValue = bc.into();
-                stream2.payload_mut().unwrap().controller = Some(bc_val);
-                // Set byte self-handle for call_pull.
-                if let Some(cp) = JSReadableByteStreamController::payload_of(&bc_val) {
-                    cp.set_byte_self_handle(bc_val);
-                }
-                bc_val
-            } else {
-                let mut controller = JSReadableStreamDefaultController::new_instance(
+                        [JSValue::from(tee_id)].into(),
+                    )?
+                    .into();
+                let cancel_fn = ctx
+                    .create_native_function_with_data(
+                        Callback::Func(tee_cancel),
+                        "teeCancel",
+                        1,
+                        0,
+                        [JSValue::from(tee_id), JSValue::from(branch)].into(),
+                    )?
+                    .into();
+                let mut source = ctx.create_base_object()?;
+                source.define_property_value_str(ctx, "pull", pull_fn, zuqe::JS_PROP_C_W_E)?;
+                source.define_property_value_str(ctx, "cancel", cancel_fn, zuqe::JS_PROP_C_W_E)?;
+
+                let mut stream2 = JSReadableStream::new_instance(
                     ctx,
                     JSValue::UNDEFINED,
-                    ReadableControllerPayload::new_default(
-                        JSValue::from(source),
-                        Some(stream2),
-                        1.0,
-                    ),
+                    ReadableStreamPayload::new(),
                 )?;
-                let handle = controller;
-                controller
-                    .payload_mut()
-                    .ok_or_else(|| ctx.throw_internal_error("invalid controller"))?
-                    .set_controller(Some(handle));
-                controller
-                    .payload_mut()
-                    .ok_or_else(|| ctx.throw_internal_error("invalid controller"))?
-                    .set_algorithms(pull_fn, cancel_fn, JSValue::UNDEFINED);
-                controller
-                    .payload_mut()
-                    .ok_or_else(|| ctx.throw_internal_error("invalid controller"))?
-                    .set_in_tee(true);
-                let cv: JSValue = controller.into();
-                stream2.payload_mut().unwrap().controller = Some(cv);
-                cv
-            };
 
-            Ok((stream2, controller_js))
-        };
+                let controller_js: JSValue = if is_byte_stream {
+                    stream2.payload_mut().unwrap().is_byte_stream = true;
+                    let mut bc = JSReadableByteStreamController::new_instance(
+                        ctx,
+                        JSValue::UNDEFINED,
+                        ReadableControllerPayload::new_byte(
+                            JSValue::from(source),
+                            Some(stream2),
+                            1.0,
+                            0,
+                        ),
+                    )?;
+                    bc.payload_mut()
+                        .ok_or_else(|| ctx.throw_internal_error("invalid byte controller"))?
+                        .set_algorithms(pull_fn, cancel_fn, JSValue::UNDEFINED);
+                    let bc_val: JSValue = bc.into();
+                    stream2.payload_mut().unwrap().controller = Some(bc_val);
+                    // Set byte self-handle for call_pull.
+                    if let Some(cp) = JSReadableByteStreamController::payload_of(&bc_val) {
+                        cp.set_byte_self_handle(bc_val);
+                    }
+                    bc_val
+                } else {
+                    let mut controller = JSReadableStreamDefaultController::new_instance(
+                        ctx,
+                        JSValue::UNDEFINED,
+                        ReadableControllerPayload::new_default(
+                            JSValue::from(source),
+                            Some(stream2),
+                            1.0,
+                        ),
+                    )?;
+                    let handle = controller;
+                    controller
+                        .payload_mut()
+                        .ok_or_else(|| ctx.throw_internal_error("invalid controller"))?
+                        .set_controller(Some(handle));
+                    controller
+                        .payload_mut()
+                        .ok_or_else(|| ctx.throw_internal_error("invalid controller"))?
+                        .set_algorithms(pull_fn, cancel_fn, JSValue::UNDEFINED);
+                    controller
+                        .payload_mut()
+                        .ok_or_else(|| ctx.throw_internal_error("invalid controller"))?
+                        .set_in_tee(true);
+                    let cv: JSValue = controller.into();
+                    stream2.payload_mut().unwrap().controller = Some(cv);
+                    cv
+                };
+
+                Ok((stream2, controller_js))
+            };
 
         let (b1, c1) = make_branch(ctx, 0)?;
         let (b2, c2) = make_branch(ctx, 1)?;
@@ -545,8 +545,14 @@ fn clone_byte_chunk(ctx: &mut ScopedContext, chunk: JSValue) -> Result<JSValue, 
     }
     // TypedArray: clone the underlying buffer, reconstruct with same ctor.
     let buffer = chunk.get_property_str(ctx, "buffer")?;
-    let byte_offset = chunk.get_property_str(ctx, "byteOffset")?.to_number(ctx)?.to_i32();
-    let byte_length = chunk.get_property_str(ctx, "byteLength")?.to_number(ctx)?.to_i32();
+    let byte_offset = chunk
+        .get_property_str(ctx, "byteOffset")?
+        .to_number(ctx)?
+        .to_i32();
+    let byte_length = chunk
+        .get_property_str(ctx, "byteLength")?
+        .to_number(ctx)?
+        .to_i32();
     let slice_fn = buffer.get_property_str(ctx, "slice")?;
     let new_buffer = slice_fn.call(ctx, buffer, &[JSValue::from(0i32)])?;
     let type_name = chunk
@@ -555,5 +561,13 @@ fn clone_byte_chunk(ctx: &mut ScopedContext, chunk: JSValue) -> Result<JSValue, 
         .class_name()
         .to_utf8(ctx.rt());
     let ctor = ctx.global_obj().get_property_str(ctx, &type_name)?;
-    ctor.call(ctx, ctor.into(), &[new_buffer, JSValue::from(byte_offset), JSValue::from(byte_length)])
+    ctor.call(
+        ctx,
+        ctor.into(),
+        &[
+            new_buffer,
+            JSValue::from(byte_offset),
+            JSValue::from(byte_length),
+        ],
+    )
 }

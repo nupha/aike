@@ -174,7 +174,11 @@ fn js_json_schema_validateSchema(ctx: &mut ScopedContext, cc: CallContext) -> JS
     let ok = errors.is_empty();
     // Without coercion the output equals the input — hand back the original
     // JSValue instead of paying a full serde→JS rebuild.
-    let js_value = if changed { to_js(ctx, &out)? } else { value_arg };
+    let js_value = if changed {
+        to_js(ctx, &out)?
+    } else {
+        value_arg
+    };
     let js_errors = {
         let js_errs: Vec<JSValue> = errors
             .iter()
@@ -210,7 +214,9 @@ enum ScalarKind {
     NullLike,
     Bool,
     Str,
-    Num { integer: bool },
+    Num {
+        integer: bool,
+    },
 }
 
 fn scalar_kind(v: &JSValue) -> Option<ScalarKind> {

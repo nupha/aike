@@ -521,9 +521,9 @@ pub(crate) fn handle_mcp_tool_call(
                 // Inside an async fn returning Result<_, McpError> we can't `?`
                 // an i32 error; drop any .then() exception so it doesn't linger.
                 if promise.then(cx, ok_fn, fail_fn).is_err() {
-                    let _e = cx.take_exception();
+                    let exc = cx.take_exception();
                     #[cfg(debug_assertions)]
-                    eprintln!("[swallow-exc] service.rs:{}: {:?}", line!(), _e);
+                    crate::helpers::print_exc(cx, exc);
                 }
             } else {
                 // Sync path: pass through a handler-returned MCP envelope

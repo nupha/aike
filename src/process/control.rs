@@ -94,9 +94,9 @@ pub(super) fn js_nextTick(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
                 for cb in callbacks {
                     if cb.call(cx, JSValue::UNDEFINED, &[]).is_err() {
                         // Clear exception to continue processing remaining callbacks
-                        let _e = cx.take_exception();
+                        let exc = cx.take_exception();
                         #[cfg(debug_assertions)]
-                        eprintln!("[swallow-exc] control.rs:{}: {:?}", line!(), _e);
+                        crate::helpers::print_exc(cx, exc);
                     }
                 }
                 Ok(JobState::Done)

@@ -6,6 +6,20 @@ use crossbeam::channel::TryRecvError;
 use serde_json::Value as JsonValue;
 use zuqe::{Exception, JobState, ScopedContext};
 
+/// Print a taken exception's message (+ traceback) instead of the opaque
+/// Debug form. Diagnostics only — never on a healthy path, never inlined.
+#[cold]
+#[cfg(debug_assertions)]
+pub(crate) fn print_exc(ctx: &mut ScopedContext, exc: Exception) {
+    if !matches!(exc, Exception::No) {
+        let t = exc.to_text(ctx);
+        match t.traceback {
+            Some(tb) => eprintln!("[cleared-exc] {}\n{}", t.message, tb),
+            None => eprintln!("[cleared-exc] {}", t.message),
+        }
+    }
+}
+
 /// Canonicalize a path, stripping the Windows `\\?\` prefix that `canonicalize()` adds.
 ///
 /// On Windows, `std::fs::canonicalize()` returns paths with `\\?\` prefix (extended-length

@@ -131,9 +131,9 @@ pub(crate) fn js_page_set_request_interception(
                     if let Some(o) = obj
                         && cb.call(cx, JSValue::UNDEFINED, &[o.into()]).is_err()
                     {
-                        let _e = cx.take_exception();
+                        let exc = cx.take_exception();
                         #[cfg(debug_assertions)]
-                        eprintln!("[swallow-exc] fetch.rs:{}: {:?}", line!(), _e);
+                        crate::helpers::print_exc(cx, exc);
                     }
                 }
 

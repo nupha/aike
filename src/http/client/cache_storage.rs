@@ -14,7 +14,8 @@ use std::{cell::RefCell, collections::HashMap, rc::Rc};
 use linkme::distributed_slice;
 use zuqe::{
     Array, CallContext, ClassCtorDef, ClassID, FieldDef, JSResult, JSValue, Runtime, ScopedContext,
-    builtins::promise::Promise, builtins::typed_array::TypedArray,
+    builtins::promise::Promise,
+    builtins::typed_array::TypedArray,
     def_native_object,
     gc_lite::{GcTrace, GcTraceCtx},
 };

@@ -35,8 +35,7 @@ static SIGNAL_REFCOUNT: LazyLock<Mutex<HashMap<u32, u32>>> =
 /// children, then exit with 128+signal) installed at startup. `uninstall_c_handler`
 /// restores this instead of SIG_DFL so removing a user handler returns to
 /// aike's default cleanup behavior.
-static DEFAULT_HANDLER_SIGS: LazyLock<Mutex<Vec<u32>>> =
-    LazyLock::new(|| Mutex::new(Vec::new()));
+static DEFAULT_HANDLER_SIGS: LazyLock<Mutex<Vec<u32>>> = LazyLock::new(|| Mutex::new(Vec::new()));
 
 /// Kill `abortOnParentExit` children, then exit with the conventional
 /// 128+signal code. Async-signal-safe (libc::kill + _exit only).
@@ -50,7 +49,10 @@ extern "C" fn default_c_signal_handler(sig_num: i32) {
 fn install_default_handler(sig_num: u32) {
     DEFAULT_HANDLER_SIGS.lock().unwrap().push(sig_num);
     unsafe {
-        libc::signal(sig_num as i32, default_c_signal_handler as *const () as usize);
+        libc::signal(
+            sig_num as i32,
+            default_c_signal_handler as *const () as usize,
+        );
     }
 }
 
@@ -256,9 +258,9 @@ fn start_signal_microtask(ctx: &mut ScopedContext, rx: channel::Receiver<u32>) {
             if let Some(cb) = cb
                 && cb.call(cx, JSValue::UNDEFINED, &[]).is_err()
             {
-                let _e = cx.take_exception();
+                let exc = cx.take_exception();
                 #[cfg(debug_assertions)]
-                eprintln!("[swallow-exc] signal.rs:{}: {:?}", line!(), _e);
+                crate::helpers::print_exc(cx, exc);
             }
             true // always continue polling
         },

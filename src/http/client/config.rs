@@ -217,11 +217,13 @@ pub(crate) fn reorder_cookie_header(value: &str) -> String {
     let mut pairs: Vec<(usize, &str)> = value
         .split("; ")
         .map(|pair| {
-            let name = pair.split('=').next().unwrap_or("").trim().to_ascii_lowercase();
-            let pos = order
-                .iter()
-                .position(|n| n == &name)
-                .unwrap_or(usize::MAX);
+            let name = pair
+                .split('=')
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_ascii_lowercase();
+            let pos = order.iter().position(|n| n == &name).unwrap_or(usize::MAX);
             (pos, pair)
         })
         .collect();
