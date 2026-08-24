@@ -63,30 +63,13 @@ impl HeaderList {
             .unwrap_or(self.list.len())
     }
 
-    /// Strip leading/trailing HTTP whitespace (0x09/0x0A/0x0D/0x20) from a header
-    /// value. This is the Fetch "header value" normalization applied at storage
-    /// time; other C0 controls are left intact (the transport/fetch layer rejects
-    /// the forbidden NUL/LF/CR ones).
-    fn normalize_header_value(value: &str) -> String {
-        let bytes = value.as_bytes();
-        let mut start = 0;
-        let mut end = bytes.len();
-        while start < end && matches!(bytes[start], 0x09 | 0x0A | 0x0D | 0x20) {
-            start += 1;
-        }
-        while end > start && matches!(bytes[end - 1], 0x09 | 0x0A | 0x0D | 0x20) {
-            end -= 1;
-        }
-        value[start..end].to_string()
-    }
-
     /// Append a value, combining with any existing same-name (case-insensitive)
     /// header as a comma-separated list. `Set-Cookie` is an exception — values
     /// are stored individually (never comma-merged) and kept sorted in place.
     pub(crate) fn append(&mut self, name: &str, value: &str) {
         // Header names are normalized to lowercase on storage (Fetch spec).
         let key = name.to_lowercase();
-        let value = Self::normalize_header_value(value);
+        let value = normalize_header_value(value).to_string();
         if let Some(pos) = self.list.iter().position(|(k, _)| *k == key) {
             if key == "set-cookie" {
                 // `Set-Cookie` never comma-merges; insert a new separate entry
@@ -108,7 +91,7 @@ impl HeaderList {
     pub(crate) fn set(&mut self, name: &str, value: &str) {
         let key = name.to_lowercase();
         let lower = key.clone();
-        let value = Self::normalize_header_value(value);
+        let value = normalize_header_value(value).to_string();
         self.list.retain(|(k, _)| *k != lower);
         let idx = self.sorted_insert_index(&key);
         self.list.insert(idx, (key, value));
@@ -208,7 +191,10 @@ fn is_valid_header_value(value: &str) -> bool {
 
 /// WHATWG "normalize a header value": strip leading/trailing HTTP whitespace
 /// (only SP, TAB, CR, LF — *not* arbitrary Unicode whitespace like `str::trim`).
-fn normalize_header_value(value: &str) -> &str {
+/// This is the Fetch normalization applied both at Headers storage time and
+/// again when values hit the wire; other C0 controls are left intact (the
+/// transport/fetch layer rejects the forbidden NUL/LF/CR ones).
+pub(super) fn normalize_header_value(value: &str) -> &str {
     value.trim_matches(|c| matches!(c, ' ' | '\t' | '\r' | '\n'))
 }
 

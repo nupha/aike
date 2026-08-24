@@ -7,6 +7,8 @@ use base64::Engine;
 use reqwest::cookie::CookieStore;
 use zuqe::{ErrorKind, Exception, JSResult, JSValue, ScopedContext};
 
+use super::headers::normalize_header_value;
+
 /// Async gate invoked by the redirect loop before each hop that the request
 /// owner flagged as needing one. This is a neutral extension point: the
 /// WHATWG fetch layer installs a CORS-preflight gate here (browser builds);
@@ -285,24 +287,6 @@ fn classify(e: &reqwest::Error) -> &'static str {
         return "connect";
     }
     "other"
-}
-
-/// Fetch spec: strip leading/trailing HTTP whitespace (0x09/0x0A/0x0D/0x20)
-/// from a header value before it hits the wire. Other C0 controls are left
-/// intact (the fetch-side validation already rejects NUL/LF/CR).
-fn strip_header_value_ws(value: &str) -> &str {
-    // Only the four HTTP whitespace code points are trimmed, NOT all Unicode
-    // whitespace (which `str::trim` would also remove).
-    let bytes = value.as_bytes();
-    let mut start = 0;
-    let mut end = bytes.len();
-    while start < end && matches!(bytes[start], 0x09 | 0x0A | 0x0D | 0x20) {
-        start += 1;
-    }
-    while end > start && matches!(bytes[end - 1], 0x09 | 0x0A | 0x0D | 0x20) {
-        end -= 1;
-    }
-    &value[start..end]
 }
 
 /// Map `reqwest::Version` to a short version string.
@@ -696,7 +680,7 @@ pub(crate) async fn perform_request(
         for (k, v) in &headers {
             // Fetch spec: strip leading/trailing HTTP whitespace (0x09/0x0A/
             // 0x0D/0x20) from header values before they hit the wire.
-            let v = strip_header_value_ws(v);
+            let v = normalize_header_value(v);
 
             // Header values are latin-1 strings (validated in JS). Encode to raw
             // bytes and bypass the http crate's validation so control characters

@@ -643,26 +643,37 @@ fn js_listen(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         return Err(ctx.throw_type_error("http server already running"));
     }
 
-    // Parse options
+    // Parse options (strict: absent/undefined keeps the default; wrong types
+    // are rejected rather than coerced)
     let mut port: u16 = 8080;
     let mut host: String = "0.0.0.0".into();
 
     if cc.length() > 0 {
-        if let Some(opts) = cc.arg(0).as_object() {
-            if let Ok(v) = opts.get_property_str(ctx, "port")
-                && let Ok(n) = v.to_number(ctx)
-                && let IntOrFloat::Int64(n) = n
-            {
-                port = n as u16;
-            }
-
-            if let Ok(v) = opts.get_property_str(ctx, "host")
-                && let Ok(s) = v.to_string(ctx)
-            {
-                host = s.content().encode_utf8(false).to_string();
-            }
-        } else {
+        let Some(opts) = cc.arg(0).as_object() else {
             return Err(ctx.throw_type_error_not_an_object());
+        };
+
+        let v = opts.get_property_str(ctx, "port")?;
+        if !v.is_undefined() {
+            if !v.is_number() {
+                return Err(ctx.throw_type_error("`port` must be a number"));
+            }
+            match v.to_number(ctx)? {
+                IntOrFloat::Int64(n) if (0..=u16::MAX as i64).contains(&n) => port = n as u16,
+                _ => {
+                    return Err(
+                        ctx.throw_range_error("`port` must be an integer between 0 and 65535")
+                    );
+                }
+            }
+        }
+
+        let v = opts.get_property_str(ctx, "host")?;
+        if !v.is_undefined() {
+            let Some(s) = v.as_string(false) else {
+                return Err(ctx.throw_type_error("`host` must be a string"));
+            };
+            host = s.content().encode_utf8(false).to_string();
         }
     }
 

@@ -172,19 +172,11 @@ fn js_res_finish(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             redirect_url = None;
         }
         FINISH_JSON => {
-            // Serialize via JS JSON.stringify
+            // Use the engine's JSON.stringify so spec behavior is inherited: it
+            // throws on circular structures, propagates errors from
+            // getters/toJSON, and returns undefined for non-encodable input.
             body_str = if cc.length() > 0 {
-                let global = ctx.global_obj();
-                let json_val = global.get_property_str(ctx, "JSON")?;
-                let stringify = json_val.get_property_str(ctx, "stringify")?;
-                let result = match stringify.call(ctx, json_val, &[cc.arg(0)]) {
-                    Ok(r) => r,
-                    Err(_) => {
-                        return Err(
-                            ctx.throw_type_error("JSON.stringify failed on the provided value")
-                        );
-                    }
-                };
+                let result = ctx.json_stringify(cc.arg(0), JSValue::UNDEFINED, JSValue::UNDEFINED)?;
                 result
                     .to_string(ctx)
                     .ok()
