@@ -3,7 +3,6 @@ use std::{
     io::Write,
     path::PathBuf,
     sync::{Mutex, OnceLock},
-    time::Instant,
 };
 
 use serde::{Deserialize, Serialize};

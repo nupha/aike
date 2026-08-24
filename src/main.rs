@@ -4,6 +4,8 @@
 #![allow(non_snake_case)]
 
 mod aike;
+#[cfg(feature = "enable_eval_log")]
+mod eval_logger;
 mod browser;
 mod class_event_emitter;
 mod color;

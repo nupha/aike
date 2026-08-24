@@ -4,7 +4,6 @@
 #![cfg(feature = "llama_cpp")]
 
 use std::{
-    cell::Cell,
     ffi::CString,
     sync::{Arc, Mutex},
 };
@@ -71,8 +70,7 @@ pub(super) fn parse_engine_params(
             if n >= 0 {
                 idle_sleep_ms = n as u64;
             } else {
-                ctx.throw_type_error("idleSleepMs must be >= 0");
-                return Err(-1);
+                return Err(ctx.throw_type_error("idleSleepMs must be >= 0"));
             }
         }
 
@@ -83,8 +81,7 @@ pub(super) fn parse_engine_params(
             if (0.0..=1.0).contains(&d) {
                 slot_match_threshold = d as f32;
             } else {
-                ctx.throw_type_error("slotMatchThreshold must be in [0, 1]");
-                return Err(-1);
+                return Err(ctx.throw_type_error("slotMatchThreshold must be in [0, 1]"));
             }
         }
 
@@ -294,16 +291,15 @@ fn js_engine_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
 
     // 提取输入用于评估日志（在 req 被 move 前）
     #[cfg(feature = "enable_eval_log")]
-    let log_input = {
-        use async_openai::types::chat::Role;
-        req.messages
-            .iter()
-            .filter(|m| m.role == Role::User)
-            .filter_map(|m| m.content.as_ref())
-            .map(|c| c.to_string())
-            .collect::<Vec<_>>()
-            .join("\n")
-    };
+    let log_input = req
+        .messages
+        .iter()
+        .filter_map(|m| {
+            let (role, content) = crate::helpers::message_to_role_content(m);
+            (role == "user").then_some(content)
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
 
     let arch = engine.lock().unwrap().model().arch();
 

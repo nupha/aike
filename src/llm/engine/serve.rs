@@ -421,13 +421,15 @@ async fn handle_chat_completions(
         // while the blocking task is waiting for engine replies.
         let mut guard = CancelGuard::new(engine.clone(), task_id);
 
+        // clone for the task: the original is needed for eval logging after join
+        let model_name_for_task = model_name.clone();
         let join = tokio::task::spawn_blocking(move || {
             collect_engine_reply_to_json(
                 rx,
                 STREAM_TIMEOUT,
                 ParserKind::Chat,
                 &respond_id,
-                &model_name,
+                &model_name_for_task,
                 n_prompt_tokens,
                 include_usage,
                 arch,
@@ -484,6 +486,19 @@ async fn handle_chat_completions(
     }
 }
 
+/// Concatenate the text of all user messages (eval-log input field).
+#[cfg(feature = "enable_eval_log")]
+fn user_input_text(req: &CreateChatCompletionRequest) -> String {
+    req.messages
+        .iter()
+        .filter_map(|m| {
+            let (role, content) = crate::helpers::message_to_role_content(m);
+            (role == "user").then_some(content)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 #[cfg(feature = "enable_eval_log")]
 fn log_eval_response(
     request_id: &str,
@@ -493,8 +508,6 @@ fn log_eval_response(
     prompt_tokens: usize,
     model_name: &str,
 ) {
-    use async_openai::types::chat::Role;
-
     let mut output = String::new();
     let mut reasoning = None;
     let mut tool_calls = Vec::new();
@@ -555,14 +568,7 @@ fn log_eval_response(
             .unwrap_or(0) as usize;
     }
 
-    let input = req
-        .messages
-        .iter()
-        .filter(|m| m.role == Role::User)
-        .filter_map(|m| m.content.as_ref())
-        .map(|c| c.to_string())
-        .collect::<Vec<_>>()
-        .join("\n");
+    let input = user_input_text(req);
 
     let entry = EvalLogEntry {
         request_id: request_id.to_string(),
@@ -601,16 +607,7 @@ fn log_eval_response_streaming(
     prompt_tokens: usize,
     model_name: &str,
 ) {
-    use async_openai::types::chat::Role;
-
-    let input = req
-        .messages
-        .iter()
-        .filter(|m| m.role == Role::User)
-        .filter_map(|m| m.content.as_ref())
-        .map(|c| c.to_string())
-        .collect::<Vec<_>>()
-        .join("\n");
+    let input = user_input_text(req);
 
     let entry = EvalLogEntry {
         request_id: request_id.to_string(),
