@@ -14,7 +14,7 @@
 use std::ptr;
 
 use base64::Engine;
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use linkme::distributed_slice;
 use sha1::Sha1;
 use sha2::{Digest, Sha256, Sha384, Sha512};
@@ -145,22 +145,22 @@ fn resolve_hmac_hash(
 fn hmac_mac(key: &[u8], hash: &str, data: &[u8]) -> Option<Vec<u8>> {
     match hash {
         "SHA-1" => {
-            let mut m = <Hmac<Sha1> as Mac>::new_from_slice(key).ok()?;
+            let mut m = <Hmac<Sha1> as KeyInit>::new_from_slice(key).ok()?;
             m.update(data);
             Some(m.finalize().into_bytes().to_vec())
         }
         "SHA-256" => {
-            let mut m = <Hmac<Sha256> as Mac>::new_from_slice(key).ok()?;
+            let mut m = <Hmac<Sha256> as KeyInit>::new_from_slice(key).ok()?;
             m.update(data);
             Some(m.finalize().into_bytes().to_vec())
         }
         "SHA-384" => {
-            let mut m = <Hmac<Sha384> as Mac>::new_from_slice(key).ok()?;
+            let mut m = <Hmac<Sha384> as KeyInit>::new_from_slice(key).ok()?;
             m.update(data);
             Some(m.finalize().into_bytes().to_vec())
         }
         "SHA-512" => {
-            let mut m = <Hmac<Sha512> as Mac>::new_from_slice(key).ok()?;
+            let mut m = <Hmac<Sha512> as KeyInit>::new_from_slice(key).ok()?;
             m.update(data);
             Some(m.finalize().into_bytes().to_vec())
         }
@@ -351,10 +351,13 @@ fn gcm_crypt(
     tag_len: usize,
     decrypt: bool,
 ) -> Option<Vec<u8>> {
-    use aes_gcm::aead::generic_array::typenum::{U12, U13, U14, U15, U16};
-    use aes_gcm::aead::{Aead, KeyInit, Payload};
-    use aes_gcm::aes::cipher::{BlockCipher, BlockEncrypt, BlockSizeUser};
-    use aes_gcm::{AesGcm, Nonce};
+    // aead 0.6 moved to hybrid-array: typenum consts live under
+    // `aead::array::typenum::consts`; cipher 0.5 splits BlockEncrypt into
+    // BlockCipherEncrypt/BlockModeEncrypt.
+    use aes_gcm::aead::array::typenum::consts::{U12, U13, U14, U15, U16};
+    use aes_gcm::aead::{Aead, AeadCore, KeyInit, Payload};
+    use aes_gcm::aes::cipher::{BlockCipherEncrypt, BlockSizeUser};
+    use aes_gcm::AesGcm;
 
     fn gcm_do<K, T>(
         key: &[u8],
@@ -364,12 +367,12 @@ fn gcm_crypt(
         decrypt: bool,
     ) -> Option<Vec<u8>>
     where
-        K: BlockCipher + BlockSizeUser<BlockSize = U16> + BlockEncrypt + KeyInit,
+        K: BlockSizeUser<BlockSize = U16> + BlockCipherEncrypt + KeyInit,
         T: aes_gcm::TagSize,
-        AesGcm<K, U12, T>: Aead,
+        AesGcm<K, U12, T>: Aead + AeadCore<NonceSize = U12>,
     {
         let cipher = AesGcm::<K, U12, T>::new_from_slice(key).ok()?;
-        let nonce = Nonce::from_slice(nonce);
+        let nonce = aes_gcm::aead::array::Array::<u8, U12>::from_slice(nonce);
         let payload = Payload { msg, aad };
         if decrypt {
             cipher.decrypt(nonce, payload).ok()

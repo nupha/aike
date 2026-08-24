@@ -61,6 +61,7 @@ zuqe = { path = "../../../devel/zhuque", features = [
     "serde_json_support",
     "zapi",
     "persistent",
+    "intl402"
 ] }
 crossbeam = "0.8"
 tokio = { version = "1", features = [
@@ -148,29 +149,29 @@ nu-ansi-term = "0.50"
 cron = "0.16"
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 mdka = "2.1"
-scraper = "0.22"
-ego-tree = "0.10"
-tokio-tungstenite = { version = "0.24", default-features = false, features = [
+scraper = "0.27"
+ego-tree = "0.11"
+tokio-tungstenite = { version = "0.30", default-features = false, features = [
     "connect",
 ] }
 url = "2"
 base64 = "0.22"
 flate2 = "1"
-sha2 = "0.10"
-sha1 = "0.10"
-hmac = "0.12"
-aes-gcm = "0.10"
+sha2 = "0.11"
+sha1 = "0.11"
+hmac = "0.13"
+aes-gcm = "0.11"
 rand = "0.9"
 subtle = "2"
 
 # TypeScript transpilation — only compiled when typescript feature is enabled
-swc_common = { version = "23", optional = true }
-swc_ecma_ast = { version = "25", optional = true }
-swc_ecma_parser = { version = "41", optional = true, default-features = false, features = [
+swc_common = { version = "26", optional = true }
+swc_ecma_ast = { version = "29", optional = true }
+swc_ecma_parser = { version = "45", optional = true, default-features = false, features = [
     "typescript",
 ] }
-swc_ecma_codegen = { version = "28", optional = true }
-swc_ecma_transforms_typescript = { version = "50", optional = true }
+swc_ecma_codegen = { version = "32", optional = true }
+swc_ecma_transforms_typescript = { version = "55", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.0", features = [
