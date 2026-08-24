@@ -27,7 +27,7 @@ mod whatwg;
 mod worker;
 mod yaml;
 
-use std::{io::Write, process::ExitCode};
+use std::process::ExitCode;
 
 use clap::{CommandFactory, Parser};
 use color::{Color::*, colorize_println};
@@ -60,45 +60,6 @@ use crate::{
     whatwg::timeout::gc_trace_timeout,
     yaml::init_mod_yaml,
 };
-
-/// write data both to stderr and file
-struct TeeWriter<A: Write, B: Write> {
-    a: Option<A>,
-    b: Option<B>,
-}
-
-impl<A: Write, B: Write> TeeWriter<A, B> {
-    fn new(a: Option<A>, b: Option<B>) -> Self {
-        Self { a, b }
-    }
-}
-
-impl<A: Write, B: Write> Write for TeeWriter<A, B> {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        if let Some(w) = &mut self.a {
-            Some(w.write_all(buf)?)
-        } else {
-            None
-        };
-        if let Some(w) = &mut self.b {
-            Some(w.write_all(buf)?)
-        } else {
-            None
-        };
-
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        if let Some(w) = &mut self.a {
-            w.flush()?;
-        }
-        if let Some(w) = &mut self.b {
-            w.flush()?;
-        }
-        Ok(())
-    }
-}
 
 #[derive(Debug, Parser)]
 #[command(version, disable_help_flag = true)]
@@ -207,11 +168,9 @@ async fn main() -> ExitCode {
             .open("debug.log")
             .unwrap();
 
-        let tee = TeeWriter::new(Some(log_file), Option::<std::fs::File>::None);
-
         env_logger::Builder::new()
             .filter_level(log::LevelFilter::Debug)
-            .target(env_logger::Target::Pipe(Box::new(tee)))
+            .target(env_logger::Target::Pipe(Box::new(log_file)))
             .init();
     }
 

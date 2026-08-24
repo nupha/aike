@@ -1,127 +1,26 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-// A Node.js `util.inspect` compatible value formatter for zuqe.
-//
-// Implements the main behaviors of Node's `util.inspect(val, opts)`:
-//   - depth / maxArrayLength / maxStringLength / breakLength
-//   - compact (single-line vs multi-line)
-//   - sorted (boolean)
-//   - colors (ANSI)
-//   - customInspect (Symbol.for('nodejs.util.inspect.custom'))
-//   - getters (false | 'get' | 'set' | true)
-//   - showHidden (non-enumerable properties)
-//   - numericSeparator (thousands separators)
-//   - string escaping / quoting (single quotes, Node style)
-//   - Map/Set/WeakMap/WeakSet, RegExp, Date, Error, functions, symbols,
-//     sparse arrays, circular references, depth collapse.
+// Node.js `util.inspect` compatible value formatter for zuqe, with Node's
+// default options baked in (depth 2, maxArrayLength 100, maxStringLength
+// 10000, compact single-line output, no colors / sorting / getter evaluation /
+// numeric separators). Reintroduce an options struct only when a
+// `util.inspect(v, opts)` JS binding needs one.
 
 use zuqe::{
     Atom, JS_GPN_ENUM_ONLY, JS_GPN_STR_OR_INT_MASK, JS_GPN_SYMBOL_MASK, JS_PROP_GETSET, JSValue,
     Object, ScopedContext,
 };
 
-/// When to evaluate accessors (getter/setter).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum GettersOpt {
-    /// Do not evaluate; show `[Getter]` / `[Setter]` / `[Getter/Setter]`.
-    Off,
-    /// Evaluate only getters; pure setters show `[Setter]`.
-    Get,
-    /// Evaluate only setters; pure getters show `[Getter]` (value unreadable, placeholder only).
-    Set,
-    /// Evaluate all accessible accessors.
-    All,
-}
-
-/// Options for `util.inspect` (based on Node's defaults).
-#[derive(Clone, Debug)]
-pub struct InspectOptions {
-    /// Recursion depth; `None` means unlimited (`Infinity`). Default `Some(2)`.
-    pub depth: Option<usize>,
-    /// Max entries to expand for arrays/Map/Set. Default `100`.
-    pub max_array_length: usize,
-    /// String truncation limit. Default `10000`.
-    pub max_string_length: usize,
-    /// Wrap to multiple lines when a single line exceeds this length and not compact. Default `80`.
-    pub break_length: usize,
-    /// Single-line (compact) or multi-line indented. Node default `true` (approx).
-    pub compact: bool,
-    /// Sort properties by key. Default `false`.
-    pub sorted: bool,
-    /// ANSI colors. Default `false`.
-    pub colors: bool,
-    /// Invoke the object's custom inspect method. Default `true`.
-    pub custom_inspect: bool,
-    /// Accessor evaluation policy. Default `Off`.
-    pub getters: GettersOpt,
-    /// Include non-enumerable properties. Default `false`.
-    pub show_hidden: bool,
-    /// Add `_` as thousands separator in numbers. Default `false`.
-    pub numeric_separator: bool,
-    /// Expand a Proxy's target/handler. Falls back to a marker if the engine does not expose them. Default `false`.
-    pub show_proxy: bool,
-}
-
-impl Default for InspectOptions {
-    fn default() -> Self {
-        InspectOptions {
-            depth: Some(2),
-            max_array_length: 100,
-            max_string_length: 10000,
-            break_length: 80,
-            compact: true,
-            sorted: false,
-            colors: false,
-            custom_inspect: true,
-            getters: GettersOpt::Off,
-            show_hidden: false,
-            numeric_separator: false,
-            show_proxy: false,
-        }
-    }
-}
-
-const C_STRING: u8 = 32; // green
-const C_NUMBER: u8 = 33; // yellow
-const C_DATE: u8 = 35; // magenta
-const C_REGEXP: u8 = 31; // red
-const C_FUNC: u8 = 36; // cyan
-const C_KEY: u8 = 36; // cyan
-const C_SYMBOL: u8 = 32; // green
-const C_SPECIAL: u8 = 90; // grey
-
-fn colorize(s: &str, code: u8, opts: &InspectOptions) -> String {
-    if !opts.colors {
-        return s.to_string();
-    }
-    format!("\x1b[{}m{}\x1b[0m", code, s)
-}
+/// Recursion depth before values collapse to `[Object]`/`[Array]` markers.
+const MAX_DEPTH: usize = 2;
+/// Max entries to expand for arrays/Map/Set.
+const MAX_ARRAY_LENGTH: usize = 100;
+/// String truncation limit.
+const MAX_STRING_LENGTH: usize = 10000;
 
 fn plural(n: usize) -> &'static str {
     if n == 1 { "" } else { "s" }
-}
-
-fn format_int(n: i64, opts: &InspectOptions) -> String {
-    if !opts.numeric_separator {
-        return n.to_string();
-    }
-    let neg = n < 0;
-    let s = n.unsigned_abs().to_string();
-    let mut out = String::new();
-    let mut cnt = 0;
-    for &b in s.as_bytes().iter().rev() {
-        if cnt > 0 && cnt % 3 == 0 {
-            out.push('_');
-        }
-        out.push(b as char);
-        cnt += 1;
-    }
-    let mut res: String = out.chars().rev().collect();
-    if neg {
-        res.insert(0, '-');
-    }
-    res
 }
 
 fn format_float(f: f64) -> String {
@@ -163,7 +62,7 @@ fn escape_char(ch: char, q: char, out: &mut String) {
     }
 }
 
-fn quote_string(s: &str, budget: usize, _sep: char) -> String {
+fn quote_string(s: &str, budget: usize) -> String {
     let len = s.chars().count();
     let q = choose_quote(s);
     let mut out = String::new();
@@ -195,52 +94,16 @@ fn class_name_str(ctx: &mut ScopedContext, obj: &Object) -> String {
     obj.class_name().to_utf8(ctx.rt()).to_string()
 }
 
-/// Lay out a group of entries as `open ... close`, choosing single-line or multi-line based on compact / breakLength.
-fn format_block(
-    open: &str,
-    entries: &[String],
-    close: &str,
-    opts: &InspectOptions,
-    level: usize,
-) -> String {
-    if entries.is_empty() {
-        return format!("{}{}", open, close);
-    }
-    let inner_len: usize =
-        entries.iter().map(|e| e.len()).sum::<usize>() + entries.len().saturating_sub(1) * 2;
-    let total = inner_len + open.len() + close.len();
-    let has_newline = entries.iter().any(|e| e.contains('\n'));
-    let fit = opts.compact || (!has_newline && total <= opts.break_length);
-    if fit {
-        let inner = entries.join(", ");
-        format!("{}{}{}", open, inner, close)
-    } else {
-        let indent = "  ".repeat(level + 1);
-        let close_indent = "  ".repeat(level);
-        let mut s = String::new();
-        s.push_str(open);
-        for e in entries {
-            s.push('\n');
-            s.push_str(&indent);
-            s.push_str(e);
-            s.push(',');
-        }
-        s.push('\n');
-        s.push_str(&close_indent);
-        s.push_str(close);
-        s
-    }
+/// Lay out a group of entries as `open ... close` on a single line (compact default).
+fn format_block(open: &str, entries: &[String], close: &str) -> String {
+    format!("{}{}{}", open, entries.join(", "), close)
 }
 
 // ---- key rendering ----
 
-/// Returns (sort key, display string).
-fn key_rendering(ctx: &mut ScopedContext, atom: &Atom, opts: &InspectOptions) -> (String, String) {
+fn key_display(ctx: &mut ScopedContext, atom: &Atom) -> String {
     if atom.is_small_int() {
-        let s = atom.to_utf8(ctx.rt()).to_string();
-        let n: i64 = s.parse().unwrap_or(0);
-        let display = colorize(&s, C_KEY, opts);
-        return (format!("0:{:020}", n), display);
+        return atom.to_utf8(ctx.rt()).to_string();
     }
     if let Ok(kv) = atom.to_value(ctx) {
         if kv.is_symbol() {
@@ -248,16 +111,12 @@ fn key_rendering(ctx: &mut ScopedContext, atom: &Atom, opts: &InspectOptions) ->
                 .as_symbol(false)
                 .map(|x| x.encode_utf8(false).into_owned())
                 .unwrap_or_default();
-            let raw = format!("Symbol({})", d);
-            let display = colorize(&raw, C_KEY, opts);
-            return (format!("2:{}", d), display);
+            return format!("Symbol({})", d);
         }
     }
     ctx.clear_exception();
     let s = atom.to_utf8(ctx.rt()).to_string();
-    let q = quote_string(&s, opts.max_string_length, '\'');
-    let display = colorize(&q, C_KEY, opts);
-    (format!("1:{}", s), display)
+    quote_string(&s, MAX_STRING_LENGTH)
 }
 
 // ---- custom inspect hook ----
@@ -266,7 +125,6 @@ fn try_custom_inspect(
     ctx: &mut ScopedContext,
     val: JSValue,
     obj: &mut Object,
-    opts: &InspectOptions,
     level: usize,
 ) -> Option<String> {
     let syms = obj
@@ -290,7 +148,7 @@ fn try_custom_inspect(
             .map(|x| x.encode_utf8(false).into_owned())
             .unwrap_or_default();
         if d == "nodejs.util.inspect.custom" {
-            let depth_arg = JSValue::from(opts.depth.map(|d| d as i32).unwrap_or(-1));
+            let depth_arg = JSValue::from(MAX_DEPTH as i32);
             match desc.value.call(
                 ctx,
                 val,
@@ -306,7 +164,7 @@ fn try_custom_inspect(
                     }
                     // custom method returned a non-string: re-format with default rules (fresh stack to avoid false circular detection)
                     let mut fresh = Vec::new();
-                    return Some(inspect(ctx, r, opts, level, &mut fresh));
+                    return Some(inspect(ctx, r, level, &mut fresh));
                 }
                 Err(_) => {
                     ctx.clear_exception();
@@ -318,31 +176,12 @@ fn try_custom_inspect(
     None
 }
 
-// ---- accessor evaluation ----
-
-fn invoke_getter(
-    ctx: &mut ScopedContext,
-    getter: JSValue,
-    this: JSValue,
-    opts: &InspectOptions,
-    level: usize,
-    stack: &mut Vec<Object>,
-) -> String {
-    match getter.call(ctx, this, &[]) {
-        Ok(r) => inspect(ctx, r, opts, level + 1, stack),
-        Err(_) => {
-            ctx.clear_exception();
-            colorize("[Getter]", C_SPECIAL, opts)
-        }
-    }
-}
+// ---- accessor rendering (getters are never evaluated) ----
 
 fn read_prop_value(
     ctx: &mut ScopedContext,
-    this: JSValue,
     obj: &mut Object,
     atom: Atom,
-    opts: &InspectOptions,
     level: usize,
     stack: &mut Vec<Object>,
 ) -> String {
@@ -350,41 +189,15 @@ fn read_prop_value(
         Ok(Some(desc)) if desc.flags & JS_PROP_GETSET != 0 => {
             let has_g = !desc.getter.is_undefined();
             let has_s = !desc.setter.is_undefined();
-            match opts.getters {
-                GettersOpt::Off => {
-                    let label = if has_g && has_s {
-                        "[Getter/Setter]"
-                    } else if has_g {
-                        "[Getter]"
-                    } else {
-                        "[Setter]"
-                    };
-                    colorize(label, C_SPECIAL, opts)
-                }
-                GettersOpt::Get => {
-                    if has_g {
-                        invoke_getter(ctx, desc.getter, this, opts, level, stack)
-                    } else {
-                        colorize("[Setter]", C_SPECIAL, opts)
-                    }
-                }
-                GettersOpt::Set => {
-                    if has_s {
-                        colorize("[Getter]", C_SPECIAL, opts)
-                    } else {
-                        invoke_getter(ctx, desc.getter, this, opts, level, stack)
-                    }
-                }
-                GettersOpt::All => {
-                    if has_g {
-                        invoke_getter(ctx, desc.getter, this, opts, level, stack)
-                    } else {
-                        colorize("[Setter]", C_SPECIAL, opts)
-                    }
-                }
+            if has_g && has_s {
+                "[Getter/Setter]".to_string()
+            } else if has_g {
+                "[Getter]".to_string()
+            } else {
+                "[Setter]".to_string()
             }
         }
-        Ok(Some(desc)) => inspect(ctx, desc.value, opts, level + 1, stack),
+        Ok(Some(desc)) => inspect(ctx, desc.value, level + 1, stack),
         _ => {
             ctx.clear_exception();
             "?".to_string()
@@ -396,48 +209,38 @@ fn read_prop_value(
 
 fn format_object(
     ctx: &mut ScopedContext,
-    val: JSValue,
     obj: &mut Object,
-    opts: &InspectOptions,
     level: usize,
     stack: &mut Vec<Object>,
 ) -> String {
-    let flags = if opts.show_hidden {
-        JS_GPN_STR_OR_INT_MASK | JS_GPN_SYMBOL_MASK
-    } else {
-        JS_GPN_ENUM_ONLY | JS_GPN_STR_OR_INT_MASK | JS_GPN_SYMBOL_MASK
-    };
-    let keys = match obj.get_own_property_names(ctx, flags) {
+    let keys = match obj.get_own_property_names(
+        ctx,
+        JS_GPN_ENUM_ONLY | JS_GPN_STR_OR_INT_MASK | JS_GPN_SYMBOL_MASK,
+    ) {
         Ok(k) => k.to_vec(),
         Err(_) => {
             ctx.clear_exception();
             Vec::new()
         }
     };
-    let mut entries: Vec<(String, String)> = Vec::new();
+    let mut entries: Vec<String> = Vec::new();
     stack.push(obj.clone());
     for pk in keys {
-        let (sort_key, display_key) = key_rendering(ctx, &pk.atom, opts);
-        let value = read_prop_value(ctx, val, obj, pk.atom, opts, level, stack);
-        entries.push((sort_key, format!("{}: {}", display_key, value)));
+        let key = key_display(ctx, &pk.atom);
+        let value = read_prop_value(ctx, obj, pk.atom, level, stack);
+        entries.push(format!("{}: {}", key, value));
     }
     stack.pop();
-    if opts.sorted {
-        entries.sort_by(|a, b| a.0.cmp(&b.0));
-    }
-    let displays: Vec<String> = entries.into_iter().map(|e| e.1).collect();
-    format_block("{ ", &displays, " }", opts, level)
+    format_block("{ ", &entries, " }")
 }
 
 fn format_array(
     ctx: &mut ScopedContext,
     obj: &mut Object,
-    opts: &InspectOptions,
     level: usize,
     stack: &mut Vec<Object>,
 ) -> String {
     let len = obj.get_length_prop(ctx).unwrap_or(0).max(0) as usize;
-    let max = opts.max_array_length;
 
     let mut entries: Vec<String> = Vec::new();
     let mut empty_run: usize = 0;
@@ -445,7 +248,7 @@ fn format_array(
     let mut truncated = false;
     stack.push(obj.clone());
     while i < len {
-        if entries.len() >= max {
+        if entries.len() >= MAX_ARRAY_LENGTH {
             truncated = true;
             break;
         }
@@ -457,7 +260,7 @@ fn format_array(
                 empty_run = 0;
             }
             let v = obj.get_property(ctx, atom).unwrap_or(JSValue::UNDEFINED);
-            entries.push(inspect(ctx, v, opts, level + 1, stack));
+            entries.push(inspect(ctx, v, level + 1, stack));
         } else {
             empty_run += 1;
         }
@@ -473,13 +276,12 @@ fn format_array(
         }
     }
     stack.pop();
-    format_block("[", &entries, "]", opts, level)
+    format_block("[", &entries, "]")
 }
 
 fn format_typed_array(
     ctx: &mut ScopedContext,
     obj: &mut Object,
-    opts: &InspectOptions,
     level: usize,
     stack: &mut Vec<Object>,
 ) -> String {
@@ -488,7 +290,6 @@ fn format_typed_array(
         Some(ta) => ta.count() as usize,
         None => 0,
     };
-    let max = opts.max_array_length;
     let mut entries: Vec<String> = Vec::new();
     let mut empty_run: usize = 0;
     let mut i = 0usize;
@@ -496,7 +297,7 @@ fn format_typed_array(
     stack.push(obj.clone());
 
     while i < count {
-        if entries.len() >= max {
+        if entries.len() >= MAX_ARRAY_LENGTH {
             truncated = true;
             break;
         }
@@ -508,7 +309,7 @@ fn format_typed_array(
                 empty_run = 0;
             }
             let v = obj.get_property(ctx, atom).unwrap_or(JSValue::UNDEFINED);
-            entries.push(inspect(ctx, v, opts, level + 1, stack));
+            entries.push(inspect(ctx, v, level + 1, stack));
         } else {
             empty_run += 1;
         }
@@ -525,14 +326,13 @@ fn format_typed_array(
     }
 
     stack.pop();
-    let block = format_block("[", &entries, "]", opts, level);
+    let block = format_block("[", &entries, "]");
     format!("{}({})", cn, block)
 }
 
 fn format_mapset(
     ctx: &mut ScopedContext,
     obj: &mut Object,
-    opts: &InspectOptions,
     level: usize,
     stack: &mut Vec<Object>,
 ) -> String {
@@ -551,10 +351,10 @@ fn format_mapset(
     for e in ms.iter() {
         if is_set {
             // Set elements are stored in key() (value() is always undefined)
-            entries.push(inspect(ctx, e.key(), opts, level + 1, stack));
+            entries.push(inspect(ctx, e.key(), level + 1, stack));
         } else {
-            let k = inspect(ctx, e.key(), opts, level + 1, stack);
-            let v = inspect(ctx, e.value(), opts, level + 1, stack);
+            let k = inspect(ctx, e.key(), level + 1, stack);
+            let v = inspect(ctx, e.value(), level + 1, stack);
             entries.push(format!("{} => {}", k, v));
         }
     }
@@ -565,10 +365,10 @@ fn format_mapset(
     head.push('(');
     head.push_str(&ms.len().to_string());
     head.push_str(") {");
-    format_block(&head, &entries, "}", opts, level)
+    format_block(&head, &entries, "}")
 }
 
-fn format_error(ctx: &mut ScopedContext, obj: &mut Object, opts: &InspectOptions) -> String {
+fn format_error(ctx: &mut ScopedContext, obj: &mut Object) -> String {
     // Node: inspect(Error) prints err.stack (of the form "Name: message\n    at ...").
     let name = get_str_opt(ctx, obj, "name")
         .filter(|n| !n.is_empty())
@@ -586,64 +386,49 @@ fn format_error(ctx: &mut ScopedContext, obj: &mut Object, opts: &InspectOptions
             s.push_str(stack);
         }
     }
-    colorize(&s, C_SPECIAL, opts)
+    s
 }
 
-fn collapse_tag(ctx: &mut ScopedContext, obj: &Object, opts: &InspectOptions) -> String {
+fn collapse_tag(ctx: &mut ScopedContext, obj: &Object) -> String {
     let cn = class_name_str(ctx, obj);
-    let s = if cn == "Object" {
+    if cn == "Object" {
         "[Object]".to_string()
     } else if cn == "Array" {
         "[Array]".to_string()
     } else {
         format!("[{}]", cn)
-    };
-    colorize(&s, C_SPECIAL, opts)
+    }
 }
 
-fn inspect(
-    ctx: &mut ScopedContext,
-    val: JSValue,
-    opts: &InspectOptions,
-    level: usize,
-    stack: &mut Vec<Object>,
-) -> String {
+fn inspect(ctx: &mut ScopedContext, val: JSValue, level: usize, stack: &mut Vec<Object>) -> String {
     if val.is_undefined() {
-        return colorize("undefined", C_SPECIAL, opts);
+        return "undefined".to_string();
     }
     if val.is_null() {
-        return colorize("null", C_SPECIAL, opts);
+        return "null".to_string();
     }
     if val.is_bool() {
-        return colorize(&val.as_bool().unwrap().to_string(), C_NUMBER, opts);
+        return val.as_bool().unwrap().to_string();
     }
     if val.is_int() {
-        return colorize(
-            &format_int(val.as_int().unwrap() as i64, opts),
-            C_NUMBER,
-            opts,
-        );
+        return val.as_int().unwrap().to_string();
     }
     if val.is_float64() {
-        return colorize(&format_float(val.as_float().unwrap()), C_NUMBER, opts);
+        return format_float(val.as_float().unwrap());
     }
     if val.is_string() {
         let s = val
             .as_string(false)
             .map(|x| x.encode_utf8(false).into_owned())
             .unwrap_or_default();
-        return colorize(
-            &quote_string(&s, opts.max_string_length, '\''),
-            C_STRING,
-            opts,
-        );
+        return quote_string(&s, MAX_STRING_LENGTH);
     }
     if val.is_symbol() {
         let d = val
             .as_symbol(false)
             .map(|x| x.encode_utf8(false).into_owned())
             .unwrap_or_default();
-        return colorize(&format!("Symbol({})", d), C_SYMBOL, opts);
+        return format!("Symbol({})", d);
     }
     if val.is_callable() {
         let name = val
@@ -654,10 +439,10 @@ fn inspect(
             Some(n) if !n.is_empty() => format!("[Function: {}]", n),
             _ => "[Function (anonymous)]".to_string(),
         };
-        return colorize(&label, C_FUNC, opts);
+        return label;
     }
     if val.as_module().is_some() {
-        return colorize("[Module]", C_SPECIAL, opts);
+        return "[Module]".to_string();
     }
 
     let Some(mut obj) = val.as_object() else {
@@ -666,69 +451,57 @@ fn inspect(
 
     // circular reference
     if stack.iter().any(|o| *o == obj) {
-        return colorize("[Circular]", C_SPECIAL, opts);
+        return "[Circular]".to_string();
     }
     // depth collapse
-    if let Some(d) = opts.depth {
-        if level > d {
-            return collapse_tag(ctx, &obj, opts);
-        }
+    if level > MAX_DEPTH {
+        return collapse_tag(ctx, &obj);
     }
     // custom inspect hook
-    if opts.custom_inspect {
-        if let Some(s) = try_custom_inspect(ctx, val, &mut obj, opts, level) {
-            return s;
-        }
+    if let Some(s) = try_custom_inspect(ctx, val, &mut obj, level) {
+        return s;
     }
 
     let cn = class_name_str(ctx, &obj);
 
-    // Proxy
+    // Proxy (engine does not directly expose target/handler)
     if cn == "Proxy" {
-        if !opts.show_proxy {
-            return colorize("[Proxy]", C_SPECIAL, opts);
-        }
-        // engine does not directly expose target/handler: fall back to plain object traversal
+        return "[Proxy]".to_string();
     }
     // TypedArray
     if obj.payload().typed_array().is_some() {
-        return format_typed_array(ctx, &mut obj, opts, level, stack);
+        return format_typed_array(ctx, &mut obj, level, stack);
     }
     // Array
     if obj.payload().array().is_some() {
-        return format_array(ctx, &mut obj, opts, level, stack);
+        return format_array(ctx, &mut obj, level, stack);
     }
     // RegExp
     if cn == "RegExp" {
         if let Ok(s) = val.to_string(ctx) {
-            return colorize(&s.encode_utf8(false).into_owned(), C_REGEXP, opts);
+            return s.encode_utf8(false).into_owned();
         }
     }
     // Date
     if cn == "Date" {
         if let Ok(s) = val.to_string(ctx) {
-            return colorize(&s.encode_utf8(false).into_owned(), C_DATE, opts);
+            return s.encode_utf8(false).into_owned();
         }
     }
     // Error
     if cn.ends_with("Error") || cn == "Error" {
-        return format_error(ctx, &mut obj, opts);
+        return format_error(ctx, &mut obj);
     }
     // Map / Set
     if obj.payload().mapset().is_some() {
-        return format_mapset(ctx, &mut obj, opts, level, stack);
+        return format_mapset(ctx, &mut obj, level, stack);
     }
     // plain object
-    format_object(ctx, val, &mut obj, opts, level, stack)
+    format_object(ctx, &mut obj, level, stack)
 }
 
-/// Format an arbitrary JS value per Node `util.inspect` semantics.
-pub fn js_inspect_value(ctx: &mut ScopedContext, val: JSValue, opts: &InspectOptions) -> String {
-    let mut stack = Vec::new();
-    inspect(ctx, val, opts, 0, &mut stack)
-}
-
-/// Format using default options (`InspectOptions::default()`).
+/// Format an arbitrary JS value per Node `util.inspect` semantics (default options).
 pub fn js_inspect(ctx: &mut ScopedContext, val: JSValue) -> String {
-    js_inspect_value(ctx, val, &InspectOptions::default())
+    let mut stack = Vec::new();
+    inspect(ctx, val, 0, &mut stack)
 }

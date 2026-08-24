@@ -17,7 +17,6 @@ use zuqe::{
     builtins::promise::Promise,
     builtins::typed_array::TypedArray,
     def_native_object,
-    gc_lite::{GcTrace, GcTraceCtx},
 };
 
 use crate::{
@@ -61,26 +60,6 @@ pub(crate) struct CacheStoragePayload {
 pub(crate) struct CachePayload {
     name: String,
     stores: Rc<RefCell<HashMap<String, CacheData>>>,
-}
-
-impl GcTrace for CacheStoragePayload {
-    fn trace(&self, gcx: &mut GcTraceCtx) {
-        Self::gc_trace(self, gcx);
-    }
-}
-
-impl GcTrace for CachePayload {
-    fn trace(&self, gcx: &mut GcTraceCtx) {
-        Self::gc_trace(self, gcx);
-    }
-}
-
-impl CacheStoragePayload {
-    fn gc_trace(&self, _gcx: &mut GcTraceCtx) {}
-}
-
-impl CachePayload {
-    fn gc_trace(&self, _gcx: &mut GcTraceCtx) {}
 }
 
 fn cache_key(method: &str, url: &str) -> String {
@@ -394,8 +373,7 @@ def_native_object!(
     JSCacheStorage,
     CacheStoragePayload,
     CACHE_STORAGE_PROTO,
-    Some(ClassCtorDef::new(js_cache_storage_ctor, 0, false)),
-    on_payload_gc: CacheStoragePayload::gc_trace
+    Some(ClassCtorDef::new(js_cache_storage_ctor, 0, false))
 );
 
 #[distributed_slice(USER_CLASS_DEFS)]
@@ -408,8 +386,7 @@ def_native_object!(
     JSCache,
     CachePayload,
     CACHE_PROTO,
-    None,
-    on_payload_gc: CachePayload::gc_trace
+    None
 );
 
 #[distributed_slice(USER_CLASS_DEFS)]
