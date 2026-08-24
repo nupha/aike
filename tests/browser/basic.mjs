@@ -27,7 +27,7 @@ async function main() {
     browser = await Browser.launch({ headless: false, port: 9366 });
   } catch (err) {
     console.log("  Launch failed:", err.message || err);
-    Aike.exit(1);
+    process.exit(1);
   }
   console.log("  Browser launched, isRunning:", browser.isRunning);
 
@@ -154,10 +154,10 @@ async function main() {
 
   console.log("\n" + "=".repeat(50));
   console.log("Page-API checks on bing page: pass " + apiPass + ", fail " + apiFail);
-  Aike.exit(apiFail > 0 ? 1 : 0);
+  process.exit(apiFail > 0 ? 1 : 0);
 }
 
 main().catch((err) => {
   console.log("Unhandled error:", err.message || err);
-  Aike.exit(1);
+  process.exit(1);
 });

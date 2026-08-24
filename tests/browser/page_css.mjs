@@ -38,7 +38,7 @@ const PAGE =
 async function main() {
   setTimeout(() => {
     console.log("  [WATCHDOG] forcing exit after 25s (a step likely hung)");
-    Aike.exit(1);
+    process.exit(1);
   }, 25000);
 
   let browser;
@@ -46,7 +46,7 @@ async function main() {
     browser = await Browser.launch({ headless: true });
   } catch (e) {
     console.log("\n  Failed to launch browser: " + (e && (e.message || e)));
-    Aike.exit(1);
+    process.exit(1);
     return;
   }
 
@@ -84,8 +84,8 @@ async function main() {
 
   console.log("\n" + "=".repeat(50));
   console.log("pass: " + pass + ", fail: " + fail);
-  if (fail > 0) Aike.exit(1);
-  else Aike.exit(0);
+  if (fail > 0) process.exit(1);
+  else process.exit(0);
 }
 
 main();

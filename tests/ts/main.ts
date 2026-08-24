@@ -77,7 +77,7 @@ const totalFail = failed();
 console.log(`\n=== TypeScript transpile test suite: ${totalPass} passed, ${totalFail} failed ===`);
 if (totalFail > 0) {
   console.log("Some tests FAILED");
-  Aike.exit(1);
+  process.exit(1);
 } else {
   console.log("All tests PASSED");
 }

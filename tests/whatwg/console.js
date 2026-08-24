@@ -213,5 +213,5 @@ console.log(`━━━━━━━━━━━━━━━━━━━━━━�
 
 // exit with non-zero if any failure
 if (fail > 0) {
-  Aike.exit(1);
+  process.exit(1);
 }
