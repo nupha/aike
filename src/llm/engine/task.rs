@@ -115,11 +115,6 @@ impl TaskConfig {
         self
     }
 
-    pub fn logits_for_all_tokens(mut self, v: bool) -> Self {
-        self.logits_for_all_tokens = v;
-        self
-    }
-
     pub fn grammar(mut self, g: GrammarConfig) -> Self {
         self.grammar = Some(g);
         self

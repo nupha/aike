@@ -40,10 +40,6 @@ impl ByobRequestPayload {
         self.view
     }
 
-    pub(crate) fn set_view(&mut self, view: JSValue) {
-        self.view = view;
-    }
-
     pub(crate) fn gc_trace(&self, gcx: &mut GcTraceCtx) {
         self.controller.trace(gcx);
         self.view.trace(gcx);

@@ -33,7 +33,6 @@ pub(crate) use {
 pub(crate) const OUTMSG_FIELD_CONTENT: &str = "content";
 pub(crate) const OUTMSG_FIELD_REASONING: &str = "reasoning_content";
 pub(crate) const OUTMSG_FIELD_TOOL_CALLS: &str = "tool_calls";
-pub(crate) const OUTMSG_FIELD_FINISH_REASON: &str = "finish_reason";
 pub(crate) const OUTMSG_FIELD_CHOICES: &str = "choices";
 
 // Magic constants shared by gated and non-gated code.
@@ -58,10 +57,10 @@ fn get_devices(ctx: &mut ScopedContext, _: CallContext) -> JSResult {
         if let Some(d) = d {
             let mut o = ctx.create_base_object()?;
 
-            let ty: JSValue = ctx.create_string_from_static(d.dev_type.to_str())?.into();
+            let ty = JSValue::make_string(ctx.create_string_from_static(d.dev_type.to_str())?);
             o.define_property_value_str(ctx, "type", ty, JS_PROP_ENUMERABLE)?;
 
-            let name: JSValue = ctx.create_string_from_utf8(d.name.into_bytes())?.into();
+            let name = JSValue::make_string(ctx.create_string_from_utf8(d.name.into_bytes())?);
             o.define_property_value_str(ctx, "name", name, JS_PROP_ENUMERABLE)?;
 
             lst.push(o.into());

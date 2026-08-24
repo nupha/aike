@@ -282,33 +282,3 @@ pub(crate) fn drain_body(
         }
     }
 }
-
-/// Create an async-iterable body stream from a `Receiver`, attaching a
-/// `cancel()` method that releases the connection (see module docs).
-pub(crate) fn make_body_async_iterator(ctx: &mut ScopedContext, rx: Receiver<Vec<u8>>) -> JSResult {
-    let iter = AsyncIterableIterator::create_with_receiver::<Vec<u8>>(
-        ctx,
-        rx,
-        |cx2, chunk| -> Result<Option<JSValue>, i32> {
-            TypedArray::create_from_vec_u8(cx2, chunk)
-                .map(JSValue::from)
-                .map(Some)
-        },
-    )
-    .map_err(|_| ctx.throw_internal_error("failed to create body stream"))?;
-
-    let mut iter_val: JSValue = iter.into();
-    let cancel_fn = ctx.create_native_function(Callback::Func(js_stream_cancel), "cancel", 1, 0)?;
-    iter_val.define_property_value_str(ctx, "cancel", cancel_fn.into(), zuqe::JS_PROP_C_W_E)?;
-    Ok(iter_val)
-}
-
-/// `body.cancel()` — delegates to the async iterator's `return()`, which
-/// drops the underlying `Receiver` and stops the producer task.
-fn js_stream_cancel(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let this = cc.this();
-    let ret = this.get_property_str(ctx, "return")?;
-    let cb = ret.ensure_callable(ctx)?;
-    cb.call(ctx, this, &[])?;
-    Ok(JSValue::UNDEFINED)
-}

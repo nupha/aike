@@ -5,7 +5,6 @@ use std::{sync::Arc, time::Duration};
 
 use futures_util::StreamExt;
 use linkme::distributed_slice;
-use reqwest::header::HeaderMap;
 use tokio::io::AsyncBufReadExt;
 use tokio_util::io::StreamReader;
 use zuqe::{
@@ -29,11 +28,8 @@ use super::{
 pub(crate) struct ClientPayload {
     pub(crate) base_url: String,
     pub(crate) api_key: String,
-    pub(crate) org_id: String,
-    pub(crate) project_id: String,
     pub(crate) buffered_tool_call: bool,
     pub(crate) timeout: Duration,
-    pub(crate) custom_headers: HeaderMap,
 
     //
     // default params
@@ -155,9 +151,6 @@ fn js_client_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         model_name: model,
         base_url,
         api_key,
-        org_id: String::new(),
-        project_id: String::new(),
-        custom_headers: HeaderMap::new(),
         buffered_tool_call,
         timeout: Duration::from_secs(timeout as u64),
         max_tokens: max_tokens as usize,

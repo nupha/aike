@@ -281,14 +281,6 @@ pub(crate) fn store(
     );
 }
 
-/// Remove a cache entry (e.g. when a response is unsafe to reuse). Kept for
-/// symmetry / future invalidation needs.
-#[allow(dead_code)]
-pub(crate) fn invalidate(method: &str, url: &str) {
-    let mut cache = CACHE.lock().unwrap();
-    cache.remove(&(method.to_ascii_uppercase(), url.to_string()));
-}
-
 /// Merge `update` headers onto a stored entry and rebuild it. Used when the
 /// server answers a revalidation with `304`: per Fetch, the 304 response's
 /// headers update the stored response but the body stays the same.

@@ -549,19 +549,6 @@ impl ReadableControllerPayload {
         }
     }
 
-    /// Reject the controller's *oldest* pending read with `reason`.
-    pub(crate) fn reject_pending_read(&self, ctx: &mut ScopedContext, reason: JSValue) {
-        let pending_read = match &self.kind {
-            ReadableControllerKind::Default { pending_read, .. } => pending_read,
-            ReadableControllerKind::Byte { pending_read, .. } => pending_read,
-        };
-        let promise = pending_read.borrow_mut().first().copied();
-        if let Some(mut p) = promise {
-            pending_read.borrow_mut().remove(0);
-            p.reject(ctx, reason);
-        }
-    }
-
     /// Reject every outstanding pending read with `reason` (used on error).
     pub(crate) fn reject_all_pending_reads(&self, ctx: &mut ScopedContext, reason: JSValue) {
         let pending_read = match &self.kind {
@@ -1506,14 +1493,4 @@ pub(super) fn get_readable_controller<'a>(
         return Ok(p);
     }
     Err(ctx.throw_type_error("not a ReadableStream controller"))
-}
-
-/// Extract the self-handle JSValue from a byte controller kind.
-fn self_handle_as_jsvalue(kind: &ReadableControllerKind) -> JSValue {
-    match kind {
-        ReadableControllerKind::Byte { self_handle, .. } => {
-            self_handle.get().unwrap_or(JSValue::UNDEFINED)
-        }
-        _ => JSValue::UNDEFINED,
-    }
 }

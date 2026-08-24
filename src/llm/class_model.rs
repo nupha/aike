@@ -129,13 +129,12 @@ fn parse_model_options(ctx: &mut ScopedContext, cc: &CallContext) -> Result<Mode
     let opts = cc
         .arg(1)
         .as_object()
-        .copied()
         .ok_or_else(|| ctx.throw_type_error("model options must be object"))?;
 
     let v = opts.get_property_str(ctx, "gpuLayers")?;
     if !v.is_undefined() {
-        if let Some(s) = v.as_string(true).and_then(|s| s.ascii()) {
-            match s {
+        if let Some(s) = v.as_string(true).and_then(|s| s.ascii().map(|a| a.to_vec())) {
+            match s.as_slice() {
                 b"auto" => out.gpu_layers = -1,
                 b"all" => out.gpu_layers = -2,
                 _ => {
@@ -272,7 +271,7 @@ fn js_model_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     let path = ctx
         .create_string_from_utf8(file_name.into_bytes())
-        .map(JSValue::String)?;
+        .map(JSValue::make_string)?;
     obj.define_property_value_str(ctx, MODEL_PATH_HIDDEN_KEY, path, 0)?;
 
     Ok(obj.into())
@@ -318,16 +317,16 @@ fn js_mode_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     match cc.magic() {
         PROP_DESC => ctx
             .create_string_from_utf8(model.model_desc().into_bytes())
-            .map(JSValue::from),
-        PROP_BOS_TOKEN => Ok(JSValue::Int(model.bos_token_id())),
+            .map(JSValue::make_string),
+        PROP_BOS_TOKEN => Ok(JSValue::from(model.bos_token_id())),
         PROP_PATH => this.get_property_str(ctx, MODEL_PATH_HIDDEN_KEY),
         PROP_PARAMETERS => Ok((model.n_params() as f64).into()),
         PROP_VOCAB_SIZE => Ok(model.vocab_n_tokens().into()),
-        PROP_EOS_TOKEN => Ok(JSValue::Int(model.eos_token_id())),
+        PROP_EOS_TOKEN => Ok(JSValue::from(model.eos_token_id())),
         PROP_BOS_TEXT => {
             if let Some(text) = model.bos_token_text() {
                 ctx.create_string_from_utf8(text.into_bytes())
-                    .map(JSValue::String)
+                    .map(JSValue::make_string)
             } else {
                 Ok(JSValue::NULL)
             }
@@ -335,32 +334,32 @@ fn js_mode_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         PROP_EOS_TEXT => {
             if let Some(text) = model.eos_token_text() {
                 ctx.create_string_from_utf8(text.into_bytes())
-                    .map(JSValue::String)
+                    .map(JSValue::make_string)
             } else {
                 Ok(JSValue::NULL)
             }
         }
-        PROP_EOT_TOKEN => Ok(JSValue::Int(model.eot_token_id())),
+        PROP_EOT_TOKEN => Ok(JSValue::from(model.eot_token_id())),
         PROP_EOT_TEXT => {
             if let Some(text) = model.eot_token_text() {
                 ctx.create_string_from_utf8(text.into_bytes())
-                    .map(JSValue::String)
+                    .map(JSValue::make_string)
             } else {
                 Ok(JSValue::NULL)
             }
         }
-        PROP_SEP_TOKEN => Ok(JSValue::Int(model.sep_token_id())),
+        PROP_SEP_TOKEN => Ok(JSValue::from(model.sep_token_id())),
         PROP_SEP_TEXT => {
             if let Some(text) = model.sep_token_text() {
                 ctx.create_string_from_utf8(text.into_bytes())
-                    .map(JSValue::String)
+                    .map(JSValue::make_string)
             } else {
                 Ok(JSValue::NULL)
             }
         }
         PROP_CHAT_TEMPLATE => {
             if let Some(text) = model.with_chat_template(|t| ctx.create_string_from_str(t)) {
-                text.map(JSValue::String)
+                text.map(JSValue::make_string)
             } else {
                 Ok(JSValue::NULL)
             }
@@ -670,7 +669,7 @@ fn js_model_createContext(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
         if v.is_undefined() || v.is_null() {
             None
         } else {
-            Some(v.as_object().copied().ok_or_else(|| {
+            Some(v.as_object().ok_or_else(|| {
                 ctx.throw_type_error("params must be object");
                 -1
             })?)
@@ -754,7 +753,7 @@ fn js_model_detokenize(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     }
 
     ctx.create_string_from_utf8(output.into_bytes())
-        .map(JSValue::String)
+        .map(JSValue::make_string)
 }
 
 fn js_model_getMeta(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -766,7 +765,7 @@ fn js_model_getMeta(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     if let Some(val) = model.meta_val_str(key.as_c_str()) {
         ctx.create_string_from_utf8(val.into_bytes())
-            .map(JSValue::String)
+            .map(JSValue::make_string)
     } else {
         Ok(JSValue::NULL)
     }
@@ -783,7 +782,7 @@ fn js_model_getMetaKeys(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         if let Some(key) = model.meta_key_by_index(i) {
             let key_val = ctx
                 .create_string_from_utf8(key.into_bytes())
-                .map(JSValue::String)?;
+                .map(JSValue::make_string)?;
             lst.push(key_val);
         }
     }
@@ -797,7 +796,7 @@ fn js_model_lookupTokenText(ctx: &mut ScopedContext, cc: CallContext) -> JSResul
     let token = cc.arg(0).to_number(ctx)?.to_i32();
 
     if let Some(text) = model.lookup_token_text(token) {
-        ctx.create_string_from_str(text).map(JSValue::String)
+        ctx.create_string_from_str(text).map(JSValue::make_string)
     } else {
         Ok(JSValue::NULL)
     }
@@ -810,14 +809,12 @@ fn js_model_renderTemplate(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
     let msgs_arr = cc
         .arg(0)
         .as_object_Array()
-        .copied()
         .ok_or_else(|| ctx.throw_type_error("messages must be array"))?;
 
     let mut messages: Vec<JinjaMessage> = Vec::with_capacity(msgs_arr.payload().len());
     for item in msgs_arr.payload().values() {
         let obj = item
             .as_object()
-            .copied()
             .ok_or_else(|| ctx.throw_type_error("messages[] item must be object"))?;
 
         let role_v = obj.get_property_str(ctx, "role")?;
@@ -854,7 +851,6 @@ fn js_model_renderTemplate(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
     if !val.is_undefined() {
         let opts = val
             .as_object()
-            .copied()
             .ok_or_else(|| ctx.throw_type_error("options must be object"))?;
 
         let json = ctx.with_new_scope(|scope| {
@@ -940,7 +936,7 @@ fn js_model_renderTemplate(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
         })?;
 
     ctx.create_string_from_utf8(rendered.into_bytes())
-        .map(JSValue::String)
+        .map(JSValue::make_string)
 }
 
 fn js_model_dispose(_: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -1003,7 +999,7 @@ fn js_model_load(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             let mut obj = JSLlmModel::new_instance(cx, JSValue::UNDEFINED, model)?;
             let path = cx
                 .create_string_from_utf8(file_name.into_bytes())
-                .map(JSValue::String)?;
+                .map(JSValue::make_string)?;
             obj.define_property_value_str(cx, MODEL_PATH_HIDDEN_KEY, path, 0)?;
             Ok(obj.into())
         },

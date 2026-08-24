@@ -33,7 +33,7 @@ pub(super) fn parse_tokens<'a>(
 ) -> Result<Cow<'a, [i32]>, i32> {
     if let Some(ta) = val.as_object_TypedArray() {
         if let Some(lst) = ta.as_i32_array() {
-            Ok(Cow::Borrowed(lst))
+            Ok(Cow::Owned(lst.to_vec()))
         } else {
             ctx.throw_type_error("expect Int32Array object");
             Err(-1)
@@ -48,8 +48,8 @@ pub(super) fn parse_tokens<'a>(
             lst.push(v.to_number(ctx)?.to_i32());
         }
         Ok(Cow::Owned(lst))
-    } else if let JSValue::Int(i) = val {
-        Ok(Cow::Owned(vec![*i]))
+    } else if let Some(i) = val.as_int() {
+        Ok(Cow::Owned(vec![i]))
     } else {
         ctx.throw_type_error("invalid input token");
         Err(-1)
@@ -114,7 +114,7 @@ fn js_context_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
 
     if cc.magic() == PROP_IS_DISPOSED {
-        return Ok(JSLlmContext::payload_of(this).is_none().into());
+        return Ok(JSLlmContext::payload_of(&this).is_none().into());
     }
 
     let llm_ctx = get_llm_ctx(ctx, this)?;
@@ -157,7 +157,7 @@ fn js_context_decode(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     if cc.length() > 2 {
         let arg2 = cc.arg(2);
-        if !matches!(arg2, JSValue::UNDEFINED) {
+        if !arg2.is_undefined() {
             logits_last = arg2.to_bool()?;
         }
     }

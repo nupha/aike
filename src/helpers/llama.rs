@@ -87,17 +87,9 @@ pub(crate) fn create_minijinja_env() -> Environment<'static> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default();
-        let total_secs = now.as_secs();
-        let ((year, month, day), (hours, minutes, seconds)) = secs_to_datetime(total_secs);
-
-        format
-            .replace("%Y", &format!("{:04}", year))
-            .replace("%m", &format!("{:02}", month))
-            .replace("%d", &format!("{:02}", day))
-            .replace("%H", &format!("{:02}", hours))
-            .replace("%M", &format!("{:02}", minutes))
-            .replace("%S", &format!("{:02}", seconds))
-            .replace("%s", &total_secs.to_string())
+        chrono::DateTime::from_timestamp(now.as_secs() as i64, 0)
+            .map(|dt| dt.format(&format).to_string())
+            .unwrap_or_default()
     });
 
     env.add_function("tojson", |value: minijinja::Value| -> String {
@@ -376,41 +368,3 @@ pub(crate) fn compute_keep_tokens(
 
 // ── private helpers ────────────────────────────────────────────────────────
 
-/// Convert seconds since epoch to (year, month, day) and (hours, minutes, seconds) in UTC.
-fn secs_to_datetime(total_secs: u64) -> ((i64, u32, u32), (u32, u32, u32)) {
-    let days = total_secs / 86400;
-    let time_secs = total_secs % 86400;
-    let hours = (time_secs / 3600) as u32;
-    let minutes = ((time_secs % 3600) / 60) as u32;
-    let seconds = (time_secs % 60) as u32;
-
-    fn is_leap(year: i64) -> bool {
-        (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
-    }
-
-    let mut y = 1970i64;
-    let mut remaining = days as i64;
-    loop {
-        let days_in_year = if is_leap(y) { 366 } else { 365 };
-        if remaining < days_in_year {
-            break;
-        }
-        remaining -= days_in_year;
-        y += 1;
-    }
-    let month_days = if is_leap(y) {
-        [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-    } else {
-        [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-    };
-    let mut m = 0u32;
-    for (i, &md) in month_days.iter().enumerate() {
-        if remaining < md {
-            m = i as u32;
-            break;
-        }
-        remaining -= md;
-    }
-    let day = (remaining + 1) as u32;
-    ((y, m + 1, day), (hours, minutes, seconds))
-}

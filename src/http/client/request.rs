@@ -185,31 +185,6 @@ const VALID_REFERRER_POLICY: &[&str] = &[
 const VALID_MODE: &[&str] = &["same-origin", "no-cors", "cors", "navigate", "websocket"];
 /// Fetch spec allowed request priorities (RequestInit.priority).
 const VALID_PRIORITY: &[&str] = &["high", "low", "auto"];
-/// Fetch spec allowed request destinations.
-const VALID_DESTINATION: &[&str] = &[
-    "",
-    "audio",
-    "audioworklet",
-    "document",
-    "embed",
-    "font",
-    "frame",
-    "iframe",
-    "image",
-    "manifest",
-    "object",
-    "paintworklet",
-    "report",
-    "script",
-    "sharedworker",
-    "style",
-    "track",
-    "video",
-    "worker",
-    "xslt",
-    "fencedframe",
-    "webidentity",
-];
 
 /// Validate a `RequestInit` option string against its allowed set (per the Fetch
 /// spec, invalid values throw `TypeError`). `request-error.js` WPT exercises the

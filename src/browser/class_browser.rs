@@ -82,7 +82,6 @@ fn register_browser(rt: &mut Runtime) -> Result<ClassID, i32> {
 pub(crate) struct LaunchData {
     pub(crate) client: cdp::CdpClient,
     pub(crate) child: Option<tokio::process::Child>,
-    pub(crate) reader_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
 /// `launch(options?)` → Promise<Browser> (exported from the `browser` module)
@@ -137,7 +136,7 @@ pub(crate) fn js_browser_launch(ctx: &mut ScopedContext, cc: CallContext) -> JSR
             }
         };
 
-        let (client, reader_handle) = match cdp::CdpClient::connect(&ws_url).await {
+        let (client, _reader_handle) = match cdp::CdpClient::connect(&ws_url).await {
             Ok(r) => r,
             Err(e) => {
                 let _ = chrome_child.start_kill();
@@ -149,7 +148,6 @@ pub(crate) fn js_browser_launch(ctx: &mut ScopedContext, cc: CallContext) -> JSR
         let data = LaunchData {
             client,
             child: Some(chrome_child),
-            reader_handle: Some(reader_handle),
         };
         result_slot.commit(Ok(data)).ok();
     });

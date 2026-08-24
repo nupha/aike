@@ -68,8 +68,6 @@ pub(crate) enum IncomingRequest {
         id: u64,
         out_tx: mpsc::Sender<String>,
         control_tx: mpsc::Sender<WsControl>,
-        query: String,
-        params: HashMap<String, String>,
     },
     /// An inbound event for an existing WS connection (client message / close).
     WebSocketData {
@@ -578,10 +576,9 @@ fn delegate_ws_route(
     let axum_path = express_to_axum_path(&path);
     let tx = request_tx;
 
-    let handler_fn = move |ws: WebSocketUpgrade, uri: axum::extract::OriginalUri| {
+    let handler_fn = move |ws: WebSocketUpgrade| {
         let tx = tx.clone();
         async move {
-            let query_string = uri.0.query().unwrap_or("").to_string();
             let id = NEXT_WS_ID.fetch_add(1, Ordering::Relaxed);
             let (out_tx, out_rx) = mpsc::channel(OUTBOUND_CAP);
             let (control_tx, control_rx) = mpsc::channel::<WsControl>(8);
@@ -593,8 +590,6 @@ fn delegate_ws_route(
                     id,
                     out_tx,
                     control_tx,
-                    query: query_string,
-                    params: HashMap::new(),
                 })
                 .is_err()
             {
@@ -916,8 +911,6 @@ fn js_start_server_job(
                     id,
                     out_tx,
                     control_tx,
-                    query,
-                    params,
                 } => {
                     let mut sv = server_ref.borrow_mut();
                     dispatch_ws_open(
@@ -925,8 +918,6 @@ fn js_start_server_job(
                         handler_index,
                         id,
                         out_tx,
-                        query,
-                        params,
                         control_tx,
                         &ws_handler_table,
                         &mut *sv,

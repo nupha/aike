@@ -74,9 +74,7 @@ pub(crate) struct WsStreamPayload {
     pub(crate) on_open: Option<Object>,
     pub(crate) on_message: Option<Object>,
     pub(crate) on_close: Option<Object>,
-    pub(crate) on_error: Option<Object>,
     pub(crate) ready_state: Cell<u8>,
-    pub(crate) remote_address: String,
 }
 
 impl WsStreamPayload {
@@ -90,9 +88,6 @@ impl WsStreamPayload {
             o.trace(tr);
         }
         if let Some(o) = &self.on_close {
-            o.trace(tr);
-        }
-        if let Some(o) = &self.on_error {
             o.trace(tr);
         }
     }
@@ -218,8 +213,6 @@ pub(crate) fn dispatch_ws_open(
     handler_index: usize,
     id: u64,
     out_tx: mpsc::Sender<String>,
-    _query: String,
-    _params: HashMap<String, String>,
     control_tx: mpsc::Sender<WsControl>,
     ws_table: &[Object],
     server_val: &mut JSValue,
@@ -242,9 +235,7 @@ pub(crate) fn dispatch_ws_open(
         on_open: None,
         on_message: None,
         on_close: None,
-        on_error: None,
         ready_state: Cell::new(1),
-        remote_address: String::new(),
     };
 
     let obj = match JSWebSocketStream::new_instance(cx, JSValue::UNDEFINED, payload) {
@@ -437,14 +428,6 @@ fn js_ws_on_close(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     Ok(this)
 }
 
-fn js_ws_on_error(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let mut this = cc.this();
-    let cb = cc.arg(0).ensure_callable(ctx)?;
-    let p = get_ws_payload_mut(ctx, &mut this)?;
-    p.on_error = Some(cb);
-    Ok(this)
-}
-
 fn js_ws_on_drain(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut this = cc.this();
     let cb = cc.arg(0).ensure_callable(ctx)?;
@@ -485,13 +468,6 @@ fn js_ws_ready_state(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     Ok(JSValue::from(p.ready_state.get() as u32))
 }
 
-fn js_ws_remote_address(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let mut this = cc.this();
-    let p = get_ws_payload_mut(ctx, &mut this)?;
-    let s = ctx.create_string_from_str(&p.remote_address)?;
-    Ok(JSValue::make_string(s))
-}
-
 fn js_ws_id(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut this = cc.this();
     let p = get_ws_payload_mut(ctx, &mut this)?;
@@ -506,12 +482,10 @@ const WS_PROTO: &[FieldDef] = &[
     FieldDef::FUNC("onMessage", 1, js_ws_on_message, 0),
     FieldDef::FUNC("onOpen", 1, js_ws_on_open, 0),
     FieldDef::FUNC("onClose", 1, js_ws_on_close, 0),
-    FieldDef::FUNC("onError", 1, js_ws_on_error, 0),
     FieldDef::FUNC("onDrain", 1, js_ws_on_drain, 0),
     FieldDef::FUNC("subscribe", 1, js_ws_subscribe, 0),
     FieldDef::FUNC("unsubscribe", 1, js_ws_unsubscribe, 0),
     FieldDef::GETSET("readyState", Some(js_ws_ready_state), None, 0),
-    FieldDef::GETSET("remoteAddress", Some(js_ws_remote_address), None, 0),
     FieldDef::GETSET("id", Some(js_ws_id), None, 0),
 ];
 

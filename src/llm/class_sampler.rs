@@ -38,7 +38,7 @@ pub fn js_model_createSamplerChain(ctx: &mut ScopedContext, cc: CallContext) -> 
     let mut chain = SamplerChain::new(model.clone(), false);
 
     if cc.length() > 0 {
-        let arr = cc.arg(0).as_object_Array().copied().ok_or_else(|| {
+        let arr = cc.arg(0).as_object_Array().ok_or_else(|| {
             ctx.throw_type_error("params must be array");
             -1
         })?;
@@ -61,9 +61,8 @@ pub fn js_model_createSamplerChain(ctx: &mut ScopedContext, cc: CallContext) -> 
                         let mut frequency_penalty = 0.0;
                         let mut presence_penalty = 0.0;
 
-                        match o.get_property_str(ctx, "repeatLast")? {
-                            JSValue::UNDEFINED => {}
-                            v => {
+                        let v = o.get_property_str(ctx, "repeatLast")?;
+                        if !v.is_undefined() {
                                 if let IntOrFloat::Int64(n) = v.to_number(ctx)?
                                     && (0..i32::MAX as i64).contains(&n)
                                 {
@@ -72,12 +71,10 @@ pub fn js_model_createSamplerChain(ctx: &mut ScopedContext, cc: CallContext) -> 
                                     ctx.throw_type_error("invalid repeatLast");
                                     return Err(-1);
                                 }
-                            }
                         }
 
-                        match o.get_property_str(ctx, "repeatPenalty")? {
-                            JSValue::UNDEFINED => {}
-                            v => {
+                        let v = o.get_property_str(ctx, "repeatPenalty")?;
+                        if !v.is_undefined() {
                                 let d = v.to_number(ctx)?.to_f64();
                                 if (0.0..f32::MAX as f64).contains(&d) {
                                     repeat_penalty = d as _;
@@ -85,12 +82,10 @@ pub fn js_model_createSamplerChain(ctx: &mut ScopedContext, cc: CallContext) -> 
                                     ctx.throw_type_error("invalid repeatPenalty");
                                     return Err(-1);
                                 }
-                            }
                         }
 
-                        match o.get_property_str(ctx, "frequencyPenalty")? {
-                            JSValue::UNDEFINED => {}
-                            v => {
+                        let v = o.get_property_str(ctx, "frequencyPenalty")?;
+                        if !v.is_undefined() {
                                 let d = v.to_number(ctx)?.to_f64();
                                 if (0.0..f32::MAX as f64).contains(&d) {
                                     frequency_penalty = d as _;
@@ -98,12 +93,10 @@ pub fn js_model_createSamplerChain(ctx: &mut ScopedContext, cc: CallContext) -> 
                                     ctx.throw_type_error("invalid frequencyPenalty");
                                     return Err(-1);
                                 }
-                            }
                         }
 
-                        match o.get_property_str(ctx, "presencePenalty")? {
-                            JSValue::UNDEFINED => {}
-                            v => {
+                        let v = o.get_property_str(ctx, "presencePenalty")?;
+                        if !v.is_undefined() {
                                 let d = v.to_number(ctx)?.to_f64();
                                 if (0.0..f32::MAX as f64).contains(&d) {
                                     presence_penalty = d as _;
@@ -111,7 +104,6 @@ pub fn js_model_createSamplerChain(ctx: &mut ScopedContext, cc: CallContext) -> 
                                     ctx.throw_type_error("invalid presencePenalty");
                                     return Err(-1);
                                 }
-                            }
                         }
 
                         chain.add_sampler(&SamplerKind::Penalties {
@@ -194,14 +186,13 @@ fn js_samplerchain_penalties(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
     let mut presence_penalty = 0.0;
 
     if cc.length() > 0 {
-        let opts = cc.arg(0).as_object().cloned().ok_or_else(|| {
+        let opts = cc.arg(0).as_object().ok_or_else(|| {
             ctx.throw_type_error("expect object");
             -1
         })?;
 
-        match opts.get_property_str(ctx, "repeatLastN")? {
-            JSValue::UNDEFINED => {}
-            v => {
+        let v = opts.get_property_str(ctx, "repeatLastN")?;
+        if !v.is_undefined() {
                 if let IntOrFloat::Int64(n) = v.to_number(ctx)?
                     && (0..i32::MAX as i64).contains(&n)
                 {
@@ -210,12 +201,10 @@ fn js_samplerchain_penalties(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
                     ctx.throw_type_error("invalid repeatLastN");
                     return Err(-1);
                 }
-            }
         }
 
-        match opts.get_property_str(ctx, "repeatPenalty")? {
-            JSValue::UNDEFINED => {}
-            v => {
+        let v = opts.get_property_str(ctx, "repeatPenalty")?;
+        if !v.is_undefined() {
                 let d = v.to_number(ctx)?.to_f64();
                 if (0.0..f32::MAX as f64).contains(&d) {
                     repeat_penalty = d as _;
@@ -223,12 +212,10 @@ fn js_samplerchain_penalties(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
                     ctx.throw_type_error("invalid repeatPenalty");
                     return Err(-1);
                 }
-            }
         }
 
-        match opts.get_property_str(ctx, "frequencyPenalty")? {
-            JSValue::UNDEFINED => {}
-            v => {
+        let v = opts.get_property_str(ctx, "frequencyPenalty")?;
+        if !v.is_undefined() {
                 let d = v.to_number(ctx)?.to_f64();
                 if (0.0..f32::MAX as f64).contains(&d) {
                     frequency_penalty = d as _;
@@ -236,12 +223,10 @@ fn js_samplerchain_penalties(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
                     ctx.throw_type_error("invalid frequencyPenalty");
                     return Err(-1);
                 }
-            }
         }
 
-        match opts.get_property_str(ctx, "presencePenalty")? {
-            JSValue::UNDEFINED => {}
-            v => {
+        let v = opts.get_property_str(ctx, "presencePenalty")?;
+        if !v.is_undefined() {
                 let d = v.to_number(ctx)?.to_f64();
                 if (0.0..f32::MAX as f64).contains(&d) {
                     presence_penalty = d as _;
@@ -249,7 +234,6 @@ fn js_samplerchain_penalties(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
                     ctx.throw_type_error("invalid presencePenalty");
                     return Err(-1);
                 }
-            }
         }
     }
 
@@ -301,30 +285,6 @@ fn js_samplerchain_temperature(ctx: &mut ScopedContext, cc: CallContext) -> JSRe
         dyn_range: 1.0,
         dyn_exponent: 1.0,
     });
-
-    Ok(this)
-}
-
-fn add_grammar(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let this = cc.this();
-    let chain = get_sampler(ctx, &this)?;
-    let mut chain = chain.lock().unwrap();
-
-    let g = cc.arg(0);
-    if g.is_undefined_or_null() {
-        ctx.throw_type_error("grammar should be string");
-        return Err(-1);
-    }
-    let s = g.to_string(ctx)?;
-    if s.is_empty() {
-        ctx.throw_type_error("empty grammar");
-        return Err(-1);
-    }
-
-    let lark = s.content().encode_utf8(false);
-    if let Err(e) = chain.set_grammar(&lark) {
-        log::warn!("failed to set grammar: {}", e);
-    }
 
     Ok(this)
 }

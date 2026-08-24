@@ -215,9 +215,6 @@ fn add_cron_notifier(ctx: &mut ScopedContext) {
 
 struct CronJobPayload {
     id: u32,
-    name: Option<String>,
-    pattern: String,
-    active: bool,
 }
 
 impl CronJobPayload {
@@ -334,12 +331,7 @@ pub(super) fn js_schedule(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
     let job_instance = JSCronJob::new_instance(
         ctx,
         JSValue::UNDEFINED,
-        CronJobPayload {
-            id,
-            name,
-            pattern: pattern_str,
-            active: true,
-        },
+        CronJobPayload { id },
     )?;
     let job_val: JSValue = job_instance.into();
 

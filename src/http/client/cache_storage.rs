@@ -35,14 +35,12 @@ struct CacheEntry {
 struct RequestSnapshot {
     method: String,
     url: String,
-    headers: Vec<(String, String)>,
 }
 
 #[derive(Clone)]
 struct ResponseSnapshot {
     status: u16,
     status_text: String,
-    headers: Vec<(String, String)>,
     // `Vec<u8>` to keep the payload free of GC handles.
     body: Vec<u8>,
 }
@@ -95,7 +93,6 @@ fn snapshot_request(ctx: &mut ScopedContext, val: &JSValue) -> Result<RequestSna
     Ok(RequestSnapshot {
         method: p.method.to_string(),
         url: p.url.to_string(),
-        headers: p.headers.borrow().entries(),
     })
 }
 
@@ -106,7 +103,6 @@ fn snapshot_response(ctx: &mut ScopedContext, val: &JSValue) -> Result<ResponseS
     Ok(ResponseSnapshot {
         status: p.status,
         status_text: p.status_text.to_string(),
-        headers: p.headers.borrow().entries(),
         body,
     })
 }

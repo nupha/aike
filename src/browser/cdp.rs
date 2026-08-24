@@ -255,45 +255,6 @@ impl CdpClient {
         self.event_tx.subscribe()
     }
 
-    /// Create a new target (tab) and attach a session to it.
-    /// Returns (target_id, session_id).
-    pub(crate) async fn create_target(&self, url: &str) -> Result<(String, String), String> {
-        let rx = self.send(
-            "Target.createTarget",
-            Some(serde_json::json!({
-                "url": url,
-            })),
-            None,
-        );
-        let resp = rx.await.map_err(|_| "channel closed".to_string())?;
-        let result = resp?;
-
-        let target_id = result
-            .get("targetId")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| "no targetId in Target.createTarget response".to_string())?
-            .to_string();
-
-        let attach_rx = self.send(
-            "Target.attachToTarget",
-            Some(serde_json::json!({
-                "targetId": target_id,
-                "flatten": true,
-            })),
-            None,
-        );
-        let attach_resp = attach_rx.await.map_err(|_| "channel closed".to_string())?;
-        let attach_result = attach_resp?;
-
-        let session_id = attach_result
-            .get("sessionId")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| "no sessionId in Target.attachToTarget response".to_string())?
-            .to_string();
-
-        Ok((target_id, session_id))
-    }
-
     /// Close a target (tab).
     pub(crate) async fn close_target(&self, target_id: &str) -> Result<(), String> {
         let rx = self.send(

@@ -39,11 +39,6 @@ pub struct Engine {
     pub(crate) pending_decode_tokens: usize,
     pub(crate) worker_join_handle: Option<JoinHandle<()>>,
 
-    /// Whether the HTTP server is currently running.
-    pub(crate) is_serving: bool,
-    /// Shutdown sender for the active HTTP server (if any).
-    pub(crate) shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
-
     /// Whether to parse <think> tags and expose reasoning content
     /// via reasoning_content field instead of leaving them in content.
     /// meaningful for chat completion response only.
@@ -251,8 +246,6 @@ impl Engine {
             model_name,
             default_max_tokens,
             ubatch_size,
-            is_serving: false,
-            shutdown_tx: None,
             parse_reasoning: true,
             n_cache_reuse,
             cache_ram: CacheRam::new(cache_ram_bytes),
@@ -295,9 +288,6 @@ impl Engine {
                     if let Ok(mut eng) = eng2.lock() {
                         eng.num_tasks = 0;
                         eng.is_dead = true;
-
-                        // Send shutdown signal to HTTP server if serving.
-                        eng.notify_stop();
                     }
                 }
             }
@@ -322,38 +312,12 @@ impl Engine {
         self.default_max_tokens
     }
 
-    pub fn is_serving(&self) -> bool {
-        self.is_serving
-    }
-
     pub fn parse_reasoning(&self) -> bool {
         self.parse_reasoning
     }
 
     pub fn set_parse_reasoning(&mut self, v: bool) {
         self.parse_reasoning = v;
-    }
-
-    /// Mark engine as serving and store the shutdown sender.
-    /// Panics in debug builds if already serving.
-    pub fn set_serving(&mut self, tx: tokio::sync::oneshot::Sender<()>) {
-        debug_assert!(!self.is_serving(), "engine is already serving");
-        self.is_serving = true;
-        self.shutdown_tx.replace(tx);
-    }
-
-    /// Mark engine as not serving and clear the shutdown sender.
-    /// Panics in debug builds if not currently serving.
-    pub fn unset_serving(&mut self) {
-        debug_assert!(self.is_serving(), "engine is not serving");
-        self.is_serving = false;
-        self.shutdown_tx.take();
-    }
-
-    pub fn notify_stop(&mut self) {
-        if let Some(tx) = self.shutdown_tx.take() {
-            let _ = tx.send(());
-        }
     }
 
     pub fn push_task(
