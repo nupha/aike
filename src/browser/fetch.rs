@@ -24,7 +24,7 @@ use crate::browser::{
 
 thread_local! {
     // session_id -> registered `onRequestPaused` callback (last wins).
-    static FETCH_CALLBACK: RefCell<std::collections::HashMap<String, JSValue>> =
+    pub(crate) static FETCH_CALLBACK: RefCell<std::collections::HashMap<String, JSValue>> =
         RefCell::new(std::collections::HashMap::new());
 }
 

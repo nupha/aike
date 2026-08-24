@@ -9,10 +9,7 @@
 use std::sync::{LazyLock, Mutex};
 
 use crossbeam::channel;
-use zuqe::{
-    CallContext, JSResult, JSValue, Object, ScopedContext,
-    gc_lite::{GcTrace, GcTraceCtx},
-};
+use zuqe::{CallContext, JSResult, JSValue, Object, ScopedContext};
 
 use crate::browser::class_page::{get_page_payload, send_page_void_cmd};
 
@@ -106,7 +103,7 @@ pub(crate) fn js_page_on_log(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
 }
 
 thread_local! {
-    static CONSOLE_CALLBACK: std::cell::RefCell<std::collections::HashMap<String, Object>> =
+    pub(crate) static CONSOLE_CALLBACK: std::cell::RefCell<std::collections::HashMap<String, Object>> =
         std::cell::RefCell::new(std::collections::HashMap::new());
 }
 
@@ -114,14 +111,6 @@ thread_local! {
 ///
 /// The callbacks live in a native-side thread-local map that the GC cannot
 /// see, so they must be explicitly traced here (registered in `main.rs`).
-pub(crate) fn gc_trace_browser(gcx: &mut GcTraceCtx) {
-    CONSOLE_CALLBACK.with(|m| {
-        for cb in m.borrow().values() {
-            cb.trace(gcx);
-        }
-    });
-}
-
 /// `page.getConsoleMessages(clear?)` — return the buffered console/log entries
 /// for this page. Pass `true` to clear the buffer after reading.
 pub(crate) fn js_page_get_console_messages(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {

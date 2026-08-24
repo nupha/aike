@@ -22,7 +22,8 @@ use crate::browser::{
 
 thread_local! {
     // Registered `handleCertificateError` callback (last wins). GC-traced.
-    static CERT_CALLBACK: RefCell<Option<JSValue>> = RefCell::new(None);
+    pub(crate) static CERT_CALLBACK: RefCell<Option<JSValue>> = RefCell::new(None);
+
     // CDP client used by the generated `accept` closure.
     static CERT_CLIENT: RefCell<Option<CdpClient>> = RefCell::new(None);
     // eventId of the cert error currently being delivered to the callback.

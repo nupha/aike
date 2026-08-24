@@ -22,13 +22,41 @@ mod storage;
 mod target;
 mod tracing;
 
-pub(crate) use log::gc_trace_browser;
 pub use {class_browser::JSBrowser, class_page::JSPage};
 
-use zuqe::{FieldDef, NativeObject, ScopedContext};
+use zuqe::{gc_lite::GcTrace, gc_lite::GcTraceCtx, FieldDef, NativeObject, ScopedContext};
+
+/// Single GC entry point for the whole browser module: traces every
+/// browser-side JS-callback registry so main.rs registers exactly one
+/// handler. Statics are pub(crate) precisely so this one function can
+/// reach into each submodule directly.
+pub(crate) fn gc_trace_browser(gcx: &mut GcTraceCtx) {
+    log::CONSOLE_CALLBACK.with(|m| {
+        for cb in m.borrow().values() {
+            cb.trace(gcx);
+        }
+    });
+    runtime::CONSOLE_CALLBACK.with(|m| {
+        for cb in m.borrow().values() {
+            cb.trace(gcx);
+        }
+    });
+    security::CERT_CALLBACK.with(|cb| {
+        if let Some(v) = cb.borrow().as_ref() {
+            v.trace(gcx);
+        }
+    });
+    fetch::FETCH_CALLBACK.with(|m| {
+        for cb in m.borrow().values() {
+            cb.trace(gcx);
+        }
+    });
+}
 
 /// Initialize the `browser` JS module (exports the `Browser` class).
 pub fn init_mod_browser(ctx: &mut ScopedContext) -> Result<(), i32> {
+    ctx.use_classes(&[JSBrowser::class_id()])?;
+
     const MOD_BROWSER_ENTRIES: &[FieldDef] = &[FieldDef::CLASS(
         JSBrowser::CLASS_NAME,
         JSBrowser::class_id,

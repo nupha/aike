@@ -514,7 +514,7 @@ pub(crate) fn js_page_evaluate_handle(ctx: &mut ScopedContext, cc: CallContext) 
 // ---------------------------------------------------------------------------
 
 thread_local! {
-    static CONSOLE_CALLBACK: std::cell::RefCell<std::collections::HashMap<String, JSValue>> =
+    pub(crate) static CONSOLE_CALLBACK: std::cell::RefCell<std::collections::HashMap<String, JSValue>> =
         std::cell::RefCell::new(std::collections::HashMap::new());
 }
 

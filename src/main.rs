@@ -44,7 +44,7 @@ use crate::llm::{JSEngine, JSLlmContext, JSLlmModel, JSSamplerChain};
 
 use crate::{
     aike::{JSCronJob, JSFileHandle, JSStdioHandle, gc_trace_cron, gc_trace_io},
-    browser::{JSBrowser, JSPage, gc_trace_browser, init_mod_browser},
+    browser::{JSPage, gc_trace_browser, init_mod_browser},
     class_event_emitter::JSEventEmitter,
     fs::init_mod_fs,
     global::setup_globals,
@@ -357,7 +357,6 @@ async fn main() -> ExitCode {
                 JSCronJob::class_id(),
                 HtmlDocument::class_id(),
                 HtmlElement::class_id(),
-                JSBrowser::class_id(),
                 JSPage::class_id(),
                 crate::http::client::headers::HeaderListIterator::class_id(),
                 crate::http::client::cache_storage::JSCacheStorage::class_id(),
