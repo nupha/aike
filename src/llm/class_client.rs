@@ -28,7 +28,6 @@ use super::{
 pub(crate) struct ClientPayload {
     pub(crate) base_url: String,
     pub(crate) api_key: String,
-    pub(crate) buffered_tool_call: bool,
     pub(crate) timeout: Duration,
 
     //
@@ -81,8 +80,6 @@ fn js_client_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             serde_json::Value::Null
         }
     };
-    let buffered_tool_call = true;
-
     let new_target = cc.this();
 
     let v = cc.arg(0);
@@ -151,7 +148,6 @@ fn js_client_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         model_name: model,
         base_url,
         api_key,
-        buffered_tool_call,
         timeout: Duration::from_secs(timeout as u64),
         max_tokens: max_tokens as usize,
         extra_body,
@@ -382,7 +378,6 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
         // Streaming: AsyncIterableIterator
         let result_slot = PromiseResultSlot::<ChatReply>::new();
         let slot = result_slot.clone();
-        let buffered_tool_call = client.buffered_tool_call;
 
         tokio::spawn(async move {
             async fn flush_buf(
@@ -446,87 +441,79 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
                                     break;
                                 }
 
-                                if buffered_tool_call {
-                                    // Check for tool_calls in this chunk
-                                    if let Some(tcs) =
-                                        json[OUTMSG_FIELD_CHOICES][0]["delta"]["tool_calls"]
-                                            .as_array()
-                                        && !tcs.is_empty()
-                                    {
-                                        // A chunk may carry content/reasoning alongside tool_calls.
-                                        // Since we only buffer tool_calls here, emit that text now —
-                                        // otherwise it is lost when finish_reason arrives in a later,
-                                        // content-less chunk.
-                                        let has_finish =
-                                            json[OUTMSG_FIELD_CHOICES][0]["finish_reason"]
-                                                .as_str()
-                                                .is_some();
-                                        let delta = &json[OUTMSG_FIELD_CHOICES][0]["delta"];
-                                        if !has_finish
-                                            && (delta.get("content").is_some()
-                                                || delta.get("reasoning_content").is_some())
-                                        {
-                                            let mut text_chunk = json.clone();
-                                            if let Some(obj) =
-                                                text_chunk[OUTMSG_FIELD_CHOICES][0]["delta"]
-                                                    .as_object_mut()
-                                            {
-                                                obj.remove("tool_calls");
-                                            }
-                                            if !has_normalizer {
-                                                normalize_message_shape(&mut text_chunk);
-                                            }
-                                            slot.commit_async(ChatReply::Chunk(text_chunk)).await;
-                                        }
-
-                                        // Accumulate tool_call deltas
-                                        for tc in tcs {
-                                            let idx = tc["index"].as_i64().unwrap_or(0) as usize;
-                                            // Got a new index → flush previous buffered tool_call (matches openai-node logic)
-                                            if let Some(ref cur) = buf
-                                                && cur.idx != idx
-                                            {
-                                                flush_buf(&slot, &mut buf).await;
-                                            }
-
-                                            let state =
-                                                buf.get_or_insert_with(|| ToolCallBuffer::new(idx));
-                                            state.apply_delta(tc, &json);
-                                        }
-
-                                        // check finish_reason AFTER processing tool_calls
-                                        // (non-standard servers may emit both in one chunk)
-                                        if json[OUTMSG_FIELD_CHOICES][0]["finish_reason"]
+                                // Check for tool_calls in this chunk
+                                if let Some(tcs) =
+                                    json[OUTMSG_FIELD_CHOICES][0]["delta"]["tool_calls"]
+                                        .as_array()
+                                    && !tcs.is_empty()
+                                {
+                                    // A chunk may carry content/reasoning alongside tool_calls.
+                                    // Since we only buffer tool_calls here, emit that text now —
+                                    // otherwise it is lost when finish_reason arrives in a later,
+                                    // content-less chunk.
+                                    let has_finish =
+                                        json[OUTMSG_FIELD_CHOICES][0]["finish_reason"]
                                             .as_str()
-                                            .is_some()
+                                            .is_some();
+                                    let delta = &json[OUTMSG_FIELD_CHOICES][0]["delta"];
+                                    if !has_finish
+                                        && (delta.get("content").is_some()
+                                            || delta.get("reasoning_content").is_some())
+                                    {
+                                        let mut text_chunk = json.clone();
+                                        if let Some(obj) =
+                                            text_chunk[OUTMSG_FIELD_CHOICES][0]["delta"]
+                                                .as_object_mut()
+                                        {
+                                            obj.remove("tool_calls");
+                                        }
+                                        if !has_normalizer {
+                                            normalize_message_shape(&mut text_chunk);
+                                        }
+                                        slot.commit_async(ChatReply::Chunk(text_chunk)).await;
+                                    }
+
+                                    // Accumulate tool_call deltas
+                                    for tc in tcs {
+                                        let idx = tc["index"].as_i64().unwrap_or(0) as usize;
+                                        // Got a new index → flush previous buffered tool_call (matches openai-node logic)
+                                        if let Some(ref cur) = buf
+                                            && cur.idx != idx
                                         {
                                             flush_buf(&slot, &mut buf).await;
-
-                                            // MUST NOT emit the original json as-is: it still carries the last
-                                            // tool_calls delta. Emit a clean finish-only chunk instead.
-                                            let mut finish = json.clone();
-                                            if let Some(obj) =
-                                                finish[OUTMSG_FIELD_CHOICES][0]["delta"]
-                                                    .as_object_mut()
-                                            {
-                                                obj.remove("tool_calls");
-                                            }
-                                            // Normalize message format in choices[] delta
-                                            if !has_normalizer {
-                                                normalize_message_shape(&mut finish);
-                                            }
-                                            slot.commit_async(ChatReply::Chunk(finish)).await;
                                         }
-                                    } else {
-                                        // Non-tool_call (content, finish_reason, etc.) → flush then passthrough
+
+                                        let state =
+                                            buf.get_or_insert_with(|| ToolCallBuffer::new(idx));
+                                        state.apply_delta(tc, &json);
+                                    }
+
+                                    // check finish_reason AFTER processing tool_calls
+                                    // (non-standard servers may emit both in one chunk)
+                                    if json[OUTMSG_FIELD_CHOICES][0]["finish_reason"]
+                                        .as_str()
+                                        .is_some()
+                                    {
                                         flush_buf(&slot, &mut buf).await;
+
+                                        // MUST NOT emit the original json as-is: it still carries the last
+                                        // tool_calls delta. Emit a clean finish-only chunk instead.
+                                        let mut finish = json.clone();
+                                        if let Some(obj) =
+                                            finish[OUTMSG_FIELD_CHOICES][0]["delta"]
+                                                .as_object_mut()
+                                        {
+                                            obj.remove("tool_calls");
+                                        }
                                         // Normalize message format in choices[] delta
                                         if !has_normalizer {
-                                            normalize_message_shape(&mut json);
+                                            normalize_message_shape(&mut finish);
                                         }
-                                        slot.commit_async(ChatReply::Chunk(json)).await;
+                                        slot.commit_async(ChatReply::Chunk(finish)).await;
                                     }
                                 } else {
+                                    // Non-tool_call (content, finish_reason, etc.) → flush then passthrough
+                                    flush_buf(&slot, &mut buf).await;
                                     // Normalize message format in choices[] delta
                                     if !has_normalizer {
                                         normalize_message_shape(&mut json);
@@ -537,6 +524,12 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
                         }
                     }
 
+                    // Stream ended without [DONE] (server closed early): flush
+                    // any still-buffered tool_call so it is not silently lost.
+                    // On the normal [DONE] path the buffer is already empty.
+                    if buf.is_some() {
+                        flush_buf(&slot, &mut buf).await;
+                    }
                     slot.commit_async(ChatReply::Done).await;
                 }
                 Err(e) => {
@@ -644,7 +637,6 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
 const PROP_MODEL: i32 = 0;
 const PROP_RESPONSE_NORMALIZER: i32 = 1;
 const PROP_BASE_URL: i32 = 2;
-const PROP_BUFFERED_TOOL_CALL: i32 = 3;
 const PROP_EXTRA_BODY: i32 = 4;
 const PROP_TIMEOUT: i32 = 5;
 const PROP_MAX_TOKENS: i32 = 6;
@@ -663,7 +655,6 @@ fn js_client_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         PROP_BASE_URL => ctx
             .create_string_from_str(&client.base_url)
             .map(JSValue::make_string),
-        PROP_BUFFERED_TOOL_CALL => Ok(JSValue::from(client.buffered_tool_call)),
         PROP_MAX_TOKENS => Ok(JSValue::from(client.max_tokens as i32)),
         PROP_EXTRA_BODY => {
             if client.extra_body.is_null() {
@@ -734,12 +725,6 @@ const CLASS_CLIENT_PROTO: &[FieldDef] = &[
     FieldDef::FUNC("dispose", 0, js_client_dispose, 0),
     FieldDef::GETSET("model", Some(js_client_getter), None, PROP_MODEL as _),
     FieldDef::GETSET("baseUrl", Some(js_client_getter), None, PROP_BASE_URL as _),
-    FieldDef::GETSET(
-        "bufferedToolCall",
-        Some(js_client_getter),
-        None,
-        PROP_BUFFERED_TOOL_CALL as _,
-    ),
     FieldDef::GETSET(
         "maxTokens",
         Some(js_client_getter),
