@@ -577,29 +577,59 @@ fn js_fh_onLine(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     fh_subscribe(ctx, cc, ReadMode::Line)
 }
 
-/// text() — async read as string via the real fd
-fn js_fh_text(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    use tokio::io::{AsyncReadExt, AsyncSeekExt};
+// ---- shared read plumbing for fh.text()/json()/bytes()/read() ----
 
-    let this = cc.this();
-    let desc = get_io(ctx, &this)?;
+/// Read a reader to end. Text mode validates UTF-8 via `read_to_string`,
+/// keeping the exact io-error wording of the original per-arm implementations.
+async fn read_to_end<R>(mut r: R, as_text: bool) -> Result<Vec<u8>, String>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    use tokio::io::AsyncReadExt;
+    if as_text {
+        let mut s = String::new();
+        r.read_to_string(&mut s).await.map(|_| s.into_bytes())
+    } else {
+        let mut v = Vec::new();
+        r.read_to_end(&mut v).await.map(|_| v)
+    }
+    .map_err(|e| e.to_string())
+}
 
-    let (promise, tx) =
-        Promise::create_with_channel::<Result<String, String>>(ctx, |cx, payload| -> JSResult {
-            let text = payload.map_err(|e| cx.throw_internal_error(&e))?;
-            cx.create_string_from_utf8(text.into_bytes())
-                .map(JSValue::make_string)
-        })?;
+/// Read up to `max_len` bytes from the current position (0 = to EOF).
+async fn read_capped<R>(mut r: R, max_len: usize) -> Result<Vec<u8>, String>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    use tokio::io::AsyncReadExt;
+    if max_len == 0 {
+        let mut buf = Vec::new();
+        r.read_to_end(&mut buf).await.map(|_| buf)
+    } else {
+        let mut buf = vec![0u8; max_len];
+        r.read(&mut buf)
+            .await
+            .map(|n| {
+                buf.truncate(n);
+                buf
+            })
+    }
+    .map_err(|e| e.to_string())
+}
 
+/// Spawn the 5-arm dispatch shared by text()/json()/bytes(): whole-stream read
+/// (file handles seek to position 0 first), then convert and deliver.
+fn spawn_whole_read<T, F>(desc: &IoPayload, tx: Sender<Result<T, String>>, as_text: bool, convert: F)
+where
+    T: Send + Unpin + 'static,
+    F: FnOnce(Vec<u8>) -> Result<T, String> + Send + 'static,
+{
     match desc {
         IoPayload::Stdin => {
             tokio::spawn(async move {
-                let mut buf = String::new();
-                let result = tokio::io::stdin()
-                    .read_to_string(&mut buf)
+                let result = read_to_end(tokio::io::stdin(), as_text)
                     .await
-                    .map(|_| buf)
-                    .map_err(|e| e.to_string());
+                    .and_then(convert);
                 let _ = PollSender::from(tx).send_async(result).await;
             });
         }
@@ -609,14 +639,10 @@ fn js_fh_text(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         IoPayload::File(fd, _) => {
             let fd = fd.clone();
             tokio::spawn(async move {
+                use tokio::io::AsyncSeekExt;
                 let mut file = fd.lock().await;
                 let _ = file.seek(std::io::SeekFrom::Start(0)).await;
-                let mut buf = String::new();
-                let result = file
-                    .read_to_string(&mut buf)
-                    .await
-                    .map(|_| buf)
-                    .map_err(|e| e.to_string());
+                let result = read_to_end(&mut *file, as_text).await.and_then(convert);
                 let _ = PollSender::from(tx).send_async(result).await;
             });
         }
@@ -624,12 +650,7 @@ fn js_fh_text(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             let reader = reader.clone();
             tokio::spawn(async move {
                 let mut r = reader.lock().await;
-                let mut buf = String::new();
-                let result = r
-                    .read_to_string(&mut buf)
-                    .await
-                    .map(|_| buf)
-                    .map_err(|e| e.to_string());
+                let result = read_to_end(&mut *r, as_text).await.and_then(convert);
                 let _ = PollSender::from(tx).send_async(result).await;
             });
         }
@@ -637,6 +658,20 @@ fn js_fh_text(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             let _ = tx.send(Err("cannot read from pipe writer".to_string()));
         }
     }
+}
+
+/// text() — async read as string via the real fd
+fn js_fh_text(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let this = cc.this();
+    let desc = get_io(ctx, &this)?;
+
+    let (promise, tx) =
+        Promise::create_with_channel::<Result<Vec<u8>, String>>(ctx, |cx, payload| -> JSResult {
+            let bytes = payload.map_err(|e| cx.throw_internal_error(&e))?;
+            cx.create_string_from_utf8(bytes).map(JSValue::make_string)
+        })?;
+
+    spawn_whole_read(desc, tx, true, Ok);
 
     Ok(promise.into())
 }
@@ -654,65 +689,9 @@ fn js_fh_json(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         },
     )?;
 
-    match desc {
-        IoPayload::Stdin => {
-            tokio::spawn(async move {
-                let mut buf = String::new();
-                let raw = tokio::io::stdin()
-                    .read_to_string(&mut buf)
-                    .await
-                    .map(|_| buf)
-                    .map_err(|e| e.to_string());
-                let result = match raw {
-                    Ok(s) => serde_json::from_str(&s).map_err(|e| e.to_string()),
-                    Err(e) => Err(e),
-                };
-                let _ = PollSender::from(tx).send_async(result).await;
-            });
-        }
-        IoPayload::Stdout | IoPayload::Stderr => {
-            let _ = tx.send(Err("cannot read from stdout/stderr".to_string()));
-        }
-        IoPayload::File(fd, _) => {
-            let fd = fd.clone();
-            tokio::spawn(async move {
-                use tokio::io::{AsyncReadExt, AsyncSeekExt};
-                let mut file = fd.lock().await;
-                let _ = file.seek(std::io::SeekFrom::Start(0)).await;
-                let mut buf = String::new();
-                let raw = file
-                    .read_to_string(&mut buf)
-                    .await
-                    .map(|_| buf)
-                    .map_err(|e| e.to_string());
-                let result = match raw {
-                    Ok(s) => serde_json::from_str(&s).map_err(|e| e.to_string()),
-                    Err(e) => Err(e),
-                };
-                let _ = PollSender::from(tx).send_async(result).await;
-            });
-        }
-        IoPayload::PipeRead(reader, _) => {
-            let reader = reader.clone();
-            tokio::spawn(async move {
-                let mut r = reader.lock().await;
-                let mut buf = String::new();
-                let raw = r
-                    .read_to_string(&mut buf)
-                    .await
-                    .map(|_| buf)
-                    .map_err(|e| e.to_string());
-                let result = match raw {
-                    Ok(s) => serde_json::from_str(&s).map_err(|e| e.to_string()),
-                    Err(e) => Err(e),
-                };
-                let _ = PollSender::from(tx).send_async(result).await;
-            });
-        }
-        IoPayload::PipeWrite(..) => {
-            let _ = tx.send(Err("cannot read from pipe writer".to_string()));
-        }
-    }
+    spawn_whole_read(desc, tx, true, |bytes| {
+        serde_json::from_slice(&bytes).map_err(|e| e.to_string())
+    });
 
     Ok(promise.into())
 }
@@ -728,53 +707,7 @@ fn js_fh_bytes(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             TypedArray::create_from_vec_u8(cx, bytes).map(JSValue::from)
         })?;
 
-    match desc {
-        IoPayload::Stdin => {
-            tokio::spawn(async move {
-                let mut buf = Vec::new();
-                let result = tokio::io::stdin()
-                    .read_to_end(&mut buf)
-                    .await
-                    .map(|_| buf)
-                    .map_err(|e| e.to_string());
-                let _ = PollSender::from(tx).send_async(result).await;
-            });
-        }
-        IoPayload::Stdout | IoPayload::Stderr => {
-            let _ = tx.send(Err("cannot read from stdout/stderr".to_string()));
-        }
-        IoPayload::File(fd, _) => {
-            let fd = fd.clone();
-            tokio::spawn(async move {
-                use tokio::io::{AsyncReadExt, AsyncSeekExt};
-                let mut file = fd.lock().await;
-                let _ = file.seek(std::io::SeekFrom::Start(0)).await;
-                let mut buf = Vec::new();
-                let result = file
-                    .read_to_end(&mut buf)
-                    .await
-                    .map(|_| buf)
-                    .map_err(|e| e.to_string());
-                let _ = PollSender::from(tx).send_async(result).await;
-            });
-        }
-        IoPayload::PipeRead(reader, _) => {
-            let reader = reader.clone();
-            tokio::spawn(async move {
-                let mut r = reader.lock().await;
-                let mut buf = Vec::new();
-                let result = r
-                    .read_to_end(&mut buf)
-                    .await
-                    .map(|_| buf)
-                    .map_err(|e| e.to_string());
-                let _ = PollSender::from(tx).send_async(result).await;
-            });
-        }
-        IoPayload::PipeWrite(..) => {
-            let _ = tx.send(Err("cannot read from pipe writer".to_string()));
-        }
-    }
+    spawn_whole_read(desc, tx, false, Ok);
 
     Ok(promise.into())
 }
@@ -831,28 +764,10 @@ fn js_fh_read(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             TypedArray::create_from_vec_u8(cx, bytes).map(JSValue::from)
         })?;
 
-    let mut buf = Vec::with_capacity(max_len);
-
     match desc {
         IoPayload::Stdin => {
             tokio::spawn(async move {
-                let result = if max_len == 0 {
-                    tokio::io::stdin()
-                        .read_to_end(&mut buf)
-                        .await
-                        .map(|_| buf)
-                        .map_err(|e| e.to_string())
-                } else {
-                    buf.resize(max_len, 0);
-                    tokio::io::stdin()
-                        .read(&mut buf)
-                        .await
-                        .map(|n| {
-                            buf.truncate(n);
-                            buf
-                        })
-                        .map_err(|e| e.to_string())
-                };
+                let result = read_capped(tokio::io::stdin(), max_len).await;
                 let _ = PollSender::from(tx).send_async(result).await;
             });
         }
@@ -863,22 +778,7 @@ fn js_fh_read(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             let fd = fd.clone();
             tokio::spawn(async move {
                 let mut file = fd.lock().await;
-
-                let result = if max_len == 0 {
-                    file.read_to_end(&mut buf)
-                        .await
-                        .map(|_| buf)
-                        .map_err(|e| e.to_string())
-                } else {
-                    buf.resize(max_len, 0);
-                    file.read(&mut buf)
-                        .await
-                        .map(|n| {
-                            buf.truncate(n);
-                            buf
-                        })
-                        .map_err(|e| e.to_string())
-                };
+                let result = read_capped(&mut *file, max_len).await;
                 let _ = PollSender::from(tx).send_async(result).await;
             });
         }
@@ -886,21 +786,7 @@ fn js_fh_read(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             let reader = reader.clone();
             tokio::spawn(async move {
                 let mut r = reader.lock().await;
-                let result = if max_len == 0 {
-                    r.read_to_end(&mut buf)
-                        .await
-                        .map(|_| buf)
-                        .map_err(|e| e.to_string())
-                } else {
-                    buf.resize(max_len, 0);
-                    r.read(&mut buf)
-                        .await
-                        .map(|n| {
-                            buf.truncate(n);
-                            buf
-                        })
-                        .map_err(|e| e.to_string())
-                };
+                let result = read_capped(&mut *r, max_len).await;
                 let _ = PollSender::from(tx).send_async(result).await;
             });
         }

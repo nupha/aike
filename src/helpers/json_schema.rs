@@ -407,46 +407,18 @@ fn json_schema_validate_property(
 
     match schema.get("type").and_then(|v| v.as_str()) {
         None => Ok(()),
-        Some("string") => {
-            if json_schema_type_strict(value, "string") {
+        Some(t @ ("string" | "integer" | "boolean" | "number" | "object" | "null")) => {
+            if json_schema_type_strict(value, t) {
                 Ok(())
             } else {
-                Err(format!("\"{}\" must be a string", name))
-            }
-        }
-        Some("integer") => {
-            if json_schema_type_strict(value, "integer") {
-                Ok(())
-            } else {
-                Err(format!("\"{}\" must be an integer", name))
-            }
-        }
-        Some("boolean") => {
-            if json_schema_type_strict(value, "boolean") {
-                Ok(())
-            } else {
-                Err(format!("\"{}\" must be a boolean", name))
-            }
-        }
-        Some("number") => {
-            if json_schema_type_strict(value, "number") {
-                Ok(())
-            } else {
-                Err(format!("\"{}\" must be a number", name))
-            }
-        }
-        Some("object") => {
-            if json_schema_type_strict(value, "object") {
-                Ok(())
-            } else {
-                Err(format!("\"{}\" must be an object", name))
-            }
-        }
-        Some("null") => {
-            if json_schema_type_strict(value, "null") {
-                Ok(())
-            } else {
-                Err(format!("\"{}\" must be null", name))
+                // Wording below is protocol surface (asserted in tests): keep
+                // exact articles — "an integer"/"an object", bare "null".
+                let noun = match t {
+                    "integer" | "object" => format!("an {t}"),
+                    "null" => "null".to_string(),
+                    _ => format!("a {t}"),
+                };
+                Err(format!("\"{}\" must be {}", name, noun))
             }
         }
         Some("array") => {

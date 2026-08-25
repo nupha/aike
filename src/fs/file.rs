@@ -409,300 +409,60 @@ pub(super) fn js_fs_replaceText(ctx: &mut ScopedContext, cc: CallContext) -> JSR
                 return Ok(0);
             }
 
+            // ponytail: whole-file in memory (O(file)); stream if huge files matter
+            let Ok(data) = tokio::fs::read(&path).await else {
+                return Ok(0); // unreadable → no replacements, as before
+            };
             let needle = old_text.as_bytes();
+            let replacement = replace_with.as_bytes();
 
-            if replace_all {
-                let count = match count_all_matches(&path, needle).await {
-                    Ok(c) => c,
-                    Err(_) => return Ok(0),
-                };
-                if count == 0 {
-                    return Ok(0);
+            // Unique mode: exactly one (overlapping-counted) occurrence; any
+            // second match means no-op. ReplaceAll: left-to-right non-overlapping.
+            let mut out = Vec::with_capacity(data.len());
+            let mut count: i32 = 0;
+            let mut last = 0usize;
+            let mut i = 0usize;
+            while i + needle.len() <= data.len() {
+                if &data[i..i + needle.len()] == needle {
+                    out.extend_from_slice(&data[last..i]);
+                    out.extend_from_slice(replacement);
+                    let start = i;
+                    i += needle.len();
+                    last = i;
+                    count += 1;
+                    if !replace_all {
+                        // any further occurrence — even one overlapping this
+                        // match — makes it non-unique (old semantics)
+                        let mut j = start + 1;
+                        while j + needle.len() <= data.len() {
+                            if &data[j..j + needle.len()] == needle {
+                                return Ok(0);
+                            }
+                            j += 1;
+                        }
+                        break;
+                    }
+                } else {
+                    i += 1;
                 }
-                let tmp = temp_path_for(&path);
-                let res = async {
-                    copy_replace_all(&path, &tmp, needle, replace_with.as_bytes()).await?;
-                    atomic_replace(&tmp, &path).await
+            }
+
+            if count == 0 {
+                return Ok(0);
+            }
+            out.extend_from_slice(&data[last..]);
+
+            match write_file_atomic(&path, &out).await {
+                Ok(()) => Ok(count),
+                Err(_) => {
+                    let _ = tokio::fs::remove_file(temp_path_for(&path)).await;
+                    Ok(0)
                 }
-                .await;
-                if res.is_err() {
-                    let _ = tokio::fs::remove_file(&tmp).await;
-                    return Ok(0);
-                }
-                Ok(count)
-            } else {
-                // Unique mode: count=1 → replace, otherwise no-op.
-                let Ok(Some(at)) = find_unique_match(&path, needle).await else {
-                    return Ok(0);
-                };
-                let tmp = temp_path_for(&path);
-                let res = async {
-                    copy_replace(&path, &tmp, at, old_text.len(), replace_with.as_bytes()).await?;
-                    atomic_replace(&tmp, &path).await
-                }
-                .await;
-                if res.is_err() {
-                    let _ = tokio::fs::remove_file(&tmp).await;
-                    return Ok(0);
-                }
-                Ok(1)
             }
         },
         |_cx, count| Ok(JSValue::from(count)),
     )
     .map(JSValue::from)
-}
-
-// Chunk size for streaming the file; keeps peak memory bounded for large files.
-const STREAM_CHUNK: usize = 1 << 20; // 1 MiB
-
-/// Return the byte offset of `needle` in the file if it occurs exactly once
-/// (counting overlapping matches), streaming in chunks. `None` means the match
-/// is missing or not unique, or the file cannot be read.
-async fn find_unique_match(path: &Path, needle: &[u8]) -> std::io::Result<Option<u64>> {
-    let mut file = tokio::fs::File::open(path).await?;
-    let mut carry: Vec<u8> = Vec::new(); // tail of the previous window
-    let mut base: u64 = 0; // absolute offset of carry[0]
-    let mut count = 0u32;
-    let mut first: Option<u64> = None;
-    let mut buf = vec![0u8; STREAM_CHUNK];
-
-    loop {
-        let n = file.read(&mut buf).await?;
-        let eof = n == 0;
-        carry.extend_from_slice(&buf[..n]);
-        let win = &carry[..];
-
-        // Count every match fully contained in this window (starting anywhere in
-        // it); matches straddling the previous boundary are caught because carry
-        // keeps the last needle_len-1 bytes. Advance byte-by-byte so overlapping
-        // matches are all seen (e.g. "aa" in "aaa" counts 2).
-        if win.len() >= needle.len() {
-            let last = win.len() - needle.len();
-            let mut s = 0;
-            while s <= last {
-                if win[s..s + needle.len()] == *needle {
-                    count += 1;
-                    if count == 1 {
-                        first = Some(base + s as u64);
-                    } else {
-                        return Ok(None); // not unique
-                    }
-                }
-                s += 1;
-            }
-        }
-
-        if eof {
-            break;
-        }
-        // Keep the tail that could be a prefix of a match spanning the boundary.
-        let keep = needle.len() - 1;
-        let drop = win.len() - keep.min(win.len());
-        base += drop as u64;
-        carry.drain(..drop);
-    }
-    Ok(first)
-}
-
-/// Stream-copy `src` to `dst`, replacing `needle` (the unique match starting at
-/// byte offset `at`) with `replacement`. Fails if the file no longer matches.
-async fn copy_replace(
-    src: &Path,
-    dst: &Path,
-    at: u64,
-    needle_len: usize,
-    replacement: &[u8],
-) -> std::io::Result<()> {
-    let mut r = tokio::fs::File::open(src).await?;
-    let mut w = tokio::fs::File::create(dst).await?;
-    let mut pos: u64 = 0; // input bytes consumed
-    let mut skip: usize = 0; // needle bytes still to consume after the splice
-    let mut spliced = false;
-    let mut buf = vec![0u8; STREAM_CHUNK];
-
-    loop {
-        let n = r.read(&mut buf).await?;
-        if n == 0 {
-            break;
-        }
-        let mut chunk = &buf[..n];
-
-        // Consume the needle bytes skipped right after the splice point.
-        if skip > 0 {
-            let k = skip.min(chunk.len());
-            chunk = &chunk[k..];
-            skip -= k;
-            pos += k as u64;
-            if skip == 0 {
-                spliced = true;
-            }
-            if chunk.is_empty() {
-                continue;
-            }
-        }
-
-        if spliced || pos >= at + needle_len as u64 {
-            // Everything from here on is past the replacement point.
-            w.write_all(chunk).await?;
-            pos += chunk.len() as u64;
-        } else if pos + chunk.len() as u64 <= at {
-            // Entire chunk lies before the match.
-            w.write_all(chunk).await?;
-            pos += chunk.len() as u64;
-        } else {
-            // Chunk straddles the match start.
-            let cut = (at - pos) as usize;
-            w.write_all(&chunk[..cut]).await?;
-            w.write_all(replacement).await?;
-            pos = at;
-            let rest = &chunk[cut..];
-            let k = needle_len.min(rest.len());
-            skip = needle_len - k;
-            let rest = &rest[k..];
-            pos += k as u64;
-            if skip == 0 {
-                spliced = true;
-            }
-            if !rest.is_empty() {
-                w.write_all(rest).await?;
-                pos += rest.len() as u64;
-            }
-        }
-    }
-
-    if spliced && skip == 0 {
-        Ok(())
-    } else {
-        Err(std::io::Error::new(
-            std::io::ErrorKind::UnexpectedEof,
-            "file changed while replacing",
-        ))
-    }
-}
-
-/// Stream-scan the file and return the total number of occurrences of
-/// `needle` (counting left-to-right non-overlapping, matching the
-/// semantics of `copy_replace_all`).
-async fn count_all_matches(path: &Path, needle: &[u8]) -> std::io::Result<i32> {
-    let mut file = tokio::fs::File::open(path).await?;
-    let mut carry: Vec<u8> = Vec::new();
-    let mut count = 0;
-    let mut buf = vec![0u8; STREAM_CHUNK];
-
-    loop {
-        let n = file.read(&mut buf).await?;
-        let eof = n == 0;
-        carry.extend_from_slice(&buf[..n]);
-        let win = &carry[..];
-
-        if win.len() >= needle.len() {
-            let last = win.len() - needle.len();
-            let mut s = 0usize;
-            while s <= last {
-                if win[s..s + needle.len()] == *needle {
-                    count += 1;
-                    s += needle.len();
-                } else {
-                    s += 1;
-                }
-            }
-        }
-
-        if eof {
-            break;
-        }
-        let keep = needle.len() - 1;
-        let drop = win.len() - keep.min(win.len());
-        carry.drain(..drop);
-    }
-
-    Ok(count)
-}
-
-/// Stream-copy `src` to `dst`, replacing every occurrence of `needle` with
-/// `replacement` (left-to-right, non-overlapping). Uses a sliding window with
-/// `2*needle_len-1` carry bytes so matches straddling chunk boundaries are
-/// always detected. Peak memory is bounded to `STREAM_CHUNK + 2*needle_len`.
-///
-/// Callers should verify that `needle` actually occurs via
-/// `count_all_matches` before invoking.
-async fn copy_replace_all(
-    src: &Path,
-    dst: &Path,
-    needle: &[u8],
-    replacement: &[u8],
-) -> std::io::Result<()> {
-    let mut r = tokio::fs::File::open(src).await?;
-    let mut w = tokio::fs::File::create(dst).await?;
-    let mut win: Vec<u8> = Vec::new(); // sliding window (carry + new chunk)
-    let mut buf = vec![0u8; STREAM_CHUNK];
-    let carry_len = needle.len() * 2 - 1; // enough to catch every boundary match
-
-    loop {
-        let n = r.read(&mut buf).await?;
-        let eof = n == 0;
-        win.extend_from_slice(&buf[..n]);
-
-        if win.is_empty() {
-            break;
-        }
-
-        // We need at least `carry_len` bytes in the window to reliably
-        // commit anything — otherwise a match might start in the committed
-        // zone but extend past it, leaving `last_out > commit_end`.
-        // On EOF we process whatever is left.
-        if win.len() < carry_len && !eof {
-            continue;
-        }
-
-        // Positions up to `commit_end` are safe to emit; positions at/after
-        // `commit_end` may be the start of a match that needs data from the
-        // *next* chunk to confirm.  On EOF everything is safe.
-        let commit_end = if eof {
-            win.len()
-        } else {
-            win.len() - carry_len
-        };
-
-        // On non‑EOF, require a full match to fit in the committed zone
-        // before we start writing — otherwise we might emit the first byte
-        // of a match that straddles the boundary.
-        let done_end = if eof {
-            win.len()
-        } else {
-            commit_end.saturating_sub(needle.len())
-        };
-        if done_end < needle.len() && !eof {
-            continue;
-        }
-
-        let mut last_out: usize = 0;
-        let mut i: usize = 0;
-        while i + needle.len() <= done_end {
-            if win[i..i + needle.len()] == *needle {
-                w.write_all(&win[last_out..i]).await?;
-                w.write_all(replacement).await?;
-                i += needle.len();
-                last_out = i;
-            } else {
-                i += 1;
-            }
-        }
-
-        // Commit bytes not yet written, but only up to the drain point.
-        // The drain point is the maximum of the safety boundary (`done_end`)
-        // and the last processed position (`last_out`), capped at
-        // `commit_end` so we keep at least `carry_len` bytes for the
-        // next iteration (on non-eof).
-        let drain_to = done_end.max(last_out).min(commit_end);
-        if last_out <= drain_to {
-            w.write_all(&win[last_out..drain_to]).await?;
-        }
-        win.drain(..drain_to);
-    }
-
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------

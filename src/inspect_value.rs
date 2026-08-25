@@ -234,14 +234,15 @@ fn format_object(
     format_block("{ ", &entries, " }")
 }
 
-fn format_array(
+/// Index entries shared by Array and TypedArray formatting: sparse runs
+/// collapse to `<N empty items>`, capped at MAX_ARRAY_LENGTH with a tail note.
+fn collect_index_entries(
     ctx: &mut ScopedContext,
     obj: &mut Object,
+    len: usize,
     level: usize,
     stack: &mut Vec<Object>,
-) -> String {
-    let len = obj.get_length_prop(ctx).unwrap_or(0).max(0) as usize;
-
+) -> Vec<String> {
     let mut entries: Vec<String> = Vec::new();
     let mut empty_run: usize = 0;
     let mut i = 0usize;
@@ -276,6 +277,17 @@ fn format_array(
         }
     }
     stack.pop();
+    entries
+}
+
+fn format_array(
+    ctx: &mut ScopedContext,
+    obj: &mut Object,
+    level: usize,
+    stack: &mut Vec<Object>,
+) -> String {
+    let len = obj.get_length_prop(ctx).unwrap_or(0).max(0) as usize;
+    let entries = collect_index_entries(ctx, obj, len, level, stack);
     format_block("[", &entries, "]")
 }
 
@@ -290,42 +302,7 @@ fn format_typed_array(
         Some(ta) => ta.count() as usize,
         None => 0,
     };
-    let mut entries: Vec<String> = Vec::new();
-    let mut empty_run: usize = 0;
-    let mut i = 0usize;
-    let mut truncated = false;
-    stack.push(obj.clone());
-
-    while i < count {
-        if entries.len() >= MAX_ARRAY_LENGTH {
-            truncated = true;
-            break;
-        }
-        let atom = Atom::from_small_int(i as u32);
-        let has = obj.has_property(ctx, atom).unwrap_or(false);
-        if has {
-            if empty_run > 0 {
-                entries.push(format!("<{} empty item{}>", empty_run, plural(empty_run)));
-                empty_run = 0;
-            }
-            let v = obj.get_property(ctx, atom).unwrap_or(JSValue::UNDEFINED);
-            entries.push(inspect(ctx, v, level + 1, stack));
-        } else {
-            empty_run += 1;
-        }
-        i += 1;
-    }
-    if empty_run > 0 {
-        entries.push(format!("<{} empty item{}>", empty_run, plural(empty_run)));
-    }
-    if truncated {
-        let more = count - i;
-        if more > 0 {
-            entries.push(format!("... {} more item{}", more, plural(more)));
-        }
-    }
-
-    stack.pop();
+    let entries = collect_index_entries(ctx, obj, count, level, stack);
     let block = format_block("[", &entries, "]");
     format!("{}({})", cn, block)
 }

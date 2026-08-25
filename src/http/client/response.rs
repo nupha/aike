@@ -19,8 +19,8 @@ use std::rc::Rc;
 use crossbeam::channel::Receiver;
 use linkme::distributed_slice;
 use zuqe::{
-    CallContext, ClassCtorDef, ClassID, Exception, FieldDef, JSResult, JSValue, NativeObject,
-    Runtime, ScopedContext,
+    CallContext, ClassCtorDef, ClassID, FieldDef, JSResult, JSValue, NativeObject, Runtime,
+    ScopedContext,
     builtins::promise::Promise,
     def_native_object,
     gc_lite::{GcTrace, GcTraceCtx},
@@ -111,6 +111,31 @@ pub(crate) struct ResponsePayload {
     /// body `ReadableStream` errors with the signal's reason (WHATWG Fetch: an
     /// abort rejects the in-flight `Response.body` reader). Kept alive for GC.
     signal: Option<JSValue>,
+}
+
+impl Default for ResponsePayload {
+    fn default() -> Self {
+        Self {
+            resp: None,
+            body_rx: None,
+            body_consumed: false,
+            cached_body: None,
+            synthetic_body: None,
+            ctor_stream: None,
+            resp_type: RespType::Default,
+            url: String::new(),
+            redirected: false,
+            status: 0,
+            status_text: String::new(),
+            content_type: String::new(),
+            headers: Rc::new(RefCell::new(HeaderList::new())),
+            headers_obj: None,
+            headers_guard: Guard::Immutable,
+            content_length: None,
+            http_version: "",
+            signal: None,
+        }
+    }
 }
 
 impl ResponsePayload {
@@ -226,24 +251,10 @@ pub(crate) fn build_opaque_redirect_response(ctx: &mut ScopedContext, url: &str)
         ctx,
         JSValue::UNDEFINED,
         ResponsePayload {
-            resp: None,
-            body_rx: None,
             body_consumed: true,
-            cached_body: None,
-            synthetic_body: None,
-            ctor_stream: None,
             resp_type: RespType::OpaqueRedirect,
             url: url.to_string(),
-            redirected: false,
-            status: 0,
-            status_text: String::new(),
-            content_type: String::new(),
-            headers: Rc::new(RefCell::new(HeaderList::new())),
-            content_length: None,
-            http_version: "",
-            signal: None,
-            headers_obj: None,
-            headers_guard: Guard::Immutable,
+            ..Default::default()
         },
     )
     .map(JSValue::from)
@@ -282,24 +293,10 @@ pub(crate) fn build_opaque_response(ctx: &mut ScopedContext, tr: TransportRespon
         ctx,
         JSValue::UNDEFINED,
         ResponsePayload {
-            resp: None,
-            body_rx: None,
             body_consumed: true,
-            cached_body: None,
-            synthetic_body: None,
-            ctor_stream: None,
             resp_type: RespType::Opaque,
-            url: String::new(),
-            redirected: false,
-            status: 0,
-            status_text: String::new(),
-            content_type: String::new(),
             headers,
-            content_length: None,
-            http_version: "",
-            signal: None,
-            headers_obj: None,
-            headers_guard: Guard::Immutable,
+            ..Default::default()
         },
     )
     .map(JSValue::from)
@@ -315,11 +312,7 @@ fn transport_payload(
 ) -> ResponsePayload {
     ResponsePayload {
         resp: tr.resp,
-        body_rx: None,
-        body_consumed: false,
-        cached_body: None,
         synthetic_body: tr.synthetic_body,
-        ctor_stream: None,
         resp_type,
         url: url.to_string(),
         redirected,
@@ -327,12 +320,11 @@ fn transport_payload(
         status_text: tr.status_text,
         content_type: tr.content_type,
         headers: Rc::new(RefCell::new(HeaderList::from_vec(tr.headers))),
-        headers_obj: None,
         // Came off the network: headers are immutable.
-        headers_guard: Guard::Immutable,
         content_length: tr.content_length,
         http_version: tr.http_version,
         signal,
+        ..Default::default()
     }
 }
 
@@ -462,24 +454,15 @@ fn js_response_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
         ctx,
         new_target,
         ResponsePayload {
-            resp: None,
-            body_rx: None,
-            body_consumed: false,
-            cached_body: None,
             synthetic_body: synthetic,
             ctor_stream,
             resp_type: RespType::Default,
-            url: String::new(),
-            redirected: false,
             status,
             status_text,
             content_type: String::new(),
             headers: Rc::new(RefCell::new(header_list)),
-            content_length: None,
-            http_version: "",
-            signal: None,
-            headers_obj: None,
             headers_guard: Guard::Response,
+            ..Default::default()
         },
     )
     .map(JSValue::from)
@@ -494,24 +477,9 @@ fn js_response_static_error(ctx: &mut ScopedContext, _cc: CallContext) -> JSResu
         ctx,
         JSValue::UNDEFINED,
         ResponsePayload {
-            resp: None,
-            body_rx: None,
             body_consumed: true,
-            cached_body: None,
-            synthetic_body: None,
-            ctor_stream: None,
             resp_type: RespType::Error,
-            url: String::new(),
-            redirected: false,
-            status: 0,
-            status_text: String::new(),
-            content_type: String::new(),
-            headers: Rc::new(RefCell::new(HeaderList::new())),
-            content_length: None,
-            http_version: "",
-            signal: None,
-            headers_obj: None,
-            headers_guard: Guard::Immutable,
+            ..Default::default()
         },
     )
     .map(JSValue::from)
@@ -562,26 +530,13 @@ fn js_response_static_redirect(ctx: &mut ScopedContext, cc: CallContext) -> JSRe
         ctx,
         JSValue::UNDEFINED,
         ResponsePayload {
-            resp: None,
-            body_rx: None,
             // A redirect response has a *null* body, not a consumed one:
             // `.body` must be null and consumers resolve to the empty value.
-            body_consumed: false,
-            cached_body: None,
-            synthetic_body: None,
-            ctor_stream: None,
             resp_type: RespType::Default,
-            url: String::new(),
-            redirected: false,
             status,
-            status_text: String::new(),
-            content_type: String::new(),
             headers: Rc::new(RefCell::new(list)),
-            content_length: None,
-            http_version: "",
-            signal: None,
-            headers_obj: None,
             headers_guard: Guard::Response,
+            ..Default::default()
         },
     )
     .map(JSValue::from)
@@ -642,24 +597,14 @@ fn js_response_static_json(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
         ctx,
         JSValue::UNDEFINED,
         ResponsePayload {
-            resp: None,
-            body_rx: None,
-            body_consumed: false,
-            cached_body: None,
             synthetic_body: Some(body),
-            ctor_stream: None,
             resp_type: RespType::Default,
-            url: String::new(),
-            redirected: false,
             status,
             status_text,
             content_type: "application/json".to_string(),
             headers: Rc::new(RefCell::new(header_list)),
-            content_length: None,
-            http_version: "",
-            signal: None,
-            headers_obj: None,
             headers_guard: Guard::Response,
+            ..Default::default()
         },
     )
     .map(JSValue::from)
