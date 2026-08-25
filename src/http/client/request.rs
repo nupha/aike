@@ -109,6 +109,22 @@ fn is_forbidden_method(method: &str) -> bool {
     )
 }
 
+/// Throw a TypeError and return it as a rejected promise: body-use methods
+/// must reject rather than throw synchronously (Fetch spec). Shared by the
+/// Request/Response body consumers.
+pub(super) fn reject_type_error_as_promise(ctx: &mut ScopedContext, msg: &str) -> JSResult {
+    let _ = ctx.throw_type_error(msg);
+    let reason = match ctx.take_exception() {
+        Exception::Error(v) => v,
+        // Non-Error exceptions (OOM, interrupt) must stay fatal.
+        other => {
+            ctx.throw(other);
+            return Err(-1);
+        }
+    };
+    Promise::from_reject_value(ctx, reason).map(JSValue::from)
+}
+
 /// Fetch spec "ensure method": the method must be a valid HTTP token, and not a
 /// forbidden method. Returns `Err` (TypeError) on violation.
 pub(crate) fn check_request_method(ctx: &mut ScopedContext, method: &str) -> Result<(), i32> {
@@ -736,15 +752,7 @@ fn js_req_body_as(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     {
         let p = get_request_payload(ctx, &this)?;
         if p.body_consumed {
-            let _ = ctx.throw_type_error("body already consumed or unavailable");
-            let reason = match ctx.take_exception() {
-                Exception::Error(v) => v,
-                other => {
-                    ctx.throw(other);
-                    return Err(-1);
-                }
-            };
-            return Promise::from_reject_value(ctx, reason).map(JSValue::from);
+            return reject_type_error_as_promise(ctx, "body already consumed or unavailable");
         }
     }
 
@@ -769,15 +777,7 @@ fn js_req_body_as(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         let p = get_request_payload(ctx, &this)?;
         let ct = p.headers.borrow().get("content-type").unwrap_or_default();
         if ct.to_ascii_lowercase().starts_with("multipart/form-data") {
-            let _ = ctx.throw_type_error("cannot parse null body as FormData");
-            let reason = match ctx.take_exception() {
-                Exception::Error(v) => v,
-                other => {
-                    ctx.throw(other);
-                    return Err(-1);
-                }
-            };
-            return Promise::from_reject_value(ctx, reason).map(JSValue::from);
+            return reject_type_error_as_promise(ctx, "cannot parse null body as FormData");
         }
     }
 
@@ -829,15 +829,7 @@ fn js_req_body_as(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         // Spec: these methods always return a promise; an already-consumed body
         // rejects it rather than throwing synchronously.
         None => {
-            let _ = ctx.throw_type_error("body already consumed or unavailable");
-            let reason = match ctx.take_exception() {
-                Exception::Error(v) => v,
-                other => {
-                    ctx.throw(other);
-                    return Err(-1);
-                }
-            };
-            Promise::from_reject_value(ctx, reason).map(JSValue::from)
+            return reject_type_error_as_promise(ctx, "body already consumed or unavailable");
         }
     }
 }

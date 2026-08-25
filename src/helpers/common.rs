@@ -116,69 +116,61 @@ pub(crate) fn now_unix_s() -> i64 {
         .as_secs() as i64
 }
 
-fn is_leap(year: i64) -> bool {
-    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+fn now_utc() -> chrono::DateTime<chrono::Utc> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    // epoch fallback keeps pre-1970 clock breakage non-fatal (as before)
+    chrono::DateTime::from_timestamp(now.as_secs() as i64, 0)
+        .unwrap_or(chrono::DateTime::UNIX_EPOCH)
 }
 
 /// Format current UTC time as RFC 3339 (e.g. "2025-05-31T12:00:00Z")
 pub(crate) fn format_timestamp_rfc3339() -> String {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
-    let total_secs = now.as_secs();
-    let (ymd, hms) = secs_to_datetime(total_secs);
-    format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
-        ymd.0, ymd.1, ymd.2, hms.0, hms.1, hms.2
-    )
+    now_utc().format("%Y-%m-%dT%H:%M:%SZ").to_string()
 }
 
 /// Format current UTC time as compact string (e.g. "20250531_120000")
 pub(crate) fn format_timestamp_compact() -> String {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
-    let total_secs = now.as_secs();
-    let (ymd, hms) = secs_to_datetime(total_secs);
-    format!(
-        "{:04}{:02}{:02}_{:02}{:02}{:02}",
-        ymd.0, ymd.1, ymd.2, hms.0, hms.1, hms.2
-    )
+    now_utc().format("%Y%m%d_%H%M%S").to_string()
 }
 
-/// Convert seconds since epoch to (year, month, day) and (hours, minutes, seconds) in UTC.
-fn secs_to_datetime(total_secs: u64) -> ((i64, u32, u32), (u32, u32, u32)) {
-    let days = total_secs / 86400;
-    let time_secs = total_secs % 86400;
-    let hours = (time_secs / 3600) as u32;
-    let minutes = ((time_secs % 3600) / 60) as u32;
-    let seconds = (time_secs % 60) as u32;
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    let mut y = 1970i64;
-    let mut remaining = days as i64;
-    loop {
-        let days_in_year = if is_leap(y) { 366 } else { 365 };
-        if remaining < days_in_year {
-            break;
-        }
-        remaining -= days_in_year;
-        y += 1;
+    #[test]
+    fn fixed_vectors() {
+        let fmt = |t: i64| {
+            chrono::DateTime::from_timestamp(t, 0)
+                .unwrap()
+                .format("%Y-%m-%dT%H:%M:%SZ")
+                .to_string()
+        };
+        assert_eq!(fmt(0), "1970-01-01T00:00:00Z");
+        assert_eq!(fmt(946684800), "2000-01-01T00:00:00Z");
+        assert_eq!(fmt(951782400), "2000-02-29T00:00:00Z"); // leap day
+        assert_eq!(fmt(1600000000), "2020-09-13T12:26:40Z");
+
+        let compact = |t: i64| {
+            chrono::DateTime::from_timestamp(t, 0)
+                .unwrap()
+                .format("%Y%m%d_%H%M%S")
+                .to_string()
+        };
+        assert_eq!(compact(0), "19700101_000000");
+        assert_eq!(compact(951782400), "20000229_000000");
     }
-    let month_days = if is_leap(y) {
-        [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-    } else {
-        [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-    };
-    let mut m = 0u32;
-    for (i, &md) in month_days.iter().enumerate() {
-        if remaining < md {
-            m = i as u32;
-            break;
-        }
-        remaining -= md;
+
+    #[test]
+    fn formatters_use_current_clock_shape() {
+        let s = format_timestamp_rfc3339();
+        assert_eq!(s.len(), 20);
+        assert!(s.ends_with('Z') && s.as_bytes()[10] == b'T');
+        let c = format_timestamp_compact();
+        assert_eq!(c.len(), 15);
+        assert!(c.as_bytes()[8] == b'_');
     }
-    let day = (remaining + 1) as u32;
-    ((y, m + 1, day), (hours, minutes, seconds))
 }
 
 /// Start a persistent polling microtask driven by a crossbeam channel.

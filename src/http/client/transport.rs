@@ -168,59 +168,19 @@ fn combine_content_length_headers(raw: Vec<(String, String)>) -> Vec<(String, St
 /// spec exposes the response's status message via `Response.statusText`; for a
 /// real HTTP response this is the status-line reason phrase (200 → "OK",
 /// 304 → "Not Modified", ...). Unknown codes fall back to the empty string.
+///
+/// Two spellings deliberately keep the Node.js table instead of the `http`
+/// crate's `canonical_reason()` (which drops the 203 hyphen and capitalizes
+/// 418 "Teapot"); everything else comes straight from the crate.
 fn canonical_status_text(status: u16) -> String {
     let phrase = match status {
-        100 => "Continue",
-        101 => "Switching Protocols",
-        200 => "OK",
-        201 => "Created",
-        202 => "Accepted",
-        203 => "Non-Authoritative Information",
-        204 => "No Content",
-        205 => "Reset Content",
-        206 => "Partial Content",
-        300 => "Multiple Choices",
-        301 => "Moved Permanently",
-        302 => "Found",
-        303 => "See Other",
-        304 => "Not Modified",
-        305 => "Use Proxy",
-        307 => "Temporary Redirect",
-        308 => "Permanent Redirect",
-        400 => "Bad Request",
-        401 => "Unauthorized",
-        402 => "Payment Required",
-        403 => "Forbidden",
-        404 => "Not Found",
-        405 => "Method Not Allowed",
-        406 => "Not Acceptable",
-        407 => "Proxy Authentication Required",
-        408 => "Request Timeout",
-        409 => "Conflict",
-        410 => "Gone",
-        411 => "Length Required",
-        412 => "Precondition Failed",
-        413 => "Payload Too Large",
-        414 => "URI Too Long",
-        415 => "Unsupported Media Type",
-        416 => "Range Not Satisfiable",
-        417 => "Expectation Failed",
-        418 => "I'm a Teapot",
-        421 => "Misdirected Request",
-        426 => "Upgrade Required",
-        428 => "Precondition Required",
-        429 => "Too Many Requests",
-        431 => "Request Header Fields Too Large",
-        451 => "Unavailable For Legal Reasons",
-        500 => "Internal Server Error",
-        501 => "Not Implemented",
-        502 => "Bad Gateway",
-        503 => "Service Unavailable",
-        504 => "Gateway Timeout",
-        505 => "HTTP Version Not Supported",
-        _ => "",
+        203 => Some("Non-Authoritative Information"),
+        418 => Some("I'm a Teapot"),
+        _ => reqwest::StatusCode::from_u16(status)
+            .ok()
+            .and_then(|s| s.canonical_reason()),
     };
-    phrase.to_string()
+    phrase.unwrap_or_default().to_string()
 }
 
 /// Percent-decode a `data:`-URL payload (so the body carries the raw octets,
@@ -881,3 +841,52 @@ pub(crate) async fn perform_request(
     }
     Ok(tr)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::canonical_status_text;
+
+    #[test]
+    fn known_phrases_unchanged() {
+        // spot-check the old table's exact spellings (incl. the two
+        // Node-compat overrides) plus a spread of methods
+        assert_eq!(canonical_status_text(100), "Continue");
+        assert_eq!(canonical_status_text(200), "OK");
+        assert_eq!(
+            canonical_status_text(203),
+            "Non-Authoritative Information"
+        );
+        assert_eq!(canonical_status_text(304), "Not Modified");
+        assert_eq!(canonical_status_text(418), "I'm a Teapot");
+        assert_eq!(canonical_status_text(414), "URI Too Long");
+        assert_eq!(canonical_status_text(451), "Unavailable For Legal Reasons");
+        assert_eq!(canonical_status_text(505), "HTTP Version Not Supported");
+    }
+
+    #[test]
+    fn codes_added_from_http_crate() {
+        // previously "" in the old table; now real phrases
+        for (code, phrase) in [
+            (102u16, "Processing"),
+            (103, "Early Hints"),
+            (207, "Multi-Status"),
+            (208, "Already Reported"),
+            (226, "IM Used"),
+            (422, "Unprocessable Entity"),
+            (423, "Locked"),
+            (424, "Failed Dependency"),
+            (425, "Too Early"),
+            (511, "Network Authentication Required"),
+        ] {
+            assert_eq!(canonical_status_text(code), phrase);
+        }
+    }
+
+    #[test]
+    fn unknown_codes_empty() {
+        assert_eq!(canonical_status_text(599), "");
+        assert_eq!(canonical_status_text(0), "");
+        assert_eq!(canonical_status_text(999), "");
+    }
+}
+

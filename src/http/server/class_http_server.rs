@@ -243,18 +243,8 @@ fn js_openai(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
 fn js_route_add(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut this = cc.this();
-    let method = match cc.magic() as u8 {
-        0 => Method::GET,
-        1 => Method::POST,
-        2 => Method::PUT,
-        3 => Method::PATCH,
-        4 => Method::DELETE,
-        5 => Method::HEAD,
-        6 => Method::OPTIONS,
-        _ => {
-            return Err(ctx.throw_internal_error("unknown method magic"));
-        }
-    };
+    let method = Method::from_magic(cc.magic() as u8)
+        .ok_or_else(|| ctx.throw_internal_error("unknown method magic"))?;
     let path_str = cc.arg(0).to_string(ctx)?;
     let path = path_str.content().encode_utf8(false).to_string();
     let handler = cc.arg(1).ensure_callable(ctx)?;
@@ -322,18 +312,9 @@ fn js_mcp(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
 fn js_remove_route(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut this = cc.this();
-    let method = match &*cc.arg(0).to_string(ctx)?.content().encode_utf8(false) {
-        "GET" => Method::GET,
-        "POST" => Method::POST,
-        "PUT" => Method::PUT,
-        "PATCH" => Method::PATCH,
-        "DELETE" => Method::DELETE,
-        "HEAD" => Method::HEAD,
-        "OPTIONS" => Method::OPTIONS,
-        _ => {
-            return Err(ctx.throw_type_error("unknown HTTP method"));
-        }
-    };
+    let method_name = cc.arg(0).to_string(ctx)?.content().encode_utf8(false).to_string();
+    let method = Method::from_str(&method_name)
+        .ok_or_else(|| ctx.throw_type_error("unknown HTTP method"))?;
     let path_str = cc.arg(1).to_string(ctx)?;
     let path = path_str.content().encode_utf8(false).to_string();
 
@@ -426,15 +407,9 @@ fn delegate_js_route(
             let (mut parts, body) = req.into_parts();
             let (res_tx, res_rx) = oneshot::channel();
             let uri = parts.uri.clone();
-            let method = match parts.method.as_str() {
-                "GET" => Method::GET,
-                "POST" => Method::POST,
-                "PUT" => Method::PUT,
-                "PATCH" => Method::PATCH,
-                "DELETE" => Method::DELETE,
-                "HEAD" => Method::HEAD,
-                "OPTIONS" => Method::OPTIONS,
-                _ => {
+            let method = match Method::from_str(parts.method.as_str()) {
+                Some(m) => m,
+                None => {
                     return (
                         axum::http::StatusCode::METHOD_NOT_ALLOWED,
                         "method not allowed",

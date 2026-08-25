@@ -36,6 +36,7 @@ use crate::{
             body_content_type, body_to_bytes, drain_body,
         },
         headers::{Guard, HeaderList, HeadersPayload, JSHeaders, header_list_from_js},
+        request::reject_type_error_as_promise,
         transport::TransportResponse,
     },
     whatwg::{abort::signal_reason, stream::JSReadableStream},
@@ -940,15 +941,7 @@ fn js_response_body_as(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             .map(|p| p.headers.borrow().get("content-type").unwrap_or_default())
             .unwrap_or_default();
         if ct.to_ascii_lowercase().starts_with("multipart/form-data") {
-            let _ = ctx.throw_type_error("cannot parse null body as FormData");
-            let reason = match ctx.take_exception() {
-                Exception::Error(v) => v,
-                other => {
-                    ctx.throw(other);
-                    return Err(-1);
-                }
-            };
-            return Promise::from_reject_value(ctx, reason).map(JSValue::from);
+            return reject_type_error_as_promise(ctx, "cannot parse null body as FormData");
         }
     }
 
@@ -982,16 +975,7 @@ fn js_response_body_as(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         // Spec: these methods always return a promise; a disturbed/locked or
         // already-consumed body rejects it rather than throwing synchronously.
         None => {
-            let _ = ctx.throw_type_error("body already consumed or unavailable");
-            let reason = match ctx.take_exception() {
-                Exception::Error(v) => v,
-                // Non-Error exceptions (OOM, interrupt) must stay fatal.
-                other => {
-                    ctx.throw(other);
-                    return Err(-1);
-                }
-            };
-            Promise::from_reject_value(ctx, reason).map(JSValue::from)
+            return reject_type_error_as_promise(ctx, "body already consumed or unavailable");
         }
     }
 }

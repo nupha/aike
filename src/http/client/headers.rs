@@ -129,13 +129,9 @@ impl HeaderList {
         if values.is_empty() {
             return None;
         }
-        // `Set-Cookie` is returned as a comma-joined combination of all its
-        // individual values (per the Fetch spec `get()` semantics).
-        if lower == "set-cookie" {
-            Some(values.join(", "))
-        } else {
-            Some(values.join(", "))
-        }
+        // Comma-join all values (this also gives `Set-Cookie` its combined
+        // form, per the Fetch spec `get()` semantics).
+        Some(values.join(", "))
     }
 
     pub(crate) fn has(&self, name: &str) -> bool {

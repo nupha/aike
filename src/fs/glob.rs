@@ -32,47 +32,7 @@ fn glob_abs(
     Ok(paths.filter_map(Result::ok).collect())
 }
 
-/// Read an optional string property from the JS options object argument.
-fn opt_str(ctx: &mut ScopedContext, cc: &CallContext, name: &str) -> Result<Option<PathBuf>, i32> {
-    let v = cc.arg(1).get_property_str(ctx, name)?;
-    if v.is_undefined() {
-        Ok(None)
-    } else {
-        let s = v.to_string(ctx)?;
-        Ok(Some(PathBuf::from(
-            s.content().encode_utf8(false).to_string(),
-        )))
-    }
-}
-
-/// Read an optional boolean property, falling back to `default`.
-fn read_bool(
-    ctx: &mut ScopedContext,
-    cc: &CallContext,
-    name: &str,
-    default: bool,
-) -> Result<bool, i32> {
-    let v = cc.arg(1).get_property_str(ctx, name)?;
-    if v.is_undefined() {
-        Ok(default)
-    } else {
-        v.to_bool()
-    }
-}
-
-/// Read the `exclude` string array from a JS options object.
-fn opt_excludes(ctx: &mut ScopedContext, cc: &CallContext) -> Result<Vec<String>, i32> {
-    let v = cc.arg(1).get_property_str(ctx, "exclude")?;
-    let mut out = Vec::new();
-    if let Some(arr) = v.as_object_Array() {
-        for item in arr.payload().values() {
-            if let Some(s) = item.as_string(true) {
-                out.push(s.content().encode_utf8(false).to_string());
-            }
-        }
-    }
-    Ok(out)
-}
+use super::{opt_str, opt_str_array, read_bool};
 
 // ---------------------------------------------------------------------------
 // glob - match files against a glob pattern
@@ -89,8 +49,8 @@ pub(super) fn js_fs_glob(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut case_sensitive = true;
     let mut absolute = false;
     if cc.length() > 1 && cc.arg(1).is_object() {
-        cwd = opt_str(ctx, &cc, "cwd")?;
-        excludes = opt_excludes(ctx, &cc)?;
+        cwd = opt_str(ctx, &cc, "cwd")?.map(PathBuf::from);
+        excludes = opt_str_array(ctx, &cc, "exclude")?;
         dot = read_bool(ctx, &cc, "dot", false)?;
         case_sensitive = read_bool(ctx, &cc, "caseSensitive", true)?;
         absolute = read_bool(ctx, &cc, "absolute", false)?;

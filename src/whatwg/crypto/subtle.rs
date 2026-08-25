@@ -143,27 +143,16 @@ fn resolve_hmac_hash(
 
 /// HMAC over `data` with the given key and hash; `None` on invalid key/hash.
 fn hmac_mac(key: &[u8], hash: &str, data: &[u8]) -> Option<Vec<u8>> {
+    fn mac<M: KeyInit + Mac>(mac_key: &[u8], mac_data: &[u8]) -> Option<Vec<u8>> {
+        let mut m = M::new_from_slice(mac_key).ok()?;
+        m.update(mac_data);
+        Some(m.finalize().into_bytes().to_vec())
+    }
     match hash {
-        "SHA-1" => {
-            let mut m = <Hmac<Sha1> as KeyInit>::new_from_slice(key).ok()?;
-            m.update(data);
-            Some(m.finalize().into_bytes().to_vec())
-        }
-        "SHA-256" => {
-            let mut m = <Hmac<Sha256> as KeyInit>::new_from_slice(key).ok()?;
-            m.update(data);
-            Some(m.finalize().into_bytes().to_vec())
-        }
-        "SHA-384" => {
-            let mut m = <Hmac<Sha384> as KeyInit>::new_from_slice(key).ok()?;
-            m.update(data);
-            Some(m.finalize().into_bytes().to_vec())
-        }
-        "SHA-512" => {
-            let mut m = <Hmac<Sha512> as KeyInit>::new_from_slice(key).ok()?;
-            m.update(data);
-            Some(m.finalize().into_bytes().to_vec())
-        }
+        "SHA-1" => mac::<Hmac<Sha1>>(key, data),
+        "SHA-256" => mac::<Hmac<Sha256>>(key, data),
+        "SHA-384" => mac::<Hmac<Sha384>>(key, data),
+        "SHA-512" => mac::<Hmac<Sha512>>(key, data),
         _ => None,
     }
 }

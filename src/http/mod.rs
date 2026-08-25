@@ -35,6 +35,26 @@ pub(crate) enum Method {
 }
 
 impl Method {
+    const ALL: [Method; 7] = [
+        Self::GET,
+        Self::POST,
+        Self::PUT,
+        Self::PATCH,
+        Self::DELETE,
+        Self::HEAD,
+        Self::OPTIONS,
+    ];
+
+    /// Parse an uppercase method name (route removal, axum request lines).
+    pub(crate) fn from_str(s: &str) -> Option<Self> {
+        Self::ALL.iter().copied().find(|m| m.as_str() == s)
+    }
+
+    /// Method from its route-registration magic number.
+    pub(crate) fn from_magic(m: u8) -> Option<Self> {
+        Self::ALL.get(m as usize).copied()
+    }
+
     pub(crate) fn as_str(&self) -> &'static str {
         match self {
             Self::GET => "GET",

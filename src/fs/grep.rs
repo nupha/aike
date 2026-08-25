@@ -74,49 +74,7 @@ impl<'a> Sink for Collector<'a> {
     }
 }
 
-/// Read an optional boolean option, falling back to `default`.
-fn read_bool(
-    ctx: &mut ScopedContext,
-    cc: &CallContext,
-    name: &str,
-    default: bool,
-) -> Result<bool, i32> {
-    let v = cc.arg(1).get_property_str(ctx, name)?;
-    if v.is_undefined() {
-        Ok(default)
-    } else {
-        v.to_bool()
-    }
-}
-
-/// Read an optional string option.
-fn opt_str(ctx: &mut ScopedContext, cc: &CallContext, name: &str) -> Result<Option<String>, i32> {
-    let v = cc.arg(1).get_property_str(ctx, name)?;
-    if v.is_undefined() {
-        Ok(None)
-    } else {
-        let s = v.to_string(ctx)?;
-        Ok(Some(s.content().encode_utf8(false).to_string()))
-    }
-}
-
-/// Read an optional string-array option.
-fn opt_str_array(
-    ctx: &mut ScopedContext,
-    cc: &CallContext,
-    name: &str,
-) -> Result<Vec<String>, i32> {
-    let v = cc.arg(1).get_property_str(ctx, name)?;
-    let mut out = Vec::new();
-    if let Some(arr) = v.as_object_Array() {
-        for item in arr.payload().values() {
-            if let Some(s) = item.as_string(true) {
-                out.push(s.content().encode_utf8(false).to_string());
-            }
-        }
-    }
-    Ok(out)
-}
+use super::{opt_str, opt_str_array, read_bool};
 
 // Output shape of `fs.grep`, selected by `mode`.
 enum GrepOutput {
