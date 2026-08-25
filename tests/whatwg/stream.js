@@ -237,13 +237,19 @@ function testTransformStreamIdentity() {
   var writer = ts.writable.getWriter();
   var reader = ts.readable.getReader();
 
-  return writer.write(42).then(function() {
-    return reader.read();
-  }).then(function(result) {
-    check("identity transform value === 42", result.value === 42, "value=" + result.value);
-    check("identity transform done === false", result.done === false);
-    return writer.close();
-  });
+  // Spec §6.4.1: initial backpressure is true, so write() stays pending until
+  // a read relieves it — the read must be issued while the write is in flight,
+  // otherwise the two deadlock.
+  var writeDone = writer.write(42);
+  return reader.read()
+    .then(function(result) {
+      check("identity transform value === 42", result.value === 42, "value=" + result.value);
+      check("identity transform done === false", result.done === false);
+      return writeDone;
+    })
+    .then(function() {
+      return writer.close();
+    });
 }
 
 function testTransformStreamUppercase() {
@@ -274,17 +280,26 @@ function testTransformStreamUppercase() {
   var writer = ts.writable.getWriter();
   var reader = ts.readable.getReader();
 
-  return writer.write("hello")
-    .then(function() { return reader.read(); })
+  // Spec §6.4.1/§6.4.3: initial backpressure is true and every enqueue()
+  // restores it (default readable HWM = 0), so each write stays pending until
+  // a concurrent read relieves it. The read for a write must therefore be
+  // issued before awaiting that write's settlement — chaining read after
+  // write deadlocks.
+  var writeDone = writer.write("hello");
+  return reader.read()
     .then(function(result) {
       check("transform output === HELLO", result.value === "HELLO", "value=" + result.value);
-      return writer.write("world");
+      return writeDone;
     })
-    .then(function() { return reader.read(); })
-    .then(function(result) {
-      check("transform output === WORLD", result.value === "WORLD", "value=" + result.value);
-      return writer.close();
+    .then(function() {
+      var w2 = writer.write("world");
+      var r2 = reader.read();
+      return r2.then(function(result) {
+        check("transform output === WORLD", result.value === "WORLD", "value=" + result.value);
+        return w2;
+      });
     })
+    .then(function() { return writer.close(); })
     .then(function() {
       check("flush() called", flushCalled);
       return reader.read();
@@ -330,8 +345,11 @@ function testByteLengthQueuingStrategy() {
   console.log("\n=== ByteLengthQueuingStrategy ===");
   var s = new ByteLengthQueuingStrategy({ highWaterMark: 10 });
   check("highWaterMark === 10", s.highWaterMark === 10);
-  check("size('abc') === 3", s.size("abc") === 3);
-  check("size('') === 0", s.size("") === 0);
+  // Spec: size() returns chunk.byteLength — strings have no byteLength,
+  // so they yield undefined, not their length.
+  check("size('abc') === undefined", s.size("abc") === undefined);
+  check("size('') === undefined", s.size("") === undefined);
+  check("size({byteLength:3}) === 3", s.size({byteLength: 3}) === 3);
 }
 
 // ===================================================================
