@@ -4,11 +4,11 @@
 #![allow(non_snake_case)]
 
 mod aike;
-#[cfg(feature = "enable_eval_log")]
-mod eval_logger;
 mod browser;
 mod class_event_emitter;
 mod color;
+#[cfg(feature = "enable_eval_log")]
+mod eval_logger;
 mod fs;
 mod global;
 mod gzip;
@@ -100,6 +100,14 @@ struct Args {
 
     #[arg(short, long, default_value_t = false, help = "eval as esm module")]
     module: bool,
+
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "exit when the event loop drains; don't await the script's \
+                completion-value promise (node-style; module TLA still waits)"
+    )]
+    no_await_result: bool,
 
     #[arg(
         short = 'e',
@@ -436,7 +444,13 @@ async fn main() -> ExitCode {
             } else {
                 EvalType::Global
             },
-            EvalFlags::empty(),
+            if args.no_await_result {
+                // Node/bun-compatible exit: don't await a pending completion-value
+                // promise after the loop drains (see EvalFlags::NO_AWAIT_RESULT).
+                EvalFlags::NO_AWAIT_RESULT
+            } else {
+                EvalFlags::empty()
+            },
         )
         .await;
 
