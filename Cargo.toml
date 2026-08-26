@@ -163,6 +163,7 @@ hmac = "0.13"
 aes-gcm = "0.11"
 rand = "0.9"
 subtle = "2"
+nanosandbox = "0.1"
 
 # TypeScript transpilation — only compiled when typescript feature is enabled
 swc_common = { version = "26", optional = true }
