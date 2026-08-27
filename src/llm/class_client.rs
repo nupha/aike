@@ -305,6 +305,16 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
         obj.remove("timeout");
     }
 
+    // Per-request stream-idle timeout (seconds): abort when no SSE data has
+    // arrived for this long. Also NOT sent to the API.
+    let idle_timeout_secs = req_json
+        .as_object()
+        .and_then(|obj| obj.get("idle_timeout")?.as_f64())
+        .map(|n| n as u64);
+    if let Some(obj) = req_json.as_object_mut() {
+        obj.remove("idle_timeout");
+    }
+
     // camelCase → snake_case for OpenAI API compatibility
     json_keys_camel_to_snake(&mut req_json);
 
@@ -416,7 +426,38 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
                     let mut lines = tokio::io::BufReader::new(reader).lines();
                     let mut buf: Option<ToolCallBuffer> = None;
 
-                    while let Ok(Some(line)) = lines.next_line().await {
+                    // Idle guard: wrap each frame read with a per-call timeout.
+                    // tokio::time::timeout measures the gap between consecutive
+                    // SSE lines, so any received byte naturally resets it. When
+                    // it fires, an Error is committed and the buffered
+                    // tool-call fragment is intentionally dropped (stalled
+                    // partial output is worthless).
+                    let mut idle_aborted = false;
+                    let idle_limit = idle_timeout_secs.map(|s| std::time::Duration::from_secs(s));
+
+                    'sse: loop {
+                        let next = match idle_limit {
+                            Some(idle) => {
+                                match tokio::time::timeout(idle, lines.next_line()).await {
+                                    Ok(inner) => inner,
+                                    Err(_) => {
+                                        idle_aborted = true;
+                                        slot.commit_async(ChatReply::Error(format!(
+                                            "llm stream idle timeout: no data for {}s",
+                                            idle.as_secs()
+                                        )))
+                                        .await;
+                                        break 'sse;
+                                    }
+                                }
+                            }
+                            None => lines.next_line().await,
+                        };
+                        // Preserve legacy end semantics: Ok(Some)=frame,
+                        // Ok(None)=EOF, Err=end silently.
+                        let Ok(Some(line)) = next else {
+                            break 'sse;
+                        };
                         let line = line.trim().to_string();
 
                         if let Some(data) = line.strip_prefix("data: ") {
@@ -443,18 +484,16 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
 
                                 // Check for tool_calls in this chunk
                                 if let Some(tcs) =
-                                    json[OUTMSG_FIELD_CHOICES][0]["delta"]["tool_calls"]
-                                        .as_array()
+                                    json[OUTMSG_FIELD_CHOICES][0]["delta"]["tool_calls"].as_array()
                                     && !tcs.is_empty()
                                 {
                                     // A chunk may carry content/reasoning alongside tool_calls.
                                     // Since we only buffer tool_calls here, emit that text now —
                                     // otherwise it is lost when finish_reason arrives in a later,
                                     // content-less chunk.
-                                    let has_finish =
-                                        json[OUTMSG_FIELD_CHOICES][0]["finish_reason"]
-                                            .as_str()
-                                            .is_some();
+                                    let has_finish = json[OUTMSG_FIELD_CHOICES][0]["finish_reason"]
+                                        .as_str()
+                                        .is_some();
                                     let delta = &json[OUTMSG_FIELD_CHOICES][0]["delta"];
                                     if !has_finish
                                         && (delta.get("content").is_some()
@@ -500,8 +539,7 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
                                         // tool_calls delta. Emit a clean finish-only chunk instead.
                                         let mut finish = json.clone();
                                         if let Some(obj) =
-                                            finish[OUTMSG_FIELD_CHOICES][0]["delta"]
-                                                .as_object_mut()
+                                            finish[OUTMSG_FIELD_CHOICES][0]["delta"].as_object_mut()
                                         {
                                             obj.remove("tool_calls");
                                         }
@@ -527,10 +565,13 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
                     // Stream ended without [DONE] (server closed early): flush
                     // any still-buffered tool_call so it is not silently lost.
                     // On the normal [DONE] path the buffer is already empty.
-                    if buf.is_some() {
-                        flush_buf(&slot, &mut buf).await;
+                    // Skipped when the idle guard aborted the stream.
+                    if !idle_aborted {
+                        if buf.is_some() {
+                            flush_buf(&slot, &mut buf).await;
+                        }
+                        slot.commit_async(ChatReply::Done).await;
                     }
-                    slot.commit_async(ChatReply::Done).await;
                 }
                 Err(e) => {
                     slot.commit_async(ChatReply::Error(e.to_string())).await;

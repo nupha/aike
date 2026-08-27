@@ -43,7 +43,14 @@ declare module "llama" {
     reasoning_effort?: string;
     response_format?: ResponseFormat;
     stream_options?: { include_usage?: boolean };
+    /** Per-request HTTP total timeout in seconds. NOT sent to the API. */
     timeout?: number;
+    /**
+     * Per-request stream-idle timeout in seconds: abort with an error when no
+     * SSE data arrives for this long (any received byte resets the timer).
+     * Streaming only; NOT sent to the API.
+     */
+    idle_timeout?: number;
     [key: string]: any;
   }
 
