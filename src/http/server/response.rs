@@ -40,6 +40,8 @@ pub(crate) struct HttpResponsePayload {
     /// `HttpResponseSse` instance.
     pub(crate) switched: bool,
     pub(crate) response_tx: Option<oneshot::Sender<HttpResponseMessage>>,
+    /// Shared close-callback list from the request.
+    pub(crate) close_cbs: super::CloseCbs,
 }
 
 impl HttpResponsePayload {
@@ -269,12 +271,28 @@ const RES_PROTO: &[FieldDef] = &[
     FieldDef::FUNC("sse", 0, js_res_sse, 0),
 ];
 
+impl HttpResponsePayload {
+    /// GC trace: keep close-callback JS values reachable.
+    pub(crate) fn gc_trace(&self, gcx: &mut GcTraceCtx) {
+        if let Ok(cbs) = self.close_cbs.lock() {
+            for v in cbs.iter() {
+                zuqe::gc_lite::GcTrace::trace(v, gcx);
+            }
+        }
+    }
+}
+
+fn gc_trace_res(data: &HttpResponsePayload, gcx: &mut zuqe::gc_lite::GcTraceCtx) {
+    data.gc_trace(gcx);
+}
+
 def_native_object!(
     "HttpServerResponse",
     JSHttpResponse,
     HttpResponsePayload,
     RES_PROTO,
-    None
+    None,
+    on_payload_gc: gc_trace_res
 );
 
 #[distributed_slice(USER_CLASS_DEFS)]
@@ -292,14 +310,30 @@ fn register_http_response(rt: &mut Runtime) -> Result<ClassID, i32> {
 /// Holds no status/headers/body — those were already sent when `sse()` opened
 /// the streaming response.
 pub(crate) struct HttpResponseSsePayload {
-    pub(crate) sink: OutboundBuffer,
+    pub(crate) sink: crate::http::server::outbound_buffer::OutboundBuffer,
     pub(crate) closed: bool,
+    /// Shared close-callback list — fired on first channel-close (client disconnect).
+    pub(crate) close_cbs: super::CloseCbs,
+}
+
+fn gc_trace_sse(data: &HttpResponseSsePayload, gcx: &mut zuqe::gc_lite::GcTraceCtx) {
+    if let Ok(cbs) = data.close_cbs.lock() {
+        for v in cbs.iter() {
+            zuqe::gc_lite::GcTrace::trace(v, gcx);
+        }
+    }
 }
 
 impl HttpResponseSsePayload {
     /// GC trace callback wired via `def_native_object!`'s `on_payload_gc`.
     pub(crate) fn gc_trace(&self, gcx: &mut GcTraceCtx) {
         self.sink.trace(gcx);
+        // Trace close-callback JS values so they stay reachable.
+        if let Ok(cbs) = self.close_cbs.lock() {
+            for v in cbs.iter() {
+                zuqe::gc_lite::GcTrace::trace(v, gcx);
+            }
+        }
     }
 }
 
@@ -348,7 +382,9 @@ fn js_res_sse(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let status = data.status;
 
     // Build the shared write-side buffer; its receiver drives the axum Sse.
-    let (sink, rx) = OutboundBuffer::new(OUTBOUND_CAP);
+    let (mut sink, rx) = OutboundBuffer::new(OUTBOUND_CAP);
+    // Wire disconnect callbacks so req.onClose(cb) fires when the client leaves.
+    sink.set_close_cbs(data.close_cbs.clone());
 
     // Open the streaming response immediately (before JS writes the first frame).
     let msg = HttpResponseMessage::Streaming {
@@ -370,6 +406,7 @@ fn js_res_sse(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         HttpResponseSsePayload {
             sink,
             closed: false,
+            close_cbs: data.close_cbs.clone(),
         },
     )?;
     Ok(sse.into())
@@ -403,10 +440,26 @@ fn js_sse_close(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     Ok(JSValue::UNDEFINED)
 }
 
+/// `sse.onClose(cb)` — register a callback for client disconnect (same list as req.onClose).
+fn js_sse_on_close(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let mut this = cc.this();
+    let p = get_sse_payload(ctx, &mut this)?;
+    if cc.length() < 1 {
+        return Err(ctx.throw_type_error("`onClose` requires a callback"));
+    }
+    let cb = cc.arg(0);
+    if !cb.is_callable() {
+        return Err(ctx.throw_type_error("`onClose` argument must be a function"));
+    }
+    p.close_cbs.lock().unwrap().push(cb);
+    Ok(JSValue::UNDEFINED)
+}
+
 const SSE_PROTO: &[FieldDef] = &[
     FieldDef::FUNC("write", 1, js_sse_write, 0),
     FieldDef::FUNC("flush", 0, js_sse_flush, 0),
     FieldDef::FUNC("close", 0, js_sse_close, 0),
+    FieldDef::FUNC("onClose", 1, js_sse_on_close, 0),
 ];
 
 def_native_object!(

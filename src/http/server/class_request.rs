@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use linkme::distributed_slice;
 use zuqe::{
@@ -12,6 +13,11 @@ use crate::USER_CLASS_DEFS;
 
 use super::super::Method;
 
+/// Shared close-callback list: stored in both HttpRequest and HttpResponse;
+/// the SSE payload clones the Arc when `res.sse()` is called, and fires
+/// the callbacks when the underlying channel closes (client disconnect).
+pub type CloseCbs = Arc<Mutex<Vec<JSValue>>>;
+
 /// Internal payload for HttpRequest classes.
 pub(super) struct HttpRequestPayload {
     pub(super) method: Method,
@@ -20,6 +26,16 @@ pub(super) struct HttpRequestPayload {
     pub(super) query: HashMap<String, String>,
     pub(super) headers: HashMap<String, String>,
     pub(super) body: Option<Vec<u8>>,
+    /// Shared with HttpResponse/SSE — fired on client disconnect.
+    pub(super) close_cbs: CloseCbs,
+}
+
+fn gc_trace_req(data: &HttpRequestPayload, gcx: &mut zuqe::gc_lite::GcTraceCtx) {
+    if let Ok(cbs) = data.close_cbs.lock() {
+        for v in cbs.iter() {
+            zuqe::gc_lite::GcTrace::trace(v, gcx);
+        }
+    }
 }
 
 fn get_req_payload<'a>(
@@ -127,6 +143,21 @@ fn js_req_bytes(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     zuqe::builtins::typed_array::TypedArray::create_from_vec_u8(ctx, body).map(JSValue::from)
 }
 
+/// `req.onClose(cb)` — register a callback fired when the client disconnects.
+fn js_req_on_close(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let mut this = cc.this();
+    let p = get_req_payload_mut(ctx, &mut this)?;
+    if cc.length() < 1 {
+        return Err(ctx.throw_type_error("`onClose` requires a callback"));
+    }
+    let cb = cc.arg(0);
+    if !cb.is_callable() {
+        return Err(ctx.throw_type_error("`onClose` argument must be a function"));
+    }
+    p.close_cbs.lock().unwrap().push(cb);
+    Ok(JSValue::UNDEFINED)
+}
+
 const REQ_PROTO: &[FieldDef] = &[
     FieldDef::GETSET("method", Some(js_req_method), None, 0),
     FieldDef::GETSET("path", Some(js_req_path), None, 0),
@@ -136,6 +167,7 @@ const REQ_PROTO: &[FieldDef] = &[
     FieldDef::FUNC("json", 0, js_req_json, 0),
     FieldDef::FUNC("text", 0, js_req_text, 0),
     FieldDef::FUNC("bytes", 0, js_req_bytes, 0),
+    FieldDef::FUNC("onClose", 1, js_req_on_close, 0),
 ];
 
 def_native_object!(
@@ -143,7 +175,8 @@ def_native_object!(
     JSHttpRequest,
     HttpRequestPayload,
     REQ_PROTO,
-    None
+    None,
+    on_payload_gc: gc_trace_req
 );
 
 #[distributed_slice(USER_CLASS_DEFS)]

@@ -10,7 +10,7 @@ mod ws;
 
 pub(crate) use {
     class_http_server::{IncomingRequest, JSHttpServer},
-    class_request::JSHttpRequest,
+    class_request::{CloseCbs, JSHttpRequest},
     response::{JSHttpResponse, JSHttpResponseSse},
     ws::JSWebSocketStream,
 };

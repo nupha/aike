@@ -932,6 +932,10 @@ fn dispatch_http_request(cx: &mut ScopedContext, incoming: HttpRequest, handler_
     let handler = &handler_table[incoming.handler_index];
     let query = parse_query_string(&incoming.query_string);
 
+    // Shared close-callback list: both req and res (and later SSE) reference
+    // the same Arc so `req.onClose(cb)` fires when SSE detects disconnect.
+    let close_cbs: super::CloseCbs = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+
     let req_val: JSValue = match JSHttpRequest::new_instance(
         cx,
         JSValue::UNDEFINED,
@@ -942,6 +946,7 @@ fn dispatch_http_request(cx: &mut ScopedContext, incoming: HttpRequest, handler_
             query,
             headers: incoming.headers.iter().cloned().collect(),
             body: Some(incoming.body),
+            close_cbs: close_cbs.clone(),
         },
     ) {
         Ok(v) => v.into(),
@@ -958,6 +963,7 @@ fn dispatch_http_request(cx: &mut ScopedContext, incoming: HttpRequest, handler_
             ended: false,
             switched: false,
             response_tx: Some(incoming.response_tx),
+            close_cbs,
         },
     ) {
         Ok(v) => v.into(),
