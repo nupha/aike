@@ -269,7 +269,13 @@ declare namespace Aike {
     signalCode: Promise<string | null>;
     /** Promise resolving to true if the process was killed by `timeout`. */
     killedByTimeout: Promise<boolean>;
-    /** Send a signal to the child process. Default: SIGTERM. */
+    /**
+     * Send a signal to the child process. Default: SIGTERM.
+     *
+     * In sandbox mode, the default signal is SIGKILL (not SIGTERM).
+     * On macOS, sandbox-exec does not forward signals to the exec'd
+     * command — only SIGKILL reliably terminates the tree.
+     */
     kill(signal?: string | number): boolean;
     /** Check if the child process is still running. */
     isRunning(): boolean;
@@ -280,6 +286,10 @@ declare namespace Aike {
      * waits `killTimeoutMs`. Resolves with the stage at which the child
      * exited, or "timed_out" if it survived SIGKILL's grace period.
      * Idempotent — a second call resolves with "already_closed".
+     *
+     * On macOS with sandbox mode, the "term" stage is effectively
+     * unreachable (sandbox-exec absorbs SIGTERM), so the ladder always
+     * escalates to "kill". The "eof" stage still works.
      */
     shutdown(options?: ShutdownOptions): Promise<ShutdownResult>;
   }

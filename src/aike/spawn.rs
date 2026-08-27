@@ -62,14 +62,14 @@ pub(crate) fn kill_all_children() {
 /// Per-child exit notification state, shared between the exit-wait task and
 /// `shutdown()`. The watch channel retains the final value, so a waiter that
 /// subscribes before or after the exit never misses the transition.
-struct ChildExitState {
+pub(crate) struct ChildExitState {
     /// true once the child has been reaped (or its wait errored).
-    exit_tx: tokio::sync::watch::Sender<bool>,
+    pub(crate) exit_tx: tokio::sync::watch::Sender<bool>,
     /// Guards against concurrent shutdown ladders on one child.
-    shutting_down: AtomicBool,
+    pub(crate) shutting_down: AtomicBool,
 }
 
-static CHILD_EXITS: LazyLock<Mutex<HashMap<i32, ChildExitState>>> =
+pub(crate) static CHILD_EXITS: LazyLock<Mutex<HashMap<i32, ChildExitState>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 pub(crate) fn register_child_exit(pid: i32) {
@@ -916,7 +916,7 @@ pub(crate) fn pid_from_this(ctx: &mut ScopedContext, cc: &CallContext) -> i32 {
 
 /// Read an optional positive-integer millisecond property.
 /// TypeError for non-numbers, RangeError for non-positive or fractional values.
-fn get_pos_ms_prop(ctx: &mut ScopedContext, obj: &Object, key: &str) -> Result<Option<u64>, i32> {
+pub(crate) fn get_pos_ms_prop(ctx: &mut ScopedContext, obj: &Object, key: &str) -> Result<Option<u64>, i32> {
     let v = obj.get_property_str(ctx, key)?;
     if v.is_undefined() {
         return Ok(None);
@@ -933,7 +933,7 @@ fn get_pos_ms_prop(ctx: &mut ScopedContext, obj: &Object, key: &str) -> Result<O
 }
 
 /// Wait until the child's exit is signalled or the timeout elapses.
-async fn wait_child_exit(mut rx: tokio::sync::watch::Receiver<bool>, timeout: Duration) -> bool {
+pub(crate) async fn wait_child_exit(mut rx: tokio::sync::watch::Receiver<bool>, timeout: Duration) -> bool {
     loop {
         if *rx.borrow_and_update() {
             return true;
@@ -947,7 +947,7 @@ async fn wait_child_exit(mut rx: tokio::sync::watch::Receiver<bool>, timeout: Du
     }
 }
 
-fn send_child_signal(pid: i32, sig: i32) {
+pub(crate) fn send_child_signal(pid: i32, sig: i32) {
     #[cfg(unix)]
     unsafe {
         libc::kill(pid, sig);
@@ -961,7 +961,7 @@ fn send_child_signal(pid: i32, sig: i32) {
 
 /// The EOF �?term �?SIGKILL shutdown ladder. Returns the stage at which the
 /// child exited. Removes the registry entry when done.
-async fn shutdown_ladder(
+pub(crate) async fn shutdown_ladder(
     pid: i32,
     rx: tokio::sync::watch::Receiver<bool>,
     eof_ms: u64,

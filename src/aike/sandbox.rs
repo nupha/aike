@@ -29,7 +29,10 @@ use zuqe::{
 use super::{
     JSStdioHandle, pipe_bridge,
     signal::signal_name,
-    spawn::{pid_from_this, register_child, signal_child_exit, unregister_child},
+    spawn::{
+        CHILD_EXITS, get_pos_ms_prop, pid_from_this, register_child, register_child_exit,
+        shutdown_ladder, signal_child_exit, unregister_child,
+    },
 };
 
 // ---------------------------------------------------------------------------
@@ -433,6 +436,7 @@ pub(crate) fn spawn_async_sandboxed(
 
     let killer = child.killer();
     insert_sandbox_child(pid, killer.clone());
+    register_child_exit(pid);
 
     // exitCode / signalCode / killedByTimeout promises — same shape as the
     // regular async path, resolved by a blocking wait on the worker pool.
@@ -483,6 +487,13 @@ pub(crate) fn spawn_async_sandboxed(
     )?;
     result.define_property_value_str(ctx, "isRunning", is_running_fn.into(), JS_PROP_C_W_E)?;
 
+    // shutdown(options?) — graceful close (EOF → term → SIGKILL), same
+    // semantics as the non-sandbox path. Reuses CHILD_EXITS for exit
+    // notification and shutdown_ladder for the actual ladder.
+    let shutdown_fn =
+        ctx.create_native_function(Callback::Func(js_sandbox_child_shutdown), "shutdown", 1, 0)?;
+    result.define_property_value_str(ctx, "shutdown", shutdown_fn.into(), JS_PROP_C_W_E)?;
+
     if abort_on_parent_exit {
         register_child(pid);
     }
@@ -506,6 +517,7 @@ pub(crate) fn spawn_async_sandboxed(
         }
         let r = child.wait();
         remove_sandbox_child(pid);
+        signal_child_exit(pid);
         if abort_on_parent_exit {
             unregister_child(pid);
         }
@@ -662,15 +674,140 @@ fn build_sandbox_sync_result(
 // tree-aware child control functions for sandboxed Subprocess objects
 // ---------------------------------------------------------------------------
 
-fn js_sandbox_child_kill(_ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let pid = pid_from_this(_ctx, &cc);
+/// kill(signal?) — send a signal to the sandboxed child tree.
+/// Default signal is SIGKILL (matching the hard-kill semantics of the
+/// sandbox). On Unix, accepts a signal name string or number.
+///
+/// NOTE (shutdown + sandbox + macOS): sandbox-exec does not forward signals
+/// to the exec'd command. kill("SIGTERM") reaches sandbox-exec but the
+/// inner process exits cleanly (code=0) without receiving the signal.
+/// Use kill() (SIGKILL) for reliable termination on macOS.
+fn js_sandbox_child_kill(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let pid = pid_from_this(ctx, &cc);
     let Some(shared) = get_shared_child(pid) else {
         return Ok(JSValue::FALSE);
     };
     if !shared.is_running() {
         return Ok(JSValue::FALSE);
     }
-    Ok(JSValue::from(shared.kill()))
+
+    #[cfg(unix)]
+    {
+        let sig = if cc.length() > 0 && !cc.arg(0).is_undefined() {
+            let arg = cc.arg(0);
+            if let Some(s) = arg.as_string(true) {
+                let name = s.content().encode_utf8(false);
+                super::signal::signal_number(&name)
+                    .map(|n| n as i32)
+                    .unwrap_or(libc::SIGKILL)
+            } else {
+                arg.to_number(ctx)?.to_i32()
+            }
+        } else {
+            libc::SIGKILL
+        };
+        Ok(JSValue::from(shared.send_signal(sig)))
+    }
+
+    #[cfg(windows)]
+    {
+        let _ = ctx;
+        let _ = cc;
+        Ok(JSValue::from(shared.kill()))
+    }
+}
+
+/// shutdown(options?) — gracefully shut the child down:
+/// close stdin (EOF), then termSignal, then SIGKILL — each stage bounded
+/// by its timeout. Resolves with the stage at which the child exited:
+/// "eof" | "term" | "kill" | "timed_out" | "already_closed".
+///
+/// NOTE (shutdown + sandbox + macOS): On macOS, sandbox-exec does not
+/// forward SIGTERM to the exec'd command, so the "term" stage is
+/// effectively unreachable — the ladder always escalates to "kill".
+/// The "eof" stage still works (stdin close propagates via pipe).
+fn js_sandbox_child_shutdown(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    /// Resolve a promise to a fixed stage string.
+    fn resolved_stage(ctx: &mut ScopedContext, stage: &'static str) -> JSResult {
+        let (promise, tx) = Promise::create_with_channel::<String>(ctx, |cx, stage| {
+            cx.create_string_from_str(&stage).map(JSValue::make_string)
+        })?;
+        let _ = tx.send(stage.to_string());
+        Ok(promise.into())
+    }
+
+    // Strict option parsing (defaults mirror the non-sandbox path).
+    let mut eof_ms = 2_000u64;
+    let mut term_ms = 2_000u64;
+    let mut kill_ms = 1_000u64;
+    let mut term_sig = libc::SIGTERM;
+    if cc.length() > 0 && !cc.arg(0).is_undefined() {
+        let Some(opts) = cc.arg(0).as_object() else {
+            return Err(ctx.throw_type_error("shutdown options must be an object"));
+        };
+        eof_ms = get_pos_ms_prop(ctx, &opts, "eofTimeoutMs")?.unwrap_or(eof_ms);
+        term_ms = get_pos_ms_prop(ctx, &opts, "termTimeoutMs")?.unwrap_or(term_ms);
+        kill_ms = get_pos_ms_prop(ctx, &opts, "killTimeoutMs")?.unwrap_or(kill_ms);
+
+        let sig_val = opts.get_property_str(ctx, "termSignal")?;
+        if !sig_val.is_undefined() {
+            let Some(s) = sig_val.as_string(true) else {
+                return Err(ctx.throw_type_error("`termSignal` must be a string"));
+            };
+            let name = s.content().encode_utf8(false);
+            match name.as_ref() {
+                "SIGTERM" | "SIGINT" => {
+                    term_sig = super::signal::signal_number(&name)
+                        .map(|n| n as i32)
+                        .unwrap_or(libc::SIGTERM)
+                }
+                _ => {
+                    return Err(
+                        ctx.throw_range_error("`termSignal` must be \"SIGTERM\" or \"SIGINT\"")
+                    );
+                }
+            }
+        }
+    }
+
+    let pid = pid_from_this(ctx, &cc);
+
+    // Claim the child's exit state: absent → never spawned by us or already
+    // reaped; already shutting down → report without re-running the ladder.
+    let rx = {
+        let mut map = super::spawn::CHILD_EXITS.lock().unwrap();
+        let Some(state) = map.get_mut(&pid) else {
+            drop(map);
+            return resolved_stage(ctx, "already_closed");
+        };
+        if state.shutting_down.swap(true, Ordering::AcqRel) {
+            drop(map);
+            return resolved_stage(ctx, "already_closed");
+        }
+        state.exit_tx.subscribe()
+    };
+
+    // Close stdin so the child sees EOF (drop closes the pipe fd).
+    {
+        let this = cc.this();
+        if let Some(obj) = this.as_object()
+            && let Ok(stdin_val) = obj.get_property_str(ctx, "stdin")
+        {
+            let mut v = stdin_val;
+            JSStdioHandle::take_payload_of(&mut v);
+        }
+    }
+
+    let (promise, tx) = Promise::create_with_channel::<String>(ctx, |cx, stage| {
+        cx.create_string_from_str(&stage).map(JSValue::make_string)
+    })?;
+
+    tokio::spawn(async move {
+        let stage = shutdown_ladder(pid, rx, eof_ms, term_ms, kill_ms, term_sig).await;
+        let _ = zuqe::PollSender::from(tx).send_async(stage.to_string()).await;
+    });
+
+    Ok(promise.into())
 }
 
 fn js_sandbox_child_is_running(_ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
