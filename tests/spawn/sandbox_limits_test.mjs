@@ -45,6 +45,7 @@ const ws = `${base}/ws`;
 const ro = `${base}/ro-data`;
 const rw = `${base}/rw-data`;
 const isMacos = process.platform === "darwin";
+const isWin = process.platform === "windows";
 
 async function setup() {
   await Promise.all([
@@ -61,7 +62,23 @@ async function cleanup() {
   await fs.remove(base).catch(() => {});
 }
 
+// Cross-platform shell helpers
+function shellSpawn(script, sandboxOpts, extra) {
+  if (isWin) {
+    return Aike.spawnSync("cmd.exe", ["/c", script], { sandbox: sandboxOpts, ...extra });
+  }
+  return Aike.spawnSync("sh", ["-c", script], { sandbox: sandboxOpts, ...extra });
+}
+
 function writeRc(script, sandboxOpts) {
+  if (isWin) {
+    // cmd.exe: capture exit code via %ERRORLEVEL% after running command
+    const r = Aike.spawnSync("cmd.exe", ["/c", `${script} 2>nul & echo rc=%ERRORLEVEL%`], {
+      sandbox: sandboxOpts,
+    });
+    const m = stdout(r).match(/rc=(\d+)/);
+    return m ? Number(m[1]) : -1;
+  }
   const r = Aike.spawnSync("sh", ["-c", `${script} 2>/dev/null; echo rc=$?`], {
     sandbox: sandboxOpts,
   });
@@ -70,6 +87,10 @@ function writeRc(script, sandboxOpts) {
 }
 
 function readOut(script, sandboxOpts) {
+  if (isWin) {
+    const r = Aike.spawnSync("cmd.exe", ["/c", script], { sandbox: sandboxOpts });
+    return stdout(r);
+  }
   const r = Aike.spawnSync("sh", ["-c", script], { sandbox: sandboxOpts });
   return stdout(r);
 }
@@ -83,11 +104,25 @@ function mkSandbox(overrides = {}) {
   };
 }
 
+// Cross-platform commands
+const cat = isWin ? "type" : "cat";
+const nul = isWin ? "nul" : "/dev/null";
+const stderrRedirect = isWin ? "2>nul" : "2>/dev/null";
+const etcHosts = isWin ? "C:/Windows/System32/drivers/etc/hosts" : "/etc/hosts";
+
 // ===================================================================
 // 1. Mounts — read/write per directory
 // ===================================================================
 async function testMounts() {
   console.log("\n=== mounts ===");
+
+  if (isWin) {
+    skip("read/write mounts", "filesystem isolation not implemented on Windows");
+    skip("write outside denied", "filesystem isolation not implemented on Windows");
+    skip("write ro denied", "filesystem isolation not implemented on Windows");
+    skip("write rw allowed", "filesystem isolation not implemented on Windows");
+    return;
+  }
 
   const mounts = {
     [ws]: { writable: true },
@@ -100,10 +135,10 @@ async function testMounts() {
   await fs.remove(outside).catch(() => {});
 
   // reads
-  check("read cwd file", readOut(`cat ${ws}/ws-file.txt`, sb) === "WS");
-  check("read ro source", readOut(`cat ${ro}/secret.txt`, sb) === "SECRET");
-  check("read rw source", readOut(`cat ${rw}/rw-file.txt`, sb) === "RW");
-  check("read system file", readOut("cat /etc/hosts", sb).length > 0);
+  check("read cwd file", readOut(`${cat} ${ws}/ws-file.txt`, sb) === "WS");
+  check("read ro source", readOut(`${cat} ${ro}/secret.txt`, sb) === "SECRET");
+  check("read rw source", readOut(`${cat} ${rw}/rw-file.txt`, sb) === "RW");
+  check("read system file", readOut(`${cat} ${etcHosts}`, sb).length > 0);
 
   // writes
   check("write cwd allowed", (await writeRc(`echo x > ${ws}/new.txt`, sb)) === 0);
@@ -136,7 +171,9 @@ async function testNonexistentMount() {
   };
 
   const throws = (fn) => { try { fn(); return null; } catch (e) { return e; } };
-  const e = throws(() => Aike.spawnSync("sh", ["-c", "echo x"], { sandbox: sb }));
+  const sh = isWin ? "cmd.exe" : "sh";
+  const shArg = isWin ? "/c" : "-c";
+  const e = throws(() => Aike.spawnSync(sh, [shArg, "echo x"], { sandbox: sb }));
   check("non-existent mount throws", e !== null, e?.message);
 }
 
@@ -146,6 +183,13 @@ async function testNonexistentMount() {
 async function testDescendantInheritance() {
   console.log("\n=== descendant inheritance ===");
 
+  if (isWin) {
+    skip("grandchild ro write denied", "filesystem isolation not implemented on Windows");
+    skip("bg grandchild ro write denied", "filesystem isolation not implemented on Windows");
+    skip("bg grandchild rw write allowed", "filesystem isolation not implemented on Windows");
+    return;
+  }
+
   const mounts = {
     [ws]: { writable: true },
     [ro]: { target: "/mnt-data" },
@@ -153,21 +197,42 @@ async function testDescendantInheritance() {
   };
   const sb = { cwd: ws, mounts, network: "host" };
 
-  // grandchild write to ro denied
-  check("grandchild ro write denied",
-    (await writeRc(`sh -c 'echo x > ${ro}/secret.txt'`, sb)) !== 0);
-  check("grandchild ro content unchanged",
-    (await fs.readText(`${ro}/secret.txt`)) === "SECRET");
+  if (isWin) {
+    // On Windows, use cmd.exe to spawn grandchildren
+    // grandchild write to ro denied
+    check("grandchild ro write denied",
+      (await writeRc(`cmd.exe /c "echo x > ${ro}/secret.txt"`, sb)) !== 0);
+    check("grandchild ro content unchanged",
+      (await fs.readText(`${ro}/secret.txt`)) === "SECRET");
 
-  // background grandchild ro write denied (assert host state, since & wait returns 0)
-  Aike.spawnSync("sh", ["-c", `sh -c 'echo bg > ${ro}/secret.txt' & wait`], { sandbox: sb });
-  check("bg grandchild ro write denied (host state)",
-    (await fs.readText(`${ro}/secret.txt`)) === "SECRET");
+    // background grandchild ro write denied (use start /b for background)
+    shellSpawn(`cmd.exe /c "start /b cmd.exe /c \\"echo bg > ${ro}/secret.txt\\""`, sb);
+    await new Promise((r) => setTimeout(r, 500));
+    check("bg grandchild ro write denied (host state)",
+      (await fs.readText(`${ro}/secret.txt`)) === "SECRET");
 
-  // background grandchild rw write allowed
-  Aike.spawnSync("sh", ["-c", `sh -c 'echo bg-rw > ${rw}/inherit.txt' & wait`], { sandbox: sb });
-  check("bg grandchild rw write allowed (host state)",
-    (await fs.readText(`${rw}/inherit.txt`)).includes("bg-rw"));
+    // background grandchild rw write allowed
+    shellSpawn(`cmd.exe /c "start /b cmd.exe /c \\"echo bg-rw > ${rw}/inherit.txt\\""`, sb);
+    await new Promise((r) => setTimeout(r, 500));
+    check("bg grandchild rw write allowed (host state)",
+      (await fs.readText(`${rw}/inherit.txt`)).includes("bg-rw"));
+  } else {
+    // grandchild write to ro denied
+    check("grandchild ro write denied",
+      (await writeRc(`sh -c 'echo x > ${ro}/secret.txt'`, sb)) !== 0);
+    check("grandchild ro content unchanged",
+      (await fs.readText(`${ro}/secret.txt`)) === "SECRET");
+
+    // background grandchild ro write denied (assert host state, since & wait returns 0)
+    Aike.spawnSync("sh", ["-c", `sh -c 'echo bg > ${ro}/secret.txt' & wait`], { sandbox: sb });
+    check("bg grandchild ro write denied (host state)",
+      (await fs.readText(`${ro}/secret.txt`)) === "SECRET");
+
+    // background grandchild rw write allowed
+    Aike.spawnSync("sh", ["-c", `sh -c 'echo bg-rw > ${rw}/inherit.txt' & wait`], { sandbox: sb });
+    check("bg grandchild rw write allowed (host state)",
+      (await fs.readText(`${rw}/inherit.txt`)).includes("bg-rw"));
+  }
 }
 
 // ===================================================================
@@ -179,9 +244,15 @@ async function testNoSandboxBaseline() {
   const probe = `${base}/baseline-probe.txt`;
   await fs.remove(probe).catch(() => {});
 
-  const r = Aike.spawnSync("sh", ["-c", `echo x > ${probe}`]);
-  check("without sandbox, $HOME write allowed",
-    r.exitCode === 0 && (await fs.exists(probe)));
+  if (isWin) {
+    const r = Aike.spawnSync("cmd.exe", ["/c", `echo x > ${probe}`]);
+    check("without sandbox, $HOME write allowed",
+      r.exitCode === 0 && (await fs.exists(probe)));
+  } else {
+    const r = Aike.spawnSync("sh", ["-c", `echo x > ${probe}`]);
+    check("without sandbox, $HOME write allowed",
+      r.exitCode === 0 && (await fs.exists(probe)));
+  }
 }
 
 // ===================================================================
@@ -192,42 +263,44 @@ async function testStrictValidation() {
 
   const throws = (fn) => { try { fn(); return null; } catch (e) { return e; } };
   const mounts = { [ws]: { writable: true } };
+  const sh = isWin ? "cmd.exe" : "sh";
+  const shArg = isWin ? "/c" : "-c";
 
   check("missing cwd throws", throws(() =>
-    Aike.spawnSync("sh", ["-c", "echo x"], { sandbox: { mounts } })) !== null);
+    Aike.spawnSync(sh, [shArg, "echo x"], { sandbox: { mounts } })) !== null);
 
   check("cwd non-string throws TypeError", (() => {
-    const e = throws(() => Aike.spawnSync("sh", ["-c", "echo x"], { sandbox: { cwd: 123, mounts } }));
+    const e = throws(() => Aike.spawnSync(sh, [shArg, "echo x"], { sandbox: { cwd: 123, mounts } }));
     return e?.name === "TypeError";
   })());
 
   check("cwd nonexistent throws RangeError", (() => {
-    const e = throws(() => Aike.spawnSync("sh", ["-c", "echo x"], { sandbox: { cwd: "/no/such/dir", mounts } }));
+    const e = throws(() => Aike.spawnSync(sh, [shArg, "echo x"], { sandbox: { cwd: "/no/such/dir", mounts } }));
     return e?.name === "RangeError";
   })());
 
   check("sandbox as array throws", (() => {
-    const e = throws(() => Aike.spawnSync("sh", ["-c", "echo x"], { sandbox: [] }));
+    const e = throws(() => Aike.spawnSync(sh, [shArg, "echo x"], { sandbox: [] }));
     return e !== null;
   })());
 
   check("mounts as array throws", (() => {
-    const e = throws(() => Aike.spawnSync("sh", ["-c", "echo x"], { sandbox: { cwd: ws, mounts: [] } }));
+    const e = throws(() => Aike.spawnSync(sh, [shArg, "echo x"], { sandbox: { cwd: ws, mounts: [] } }));
     return e !== null;
   })());
 
   check("mount value non-object throws", (() => {
-    const e = throws(() => Aike.spawnSync("sh", ["-c", "echo x"], { sandbox: { cwd: ws, mounts: { [ro]: "rw" } } }));
+    const e = throws(() => Aike.spawnSync(sh, [shArg, "echo x"], { sandbox: { cwd: ws, mounts: { [ro]: "rw" } } }));
     return e !== null;
   })());
 
   check("mount writable non-boolean throws", (() => {
-    const e = throws(() => Aike.spawnSync("sh", ["-c", "echo x"], { sandbox: { cwd: ws, mounts: { [ro]: { writable: 1 } } } }));
+    const e = throws(() => Aike.spawnSync(sh, [shArg, "echo x"], { sandbox: { cwd: ws, mounts: { [ro]: { writable: 1 } } } }));
     return e !== null;
   })());
 
   check("network invalid throws", (() => {
-    const e = throws(() => Aike.spawnSync("sh", ["-c", "echo x"], { sandbox: { cwd: ws, network: "wifi" } }));
+    const e = throws(() => Aike.spawnSync(sh, [shArg, "echo x"], { sandbox: { cwd: ws, network: "wifi" } }));
     return e !== null;
   })());
 }
@@ -240,6 +313,10 @@ async function testMemoryLimit() {
 
   if (isMacos) {
     skip("kills over-allocating process", "not enforced on macOS");
+    return;
+  }
+  if (isWin) {
+    skip("kills over-allocating process", "perl not available in Windows sandbox");
     return;
   }
 
@@ -261,6 +338,10 @@ async function testCpuLimit() {
 
   if (isMacos) {
     skip("limited takes >= 1.2x of unlimited", "not enforced on macOS");
+    return;
+  }
+  if (isWin) {
+    skip("limited takes >= 1.2x of unlimited", "perl not available in Windows sandbox");
     return;
   }
 
@@ -296,6 +377,10 @@ async function testMaxPids() {
     skip("some spawns rejected", "not enforced on macOS");
     return;
   }
+  if (isWin) {
+    skip("some spawns rejected", "shell job control not available on Windows");
+    return;
+  }
 
   const script = `ok=0; fail=0
 for i in 1 2 3 4 5 6 7 8; do
@@ -328,6 +413,12 @@ async function testMaxFileSize() {
   const bigFile = `${ws}/bigfile`;
   const smallFile = `${ws}/smallfile`;
 
+  if (isWin) {
+    skip("large write rejected", "perl not available in Windows sandbox");
+    skip("small write allowed", "perl not available in Windows sandbox");
+    return;
+  }
+
   const r1 = Aike.spawnSync("sh", ["-c",
     `perl -e 'print "x" x 4096' > ${bigFile}; echo rc=$?`
   ], {
@@ -354,6 +445,10 @@ async function testMaxOpenFiles() {
 
   if (isMacos) {
     skip("some opens rejected", "not enforced on macOS");
+    return;
+  }
+  if (isWin) {
+    skip("some opens rejected", "perl not available in Windows sandbox");
     return;
   }
 
@@ -384,16 +479,33 @@ async function testMaxOpenFiles() {
 async function testTmpfs() {
   console.log("\n=== tmpfs ===");
 
+  if (isWin) {
+    skip("write and read back", "tmpfs not implemented on Windows");
+    return;
+  }
+
   const tmpfsDir = `${ws}/ramdisk`;
-  const r = Aike.spawnSync("sh", ["-c",
-    `mkdir -p ${tmpfsDir} && echo hello > ${tmpfsDir}/test.txt && cat ${tmpfsDir}/test.txt`
-  ], {
-    sandbox: mkSandbox({
-      tmpfs: [{ path: tmpfsDir, size: 1024 * 1024 }],
-    }),
-    timeout: 5000,
-  });
-  check("write and read back", stdout(r) === "hello", stdout(r));
+  if (isWin) {
+    const r = Aike.spawnSync("cmd.exe", ["/c",
+      `mkdir ${tmpfsDir} 2>nul & echo hello > ${tmpfsDir}/test.txt & ${cat} ${tmpfsDir}/test.txt`
+    ], {
+      sandbox: mkSandbox({
+        tmpfs: [{ path: tmpfsDir, size: 1024 * 1024 }],
+      }),
+      timeout: 5000,
+    });
+    check("write and read back", stdout(r) === "hello", stdout(r));
+  } else {
+    const r = Aike.spawnSync("sh", ["-c",
+      `mkdir -p ${tmpfsDir} && echo hello > ${tmpfsDir}/test.txt && cat ${tmpfsDir}/test.txt`
+    ], {
+      sandbox: mkSandbox({
+        tmpfs: [{ path: tmpfsDir, size: 1024 * 1024 }],
+      }),
+      timeout: 5000,
+    });
+    check("write and read back", stdout(r) === "hello", stdout(r));
+  }
 }
 
 // ===================================================================
@@ -402,19 +514,22 @@ async function testTmpfs() {
 async function testSeccompProfile() {
   console.log("\n=== seccompProfile ===");
 
-  const r1 = Aike.spawnSync("sh", ["-c", "echo hello"], {
+  const sh = isWin ? "cmd.exe" : "sh";
+  const shArg = isWin ? "/c" : "-c";
+
+  const r1 = Aike.spawnSync(sh, [shArg, "echo hello"], {
     sandbox: mkSandbox({ seccompProfile: "strict" }),
     timeout: 5000,
   });
   check("strict seccomp: API accepted", true);
 
-  const r2 = Aike.spawnSync("sh", ["-c", "echo hello"], {
+  const r2 = Aike.spawnSync(sh, [shArg, "echo hello"], {
     sandbox: mkSandbox({ seccompProfile: "disabled" }),
     timeout: 5000,
   });
   check("disabled seccomp: echo works", stdout(r2).includes("hello"), stdout(r2));
 
-  const r3 = Aike.spawnSync("sh", ["-c", "echo hello"], {
+  const r3 = Aike.spawnSync(sh, [shArg, "echo hello"], {
     sandbox: mkSandbox({ seccompProfile: "standard" }),
     timeout: 5000,
   });
@@ -426,6 +541,11 @@ async function testSeccompProfile() {
 // ===================================================================
 async function testNetworkAllowlist() {
   console.log("\n=== network allowlist ===");
+
+  if (isWin) {
+    skip("external domain blocked", "network filtering not implemented on Windows");
+    return;
+  }
 
   const r = Aike.spawnSync("sh", ["-c",
     "curl -s --max-time 3 https://example.com > /dev/null 2>&1; echo rc=$?"
@@ -443,7 +563,12 @@ async function testNetworkAllowlist() {
 async function testNetworkModes() {
   console.log("\n=== network modes ===");
 
-  // "none" — external should be blocked. rc=6 (DNS fail), rc=7, rc=28, rc=56 all indicate blocked.
+  if (isWin) {
+    skip("network none/host", "network filtering not implemented on Windows");
+    return;
+  }
+
+  // "none" — external should be blocked
   const r1 = Aike.spawnSync("sh", ["-c",
     "curl -s --max-time 3 https://example.com > /dev/null 2>&1; echo rc=$?"
   ], {
@@ -460,7 +585,6 @@ async function testNetworkModes() {
     sandbox: mkSandbox({ network: "host" }),
     timeout: 15000,
   });
-  // rc=0 means reachable, rc=28 means timeout but not blocked.
   const rc2 = stdout(r2).match(/rc=(\d+)/);
   check("network host: external reachable or not sandbox-blocked",
     rc2 && (Number(rc2[1]) === 0 || Number(rc2[1]) === 28),
@@ -472,6 +596,11 @@ async function testNetworkModes() {
 // ===================================================================
 async function testUidGid() {
   console.log("\n=== uid/gid ===");
+
+  if (isWin) {
+    skip("uid/gid", "uid/gid not applicable on Windows");
+    return;
+  }
 
   const r = Aike.spawnSync("sh", ["-c", "id -u"], {
     sandbox: mkSandbox({ uid: 65534, gid: 65534 }),
@@ -488,7 +617,9 @@ async function testUidGid() {
 async function testHostname() {
   console.log("\n=== hostname ===");
 
-  const r = Aike.spawnSync("sh", ["-c", "hostname"], {
+  const sh = isWin ? "cmd.exe" : "sh";
+  const shArg = isWin ? "/c" : "-c";
+  const r = Aike.spawnSync(sh, [shArg, "hostname"], {
     sandbox: mkSandbox({ hostname: "sandbox-box" }),
     timeout: 5000,
   });
@@ -504,13 +635,24 @@ async function testWallTimeLimitMs() {
   console.log("\n=== wallTimeLimitMs ===");
 
   const t0 = Date.now();
-  const r = Aike.spawnSync("sh", ["-c", "sleep 30"], {
-    sandbox: mkSandbox({ wallTimeLimitMs: 1000 }),
-    timeout: 5000,
-  });
-  const elapsed = Date.now() - t0;
-  check("wallTimeLimitMs kills slow process", r.exitCode !== 0 || elapsed < 3000,
-    `exit=${r.exitCode} elapsed=${elapsed}ms`);
+  if (isWin) {
+    // Use ping as sleep equivalent (ping -n N = N-1 seconds)
+    const r = Aike.spawnSync("cmd.exe", ["/c", "ping -n 31 127.0.0.1 >nul"], {
+      sandbox: mkSandbox({ wallTimeLimitMs: 1000 }),
+      timeout: 5000,
+    });
+    const elapsed = Date.now() - t0;
+    check("wallTimeLimitMs kills slow process", r.exitCode !== 0 || elapsed < 3000,
+      `exit=${r.exitCode} elapsed=${elapsed}ms`);
+  } else {
+    const r = Aike.spawnSync("sh", ["-c", "sleep 30"], {
+      sandbox: mkSandbox({ wallTimeLimitMs: 1000 }),
+      timeout: 5000,
+    });
+    const elapsed = Date.now() - t0;
+    check("wallTimeLimitMs kills slow process", r.exitCode !== 0 || elapsed < 3000,
+      `exit=${r.exitCode} elapsed=${elapsed}ms`);
+  }
 }
 
 // ===================================================================
