@@ -165,7 +165,7 @@ pub(super) fn js_spawn(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         // sandbox — optional; when present the command runs inside a
         // nanosandbox child (see super::sandbox) instead of a plain spawn.
         // Validated here; dispatched after timeout parsing below.
-        sandbox_opt = super::sandbox::get_sandbox_opt(ctx, &opts)?;
+        sandbox_opt = super::sandbox::get_sandbox_opt(ctx, &opts, env_opt.clone())?;
 
         // stdio modes
         (stdin_mode, stdin_inherit) = parse_stdio_mode_strict(ctx, &opts, "stdin", true)?;
@@ -196,8 +196,9 @@ pub(super) fn js_spawn(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         None => None,
     };
 
-    // Sandbox dispatch: top-level stdio/cwd/env options are ignored for
-    // sandboxed children (always piped; sandbox.cwd/sandbox.env apply).
+    // Sandbox dispatch: sandboxed children always use piped stdio and
+    // `sandbox.cwd` as the working dir. `env` (SpawnOptions.env) is forwarded
+    // into the sandbox builder by get_sandbox_opt, so it is NOT ignored.
     if let Some(sb) = sandbox_opt {
         return if is_async {
             super::sandbox::spawn_async_sandboxed(

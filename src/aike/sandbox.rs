@@ -118,6 +118,7 @@ fn parse_string_array(
 pub(crate) fn get_sandbox_opt(
     ctx: &mut ScopedContext,
     opts: &Object,
+    env: Option<HashMap<String, String>>,
 ) -> Result<Option<Sandbox>, i32> {
     let v = opts.get_property_str(ctx, "sandbox")?;
     if v.is_undefined() {
@@ -313,31 +314,10 @@ pub(crate) fn get_sandbox_opt(
         );
     }
 
-    // env: Record<string, string>
-    let env_v = opts.get_property_str(ctx, "env")?;
-    if !env_v.is_undefined() {
-        let Some(mut env_obj) = env_v.as_object() else {
-            return Err(ctx.throw_type_error("`sandbox.env` must be an object"));
-        };
-        let pks = env_obj.get_own_property_names(ctx, JS_GPN_ENUM_ONLY | JS_GPN_STR_OR_INT_MASK)?;
-        for pk in pks.iter() {
-            let key_v = pk.atom.to_value(ctx)?;
-            let key = key_v
-                .to_string(ctx)?
-                .content()
-                .encode_utf8(false)
-                .to_string();
-            let value = env_obj
-                .get_property(ctx, pk.atom)?
-                .as_string(true)
-                .ok_or_else(|| {
-                    ctx.throw_type_error(&format!("`sandbox.env.{key}` must be a string"))
-                })?
-                .content()
-                .encode_utf8(false)
-                .to_string();
-            b = b.env(key, value);
-        }
+    // env: the single env knob (SpawnOptions.env), forwarded from the caller.
+    // Replaces the entire sandbox env, matching plain-spawn semantics.
+    if let Some(env_map) = env {
+        b = b.envs(env_map);
     }
 
     if let Some(v) = get_str_prop(ctx, &opts, "hostname")? {

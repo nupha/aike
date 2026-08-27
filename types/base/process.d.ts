@@ -348,16 +348,22 @@ declare namespace Aike {
     options?: SpawnOptions,
   ): Subprocess;
 
-  interface SandboxMountOptions {
-    /** In-sandbox path. Omitted = mount at the same path as the source. */
-    target?: string;
-    /** Default false (read-only). */
-    writable?: boolean;
-  }
-
-  interface SpawnSandboxOptions {
+  interface SandboxOptions {
+    /**
+     * Directory the sandbox starts in. Required — canonicalized by the
+     * runtime before spawning; missing or non-existent dirs throw.
+     */
+    cwd: string;
     /** Map of host source path → mount options (insertion order preserved). */
-    mounts?: Record<string, SandboxMountOptions>;
+    mounts?: Record<
+      string,
+      {
+        /** In-sandbox path. Omitted = mount at the same path as the source. */
+        target?: string;
+        /** Default false (read-only). */
+        writable?: boolean;
+      }
+    >;
     tmpfs?: { path: string; size: number }[];
     rootfs?: string;
     /**
@@ -398,6 +404,7 @@ declare namespace Aike {
       | "standard"
       | "permissive"
       | string[];
+
     /**
      * Run as this UID inside the sandbox.
      * NOTE: Not enforced on macOS.
@@ -408,7 +415,6 @@ declare namespace Aike {
      * NOTE: Not enforced on macOS.
      */
     gid?: number;
-    env?: Record<string, string>;
     /**
      * Set hostname inside the sandbox.
      * NOTE: Not enforced on macOS.
@@ -416,6 +422,8 @@ declare namespace Aike {
     hostname?: string;
     // `cwd` intentionally NOT here: spawn's top-level `cwd` doubles as the
     // sandbox working directory when sandboxing is enabled.
+    // `env` is intentionally NOT here: spawn's top-level `env` is the single
+    // env knob and is forwarded into the sandbox builder when sandboxing.
   }
 
   interface SpawnOptions {
@@ -452,8 +460,8 @@ declare namespace Aike {
      */
     abortOnParentExit?: boolean;
 
-    /** Run the child inside a security sandbox (nanosandbox fork). */
-    sandbox?: SpawnSandboxOptions;
+    /** Run the child inside sandbox mode. */
+    sandbox?: SandboxOptions;
   }
 
   // --- sys ---
