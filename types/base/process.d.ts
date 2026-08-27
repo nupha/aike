@@ -336,6 +336,45 @@ declare namespace Aike {
     options?: SpawnOptions,
   ): Subprocess;
 
+  interface SandboxMountOptions {
+    /** In-sandbox path. Omitted = mount at the same path as the source. */
+    target?: string;
+    /** Default false (read-only). */
+    writable?: boolean;
+  }
+
+  interface SpawnSandboxOptions {
+    /** Map of host source path → mount options (insertion order preserved). */
+    mounts?: Record<string, SandboxMountOptions>;
+    tmpfs?: { path: string; size: number }[];
+    rootfs?: string;
+    /** Memory limit in bytes. */
+    memoryLimit?: number;
+    /** CPU limit, 0 < n <= core count; fractions allowed. */
+    cpuLimit?: number;
+    /** Wall-clock time limit in milliseconds (also enforced independently). */
+    wallTimeLimitMs?: number;
+    /** CPU time limit in milliseconds. */
+    cpuTimeLimitMs?: number;
+    maxPids?: number;
+    maxFileSize?: number;
+    maxOpenFiles?: number;
+    /** "none" (default) | full host network | domain allowlist (proxied). */
+    network?: "none" | "host" | { allow: string[] };
+    seccompProfile?:
+      | "disabled"
+      | "strict"
+      | "standard"
+      | "permissive"
+      | string[];
+    uid?: number;
+    gid?: number;
+    env?: Record<string, string>;
+    hostname?: string;
+    // `cwd` intentionally NOT here: spawn's top-level `cwd` doubles as the
+    // sandbox working directory when sandboxing is enabled.
+  }
+
   interface SpawnOptions {
     /** Working directory for the child process. */
     cwd?: string;
@@ -369,6 +408,9 @@ declare namespace Aike {
      * time the call returns).
      */
     abortOnParentExit?: boolean;
+
+    /** Run the child inside a security sandbox (nanosandbox fork). */
+    sandbox?: SpawnSandboxOptions;
   }
 
   // --- sys ---

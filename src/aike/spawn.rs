@@ -36,11 +36,11 @@ use super::{JSStdioHandle, signal::signal_name};
 /// Only populated when the option is set �?the default is zero overhead.
 static SPAWNED_PIDS: LazyLock<Mutex<Vec<i32>>> = LazyLock::new(|| Mutex::new(Vec::new()));
 
-fn register_child(pid: i32) {
+pub(crate) fn register_child(pid: i32) {
     SPAWNED_PIDS.lock().unwrap().push(pid);
 }
 
-fn unregister_child(pid: i32) {
+pub(crate) fn unregister_child(pid: i32) {
     SPAWNED_PIDS.lock().unwrap().retain(|&p| p != pid);
 }
 
@@ -72,7 +72,7 @@ struct ChildExitState {
 static CHILD_EXITS: LazyLock<Mutex<HashMap<i32, ChildExitState>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-fn register_child_exit(pid: i32) {
+pub(crate) fn register_child_exit(pid: i32) {
     let (exit_tx, _) = tokio::sync::watch::channel(false);
     CHILD_EXITS.lock().unwrap().insert(
         pid,
@@ -84,7 +84,7 @@ fn register_child_exit(pid: i32) {
 }
 
 /// Signal waiters that `pid` exited and drop its registry entry.
-fn signal_child_exit(pid: i32) {
+pub(crate) fn signal_child_exit(pid: i32) {
     if let Some(state) = CHILD_EXITS.lock().unwrap().remove(&pid) {
         let _ = state.exit_tx.send(true);
     }
@@ -127,6 +127,7 @@ pub(super) fn js_spawn(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut env_opt: Option<HashMap<String, String>> = None;
     let mut input_data: Option<Vec<u8>> = None;
     let mut abort_on_parent_exit = false;
+    let mut sandbox_opt: Option<nanosandbox::Sandbox> = None;
 
     // arg 2 (optional): options object
     if cc.length() > 2 {
@@ -156,10 +157,15 @@ pub(super) fn js_spawn(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             abort_on_parent_exit = abort_val.to_bool()?;
         }
 
-        // input �?extract bytes for spawnSync stdin
+        // input — extract bytes for spawnSync stdin
         if !is_async {
             input_data = extract_input(ctx, &opts)?;
         }
+
+        // sandbox — optional; when present the command runs inside a
+        // nanosandbox child (see super::sandbox) instead of a plain spawn.
+        // Validated here; dispatched after timeout parsing below.
+        sandbox_opt = super::sandbox::get_sandbox_opt(ctx, &opts)?;
 
         // stdio modes
         (stdin_mode, stdin_inherit) = parse_stdio_mode_strict(ctx, &opts, "stdin", true)?;
@@ -189,6 +195,30 @@ pub(super) fn js_spawn(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         Some(opts) => get_timeout_prop(ctx, &opts)?,
         None => None,
     };
+
+    // Sandbox dispatch: top-level stdio/cwd/env options are ignored for
+    // sandboxed children (always piped; sandbox.cwd/sandbox.env apply).
+    if let Some(sb) = sandbox_opt {
+        return if is_async {
+            super::sandbox::spawn_async_sandboxed(
+                ctx,
+                sb,
+                cmd_str,
+                args,
+                timeout_limit,
+                abort_on_parent_exit,
+            )
+        } else {
+            super::sandbox::spawn_sync_sandboxed(
+                ctx,
+                sb,
+                cmd_str,
+                args,
+                input_data,
+                timeout_limit,
+            )
+        };
+    }
 
     if is_async {
         let mut cmd_obj = tokio::process::Command::new(&cmd_str);
@@ -876,7 +906,7 @@ fn js_child_isRunning(_ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 }
 
 /// Read `pid` from the `this` object's "pid" property.
-fn pid_from_this(ctx: &mut ScopedContext, cc: &CallContext) -> i32 {
+pub(crate) fn pid_from_this(ctx: &mut ScopedContext, cc: &CallContext) -> i32 {
     let this = cc.this();
     this.as_object()
         .and_then(|obj| obj.get_property_str(ctx, "pid").ok())

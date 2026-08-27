@@ -23,7 +23,6 @@ mod mcp;
 mod path;
 mod process;
 mod repl;
-mod sandbox;
 mod transpile;
 mod whatwg;
 #[cfg(feature = "llama_cpp")]
@@ -58,7 +57,6 @@ use crate::{
     mcp::init_mod_mcp,
     path::init_mod_path,
     process::gc_trace_next_tick,
-    sandbox::init_mod_sandbox,
     whatwg::fetch::gc_trace_fetch,
     whatwg::stream::gc_trace_stream,
     whatwg::timeout::gc_trace_timeout,
@@ -354,7 +352,6 @@ async fn main() -> ExitCode {
             json_schema::init_mod_json_schema(cx)?;
             init_mod_llm(cx)?;
             init_mod_mcp(cx)?;
-            init_mod_sandbox(cx)?;
 
             setup_globals(cx, &argv, &exec_argv, &exe_path)
         })

@@ -4,6 +4,8 @@
 mod class_io_handle;
 mod cron;
 mod download;
+pub(crate) mod pipe_bridge;
+pub(crate) mod sandbox;
 mod persistent;
 mod signal;
 mod spawn;
