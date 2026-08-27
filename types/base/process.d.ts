@@ -257,6 +257,8 @@ declare namespace Aike {
   interface Subprocess {
     /** Child process PID. */
     pid: number;
+    /** Whether this child was spawned inside a sandbox. */
+    sandboxed: boolean;
     /** Writable stdin handle (StdioHandle or null). */
     stdin: StdioHandle | null;
     /** Readable stdout handle (StdioHandle or null). */

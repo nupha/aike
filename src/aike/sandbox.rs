@@ -467,6 +467,7 @@ pub(crate) fn spawn_async_sandboxed(
 
     let mut result = ctx.create_base_object()?;
     result.define_property_value_str(ctx, "pid", JSValue::from(pid), JS_PROP_ENUMERABLE)?;
+    result.define_property_value_str(ctx, "sandboxed", JSValue::TRUE, JS_PROP_ENUMERABLE)?;
     result.define_property_value_str(ctx, "stdin", stdin_val, JS_PROP_C_W_E)?;
     result.define_property_value_str(ctx, "stdout", stdout_val, JS_PROP_C_W_E)?;
     result.define_property_value_str(ctx, "stderr", stderr_val, JS_PROP_C_W_E)?;
@@ -651,6 +652,7 @@ fn build_sandbox_sync_result(
     let ta_out = TypedArray::create_from_vec_u8(ctx, out.stdout)?;
     let ta_err = TypedArray::create_from_vec_u8(ctx, out.stderr)?;
     result.define_property_value_str(ctx, "pid", JSValue::from(pid), JS_PROP_C_W_E)?;
+    result.define_property_value_str(ctx, "sandboxed", JSValue::TRUE, JS_PROP_ENUMERABLE)?;
     result.define_property_value_str(ctx, "stdout", ta_out.into(), JS_PROP_C_W_E)?;
     result.define_property_value_str(ctx, "stderr", ta_err.into(), JS_PROP_C_W_E)?;
     result.define_property_value_str(ctx, "exitCode", JSValue::from(exit_code), JS_PROP_C_W_E)?;
