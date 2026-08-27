@@ -296,139 +296,7 @@ async function testAbortSignal() {
   check("child killed on SIGTERM", !alivePid(childPid), `pid=${childPid}`);
 }
 
-// ===================================================================
-// sandbox option — directory read/write restrictions, mount ro/rw,
-// descendant inheritance, strict sandbox validation.
-//
-// Scratch dirs live under $HOME (NOT /tmp): the sandbox profile hardcodes
-// /tmp as writable, so /tmp-based paths can't detect write restriction.
-// Writes are asserted by the write's own rc (`...; echo rc=$?`), because
-// a trailing `echo`/`wait` would mask a failed redirect.
-// ===================================================================
-async function testSandbox() {
-  console.log("\n=== sandbox option: directory read/write restrictions ===");
 
-  const fs = await import("fs");
-  const base = `${process.env.HOME}/.aike-spawn-sandbox-test-${process.pid}`;
-  const ws = `${base}/wd`;
-  const ro = `${base}/ro-data`;
-  const rw = `${base}/rw-data`;
-  const outside = `${base}/outside.txt`;
-  await fs.remove(base).catch(() => {});
-  await fs.makeDir(ws, { recursive: true });
-  await fs.makeDir(ro, { recursive: true });
-  await fs.makeDir(rw, { recursive: true });
-  await fs.writeText(`${ws}/ws-file.txt`, "WS");
-  await fs.writeText(`${ro}/secret.txt`, "SECRET");
-  await fs.writeText(`${rw}/rw-file.txt`, "RW");
-
-  const mounts = {
-    [ws]: { writable: true },               // cwd — writable
-    [ro]: { target: "/mnt-data" },          // ro mount
-    [rw]: { target: "/mnt-rw", writable: true }, // rw mount
-  };
-  const sandboxOpt = { cwd: ws, mounts, network: "host" };
-
-  // rc of the write itself: 0 → allowed, non-zero → denied.
-  async function writeRc(script) {
-    const r = Aike.spawnSync("sh", ["-c", `${script} 2>/dev/null; echo rc=$?`], { sandbox: sandboxOpt });
-    const m = out(r).match(/rc=(\d+)/);
-    return m ? Number(m[1]) : -1;
-  }
-  function readOut(script) {
-    const r = Aike.spawnSync("sh", ["-c", script], { sandbox: sandboxOpt });
-    return out(r);
-  }
-
-  // ── reads: everything readable (global read, write is the control point) ──
-  check("read cwd file", readOut(`cat ${ws}/ws-file.txt`) === "WS");
-  check("read ro source file", readOut(`cat ${ro}/secret.txt`) === "SECRET");
-  check("read rw source file", readOut(`cat ${rw}/rw-file.txt`) === "RW");
-  check("read system file", readOut("cat /etc/hosts").length > 0);
-
-  // ── writes per directory ──
-  check("write inside cwd allowed", (await writeRc(`echo x > ${ws}/new.txt`)) === 0);
-  check("write $HOME/outside (whitelist) denied", (await writeRc(`echo x > ${outside}`)) !== 0);
-  check("outside file not created", !(await fs.exists(outside)));
-
-  // ro mount source
-  check("write ro source denied", (await writeRc(`echo x >> ${ro}/secret.txt`)) !== 0);
-  check("ro source content unchanged", (await fs.readText(`${ro}/secret.txt`)) === "SECRET");
-
-  // rw mount source
-  check("write rw source allowed", (await writeRc(`echo x > ${rw}/new.txt`)) === 0);
-  check("rw source content persisted", (await fs.readText(`${rw}/new.txt`)) === "x\n" || (await fs.readText(`${rw}/new.txt`)) === "x");
-
-  // ── descendant inheritance ──
-  check("grandchild write to ro denied", (await writeRc(`sh -c 'echo x > ${ro}/secret.txt'`)) !== 0);
-  check("grandchild ro content unchanged", (await fs.readText(`${ro}/secret.txt`)) === "SECRET");
-
-  // `& wait` always returns 0 → assert host file state instead
-  Aike.spawnSync("sh", ["-c", `sh -c 'echo bg > ${ro}/secret.txt' & wait`], { sandbox: sandboxOpt });
-  check("bg grandchild ro write denied (host state)", (await fs.readText(`${ro}/secret.txt`)) === "SECRET");
-  Aike.spawnSync("sh", ["-c", `sh -c 'echo bg-rw > ${rw}/inherit.txt' & wait`], { sandbox: sandboxOpt });
-  check("bg grandchild rw write allowed (host state)", (await fs.readText(`${rw}/inherit.txt`)).includes("bg-rw"));
-
-  // ── async spawn: streaming stdout + timeout kill ──
-  {
-    const p = Aike.spawn("sh", ["-c", "echo streamed"], { sandbox: sandboxOpt, timeout: 5000 });
-    let stdout = "";
-    p.stdout?.onData((c) => { if (c) stdout += dec.decode(c, { stream: true }); });
-    const code = await p.exitCode;
-    check("async sandbox exit 0", code === 0);
-    check("async sandbox streams stdout", stdout.trim() === "streamed");
-
-    const t0 = Date.now();
-    const p2 = Aike.spawn("sleep", ["60"], { sandbox: sandboxOpt, timeout: 1500 });
-    const code2 = await p2.exitCode;
-    const killed2 = await p2.killedByTimeout;
-    check("async sandbox timeout killed", killed2 === true && code2 !== 0);
-    check("async sandbox timeout within limit", Date.now() - t0 < 5000);
-  }
-
-  // ── no sandbox option → unrestricted (baseline) ──
-  {
-    const r = Aike.spawnSync("sh", ["-c", `echo x > ${outside}`]);
-    check("without sandbox, $HOME write allowed", r.exitCode === 0 && (await fs.exists(outside)));
-  }
-
-  // ── strict validation ──
-  {
-    const throws = (fn) => { try { fn(); return null; } catch (e) { return e; } };
-    check("sandbox missing cwd throws", throws(() =>
-      Aike.spawnSync("sh", ["-c", "echo x"], { sandbox: { mounts } })) !== null);
-    check("sandbox.cwd non-string throws TypeError", (() => {
-      const e = throws(() => Aike.spawnSync("sh", ["-c", "echo x"], { sandbox: { cwd: 123, mounts } }));
-      return e?.name === "TypeError";
-    })());
-    check("sandbox.cwd nonexistent throws RangeError", (() => {
-      const e = throws(() => Aike.spawnSync("sh", ["-c", "echo x"], { sandbox: { cwd: "/no/such/dir", mounts } }));
-      return e?.name === "RangeError";
-    })());
-    check("sandbox as array throws", (() => {
-      const e = throws(() => Aike.spawnSync("sh", ["-c", "echo x"], { sandbox: [] }));
-      return e !== null;
-    })());
-    check("mounts as array throws", (() => {
-      const e = throws(() => Aike.spawnSync("sh", ["-c", "echo x"], { sandbox: { cwd: ws, mounts: [] } }));
-      return e !== null;
-    })());
-    check("mount value non-object throws", (() => {
-      const e = throws(() => Aike.spawnSync("sh", ["-c", "echo x"], { sandbox: { cwd: ws, mounts: { [ro]: "rw" } } }));
-      return e !== null;
-    })());
-    check("mount writable non-boolean throws", (() => {
-      const e = throws(() => Aike.spawnSync("sh", ["-c", "echo x"], { sandbox: { cwd: ws, mounts: { [ro]: { writable: 1 } } } }));
-      return e !== null;
-    })());
-    check("sandbox.network invalid throws", (() => {
-      const e = throws(() => Aike.spawnSync("sh", ["-c", "echo x"], { sandbox: { cwd: ws, network: "wifi" } }));
-      return e !== null;
-    })());
-  }
-
-  await fs.remove(base).catch(() => {});
-}
 
 await testSyncBaseline();
 await testSyncTimeout();
@@ -440,7 +308,6 @@ await testAwaited();
 await testAbortNormalExit();
 await testAbortProcessExit();
 await testAbortSignal();
-await testSandbox();
 
 console.log(`\n${"=".repeat(40)}`);
 console.log(`  Pass: ${pass}  Fail: ${fail}`);

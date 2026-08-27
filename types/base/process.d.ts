@@ -348,28 +348,59 @@ declare namespace Aike {
     mounts?: Record<string, SandboxMountOptions>;
     tmpfs?: { path: string; size: number }[];
     rootfs?: string;
-    /** Memory limit in bytes. */
+    /**
+     * Memory limit in bytes.
+     * NOTE: Not enforced on macOS (sandbox uses per-process memlimit only).
+     */
     memoryLimit?: number;
-    /** CPU limit, 0 < n <= core count; fractions allowed. */
+    /**
+     * CPU limit, 0 < n <= core count; fractions allowed.
+     * NOTE: Not enforced on macOS.
+     */
     cpuLimit?: number;
     /** Wall-clock time limit in milliseconds (also enforced independently). */
     wallTimeLimitMs?: number;
     /** CPU time limit in milliseconds. */
     cpuTimeLimitMs?: number;
+    /**
+     * Max concurrent processes (PIDs) in the sandbox.
+     * NOTE: Not enforced on macOS.
+     */
     maxPids?: number;
+    /** Max file size in bytes for files created inside the sandbox. */
     maxFileSize?: number;
+    /**
+     * Max open file descriptors per process.
+     * NOTE: Not enforced on macOS.
+     */
     maxOpenFiles?: number;
     /** "none" (default) | full host network | domain allowlist (proxied). */
     network?: "none" | "host" | { allow: string[] };
+    /**
+     * Seccomp syscall filter profile (Linux only).
+     * NOTE: Ignored on macOS (no seccomp support).
+     */
     seccompProfile?:
       | "disabled"
       | "strict"
       | "standard"
       | "permissive"
       | string[];
+    /**
+     * Run as this UID inside the sandbox.
+     * NOTE: Not enforced on macOS.
+     */
     uid?: number;
+    /**
+     * Run as this GID inside the sandbox.
+     * NOTE: Not enforced on macOS.
+     */
     gid?: number;
     env?: Record<string, string>;
+    /**
+     * Set hostname inside the sandbox.
+     * NOTE: Not enforced on macOS.
+     */
     hostname?: string;
     // `cwd` intentionally NOT here: spawn's top-level `cwd` doubles as the
     // sandbox working directory when sandboxing is enabled.
