@@ -80,9 +80,7 @@ declare module "llama" {
     splitMode?: string | number;
     mainGpu?: number;
     vocabOnly?: boolean;
-    useMmap?: boolean;
-    useDirectIo?: boolean;
-    useMlock?: boolean;
+    loadMode?: string | number;
     checkTensors?: boolean;
     useExtraBufts?: boolean;
     noHost?: boolean;

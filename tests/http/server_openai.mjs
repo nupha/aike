@@ -26,8 +26,7 @@ if (!MODEL_PATH) {
 
 console.log("[server_llama] loading model:", MODEL_PATH);
 const model = await Model.load(MODEL_PATH, {
-  useMmap: true,
-  useDirectIo: true,
+  loadMode: "dio",
   gpuLayers: 99,
   splitMode: "none",
   checkTensors: false,

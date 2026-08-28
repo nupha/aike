@@ -11,8 +11,8 @@ use std::{
 
 use linkme::distributed_slice;
 use llama::{
-    AttentionType, BackendDevice, FlashAttentionType, KVCacheType, LlamaContext, LlamaModel,
-    ModelOptions, PoolingType, RopeScalingType, SplitMode,
+    AttentionType, BackendDevice, FlashAttentionType, KVCacheType, LlamaContext, LlamaLoadMode,
+    LlamaModel, ModelOptions, PoolingType, RopeScalingType, SplitMode,
 };
 use zuqe::{
     Array, CallContext, ClassCtorDef, ClassID, FieldDef, JS_PROP_ENUMERABLE, JSResult, JSValue,
@@ -119,6 +119,26 @@ fn parse_split_mode(ctx: &mut ScopedContext, val: &JSValue) -> Result<SplitMode,
         .ok_or_else(|| ctx.throw_type_error("splitMode must be 0..3 or none/layer/row/tensor"))
 }
 
+fn parse_load_mode(ctx: &mut ScopedContext, val: &JSValue) -> Result<LlamaLoadMode, i32> {
+    if let Some(s) = val.as_string(true) {
+        return s
+            .content()
+            .encode_utf8(false)
+            .as_ref()
+            .parse::<LlamaLoadMode>()
+            .ok()
+            .ok_or_else(|| {
+                ctx.throw_type_error(
+                    "loadMode must be one of: auto | none | mmap | mlock | mmap+mlock | dio",
+                )
+            });
+    }
+
+    let n = val.to_number(ctx)?.to_i32();
+    LlamaLoadMode::from_i32(n)
+        .ok_or_else(|| ctx.throw_type_error("loadMode must be -1..4 or auto/none/mmap/mlock/mmap+mlock/dio"))
+}
+
 fn parse_model_options(ctx: &mut ScopedContext, cc: &CallContext) -> Result<ModelOptions, i32> {
     let mut out = ModelOptions::default();
 
@@ -172,19 +192,9 @@ fn parse_model_options(ctx: &mut ScopedContext, cc: &CallContext) -> Result<Mode
         out.vocab_only = Some(v.to_bool()?);
     }
 
-    let v = opts.get_property_str(ctx, "useMmap")?;
+    let v = opts.get_property_str(ctx, "loadMode")?;
     if !v.is_undefined() {
-        out.use_mmap = Some(v.to_bool()?);
-    }
-
-    let v = opts.get_property_str(ctx, "useDirectIo")?;
-    if !v.is_undefined() {
-        out.use_direct_io = Some(v.to_bool()?);
-    }
-
-    let v = opts.get_property_str(ctx, "useMlock")?;
-    if !v.is_undefined() {
-        out.use_mlock = Some(v.to_bool()?);
+        out.load_mode = Some(parse_load_mode(ctx, &v)?);
     }
 
     let v = opts.get_property_str(ctx, "checkTensors")?;
@@ -207,11 +217,16 @@ fn parse_model_options(ctx: &mut ScopedContext, cc: &CallContext) -> Result<Mode
         out.no_alloc = Some(v.to_bool()?);
     }
 
-    // llama.cpp currently asserts on the combination of no_alloc + use_mmap.
-    // If user enables noAlloc without explicitly disabling useMmap, ignore noAlloc.
-    if out.no_alloc == Some(true) && out.use_mmap != Some(false) {
+    // llama.cpp currently asserts on the combination of no_alloc + mmap loading.
+    // If user enables noAlloc without explicitly switching to a non-mmap load mode, ignore noAlloc.
+    if out.no_alloc == Some(true)
+        && !matches!(
+            out.load_mode,
+            Some(LlamaLoadMode::None | LlamaLoadMode::Mlock | LlamaLoadMode::DirectIo)
+        )
+    {
         eprintln!(
-            "[warn] ModelOptions.noAlloc is ignored when useMmap is enabled; set useMmap: false to use noAlloc"
+            "[warn] ModelOptions.noAlloc is ignored when mmap loading is enabled; set loadMode to a non-mmap mode (e.g. \"mlock\") to use noAlloc"
         );
         out.no_alloc = Some(false);
     }
