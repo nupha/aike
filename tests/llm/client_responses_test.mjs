@@ -125,3 +125,5 @@ if (fc) {
 
 console.log(pass + " passed, " + fail + " failed");
 if (fail > 0) throw new Error(fail + " test(s) failed");
+globalThis.mockHandle.shutdown();
+await globalThis.mockHandle.exit;

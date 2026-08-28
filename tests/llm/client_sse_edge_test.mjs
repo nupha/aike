@@ -137,3 +137,5 @@ console.log("F mid-error     :", JSON.stringify(await run("/mid-error")));
 console.log("G empty-args    :", JSON.stringify(summarize(await run("/empty-args"))));
 console.log("H text-then-tool:", JSON.stringify(summarize(await run("/text-then-tool"))));
 console.log("done: all scenarios executed");
+globalThis.h.shutdown();
+await globalThis.h.exit;
