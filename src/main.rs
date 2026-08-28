@@ -552,7 +552,7 @@ fn get_attr_type(ctx: &mut ScopedContext, attrs: JSValue) -> Option<String> {
 /// the real file URL: that keeps cache identity stable across repeated
 /// imports, makes `import.meta.url` point at the actual file, lets relative
 /// imports inside the module resolve correctly, and lets the loader dispatch
-/// searched `.zuqe` hits to `load_zapi_extension`.
+/// searched `.aike` hits to `load_zapi_extension`.
 fn js_module_normalizer(
     _ctx: &mut ScopedContext,
     base_name: &url::Url,
@@ -610,7 +610,7 @@ fn module_search_dirs() -> Vec<PathBuf> {
 ///
 /// Per directory (in order): if the joined path is a directory (dotted names
 /// like `abc.def` can be directories too), look for `index.js` / `index.ts`
-/// inside it; otherwise try `name.js`, `name.ts`, `name.zuqe` (native
+/// inside it; otherwise try `name.js`, `name.ts`, `name.aike` (native
 /// zapi extension), in that order.
 ///
 /// The first hit wins; a directory without index files falls through to the
@@ -641,7 +641,7 @@ fn search_module(name: &str, dirs: &[PathBuf]) -> Option<PathBuf> {
                 return Some(cand);
             }
         } else {
-            for ext in ["js", "ts", "zuqe"] {
+            for ext in ["js", "ts", "aike"] {
                 let p = cand.with_extension(ext);
                 if p.is_file() {
                     return Some(p);
@@ -669,7 +669,7 @@ fn js_module_loader(
     let is_native_lib = file_path
         .extension()
         .and_then(|e| e.to_str())
-        .is_some_and(|e| e == "zuqe");
+        .is_some_and(|e| e == "aike");
 
     if is_native_lib {
         return ctx.load_zapi_extension(&file_path);
@@ -882,21 +882,21 @@ mod search_tests {
     }
 
     #[test]
-    fn js_beats_ts_beats_zuqe() {
+    fn js_beats_ts_beats_aike() {
         let d = TempDir::new("order1");
         d.write("foo.js");
         d.write("foo.ts");
-        d.write("foo.zuqe");
+        d.write("foo.aike");
         assert_eq!(find("foo", &[&d]), Some(d.0.join("foo.js")));
 
         let d = TempDir::new("order2");
         d.write("foo.ts");
-        d.write("foo.zuqe");
+        d.write("foo.aike");
         assert_eq!(find("foo", &[&d]), Some(d.0.join("foo.ts")));
 
         let d = TempDir::new("order3");
-        d.write("foo.zuqe");
-        assert_eq!(find("foo", &[&d]), Some(d.0.join("foo.zuqe")));
+        d.write("foo.aike");
+        assert_eq!(find("foo", &[&d]), Some(d.0.join("foo.aike")));
 
         // raw platform suffixes are not module candidates
         let d = TempDir::new("order4");
