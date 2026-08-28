@@ -10,7 +10,7 @@ use std::io::Write;
 
 use crossbeam::channel::Receiver;
 
-use crate::llm::engine::caching::CHECKPOINT_AUTO_DUMP;
+use crate::ai::engine::caching::CHECKPOINT_AUTO_DUMP;
 
 use super::{
     caching::{ContextMode, find_swap_candidate},

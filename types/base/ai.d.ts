@@ -1,4 +1,4 @@
-declare module "llama" {
+declare module "ai" {
   export interface ChatMessage {
     role: "system" | "user" | "assistant" | "tool";
     content?: string;

@@ -6,7 +6,7 @@
 // Run:  AIKE_MODEL_PATH=../models/.../model.gguf cargo run -- tests/http/server_llama.mjs
 // Or pass the path inline (see MODEL_PATH below).
 
-import { Model } from "llama";
+import { Model } from "ai";
 import { HttpServer } from "http";
 
 // Model path: override via AIKE_MODEL_PATH env var (set on the cargo command),

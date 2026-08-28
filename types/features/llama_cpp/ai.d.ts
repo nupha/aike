@@ -1,7 +1,7 @@
-// Type declarations for the "llama" module — llama_cpp feature only.
-// Declarations augment the base `llama` module with local model support.
+// Type declarations for the "ai" module — llama_cpp feature only.
+// Declarations augment the base `ai` module with local model support.
 
-declare module "llama" {
+declare module "ai" {
   // ---------------------------------------------------------------------------
   // Enums
   // ---------------------------------------------------------------------------

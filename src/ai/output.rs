@@ -26,7 +26,7 @@ use uuid::Uuid;
 
 use crate::{
     helpers::now_unix_s,
-    llm::{
+    ai::{
         ERR_CANCELLED, ERR_ENGINE_SHUTDOWN, OUTMSG_FIELD_CHOICES, OUTMSG_FIELD_REASONING,
         engine::{EngineReply, GeneratedContent, StopReason},
     },

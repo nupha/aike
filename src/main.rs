@@ -18,7 +18,7 @@ mod http;
 mod inspect_value;
 mod json_schema;
 mod jsonl;
-mod llm;
+mod ai;
 mod mcp;
 mod path;
 mod process;
@@ -42,10 +42,10 @@ use zuqe::{
     ScopedContext,
 };
 
-use crate::{aike::gc_trace_signals, llm::init_mod_llm, mcp::gc_trace_stdio_state};
+use crate::{aike::gc_trace_signals, ai::init_mod_ai, mcp::gc_trace_stdio_state};
 
 #[cfg(feature = "llama_cpp")]
-use crate::llm::{JSEngine, JSLlmContext, JSLlmModel, JSSamplerChain};
+use crate::ai::{JSEngine, JSLlmContext, JSLlmModel, JSSamplerChain};
 
 use crate::{
     aike::{JSCronJob, JSFileHandle, JSStdioHandle, gc_trace_cron, gc_trace_io},
@@ -56,7 +56,7 @@ use crate::{
     helpers::canonicalize_path,
     html::{HtmlDocument, HtmlElement, init_mod_html},
     http::init_mod_http,
-    llm::JSLlmClient,
+    ai::JSLlmClient,
     mcp::init_mod_mcp,
     path::init_mod_path,
     process::gc_trace_next_tick,
@@ -357,7 +357,7 @@ async fn main() -> ExitCode {
             init_mod_yaml(cx)?;
             jsonl::init_mod_jsonl(cx)?;
             json_schema::init_mod_json_schema(cx)?;
-            init_mod_llm(cx)?;
+            init_mod_ai(cx)?;
             init_mod_mcp(cx)?;
 
             setup_globals(cx, &argv, &exec_argv, &exe_path)

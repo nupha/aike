@@ -1,7 +1,7 @@
-import { Client } from "llama";
+import { Client } from "ai";
 import { HttpServer } from "http";
 
-// client_test.mjs — JSLlmClient ("llama".Client) protocol tests against a
+// client_test.mjs — JSLlmClient ("ai".Client) protocol tests against a
 // built-in mock OpenAI-compatible server. Self-contained, no backend needed:
 //   ./target/debug/aike tests/llm/client_test.mjs
 // To run against a real server instead of the mock:

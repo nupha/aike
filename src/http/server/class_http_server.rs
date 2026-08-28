@@ -42,7 +42,7 @@ use crate::{
 };
 
 #[cfg(feature = "llama_cpp")]
-use crate::llm::{
+use crate::ai::{
     JSEngine,
     engine::{Engine, serve::engine_openai_router},
 };

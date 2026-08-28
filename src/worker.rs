@@ -67,7 +67,7 @@ struct Inner {
 /// (decode, sample, reset, embed, etc.) so they don't block the JS event loop.
 ///
 /// Workers communicate results back to JS via Promise channels
-/// (see `llm/class_context.rs` for usage).
+/// (see `ai/class_context.rs` for usage).
 ///
 /// Created lazily via `singleton()`.  Tuned via environment variables:
 /// - `LLAMA_JS_MIN_WORKERS`   (default: 1)

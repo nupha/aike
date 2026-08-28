@@ -31,8 +31,8 @@ use crate::{
         PromptThinkPattern, apply_chat_template, compute_keep_tokens, detect_prompt_think_pattern,
         now_unix_s, to_lark_tool_choice,
     },
-    llm::engine::{Engine, EngineReply, EngineTask, GrammarConfig, TaskConfig},
-    llm::output::{
+    ai::engine::{Engine, EngineReply, EngineTask, GrammarConfig, TaskConfig},
+    ai::output::{
         ChunkSSE, ParserKind, collect_engine_reply_to_json, redirect_engine_reply_to_chat_sse,
     },
 };
@@ -129,7 +129,7 @@ pub(crate) fn engine_openai_router(engine: Arc<Mutex<Engine>>) -> Router {
         )
         .route(
             "/v1/responses",
-            post(crate::llm::responses::handle_responses).with_state(engine.clone()),
+            post(crate::ai::responses::handle_responses).with_state(engine.clone()),
         )
 }
 
@@ -515,24 +515,24 @@ fn log_eval_response(
     let mut stop_reason = "unknown".to_string();
 
     if let Some(choices) = response
-        .get(crate::llm::OUTMSG_FIELD_CHOICES)
+        .get(crate::ai::OUTMSG_FIELD_CHOICES)
         .and_then(|c| c.as_array())
     {
         if let Some(choice) = choices.first() {
             if let Some(message) = choice.get("message") {
                 if let Some(c) = message
-                    .get(crate::llm::OUTMSG_FIELD_CONTENT)
+                    .get(crate::ai::OUTMSG_FIELD_CONTENT)
                     .and_then(|c| c.as_str())
                 {
                     output = c.to_string();
                 }
                 if let Some(c) = message
-                    .get(crate::llm::OUTMSG_FIELD_REASONING)
+                    .get(crate::ai::OUTMSG_FIELD_REASONING)
                     .and_then(|r| r.as_str())
                 {
                     reasoning = Some(c.to_string());
                 }
-                if let Some(calls) = message.get(crate::llm::OUTMSG_FIELD_TOOL_CALLS) {
+                if let Some(calls) = message.get(crate::ai::OUTMSG_FIELD_TOOL_CALLS) {
                     if let Some(arr) = calls.as_array() {
                         for call in arr {
                             if let Some(func) = call.get("function") {

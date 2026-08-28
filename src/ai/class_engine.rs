@@ -26,7 +26,7 @@ use crate::{
         PromptThinkPattern, apply_chat_template, compute_keep_tokens, detect_prompt_think_pattern,
         parse_chat_completion_req, to_lark_tool_choice,
     },
-    llm::output::{
+    ai::output::{
         ChunkSSE, ParserKind, collect_engine_reply_to_json, redirect_engine_reply_to_chat_sse,
         redirect_engine_reply_to_responses_sse,
     },
@@ -305,7 +305,7 @@ fn js_engine_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
 
     if is_stream {
         // Streaming: AsyncIterableIterator
-        let (chunk_tx, chunk_rx) = crossbeam::channel::bounded::<crate::llm::output::ChunkSSE>(8);
+        let (chunk_tx, chunk_rx) = crossbeam::channel::bounded::<crate::ai::output::ChunkSSE>(8);
         std::thread::spawn(move || {
             redirect_engine_reply_to_chat_sse(
                 rx,
@@ -319,22 +319,22 @@ fn js_engine_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
             );
         });
 
-        AsyncIterableIterator::create_with_receiver::<crate::llm::output::ChunkSSE>(
+        AsyncIterableIterator::create_with_receiver::<crate::ai::output::ChunkSSE>(
             ctx,
             chunk_rx,
             move |cx, chunk| -> Result<Option<JSValue>, i32> {
                 match chunk {
-                    crate::llm::output::ChunkSSE::Chunk(data) => {
+                    crate::ai::output::ChunkSSE::Chunk(data) => {
                         JSValue::from_serde_json(cx, &data).map(Some).map_err(|_| {
                             cx.throw_internal_error("serialize chunk failed");
                             -1
                         })
                     }
-                    crate::llm::output::ChunkSSE::Error(e) => {
+                    crate::ai::output::ChunkSSE::Error(e) => {
                         cx.throw_internal_error(&e);
                         Err(-1)
                     }
-                    crate::llm::output::ChunkSSE::Done => {
+                    crate::ai::output::ChunkSSE::Done => {
                         // End the iterator
                         Ok(None)
                     }
@@ -375,7 +375,7 @@ fn js_engine_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
                 let mut output = String::new();
                 let mut tool_calls = Vec::new();
                 if let Some(choices) = val
-                    .get(crate::llm::OUTMSG_FIELD_CHOICES)
+                    .get(crate::ai::OUTMSG_FIELD_CHOICES)
                     .and_then(|c| c.as_array())
                 {
                     if let Some(choice) = choices.first() {
@@ -526,13 +526,13 @@ fn js_engine_responses(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     }
     let messages: Vec<_> = input_items
         .iter()
-        .filter_map(crate::llm::responses::convert::input_item_to_chat_message)
+        .filter_map(crate::ai::responses::convert::input_item_to_chat_message)
         .collect();
 
     // Build prompt tokens
     let chat_tools: Option<Vec<async_openai::types::chat::ChatCompletionTools>> = tools
         .as_ref()
-        .map(|t| crate::llm::responses::convert::responses_tools_to_chat_tools(t));
+        .map(|t| crate::ai::responses::convert::responses_tools_to_chat_tools(t));
 
     let reasoning_effort = reasoning
         .as_ref()

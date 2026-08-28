@@ -1,4 +1,4 @@
-import { Client } from "llama";
+import { Client } from "ai";
 import { HttpServer } from "http";
 
 // client_responses_test.mjs — JSLlmClient Responses API (responsesOnce) against

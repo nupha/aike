@@ -72,7 +72,7 @@ fn get_devices(ctx: &mut ScopedContext, _: CallContext) -> JSResult {
     Array::from_values(ctx, lst).map(JSValue::from)
 }
 
-const MOD_LLAMA_ENTRIES: &[FieldDef] = &[
+const MOD_AI_ENTRIES: &[FieldDef] = &[
     FieldDef::CLASS(
         JSLlmClient::CLASS_NAME,
         JSLlmClient::class_id,
@@ -243,7 +243,7 @@ const MOD_LLAMA_ENTRIES: &[FieldDef] = &[
     FieldDef::FUNC("getDevices", 0, get_devices, 0),
 ];
 
-pub fn init_mod_llm(ctx: &mut ScopedContext) -> Result<(), i32> {
-    ctx.create_module("llama", MOD_LLAMA_ENTRIES)?;
+pub fn init_mod_ai(ctx: &mut ScopedContext) -> Result<(), i32> {
+    ctx.create_module("ai", MOD_AI_ENTRIES)?;
     Ok(())
 }
