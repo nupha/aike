@@ -3,6 +3,7 @@
 
 #![allow(non_snake_case)]
 
+mod ai;
 mod aike;
 mod browser;
 mod class_event_emitter;
@@ -18,7 +19,6 @@ mod http;
 mod inspect_value;
 mod json_schema;
 mod jsonl;
-mod ai;
 mod mcp;
 mod path;
 mod process;
@@ -42,12 +42,13 @@ use zuqe::{
     ScopedContext,
 };
 
-use crate::{aike::gc_trace_signals, ai::init_mod_ai, mcp::gc_trace_stdio_state};
+use crate::{ai::init_mod_ai, aike::gc_trace_signals, mcp::gc_trace_stdio_state};
 
 #[cfg(feature = "llama_cpp")]
 use crate::ai::{JSEngine, JSLlmContext, JSLlmModel, JSSamplerChain};
 
 use crate::{
+    ai::JSLlmClient,
     aike::{JSCronJob, JSFileHandle, JSStdioHandle, gc_trace_cron, gc_trace_io},
     browser::{JSPage, gc_trace_browser, init_mod_browser},
     class_event_emitter::JSEventEmitter,
@@ -56,7 +57,6 @@ use crate::{
     helpers::canonicalize_path,
     html::{HtmlDocument, HtmlElement, init_mod_html},
     http::init_mod_http,
-    ai::JSLlmClient,
     mcp::init_mod_mcp,
     path::init_mod_path,
     process::gc_trace_next_tick,
@@ -517,8 +517,9 @@ async fn main() -> ExitCode {
 /// Unix: `atexit` runs on normal exit and `std::process::exit` (libc::exit),
 /// covering paths that bypass main's epilogue; default signal handlers cover
 /// SIGTERM/SIGINT/SIGHUP/SIGQUIT. Windows: main's epilogue kills explicitly
-/// (ExitProcess skips atexit), plus the console-ctrl handler covers Ctrl-C;
-/// kill-on-close job objects remain as crash-path backstop.
+/// (ExitProcess skips atexit), plus the console-ctrl handler covers Ctrl-C,
+/// console close, logoff and shutdown; kill-on-close job objects remain as
+/// crash-path backstop.
 fn install_exit_cleanup() {
     #[cfg(not(windows))]
     {
@@ -531,6 +532,25 @@ fn install_exit_cleanup() {
             libc::atexit(exit_kill_children);
         }
     }
+    #[cfg(windows)]
+    {
+        // Console ctrl events terminate the process without running main's
+        // epilogue, so children must be killed here — same cleanup set.
+        unsafe extern "system" fn console_ctrl_handler(ctrl: u32) -> i32 {
+            crate::aike::kill_all_children();
+            crate::mcp::kill_all_mcp_children();
+            crate::browser::kill_all_spawned_browsers();
+            // 128+ctrl mirrors the Unix 128+signal convention. Never returns.
+            windows_sys::Win32::System::Threading::ExitProcess(128 + ctrl)
+        }
+        unsafe {
+            windows_sys::Win32::System::Console::SetConsoleCtrlHandler(
+                Some(console_ctrl_handler),
+                1,
+            );
+        }
+    }
+
     crate::aike::install_default_signal_handlers();
 }
 
