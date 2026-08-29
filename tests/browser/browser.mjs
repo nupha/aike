@@ -4,6 +4,7 @@
 //   Browser domain : getVersion, getWindowBounds, setWindowBounds, setDownloadBehavior
 //   Target domain  : getTargets, listPages, newContext, disposeContext
 //   Security domain: setIgnoreHTTPSErrors, handleCertificateError
+//   Process handle : Browser.spawn() — bin/cdpUrl/pid getters, kill()
 //
 // This is a self-contained, headless script — no external network is required
 // (pages are created against about:blank / data: URLs), so it can run anywhere
@@ -230,6 +231,48 @@ async function testCustomPort() {
   check("custom port close() resolved", true);
 }
 
+async function testSpawnProcess() {
+  console.log("\n=== Browser.spawn() process handle ===");
+
+  const proc = await Browser.spawn({ headless: true });
+  check("spawn() returns a handle", !!proc);
+
+  // All properties are proto getters — no own instance properties.
+  const ownKeys = Object.getOwnPropertyNames(proc);
+  check(
+    "no own instance properties (bin/cdpUrl/pid are proto getters)",
+    ownKeys.length === 0,
+    "got: " + JSON.stringify(ownKeys),
+  );
+
+  check(
+    "bin getter resolves the Chrome path",
+    typeof proc.bin === "string" && /chrome|chromium/i.test(proc.bin),
+    "got: " + proc.bin,
+  );
+  check(
+    "cdpUrl getter returns a ws:// URL",
+    typeof proc.cdpUrl === "string" && proc.cdpUrl.startsWith("ws://"),
+    "got: " + proc.cdpUrl,
+  );
+  check(
+    "pid getter returns a live process id",
+    typeof proc.pid === "number" && proc.pid > 0,
+    "got: " + proc.pid,
+  );
+
+  // The handle is usable: connect, round-trip a command, detach.
+  const b = await Browser.connect(proc.cdpUrl);
+  const ver = await b.getVersion();
+  check("connect() to spawned browser works", typeof ver?.product === "string");
+  await b.close();
+
+  // pid is live: reads through the child handle, null after kill().
+  await proc.kill();
+  check("pid getter is null after kill()", proc.pid === null, "got: " + proc.pid);
+  check("bin getter still readable after kill()", typeof proc.bin === "string");
+}
+
 async function main() {
   let browser;
   try {
@@ -254,6 +297,7 @@ async function main() {
     testBasicAPI,
     testMultipleTabs,
     testCustomPort,
+    testSpawnProcess,
   ];
   for (const fn of tests) {
     try {

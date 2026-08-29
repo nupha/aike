@@ -218,7 +218,11 @@ fn browser_promise(ctx: &mut ScopedContext, req: LaunchRequest) -> JSResult {
 pub(crate) struct BrowserProcessPayload {
     /// Shared with the spawn registry so runtime-exit cleanup can kill the
     /// process even if this handle was GC-collected.
-    pub(crate) child: Arc<tokio::sync::Mutex<Option<tokio::process::Child>>>,
+    pub(crate) child: ChildArcSlot,
+    /// Resolved browser binary path (surfaced via the `bin` getter).
+    pub(crate) bin: String,
+    /// Ready browser-level CDP WebSocket URL (surfaced via `cdpUrl`).
+    pub(crate) cdp_url: String,
 }
 
 /// `Browser.spawn(options?)` → Promise<BrowserProcess>
@@ -273,36 +277,20 @@ pub(crate) fn js_browser_spawn(ctx: &mut ScopedContext, cc: CallContext) -> JSRe
         return Err(ctx.throw_type_error("`spawn`: `args` requires `bin`"));
     }
 
-    let result_slot = PromiseResultSlot::<Result<(String, String, ChildArcSlot, Option<u32>), String>>::new();
+    let result_slot = PromiseResultSlot::<Result<(String, String, ChildArcSlot), String>>::new();
     let promise =
         Promise::create_with_result_slot(ctx, result_slot.clone(), |cx, payload| -> JSResult {
-            let (bin, cdp_url, child, pid) = payload.map_err(|e| cx.throw_internal_error(&e))?;
+            let (bin, cdp_url, child) = payload.map_err(|e| cx.throw_internal_error(&e))?;
 
-            let mut proc_obj = JSBrowserProcess::new_instance(
+            let proc_obj = JSBrowserProcess::new_instance(
                 cx,
                 JSValue::UNDEFINED,
-                BrowserProcessPayload { child },
+                BrowserProcessPayload {
+                    child,
+                    bin,
+                    cdp_url,
+                },
             )?;
-
-            // bin / cdpUrl readonly props
-            for (name, value) in [("bin", bin), ("cdpUrl", cdp_url)] {
-                let js = cx.create_string_from_utf8(value.into_bytes())?;
-                proc_obj.define_property_value_str(
-                    cx,
-                    name,
-                    JSValue::make_string(js),
-                    JS_PROP_C_W_E,
-                )?;
-            }
-
-            if let Some(p) = pid {
-                proc_obj.define_property_value_str(
-                    cx,
-                    "pid",
-                    JSValue::from(p as i32),
-                    JS_PROP_C_W_E,
-                )?;
-            }
 
             Ok(proc_obj.into())
         })?;
@@ -326,14 +314,12 @@ pub(crate) fn js_browser_spawn(ctx: &mut ScopedContext, cc: CallContext) -> JSRe
             }
         };
 
-        let pid = child.id();
-
         // Register for runtime-exit cleanup, then hand the same Arc to the
         // JS handle.
         let handle: ChildArcSlot = Arc::new(tokio::sync::Mutex::new(Some(child)));
         chrome::register_spawned_child(&handle);
 
-        result_slot.commit(Ok((bin, cdp_url, handle, pid))).ok();
+        result_slot.commit(Ok((bin, cdp_url, handle))).ok();
     });
 
     Ok(promise.into())
@@ -367,25 +353,46 @@ fn js_process_kill(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     Ok(promise.into())
 }
 
-/// `process.pid` getter — browser process id, or `null` once killed.
-fn js_process_pid(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+// magic constants for the BrowserProcess getters
+const GETTER_BIN: i16 = 0;
+const GETTER_CDP_URL: i16 = 1;
+const GETTER_PID: i16 = 2;
+
+/// Shared getter for `bin` / `cdpUrl` / `pid`.
+/// Selected by `magic`: 0=bin, 1=cdpUrl, 2=pid.
+fn js_process_get(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let payload = JSBrowserProcess::payload_of(&this)
         .ok_or_else(|| ctx.throw_type_error("not a BrowserProcess instance"))?;
-    let pid = payload
-        .child
-        .try_lock()
-        .ok()
-        .and_then(|g| g.as_ref().and_then(|c| c.id()));
-    match pid {
-        Some(pid) => Ok(JSValue::from(pid as i64)),
-        None => Ok(JSValue::NULL),
+    match cc.magic() as i16 {
+        GETTER_BIN => {
+            let s = ctx.create_string_from_utf8(payload.bin.clone().into_bytes())?;
+            Ok(JSValue::make_string(s))
+        }
+        GETTER_CDP_URL => {
+            let s = ctx.create_string_from_utf8(payload.cdp_url.clone().into_bytes())?;
+            Ok(JSValue::make_string(s))
+        }
+        GETTER_PID => {
+            let pid = payload
+                .child
+                .try_lock()
+                .ok()
+                .and_then(|g| g.as_ref().and_then(|c| c.id()));
+            match pid {
+                Some(pid) => Ok(JSValue::from(pid as i64)),
+                None => Ok(JSValue::NULL),
+            }
+        }
+        _ => Err(ctx.throw_internal_error("invalid BrowserProcess getter")),
     }
 }
 
 const PROCESS_PROTO: &[FieldDef] = &[
     FieldDef::FUNC("kill", 0, js_process_kill, 0),
-    FieldDef::GETSET("pid", Some(js_process_pid), None, 0),
+    FieldDef::GETSET("bin", Some(js_process_get), None, GETTER_BIN),
+    FieldDef::GETSET("cdpUrl", Some(js_process_get), None, GETTER_CDP_URL),
+    FieldDef::GETSET("pid", Some(js_process_get), None, GETTER_PID),
 ];
 
 const PROCESS_CTOR: ClassCtorDef = ClassCtorDef::new(
