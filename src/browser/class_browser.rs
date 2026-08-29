@@ -367,7 +367,26 @@ fn js_process_kill(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     Ok(promise.into())
 }
 
-const PROCESS_PROTO: &[FieldDef] = &[FieldDef::FUNC("kill", 0, js_process_kill, 0)];
+/// `process.pid` getter — browser process id, or `null` once killed.
+fn js_process_pid(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let this = cc.this();
+    let payload = JSBrowserProcess::payload_of(&this)
+        .ok_or_else(|| ctx.throw_type_error("not a BrowserProcess instance"))?;
+    let pid = payload
+        .child
+        .try_lock()
+        .ok()
+        .and_then(|g| g.as_ref().and_then(|c| c.id()));
+    match pid {
+        Some(pid) => Ok(JSValue::from(pid as i64)),
+        None => Ok(JSValue::NULL),
+    }
+}
+
+const PROCESS_PROTO: &[FieldDef] = &[
+    FieldDef::FUNC("kill", 0, js_process_kill, 0),
+    FieldDef::GETSET("pid", Some(js_process_pid), None, 0),
+];
 
 const PROCESS_CTOR: ClassCtorDef = ClassCtorDef::new(
     |ctx: &mut ScopedContext, _cc: CallContext| {
