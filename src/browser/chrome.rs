@@ -1,27 +1,151 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-//! Chrome process management — find, launch, stop.
+//! Chrome process management — find, spawn, stop.
 
-use std::time::Duration;
+use std::{
+    sync::{
+        Arc, Mutex, OnceLock,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::Duration,
+};
 
 use tokio::{process::Child, time::sleep};
 
-/// Launch Chrome with remote debugging enabled.
-/// Returns (child_handle, webSocketDebuggerUrl).
+/// Per-launch sequence number, makes auto-port user-data-dirs unique.
+static LAUNCH_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Child handles of live `Browser.spawn()` processes, killed at runtime exit.
+/// Dropping / GC-collecting the JS handle does NOT kill the process — that is
+/// the whole point of the explicit-ownership model (`kill()` or exit cleanup).
+static SPAWNED_BROWSERS: OnceLock<Mutex<Vec<Arc<tokio::sync::Mutex<Option<Child>>>>>> =
+    OnceLock::new();
+
+/// Kill every registered `Browser.spawn()` child. Called from the engine's
+/// atexit / signal-handler cleanup alongside `spawn::kill_all_children`.
+pub(crate) fn kill_all_spawned_browsers() {
+    if let Some(reg) = SPAWNED_BROWSERS.get() {
+        if let Ok(guard) = reg.lock() {
+            for arc in guard.iter() {
+                if let Ok(mut slot) = arc.try_lock()
+                    && let Some(child) = slot.as_mut()
+                {
+                    let _ = child.start_kill();
+                }
+            }
+        }
+    }
+}
+
+pub(crate) fn register_spawned_child(handle: &Arc<tokio::sync::Mutex<Option<Child>>>) {
+    let reg = SPAWNED_BROWSERS.get_or_init(|| Mutex::new(Vec::new()));
+    reg.lock().unwrap().push(handle.clone());
+}
+
+/// A spawned browser CDP server: resolved binary, process handle, and the
+/// ready browser-level CDP WebSocket URL.
+pub(crate) struct SpawnedBrowser {
+    pub(crate) bin: String,
+    pub(crate) child: Child,
+    pub(crate) cdp_url: String,
+}
+
+/// Spawn a browser CDP server process and wait until its endpoint is ready.
+///
+/// - `args == None` → auto mode: assemble the standard Chrome command line
+///   (`headless`/`proxy_url` apply); `bin` defaults to auto-detected Chrome.
+///   `port == 0` picks a free port discovered via DevToolsActivePort.
+/// - `args == Some` → custom command line (e.g. lightpanda): `bin` required,
+///   `port` must be explicit and the endpoint is polled at that port.
+pub(crate) async fn spawn(
+    bin: Option<&str>,
+    args: Option<&[String]>,
+    headless: bool,
+    port: u16,
+    proxy_url: Option<&str>,
+    kill_on_drop: bool,
+) -> Result<SpawnedBrowser, String> {
+    let user_data_dir = auto_data_dir(port);
+    let (bin, args) = match (bin, args) {
+        (Some(bin), Some(args)) => {
+            if port == 0 {
+                return Err("`args` requires an explicit `port`".to_string());
+            }
+            (bin.to_string(), args.to_vec())
+        }
+        (bin, None) => {
+            let bin = bin
+                .map(|s| s.to_string())
+                .or_else(find_chrome)
+                .ok_or_else(|| {
+                    "Chrome/Chromium not found. Install Chrome or set `bin`.".to_string()
+                })?;
+            (bin, chrome_args(headless, port, proxy_url, &user_data_dir))
+        }
+        (None, Some(_)) => return Err("`args` requires `bin`".to_string()),
+    };
+
+    let mut cmd = tokio::process::Command::new(&bin);
+    cmd.args(&args)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    if kill_on_drop {
+        cmd.kill_on_drop(true);
+    }
+    let child = cmd
+        .spawn()
+        .map_err(|e| format!("failed to spawn `{bin}`: {e}"))?;
+
+    // Auto port: discover the real endpoint from DevToolsActivePort; explicit
+    // port: poll the known /json/version endpoint.
+    let cdp_url = if port == 0 {
+        wait_for_devtools_port(&user_data_dir).await?
+    } else {
+        wait_for_debug_url(port).await?
+    };
+
+    Ok(SpawnedBrowser {
+        bin,
+        child,
+        cdp_url,
+    })
+}
+
+/// `Browser.launch()` sugar: auto-mode spawn owning the process (killed when
+/// the owning Browser object is dropped / closed).
 pub(crate) async fn launch(
     headless: bool,
     port: u16,
     proxy_url: Option<&str>,
     chrome_path: Option<&str>,
 ) -> Result<(Child, String), String> {
-    let path = chrome_path
-        .map(|p| p.to_string())
-        .or_else(find_chrome)
-        .ok_or_else(|| {
-            "Chrome/Chromium not found. Install Chrome or set chromePath.".to_string()
-        })?;
+    let spawned = spawn(chrome_path, None, headless, port, proxy_url, true).await?;
+    Ok((spawned.child, spawned.cdp_url))
+}
 
+/// Unique per-launch user-data-dir (pid + seq); explicit-port launches keep
+/// the historical `aike-chrome-<port>` name.
+fn auto_data_dir(port: u16) -> std::path::PathBuf {
+    let dir_name = if port == 0 {
+        format!(
+            "aike-chrome-{}-{}",
+            std::process::id(),
+            LAUNCH_SEQ.fetch_add(1, Ordering::Relaxed)
+        )
+    } else {
+        format!("aike-chrome-{}", port)
+    };
+    std::env::temp_dir().join(dir_name)
+}
+
+/// Assemble the standard Chrome command line (incl. anti-detection flags).
+fn chrome_args(
+    headless: bool,
+    port: u16,
+    proxy_url: Option<&str>,
+    user_data_dir: &std::path::Path,
+) -> Vec<String> {
     let mut args: Vec<String> = vec![
         format!("--remote-debugging-port={}", port),
         "--no-first-run".to_string(),
@@ -32,12 +156,7 @@ pub(crate) async fn launch(
         // Use a temp user-data-dir so remote debugging port reliably opens.
         // Without this, modern Chrome on macOS may silently skip the debug.
         // Set window-size so the actual Chrome frame is large enough.
-        format!(
-            "--user-data-dir={}",
-            std::env::temp_dir()
-                .join(format!("aike-chrome-{}", port))
-                .display()
-        ),
+        format!("--user-data-dir={}", user_data_dir.display()),
 
         // === Anti-detection parameters (Phase 1) ===
         // Hide navigator.webdriver attribute (most important one)
@@ -70,19 +189,26 @@ pub(crate) async fn launch(
     if let Some(proxy) = proxy_url {
         args.push(format!("--proxy-server={}", proxy));
     }
+    args
+}
 
-    let child = tokio::process::Command::new(&path)
-        .args(&args)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .kill_on_drop(true)
-        .spawn()
-        .map_err(|e| format!("failed to launch Chrome: {e}"))?;
-
-    // Wait for Chrome's DevTools HTTP endpoint to become ready
-    let ws_url = wait_for_debug_url(port).await?;
-
-    Ok((child, ws_url))
+/// Poll `<user-data-dir>/DevToolsActivePort` (written by Chrome once the debug
+/// server binds) and build the browser WS url from it: line 1 is the port,
+/// line 2 is the browser target path.
+async fn wait_for_devtools_port(user_data_dir: &std::path::Path) -> Result<String, String> {
+    let file = user_data_dir.join("DevToolsActivePort");
+    for _ in 0..300 {
+        if let Ok(content) = std::fs::read_to_string(&file) {
+            let mut lines = content.lines();
+            if let (Some(port), Some(path)) = (lines.next(), lines.next()) {
+                if let Ok(port) = port.trim().parse::<u16>() {
+                    return Ok(format!("ws://127.0.0.1:{}{}", port, path.trim()));
+                }
+            }
+        }
+        sleep(Duration::from_millis(100)).await;
+    }
+    Err("Chrome did not write DevToolsActivePort within 30 seconds".into())
 }
 
 /// Poll Chrome's /json/version until webSocketDebuggerUrl appears.

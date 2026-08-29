@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use linkme::distributed_slice;
 use zuqe::{
-    CallContext, ClassCtorDef, ClassID, FieldDef, JS_PROP_C_W_E, JSResult, JSValue, Runtime,
+    Array, CallContext, ClassCtorDef, ClassID, FieldDef, JS_PROP_C_W_E, JSResult, JSValue, Runtime,
     ScopedContext,
     builtins::promise::{Promise, PromiseResultSlot},
     def_native_object,
@@ -84,28 +84,84 @@ pub(crate) struct LaunchData {
     pub(crate) child: Option<tokio::process::Child>,
 }
 
+/// Normalized launch request shared by `launch` / `connect`.
+struct LaunchRequest {
+    headless: bool,
+    port: u16,
+    proxy_url: Option<String>,
+    chrome_path: Option<String>,
+    cdp_url: Option<String>,
+}
+
+impl Default for LaunchRequest {
+    fn default() -> Self {
+        Self {
+            headless: true,
+            port: 0, // 0 = auto-assign a free port
+            proxy_url: None,
+            chrome_path: None,
+            cdp_url: None,
+        }
+    }
+}
+
 /// `launch(options?)` → Promise<Browser> (exported from the `browser` module)
 pub(crate) fn js_browser_launch(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let mut headless = true;
-    let mut port = 9222u16;
-    let mut proxy_url: Option<String> = None;
-    let mut chrome_path: Option<String> = None;
+    let mut req = LaunchRequest::default();
 
     if cc.length() > 0
         && let Some(opts) = cc.arg(0).as_object()
     {
-        proxy_url = get_str_prop(ctx, opts, "proxyUrl");
-        chrome_path = get_str_prop(ctx, opts, "chromePath");
+        req.proxy_url = get_str_prop(ctx, opts, "proxyUrl");
+        req.chrome_path = get_str_prop(ctx, opts, "chromePath");
+        req.cdp_url = get_str_prop(ctx, opts, "cdpUrl");
         if let Some(v) = get_number_prop(ctx, opts, "port") {
-            port = v as u16;
+            req.port = v as u16;
         }
         let hv = opts
             .get_property_str(ctx, "headless")
             .unwrap_or(JSValue::UNDEFINED);
         if !hv.is_undefined() {
-            headless = hv.to_bool().unwrap_or(false);
+            req.headless = hv.to_bool().unwrap_or(false);
         }
     }
+
+    browser_promise(ctx, req)
+}
+
+/// `Browser.connect(cdpUrl)` → Promise<Browser>
+///
+/// Attach to an already-running CDP server (e.g. from `Browser.spawn()` or an
+/// external browser). The returned Browser does NOT own the process — `close()`
+/// only disconnects.
+pub(crate) fn js_browser_connect(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let url = cc
+        .arg(0)
+        .as_string(true)
+        .map(|s| s.content().encode_utf8(false).to_string());
+    let Some(cdp_url) = url else {
+        return Err(ctx.throw_type_error("`connect` requires a `cdpUrl` string (ws://...)"));
+    };
+
+    browser_promise(
+        ctx,
+        LaunchRequest {
+            cdp_url: Some(cdp_url),
+            ..LaunchRequest::default()
+        },
+    )
+}
+
+/// Shared promise machinery for launch/connect: run the request, build the
+/// Browser object when the CDP connection is ready.
+fn browser_promise(ctx: &mut ScopedContext, req: LaunchRequest) -> JSResult {
+    let LaunchRequest {
+        headless,
+        port,
+        proxy_url,
+        chrome_path,
+        cdp_url,
+    } = req;
 
     let result_slot = PromiseResultSlot::<Result<LaunchData, String>>::new();
     let promise =
@@ -125,10 +181,25 @@ pub(crate) fn js_browser_launch(ctx: &mut ScopedContext, cc: CallContext) -> JSR
         })?;
 
     tokio::spawn(async move {
-        let result =
-            chrome::launch(headless, port, proxy_url.as_deref(), chrome_path.as_deref()).await;
+        // With `cdpUrl` attach to an already-running CDP server (no child
+        // process to own); otherwise spawn a browser and connect to it.
+        let outcome = if let Some(url) = cdp_url {
+            cdp::CdpClient::connect(&url).await.map(|(c, _)| (c, None))
+        } else {
+            match chrome::launch(headless, port, proxy_url.as_deref(), chrome_path.as_deref()).await
+            {
+                Ok((mut child, ws_url)) => match cdp::CdpClient::connect(&ws_url).await {
+                    Ok((c, _)) => Ok((c, Some(child))),
+                    Err(e) => {
+                        let _ = child.start_kill();
+                        Err(e)
+                    }
+                },
+                Err(e) => Err(e),
+            }
+        };
 
-        let (mut chrome_child, ws_url) = match result {
+        let (client, child) = match outcome {
             Ok(r) => r,
             Err(e) => {
                 result_slot.commit(Err(e)).ok();
@@ -136,23 +207,177 @@ pub(crate) fn js_browser_launch(ctx: &mut ScopedContext, cc: CallContext) -> JSR
             }
         };
 
-        let (client, _reader_handle) = match cdp::CdpClient::connect(&ws_url).await {
-            Ok(r) => r,
-            Err(e) => {
-                let _ = chrome_child.start_kill();
-                result_slot.commit(Err(e)).ok();
-                return;
-            }
-        };
-
-        let data = LaunchData {
-            client,
-            child: Some(chrome_child),
-        };
+        let data = LaunchData { client, child };
         result_slot.commit(Ok(data)).ok();
     });
 
     Ok(promise.into())
+}
+
+/// Payload of a `BrowserProcess` handle returned by `Browser.spawn()`.
+pub(crate) struct BrowserProcessPayload {
+    /// Shared with the spawn registry so runtime-exit cleanup can kill the
+    /// process even if this handle was GC-collected.
+    pub(crate) child: Arc<tokio::sync::Mutex<Option<tokio::process::Child>>>,
+}
+
+/// `Browser.spawn(options?)` → Promise<BrowserProcess>
+///
+/// Spawn a browser CDP server without connecting. Returns a process handle
+/// with the resolved `bin`, the ready `cdpUrl`, and an explicit `kill()`.
+/// The handle does NOT own the process lifetime — dropping it is harmless;
+/// the process dies on `kill()` or at runtime exit.
+pub(crate) fn js_browser_spawn(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let mut bin: Option<String> = None;
+    let mut args: Option<Vec<String>> = None;
+    let mut headless = true;
+    let mut port = 0u16; // 0 = auto-assign a free port
+    let mut proxy_url: Option<String> = None;
+
+    if cc.length() > 0
+        && let Some(opts) = cc.arg(0).as_object()
+    {
+        bin = get_str_prop(ctx, opts, "bin");
+        proxy_url = get_str_prop(ctx, opts, "proxyUrl");
+        if let Some(v) = get_number_prop(ctx, opts, "port") {
+            port = v as u16;
+        }
+        let hv = opts
+            .get_property_str(ctx, "headless")
+            .unwrap_or(JSValue::UNDEFINED);
+        if !hv.is_undefined() {
+            headless = hv.to_bool().unwrap_or(false);
+        }
+        if let Some(v) = opts
+            .get_property_str(ctx, "args")
+            .ok()
+            .filter(|v| !v.is_undefined())
+        {
+            let arr = Array::try_from(v)?;
+            let len = arr.get_length_prop(ctx)? as usize;
+            let mut out = Vec::with_capacity(len);
+            for i in 0..len {
+                let s = arr
+                    .get_property_u32(ctx, i as u32)?
+                    .to_string(ctx)?
+                    .content()
+                    .encode_utf8(false)
+                    .to_string();
+                out.push(s);
+            }
+            args = Some(out);
+        }
+    }
+
+    if args.is_some() && bin.is_none() {
+        return Err(ctx.throw_type_error("`spawn`: `args` requires `bin`"));
+    }
+
+    let result_slot = PromiseResultSlot::<Result<(String, String, ChildArcSlot), String>>::new();
+    let promise =
+        Promise::create_with_result_slot(ctx, result_slot.clone(), |cx, payload| -> JSResult {
+            let (bin, cdp_url, child) = payload.map_err(|e| cx.throw_internal_error(&e))?;
+
+            let mut proc_obj = JSBrowserProcess::new_instance(
+                cx,
+                JSValue::UNDEFINED,
+                BrowserProcessPayload { child },
+            )?;
+
+            // bin / cdpUrl readonly props
+            for (name, value) in [("bin", bin), ("cdpUrl", cdp_url)] {
+                let js = cx.create_string_from_utf8(value.into_bytes())?;
+                proc_obj.define_property_value_str(
+                    cx,
+                    name,
+                    JSValue::make_string(js),
+                    JS_PROP_C_W_E,
+                )?;
+            }
+
+            Ok(proc_obj.into())
+        })?;
+
+    tokio::spawn(async move {
+        let r = chrome::spawn(
+            bin.as_deref(),
+            args.as_deref(),
+            headless,
+            port,
+            proxy_url.as_deref(),
+            false,
+        )
+        .await;
+
+        let (bin, cdp_url, child) = match r {
+            Ok(s) => (s.bin, s.cdp_url, s.child),
+            Err(e) => {
+                result_slot.commit(Err(e)).ok();
+                return;
+            }
+        };
+
+        // Register for runtime-exit cleanup, then hand the same Arc to the
+        // JS handle.
+        let handle: ChildArcSlot = Arc::new(tokio::sync::Mutex::new(Some(child)));
+        chrome::register_spawned_child(&handle);
+
+        result_slot.commit(Ok((bin, cdp_url, handle))).ok();
+    });
+
+    Ok(promise.into())
+}
+
+type ChildArcSlot = Arc<tokio::sync::Mutex<Option<tokio::process::Child>>>;
+
+/// `process.kill()` — kill the spawned browser process; resolves after exit.
+fn js_process_kill(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let this = cc.this();
+    let payload = JSBrowserProcess::payload_of(&this)
+        .ok_or_else(|| ctx.throw_type_error("not a BrowserProcess instance"))?;
+    let child = payload.child.clone();
+
+    let result_slot = PromiseResultSlot::<Result<(), String>>::new();
+    let promise =
+        Promise::create_with_result_slot(ctx, result_slot.clone(), |cx, payload| -> JSResult {
+            payload.map_err(|e| cx.throw_internal_error(&e))?;
+            Ok(JSValue::UNDEFINED)
+        })?;
+
+    tokio::spawn(async move {
+        let mut guard = child.lock().await;
+        if let Some(mut child) = guard.take() {
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+        }
+        result_slot.commit(Ok(())).ok();
+    });
+
+    Ok(promise.into())
+}
+
+const PROCESS_PROTO: &[FieldDef] = &[FieldDef::FUNC("kill", 0, js_process_kill, 0)];
+
+const PROCESS_CTOR: ClassCtorDef = ClassCtorDef::new(
+    |ctx: &mut ScopedContext, _cc: CallContext| {
+        Err(ctx
+            .throw_type_error("BrowserProcess cannot be constructed directly; use Browser.spawn()"))
+    },
+    0,
+    false,
+);
+
+def_native_object!(
+    "BrowserProcess",
+    JSBrowserProcess,
+    BrowserProcessPayload,
+    PROCESS_PROTO,
+    Some(PROCESS_CTOR)
+);
+
+#[distributed_slice(USER_CLASS_DEFS)]
+fn register_browser_process(rt: &mut Runtime) -> Result<ClassID, i32> {
+    JSBrowserProcess::register(rt)
 }
 
 /// Extract the `BrowserPayload` from a `Browser` JS value.
@@ -322,8 +547,16 @@ fn js_browser_close(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         })?;
 
     tokio::spawn(async move {
-        let rx = client.send("Browser.close", None, None);
-        let _ = rx.await;
+        // Attach mode (no child process): don't send `Browser.close` — the
+        // external browser is not ours; just drop the connection.
+        let owns_process = chrome_child
+            .try_lock()
+            .map(|g| g.is_some())
+            .unwrap_or(false);
+        if owns_process {
+            let rx = client.send("Browser.close", None, None);
+            let _ = rx.await;
+        }
         // Kill the Chrome process
         if let Ok(mut guard) = chrome_child.try_lock() {
             if let Some(child) = guard.as_mut() {
@@ -500,7 +733,11 @@ const BROWSER_CTOR: ClassCtorDef = ClassCtorDef::new(
     0,
     false,
 )
-.entries(&[FieldDef::FUNC("launch", 1, js_browser_launch, 0)]);
+.entries(&[
+    FieldDef::FUNC("launch", 1, js_browser_launch, 0),
+    FieldDef::FUNC("spawn", 1, js_browser_spawn, 0),
+    FieldDef::FUNC("connect", 1, js_browser_connect, 0),
+]);
 
 def_native_object!(
     "Browser",

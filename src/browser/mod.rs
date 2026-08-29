@@ -24,7 +24,9 @@ mod tracing;
 
 pub use {class_browser::JSBrowser, class_page::JSPage};
 
-use zuqe::{gc_lite::GcTrace, gc_lite::GcTraceCtx, FieldDef, NativeObject, ScopedContext};
+pub(crate) use chrome::kill_all_spawned_browsers;
+
+use zuqe::{FieldDef, NativeObject, ScopedContext, gc_lite::GcTrace, gc_lite::GcTraceCtx};
 
 /// Single GC entry point for the whole browser module: traces every
 /// browser-side JS-callback registry so main.rs registers exactly one
@@ -55,7 +57,10 @@ pub(crate) fn gc_trace_browser(gcx: &mut GcTraceCtx) {
 
 /// Initialize the `browser` JS module (exports the `Browser` class).
 pub fn init_mod_browser(ctx: &mut ScopedContext) -> Result<(), i32> {
-    ctx.use_classes(&[JSBrowser::class_id()])?;
+    ctx.use_classes(&[
+        JSBrowser::class_id(),
+        class_browser::JSBrowserProcess::class_id(),
+    ])?;
 
     const MOD_BROWSER_ENTRIES: &[FieldDef] = &[FieldDef::CLASS(
         JSBrowser::CLASS_NAME,

@@ -508,6 +508,7 @@ async fn main() -> ExitCode {
     // atexit entirely, so this must happen explicitly before it.
     crate::aike::kill_all_children();
     crate::mcp::kill_all_mcp_children();
+    crate::browser::kill_all_spawned_browsers();
     std::process::exit(exit_code);
 }
 
@@ -524,6 +525,7 @@ fn install_exit_cleanup() {
         extern "C" fn exit_kill_children() {
             crate::aike::kill_all_children();
             crate::mcp::kill_all_mcp_children();
+            crate::browser::kill_all_spawned_browsers();
         }
         unsafe {
             libc::atexit(exit_kill_children);

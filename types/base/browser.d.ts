@@ -10,14 +10,58 @@ declare module "browser" {
   // =========================================================================
 
   interface LaunchOptions {
+    /**
+     * Attach to an already-running browser via its CDP endpoint
+     * (e.g. "ws://127.0.0.1:9222"). When set, no browser is spawned and
+     * `close()` only disconnects — the external process is left running.
+     */
+    cdpUrl?: string;
     /** Run browser in headless mode. Default: true */
     headless?: boolean;
     /** Proxy server URL (e.g. "http://127.0.0.1:7890"). */
     proxyUrl?: string;
     /** Custom Chrome/Chromium executable path. Auto-detected when omitted. */
     chromePath?: string;
-    /** Remote debugging port. Default: 9222 */
+    /** Remote debugging port. Default: auto-assigned free port (pass 0 for auto). */
     port?: number;
+  }
+
+  // =========================================================================
+  // Spawn options / process handle
+  // =========================================================================
+
+  interface SpawnOptions {
+    /**
+     * Browser binary to spawn. Omit → auto-detect system
+     * Chrome/Chromium/Brave/Edge (known install paths, then PATH).
+     */
+    bin?: string;
+    /**
+     * Full custom command line (e.g. `["serve", "--port", "9222"]` for
+     * lightpanda). Requires `bin` and an explicit `port`; `headless` /
+     * `proxyUrl` are ignored (the command line controls them).
+     */
+    args?: string[];
+    /** CDP port. Default: auto-assigned free port (auto mode only). */
+    port?: number;
+    /** Run browser in headless mode. Default: true (auto mode only). */
+    headless?: boolean;
+    /** Proxy server URL (auto mode only). */
+    proxyUrl?: string;
+  }
+
+  /**
+   * Handle to a browser process started by `Browser.spawn()`. Does NOT own
+   * the process lifetime: dropping / GC-collecting the handle is harmless;
+   * the process dies on `kill()` or at runtime exit.
+   */
+  interface BrowserProcess {
+    /** Resolved browser binary path. */
+    readonly bin: string;
+    /** Browser-level CDP WebSocket URL — pass to `Browser.connect()`. */
+    readonly cdpUrl: string;
+    /** Kill the browser process. Resolves after it has exited. */
+    kill(): Promise<void>;
   }
 
   // =========================================================================
@@ -577,12 +621,28 @@ declare module "browser" {
   // Module export
   // =========================================================================
 
-  /** The Browser class. Launch a Chrome instance via the static `launch` factory. */
+  /** The Browser class. Launch / spawn / connect via static factories. */
   export class Browser {
     /**
-     * Launch a Chrome browser instance.
+     * Spawn a browser AND connect to it, owning the process: `close()`
+     * kills it. Sugar over `spawn()` + `connect()`.
      * @returns A `Browser` instance (NOT a Page — call `browser.newPage()` next).
      */
     static launch(options?: LaunchOptions): Promise<Browser>;
+
+    /**
+     * Spawn a browser CDP server without connecting. Auto-detects system
+     * Chrome when `bin` is omitted; accepts a custom command line
+     * (e.g. lightpanda) via `bin` + `args` (+ explicit `port`).
+     * @returns A process handle with `bin`, `cdpUrl` and `kill()`.
+     */
+    static spawn(options?: SpawnOptions): Promise<BrowserProcess>;
+
+    /**
+     * Attach to an already-running CDP server (from `spawn()`, an external
+     * browser, or lightpanda). Does NOT own the process — `close()` only
+     * disconnects.
+     */
+    static connect(cdpUrl: string): Promise<Browser>;
   }
 }

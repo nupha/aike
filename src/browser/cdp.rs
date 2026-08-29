@@ -53,7 +53,8 @@ impl CdpClient {
     pub(crate) async fn connect(
         ws_url: &str,
     ) -> Result<(Self, tokio::task::JoinHandle<()>), String> {
-        let (ws_stream, _) = connect_async(ws_url)
+        let ws_url = Self::resolve_browser_url(ws_url).await?;
+        let (ws_stream, _) = connect_async(&ws_url)
             .await
             .map_err(|e| format!("CDP WebSocket connect failed: {e}"))?;
         let (writer, reader) = ws_stream.split();
@@ -77,6 +78,40 @@ impl CdpClient {
             },
             handle,
         ))
+    }
+
+    /// Resolve a bare-origin CDP URL (e.g. "ws://127.0.0.1:9222") to the full
+    /// browser WS endpoint via the /json/version HTTP endpoint — Chrome requires
+    /// the `/devtools/browser/<uuid>` path which changes on every launch.
+    /// URLs that already carry a path are used as-is.
+    async fn resolve_browser_url(ws_url: &str) -> Result<String, String> {
+        let (rest, scheme) = ws_url
+            .strip_prefix("wss://")
+            .map(|r| (r, "https://"))
+            .or_else(|| ws_url.strip_prefix("ws://").map(|r| (r, "http://")))
+            .ok_or_else(|| format!("`cdpUrl` must be a ws:// or wss:// URL, got `{ws_url}`"))?;
+
+        let authority = rest.split('/').next().unwrap_or("");
+        let path = &rest[authority.len()..];
+        if !path.is_empty() && path != "/" {
+            return Ok(ws_url.to_string());
+        }
+
+        let http_url = format!("{scheme}{authority}/json/version");
+        let resp = reqwest::Client::new()
+            .get(&http_url)
+            .timeout(std::time::Duration::from_secs(5))
+            .send()
+            .await
+            .map_err(|e| format!("failed to query CDP endpoint {http_url}: {e}"))?;
+        let json: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| format!("invalid /json/version response from {http_url}: {e}"))?;
+        json.get("webSocketDebuggerUrl")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .ok_or_else(|| format!("no webSocketDebuggerUrl in response from {http_url}"))
     }
 
     /// Background loop: forward commands to WS and dispatch responses / events.
