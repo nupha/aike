@@ -60,6 +60,8 @@ declare module "browser" {
     readonly bin: string;
     /** Browser-level CDP WebSocket URL — pass to `Browser.connect()`. */
     readonly cdpUrl: string;
+    /** OS process ID of the spawned browser. */
+    readonly pid: number;
     /** Kill the browser process. Resolves after it has exited. */
     kill(): Promise<void>;
   }

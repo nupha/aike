@@ -273,10 +273,10 @@ pub(crate) fn js_browser_spawn(ctx: &mut ScopedContext, cc: CallContext) -> JSRe
         return Err(ctx.throw_type_error("`spawn`: `args` requires `bin`"));
     }
 
-    let result_slot = PromiseResultSlot::<Result<(String, String, ChildArcSlot), String>>::new();
+    let result_slot = PromiseResultSlot::<Result<(String, String, ChildArcSlot, Option<u32>), String>>::new();
     let promise =
         Promise::create_with_result_slot(ctx, result_slot.clone(), |cx, payload| -> JSResult {
-            let (bin, cdp_url, child) = payload.map_err(|e| cx.throw_internal_error(&e))?;
+            let (bin, cdp_url, child, pid) = payload.map_err(|e| cx.throw_internal_error(&e))?;
 
             let mut proc_obj = JSBrowserProcess::new_instance(
                 cx,
@@ -291,6 +291,15 @@ pub(crate) fn js_browser_spawn(ctx: &mut ScopedContext, cc: CallContext) -> JSRe
                     cx,
                     name,
                     JSValue::make_string(js),
+                    JS_PROP_C_W_E,
+                )?;
+            }
+
+            if let Some(p) = pid {
+                proc_obj.define_property_value_str(
+                    cx,
+                    "pid",
+                    JSValue::from(p as i32),
                     JS_PROP_C_W_E,
                 )?;
             }
@@ -317,12 +326,14 @@ pub(crate) fn js_browser_spawn(ctx: &mut ScopedContext, cc: CallContext) -> JSRe
             }
         };
 
+        let pid = child.id();
+
         // Register for runtime-exit cleanup, then hand the same Arc to the
         // JS handle.
         let handle: ChildArcSlot = Arc::new(tokio::sync::Mutex::new(Some(child)));
         chrome::register_spawned_child(&handle);
 
-        result_slot.commit(Ok((bin, cdp_url, handle))).ok();
+        result_slot.commit(Ok((bin, cdp_url, handle, pid))).ok();
     });
 
     Ok(promise.into())
