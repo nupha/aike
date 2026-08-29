@@ -1,4 +1,4 @@
-import { Client } from "ai";
+import { LlmClient } from "ai";
 import { HttpServer } from "http";
 
 // client_responses_test.mjs — JSLlmClient Responses API (responsesOnce) against
@@ -72,7 +72,7 @@ svr.post("/v1/responses", async (req, res) => {
 globalThis.mockHandle = await svr.listen({ host: "127.0.0.1", port: 18141 });
 await new Promise((r) => setTimeout(r, 200));
 
-const cli = new Client({ baseUrl: MOCK + "/v1", apiKey: "test-key", model: "mock" });
+const cli = new LlmClient({ baseUrl: MOCK + "/v1", apiKey: "test-key", model: "mock" });
 
 const resp = await cli.responsesOnce({
   input: [

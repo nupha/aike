@@ -1,4 +1,4 @@
-import { Client } from "ai";
+import { LlmClient } from "ai";
 import { HttpServer } from "http";
 
 // SSE chunk builders
@@ -87,7 +87,7 @@ globalThis.h = await svr.listen({ host: "127.0.0.1", port: 18133 });
 await new Promise(r => setTimeout(r, 200));
 
 async function run(path) {
-  const client = new Client({ baseUrl: "http://127.0.0.1:18133/v1", apiKey: "t", model: "fake" });
+  const client = new LlmClient({ baseUrl: "http://127.0.0.1:18133/v1", apiKey: "t", model: "fake" });
   void 0;
   const chunks = [];
   try {

@@ -1,7 +1,7 @@
-import { Client } from "ai";
+import { LlmClient } from "ai";
 import { HttpServer } from "http";
 
-// client_test.mjs — JSLlmClient ("ai".Client) protocol tests against a
+// client_test.mjs — JSLlmClient ("ai".LlmClient) protocol tests against a
 // built-in mock OpenAI-compatible server. Self-contained, no backend needed:
 //   ./target/debug/aike tests/llm/client_test.mjs
 // To run against a real server instead of the mock:
@@ -90,7 +90,7 @@ await new Promise((r) => setTimeout(r, 200));
 
 // ---- constructor & getters ----
 
-const cli = new Client({
+const cli = new LlmClient({
   baseUrl: BASE,
   apiKey: "test-key",
   model: "mock-model",
@@ -102,8 +102,8 @@ check("getter maxTokens is number", typeof cli.maxTokens === "number");
 check("getter timeout", cli.timeout === 30);
 check("bufferedToolCall getter removed", cli.bufferedToolCall === undefined);
 
-const envCli = new Client({});
-check("new Client({}) with env/defaults", envCli instanceof Client);
+const envCli = new LlmClient({});
+check("new LlmClient({}) with env/defaults", envCli instanceof LlmClient);
 
 // ---- chatOnce ----
 
@@ -159,7 +159,7 @@ check("new Client({}) with env/defaults", envCli instanceof Client);
 // ---- responseNormalizer ----
 
 {
-  const cli2 = new Client({ baseUrl: BASE, apiKey: "test-key" });
+  const cli2 = new LlmClient({ baseUrl: BASE, apiKey: "test-key" });
   cli2.responseNormalizer = function (data) {
     // stream chunks carry delta, non-stream carries message
     const t0 = data.choices && data.choices[0];

@@ -43,11 +43,11 @@ pub(crate) fn get_client(ctx: &mut ScopedContext, val: JSValue) -> Result<Arc<Cl
     if let Some(c) = ob.payload() {
         Ok(c.clone())
     } else {
-        Err(ctx.throw_type_error("Client was detached"))
+        Err(ctx.throw_type_error("LlmClient was detached"))
     }
 }
 
-/// Constructor: new Client({apiKey, baseUrl, model?, timeout?})
+/// Constructor: new LlmClient({apiKey, baseUrl, model?, timeout?})
 fn js_client_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     // params from envvar
     let mut base_url = std::env::var("AIKE_LLM_BASE_URL").unwrap_or_default();
@@ -292,7 +292,7 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
 
     // Convert JS options to raw JSON, preserving all fields (including extension
     // fields like reasoning_content) that async-openai typed structs would drop.
-    // Client is a remote API proxy — it should forward everything, not filter.
+    // LlmClient is a remote API proxy — it should forward everything, not filter.
     let mut req_json = opts_obj.to_serde_json(ctx)?;
 
     // Extract per-request timeout (seconds), defaults to client-level timeout
@@ -337,7 +337,7 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
             if let Some(req_body) = b.as_object() {
                 if let Some(mut merged) = client.extra_body.as_object().cloned() {
                     // Merge default extra_body with per-request extra_body.
-                    // Client default extra_body serves as base, per-request fields override.
+                    // LlmClient default extra_body serves as base, per-request fields override.
                     for (k, v) in req_body.iter() {
                         merged.insert(k.clone(), v.clone());
                     }
@@ -788,7 +788,7 @@ const CLASS_CLIENT_PROTO: &[FieldDef] = &[
 ];
 
 def_native_object!(
-    "Client",
+    "LlmClient",
     JSLlmClient,
     Arc<ClientPayload>,
     CLASS_CLIENT_PROTO,

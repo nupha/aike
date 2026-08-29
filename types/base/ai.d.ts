@@ -79,10 +79,10 @@ declare module "ai" {
   }
 
   // ---------------------------------------------------------------------------
-  // Client — remote LLM client (always available)
+  // LlmClient — remote LLM client (always available)
   // ---------------------------------------------------------------------------
 
-  interface ClientOptions {
+  interface LlmClientOptions {
     apiKey?: string;
     baseUrl?: string;
     model?: string;
@@ -92,8 +92,8 @@ declare module "ai" {
   }
 
   /** Remote LLM client compatible with OpenAI chat API. */
-  export class Client {
-    constructor(options?: ClientOptions);
+  export class LlmClient {
+    constructor(options?: LlmClientOptions);
 
     readonly model: string;
     readonly baseUrl: string;
