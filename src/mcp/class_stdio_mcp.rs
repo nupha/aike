@@ -360,7 +360,7 @@ fn start_stdio_server(ctx: &mut ScopedContext, p: &McpServicePayload) -> Result<
     // Create crossbeam channel (same IncomingRequest mechanism as HTTP mode)
     let (js_tx, js_rx) = channel::unbounded::<IncomingRequest>();
     // Build McpService from payload (stdio: no native handlers, single endpoint).
-    let service = McpService::from_payload(p, js_tx, 0);
+    let service = McpService::from_payload(p, js_tx, 0, ctx.wake_handle());
 
     // Start JS poller job for tool call dispatch
     let mcp_tables = RefCell::new(vec![js_handlers.clone()]);
@@ -410,6 +410,7 @@ fn start_stdio_server(ctx: &mut ScopedContext, p: &McpServicePayload) -> Result<
         .ok();
 
     // Spawn background tokio task to run rmcp serve_server_with_ct
+    let wake = ctx.wake_handle();
     tokio::spawn(async move {
         // Create the cancellation token up front — before the handshake — so
         // stop()/SIGINT/SIGTERM can cancel even while serve_server_with_ct is
@@ -446,7 +447,9 @@ fn start_stdio_server(ctx: &mut ScopedContext, p: &McpServicePayload) -> Result<
                 is_running.store(false, Ordering::Release);
                 let _ = crate::repl::caupture_stdio(false);
                 close_stdin();
-                let _ = PollSender::from(tx).send_async(Ok(())).await;
+                if PollSender::from(tx).send_async(Ok(())).await.is_ok() {
+                    wake.wake();
+                }
                 return;
             }
         };
@@ -482,7 +485,9 @@ fn start_stdio_server(ctx: &mut ScopedContext, p: &McpServicePayload) -> Result<
         // task ends and the runtime can shut down. Safe here: stdin is the MCP
         // protocol and the process is exiting anyway.
         close_stdin();
-        let _ = PollSender::from(tx).send_async(Ok(())).await;
+        if PollSender::from(tx).send_async(Ok(())).await.is_ok() {
+            wake.wake();
+        }
     });
 
     Ok(promise)

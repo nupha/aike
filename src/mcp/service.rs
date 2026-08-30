@@ -81,6 +81,9 @@ pub(crate) struct McpService {
     js_tx: channel::Sender<IncomingRequest>,
     /// Index of this endpoint in the global mcp_tables
     endpoint_index: usize,
+    /// JS thread's event-loop wake handle (captured at construction);
+    /// `wake()`d after dispatching so a parked loop re-ticks promptly.
+    wake: zuqe::WakeHandle,
 }
 
 impl McpService {
@@ -93,6 +96,7 @@ impl McpService {
         version: String,
         description: String,
         instructions: String,
+        wake: zuqe::WakeHandle,
     ) -> Self {
         let native_handlers: HashMap<String, NativeMcpToolFn> = handlers
             .into_iter()
@@ -108,6 +112,7 @@ impl McpService {
             version,
             description,
             instructions,
+            wake,
         }
     }
 
@@ -117,6 +122,7 @@ impl McpService {
         p: &McpServicePayload,
         js_tx: channel::Sender<IncomingRequest>,
         endpoint_index: usize,
+        wake: zuqe::WakeHandle,
     ) -> Self {
         Self::new(
             p.schemas.clone(),
@@ -127,6 +133,7 @@ impl McpService {
             p.version.borrow().to_string(),
             p.description.borrow().to_string(),
             p.instructions.borrow().to_string(),
+            wake,
         )
     }
 }
@@ -233,6 +240,8 @@ impl ServerHandler for McpService {
                     params: arguments,
                     response_tx: resp_tx,
                 }));
+            self.wake.wake();
+
 
             // Send a "started" notification before JS handler runs.
             {
@@ -326,8 +335,9 @@ pub(crate) fn build_axum_mcp_route(
     p: &McpServicePayload,
     js_tx: channel::Sender<IncomingRequest>,
     endpoint_index: usize,
+    wake: zuqe::WakeHandle,
 ) -> axum::Router {
-    let service = McpService::from_payload(p, js_tx, endpoint_index);
+    let service = McpService::from_payload(p, js_tx, endpoint_index, wake);
     let config = StreamableHttpServerConfig::default()
         .with_legacy_session_mode(false)
         .disable_allowed_hosts();

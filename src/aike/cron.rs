@@ -100,20 +100,23 @@ fn normalize_cron_expr(expr: &str) -> String {
 }
 
 /// Spawn a tokio task that sleeps until next fire time
-fn spawn_cron_timer(id: u32, schedule: &Schedule) {
+fn spawn_cron_timer(ctx: &mut ScopedContext, id: u32, schedule: &Schedule) {
     // Clone tx on the JS thread before moving into tokio worker
     let tx = CRON_STATE.with_borrow(|opt| opt.as_ref().map(|s| s.tx.clone()));
     let Some(tx) = tx else { return };
+    let wake = ctx.wake_handle();
 
     let Some(delay_ms) = next_delay_ms(schedule) else {
         // No more future occurrences — auto-expire
         let _ = tx.send(CronMsg::Cancelled(id));
+        wake.wake();
         return;
     };
 
     tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(delay_ms)).await;
         let _ = tx.send(CronMsg::Fired(id));
+        wake.wake();
     });
 }
 
@@ -165,7 +168,7 @@ fn add_cron_notifier(ctx: &mut ScopedContext) {
                                 if let Some(s) = opt.as_ref()
                                     && let Some(e) = s.entries.get(&id)
                                 {
-                                    spawn_cron_timer(id, &e.schedule);
+                                    spawn_cron_timer(cx, id, &e.schedule);
                                 }
                             });
 
@@ -328,11 +331,7 @@ pub(super) fn js_schedule(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
         .map(JSValue::make_string)?;
 
     // Create native JSCronJob instance
-    let job_instance = JSCronJob::new_instance(
-        ctx,
-        JSValue::UNDEFINED,
-        CronJobPayload { id },
-    )?;
+    let job_instance = JSCronJob::new_instance(ctx, JSValue::UNDEFINED, CronJobPayload { id })?;
     let job_val: JSValue = job_instance.into();
 
     // Set data properties on the instance
@@ -362,7 +361,7 @@ pub(super) fn js_schedule(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
     });
 
     // Spawn first timer
-    spawn_cron_timer(id, &schedule);
+    spawn_cron_timer(ctx, id, &schedule);
 
     // Start poller if this is the first job
     if need_notifier {

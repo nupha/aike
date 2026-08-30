@@ -83,6 +83,7 @@ pub(crate) fn js_browser_handle_certificate_error(
     let _ = send_browser_void_cmd(ctx, &cc, "Security.enable", None);
 
     let (tx, rx) = channel::unbounded::<serde_json::Value>();
+    let wake = ctx.wake_handle();
     tokio::spawn(async move {
         let mut event_rx = client.subscribe_events();
         loop {
@@ -91,6 +92,7 @@ pub(crate) fn js_browser_handle_certificate_error(
                     if tx.send(evt.params.clone()).is_err() {
                         break;
                     }
+                    wake.wake();
                 }
                 Ok(_) => {}
                 Err(_) => break,

@@ -133,11 +133,14 @@ fn read_jsonl_impl(cx: &mut ScopedContext, path: PathBuf, on_error: OnError) -> 
             Array::from_values(cx2, values).map(JSValue::from)
         })?;
 
+    let wake = cx.wake_handle();
     tokio::spawn(async move {
         let res = tokio::fs::read_to_string(&path)
             .await
             .map_err(|e| e.to_string());
-        let _ = PollSender::from(tx).send_async(res).await;
+        if PollSender::from(tx).send_async(res).await.is_ok() {
+            wake.wake();
+        }
     });
 
     Ok(promise.into())
@@ -185,6 +188,7 @@ fn write_jsonl_impl(
             Ok(JSValue::UNDEFINED)
         })?;
 
+    let wake = cx.wake_handle();
     tokio::spawn(async move {
         let res = async {
             if append {
@@ -209,7 +213,9 @@ fn write_jsonl_impl(
         }
         .await
         .map_err(|e| e.to_string());
-        let _ = PollSender::from(tx).send_async(res).await;
+        if PollSender::from(tx).send_async(res).await.is_ok() {
+            wake.wake();
+        }
     });
 
     Ok(promise.into())

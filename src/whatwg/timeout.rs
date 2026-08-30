@@ -141,7 +141,12 @@ fn start_timer_task(ctx: &mut ScopedContext) {
                     });
                     return Ok(JobState::Done);
                 }
-                Some(t) if now < t => return Ok(JobState::Again),
+                Some(t) if now < t => {
+                    // Report the deadline to the event loop so a `Parked`
+                    // round suspends until it instead of hot-spinning.
+                    cx.set_poll_hint(t);
+                    return Ok(JobState::Again);
+                }
                 Some(_) => {}
             }
 
@@ -219,6 +224,17 @@ fn start_timer_task(ctx: &mut ScopedContext) {
             let has_entries =
                 TIMER_STATE.with_borrow(|s| s.as_ref().is_some_and(|s| !s.entries.is_empty()));
             if has_entries {
+                // All due timers fired above, so `entries[0]` is in the
+                // future: report it so the parked loop wakes exactly then.
+                if let Some(d) = TIMER_STATE.with_borrow(|s| {
+                    s.as_ref()
+                        .and_then(|s| s.entries.first())
+                        .map(|e| e.deadline)
+                }) {
+                    if d > now {
+                        cx.set_poll_hint(d);
+                    }
+                }
                 Ok(JobState::Again)
             } else {
                 TIMER_STATE.with_borrow_mut(|s| {

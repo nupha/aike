@@ -182,7 +182,8 @@ impl ResponsePayload {
 
     /// Start body streaming (lazily) and return a `BodySource`.
     /// Returns `Err` if the body was already consumed or is unavailable.
-    fn ensure_cached_body(&mut self) -> Result<BodySource, i32> {
+    /// `wake` is the JS thread's event-loop handle, captured by the caller.
+    fn ensure_cached_body(&mut self, wake: zuqe::WakeHandle) -> Result<BodySource, i32> {
         if self.body_consumed {
             return Err(-1);
         }
@@ -201,11 +202,13 @@ impl ResponsePayload {
                             if tx.send(Ok(bytes.to_vec())).is_err() {
                                 break;
                             }
+                            wake.wake();
                         }
                         Err(e) => {
                             // Signal the consumer that the body stream failed:
                             // the reader's read() promise must reject (TypeError).
                             let _ = tx.send(Err(format!("{e}")));
+                            wake.wake();
                             break;
                         }
                     }
@@ -734,7 +737,7 @@ fn js_response_body(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         let source = {
             let p = get_response_payload_mut(ctx, &mut this)?;
             if p.resp.is_some() || p.synthetic_body.is_some() {
-                p.ensure_cached_body().ok()
+                p.ensure_cached_body(ctx.wake_handle()).ok()
             } else {
                 None
             }
@@ -836,7 +839,7 @@ fn js_response_body_as(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 // and lose the body. Reuse the cached stream instance instead.
                 p.cached_body.take().map(BodySource::Stream)
             } else {
-                p.ensure_cached_body().ok()
+                p.ensure_cached_body(ctx.wake_handle()).ok()
             };
 
             // Mark body as consumed only when consuming via text/json/bytes/etc.,
@@ -944,7 +947,7 @@ fn js_response_text_stream(ctx: &mut ScopedContext, _cc: CallContext) -> JSResul
             let src = if p.cached_body.is_some() && !p.body_consumed {
                 p.cached_body.take().map(BodySource::Stream)
             } else {
-                p.ensure_cached_body().ok()
+                p.ensure_cached_body(ctx.wake_handle()).ok()
             };
             p.body_consumed = true;
             Some(src)

@@ -15,7 +15,10 @@ use std::os::fd::AsRawFd;
 use std::{
     collections::HashMap,
     path::PathBuf,
-    sync::{Arc, LazyLock, Mutex, atomic::{AtomicBool, Ordering}},
+    sync::{
+        Arc, LazyLock, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 
@@ -23,15 +26,18 @@ use nanosandbox::{ExecutionResult, Sandbox};
 use zuqe::{
     Array, CallContext, Callback, IntOrFloat, JS_GPN_ENUM_ONLY, JS_GPN_STR_OR_INT_MASK,
     JS_PROP_C_W_E, JS_PROP_ENUMERABLE, JSResult, JSValue, Object, ScopedContext,
-    builtins::{promise::Promise, typed_array::TypedArray},
+    builtins::{
+        promise::{Promise, PromiseResultSlot},
+        typed_array::TypedArray,
+    },
 };
 
 use super::{
     JSStdioHandle, pipe_bridge,
     signal::signal_name,
     spawn::{
-        CHILD_EXITS, get_pos_ms_prop, pid_from_this, register_child, register_child_exit,
-        shutdown_ladder, signal_child_exit, unregister_child,
+        get_pos_ms_prop, pid_from_this, register_child, register_child_exit, shutdown_ladder,
+        signal_child_exit, unregister_child,
     },
 };
 
@@ -421,16 +427,13 @@ pub(crate) fn spawn_async_sandboxed(
     // exitCode / signalCode / killedByTimeout promises — same shape as the
     // regular async path, resolved by a blocking wait on the worker pool.
     // Use PromiseResultSlot instead of channels to avoid disconnect races.
-    use zuqe::builtins::promise::PromiseResultSlot;
-    let slot_exit =
-        PromiseResultSlot::<Result<i32, String>>::new();
+    let slot_exit = PromiseResultSlot::<Result<i32, String>>::new();
     let prom_exit =
         Promise::create_with_result_slot(ctx, slot_exit.clone(), |cx, data| match data {
             Ok(code) => Ok(JSValue::from(code)),
             Err(e) => Err(cx.throw_internal_error(&e)),
         })?;
-    let slot_signal =
-        PromiseResultSlot::<Result<Option<String>, String>>::new();
+    let slot_signal = PromiseResultSlot::<Result<Option<String>, String>>::new();
     let prom_signal =
         Promise::create_with_result_slot(ctx, slot_signal.clone(), |cx, data| match data {
             Ok(Some(name)) => cx
@@ -440,10 +443,9 @@ pub(crate) fn spawn_async_sandboxed(
             Err(e) => Err(cx.throw_internal_error(&e)),
         })?;
     let slot_killed = PromiseResultSlot::<bool>::new();
-    let prom_killed =
-        Promise::create_with_result_slot(ctx, slot_killed.clone(), |_, killed| {
-            Ok(JSValue::from(killed))
-        })?;
+    let prom_killed = Promise::create_with_result_slot(ctx, slot_killed.clone(), |_, killed| {
+        Ok(JSValue::from(killed))
+    })?;
 
     let mut result = ctx.create_base_object()?;
     result.define_property_value_str(ctx, "pid", JSValue::from(pid), JS_PROP_ENUMERABLE)?;
@@ -784,9 +786,16 @@ fn js_sandbox_child_shutdown(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
         cx.create_string_from_str(&stage).map(JSValue::make_string)
     })?;
 
+    let wake = ctx.wake_handle();
     tokio::spawn(async move {
         let stage = shutdown_ladder(pid, rx, eof_ms, term_ms, kill_ms, term_sig).await;
-        let _ = zuqe::PollSender::from(tx).send_async(stage.to_string()).await;
+        if zuqe::PollSender::from(tx)
+            .send_async(stage.to_string())
+            .await
+            .is_ok()
+        {
+            wake.wake();
+        }
     });
 
     Ok(promise.into())

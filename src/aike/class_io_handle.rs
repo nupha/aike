@@ -233,6 +233,7 @@ async fn pump_direct(
     fd: i32,
     ctrl: PumpControl,
     buf_size: usize,
+    wake: zuqe::WakeHandle,
     mut reader: impl tokio::io::AsyncRead + Unpin + Send + 'static,
 ) {
     let mut buf = vec![0u8; buf_size];
@@ -241,13 +242,16 @@ async fn pump_direct(
         match reader.read(&mut buf).await {
             Ok(0) => {
                 let _ = tx.send(PumpMsg::Eof(fd));
+                wake.wake();
                 return;
             }
             Ok(n) => {
                 let _ = tx.send(PumpMsg::Chunk(fd, buf[..n].to_vec()));
+                wake.wake();
             }
             Err(e) => {
                 let _ = tx.send(PumpMsg::Error(fd, e.to_string()));
+                wake.wake();
                 return;
             }
         }
@@ -261,6 +265,7 @@ async fn pump_locked<M: tokio::io::AsyncRead + Unpin + Send + 'static>(
     fd: i32,
     ctrl: PumpControl,
     mutex: Arc<tokio::sync::Mutex<M>>,
+    wake: zuqe::WakeHandle,
 ) {
     let mut buf = vec![0u8; BUF_SIZE_PIPE];
     loop {
@@ -272,13 +277,16 @@ async fn pump_locked<M: tokio::io::AsyncRead + Unpin + Send + 'static>(
         match result {
             Ok(0) => {
                 let _ = tx.send(PumpMsg::Eof(fd));
+                wake.wake();
                 return;
             }
             Ok(n) => {
                 let _ = tx.send(PumpMsg::Chunk(fd, buf[..n].to_vec()));
+                wake.wake();
             }
             Err(e) => {
                 let _ = tx.send(PumpMsg::Error(fd, e.to_string()));
+                wake.wake();
                 return;
             }
         }
@@ -535,6 +543,8 @@ fn fh_subscribe(ctx: &mut ScopedContext, cc: CallContext, mode: ReadMode) -> JSR
 
     if spawn_pump {
         let tx = PUMP_CHANNEL.0.clone();
+        // Captured on the JS thread; the pump task runs on a tokio worker.
+        let wake = ctx.wake_handle();
         match desc {
             IoPayload::Stdin => {
                 tokio::spawn(pump_direct(
@@ -542,14 +552,15 @@ fn fh_subscribe(ctx: &mut ScopedContext, cc: CallContext, mode: ReadMode) -> JSR
                     raw_fd,
                     ctrl,
                     desc.read_buf_size(),
+                    wake,
                     tokio::io::stdin(),
                 ));
             }
             IoPayload::File(fd, _) => {
-                tokio::spawn(pump_locked(tx, raw_fd, ctrl, fd.clone()));
+                tokio::spawn(pump_locked(tx, raw_fd, ctrl, fd.clone(), wake));
             }
             IoPayload::PipeRead(reader, _) => {
-                tokio::spawn(pump_locked(tx, raw_fd, ctrl, reader.clone()));
+                tokio::spawn(pump_locked(tx, raw_fd, ctrl, reader.clone(), wake));
             }
             IoPayload::PipeWrite(..) => {
                 let _ = tx.send(PumpMsg::Error(
@@ -607,30 +618,37 @@ where
         r.read_to_end(&mut buf).await.map(|_| buf)
     } else {
         let mut buf = vec![0u8; max_len];
-        r.read(&mut buf)
-            .await
-            .map(|n| {
-                buf.truncate(n);
-                buf
-            })
+        r.read(&mut buf).await.map(|n| {
+            buf.truncate(n);
+            buf
+        })
     }
     .map_err(|e| e.to_string())
 }
 
 /// Spawn the 5-arm dispatch shared by text()/json()/bytes(): whole-stream read
 /// (file handles seek to position 0 first), then convert and deliver.
-fn spawn_whole_read<T, F>(desc: &IoPayload, tx: Sender<Result<T, String>>, as_text: bool, convert: F)
-where
+fn spawn_whole_read<T, F>(
+    ctx: &mut ScopedContext,
+    desc: &IoPayload,
+    tx: Sender<Result<T, String>>,
+    as_text: bool,
+    convert: F,
+) where
     T: Send + Unpin + 'static,
     F: FnOnce(Vec<u8>) -> Result<T, String> + Send + 'static,
 {
+    // Runs on the JS thread; captured here for the spawned tokio tasks below.
+    let wake = ctx.wake_handle();
     match desc {
         IoPayload::Stdin => {
             tokio::spawn(async move {
                 let result = read_to_end(tokio::io::stdin(), as_text)
                     .await
                     .and_then(convert);
-                let _ = PollSender::from(tx).send_async(result).await;
+                if PollSender::from(tx).send_async(result).await.is_ok() {
+                    wake.wake();
+                }
             });
         }
         IoPayload::Stdout | IoPayload::Stderr => {
@@ -643,7 +661,9 @@ where
                 let mut file = fd.lock().await;
                 let _ = file.seek(std::io::SeekFrom::Start(0)).await;
                 let result = read_to_end(&mut *file, as_text).await.and_then(convert);
-                let _ = PollSender::from(tx).send_async(result).await;
+                if PollSender::from(tx).send_async(result).await.is_ok() {
+                    wake.wake();
+                }
             });
         }
         IoPayload::PipeRead(reader, _) => {
@@ -651,7 +671,9 @@ where
             tokio::spawn(async move {
                 let mut r = reader.lock().await;
                 let result = read_to_end(&mut *r, as_text).await.and_then(convert);
-                let _ = PollSender::from(tx).send_async(result).await;
+                if PollSender::from(tx).send_async(result).await.is_ok() {
+                    wake.wake();
+                }
             });
         }
         IoPayload::PipeWrite(..) => {
@@ -671,7 +693,7 @@ fn js_fh_text(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             cx.create_string_from_utf8(bytes).map(JSValue::make_string)
         })?;
 
-    spawn_whole_read(desc, tx, true, Ok);
+    spawn_whole_read(ctx, desc, tx, true, Ok);
 
     Ok(promise.into())
 }
@@ -689,7 +711,7 @@ fn js_fh_json(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         },
     )?;
 
-    spawn_whole_read(desc, tx, true, |bytes| {
+    spawn_whole_read(ctx, desc, tx, true, |bytes| {
         serde_json::from_slice(&bytes).map_err(|e| e.to_string())
     });
 
@@ -707,7 +729,7 @@ fn js_fh_bytes(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             TypedArray::create_from_vec_u8(cx, bytes).map(JSValue::from)
         })?;
 
-    spawn_whole_read(desc, tx, false, Ok);
+    spawn_whole_read(ctx, desc, tx, false, Ok);
 
     Ok(promise.into())
 }
@@ -725,6 +747,7 @@ fn js_fh_stat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         },
     )?;
 
+    let wake = ctx.wake_handle();
     match desc {
         IoPayload::Stdin | IoPayload::Stdout | IoPayload::Stderr => {
             // std streams: stat via /dev/stdin etc. is unreliable, return zero-stats
@@ -735,7 +758,9 @@ fn js_fh_stat(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             tokio::spawn(async move {
                 let file = fd.lock().await;
                 let result = file.metadata().await.map_err(|e| e.to_string());
-                let _ = PollSender::from(tx).send_async(result).await;
+                if PollSender::from(tx).send_async(result).await.is_ok() {
+                    wake.wake();
+                }
             });
         }
         IoPayload::PipeRead(..) | IoPayload::PipeWrite(..) => {
@@ -764,11 +789,14 @@ fn js_fh_read(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             TypedArray::create_from_vec_u8(cx, bytes).map(JSValue::from)
         })?;
 
+    let wake = ctx.wake_handle();
     match desc {
         IoPayload::Stdin => {
             tokio::spawn(async move {
                 let result = read_capped(tokio::io::stdin(), max_len).await;
-                let _ = PollSender::from(tx).send_async(result).await;
+                if PollSender::from(tx).send_async(result).await.is_ok() {
+                    wake.wake();
+                }
             });
         }
         IoPayload::Stdout | IoPayload::Stderr => {
@@ -779,7 +807,9 @@ fn js_fh_read(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             tokio::spawn(async move {
                 let mut file = fd.lock().await;
                 let result = read_capped(&mut *file, max_len).await;
-                let _ = PollSender::from(tx).send_async(result).await;
+                if PollSender::from(tx).send_async(result).await.is_ok() {
+                    wake.wake();
+                }
             });
         }
         IoPayload::PipeRead(reader, _) => {
@@ -787,7 +817,9 @@ fn js_fh_read(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             tokio::spawn(async move {
                 let mut r = reader.lock().await;
                 let result = read_capped(&mut *r, max_len).await;
-                let _ = PollSender::from(tx).send_async(result).await;
+                if PollSender::from(tx).send_async(result).await.is_ok() {
+                    wake.wake();
+                }
             });
         }
         IoPayload::PipeWrite(..) => {
@@ -868,10 +900,13 @@ fn js_fh_writeAll(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 },
             )?;
             let fd = fd.clone();
+            let wake = ctx.wake_handle();
             tokio::spawn(async move {
                 let mut file = fd.lock().await;
                 let result = file.write_all(&data).await.map_err(|e| e.to_string());
-                let _ = PollSender::from(tx).send_async(result).await;
+                if PollSender::from(tx).send_async(result).await.is_ok() {
+                    wake.wake();
+                }
             });
             Ok(promise.into())
         }
@@ -911,10 +946,13 @@ fn js_fh_flush(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 },
             )?;
             let fd = fd.clone();
+            let wake = ctx.wake_handle();
             tokio::spawn(async move {
                 let mut file = fd.lock().await;
                 let result = file.flush().await.map_err(|e| e.to_string());
-                let _ = PollSender::from(tx).send_async(result).await;
+                if PollSender::from(tx).send_async(result).await.is_ok() {
+                    wake.wake();
+                }
             });
             Ok(promise.into())
         }

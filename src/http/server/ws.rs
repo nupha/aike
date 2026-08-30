@@ -117,6 +117,7 @@ pub(crate) async fn bridge_ws(
     mut control_rx: mpsc::Receiver<WsControl>,
     event_tx: Sender<IncomingRequest>,
     id: u64,
+    wake: zuqe::WakeHandle,
 ) {
     loop {
         tokio::select! {
@@ -137,6 +138,7 @@ pub(crate) async fn bridge_ws(
                             id,
                             event: WsStreamEvent::Message(t.to_string()),
                         });
+                        wake.wake();
                     }
                     Some(Ok(Message::Close(_))) => break,
                     Some(Ok(_)) => {} // ignore binary / ping / pong
@@ -164,6 +166,7 @@ pub(crate) async fn bridge_ws(
         id,
         event: WsStreamEvent::Close,
     });
+    wake.wake();
 }
 
 // ---------------------------------------------------------------------------

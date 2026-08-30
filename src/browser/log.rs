@@ -41,6 +41,7 @@ pub(crate) fn js_page_on_log(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
     let (tx, rx) = channel::unbounded::<serde_json::Value>();
     let client_ev = client.clone();
     let session_ev = session_id.clone();
+    let wake = ctx.wake_handle();
     tokio::spawn(async move {
         let mut event_rx = client_ev.subscribe_events();
         loop {
@@ -62,6 +63,7 @@ pub(crate) fn js_page_on_log(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
                     if tx.send(msg).is_err() {
                         break;
                     }
+                    wake.wake();
                 }
                 Ok(_) => {}
                 Err(_) => break,

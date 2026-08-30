@@ -210,14 +210,7 @@ pub(super) fn js_spawn(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 abort_on_parent_exit,
             )
         } else {
-            super::sandbox::spawn_sync_sandboxed(
-                ctx,
-                sb,
-                cmd_str,
-                args,
-                input_data,
-                timeout_limit,
-            )
+            super::sandbox::spawn_sync_sandboxed(ctx, sb, cmd_str, args, input_data, timeout_limit)
         };
     }
 
@@ -919,7 +912,11 @@ pub(crate) fn pid_from_this(ctx: &mut ScopedContext, cc: &CallContext) -> i32 {
 
 /// Read an optional positive-integer millisecond property.
 /// TypeError for non-numbers, RangeError for non-positive or fractional values.
-pub(crate) fn get_pos_ms_prop(ctx: &mut ScopedContext, obj: &Object, key: &str) -> Result<Option<u64>, i32> {
+pub(crate) fn get_pos_ms_prop(
+    ctx: &mut ScopedContext,
+    obj: &Object,
+    key: &str,
+) -> Result<Option<u64>, i32> {
     let v = obj.get_property_str(ctx, key)?;
     if v.is_undefined() {
         return Ok(None);
@@ -936,7 +933,10 @@ pub(crate) fn get_pos_ms_prop(ctx: &mut ScopedContext, obj: &Object, key: &str) 
 }
 
 /// Wait until the child's exit is signalled or the timeout elapses.
-pub(crate) async fn wait_child_exit(mut rx: tokio::sync::watch::Receiver<bool>, timeout: Duration) -> bool {
+pub(crate) async fn wait_child_exit(
+    mut rx: tokio::sync::watch::Receiver<bool>,
+    timeout: Duration,
+) -> bool {
     loop {
         if *rx.borrow_and_update() {
             return true;
@@ -1082,9 +1082,16 @@ fn js_child_shutdown(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         cx.create_string_from_str(&stage).map(JSValue::make_string)
     })?;
 
+    let wake = ctx.wake_handle();
     tokio::spawn(async move {
         let stage = shutdown_ladder(pid, rx, eof_ms, term_ms, kill_ms, term_sig).await;
-        let _ = PollSender::from(tx).send_async(stage.to_string()).await;
+        if PollSender::from(tx)
+            .send_async(stage.to_string())
+            .await
+            .is_ok()
+        {
+            wake.wake();
+        }
     });
 
     Ok(promise.into())

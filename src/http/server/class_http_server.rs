@@ -312,7 +312,12 @@ fn js_mcp(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
 fn js_remove_route(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut this = cc.this();
-    let method_name = cc.arg(0).to_string(ctx)?.content().encode_utf8(false).to_string();
+    let method_name = cc
+        .arg(0)
+        .to_string(ctx)?
+        .content()
+        .encode_utf8(false)
+        .to_string();
     let method = Method::from_str(&method_name)
         .ok_or_else(|| ctx.throw_type_error("unknown HTTP method"))?;
     let path_str = cc.arg(1).to_string(ctx)?;
@@ -395,12 +400,14 @@ fn delegate_js_route(
     path: String,
     handler_index: usize,
     request_tx: channel::Sender<IncomingRequest>,
+    wake: zuqe::WakeHandle,
 ) -> (String, MethodRouter<()>) {
     let axum_path = express_to_axum_path(&path);
     let tx = request_tx;
 
     let handler_fn = move |req: Request| {
         let tx = tx.clone();
+        let wake = wake.clone();
 
         async move {
             // Split request to access extensions (axum stores parsed path params there)
@@ -463,6 +470,7 @@ fn delegate_js_route(
                 )
                     .into_response();
             }
+            wake.wake();
 
             match res_rx.await {
                 Ok(msg) => match msg {
@@ -547,12 +555,14 @@ fn delegate_ws_route(
     path: String,
     handler_index: usize,
     request_tx: channel::Sender<IncomingRequest>,
+    wake: zuqe::WakeHandle,
 ) -> (String, MethodRouter<()>) {
     let axum_path = express_to_axum_path(&path);
     let tx = request_tx;
 
     let handler_fn = move |ws: WebSocketUpgrade| {
         let tx = tx.clone();
+        let wake = wake.clone();
         async move {
             let id = NEXT_WS_ID.fetch_add(1, Ordering::Relaxed);
             let (out_tx, out_rx) = mpsc::channel(OUTBOUND_CAP);
@@ -574,10 +584,11 @@ fn delegate_ws_route(
                 )
                     .into_response();
             }
+            wake.wake();
 
             // Hand the socket to the bridge task; it owns out_rx + control_rx
             // and forwards client traffic to the JS poller via event_tx.
-            ws.on_upgrade(move |socket| bridge_ws(socket, out_rx, control_rx, event_tx, id))
+            ws.on_upgrade(move |socket| bridge_ws(socket, out_rx, control_rx, event_tx, id, wake))
         }
     };
 
@@ -708,9 +719,10 @@ fn js_listen(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
             // --- HTTP routes ---
             let http_table: Vec<Object> = data.js_routes.iter().map(|(_, _, h)| *h).collect();
+            let wake = ctx.wake_handle();
             for (i, (method, path, _)) in data.js_routes.iter().enumerate() {
                 let (axum_path, handler) =
-                    delegate_js_route(*method, path.clone(), i, js_tx.clone());
+                    delegate_js_route(*method, path.clone(), i, js_tx.clone(), wake.clone());
                 if let Err(e) = validate_axum_path(&axum_path) {
                     return Err(ctx.throw_type_error(&e));
                 }
@@ -720,7 +732,8 @@ fn js_listen(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             // --- WS routes ---
             let ws_table: Vec<Object> = data.ws_routes.iter().map(|(_, h)| *h).collect();
             for (i, (path, _)) in data.ws_routes.iter().enumerate() {
-                let (axum_path, handler) = delegate_ws_route(path.clone(), i, js_tx.clone());
+                let (axum_path, handler) =
+                    delegate_ws_route(path.clone(), i, js_tx.clone(), wake.clone());
                 if let Err(e) = validate_axum_path(&axum_path) {
                     return Err(ctx.throw_type_error(&e));
                 }
@@ -737,7 +750,8 @@ fn js_listen(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                     .ok_or_else(|| ctx.throw_type_error("invalid HttpMcp endpoint"))?;
 
                 // Build axum route via rmcp's StreamableHttpService
-                let mcp_axum_router = build_axum_mcp_route(p, js_tx.clone(), i);
+                let mcp_axum_router =
+                    build_axum_mcp_route(p, js_tx.clone(), i, ctx.wake_handle());
                 router = router.merge(mcp_axum_router);
 
                 // JS handler table for poller-side dispatch
@@ -811,11 +825,14 @@ fn js_listen(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         Promise::create_with_channel::<Result<(), ()>>(ctx, |_cx, _| Ok(JSValue::UNDEFINED))?;
 
     // Spawn tokio task that polls is_running and resolves the exit promise
+    let wake = ctx.wake_handle();
     tokio::spawn(async move {
         while running_flag.load(Ordering::Acquire) {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
-        let _ = PollSender::from(exit_tx).send_async(Ok(())).await;
+        if PollSender::from(exit_tx).send_async(Ok(())).await.is_ok() {
+            wake.wake();
+        }
     });
 
     // Create handle object with exit (readonly Promise) and shutdown()
@@ -1043,11 +1060,14 @@ fn js_shutdown(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let (promise, tx) =
         Promise::create_with_channel::<Result<(), ()>>(ctx, |_cx, _| Ok(JSValue::UNDEFINED))?;
 
+    let wake = ctx.wake_handle();
     tokio::spawn(async move {
         while is_running.load(Ordering::Acquire) {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
-        let _ = PollSender::from(tx).send_async(Ok(())).await;
+        if PollSender::from(tx).send_async(Ok(())).await.is_ok() {
+            wake.wake();
+        }
     });
 
     Ok(promise.into())

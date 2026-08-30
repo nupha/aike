@@ -43,6 +43,7 @@ pub(crate) fn js_page_set_request_interception(
         let (tx, rx) = channel::unbounded::<serde_json::Value>();
         let client_ev = client.clone();
         let session_ev = session_id.clone();
+        let wake = ctx.wake_handle();
         tokio::spawn(async move {
             let _ = client_ev
                 .send(
@@ -68,6 +69,7 @@ pub(crate) fn js_page_set_request_interception(
                         if tx.send(msg).is_err() {
                             break;
                         }
+                        wake.wake();
                     }
                     Ok(_) => {}
                     Err(_) => break,

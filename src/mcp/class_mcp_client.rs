@@ -437,9 +437,12 @@ fn js_connect(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             }
         })?;
 
+    let wake = ctx.wake_handle();
     tokio::spawn(async move {
         let result = run_connect(state, timeout_ms, &cfg).await;
-        let _ = PollSender::from(tx).send_async(result).await;
+        if PollSender::from(tx).send_async(result).await.is_ok() {
+            wake.wake();
+        }
     });
 
     Ok(promise.into())
@@ -551,11 +554,14 @@ fn js_list_tools(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         },
     )?;
 
+    let wake = ctx.wake_handle();
     tokio::spawn(async move {
         let result = with_peer(&state, timeout_ms, |peer| Box::pin(peer.list_tools(None)))
             .await
             .and_then(|r| serde_json::to_value(&r).map_err(|e| e.to_string()));
-        let _ = PollSender::from(tx).send_async(result).await;
+        if PollSender::from(tx).send_async(result).await.is_ok() {
+            wake.wake();
+        }
     });
 
     Ok(promise.into())
@@ -601,6 +607,7 @@ fn js_call_tool(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         },
     )?;
 
+    let wake = ctx.wake_handle();
     tokio::spawn(async move {
         let result = with_peer(&state, timeout_ms, move |peer| {
             let mut params = CallToolRequestParams::new(name);
@@ -615,7 +622,9 @@ fn js_call_tool(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         })
         .await
         .and_then(|r| serde_json::to_value(&r).map_err(|e| e.to_string()));
-        let _ = PollSender::from(tx).send_async(result).await;
+        if PollSender::from(tx).send_async(result).await.is_ok() {
+            wake.wake();
+        }
     });
 
     Ok(promise.into())
@@ -641,6 +650,7 @@ fn js_close(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             }
         })?;
 
+    let wake = ctx.wake_handle();
     tokio::spawn(async move {
         // Take the service out first so concurrent calls see "not connected".
         let svc = state.service.lock().await.take();
@@ -663,7 +673,9 @@ fn js_close(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             LIVE_SERVER_PIDS.lock().unwrap().retain(|&p| p != pid);
         }
         CLIENTS.lock().unwrap().remove(&id);
-        let _ = PollSender::from(tx).send_async(result).await;
+        if PollSender::from(tx).send_async(result).await.is_ok() {
+            wake.wake();
+        }
     });
 
     Ok(promise.into())
