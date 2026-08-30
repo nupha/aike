@@ -1082,16 +1082,9 @@ fn js_child_shutdown(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         cx.create_string_from_str(&stage).map(JSValue::make_string)
     })?;
 
-    let wake = ctx.wake_handle();
     tokio::spawn(async move {
         let stage = shutdown_ladder(pid, rx, eof_ms, term_ms, kill_ms, term_sig).await;
-        if PollSender::from(tx)
-            .send_async(stage.to_string())
-            .await
-            .is_ok()
-        {
-            wake.wake();
-        }
+        let _ = tx.send_async(stage.to_string()).await;
     });
 
     Ok(promise.into())

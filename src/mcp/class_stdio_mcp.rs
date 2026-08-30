@@ -358,9 +358,9 @@ fn start_stdio_server(ctx: &mut ScopedContext, p: &McpServicePayload) -> Result<
     let js_handlers = p.js_handlers.borrow().clone();
 
     // Create crossbeam channel (same IncomingRequest mechanism as HTTP mode)
-    let (js_tx, js_rx) = channel::unbounded::<IncomingRequest>();
+    let (js_tx, js_rx) = ctx.make_wake_channel::<IncomingRequest>();
     // Build McpService from payload (stdio: no native handlers, single endpoint).
-    let service = McpService::from_payload(p, js_tx, 0, ctx.wake_handle());
+    let service = McpService::from_payload(p, js_tx, 0);
 
     // Start JS poller job for tool call dispatch
     let mcp_tables = RefCell::new(vec![js_handlers.clone()]);
@@ -410,7 +410,6 @@ fn start_stdio_server(ctx: &mut ScopedContext, p: &McpServicePayload) -> Result<
         .ok();
 
     // Spawn background tokio task to run rmcp serve_server_with_ct
-    let wake = ctx.wake_handle();
     tokio::spawn(async move {
         // Create the cancellation token up front — before the handshake — so
         // stop()/SIGINT/SIGTERM can cancel even while serve_server_with_ct is
@@ -447,9 +446,7 @@ fn start_stdio_server(ctx: &mut ScopedContext, p: &McpServicePayload) -> Result<
                 is_running.store(false, Ordering::Release);
                 let _ = crate::repl::caupture_stdio(false);
                 close_stdin();
-                if PollSender::from(tx).send_async(Ok(())).await.is_ok() {
-                    wake.wake();
-                }
+                let _ = tx.send_async(Ok(())).await;
                 return;
             }
         };
@@ -485,9 +482,7 @@ fn start_stdio_server(ctx: &mut ScopedContext, p: &McpServicePayload) -> Result<
         // task ends and the runtime can shut down. Safe here: stdin is the MCP
         // protocol and the process is exiting anyway.
         close_stdin();
-        if PollSender::from(tx).send_async(Ok(())).await.is_ok() {
-            wake.wake();
-        }
+        let _ = tx.send_async(Ok(())).await;
     });
 
     Ok(promise)

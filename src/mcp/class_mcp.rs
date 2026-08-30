@@ -65,7 +65,7 @@ pub(crate) enum McpTransport {
     /// http-only install / hot-reload fields.
     Http {
         mount_path: String,
-        update_tx: Option<channel::Sender<Vec<Object>>>,
+        update_tx: Option<zuqe::WakeSender<Vec<Object>>>,
     },
 }
 

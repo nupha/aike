@@ -41,7 +41,7 @@ pub(crate) struct OutboundBuffer {
     /// Bounded sender. `None` once the stream is explicitly closed.
     pub(crate) tx: Option<mpsc::Sender<String>>,
     /// Frames awaiting capacity + the resolver that completes their Promise.
-    pending: Arc<Mutex<VecDeque<(crossbeam::channel::Sender<()>, String)>>>,
+    pending: Arc<Mutex<VecDeque<(zuqe::WakeSender<()>, String)>>>,
     /// Backpressure-relief callback (Bun `drain` semantics), invoked on the JS
     /// thread when the backlog drains.
     pub(crate) on_drain: Option<Object>,
@@ -103,7 +103,7 @@ impl OutboundBuffer {
                     let (p, slot) =
                         Promise::create_with_channel::<()>(ctx, |_cx, _| Ok(JSValue::UNDEFINED))?;
                     self.pending.lock().unwrap().push_back((slot, f));
-                    self.arm_drain_watcher(ctx.wake_handle());
+                    self.arm_drain_watcher();
                     Ok(Some(p.into()))
                 }
                 // Closed: the stream is gone, drop silently.
@@ -116,7 +116,7 @@ impl OutboundBuffer {
 
     /// Spawn a tokio task that waits for channel capacity and flushes the
     /// parked backlog, resolving each Promise as its frame is sent.
-    fn arm_drain_watcher(&self, wake: zuqe::WakeHandle) {
+    fn arm_drain_watcher(&self) {
         let tx = self.tx.clone();
         let pending = self.pending.clone();
         tokio::spawn(async move {
@@ -132,7 +132,6 @@ impl OutboundBuffer {
                             permit.send(frame);
                             // Resolve the parked write Promise.
                             let _ = slot_tx.send(());
-                            wake.wake();
                         }
                         // Channel closed — abandon the backlog.
                         Err(_) => break,

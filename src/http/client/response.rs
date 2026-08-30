@@ -191,6 +191,8 @@ impl ResponsePayload {
         if let Some(resp) = self.resp.take() {
             let (tx, rx) = crossbeam::channel::unbounded::<Result<Vec<u8>, String>>();
             self.body_rx = Some(rx);
+            // Chunk sends wake the parked event loop automatically.
+            let tx = zuqe::WakeSender::wrap(tx, wake);
 
             tokio::spawn(async move {
                 use futures_util::StreamExt;
@@ -202,13 +204,11 @@ impl ResponsePayload {
                             if tx.send(Ok(bytes.to_vec())).is_err() {
                                 break;
                             }
-                            wake.wake();
                         }
                         Err(e) => {
                             // Signal the consumer that the body stream failed:
                             // the reader's read() promise must reject (TypeError).
                             let _ = tx.send(Err(format!("{e}")));
-                            wake.wake();
                             break;
                         }
                     }

@@ -39,11 +39,8 @@ where
             let val = payload.map_err(|e| cx.throw_internal_error(&e))?;
             convert(cx, val)
         })?;
-    let wake = ctx.wake_handle();
     tokio::spawn(async move {
-        if PollSender::from(tx).send_async(fut.await).await.is_ok() {
-            wake.wake();
-        }
+        let _ = tx.send_async(fut.await).await;
     });
     Ok(promise)
 }

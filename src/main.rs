@@ -243,6 +243,29 @@ async fn main() -> ExitCode {
     // Create runtime
     let mut rt = Runtime::create().unwrap();
 
+    // Inject the tokio deadline waker: when the event loop parks with a
+    // deadline (timer / quantum fallback), a sleep task wakes it. One armed
+    // timer at a time — re-arming aborts the previous one.
+    {
+        let wake = rt.wake_handle();
+        let armed: std::sync::Arc<std::sync::Mutex<Option<tokio::task::AbortHandle>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(None));
+        rt.set_deadline_waker(std::sync::Arc::new(move |at: std::time::Instant| {
+            let mut g = armed.lock().unwrap();
+            if let Some(h) = g.take() {
+                h.abort();
+            }
+            let w = wake.clone();
+            *g = Some(
+                tokio::spawn(async move {
+                    tokio::time::sleep_until(tokio::time::Instant::from_std(at)).await;
+                    w.wake();
+                })
+                .abort_handle(),
+            );
+        }));
+    }
+
     // In release build, when set panic="abort" in Cargo.toml,
     // should install panic handler to ensure gc heap deallocate when panic.
     rt.install_panic_handler();

@@ -192,6 +192,12 @@ pub(crate) fn signal_name(sig: u32) -> Option<&'static str> {
     })
 }
 
+/// Write-end fd of the event loop's self-pipe (stored on the JS thread at
+/// poller setup). The C handler writes one byte after enqueueing the signal
+/// so a parked event loop wakes promptly — the only async-signal-safe wake
+/// available (taking locks in a signal handler is not allowed).
+static SIGNAL_WAKE_FD: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
+
 /// Process-wide C signal handler — broadcasts to all registered senders
 extern "C" fn c_signal_handler(sig_num: i32) {
     // signal-safe trace (only async-signal-safe syscalls)
@@ -200,6 +206,21 @@ extern "C" fn c_signal_handler(sig_num: i32) {
         for tx in guard.values() {
             // try_send: non-blocking, never blocks the signal handler.
             let _ = tx.try_send(sig_num as u32);
+        }
+    }
+    // Wake the parked event loop: one byte into the self-pipe (locks are
+    // not async-signal-safe, so we cannot call wake() here).
+    let fd = SIGNAL_WAKE_FD.load(std::sync::atomic::Ordering::Relaxed);
+    if fd >= 0 {
+        let byte = 1u8;
+        loop {
+            let n = unsafe {
+                libc::write(fd, &byte as *const u8 as *const libc::c_void, 1)
+            };
+            if n < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
+            break;
         }
     }
 }
@@ -250,6 +271,38 @@ pub fn gc_trace_signals(gcx: &mut GcTraceCtx) {
 /// sender for this thread is dropped (all handlers removed), the microtask
 /// sees `Disconnected` and returns `Done`.
 fn start_signal_microtask(ctx: &mut ScopedContext, rx: channel::Receiver<u32>) {
+    #[cfg(unix)]
+    {
+        // Signal wake path: the C handler writes a byte into the event
+        // loop's self-pipe (async-signal-safe); this tokio watcher task
+        // consumes it and forwards a regular wake. A duplicated fd is used
+        // so the watcher, not the runtime's ParkState drop, owns its copy.
+        let wake = ctx.wake_handle();
+        let write_fd = wake.signal_write_fd();
+        SIGNAL_WAKE_FD.store(write_fd, std::sync::atomic::Ordering::Relaxed);
+        let read_fd = unsafe { libc::dup(wake.signal_read_fd()) };
+        let file = unsafe {
+            use std::os::fd::FromRawFd;
+            std::fs::File::from_raw_fd(read_fd)
+        };
+        tokio::spawn(async move {
+            use std::io::Read;
+            let mut buf = [0u8; 64];
+            match tokio::io::unix::AsyncFd::new(file) {
+                Ok(af) => {
+                    loop {
+                        let Ok(mut guard) = af.readable().await else { return };
+                        let drained = guard.try_io(|f| f.get_ref().read(&mut buf)).ok();
+                        if drained.is_none() {
+                            return; // would-block is not expected to leak through
+                        }
+                        wake.wake();
+                    }
+                }
+                Err(_) => { /* fd unusable: signal wakes degrade to no-ops */ }
+            }
+        });
+    }
     crate::helpers::start_channel_poller(
         ctx,
         "signal",

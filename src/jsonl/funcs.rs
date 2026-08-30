@@ -138,9 +138,7 @@ fn read_jsonl_impl(cx: &mut ScopedContext, path: PathBuf, on_error: OnError) -> 
         let res = tokio::fs::read_to_string(&path)
             .await
             .map_err(|e| e.to_string());
-        if PollSender::from(tx).send_async(res).await.is_ok() {
-            wake.wake();
-        }
+        let _ = tx.send_async(res).await;
     });
 
     Ok(promise.into())
@@ -213,9 +211,7 @@ fn write_jsonl_impl(
         }
         .await
         .map_err(|e| e.to_string());
-        if PollSender::from(tx).send_async(res).await.is_ok() {
-            wake.wake();
-        }
+        let _ = tx.send_async(res).await;
     });
 
     Ok(promise.into())

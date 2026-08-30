@@ -78,25 +78,21 @@ pub(crate) struct McpService {
     /// Native handlers indexed by name
     native_handlers: Arc<HashMap<String, NativeMcpToolFn>>,
     /// Crossbeam channel sender for dispatching JS tool calls
-    js_tx: channel::Sender<IncomingRequest>,
+    js_tx: zuqe::WakeSender<IncomingRequest>,
     /// Index of this endpoint in the global mcp_tables
     endpoint_index: usize,
-    /// JS thread's event-loop wake handle (captured at construction);
-    /// `wake()`d after dispatching so a parked loop re-ticks promptly.
-    wake: zuqe::WakeHandle,
 }
 
 impl McpService {
     pub(crate) fn new(
         shared: Arc<RwLock<McpSchemas>>,
         handlers: Vec<(String, serde_json::Value, NativeMcpToolFn)>,
-        js_tx: channel::Sender<IncomingRequest>,
+        js_tx: zuqe::WakeSender<IncomingRequest>,
         endpoint_index: usize,
         name: String,
         version: String,
         description: String,
         instructions: String,
-        wake: zuqe::WakeHandle,
     ) -> Self {
         let native_handlers: HashMap<String, NativeMcpToolFn> = handlers
             .into_iter()
@@ -112,7 +108,6 @@ impl McpService {
             version,
             description,
             instructions,
-            wake,
         }
     }
 
@@ -120,9 +115,8 @@ impl McpService {
     /// Native handlers are always empty in the JS path today.
     pub(crate) fn from_payload(
         p: &McpServicePayload,
-        js_tx: channel::Sender<IncomingRequest>,
+        js_tx: zuqe::WakeSender<IncomingRequest>,
         endpoint_index: usize,
-        wake: zuqe::WakeHandle,
     ) -> Self {
         Self::new(
             p.schemas.clone(),
@@ -133,7 +127,6 @@ impl McpService {
             p.version.borrow().to_string(),
             p.description.borrow().to_string(),
             p.instructions.borrow().to_string(),
-            wake,
         )
     }
 }
@@ -240,7 +233,6 @@ impl ServerHandler for McpService {
                     params: arguments,
                     response_tx: resp_tx,
                 }));
-            self.wake.wake();
 
 
             // Send a "started" notification before JS handler runs.
@@ -333,11 +325,10 @@ impl ServerHandler for McpService {
 /// version is always served statelessly anyway).
 pub(crate) fn build_axum_mcp_route(
     p: &McpServicePayload,
-    js_tx: channel::Sender<IncomingRequest>,
+    js_tx: zuqe::WakeSender<IncomingRequest>,
     endpoint_index: usize,
-    wake: zuqe::WakeHandle,
 ) -> axum::Router {
-    let service = McpService::from_payload(p, js_tx, endpoint_index, wake);
+    let service = McpService::from_payload(p, js_tx, endpoint_index);
     let config = StreamableHttpServerConfig::default()
         .with_legacy_session_mode(false)
         .disable_allowed_hosts();

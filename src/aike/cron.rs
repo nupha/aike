@@ -40,17 +40,17 @@ struct CronEntry {
 struct CronState {
     next_id: u32,
     entries: HashMap<u32, CronEntry>,
-    tx: Sender<CronMsg>,
+    tx: zuqe::WakeSender<CronMsg>,
     rx: Receiver<CronMsg>,
 }
 
 impl CronState {
-    fn new() -> Self {
+    fn new(wake: zuqe::WakeHandle) -> Self {
         let (tx, rx) = crossbeam::channel::bounded::<CronMsg>(64);
         Self {
             next_id: 1,
             entries: HashMap::new(),
-            tx,
+            tx: zuqe::WakeSender::wrap(tx, wake),
             rx,
         }
     }
@@ -100,23 +100,21 @@ fn normalize_cron_expr(expr: &str) -> String {
 }
 
 /// Spawn a tokio task that sleeps until next fire time
-fn spawn_cron_timer(ctx: &mut ScopedContext, id: u32, schedule: &Schedule) {
-    // Clone tx on the JS thread before moving into tokio worker
+fn spawn_cron_timer(id: u32, schedule: &Schedule) {
+    // Clone the (wake-carrying) tx on the JS thread before moving into the
+    // tokio worker; sends wake the parked loop automatically.
     let tx = CRON_STATE.with_borrow(|opt| opt.as_ref().map(|s| s.tx.clone()));
     let Some(tx) = tx else { return };
-    let wake = ctx.wake_handle();
 
     let Some(delay_ms) = next_delay_ms(schedule) else {
         // No more future occurrences — auto-expire
         let _ = tx.send(CronMsg::Cancelled(id));
-        wake.wake();
         return;
     };
 
     tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(delay_ms)).await;
         let _ = tx.send(CronMsg::Fired(id));
-        wake.wake();
     });
 }
 
@@ -168,7 +166,7 @@ fn add_cron_notifier(ctx: &mut ScopedContext) {
                                 if let Some(s) = opt.as_ref()
                                     && let Some(e) = s.entries.get(&id)
                                 {
-                                    spawn_cron_timer(cx, id, &e.schedule);
+                                    spawn_cron_timer(id, &e.schedule);
                                 }
                             });
 
@@ -305,7 +303,7 @@ pub(super) fn js_schedule(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
     // Initialize state if needed
     let (id, need_notifier) = CRON_STATE.with_borrow_mut(|opt| {
         let start_job = opt.is_none();
-        let s = opt.get_or_insert_with(CronState::new);
+        let s = opt.get_or_insert_with(|| CronState::new(ctx.wake_handle()));
         let id = s.next_id;
         s.next_id += 1;
         (id, start_job)
@@ -361,7 +359,7 @@ pub(super) fn js_schedule(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
     });
 
     // Spawn first timer
-    spawn_cron_timer(ctx, id, &schedule);
+    spawn_cron_timer(id, &schedule);
 
     // Start poller if this is the first job
     if need_notifier {
