@@ -21,6 +21,12 @@ declare module "http" {
     text(): string;
     /** Read the request body as a Uint8Array. Consumes body. */
     bytes(): Uint8Array;
+    /**
+     * Register a callback fired when the client disconnects (connection closed
+     * or response fully sent). Multiple callbacks may be registered; they fire
+     * in registration order.
+     */
+    onClose(cb: () => void): void;
   }
 
   /** HTTP response builder passed to route handlers. Cannot be constructed directly. */
@@ -64,6 +70,11 @@ declare module "http" {
     flush(): void;
     /** End the stream. Idempotent. */
     close(): void;
+    /**
+     * Register a callback fired when the client disconnects or the stream is
+     * closed. Shares the same callback list as `req.onClose`.
+     */
+    onClose(cb: () => void): void;
   }
 
   /**
@@ -75,8 +86,6 @@ declare module "http" {
     readonly id: number;
     /** Connection state: 0 connecting / 1 open / 2 closing / 3 closed. */
     readonly readyState: number;
-    /** Remote client address (Bun `remoteAddress`). */
-    readonly remoteAddress: string;
 
     /** Async-iterable: `for await (const msg of stream) { ... }` (pull mode). */
     [Symbol.asyncIterator](): AsyncIterator<string>;
@@ -91,7 +100,6 @@ declare module "http" {
     onMessage(cb: (data: string) => void): void;
     onOpen(cb: () => void): void;
     onClose(cb: () => void): void;
-    onError(cb: (err: any) => void): void;
     /** Fired when the write backlog drains (Bun `drain`). */
     onDrain(cb: () => void): void;
     /** Subscribe to a broadcast topic (Bun `subscribe`). */
