@@ -121,6 +121,13 @@ struct Args {
     )]
     eval: Option<String>,
 
+    #[arg(
+        long,
+        value_name = "path",
+        help = "custom path for localStorage database file"
+    )]
+    local_storage_db: Option<String>,
+
     #[arg(help = "file to execute (omit for REPL mode)")]
     filename: Option<String>,
 
@@ -383,7 +390,14 @@ async fn main() -> ExitCode {
             init_mod_ai(cx)?;
             init_mod_mcp(cx)?;
 
-            setup_globals(cx, &argv, &exec_argv, &exe_path)
+            setup_globals(
+                cx,
+                &argv,
+                &exec_argv,
+                &exe_path,
+                #[cfg(feature = "local_storage")]
+                args.local_storage_db.as_deref(),
+            )
         })
         .inspect_err(|_| {
             let _ = rt.create_context(|cx| {

@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
+use std::path::PathBuf;
+
 use async_openai::types::chat::CreateChatCompletionRequest;
 use crossbeam::channel::TryRecvError;
 use serde_json::Value as JsonValue;
@@ -18,6 +20,15 @@ pub(crate) fn print_exc(ctx: &mut ScopedContext, exc: Exception) {
             None => eprintln!("[cleared-exc] {}", t.message),
         }
     }
+}
+
+/// Return `$AIKE_HOME` if set, otherwise the current working directory.
+pub(crate) fn aike_home() -> PathBuf {
+    std::env::var("AIKE_HOME")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
 }
 
 /// Canonicalize a path, stripping the Windows `\\?\` prefix that `canonicalize()` adds.
