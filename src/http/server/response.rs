@@ -178,7 +178,8 @@ fn js_res_finish(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             // throws on circular structures, propagates errors from
             // getters/toJSON, and returns undefined for non-encodable input.
             body_str = if cc.length() > 0 {
-                let result = ctx.json_stringify(cc.arg(0), JSValue::UNDEFINED, JSValue::UNDEFINED)?;
+                let result =
+                    ctx.json_stringify(cc.arg(0), JSValue::UNDEFINED, JSValue::UNDEFINED)?;
                 result
                     .to_string(ctx)
                     .ok()

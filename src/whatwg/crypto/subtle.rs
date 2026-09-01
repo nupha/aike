@@ -343,10 +343,10 @@ fn gcm_crypt(
     // aead 0.6 moved to hybrid-array: typenum consts live under
     // `aead::array::typenum::consts`; cipher 0.5 splits BlockEncrypt into
     // BlockCipherEncrypt/BlockModeEncrypt.
+    use aes_gcm::AesGcm;
     use aes_gcm::aead::array::typenum::consts::{U12, U13, U14, U15, U16};
     use aes_gcm::aead::{Aead, AeadCore, KeyInit, Payload};
     use aes_gcm::aes::cipher::{BlockCipherEncrypt, BlockSizeUser};
-    use aes_gcm::AesGcm;
 
     fn gcm_do<K, T>(
         key: &[u8],

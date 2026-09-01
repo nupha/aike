@@ -16,17 +16,20 @@ use futures_util::StreamExt;
 use uuid::Uuid;
 
 use crate::{
-    helpers::{PromptThinkPattern, apply_chat_template, detect_prompt_think_pattern},
-    ai::engine::{
-        Engine, EngineReply, GrammarConfig, TaskConfig,
-        serve::{
-            CancelGuard, DEFAULT_TEMPERATURE, DEFAULT_TOP_P, ERR_CANCELLED, ERR_ENGINE_SHUTDOWN,
-            STREAM_TIMEOUT, oai_error,
+    ai::{
+        engine::{
+            Engine, EngineReply, GrammarConfig, TaskConfig,
+            serve::{
+                CancelGuard, DEFAULT_TEMPERATURE, DEFAULT_TOP_P, ERR_CANCELLED,
+                ERR_ENGINE_SHUTDOWN, STREAM_TIMEOUT, oai_error,
+            },
+        },
+        output::{
+            ChunkSSE, ParserKind, collect_engine_reply_to_json,
+            redirect_engine_reply_to_responses_sse,
         },
     },
-    ai::output::{
-        ChunkSSE, ParserKind, collect_engine_reply_to_json, redirect_engine_reply_to_responses_sse,
-    },
+    helpers::{PromptThinkPattern, apply_chat_template, detect_prompt_think_pattern},
 };
 
 use super::{

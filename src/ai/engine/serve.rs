@@ -27,13 +27,15 @@ use tokio_stream::wrappers::UnboundedReceiverStream;
 use uuid::Uuid;
 
 use crate::{
+    ai::{
+        engine::{Engine, EngineReply, EngineTask, GrammarConfig, TaskConfig},
+        output::{
+            ChunkSSE, ParserKind, collect_engine_reply_to_json, redirect_engine_reply_to_chat_sse,
+        },
+    },
     helpers::{
         PromptThinkPattern, apply_chat_template, compute_keep_tokens, detect_prompt_think_pattern,
         now_unix_s, to_lark_tool_choice,
-    },
-    ai::engine::{Engine, EngineReply, EngineTask, GrammarConfig, TaskConfig},
-    ai::output::{
-        ChunkSSE, ParserKind, collect_engine_reply_to_json, redirect_engine_reply_to_chat_sse,
     },
 };
 

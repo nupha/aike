@@ -22,13 +22,13 @@ use zuqe::{
 
 use crate::{
     USER_CLASS_DEFS,
-    helpers::{
-        PromptThinkPattern, apply_chat_template, compute_keep_tokens, detect_prompt_think_pattern,
-        parse_chat_completion_req, to_lark_tool_choice,
-    },
     ai::output::{
         ChunkSSE, ParserKind, collect_engine_reply_to_json, redirect_engine_reply_to_chat_sse,
         redirect_engine_reply_to_responses_sse,
+    },
+    helpers::{
+        PromptThinkPattern, apply_chat_template, compute_keep_tokens, detect_prompt_think_pattern,
+        parse_chat_completion_req, to_lark_tool_choice,
     },
 };
 

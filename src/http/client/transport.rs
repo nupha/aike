@@ -852,10 +852,7 @@ mod tests {
         // Node-compat overrides) plus a spread of methods
         assert_eq!(canonical_status_text(100), "Continue");
         assert_eq!(canonical_status_text(200), "OK");
-        assert_eq!(
-            canonical_status_text(203),
-            "Non-Authoritative Information"
-        );
+        assert_eq!(canonical_status_text(203), "Non-Authoritative Information");
         assert_eq!(canonical_status_text(304), "Not Modified");
         assert_eq!(canonical_status_text(418), "I'm a Teapot");
         assert_eq!(canonical_status_text(414), "URI Too Long");
@@ -889,4 +886,3 @@ mod tests {
         assert_eq!(canonical_status_text(999), "");
     }
 }
-

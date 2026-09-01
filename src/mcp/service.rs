@@ -234,7 +234,6 @@ impl ServerHandler for McpService {
                     response_tx: resp_tx,
                 }));
 
-
             // Send a "started" notification before JS handler runs.
             {
                 let start_notif = CustomNotification::new(

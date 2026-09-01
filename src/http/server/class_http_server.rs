@@ -591,6 +591,11 @@ fn delegate_ws_route(
 
 fn js_handler_then(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let is_reject = cc.magic() == 1;
+    let ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    eprintln!("[{ms}] handler_then is_reject={}", is_reject);
 
     if is_reject {
         let reason = cc.arg(0);
@@ -725,8 +730,7 @@ fn js_listen(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             // --- WS routes ---
             let ws_table: Vec<Object> = data.ws_routes.iter().map(|(_, h)| *h).collect();
             for (i, (path, _)) in data.ws_routes.iter().enumerate() {
-                let (axum_path, handler) =
-                    delegate_ws_route(path.clone(), i, js_tx.clone());
+                let (axum_path, handler) = delegate_ws_route(path.clone(), i, js_tx.clone());
                 if let Err(e) = validate_axum_path(&axum_path) {
                     return Err(ctx.throw_type_error(&e));
                 }
@@ -931,6 +935,11 @@ fn js_start_server_job(
 fn dispatch_http_request(cx: &mut ScopedContext, incoming: HttpRequest, handler_table: &[Object]) {
     let handler = &handler_table[incoming.handler_index];
     let query = parse_query_string(&incoming.query_string);
+    let ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    eprintln!("[{ms}] dispatch path={}", incoming.path);
 
     // Shared close-callback list: both req and res (and later SSE) reference
     // the same Arc so `req.onClose(cb)` fires when SSE detects disconnect.

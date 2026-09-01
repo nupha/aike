@@ -214,9 +214,7 @@ extern "C" fn c_signal_handler(sig_num: i32) {
     if fd >= 0 {
         let byte = 1u8;
         loop {
-            let n = unsafe {
-                libc::write(fd, &byte as *const u8 as *const libc::c_void, 1)
-            };
+            let n = unsafe { libc::write(fd, &byte as *const u8 as *const libc::c_void, 1) };
             if n < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
                 continue;
             }
@@ -291,7 +289,9 @@ fn start_signal_microtask(ctx: &mut ScopedContext, rx: channel::Receiver<u32>) {
             match tokio::io::unix::AsyncFd::new(file) {
                 Ok(af) => {
                     loop {
-                        let Ok(mut guard) = af.readable().await else { return };
+                        let Ok(mut guard) = af.readable().await else {
+                            return;
+                        };
                         let drained = guard.try_io(|f| f.get_ref().read(&mut buf)).ok();
                         if drained.is_none() {
                             return; // would-block is not expected to leak through

@@ -4,9 +4,9 @@
 mod class_io_handle;
 mod cron;
 mod download;
+mod persistent;
 pub(crate) mod pipe_bridge;
 pub(crate) mod sandbox;
-mod persistent;
 mod signal;
 mod spawn;
 mod sys;

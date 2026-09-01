@@ -135,8 +135,9 @@ fn parse_load_mode(ctx: &mut ScopedContext, val: &JSValue) -> Result<LlamaLoadMo
     }
 
     let n = val.to_number(ctx)?.to_i32();
-    LlamaLoadMode::from_i32(n)
-        .ok_or_else(|| ctx.throw_type_error("loadMode must be -1..4 or auto/none/mmap/mlock/mmap+mlock/dio"))
+    LlamaLoadMode::from_i32(n).ok_or_else(|| {
+        ctx.throw_type_error("loadMode must be -1..4 or auto/none/mmap/mlock/mmap+mlock/dio")
+    })
 }
 
 fn parse_model_options(ctx: &mut ScopedContext, cc: &CallContext) -> Result<ModelOptions, i32> {
@@ -153,7 +154,10 @@ fn parse_model_options(ctx: &mut ScopedContext, cc: &CallContext) -> Result<Mode
 
     let v = opts.get_property_str(ctx, "gpuLayers")?;
     if !v.is_undefined() {
-        if let Some(s) = v.as_string(true).and_then(|s| s.ascii().map(|a| a.to_vec())) {
+        if let Some(s) = v
+            .as_string(true)
+            .and_then(|s| s.ascii().map(|a| a.to_vec()))
+        {
             match s.as_slice() {
                 b"auto" => out.gpu_layers = -1,
                 b"all" => out.gpu_layers = -2,

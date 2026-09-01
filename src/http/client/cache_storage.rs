@@ -14,9 +14,7 @@ use std::{cell::RefCell, collections::HashMap, rc::Rc};
 use linkme::distributed_slice;
 use zuqe::{
     Array, CallContext, ClassCtorDef, ClassID, FieldDef, JSResult, JSValue, Runtime, ScopedContext,
-    builtins::promise::Promise,
-    builtins::typed_array::TypedArray,
-    def_native_object,
+    builtins::promise::Promise, builtins::typed_array::TypedArray, def_native_object,
 };
 
 use crate::{
@@ -381,13 +379,7 @@ fn register_class_cache_storage(rt: &mut Runtime) -> Result<ClassID, i32> {
     JSCacheStorage::register(rt)
 }
 
-def_native_object!(
-    "Cache",
-    JSCache,
-    CachePayload,
-    CACHE_PROTO,
-    None
-);
+def_native_object!("Cache", JSCache, CachePayload, CACHE_PROTO, None);
 
 #[distributed_slice(USER_CLASS_DEFS)]
 fn register_class_cache(rt: &mut Runtime) -> Result<ClassID, i32> {

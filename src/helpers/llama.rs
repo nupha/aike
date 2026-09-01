@@ -365,6 +365,3 @@ pub(crate) fn compute_keep_tokens(
     let tokens = model.tokenize(&c_str, false, false);
     tokens.len()
 }
-
-// ── private helpers ────────────────────────────────────────────────────────
-

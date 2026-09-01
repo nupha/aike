@@ -11,7 +11,7 @@
 use std::{
     io,
     pin::Pin,
-    task::{ready, Context, Poll},
+    task::{Context, Poll, ready},
     thread,
 };
 
@@ -60,7 +60,13 @@ pub fn bridge_reader(r: std::fs::File) -> BlockingReadAdapter {
             }
         }
     });
-    BlockingReadAdapter { rx, buf: Vec::new(), pos: 0, eof: false, file }
+    BlockingReadAdapter {
+        rx,
+        buf: Vec::new(),
+        pos: 0,
+        eof: false,
+        file,
+    }
 }
 
 impl AsyncRead for BlockingReadAdapter {
@@ -108,7 +114,9 @@ pub struct BlockingWriteAdapter {
 }
 
 #[cfg(unix)]
-pub fn bridge_writer(w: impl io::Write + Send + std::os::fd::AsRawFd + 'static) -> BlockingWriteAdapter {
+pub fn bridge_writer(
+    w: impl io::Write + Send + std::os::fd::AsRawFd + 'static,
+) -> BlockingWriteAdapter {
     let fd = w.as_raw_fd();
     bridge_writer_impl(w, fd)
 }
@@ -130,7 +138,11 @@ fn bridge_writer_impl(w: impl io::Write + Send + 'static, fd: i32) -> BlockingWr
             let _ = w.flush();
         }
     });
-    BlockingWriteAdapter { tx: Some(tx), join: Some(join), fd }
+    BlockingWriteAdapter {
+        tx: Some(tx),
+        join: Some(join),
+        fd,
+    }
 }
 
 #[cfg(unix)]

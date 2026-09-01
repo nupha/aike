@@ -63,47 +63,47 @@ pub fn js_model_createSamplerChain(ctx: &mut ScopedContext, cc: CallContext) -> 
 
                         let v = o.get_property_str(ctx, "repeatLast")?;
                         if !v.is_undefined() {
-                                if let IntOrFloat::Int64(n) = v.to_number(ctx)?
-                                    && (0..i32::MAX as i64).contains(&n)
-                                {
-                                    repeat_last_n = n as i32;
-                                } else {
-                                    ctx.throw_type_error("invalid repeatLast");
-                                    return Err(-1);
-                                }
+                            if let IntOrFloat::Int64(n) = v.to_number(ctx)?
+                                && (0..i32::MAX as i64).contains(&n)
+                            {
+                                repeat_last_n = n as i32;
+                            } else {
+                                ctx.throw_type_error("invalid repeatLast");
+                                return Err(-1);
+                            }
                         }
 
                         let v = o.get_property_str(ctx, "repeatPenalty")?;
                         if !v.is_undefined() {
-                                let d = v.to_number(ctx)?.to_f64();
-                                if (0.0..f32::MAX as f64).contains(&d) {
-                                    repeat_penalty = d as _;
-                                } else {
-                                    ctx.throw_type_error("invalid repeatPenalty");
-                                    return Err(-1);
-                                }
+                            let d = v.to_number(ctx)?.to_f64();
+                            if (0.0..f32::MAX as f64).contains(&d) {
+                                repeat_penalty = d as _;
+                            } else {
+                                ctx.throw_type_error("invalid repeatPenalty");
+                                return Err(-1);
+                            }
                         }
 
                         let v = o.get_property_str(ctx, "frequencyPenalty")?;
                         if !v.is_undefined() {
-                                let d = v.to_number(ctx)?.to_f64();
-                                if (0.0..f32::MAX as f64).contains(&d) {
-                                    frequency_penalty = d as _;
-                                } else {
-                                    ctx.throw_type_error("invalid frequencyPenalty");
-                                    return Err(-1);
-                                }
+                            let d = v.to_number(ctx)?.to_f64();
+                            if (0.0..f32::MAX as f64).contains(&d) {
+                                frequency_penalty = d as _;
+                            } else {
+                                ctx.throw_type_error("invalid frequencyPenalty");
+                                return Err(-1);
+                            }
                         }
 
                         let v = o.get_property_str(ctx, "presencePenalty")?;
                         if !v.is_undefined() {
-                                let d = v.to_number(ctx)?.to_f64();
-                                if (0.0..f32::MAX as f64).contains(&d) {
-                                    presence_penalty = d as _;
-                                } else {
-                                    ctx.throw_type_error("invalid presencePenalty");
-                                    return Err(-1);
-                                }
+                            let d = v.to_number(ctx)?.to_f64();
+                            if (0.0..f32::MAX as f64).contains(&d) {
+                                presence_penalty = d as _;
+                            } else {
+                                ctx.throw_type_error("invalid presencePenalty");
+                                return Err(-1);
+                            }
                         }
 
                         chain.add_sampler(&SamplerKind::Penalties {
@@ -193,47 +193,47 @@ fn js_samplerchain_penalties(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
 
         let v = opts.get_property_str(ctx, "repeatLastN")?;
         if !v.is_undefined() {
-                if let IntOrFloat::Int64(n) = v.to_number(ctx)?
-                    && (0..i32::MAX as i64).contains(&n)
-                {
-                    repeat_last_n = n as i32;
-                } else {
-                    ctx.throw_type_error("invalid repeatLastN");
-                    return Err(-1);
-                }
+            if let IntOrFloat::Int64(n) = v.to_number(ctx)?
+                && (0..i32::MAX as i64).contains(&n)
+            {
+                repeat_last_n = n as i32;
+            } else {
+                ctx.throw_type_error("invalid repeatLastN");
+                return Err(-1);
+            }
         }
 
         let v = opts.get_property_str(ctx, "repeatPenalty")?;
         if !v.is_undefined() {
-                let d = v.to_number(ctx)?.to_f64();
-                if (0.0..f32::MAX as f64).contains(&d) {
-                    repeat_penalty = d as _;
-                } else {
-                    ctx.throw_type_error("invalid repeatPenalty");
-                    return Err(-1);
-                }
+            let d = v.to_number(ctx)?.to_f64();
+            if (0.0..f32::MAX as f64).contains(&d) {
+                repeat_penalty = d as _;
+            } else {
+                ctx.throw_type_error("invalid repeatPenalty");
+                return Err(-1);
+            }
         }
 
         let v = opts.get_property_str(ctx, "frequencyPenalty")?;
         if !v.is_undefined() {
-                let d = v.to_number(ctx)?.to_f64();
-                if (0.0..f32::MAX as f64).contains(&d) {
-                    frequency_penalty = d as _;
-                } else {
-                    ctx.throw_type_error("invalid frequencyPenalty");
-                    return Err(-1);
-                }
+            let d = v.to_number(ctx)?.to_f64();
+            if (0.0..f32::MAX as f64).contains(&d) {
+                frequency_penalty = d as _;
+            } else {
+                ctx.throw_type_error("invalid frequencyPenalty");
+                return Err(-1);
+            }
         }
 
         let v = opts.get_property_str(ctx, "presencePenalty")?;
         if !v.is_undefined() {
-                let d = v.to_number(ctx)?.to_f64();
-                if (0.0..f32::MAX as f64).contains(&d) {
-                    presence_penalty = d as _;
-                } else {
-                    ctx.throw_type_error("invalid presencePenalty");
-                    return Err(-1);
-                }
+            let d = v.to_number(ctx)?.to_f64();
+            if (0.0..f32::MAX as f64).contains(&d) {
+                presence_penalty = d as _;
+            } else {
+                ctx.throw_type_error("invalid presencePenalty");
+                return Err(-1);
+            }
         }
     }
 

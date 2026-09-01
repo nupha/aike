@@ -25,11 +25,11 @@ use llama::ModelArch;
 use uuid::Uuid;
 
 use crate::{
-    helpers::now_unix_s,
     ai::{
         ERR_CANCELLED, ERR_ENGINE_SHUTDOWN, OUTMSG_FIELD_CHOICES, OUTMSG_FIELD_REASONING,
         engine::{EngineReply, GeneratedContent, StopReason},
     },
+    helpers::now_unix_s,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq)]
