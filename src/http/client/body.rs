@@ -13,10 +13,9 @@ use std::{
 
 use crossbeam::channel::{Receiver, TryRecvError};
 use zuqe::{
-    CallContext, Callback, Exception, JSResult, JSValue, JobState, ScopedContext,
+    Exception, JSResult, JSValue, JobState, ScopedContext,
     builtins::{
         array_buffer::ArrayBuffer,
-        iterator::AsyncIterableIterator,
         json::JSON,
         promise::{Promise, PromiseResultSlot},
         typed_array::TypedArray,
@@ -232,7 +231,7 @@ pub(crate) fn drain_body(
             let committed = Arc::new(AtomicBool::new(false));
             let start = Instant::now();
             ctx.queue_job(
-                move |_cx| {
+                move |cx| {
                     if committed.load(Ordering::SeqCst) {
                         // Stay queued (holding the strong ref) until the
                         // result-slot job consumed the committed value.
@@ -249,8 +248,6 @@ pub(crate) fn drain_body(
                         committed.store(true, Ordering::SeqCst);
                     };
 
-                    // Drain up to BATCH bytes per tick: fast enough for large
-                    // responses, but yields so other jobs can run.
                     const BATCH: usize = 1024 * 1024;
                     let mut drained = 0usize;
                     loop {
@@ -259,6 +256,11 @@ pub(crate) fn drain_body(
                                 drained += chunk.len();
                                 inner.extend_from_slice(&chunk);
                                 if drained >= BATCH {
+                                    // More data is still buffered in the channel but
+                                    // the producer may already be gone (unbounded
+                                    // channel holds it all), so no further wake is
+                                    // coming — wake now or this `Again` parks forever.
+                                    cx.wake_handle().wake();
                                     return Ok(JobState::Again);
                                 }
                             }
@@ -272,6 +274,7 @@ pub(crate) fn drain_body(
                                 let full = guard.take().unwrap();
                                 committed.store(true, Ordering::SeqCst);
                                 let _ = result_slot.commit(Ok(full));
+                                cx.wake_handle().wake();
                                 return Ok(JobState::Again);
                             }
                             Err(TryRecvError::Empty) => {

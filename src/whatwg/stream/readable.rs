@@ -51,11 +51,6 @@ pub(crate) struct ReadableStreamPayload {
     /// errors with the signal's reason. Stored on the stream payload (not just
     /// the channel registry) so GC keeps it alive while the stream is live.
     pub(crate) signal: Option<JSValue>,
-    /// Id of this stream's entry in CHANNEL_STREAMS, so the entry can be
-    /// removed when the stream is garbage-collected. The registry is a plain
-    /// RefCell that GC does not scan, so a collected stream would otherwise
-    /// leave a dangling controller handle for the poller to trip over.
-    pub(crate) channel_id: Option<u64>,
     /// True when the stream was constructed with `type: 'bytes'`. Used by
     /// `getReader({mode:'byob'})` and `ReadableStreamBYOBReader` to validate
     /// that only byte streams support BYOB reading.
@@ -71,7 +66,6 @@ impl ReadableStreamPayload {
             controller: None,
             disturbed: false,
             signal: None,
-            channel_id: None,
             is_byte_stream: false,
         }
     }
@@ -97,13 +91,14 @@ impl ReadableStreamPayload {
         if let Some(ref s) = self.signal {
             s.trace(gcx);
         }
-        // Drop the poller registry entry so a collected stream is never visited
-        // via a dangling controller handle. Single-threaded, GC phase: safe.
-        if let Some(id) = self.channel_id {
-            CHANNEL_STREAMS.with(|m| {
-                m.borrow_mut().remove(&id);
-            });
-        }
+        // NOTE: must NOT remove the CHANNEL_STREAMS entry here. `gc_trace`
+        // also runs for LIVE streams (the payload is in the live object
+        // graph), so removing the id would silently delete the poller's
+        // registry entry mid-body, orphaning the reader (pending read never
+        // resolves). The entry is safe in the map: `gc_trace_stream` traces
+        // every registered controller each GC, so it is never collected while
+        // the entry exists, and the poller reaps the entry itself on
+        // Disconnected/error/idle-timeout.
     }
 
     /// Set this stream's state (and `stored_error` when errored), then settle
@@ -1317,7 +1312,6 @@ impl JSReadableStream {
         // the channel registry, so it cannot be reclaimed while the body is live.
         let sp = stream.payload_mut().unwrap();
         sp.signal = signal;
-        sp.channel_id = Some(id);
 
         let was_empty = CHANNEL_STREAMS.with(|map| {
             let empty = map.borrow().is_empty();
