@@ -135,11 +135,14 @@ fn js_signal_add_event_listener(ctx: &mut ScopedContext, cc: CallContext) -> JSR
     if cc.length() < 1 {
         return Ok(JSValue::UNDEFINED);
     }
+
     let event = cc.arg(0);
-    let type_name = match event.to_string(ctx) {
-        Ok(s) => s.content().encode_utf8(false).to_string(),
-        Err(_) => return Ok(JSValue::UNDEFINED),
-    };
+    let type_name = event
+        .to_string(ctx)?
+        .content()
+        .encode_utf8(false)
+        .to_string();
+
     let cb = if cc.length() > 1 {
         cc.arg(1)
     } else {
@@ -157,11 +160,14 @@ fn js_signal_remove_event_listener(ctx: &mut ScopedContext, cc: CallContext) -> 
     if cc.length() < 2 {
         return Ok(JSValue::UNDEFINED);
     }
+
     let event = cc.arg(0);
-    let type_name = match event.to_string(ctx) {
-        Ok(s) => s.content().encode_utf8(false).to_string(),
-        Err(_) => return Ok(JSValue::UNDEFINED),
-    };
+    let type_name = event
+        .to_string(ctx)?
+        .content()
+        .encode_utf8(false)
+        .to_string();
+
     let cb = cc.arg(1);
     signal
         .inner

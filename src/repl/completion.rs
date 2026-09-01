@@ -383,7 +383,10 @@ fn resolve_context_obj(scope: &mut zuqe::ScopedContext<'_>, line: &str, pos: usi
         };
         match o.get_property_str(scope, prop_name) {
             Ok(v) => v,
-            Err(_) => JSValue::UNDEFINED,
+            Err(_) => {
+                scope.take_exception();
+                JSValue::UNDEFINED
+            }
         }
     } else {
         // Preceded by a word character but no dot → cursor is mid-word, can't resolve

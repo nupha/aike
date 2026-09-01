@@ -599,17 +599,23 @@ fn js_handler_then(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     if is_reject {
         let reason = cc.arg(0);
-        if !reason.is_undefined()
-            && let Ok(s) = reason.to_string(ctx)
-        {
+        if !reason.is_undefined() {
+            let Ok(s) = reason.to_string(ctx) else {
+                ctx.take_exception();
+                return Ok(JSValue::UNDEFINED);
+            };
             eprintln!("{}", s.content().encode_utf8(false));
         }
     }
 
     let mut res_val = cc.data(0);
-    let p = match get_res_payload_mut(ctx, &mut res_val) {
-        Ok(p) => p,
-        Err(_) => return Ok(JSValue::UNDEFINED),
+    let Ok(p) = get_res_payload_mut(ctx, &mut res_val) else {
+        // Response already switched to SSE (or detached/ended): completing the
+        // handler promise is a no-op for an SSE route. Drop the matching
+        // exception so the engine's Ok-with-pending-exception guard doesn't
+        // fire on an intentionally-ignored throw.
+        ctx.take_exception();
+        return Ok(JSValue::UNDEFINED);
     };
 
     if !p.ended {
@@ -1008,6 +1014,7 @@ fn dispatch_http_request(cx: &mut ScopedContext, incoming: HttpRequest, handler_
                 };
 
                 if promise.then(cx, ok_fn, fail_fn).is_err() {
+                    cx.take_exception();
                     if let Ok(p) = get_res_payload_mut(cx, &mut val) {
                         p.status = 500;
                         p.body = Some(String::from("Internal Server Error"));
@@ -1036,6 +1043,8 @@ fn dispatch_http_request(cx: &mut ScopedContext, incoming: HttpRequest, handler_
                 p.status = 500;
                 p.body = Some(String::from("Internal Server Error"));
                 p.send_response();
+            } else {
+                cx.take_exception();
             }
         }
     }
