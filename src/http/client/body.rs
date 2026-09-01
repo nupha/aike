@@ -248,30 +248,38 @@ pub(crate) fn drain_body(
                         guard.take();
                         committed.store(true, Ordering::SeqCst);
                     };
-                    match rx.try_recv() {
-                        Ok(Ok(chunk)) => {
-                            inner.extend_from_slice(&chunk);
-                            Ok(JobState::Again)
-                        }
-                        // A network error mid-body: reject the buffered read.
-                        Ok(Err(msg)) => {
-                            finish(&mut guard);
-                            let _ = result_slot.commit(Err(msg));
-                            Ok(JobState::Again)
-                        }
-                        Err(TryRecvError::Disconnected) => {
-                            let full = guard.take().unwrap();
-                            committed.store(true, Ordering::SeqCst);
-                            let _ = result_slot.commit(Ok(full));
-                            Ok(JobState::Again)
-                        }
-                        Err(TryRecvError::Empty) => {
-                            if start.elapsed() > BODY_TIMEOUT {
+
+                    // Drain up to BATCH bytes per tick: fast enough for large
+                    // responses, but yields so other jobs can run.
+                    const BATCH: usize = 1024 * 1024;
+                    let mut drained = 0usize;
+                    loop {
+                        match rx.try_recv() {
+                            Ok(Ok(chunk)) => {
+                                drained += chunk.len();
+                                inner.extend_from_slice(&chunk);
+                                if drained >= BATCH {
+                                    return Ok(JobState::Again);
+                                }
+                            }
+                            // A network error mid-body: reject the buffered read.
+                            Ok(Err(msg)) => {
                                 finish(&mut guard);
-                                let _ = result_slot.commit(Err("body read timeout".into()));
-                                Ok(JobState::Again)
-                            } else {
-                                Ok(JobState::Again)
+                                let _ = result_slot.commit(Err(msg));
+                                return Ok(JobState::Again);
+                            }
+                            Err(TryRecvError::Disconnected) => {
+                                let full = guard.take().unwrap();
+                                committed.store(true, Ordering::SeqCst);
+                                let _ = result_slot.commit(Ok(full));
+                                return Ok(JobState::Again);
+                            }
+                            Err(TryRecvError::Empty) => {
+                                if start.elapsed() > BODY_TIMEOUT {
+                                    finish(&mut guard);
+                                    let _ = result_slot.commit(Err("body read timeout".into()));
+                                }
+                                return Ok(JobState::Again);
                             }
                         }
                     }
