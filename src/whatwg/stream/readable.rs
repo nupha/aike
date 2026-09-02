@@ -7,7 +7,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crossbeam::channel::{Receiver, TryRecvError};
+use crossbeam::channel::TryRecvError;
 use linkme::distributed_slice;
 use zuqe::{
     CallContext, Callback, ClassCtorDef, ClassID, ErrorKind, Exception, FieldDef, JSResult,
