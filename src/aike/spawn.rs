@@ -520,11 +520,7 @@ fn collect_with_timeout(
         unsafe { CloseHandle(job) };
     }
 
-    let (stdout_buf, stderr_buf, exit_status) = match collected {
-        Ok(t) => t,
-        Err(e) => return Err(e),
-    };
-
+    let (stdout_buf, stderr_buf, exit_status) = collected?;
     Ok((stdout_buf, stderr_buf, exit_status, killed_by_timeout))
 }
 
@@ -573,14 +569,14 @@ fn extract_input(ctx: &mut ScopedContext, opts: &Object) -> Result<Option<Vec<u8
             s.content().encode_utf8(false).into_owned().into_bytes(),
         ));
     }
-    if let Some(payload) = input_val.payload() {
-        if let Some(ta) = payload.typed_array() {
+    if let Some(o) = input_val.as_object() {
+        if let Some(ta) = o.payload_typed_array() {
             return Ok(Some(ta.bytes().to_vec()));
-        }
-        if let Some(ab) = payload.array_buffer() {
+        } else if let Some(ab) = o.payload_array_buffer() {
             return Ok(Some(ab.bytes().to_vec()));
         }
     }
+
     Err(ctx.throw_type_error("`input` must be a string, TypedArray, or ArrayBuffer"))
 }
 

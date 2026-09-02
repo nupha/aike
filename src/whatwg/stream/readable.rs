@@ -196,6 +196,12 @@ impl ReadableStreamPayload {
     }
 }
 
+impl GcTrace for ReadableStreamPayload {
+    fn trace(&self, gcx: &mut GcTraceCtx) {
+        self.gc_trace(gcx);
+    }
+}
+
 impl JSReadableStream {
     /// Lock this stream by acquiring a reader. Creates a default (or BYOB)
     /// reader bound to this stream and stores it in the stream's `reader`
@@ -323,8 +329,7 @@ def_native_object!(
     ReadableStreamPayload,
     READABLE_STREAM_PROTO,
     Some(ClassCtorDef::new(js_readable_stream_constructor, 1, false)
-        .expose_to_global()),
-    on_payload_gc: ReadableStreamPayload::gc_trace
+        .expose_to_global())
 );
 
 pub(crate) fn get_readable_stream_payload<'a>(

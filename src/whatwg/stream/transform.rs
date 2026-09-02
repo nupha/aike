@@ -57,6 +57,12 @@ impl TransformStreamPayload {
     }
 }
 
+impl GcTrace for TransformStreamPayload {
+    fn trace(&self, gcx: &mut GcTraceCtx) {
+        self.gc_trace(gcx);
+    }
+}
+
 const TRANSFORM_STREAM_PROTO: &[FieldDef] = &[
     FieldDef::GETSET("readable", Some(js_transform_stream_readable), None, 0),
     FieldDef::GETSET("writable", Some(js_transform_stream_writable), None, 0),
@@ -72,8 +78,7 @@ def_native_object!(
     JSTransformStream,
     TransformStreamPayload,
     TRANSFORM_STREAM_PROTO,
-    Some(ClassCtorDef::new(js_transform_stream_constructor, 1, false).expose_to_global()),
-    on_payload_gc: TransformStreamPayload::gc_trace
+    Some(ClassCtorDef::new(js_transform_stream_constructor, 1, false).expose_to_global())
 );
 
 fn js_transform_stream_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {

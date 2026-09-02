@@ -49,6 +49,12 @@ impl EmitterPayload {
     }
 }
 
+impl GcTrace for EmitterPayload {
+    fn trace(&self, gcx: &mut zuqe::gc_lite::GcTraceCtx) {
+        self.gc_trace(gcx);
+    }
+}
+
 fn get_emitter<'a>(ctx: &mut ScopedContext, val: &'a JSValue) -> Result<&'a EmitterPayload, i32> {
     JSEventEmitter::payload_of(val)
         .ok_or_else(|| ctx.throw_internal_error("not an EventEmitter instance"))
@@ -245,8 +251,7 @@ def_native_object!(
     JSEventEmitter,
     EmitterPayload,
     CLASS_EVENT_EMITTER_PROTO,
-    Some(ClassCtorDef::new(js_constructor, 0, true).expose_to_global()),
-    on_payload_gc: EmitterPayload::gc_trace
+    Some(ClassCtorDef::new(js_constructor, 0, true).expose_to_global())
 );
 
 #[distributed_slice(USER_CLASS_DEFS)]

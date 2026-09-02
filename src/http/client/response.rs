@@ -226,6 +226,12 @@ impl ResponsePayload {
     }
 }
 
+impl GcTrace for ResponsePayload {
+    fn trace(&self, gcx: &mut GcTraceCtx) {
+        self.gc_trace(gcx);
+    }
+}
+
 fn get_response_payload_mut<'a>(
     ctx: &mut ScopedContext,
     val: &'a mut JSValue,
@@ -1092,8 +1098,7 @@ def_native_object!(
         ClassCtorDef::new(js_response_constructor, 1, true)
             .entries(RESPONSE_STATIC_ENTRIES)
             .expose_to_global()
-    ),
-    on_payload_gc: ResponsePayload::gc_trace
+    )
 );
 
 #[distributed_slice(USER_CLASS_DEFS)]
@@ -1141,8 +1146,7 @@ def_native_object!(
     ResponsePayload,
     HTTP_RESPONSE_PROTO,
     Some(ClassCtorDef::new(js_http_response_constructor, 0, false)),
-    extends: JSResponse::class_id,
-    on_payload_gc: ResponsePayload::gc_trace
+    extends: JSResponse::class_id
 );
 
 #[distributed_slice(USER_CLASS_DEFS)]

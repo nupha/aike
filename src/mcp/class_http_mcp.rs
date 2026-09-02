@@ -62,8 +62,7 @@ def_native_object!(
     McpServicePayload,
     HTTP_MCP_PROTO,
     Some( ClassCtorDef::new(js_http_constructor, 1, true).entries(HTTP_MCP_STATIC)),
-    extends: JSBaseMcp::class_id,
-    on_payload_gc: McpServicePayload::gc_trace
+    extends: JSBaseMcp::class_id
 );
 
 #[distributed_slice(USER_CLASS_DEFS)]

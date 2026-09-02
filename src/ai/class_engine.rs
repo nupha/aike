@@ -18,6 +18,7 @@ use zuqe::{
         promise::{Promise, PromiseResultSlot},
     },
     def_native_object,
+    gc_lite::{GcTrace, GcTraceCtx},
 };
 
 use crate::{

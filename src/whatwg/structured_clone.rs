@@ -183,8 +183,13 @@ fn clone_typed_array(
     let buffer_clone = clone_value(ctx, buffer.into(), memory, transfer)?;
 
     // Same element type via the global constructor, e.g. `new Uint8Array(buf, o, n)`.
-    let type_name = obj_class_name(ctx, value)?;
-    let ctor = global_ctor(ctx, &type_name)?;
+    let ctor = {
+        let o = value
+            .as_object()
+            .ok_or_else(|| ctx.throw_internal_error("not an object"))?;
+        global_ctor(ctx, o.class_name_str())?
+    };
+
     let clone = ctor.call_ctor(
         ctx,
         &[
@@ -194,6 +199,7 @@ fn clone_typed_array(
         ],
     )?;
     memory.insert(value, clone);
+
     Ok(clone)
 }
 
@@ -227,26 +233,30 @@ fn clone_data_view(
 }
 
 /// The class name of an object (e.g. "Uint8Array", "Float64Array") as a String.
-fn obj_class_name(ctx: &mut ScopedContext, value: JSValue) -> Result<String, i32> {
+fn obj_class_name(ctx: &mut ScopedContext, value: &JSValue) -> Result<String, i32> {
     let name = value
         .as_object()
         .ok_or_else(|| ctx.throw_internal_error("not an object"))?
-        .class_name()
-        .to_utf8(ctx.rt());
+        .class_name_str()
+        .to_string();
     Ok(name)
 }
 
 /// Clone a Date via `new Date(timestamp)`.
 fn clone_date(ctx: &mut ScopedContext, value: JSValue) -> Result<JSValue, i32> {
-    let dt = value
-        .payload()
-        .and_then(|p| p.datetime())
+    let ts = value
+        .as_object()
+        .and_then(|p| {
+            p.payload_datetime().map(|dt| {
+                if dt.is_invalid() {
+                    f64::NAN
+                } else {
+                    dt.timestamp() as f64
+                }
+            })
+        })
         .ok_or_else(|| ctx.throw_internal_error("not a Date"))?;
-    let ts = if dt.is_invalid() {
-        f64::NAN
-    } else {
-        dt.timestamp() as f64
-    };
+
     let ctor = global_ctor(ctx, "Date")?;
     ctor.call_ctor(ctx, &[JSValue::from(ts)])
 }
@@ -313,9 +323,11 @@ fn clone_map(
     transfer: &HashSet<JSValue>,
 ) -> Result<JSValue, i32> {
     let entries: Vec<(JSValue, JSValue)> = value
-        .payload()
-        .and_then(|p| p.mapset())
-        .map(|state| state.iter().map(|e| (e.key(), e.value())).collect())
+        .as_object()
+        .and_then(|o| {
+            o.payload_mapset()
+                .map(|s| s.iter().map(|e| (e.key(), e.value())).collect())
+        })
         .unwrap_or_default();
 
     let ctor = global_ctor(ctx, "Map")?;
@@ -343,9 +355,11 @@ fn clone_set(
     transfer: &HashSet<JSValue>,
 ) -> Result<JSValue, i32> {
     let elements: Vec<JSValue> = value
-        .payload()
-        .and_then(|p| p.mapset())
-        .map(|state| state.iter().map(|e| e.key()).collect())
+        .as_object()
+        .and_then(|o| {
+            o.payload_mapset()
+                .map(|s| s.iter().map(|e| e.key()).collect())
+        })
         .unwrap_or_default();
 
     let ctor = global_ctor(ctx, "Set")?;

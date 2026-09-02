@@ -180,6 +180,10 @@ pub(crate) struct CryptoKeyPayload {
     pub(crate) usages: Vec<String>,
 }
 
+impl GcTrace for CryptoKeyPayload {
+    fn trace(&self, _gcx: &mut GcTraceCtx) {}
+}
+
 /// Per WebCrypto, `CryptoKey` cannot be constructed from JS.
 fn js_key_constructor(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
     Err(ctx.throw_type_error("Illegal constructor: 'CryptoKey' is not constructable"))
@@ -289,6 +293,12 @@ impl CryptoPayload {
     }
 }
 
+impl GcTrace for CryptoPayload {
+    fn trace(&self, gcx: &mut GcTraceCtx) {
+        self.gc_trace(gcx);
+    }
+}
+
 /// Per WebCrypto, `Crypto` cannot be constructed from JS; only the global
 /// `crypto` instance exists.
 fn js_crypto_constructor(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
@@ -366,8 +376,7 @@ def_native_object!(
     JSCrypto,
     CryptoPayload,
     CLASS_CRYPTO_PROTO,
-    Some(ClassCtorDef::new(js_crypto_constructor, 0, true).expose_to_global()),
-    on_payload_gc: CryptoPayload::gc_trace
+    Some(ClassCtorDef::new(js_crypto_constructor, 0, true).expose_to_global())
 );
 
 #[distributed_slice(USER_CLASS_DEFS)]

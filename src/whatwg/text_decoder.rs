@@ -12,6 +12,7 @@ use linkme::distributed_slice;
 use zuqe::{
     CallContext, ClassCtorDef, ClassID, FieldDef, JSResult, JSValue, Object, Runtime,
     ScopedContext, def_native_object,
+    gc_lite::{GcTrace, GcTraceCtx},
 };
 
 use crate::USER_CLASS_DEFS;
@@ -56,6 +57,10 @@ pub(crate) struct TextDecoderPayload {
     ignore_bom: bool,
     bom_handled: Cell<bool>,
     pending: RefCell<Vec<u8>>,
+}
+
+impl GcTrace for TextDecoderPayload {
+    fn trace(&self, _gcx: &mut GcTraceCtx) {}
 }
 
 fn get_decoder<'a>(
@@ -356,11 +361,11 @@ fn js_text_decoder_decode(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
 
         if let Some(o) = a.as_object() {
             ob.replace(o);
-            let p = ob.as_ref().map(|o| o.payload()).unwrap();
 
-            if let Some(ab) = p.array_buffer() {
+            let p = ob.as_ref().unwrap();
+            if let Some(ab) = p.payload_array_buffer() {
                 ab.bytes() // &[u8] borrowing from the JS object
-            } else if let Some(ta) = p.typed_array() {
+            } else if let Some(ta) = p.payload_typed_array() {
                 ta.bytes()
             } else {
                 return Err(ctx.throw_type_error("Input must be an ArrayBuffer or TypedArray"));
@@ -368,29 +373,6 @@ fn js_text_decoder_decode(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
         } else {
             return Err(ctx.throw_type_error("Input must be TypedArray, ArrayBuffer or Object"));
         }
-
-        // match cc.arg(0) {
-        //     s @ JSValue::String(_) => {
-        //         return Ok(s);
-        //     }
-        //     JSValue::Object(o) => {
-        //         ob.replace(o);
-        //         let p = ob.as_ref().map(|o| o.payload()).unwrap();
-
-        //         if let Some(ab) = p.array_buffer() {
-        //             ab.bytes() // &[u8] borrowing from the JS object
-        //         } else if let Some(ta) = p.typed_array() {
-        //             ta.bytes()
-        //         } else {
-        //             ctx.throw_type_error("Input must be an ArrayBuffer or TypedArray");
-        //             return Err(-1);
-        //         }
-        //     }
-        //     _ => {
-        //         ctx.throw_type_error("Input must be TypedArray, ArrayBuffer or Object");
-        //         return Err(-1);
-        //     }
-        // }
     };
 
     let pending_old = std::mem::take(&mut *decoder.pending.borrow_mut());

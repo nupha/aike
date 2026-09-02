@@ -385,8 +385,7 @@ def_native_object!(
     JSAbortSignal,
     AbortSignalPayload,
     CLASS_SIGNAL_PROTO,
-    Some(ClassCtorDef::new(js_signal_constructor, 0, true).expose_to_global()),
-    on_payload_gc: AbortSignalPayload::gc_trace
+    Some(ClassCtorDef::new(js_signal_constructor, 0, true).expose_to_global())
 );
 
 #[distributed_slice(USER_CLASS_DEFS)]
@@ -408,8 +407,7 @@ def_native_object!(
     JSAbortController,
     AbortControllerPayload,
     CLASS_CONTROLLER_PROTO,
-    Some(ClassCtorDef::new(js_controller_constructor, 0, true).expose_to_global()),
-    on_payload_gc: AbortControllerPayload::gc_trace
+    Some(ClassCtorDef::new(js_controller_constructor, 0, true).expose_to_global())
 );
 
 #[distributed_slice(USER_CLASS_DEFS)]
@@ -441,12 +439,24 @@ impl AbortSignalPayload {
     }
 }
 
+impl GcTrace for AbortSignalPayload {
+    fn trace(&self, gcx: &mut GcTraceCtx) {
+        self.gc_trace(gcx);
+    }
+}
+
 impl AbortControllerPayload {
     fn gc_trace(&self, gcx: &mut GcTraceCtx) {
         // Keep the associated signal alive: the controller→signal link is the
         // only GC-traceable edge into the shared signal state for a signal
         // referenced solely via `AbortController.signal`.
         self.signal.trace(gcx);
+    }
+}
+
+impl GcTrace for AbortControllerPayload {
+    fn trace(&self, gcx: &mut GcTraceCtx) {
+        self.gc_trace(gcx);
     }
 }
 

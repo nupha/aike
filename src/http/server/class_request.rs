@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex};
 use linkme::distributed_slice;
 use zuqe::{
     CallContext, ClassID, FieldDef, JSResult, JSValue, Runtime, ScopedContext, def_native_object,
+    gc_lite::GcTrace,
 };
 
 use crate::USER_CLASS_DEFS;
@@ -35,6 +36,12 @@ fn gc_trace_req(data: &HttpRequestPayload, gcx: &mut zuqe::gc_lite::GcTraceCtx) 
         for v in cbs.iter() {
             zuqe::gc_lite::GcTrace::trace(v, gcx);
         }
+    }
+}
+
+impl GcTrace for HttpRequestPayload {
+    fn trace(&self, gcx: &mut zuqe::gc_lite::GcTraceCtx) {
+        gc_trace_req(self, gcx);
     }
 }
 
@@ -175,8 +182,7 @@ def_native_object!(
     JSHttpRequest,
     HttpRequestPayload,
     REQ_PROTO,
-    None,
-    on_payload_gc: gc_trace_req
+    None
 );
 
 #[distributed_slice(USER_CLASS_DEFS)]

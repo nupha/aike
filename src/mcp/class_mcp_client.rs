@@ -40,6 +40,7 @@ use rmcp::{
 use zuqe::{
     CallContext, ClassCtorDef, ClassID, FieldDef, JSResult, JSValue, Object, PollSender, Runtime,
     ScopedContext, builtins::promise::Promise, def_native_object,
+    gc_lite::{GcTrace, GcTraceCtx},
 };
 
 use crate::USER_CLASS_DEFS;
@@ -160,6 +161,10 @@ pub(crate) struct McpClientPayload {
     id: i64,
     timeout_ms: u64,
     cfg: ClientCfg,
+}
+
+impl GcTrace for McpClientPayload {
+    fn trace(&self, _gcx: &mut GcTraceCtx) {}
 }
 
 impl McpClientPayload {

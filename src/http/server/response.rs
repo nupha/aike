@@ -283,6 +283,12 @@ impl HttpResponsePayload {
     }
 }
 
+impl GcTrace for HttpResponsePayload {
+    fn trace(&self, gcx: &mut GcTraceCtx) {
+        self.gc_trace(gcx);
+    }
+}
+
 fn gc_trace_res(data: &HttpResponsePayload, gcx: &mut zuqe::gc_lite::GcTraceCtx) {
     data.gc_trace(gcx);
 }
@@ -292,8 +298,7 @@ def_native_object!(
     JSHttpResponse,
     HttpResponsePayload,
     RES_PROTO,
-    None,
-    on_payload_gc: gc_trace_res
+    None
 );
 
 #[distributed_slice(USER_CLASS_DEFS)]
@@ -335,6 +340,12 @@ impl HttpResponseSsePayload {
                 zuqe::gc_lite::GcTrace::trace(v, gcx);
             }
         }
+    }
+}
+
+impl GcTrace for HttpResponseSsePayload {
+    fn trace(&self, gcx: &mut GcTraceCtx) {
+        self.gc_trace(gcx);
     }
 }
 
@@ -468,8 +479,7 @@ def_native_object!(
     JSHttpResponseSse,
     HttpResponseSsePayload,
     SSE_PROTO,
-    None,
-    on_payload_gc: HttpResponseSsePayload::gc_trace
+    None
 );
 
 #[distributed_slice(USER_CLASS_DEFS)]

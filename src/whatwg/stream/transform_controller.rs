@@ -86,6 +86,12 @@ impl TransformControllerPayload {
     }
 }
 
+impl GcTrace for TransformControllerPayload {
+    fn trace(&self, gcx: &mut GcTraceCtx) {
+        self.gc_trace(gcx);
+    }
+}
+
 const TRANSFORM_CONTROLLER_PROTO: &[FieldDef] = &[
     FieldDef::FUNC("enqueue", 1, js_transform_controller_enqueue, 0),
     FieldDef::FUNC("error", 1, js_transform_controller_error, 0),
@@ -112,8 +118,7 @@ def_native_object!(
     JSTransformStreamDefaultController,
     TransformControllerPayload,
     TRANSFORM_CONTROLLER_PROTO,
-    Some(ClassCtorDef::new(js_transform_controller_constructor, 0, false).expose_to_global()),
-    on_payload_gc: TransformControllerPayload::gc_trace
+    Some(ClassCtorDef::new(js_transform_controller_constructor, 0, false).expose_to_global())
 );
 
 fn js_transform_controller_enqueue(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {

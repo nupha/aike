@@ -437,6 +437,12 @@ impl HeadersPayload {
     }
 }
 
+impl GcTrace for HeadersPayload {
+    fn trace(&self, _gcx: &mut GcTraceCtx) {
+        // No JS objects in HeadersPayload — list is pure Rust data
+    }
+}
+
 /// WHATWG "forbidden response-header name": cannot be set through a Response's
 /// headers, silently ignored under the `response` guard.
 fn is_forbidden_response_header(name: &str) -> bool {
@@ -773,6 +779,12 @@ impl HeaderListIter {
     }
 }
 
+impl GcTrace for HeaderListIter {
+    fn trace(&self, gcx: &mut GcTraceCtx) {
+        self.obj.trace(gcx);
+    }
+}
+
 const HEADER_ITER_PROTO: &[FieldDef] = &[
     // `next` must be enumerable (WPT `checkIteratorProperties` requires a writable
     // + configurable + enumerable `next`). We expose it as a normal method that
@@ -796,10 +808,7 @@ def_native_object!(
     HeaderListIter,
     HEADER_ITER_PROTO,
     Some(ClassCtorDef::new(js_headers_iterator_ctor, 0, false)),
-    extends: || JS_CLASS_ITERATOR,
-    on_payload_gc: |p: &HeaderListIter, gcx: &mut GcTraceCtx| {
-        p.obj.trace(gcx);
-    }
+    extends: || JS_CLASS_ITERATOR
 );
 
 /// Build a `{value, done}` iterator result object.

@@ -15,6 +15,7 @@ use linkme::distributed_slice;
 use zuqe::{
     Array, CallContext, ClassCtorDef, ClassID, FieldDef, JSResult, JSValue, Runtime, ScopedContext,
     builtins::promise::Promise, builtins::typed_array::TypedArray, def_native_object,
+    gc_lite::{GcTrace, GcTraceCtx},
 };
 
 use crate::{
@@ -54,10 +55,18 @@ pub(crate) struct CacheStoragePayload {
     pub(crate) stores: Rc<RefCell<HashMap<String, CacheData>>>,
 }
 
+impl GcTrace for CacheStoragePayload {
+    fn trace(&self, _gcx: &mut GcTraceCtx) {}
+}
+
 /// A single named cache. Holds only its name and a shared handle to the store.
 pub(crate) struct CachePayload {
     name: String,
     stores: Rc<RefCell<HashMap<String, CacheData>>>,
+}
+
+impl GcTrace for CachePayload {
+    fn trace(&self, _gcx: &mut GcTraceCtx) {}
 }
 
 fn cache_key(method: &str, url: &str) -> String {

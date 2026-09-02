@@ -80,6 +80,12 @@ impl RequestPayload {
     }
 }
 
+impl GcTrace for RequestPayload {
+    fn trace(&self, gcx: &mut GcTraceCtx) {
+        self.gc_trace(gcx);
+    }
+}
+
 pub(crate) fn get_request_payload_mut<'a>(
     ctx: &mut ScopedContext,
     val: &'a mut JSValue,
@@ -980,8 +986,7 @@ def_native_object!(
     REQUEST_PROTO,
     // `call_as_func: false`: Request must be constructed with `new` (WPT
     // request-error "without new must throw").
-    Some(ClassCtorDef::new(js_request_constructor, 1, false).expose_to_global()),
-    on_payload_gc: RequestPayload::gc_trace
+    Some(ClassCtorDef::new(js_request_constructor, 1, false).expose_to_global())
 );
 
 #[distributed_slice(USER_CLASS_DEFS)]

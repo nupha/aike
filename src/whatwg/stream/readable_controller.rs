@@ -1379,6 +1379,12 @@ impl ReadableControllerPayload {
     }
 }
 
+impl GcTrace for ReadableControllerPayload {
+    fn trace(&self, gcx: &mut GcTraceCtx) {
+        self.gc_trace(gcx);
+    }
+}
+
 /// WHATWG `ReadableByteStreamControllerEnqueue` steps 4-7: validate the chunk
 /// and transfer its buffer so the stream takes ownership.
 fn validate_and_transfer_byte_chunk(

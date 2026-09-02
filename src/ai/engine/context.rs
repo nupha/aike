@@ -11,6 +11,8 @@ use std::{
 use crossbeam::channel::{Receiver, SendError, Sender};
 use llama::{LlamaContext, LlamaModel, SamplerChain, SamplerKind};
 
+use zuqe::gc_lite::{GcTrace, GcTraceCtx};
+
 use super::{
     caching::{CacheRam, ContextMode, SwapEntry},
     slot::Slot,
@@ -62,6 +64,10 @@ pub struct Engine {
     /// Once dead, push_task() will return an error and the engine
     /// should be considered unusable.
     pub(crate) is_dead: bool,
+}
+
+impl GcTrace for Engine {
+    fn trace(&self, _gcx: &mut GcTraceCtx) {}
 }
 
 impl Drop for Engine {

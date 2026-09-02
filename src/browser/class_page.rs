@@ -12,6 +12,7 @@ use zuqe::{
     builtins::promise::{Promise, PromiseResultSlot},
     builtins::typed_array::TypedArray,
     def_native_object,
+    gc_lite::{GcTrace, GcTraceCtx},
 };
 
 use crate::{
@@ -47,6 +48,10 @@ pub(crate) struct PagePayload {
     pub(crate) session_id: String,
     pub(crate) target_id: String,
     pub(crate) network: PageNetworkState,
+}
+
+impl GcTrace for PagePayload {
+    fn trace(&self, _gcx: &mut GcTraceCtx) {}
 }
 
 // ---------------------------------------------------------------------------

@@ -317,6 +317,12 @@ impl ReaderPayload {
     }
 }
 
+impl GcTrace for ReaderPayload {
+    fn trace(&self, gcx: &mut GcTraceCtx) {
+        self.gc_trace(gcx);
+    }
+}
+
 /// Transfer a BYOB view's underlying ArrayBuffer: detach the original, then
 /// return a new empty Uint8Array backed by a fresh buffer. This matches
 /// WHATWG ReadableByteStreamControllerBYOBRead when reading from a closed
@@ -419,8 +425,7 @@ def_native_object!(
     JSReadableStreamDefaultReader,
     ReaderPayload,
     READER_PROTO,
-    Some(ClassCtorDef::new(js_reader_constructor, 0, false).expose_to_global()),
-    on_payload_gc: ReaderPayload::gc_trace
+    Some(ClassCtorDef::new(js_reader_constructor, 0, false).expose_to_global())
 );
 
 fn js_reader_read(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {

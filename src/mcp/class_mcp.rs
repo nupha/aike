@@ -397,6 +397,12 @@ fn js_update_tools(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     Ok(this)
 }
 
+impl GcTrace for McpServicePayload {
+    fn trace(&self, gcx: &mut GcTraceCtx) {
+        self.gc_trace(gcx);
+    }
+}
+
 fn js_base_constructor(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
     Err(ctx.throw_type_error(
         "BaseMcp is abstract and cannot be constructed directly; use StdioMcp.define / HttpMcp.define",
@@ -418,8 +424,7 @@ def_native_object!(
     JSBaseMcp,
     McpServicePayload,
     BASE_MCP_PROTO,
-    Some(ClassCtorDef::new(js_base_constructor, 0, false)),
-    on_payload_gc: McpServicePayload::gc_trace
+    Some(ClassCtorDef::new(js_base_constructor, 0, false))
 );
 
 #[distributed_slice(USER_CLASS_DEFS)]

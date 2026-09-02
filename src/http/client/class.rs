@@ -8,6 +8,7 @@ use zuqe::{
     ErrorKind, Exception,
     builtins::promise::{Promise, PromiseResultSlot},
     def_native_object,
+    gc_lite::{GcTrace, GcTraceCtx},
     {CallContext, ClassCtorDef, FieldDef, JSResult, JSValue, Object, Runtime, ScopedContext},
 };
 
@@ -31,6 +32,10 @@ use crate::{
 pub(crate) struct HttpClientPayload {
     cfg: HttpClientConfig,
     clients: std::sync::RwLock<std::collections::HashMap<bool, reqwest::Client>>,
+}
+
+impl GcTrace for HttpClientPayload {
+    fn trace(&self, _gcx: &mut GcTraceCtx) {}
 }
 
 impl HttpClientPayload {

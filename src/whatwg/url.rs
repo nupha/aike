@@ -54,6 +54,12 @@ impl UrlPayload {
     }
 }
 
+impl GcTrace for UrlPayload {
+    fn trace(&self, gcx: &mut GcTraceCtx) {
+        self.gc_trace(gcx);
+    }
+}
+
 fn get_url<'a>(ctx: &mut ScopedContext, val: &'a JSValue) -> Result<&'a UrlPayload, i32> {
     JSURL::payload_of(val).ok_or_else(|| ctx.throw_internal_error("not a URL instance"))
 }
@@ -297,6 +303,10 @@ pub(crate) struct SearchParamsPayload {
     shared_url: Option<Rc<RefCell<Url>>>,
     /// Query string (used only when standalone).
     standalone_query: RefCell<String>,
+}
+
+impl GcTrace for SearchParamsPayload {
+    fn trace(&self, _gcx: &mut GcTraceCtx) {}
 }
 
 fn get_sp<'a>(ctx: &mut ScopedContext, val: &'a JSValue) -> Result<&'a SearchParamsPayload, i32> {
@@ -626,8 +636,7 @@ def_native_object!(
     JSURL,
     UrlPayload,
     CLASS_URL_PROTO,
-    Some(ClassCtorDef::new(js_url_constructor, 2, true).expose_to_global()),
-    on_payload_gc: UrlPayload::gc_trace
+    Some(ClassCtorDef::new(js_url_constructor, 2, true).expose_to_global())
 );
 
 #[distributed_slice(USER_CLASS_DEFS)]

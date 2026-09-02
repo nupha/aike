@@ -15,6 +15,7 @@ use zuqe::{
     CallContext, ClassCtorDef, ClassID, FieldDef, JSResult, JSValue, Runtime, ScopedContext,
     builtins::{array_buffer::ArrayBuffer, promise::Promise, typed_array::TypedArray},
     def_native_object,
+    gc_lite::{GcTrace, GcTraceCtx},
 };
 
 use crate::{USER_CLASS_DEFS, whatwg::stream::JSReadableStream};
@@ -26,6 +27,10 @@ pub(crate) struct BlobPayload {
     pub(crate) bytes: Arc<[u8]>,
     /// Lower-cased MIME type, stripped of control characters per spec.
     pub(crate) type_: String,
+}
+
+impl GcTrace for BlobPayload {
+    fn trace(&self, _gcx: &mut GcTraceCtx) {}
 }
 
 impl BlobPayload {

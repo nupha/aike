@@ -14,6 +14,7 @@ use zuqe::{
     ScopedContext,
     builtins::promise::{Promise, PromiseResultSlot},
     def_native_object,
+    gc_lite::{GcTrace, GcTraceCtx},
 };
 
 use crate::{
@@ -28,6 +29,10 @@ use crate::{
 pub(crate) struct BrowserPayload {
     pub(crate) client: cdp::CdpClient,
     pub(crate) chrome_child: Arc<tokio::sync::Mutex<Option<tokio::process::Child>>>,
+}
+
+impl GcTrace for BrowserPayload {
+    fn trace(&self, _gcx: &mut GcTraceCtx) {}
 }
 
 // ---------------------------------------------------------------------------
@@ -223,6 +228,10 @@ pub(crate) struct BrowserProcessPayload {
     pub(crate) bin: String,
     /// Ready browser-level CDP WebSocket URL (surfaced via `cdpUrl`).
     pub(crate) cdp_url: String,
+}
+
+impl GcTrace for BrowserProcessPayload {
+    fn trace(&self, _gcx: &mut GcTraceCtx) {}
 }
 
 /// `Browser.spawn(options?)` → Promise<BrowserProcess>

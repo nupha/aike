@@ -13,7 +13,19 @@ use llama::{SamplerChain, SamplerKind};
 use zuqe::{
     CallContext, ClassID, FieldDef, IntOrFloat, JS_PROP_ENUMERABLE, JSResult, JSValue, Runtime,
     ScopedContext, def_native_object,
+    gc_lite::{GcTrace, GcTraceCtx},
 };
+
+pub(crate) struct SamplerChainPayload(pub(crate) Arc<Mutex<SamplerChain>>);
+
+impl std::ops::Deref for SamplerChainPayload {
+    type Target = Arc<Mutex<SamplerChain>>;
+    fn deref(&self) -> &Self::Target { &self.0 }
+}
+
+impl GcTrace for SamplerChainPayload {
+    fn trace(&self, _gcx: &mut GcTraceCtx) {}
+}
 
 use crate::USER_CLASS_DEFS;
 
@@ -299,7 +311,7 @@ const CLASS_SAMPLER_CHAIN_PROTO: &[FieldDef] = &[
 def_native_object!(
     "SamplerChain",
     JSSamplerChain,
-    Arc<Mutex<SamplerChain>>,
+    SamplerChainPayload,
     CLASS_SAMPLER_CHAIN_PROTO,
     None
 );

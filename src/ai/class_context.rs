@@ -17,7 +17,19 @@ use zuqe::{
     JSValue, Runtime, ScopedContext,
     builtins::{promise::Promise, typed_array::TypedArray},
     def_native_object,
+    gc_lite::{GcTrace, GcTraceCtx},
 };
+
+pub(crate) struct LlamaContextPayload(pub(crate) Arc<Mutex<Option<LlamaContext>>>);
+
+impl std::ops::Deref for LlamaContextPayload {
+    type Target = Arc<Mutex<Option<LlamaContext>>>;
+    fn deref(&self) -> &Self::Target { &self.0 }
+}
+
+impl GcTrace for LlamaContextPayload {
+    fn trace(&self, _gcx: &mut GcTraceCtx) {}
+}
 
 use crate::{USER_CLASS_DEFS, worker::WorkerPool};
 
@@ -476,7 +488,7 @@ const CLASS_CONTEXT_PROTO: &[FieldDef] = &[
 def_native_object!(
     "Context",
     JSLlmContext,
-    Arc<Mutex<Option<LlamaContext>>>,
+    LlamaContextPayload,
     CLASS_CONTEXT_PROTO,
     None
 );

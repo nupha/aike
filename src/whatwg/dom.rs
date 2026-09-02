@@ -12,6 +12,7 @@ use linkme::distributed_slice;
 use zuqe::{
     CallContext, ClassCtorDef, ClassID, FieldDef, JSResult, JSValue, Runtime, ScopedContext,
     def_native_object,
+    gc_lite::{GcTrace, GcTraceCtx},
 };
 
 use crate::USER_CLASS_DEFS;
@@ -20,6 +21,10 @@ pub(crate) struct DOMExceptionPayload {
     name: String,
     message: String,
     code: i32,
+}
+
+impl GcTrace for DOMExceptionPayload {
+    fn trace(&self, _gcx: &mut GcTraceCtx) {}
 }
 
 /// Legacy `DOMException` error-name → code mapping (WebIDL DOMExceptionError).

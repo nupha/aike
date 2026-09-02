@@ -82,8 +82,7 @@ def_native_object!(
     JSReadableByteStreamController,
     ReadableControllerPayload,
     BYTE_CONTROLLER_PROTO,
-    Some(ClassCtorDef::new(js_byte_controller_constructor, 0, false).expose_to_global()),
-    on_payload_gc: ReadableControllerPayload::gc_trace
+    Some(ClassCtorDef::new(js_byte_controller_constructor, 0, false).expose_to_global())
 );
 
 #[distributed_slice(USER_CLASS_DEFS)]

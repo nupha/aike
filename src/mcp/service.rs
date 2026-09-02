@@ -24,6 +24,7 @@ use rmcp::{
 use zuqe::{
     CallContext, Callback, ClassID, FieldDef, JSResult, JSValue, Object, Runtime, ScopedContext,
     builtins::promise::Promise, def_native_object,
+    gc_lite::{GcTrace, GcTraceCtx},
 };
 
 use crate::{
@@ -354,6 +355,10 @@ pub(crate) fn build_axum_mcp_route(
 
 pub(crate) struct McpBridgePayload {
     tx: Option<tokio::sync::mpsc::Sender<McpChunkMessage>>,
+}
+
+impl GcTrace for McpBridgePayload {
+    fn trace(&self, _gcx: &mut GcTraceCtx) {}
 }
 
 impl McpBridgePayload {

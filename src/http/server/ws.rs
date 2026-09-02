@@ -93,6 +93,12 @@ impl WsStreamPayload {
     }
 }
 
+impl GcTrace for WsStreamPayload {
+    fn trace(&self, gcx: &mut GcTraceCtx) {
+        self.gc_trace(gcx);
+    }
+}
+
 pub(crate) fn get_ws_payload_mut<'a>(
     ctx: &mut ScopedContext,
     val: &'a mut JSValue,
@@ -494,8 +500,7 @@ def_native_object!(
     JSWebSocketStream,
     WsStreamPayload,
     WS_PROTO,
-    None,
-    on_payload_gc: WsStreamPayload::gc_trace
+    None
 );
 
 #[distributed_slice(USER_CLASS_DEFS)]

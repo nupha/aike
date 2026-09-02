@@ -76,6 +76,12 @@ impl WritableControllerPayload {
     }
 }
 
+impl GcTrace for WritableControllerPayload {
+    fn trace(&self, gcx: &mut GcTraceCtx) {
+        self.gc_trace(gcx);
+    }
+}
+
 const WRITABLE_CONTROLLER_PROTO: &[FieldDef] = &[
     FieldDef::FUNC("error", 1, js_writable_controller_error, 0),
     FieldDef::GETSET("signal", Some(js_writable_controller_signal), None, 0),
@@ -95,8 +101,7 @@ def_native_object!(
     JSWritableStreamDefaultController,
     WritableControllerPayload,
     WRITABLE_CONTROLLER_PROTO,
-    Some(ClassCtorDef::new(js_writable_controller_constructor, 0, false).expose_to_global()),
-    on_payload_gc: WritableControllerPayload::gc_trace
+    Some(ClassCtorDef::new(js_writable_controller_constructor, 0, false).expose_to_global())
 );
 
 fn js_writable_controller_error(_ctx: &mut ScopedContext, cc: CallContext) -> JSResult {

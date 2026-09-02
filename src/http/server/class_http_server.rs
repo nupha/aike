@@ -158,6 +158,12 @@ impl HttpServerPayload {
     }
 }
 
+impl GcTrace for HttpServerPayload {
+    fn trace(&self, gcx: &mut GcTraceCtx) {
+        self.gc_trace(gcx);
+    }
+}
+
 fn get_server_payload<'a>(
     ctx: &mut ScopedContext,
     val: &'a JSValue,
@@ -1263,8 +1269,7 @@ def_native_object!(
     JSHttpServer,
     HttpServerPayload,
     SERVER_PROTO,
-    Some(ClassCtorDef::new(js_constructor, 0, false)),
-    on_payload_gc: HttpServerPayload::gc_trace
+    Some(ClassCtorDef::new(js_constructor, 0, false))
 );
 
 #[distributed_slice(USER_CLASS_DEFS)]

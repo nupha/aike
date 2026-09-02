@@ -54,6 +54,14 @@ pub(crate) struct FormDataPayload {
     entries: RefCell<Vec<(String, EntryValue)>>,
 }
 
+impl GcTrace for FormDataPayload {
+    fn trace(&self, gcx: &mut GcTraceCtx) {
+        for (_, v) in self.entries.borrow().iter() {
+            v.trace(gcx);
+        }
+    }
+}
+
 fn get_fd<'a>(ctx: &mut ScopedContext, val: &'a JSValue) -> Result<&'a FormDataPayload, i32> {
     JSFormData::payload_of(val).ok_or_else(|| ctx.throw_type_error("not a FormData instance"))
 }
@@ -273,6 +281,12 @@ impl FormDataIter {
     }
 }
 
+impl GcTrace for FormDataIter {
+    fn trace(&self, gcx: &mut GcTraceCtx) {
+        self.obj.trace(gcx);
+    }
+}
+
 /// Build a `{value, done}` iterator result object.
 fn make_iter_result(ctx: &mut ScopedContext, value: JSValue, done: bool) -> JSResult {
     let mut obj = ctx.create_base_object()?;
@@ -338,10 +352,7 @@ def_native_object!(
     FormDataIter,
     FORM_DATA_ITER_PROTO,
     Some(ClassCtorDef::new(js_fd_iterator_ctor, 0, false)),
-    extends: || JS_CLASS_ITERATOR,
-    on_payload_gc: |p: &FormDataIter, gcx: &mut GcTraceCtx| {
-        p.obj.trace(gcx);
-    }
+    extends: || JS_CLASS_ITERATOR
 );
 
 fn create_fd_iterator(
@@ -701,12 +712,7 @@ def_native_object!(
     JSFormData,
     FormDataPayload,
     FORM_DATA_PROTO,
-    Some(ClassCtorDef::new(js_fd_constructor, 0, true).expose_to_global()),
-    on_payload_gc: |p: &FormDataPayload, gcx: &mut GcTraceCtx| {
-        for (_, v) in p.entries.borrow().iter() {
-            v.trace(gcx);
-        }
-    }
+    Some(ClassCtorDef::new(js_fd_constructor, 0, true).expose_to_global())
 );
 
 #[distributed_slice(USER_CLASS_DEFS)]

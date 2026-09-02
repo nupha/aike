@@ -16,6 +16,7 @@ use scraper::{ElementRef, Html, Selector};
 use zuqe::{
     Array, CallContext, ClassID, FieldDef, JSResult, JSValue, Runtime, ScopedContext,
     def_native_object,
+    gc_lite::{GcTrace, GcTraceCtx},
 };
 
 use crate::USER_CLASS_DEFS;
@@ -203,6 +204,10 @@ pub(crate) struct HtmlDocumentPayload {
     html: Html,
 }
 
+impl GcTrace for HtmlDocumentPayload {
+    fn trace(&self, _gcx: &mut GcTraceCtx) {}
+}
+
 /// `this`-access helper for Document.
 fn get_doc<'a>(ctx: &mut ScopedContext, val: &'a JSValue) -> Result<&'a HtmlDocumentPayload, i32> {
     HtmlDocument::payload_of(val).ok_or_else(|| ctx.throw_type_error("not a Document instance"))
@@ -261,6 +266,10 @@ fn register_document(rt: &mut Runtime) -> Result<ClassID, i32> {
 pub(crate) struct ElementPayload {
     html: Html,
     node_id: NodeId,
+}
+
+impl GcTrace for ElementPayload {
+    fn trace(&self, _gcx: &mut GcTraceCtx) {}
 }
 
 /// `this`-access helper for Element.

@@ -83,6 +83,10 @@ pub(crate) enum IoPayload {
     PipeWrite(PipeFd),
 }
 
+impl GcTrace for IoPayload {
+    fn trace(&self, _gcx: &mut GcTraceCtx) {}
+}
+
 impl IoPayload {
     fn read_buf_size(&self) -> usize {
         match self {
@@ -820,16 +824,20 @@ fn js_fh_writeAll(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     // Extract bytes: TypedArray, ArrayBuffer or String
     let data: Vec<u8> = if let Some(s) = arg.as_string(true) {
         s.content().encode_utf8(false).into_owned().into_bytes()
-    } else if let Some(p) = arg.payload() {
-        if let Some(ta) = p.typed_array() {
-            ta.bytes().to_vec()
-        } else if let Some(ab) = p.array_buffer() {
-            ab.bytes().to_vec()
+    } else {
+        if let Some(p) = arg.as_object() {
+            if let Some(ta) = p.payload_typed_array() {
+                ta.bytes().to_vec()
+            } else if let Some(ab) = p.payload_array_buffer() {
+                ab.bytes().to_vec()
+            } else {
+                return Err(
+                    ctx.throw_type_error("expect string, TypedArray or ArrayBuffer argument")
+                );
+            }
         } else {
             return Err(ctx.throw_type_error("expect string, TypedArray or ArrayBuffer argument"));
         }
-    } else {
-        return Err(ctx.throw_type_error("expect string, TypedArray or ArrayBuffer argument"));
     };
 
     match desc {
@@ -1174,10 +1182,10 @@ fn js_fh_writeSync(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let arg = cc.arg(0);
     let data: Vec<u8> = if let Some(s) = arg.as_string(true) {
         s.content().encode_utf8(false).into_owned().into_bytes()
-    } else if let Some(p) = arg.payload() {
-        if let Some(ta) = p.typed_array() {
+    } else if let Some(o) = arg.as_object() {
+        if let Some(ta) = o.payload_typed_array() {
             ta.bytes().to_vec()
-        } else if let Some(ab) = p.array_buffer() {
+        } else if let Some(ab) = o.payload_array_buffer() {
             ab.bytes().to_vec()
         } else {
             return Err(ctx.throw_type_error("expect string, TypedArray or ArrayBuffer argument"));

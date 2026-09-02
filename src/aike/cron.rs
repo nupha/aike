@@ -225,6 +225,12 @@ impl CronJobPayload {
     }
 }
 
+impl zuqe::gc_lite::GcTrace for CronJobPayload {
+    fn trace(&self, gcx: &mut zuqe::gc_lite::GcTraceCtx) {
+        self.gc_trace(gcx);
+    }
+}
+
 fn get_cron_job<'a>(ctx: &mut ScopedContext, val: &'a JSValue) -> Result<&'a CronJobPayload, i32> {
     JSCronJob::payload_of(val).ok_or_else(|| ctx.throw_internal_error("not a CronJob instance"))
 }
@@ -265,8 +271,7 @@ def_native_object!(
     JSCronJob,
     CronJobPayload,
     CRON_JOB_PROTO,
-    None,
-    on_payload_gc: CronJobPayload::gc_trace
+    None
 );
 
 #[distributed_slice(USER_CLASS_DEFS)]

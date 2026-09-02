@@ -10,11 +10,16 @@ use linkme::distributed_slice;
 use zuqe::{
     CallContext, ClassCtorDef, ClassID, FieldDef, JSResult, JSValue, Runtime, ScopedContext,
     builtins::typed_array::TypedArray, def_native_object,
+    gc_lite::{GcTrace, GcTraceCtx},
 };
 
 use crate::USER_CLASS_DEFS;
 
 pub(crate) struct TextEncoderPayload;
+
+impl GcTrace for TextEncoderPayload {
+    fn trace(&self, _gcx: &mut GcTraceCtx) {}
+}
 
 fn js_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let new_target = cc.this();

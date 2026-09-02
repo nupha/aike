@@ -15,6 +15,7 @@ use zuqe::{
         promise::{Promise, PromiseResultSlot},
     },
     def_native_object,
+    gc_lite::{GcTrace, GcTraceCtx},
 };
 
 use crate::{USER_CLASS_DEFS, helpers::json_keys_camel_to_snake};
@@ -36,6 +37,10 @@ pub(crate) struct ClientPayload {
     pub(crate) model_name: String,
     pub(crate) max_tokens: usize,
     pub(crate) extra_body: serde_json::Value,
+}
+
+impl GcTrace for ClientPayload {
+    fn trace(&self, _gcx: &mut GcTraceCtx) {}
 }
 
 pub(crate) fn get_client(ctx: &mut ScopedContext, val: JSValue) -> Result<Arc<ClientPayload>, i32> {

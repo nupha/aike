@@ -6,7 +6,8 @@
 
 use linkme::distributed_slice;
 use zuqe::{
-    CallContext, ClassCtorDef, ClassID, FieldDef, JSResult, JSValue, Runtime, ScopedContext,
+    CallContext, ClassCtorDef, ClassID, FieldDef, JSResult, JSValue, NativeObject, Runtime,
+    ScopedContext,
     builtins::promise::{Promise, PromiseState},
     def_native_object,
     gc_lite::{GcTrace, GcTraceCtx},
@@ -144,6 +145,12 @@ impl WriterPayload {
     }
 }
 
+impl GcTrace for WriterPayload {
+    fn trace(&self, gcx: &mut GcTraceCtx) {
+        self.gc_trace(gcx);
+    }
+}
+
 const WRITER_PROTO: &[FieldDef] = &[
     FieldDef::FUNC("write", 1, js_writer_write, 0),
     FieldDef::FUNC("close", 0, js_writer_close, 0),
@@ -223,12 +230,16 @@ fn js_writer_desired_size(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
 
 fn js_writer_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let new_target = cc.this();
-    let mut stream = cc
-        .arg(0)
-        .as_native_object::<JSWritableStream>()
-        .ok_or_else(|| {
-            ctx.throw_type_error("WritableStreamDefaultWriter requires a WritableStream")
-        })?;
+
+    let mut stream = JSWritableStream::from_value(cc.arg(0)).ok_or_else(|| {
+        ctx.throw_type_error("WritableStreamDefaultWriter requires a WritableStream")
+    })?;
+    // let mut stream = cc
+    //     .arg(0)
+    //     .as_native_object::<JSWritableStream>()
+    //     .ok_or_else(|| {
+    //         ctx.throw_type_error("WritableStreamDefaultWriter requires a WritableStream")
+    //     })?;
     let handle = stream;
 
     // Per spec `SetUpWritableStreamDefaultWriter`: the stream must not be
@@ -288,8 +299,7 @@ def_native_object!(
     JSWritableStreamDefaultWriter,
     WriterPayload,
     WRITER_PROTO,
-    Some(ClassCtorDef::new(js_writer_constructor, 0, false).expose_to_global()),
-    on_payload_gc: WriterPayload::gc_trace
+    Some(ClassCtorDef::new(js_writer_constructor, 0, false).expose_to_global())
 );
 
 fn js_writer_write(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {

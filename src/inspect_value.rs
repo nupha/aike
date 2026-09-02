@@ -1,12 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-// Node.js `util.inspect` compatible value formatter for zuqe, with Node's
-// default options baked in (depth 2, maxArrayLength 100, maxStringLength
-// 10000, compact single-line output, no colors / sorting / getter evaluation /
-// numeric separators). Reintroduce an options struct only when a
-// `util.inspect(v, opts)` JS binding needs one.
-
 use zuqe::{
     Atom, JS_GPN_ENUM_ONLY, JS_GPN_STR_OR_INT_MASK, JS_GPN_SYMBOL_MASK, JS_PROP_GETSET, JSValue,
     Object, ScopedContext,
@@ -68,13 +62,12 @@ fn quote_string(s: &str, budget: usize) -> String {
     let mut out = String::new();
     out.push(q);
     let limit = if len <= budget { len } else { budget };
-    let mut shown = 0;
-    for ch in s.chars() {
+
+    for (shown, ch) in s.chars().enumerate() {
         if shown >= limit {
             break;
         }
         escape_char(ch, q, &mut out);
-        shown += 1;
     }
     if len > budget {
         out.push_str(&format!("... {} more characters", len - budget));
@@ -90,31 +83,27 @@ fn get_str_opt(ctx: &mut ScopedContext, obj: &Object, key: &str) -> Option<Strin
         .map(|s| s.encode_utf8(false).into_owned())
 }
 
-fn class_name_str(ctx: &mut ScopedContext, obj: &Object) -> String {
-    obj.class_name().to_utf8(ctx.rt()).to_string()
-}
-
 /// Lay out a group of entries as `open ... close` on a single line (compact default).
 fn format_block(open: &str, entries: &[String], close: &str) -> String {
     format!("{}{}{}", open, entries.join(", "), close)
 }
 
-// ---- key rendering ----
-
 fn key_display(ctx: &mut ScopedContext, atom: &Atom) -> String {
-    if atom.is_small_int() {
-        return atom.to_utf8(ctx.rt()).to_string();
+    if let Some(i) = atom.to_small_int() {
+        return format!("{i}");
     }
-    if let Ok(kv) = atom.to_value(ctx) {
-        if kv.is_symbol() {
-            let d = kv
-                .as_symbol(false)
-                .map(|x| x.encode_utf8(false).into_owned())
-                .unwrap_or_default();
-            return format!("Symbol({})", d);
-        }
+
+    if let Ok(kv) = atom.to_value(ctx)
+        && kv.is_symbol()
+    {
+        let d = kv
+            .as_symbol(false)
+            .map(|x| x.encode_utf8(false).into_owned())
+            .unwrap_or_default();
+        return format!("Symbol({})", d);
     }
     ctx.clear_exception();
+
     let s = atom.to_utf8(ctx.rt()).to_string();
     quote_string(&s, MAX_STRING_LENGTH)
 }
@@ -223,14 +212,16 @@ fn format_object(
             Vec::new()
         }
     };
+
     let mut entries: Vec<String> = Vec::new();
-    stack.push(obj.clone());
+    stack.push(*obj);
     for pk in keys {
         let key = key_display(ctx, &pk.atom);
         let value = read_prop_value(ctx, obj, pk.atom, level, stack);
         entries.push(format!("{}: {}", key, value));
     }
     stack.pop();
+
     format_block("{ ", &entries, " }")
 }
 
@@ -247,7 +238,8 @@ fn collect_index_entries(
     let mut empty_run: usize = 0;
     let mut i = 0usize;
     let mut truncated = false;
-    stack.push(obj.clone());
+
+    stack.push(*obj);
     while i < len {
         if entries.len() >= MAX_ARRAY_LENGTH {
             truncated = true;
@@ -277,6 +269,7 @@ fn collect_index_entries(
         }
     }
     stack.pop();
+
     entries
 }
 
@@ -297,14 +290,10 @@ fn format_typed_array(
     level: usize,
     stack: &mut Vec<Object>,
 ) -> String {
-    let cn = class_name_str(ctx, obj);
-    let count = match obj.payload().typed_array() {
-        Some(ta) => ta.count() as usize,
-        None => 0,
-    };
+    let count = obj.payload_typed_array().map_or(0, |ta| ta.count());
     let entries = collect_index_entries(ctx, obj, count, level, stack);
     let block = format_block("[", &entries, "]");
-    format!("{}({})", cn, block)
+    format!("{}({})", obj.class_name_str(), block)
 }
 
 fn format_mapset(
@@ -313,17 +302,16 @@ fn format_mapset(
     level: usize,
     stack: &mut Vec<Object>,
 ) -> String {
-    let cn = class_name_str(ctx, obj);
-    let ms = match obj.payload().mapset() {
-        Some(ms) => ms,
-        None => return format!("{} {{}}", cn),
+    let cn = obj.class_name_str();
+    let Some(ms) = obj.payload_mapset() else {
+        return format!("{} {{}}", cn);
     };
     if ms.is_weak() {
         return format!("{} {{ <items unknown> }}", cn);
     }
     let is_set = cn == "Set";
     let mut entries: Vec<String> = Vec::new();
-    stack.push(obj.clone());
+    stack.push(*obj);
 
     for e in ms.iter() {
         if is_set {
@@ -338,7 +326,7 @@ fn format_mapset(
     stack.pop();
 
     let mut head = String::new();
-    head.push_str(&cn);
+    head.push_str(cn);
     head.push('(');
     head.push_str(&ms.len().to_string());
     head.push_str(") {");
@@ -349,7 +337,8 @@ fn format_error(ctx: &mut ScopedContext, obj: &mut Object) -> String {
     // Node: inspect(Error) prints err.stack (of the form "Name: message\n    at ...").
     let name = get_str_opt(ctx, obj, "name")
         .filter(|n| !n.is_empty())
-        .unwrap_or_else(|| class_name_str(ctx, obj));
+        .unwrap_or_else(|| obj.class_name_str().to_string());
+
     let msg = get_str_opt(ctx, obj, "message").unwrap_or_default();
     let mut s = if msg.is_empty() {
         name
@@ -364,17 +353,6 @@ fn format_error(ctx: &mut ScopedContext, obj: &mut Object) -> String {
         }
     }
     s
-}
-
-fn collapse_tag(ctx: &mut ScopedContext, obj: &Object) -> String {
-    let cn = class_name_str(ctx, obj);
-    if cn == "Object" {
-        "[Object]".to_string()
-    } else if cn == "Array" {
-        "[Array]".to_string()
-    } else {
-        format!("[{}]", cn)
-    }
 }
 
 fn inspect(ctx: &mut ScopedContext, val: JSValue, level: usize, stack: &mut Vec<Object>) -> String {
@@ -427,52 +405,78 @@ fn inspect(ctx: &mut ScopedContext, val: JSValue, level: usize, stack: &mut Vec<
     };
 
     // circular reference
-    if stack.iter().any(|o| *o == obj) {
+    if stack.contains(&obj) {
         return "[Circular]".to_string();
     }
+
     // depth collapse
     if level > MAX_DEPTH {
-        return collapse_tag(ctx, &obj);
+        return match obj.class_name_str() {
+            "Object" => "[Object]".to_string(),
+            "Array" => "[Array]".to_string(),
+            _ => {
+                format!("[{}]", obj.class_name_str())
+            }
+        };
     }
     // custom inspect hook
     if let Some(s) = try_custom_inspect(ctx, val, &mut obj, level) {
         return s;
     }
 
-    let cn = class_name_str(ctx, &obj);
-
     // Proxy (engine does not directly expose target/handler)
-    if cn == "Proxy" {
-        return "[Proxy]".to_string();
-    }
-    // TypedArray
-    if obj.payload().typed_array().is_some() {
-        return format_typed_array(ctx, &mut obj, level, stack);
-    }
-    // Array
-    if obj.payload().array().is_some() {
-        return format_array(ctx, &mut obj, level, stack);
-    }
-    // RegExp
-    if cn == "RegExp" {
-        if let Ok(s) = val.to_string(ctx) {
+    match obj.class_name_str() {
+        "Proxy" => {
+            return "[Proxy]".to_string();
+        }
+        "RegExp" if let Ok(s) = val.to_string(ctx) => {
             return s.encode_utf8(false).into_owned();
         }
-    }
-    // Date
-    if cn == "Date" {
-        if let Ok(s) = val.to_string(ctx) {
+        "Date" if let Ok(s) = val.to_string(ctx) => {
             return s.encode_utf8(false).into_owned();
         }
+        "Error" => {
+            return format_error(ctx, &mut obj);
+        }
+        n if n.ends_with("Error") => {
+            return format_error(ctx, &mut obj);
+        }
+        _ => {
+            // TypedArray
+            if obj.payload_typed_array().is_some() {
+                return format_typed_array(ctx, &mut obj, level, stack);
+            }
+            // Array
+            if obj.payload_array().is_some() {
+                return format_array(ctx, &mut obj, level, stack);
+            }
+            // Map / Set
+            if obj.payload_mapset().is_some() {
+                return format_mapset(ctx, &mut obj, level, stack);
+            }
+        }
     }
-    // Error
-    if cn.ends_with("Error") || cn == "Error" {
-        return format_error(ctx, &mut obj);
-    }
-    // Map / Set
-    if obj.payload().mapset().is_some() {
-        return format_mapset(ctx, &mut obj, level, stack);
-    }
+
+    // if cn == "Proxy" {
+    //     return "[Proxy]".to_string();
+    // }
+    // // RegExp
+    // if cn == "RegExp" {
+    //     if let Ok(s) = val.to_string(ctx) {
+    //         return s.encode_utf8(false).into_owned();
+    //     }
+    // }
+    // // Date
+    // if cn == "Date" {
+    //     if let Ok(s) = val.to_string(ctx) {
+    //         return s.encode_utf8(false).into_owned();
+    //     }
+    // }
+    // // Error
+    // if cn.ends_with("Error") || cn == "Error" {
+    //     return format_error(ctx, &mut obj);
+    // }
+
     // plain object
     format_object(ctx, &mut obj, level, stack)
 }

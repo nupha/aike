@@ -1023,6 +1023,12 @@ impl WritableStreamPayload {
     }
 }
 
+impl GcTrace for WritableStreamPayload {
+    fn trace(&self, gcx: &mut GcTraceCtx) {
+        self.gc_trace(gcx);
+    }
+}
+
 // flush fulfilled: close the readable side of the transform stream and mark
 // the writable stream closed, per spec (close after flush resolves).
 fn flush_close_ok(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -1088,8 +1094,7 @@ def_native_object!(
     JSWritableStream,
     WritableStreamPayload,
     WRITABLE_STREAM_PROTO,
-    Some(ClassCtorDef::new(js_writable_stream_constructor, 1, false).expose_to_global()),
-    on_payload_gc: WritableStreamPayload::gc_trace
+    Some(ClassCtorDef::new(js_writable_stream_constructor, 1, false).expose_to_global())
 );
 
 impl JSWritableStream {

@@ -46,6 +46,12 @@ impl ByobRequestPayload {
     }
 }
 
+impl GcTrace for ByobRequestPayload {
+    fn trace(&self, gcx: &mut GcTraceCtx) {
+        self.gc_trace(gcx);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Prototype methods / getters
 // ---------------------------------------------------------------------------
@@ -126,8 +132,7 @@ def_native_object!(
     JSReadableStreamBYOBRequest,
     ByobRequestPayload,
     BYOB_REQUEST_PROTO,
-    Some(ClassCtorDef::new(js_byob_request_constructor, 2, false).expose_to_global()),
-    on_payload_gc: ByobRequestPayload::gc_trace
+    Some(ClassCtorDef::new(js_byob_request_constructor, 2, false).expose_to_global())
 );
 
 #[distributed_slice(USER_CLASS_DEFS)]

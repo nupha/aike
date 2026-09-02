@@ -583,8 +583,7 @@ def_native_object!(
     McpServicePayload,
     STDIO_MCP_PROTO,
     Some(STDIO_MCP_CTOR),
-    extends: JSBaseMcp::class_id,
-    on_payload_gc: McpServicePayload::gc_trace
+    extends: JSBaseMcp::class_id
 );
 
 #[distributed_slice(USER_CLASS_DEFS)]

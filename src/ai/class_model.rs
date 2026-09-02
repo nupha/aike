@@ -19,7 +19,19 @@ use zuqe::{
     Object, Runtime, RuntimeImpl, ScopedContext,
     builtins::{promise::Promise, typed_array::TypedArray},
     def_native_object,
+    gc_lite::{GcTrace, GcTraceCtx},
 };
+
+pub(super) struct LlamaModelWrapper(pub(crate) LlamaModel);
+
+impl std::ops::Deref for LlamaModelWrapper {
+    type Target = LlamaModel;
+    fn deref(&self) -> &Self::Target { &self.0 }
+}
+
+impl GcTrace for LlamaModelWrapper {
+    fn trace(&self, _gcx: &mut GcTraceCtx) {}
+}
 
 use crate::{
     USER_CLASS_DEFS,
@@ -299,7 +311,7 @@ fn js_model_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 pub(super) fn get_llama_model<'a>(
     ctx: &mut ScopedContext,
     val: &'a JSValue,
-) -> Result<&'a LlamaModel, i32> {
+) -> Result<&'a LlamaModelWrapper, i32> {
     JSLlmModel::payload_of(val).ok_or_else(|| {
         ctx.throw_type_error("invalid Model object");
         -1
@@ -1043,7 +1055,7 @@ const CLASS_MODEL_ENTRIES: &[FieldDef] = &[FieldDef::FUNC("load", 1, js_model_lo
 def_native_object!(
     "Model",
     JSLlmModel,
-    LlamaModel,
+    LlamaModelWrapper,
     CLASS_MODEL_PROTO_ENTRIES,
     Some(ClassCtorDef::new(js_model_constructor, 2, false).entries(CLASS_MODEL_ENTRIES)),
     on_class_register: JSLlmModel::on_register,

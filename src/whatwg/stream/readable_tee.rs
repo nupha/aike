@@ -367,10 +367,10 @@ fn tee_pull_fulfilled(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     if done {
         shared.done.set(true);
         for c in [shared.c1, shared.c2] {
-            if !tee_branch_is_final(ctx, c) {
-                if let Some(cp) = get_controller_payload_from_val(&c) {
-                    cp.close(ctx)?;
-                }
+            if !tee_branch_is_final(ctx, c)
+                && let Some(cp) = get_controller_payload_from_val(&c)
+            {
+                cp.close(ctx)?;
             }
         }
         TEE_STREAMS.with(|m| m.borrow_mut().remove(&tee_id));
@@ -541,8 +541,9 @@ fn clone_byte_chunk(ctx: &mut ScopedContext, chunk: JSValue) -> Result<JSValue, 
     // ArrayBuffer: just slice it.
     if let Some(ab) = chunk.as_object_ArrayBuffer() {
         let slice_fn = ab.get_property_str(ctx, "slice")?;
-        return slice_fn.call(ctx, chunk.into(), &[JSValue::from(0i32)]);
+        return slice_fn.call(ctx, chunk, &[JSValue::from(0i32)]);
     }
+
     // TypedArray: clone the underlying buffer, reconstruct with same ctor.
     let buffer = chunk.get_property_str(ctx, "buffer")?;
     let byte_offset = chunk
@@ -555,15 +556,16 @@ fn clone_byte_chunk(ctx: &mut ScopedContext, chunk: JSValue) -> Result<JSValue, 
         .to_i32();
     let slice_fn = buffer.get_property_str(ctx, "slice")?;
     let new_buffer = slice_fn.call(ctx, buffer, &[JSValue::from(0i32)])?;
-    let type_name = chunk
-        .as_object()
-        .ok_or_else(|| ctx.throw_internal_error("not an object"))?
-        .class_name()
-        .to_utf8(ctx.rt());
-    let ctor = ctx.global_obj().get_property_str(ctx, &type_name)?;
+
+    let ctor = {
+        let o = chunk
+            .as_object()
+            .ok_or_else(|| ctx.throw_internal_error("not an object"))?;
+        ctx.global_obj().get_property_str(ctx, o.class_name_str())?
+    };
     ctor.call(
         ctx,
-        ctor.into(),
+        ctor,
         &[
             new_buffer,
             JSValue::from(byte_offset),
