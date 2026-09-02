@@ -57,7 +57,7 @@ opt-level = 3
 debug-assertions = false
 
 [dependencies]
-zuqe = { path = "../../../devel/zuqe-payload-ptr", features = [
+zuqe = { path = "../../../devel/zhuque", features = [
     "crossbeam_channel",
     "serde_json_support",
     "zapi",
