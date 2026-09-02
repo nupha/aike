@@ -306,7 +306,7 @@ fn start_signal_microtask(ctx: &mut ScopedContext, rx: channel::Receiver<u32>) {
     crate::helpers::start_channel_poller(
         ctx,
         "signal",
-        rx,
+        zuqe::WakeReceiver::new(rx),
         |sig_num, cx| {
             let cb = HANDLER_MAP.with(|map| map.borrow().get(&sig_num).copied());
             if let Some(cb) = cb

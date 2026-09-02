@@ -751,7 +751,7 @@ fn js_listen(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
             // --- MCP routes: rmcp-based, protocol handled by rmcp crate ---
             let mut mcp_tables: Vec<Vec<Object>> = Vec::new();
-            let mut mcp_update_rxs: Vec<channel::Receiver<Vec<Object>>> = Vec::new();
+            let mut mcp_update_rxs: Vec<zuqe::WakeReceiver<Vec<Object>>> = Vec::new();
             for (i, obj) in data.mcp_endpoints.iter_mut().enumerate() {
                 // Read the payload (immutable) to build the route + handler table.
                 let obj_val = JSValue::from(*obj);
@@ -885,10 +885,10 @@ fn js_listen(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 /// Handles HTTP, MCP tool call, and WebSocket stream requests through the same channel.
 fn js_start_server_job(
     ctx: &mut ScopedContext,
-    rx: channel::Receiver<IncomingRequest>,
+    rx: zuqe::WakeReceiver<IncomingRequest>,
     http_handler_table: Vec<Object>,
     mcp_handler_tables: Vec<Vec<Object>>,
-    mcp_update_rxs: Vec<channel::Receiver<Vec<Object>>>,
+    mcp_update_rxs: Vec<zuqe::WakeReceiver<Vec<Object>>>,
     ws_handler_table: Vec<Object>,
     server_ref: RefCell<JSValue>,
     is_running: Arc<AtomicBool>,

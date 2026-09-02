@@ -13,10 +13,8 @@
 //! `ResponsePayload` and the same native callbacks; only the ClassID and
 //! prototype differ.
 
-use std::cell::RefCell;
-use std::rc::Rc;
+use std::{cell::RefCell, rc::Rc};
 
-use crossbeam::channel::Receiver;
 use linkme::distributed_slice;
 use zuqe::{
     CallContext, ClassCtorDef, ClassID, FieldDef, JSResult, JSValue, NativeObject, Runtime,
@@ -73,7 +71,7 @@ pub(crate) struct ResponsePayload {
     resp: Option<reqwest::Response>,
     /// Transient holder for the body channel while it is being consumed.
     /// Each item is `Ok(bytes)` for a chunk or `Err(msg)` on a network failure.
-    body_rx: Option<Receiver<Result<Vec<u8>, String>>>,
+    body_rx: Option<zuqe::WakeReceiver<Result<Vec<u8>, String>>>,
     /// Whether the body has begun consumption (enforces single-use).
     body_consumed: bool,
 

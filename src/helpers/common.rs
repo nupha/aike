@@ -196,7 +196,7 @@ mod tests {
 pub(crate) fn start_channel_poller<T, F>(
     ctx: &mut ScopedContext,
     label: &'static str,
-    rx: crossbeam::channel::Receiver<T>,
+    rx: zuqe::WakeReceiver<T>,
     handler: F,
     has_entries: impl Fn() -> bool + 'static,
     on_finish: impl Fn() + 'static,

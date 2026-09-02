@@ -14,7 +14,6 @@ use std::{
 
 use chrono::Utc;
 use cron::Schedule;
-use crossbeam::channel::{Receiver, Sender};
 use linkme::distributed_slice;
 use zuqe::{
     CallContext, ClassID, FieldDef, JS_PROP_C_W_E, JSResult, JSValue, Object, Runtime,
@@ -41,7 +40,7 @@ struct CronState {
     next_id: u32,
     entries: HashMap<u32, CronEntry>,
     tx: zuqe::WakeSender<CronMsg>,
-    rx: Receiver<CronMsg>,
+    rx: zuqe::WakeReceiver<CronMsg>,
 }
 
 impl CronState {

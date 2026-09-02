@@ -201,10 +201,12 @@ thread_local! {
 /// tasks keep sending into THIS receiver regardless of generation. The
 /// sender wakes the parked event loop on every send automatically; the
 /// channel is created on first use on the JS thread (needs the wake handle).
-static PUMP_CHANNEL: std::sync::OnceLock<(zuqe::WakeSender<PumpMsg>, Receiver<PumpMsg>)> =
+static PUMP_CHANNEL: std::sync::OnceLock<(zuqe::WakeSender<PumpMsg>, zuqe::WakeReceiver<PumpMsg>)> =
     std::sync::OnceLock::new();
 
-fn pump_channel(ctx: &ScopedContext) -> &'static (zuqe::WakeSender<PumpMsg>, Receiver<PumpMsg>) {
+fn pump_channel(
+    ctx: &ScopedContext,
+) -> &'static (zuqe::WakeSender<PumpMsg>, zuqe::WakeReceiver<PumpMsg>) {
     PUMP_CHANNEL.get_or_init(|| ctx.make_channel::<PumpMsg>(256))
 }
 

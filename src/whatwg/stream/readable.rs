@@ -950,12 +950,13 @@ fn js_readable_stream_async_iterator(ctx: &mut ScopedContext, cc: CallContext) -
 fn js_readable_stream_async_iterator_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     cc.this().get_property_str(ctx, "values")
 }
+
 thread_local! {
     /// Channel-backed streams being polled: id -> (controller, receiver, idle deadline).
     /// The deadline is per stream and refreshed on every chunk, so a slow but
     /// live producer is never cut off; only a stalled stream times out.
     pub(super) static CHANNEL_STREAMS: RefCell<
-        HashMap<u64, (JSReadableStreamDefaultController, Receiver<Result<Vec<u8>, String>>, Instant)>,
+        HashMap<u64, (JSReadableStreamDefaultController, zuqe::WakeReceiver<Result<Vec<u8>, String>>, Instant)>,
     > = RefCell::new(HashMap::new());
 
     static NEXT_STREAM_ID: Cell<u64> = const { Cell::new(1) };
@@ -1288,7 +1289,7 @@ impl JSReadableStream {
     /// the channel is disconnected the stream is closed.
     pub(crate) fn from_channel(
         ctx: &mut ScopedContext,
-        rx: Receiver<Result<Vec<u8>, String>>,
+        rx: zuqe::WakeReceiver<Result<Vec<u8>, String>>,
         signal: Option<JSValue>,
     ) -> Result<Self, i32> {
         let source = ctx.create_base_object()?;
@@ -1392,7 +1393,7 @@ impl JSReadableStream {
     /// `textStream()` on network responses.
     pub(crate) fn from_text_channel(
         ctx: &mut ScopedContext,
-        rx: Receiver<Result<Vec<u8>, String>>,
+        rx: zuqe::WakeReceiver<Result<Vec<u8>, String>>,
     ) -> Result<Self, i32> {
         let source = ctx.create_base_object()?;
         let mut stream =

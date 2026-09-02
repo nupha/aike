@@ -11,7 +11,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crossbeam::channel::{Receiver, TryRecvError};
+use crossbeam::channel::TryRecvError;
 use zuqe::{
     Exception, JSResult, JSValue, JobState, ScopedContext,
     builtins::{
@@ -39,7 +39,7 @@ pub(crate) enum BodySource {
     /// Each item is `Ok(bytes)` for a chunk or `Err(msg)` when the underlying
     /// network stream fails; the latter must reject the body reader, not be
     /// treated as a normal chunk (see `JSReadableStream::from_channel`).
-    Channel(Receiver<Result<Vec<u8>, String>>),
+    Channel(zuqe::WakeReceiver<Result<Vec<u8>, String>>),
     /// Entire body is already available as bytes (synthetic response).
     Synthetic(Vec<u8>),
     /// A JS `ReadableStream` body — drain by pumping its reader.
@@ -58,7 +58,7 @@ pub(crate) fn body_to_bytes(ctx: &mut ScopedContext, val: &JSValue) -> Result<Ve
     if let Some(bytes) = form_data_to_bytes(val) {
         return Ok(bytes);
     }
-    if let Ok(ta) = TypedArray::try_from(val.clone()) {
+    if let Ok(ta) = TypedArray::try_from(*val) {
         return Ok(ta.with_bytes(|b| b.to_vec()));
     }
     // DataView and ArrayBuffer are distinct classes from TypedArray — handle

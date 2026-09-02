@@ -361,9 +361,10 @@ fn js_ws_asyncIterator(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let p = get_ws_payload_mut(ctx, &mut this)?;
     if p.closed.load(Ordering::Acquire) || p.read_rx.is_none() {
         // Already closed or already consumed — return an empty iterator.
+        let (_, empty_rx) = ctx.make_channel::<String>(1);
         let iter = AsyncIterableIterator::create_with_receiver::<String>(
             ctx,
-            bounded::<String>(1).1,
+            empty_rx,
             |_cx, _: String| Ok(None),
         )?;
         return Ok(iter.into());
