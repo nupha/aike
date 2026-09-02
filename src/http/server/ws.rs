@@ -13,7 +13,7 @@
 
 use std::{
     cell::{Cell, RefCell},
-    collections::{HashMap, HashSet},
+    collections::HashSet,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -248,7 +248,7 @@ pub(crate) fn dispatch_ws_open(
         Ok(o) => o,
         Err(_) => return,
     };
-    let obj_val: JSValue = obj.clone().into();
+    let obj_val: JSValue = obj.into();
 
     // Register so publish() / close cleanup can find it.
     {
@@ -260,7 +260,7 @@ pub(crate) fn dispatch_ws_open(
     }
 
     // Invoke the user handler (synchronous setup runs before we return).
-    if let Err(_) = handler.call(cx, JSValue::UNDEFINED, &[obj_val]) {
+    if handler.call(cx, JSValue::UNDEFINED, &[obj_val]).is_err() {
         let exc = cx.take_exception();
         let msg = exc.to_text(cx);
         if !msg.message.is_empty() {
@@ -271,14 +271,13 @@ pub(crate) fn dispatch_ws_open(
     // Fire on_open now (after the handler's synchronous setup completed).
     {
         let mut ov = obj_val;
-        if let Ok(p) = get_ws_payload_mut(cx, &mut ov) {
-            if let Some(cb) = p.on_open.clone()
-                && cb.call(cx, ov, &[]).is_err()
-            {
-                let exc = cx.take_exception();
-                #[cfg(debug_assertions)]
-                crate::helpers::print_exc(cx, exc);
-            }
+        if let Ok(p) = get_ws_payload_mut(cx, &mut ov)
+            && let Some(cb) = p.on_open
+            && cb.call(cx, ov, &[]).is_err()
+        {
+            let exc = cx.take_exception();
+            #[cfg(debug_assertions)]
+            crate::helpers::print_exc(cx, exc);
         }
     }
 }
@@ -310,7 +309,7 @@ pub(crate) fn dispatch_ws_data(
                 Ok(p) => p,
                 Err(_) => return,
             };
-            if let Some(cb) = p.on_message.clone() {
+            if let Some(cb) = p.on_message {
                 // push mode: deliver to the callback
                 let s = match cx.create_string_from_str(&msg) {
                     Ok(s) => s,
@@ -335,7 +334,8 @@ pub(crate) fn dispatch_ws_data(
                 p.closed.store(true, Ordering::Release);
                 p.ready_state.set(3);
                 p.read_tx = None; // → iterator sees Disconnected → for await ends
-                if let Some(cb) = p.on_close.clone()
+
+                if let Some(cb) = p.on_close
                     && cb.call(cx, ov, &[]).is_err()
                 {
                     let exc = cx.take_exception();

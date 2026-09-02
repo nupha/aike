@@ -120,10 +120,7 @@ fn js_byte_length_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSRes
 
 /// WebIDL `QueuingStrategy` dict init: must be a (non-null) object.
 /// Returns the init object, or throws TypeError for undefined/null/non-object.
-fn queuing_strategy_init<'a>(
-    ctx: &mut ScopedContext,
-    init_val: JSValue,
-) -> Result<zuqe::Object, i32> {
+fn queuing_strategy_init(ctx: &mut ScopedContext, init_val: JSValue) -> Result<zuqe::Object, i32> {
     if init_val.is_undefined() || init_val.is_null() || init_val.as_object().is_none() {
         return Err(ctx.throw_type_error("QueuingStrategy requires an object init"));
     }

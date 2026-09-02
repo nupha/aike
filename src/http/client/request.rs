@@ -243,6 +243,7 @@ fn is_cors_safelisted_method(method: &str) -> bool {
 /// `abort/general.any.js` "TypeError from request constructor takes priority"
 /// requires a bad init to reject with `TypeError` *before* an already-aborted
 /// signal surfaces an `AbortError`.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn validate_request_init_options(
     ctx: &mut ScopedContext,
     url_str: &str,
@@ -443,7 +444,7 @@ fn js_request_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
             }
             let s = o.get_property_str(ctx, "signal")?;
             if !s.is_undefined_or_null() && s.as_native_object::<JSAbortSignal>().is_some() {
-                signal = Some(s.clone());
+                signal = Some(s);
             }
             let mut read_str = |o: Object, key: &str| -> Result<Option<String>, i32> {
                 let v = o.get_property_str(ctx, key)?;
@@ -556,10 +557,13 @@ fn js_request_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
             "Cannot construct a Request from a request whose body has already been used",
         ));
     }
-    if input_is_request && input_has_body && !input_body_consumed {
-        if let Ok(p) = get_request_payload_mut(ctx, &mut input.clone()) {
-            p.body_consumed = true;
-        }
+
+    if input_is_request
+        && input_has_body
+        && !input_body_consumed
+        && let Ok(p) = get_request_payload_mut(ctx, &mut input.clone())
+    {
+        p.body_consumed = true;
     }
 
     // WHATWG: `request.signal` is a fresh "follow" signal that follows the
@@ -834,9 +838,7 @@ fn js_req_body_as(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         Some(source) => drain_body(ctx, source, magic, None, blob_type),
         // Spec: these methods always return a promise; an already-consumed body
         // rejects it rather than throwing synchronously.
-        None => {
-            return reject_type_error_as_promise(ctx, "body already consumed or unavailable");
-        }
+        None => reject_type_error_as_promise(ctx, "body already consumed or unavailable"),
     }
 }
 

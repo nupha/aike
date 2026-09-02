@@ -119,17 +119,14 @@ fn js_res_setHeaders(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             let mut entries = Vec::new();
             if let Some(keys) = pks {
                 for pk in keys.iter() {
-                    if let Ok(key_v) = pk.atom.to_value(ctx) {
-                        if let Ok(key_r) = key_v.to_string(ctx) {
-                            let key_str = key_r.content().encode_utf8(false).to_string();
-                            if let Ok(val) = obj.get_property(ctx, pk.atom) {
-                                if let Ok(val_r) = val.to_string(ctx) {
-                                    entries.push((
-                                        key_str,
-                                        val_r.content().encode_utf8(false).to_string(),
-                                    ));
-                                }
-                            }
+                    if let Ok(key_v) = pk.atom.to_value(ctx)
+                        && let Ok(key_r) = key_v.to_string(ctx)
+                    {
+                        let key_str = key_r.content().encode_utf8(false).to_string();
+                        if let Ok(val) = obj.get_property(ctx, pk.atom)
+                            && let Ok(val_r) = val.to_string(ctx)
+                        {
+                            entries.push((key_str, val_r.content().encode_utf8(false).to_string()));
                         }
                     }
                 }

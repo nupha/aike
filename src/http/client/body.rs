@@ -238,7 +238,7 @@ pub(crate) fn drain_body(
                         return if result_slot.is_empty() {
                             Ok(JobState::Done)
                         } else {
-                            Ok(JobState::Again)
+                            Ok(JobState::Block)
                         };
                     }
                     let mut guard = buf.lock().unwrap();
@@ -261,28 +261,28 @@ pub(crate) fn drain_body(
                                     // channel holds it all), so no further wake is
                                     // coming — wake now or this `Again` parks forever.
                                     cx.wake_handle().wake();
-                                    return Ok(JobState::Again);
+                                    return Ok(JobState::Block);
                                 }
                             }
                             // A network error mid-body: reject the buffered read.
                             Ok(Err(msg)) => {
                                 finish(&mut guard);
                                 let _ = result_slot.commit(Err(msg));
-                                return Ok(JobState::Again);
+                                return Ok(JobState::Block);
                             }
                             Err(TryRecvError::Disconnected) => {
                                 let full = guard.take().unwrap();
                                 committed.store(true, Ordering::SeqCst);
                                 let _ = result_slot.commit(Ok(full));
                                 cx.wake_handle().wake();
-                                return Ok(JobState::Again);
+                                return Ok(JobState::Block);
                             }
                             Err(TryRecvError::Empty) => {
                                 if start.elapsed() > BODY_TIMEOUT {
                                     finish(&mut guard);
                                     let _ = result_slot.commit(Err("body read timeout".into()));
                                 }
-                                return Ok(JobState::Again);
+                                return Ok(JobState::Block);
                             }
                         }
                     }

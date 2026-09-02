@@ -298,6 +298,7 @@ pub(crate) fn throw_transport_error(cx: &mut ScopedContext, te: TransportError) 
 /// hop's actual request (Fetch spec: a redirect re-enters HTTP-network-or-cache
 /// fetch, which re-runs CORS-preflight for the new URL). A failed preflight
 /// aborts the whole fetch with a "cors" network error.
+#[allow(clippy::too_many_arguments)]
 async fn follow_redirects<F, Fut>(
     rc: &ReferrerCtx,
     start_url: &str,
@@ -396,12 +397,11 @@ where
         if let Some(hdr) = resp
             .headers()
             .get(reqwest::header::HeaderName::from_static("referrer-policy"))
+            && let Ok(v) = hdr.to_str()
         {
-            if let Ok(v) = hdr.to_str() {
-                let v = v.trim().to_ascii_lowercase();
-                if !v.is_empty() {
-                    policy = v;
-                }
+            let v = v.trim().to_ascii_lowercase();
+            if !v.is_empty() {
+                policy = v;
             }
         }
 
@@ -409,7 +409,7 @@ where
         // ubiquitous POST→GET behavior; 303 always does). The request body is
         // dropped for GET automatically in `send_once`.
         let status = resp.status().as_u16();
-        if matches!(status, 301 | 302 | 303) && !method_is_safe(&method) {
+        if matches!(status, 301..=303) && !method_is_safe(&method) {
             method = "GET".to_string();
         }
 
@@ -626,14 +626,13 @@ pub(crate) async fn perform_request(
         if req.use_shared_cookies
             && cookies_allowed(&req.credentials_mode, &req.cors_client_origin, &url)
             && let Ok(u) = url::Url::parse(&url)
+            && let Some(cv) = crate::http::client::config::global_cookie_jar().cookies(&u)
         {
-            if let Some(cv) = crate::http::client::config::global_cookie_jar().cookies(&u) {
-                headers.retain(|(k, _)| !k.eq_ignore_ascii_case("cookie"));
-                if let Ok(s) = cv.to_str() {
-                    // Present cookies in creation order (WPT `cookies.any.js`).
-                    let s = crate::http::client::config::reorder_cookie_header(s);
-                    headers.push(("Cookie".to_string(), s));
-                }
+            headers.retain(|(k, _)| !k.eq_ignore_ascii_case("cookie"));
+            if let Ok(s) = cv.to_str() {
+                // Present cookies in creation order (WPT `cookies.any.js`).
+                let s = crate::http::client::config::reorder_cookie_header(s);
+                headers.push(("Cookie".to_string(), s));
             }
         }
 
@@ -662,11 +661,12 @@ pub(crate) async fn perform_request(
         // A redirect rewrites the method to GET (see `follow_redirects`); a GET
         // request must not carry the original request body, so only attach it for
         // non-GET/HEAD methods.
-        if !method_is_safe(&method.to_string()) {
-            if let Some(b) = &req.body {
-                rb = rb.body(b.clone());
-            }
+        if !method_is_safe(method.as_ref())
+            && let Some(b) = &req.body
+        {
+            rb = rb.body(b.clone());
         }
+
         async move { rb.send().await }
     };
 

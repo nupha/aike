@@ -145,11 +145,12 @@ fn is_fresh(entry: &CacheEntry) -> bool {
             return now_epoch().saturating_sub(entry.stored_at) < max_age;
         }
     }
-    if let Some(expires) = header_value(&entry.headers, "expires") {
-        if let Some(expires_epoch) = parse_http_date(&expires) {
-            return now_epoch() < expires_epoch;
-        }
+    if let Some(expires) = header_value(&entry.headers, "expires")
+        && let Some(expires_epoch) = parse_http_date(&expires)
+    {
+        return now_epoch() < expires_epoch;
     }
+
     // No freshness info: conservatively treat as stale (requires revalidation).
     false
 }
@@ -176,7 +177,7 @@ pub(crate) fn lookup_validators(
     method: &str,
     url: &str,
 ) -> Option<(Option<String>, Option<String>)> {
-    if method.to_ascii_uppercase() != "GET" {
+    if !method.eq_ignore_ascii_case("GET") {
         return None;
     }
     let cache = CACHE.lock().unwrap();
@@ -189,7 +190,7 @@ pub(crate) fn lookup_validators(
 /// cache modes that can serve straight from cache (`default` fresh,
 /// `force-cache`, `only-if-cached`).
 pub(crate) fn lookup_full(method: &str, url: &str) -> Option<CacheHit> {
-    if method.to_ascii_uppercase() != "GET" {
+    if !method.eq_ignore_ascii_case("GET") {
         return None;
     }
     let cache = CACHE.lock().unwrap();
@@ -218,18 +219,19 @@ pub(crate) fn add_conditional_headers(
 ) -> bool {
     let (etag, last_modified) = validators;
     let mut added = false;
-    if let Some(etag) = etag {
-        if !has_header(headers, "if-none-match") {
-            headers.push(("If-None-Match".to_string(), etag));
-            added = true;
-        }
+    if let Some(etag) = etag
+        && !has_header(headers, "if-none-match")
+    {
+        headers.push(("If-None-Match".to_string(), etag));
+        added = true;
     }
-    if let Some(lm) = last_modified {
-        if !has_header(headers, "if-modified-since") {
-            headers.push(("If-Modified-Since".to_string(), lm));
-            added = true;
-        }
+    if let Some(lm) = last_modified
+        && !has_header(headers, "if-modified-since")
+    {
+        headers.push(("If-Modified-Since".to_string(), lm));
+        added = true;
     }
+
     added
 }
 
@@ -242,7 +244,7 @@ pub(crate) fn store(
     body: Vec<u8>,
     final_url: &str,
 ) {
-    if method.to_ascii_uppercase() != "GET" {
+    if !method.eq_ignore_ascii_case("GET") {
         return;
     }
     // Never buffer an unbounded body in the in-memory cache: an 8GiB response
@@ -291,7 +293,7 @@ fn merge_and_update(method: &str, url: &str, update: &[(String, String)]) {
             if let Some(slot) = entry
                 .headers
                 .iter_mut()
-                .find(|(ek, _)| ek.to_ascii_lowercase() == k.to_ascii_lowercase())
+                .find(|(ek, _)| ek.eq_ignore_ascii_case(k))
             {
                 slot.1 = v.clone();
             } else {

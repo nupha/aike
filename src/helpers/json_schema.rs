@@ -23,7 +23,7 @@ pub(crate) fn json_schema_type_matches(value: &serde_json::Value, schema_type: &
             value.is_i64() || value.is_u64() ||
             // serde_json doesn't distinguish integer from float, so check
             // that an f64 value is actually an integer.
-            value.as_f64().map_or(false, |f| f.fract() == 0.0)
+            value.as_f64().is_some_and(|f| f.fract() == 0.0)
         }
         "boolean" => value.is_boolean(),
         "object" => value.is_object(),
@@ -121,10 +121,10 @@ pub(crate) fn json_schema_coerce_or_check(
                         changed,
                     );
                     result.insert(k.clone(), coerced);
-                } else if let Some(req) = required {
-                    if req.iter().any(|r| r.as_str() == Some(k.as_str())) {
-                        errors.push(format!("{path}.{k}: missing required property"));
-                    }
+                } else if let Some(req) = required
+                    && req.iter().any(|r| r.as_str() == Some(k.as_str()))
+                {
+                    errors.push(format!("{path}.{k}: missing required property"));
                 }
             }
             return serde_json::Value::Object(result);
@@ -133,7 +133,7 @@ pub(crate) fn json_schema_coerce_or_check(
     }
 
     // Array type
-    let schema_is_array = schema_type.map_or(false, |t| t.as_str() == Some("array"));
+    let schema_is_array = schema_type.is_some_and(|t| t.as_str() == Some("array"));
     if schema_is_array || (schema_type.is_none() && !value.is_null() && value.is_array()) {
         if !value.is_array() {
             errors.push(format!("{path}: expected array"));
@@ -161,78 +161,78 @@ pub(crate) fn json_schema_coerce_or_check(
     }
 
     // Primitive types
-    if let Some(type_field) = schema_type {
-        if let Some(type_str) = type_field.as_str() {
-            match type_str {
-                "string" => {
-                    if !json_schema_type_matches(&value, "string") {
-                        if coerce && (value.is_number() || value.is_boolean()) {
-                            let s = match &value {
-                                serde_json::Value::Number(n) => n.to_string(),
-                                serde_json::Value::Bool(b) => b.to_string(),
-                                _ => String::new(),
-                            };
-                            *changed = true;
-                            return serde_json::Value::String(s);
-                        }
-                        errors.push(format!("{path}: expected string"));
+    if let Some(type_field) = schema_type
+        && let Some(type_str) = type_field.as_str()
+    {
+        match type_str {
+            "string" => {
+                if !json_schema_type_matches(&value, "string") {
+                    if coerce && (value.is_number() || value.is_boolean()) {
+                        let s = match &value {
+                            serde_json::Value::Number(n) => n.to_string(),
+                            serde_json::Value::Bool(b) => b.to_string(),
+                            _ => String::new(),
+                        };
+                        *changed = true;
+                        return serde_json::Value::String(s);
                     }
-                    return value;
+                    errors.push(format!("{path}: expected string"));
                 }
-                "number" | "integer" => {
-                    if !json_schema_type_matches(&value, type_str) {
-                        if coerce {
-                            let n = match &value {
-                                serde_json::Value::String(s) => s.parse::<f64>().ok(),
-                                serde_json::Value::Bool(true) => Some(1.0),
-                                serde_json::Value::Bool(false) => Some(0.0),
-                                _ => None,
-                            };
-                            if let Some(n) = n {
-                                if type_str == "integer" && n.fract() != 0.0 {
-                                    errors.push(format!("{path}: expected integer"));
-                                }
-                                if let Some(num) = serde_json::Number::from_f64(n) {
-                                    *changed = true;
-                                    return serde_json::Value::Number(num);
-                                }
-                            }
-                        }
-                        errors.push(format!("{path}: expected {type_str}"));
-                        return value;
-                    }
-                    if type_str == "integer" && !json_schema_type_matches(&value, "integer") {
-                        errors.push(format!("{path}: expected integer"));
-                    }
-                    return value;
-                }
-                "boolean" => {
-                    if !json_schema_type_matches(&value, "boolean") {
-                        if coerce {
-                            match &value {
-                                serde_json::Value::String(s) if s == "true" => {
-                                    *changed = true;
-                                    return serde_json::Value::Bool(true);
-                                }
-                                serde_json::Value::String(s) if s == "false" => {
-                                    *changed = true;
-                                    return serde_json::Value::Bool(false);
-                                }
-                                _ => {}
-                            }
-                        }
-                        errors.push(format!("{path}: expected boolean"));
-                    }
-                    return value;
-                }
-                "null" => {
-                    if !value.is_null() {
-                        errors.push(format!("{path}: expected null"));
-                    }
-                    return value;
-                }
-                _ => return value, // unknown type → accept
+                return value;
             }
+            "number" | "integer" => {
+                if !json_schema_type_matches(&value, type_str) {
+                    if coerce {
+                        let n = match &value {
+                            serde_json::Value::String(s) => s.parse::<f64>().ok(),
+                            serde_json::Value::Bool(true) => Some(1.0),
+                            serde_json::Value::Bool(false) => Some(0.0),
+                            _ => None,
+                        };
+                        if let Some(n) = n {
+                            if type_str == "integer" && n.fract() != 0.0 {
+                                errors.push(format!("{path}: expected integer"));
+                            }
+                            if let Some(num) = serde_json::Number::from_f64(n) {
+                                *changed = true;
+                                return serde_json::Value::Number(num);
+                            }
+                        }
+                    }
+                    errors.push(format!("{path}: expected {type_str}"));
+                    return value;
+                }
+                if type_str == "integer" && !json_schema_type_matches(&value, "integer") {
+                    errors.push(format!("{path}: expected integer"));
+                }
+                return value;
+            }
+            "boolean" => {
+                if !json_schema_type_matches(&value, "boolean") {
+                    if coerce {
+                        match &value {
+                            serde_json::Value::String(s) if s == "true" => {
+                                *changed = true;
+                                return serde_json::Value::Bool(true);
+                            }
+                            serde_json::Value::String(s) if s == "false" => {
+                                *changed = true;
+                                return serde_json::Value::Bool(false);
+                            }
+                            _ => {}
+                        }
+                    }
+                    errors.push(format!("{path}: expected boolean"));
+                }
+                return value;
+            }
+            "null" => {
+                if !value.is_null() {
+                    errors.push(format!("{path}: expected null"));
+                }
+                return value;
+            }
+            _ => return value, // unknown type → accept
         }
     }
 
@@ -377,10 +377,10 @@ pub(crate) fn json_schema_apply_defaults(
         }
     };
     for (name, prop_schema) in properties {
-        if !obj.contains_key(name) {
-            if let Some(default) = prop_schema.get("default") {
-                obj.insert(name.clone(), default.clone());
-            }
+        if !obj.contains_key(name)
+            && let Some(default) = prop_schema.get("default")
+        {
+            obj.insert(name.clone(), default.clone());
         }
     }
 }
@@ -395,14 +395,14 @@ fn json_schema_validate_property(
     value: &serde_json::Value,
 ) -> Result<(), String> {
     // enum whitelist
-    if let Some(list) = schema.get("enum").and_then(|v| v.as_array()) {
-        if !list.iter().any(|v| v == value) {
-            return Err(format!(
-                "invalid value for \"{}\": {}",
-                name,
-                serde_json::to_string(value).unwrap_or_default()
-            ));
-        }
+    if let Some(list) = schema.get("enum").and_then(|v| v.as_array())
+        && !list.iter().any(|v| v == value)
+    {
+        return Err(format!(
+            "invalid value for \"{}\": {}",
+            name,
+            serde_json::to_string(value).unwrap_or_default()
+        ));
     }
 
     match schema.get("type").and_then(|v| v.as_str()) {

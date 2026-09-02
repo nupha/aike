@@ -25,10 +25,10 @@ use crate::USER_CLASS_DEFS;
 fn find_node_id(html: &Html, target: &ElementRef) -> Option<NodeId> {
     let root = html.tree.root();
     for node in root.descendants() {
-        if let Some(el) = ElementRef::wrap(node) {
-            if el == *target {
-                return Some(node.id());
-            }
+        if let Some(el) = ElementRef::wrap(node)
+            && el == *target
+        {
+            return Some(node.id());
         }
     }
     None

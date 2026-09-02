@@ -1168,7 +1168,7 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             ctx.queue_job(
                 move |_cx| {
                     let Some(bytes) = drain_slot.try_take() else {
-                        return Ok(JobState::Again);
+                        return Ok(JobState::Block);
                     };
 
                     match bytes {

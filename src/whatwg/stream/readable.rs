@@ -1415,7 +1415,7 @@ impl JSReadableStream {
                     let sval = cx.create_string_from_utf8(text.into_bytes())?;
                     let enqueue_fn = ctrl.get_property_str(cx, "enqueue")?;
                     enqueue_fn.call(cx, JSValue::from(ctrl), &[JSValue::make_string(sval)])?;
-                    Ok(JobState::Again)
+                    Ok(JobState::Block)
                 }
                 Ok(Err(msg)) => {
                     let err = cx
@@ -1437,7 +1437,7 @@ impl JSReadableStream {
                         error_fn.call(cx, JSValue::from(ctrl), &[JSValue::make_string(err)])?;
                         Ok(JobState::Done)
                     } else {
-                        Ok(JobState::Again)
+                        Ok(JobState::Block)
                     }
                 }
             },
@@ -1600,7 +1600,7 @@ fn start_channel_stream_poller(ctx: &mut ScopedContext) {
             if CHANNEL_STREAMS.with(|map| map.borrow().is_empty()) {
                 Ok(JobState::Done)
             } else {
-                Ok(JobState::Again)
+                Ok(JobState::Block)
             }
         },
         (),

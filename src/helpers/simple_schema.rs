@@ -42,11 +42,8 @@ pub(crate) fn simple_schema_from_args(
             continue;
         }
 
-        let field_obj = match args_obj.get_property(ctx, pk.atom)?.as_object() {
-            Some(o) => o.clone(),
-            None => {
-                continue;
-            }
+        let Some(field_obj) = args_obj.get_property(ctx, pk.atom)?.as_object() else {
+            continue;
         };
 
         let mut prop = serde_json::Map::new();
@@ -56,13 +53,12 @@ pub(crate) fn simple_schema_from_args(
             .get_property_str(ctx, "desc")
             .ok()
             .filter(|v| !v.is_undefined())
+            && let Ok(s) = desc_val.to_string(ctx)
         {
-            if let Ok(s) = desc_val.to_string(ctx) {
-                prop.insert(
-                    "description".into(),
-                    serde_json::Value::String(s.content().encode_utf8(false).to_string()),
-                );
-            }
+            prop.insert(
+                "description".into(),
+                serde_json::Value::String(s.content().encode_utf8(false).to_string()),
+            );
         }
 
         // type (default: "string" when absent/undefined)
@@ -81,14 +77,12 @@ pub(crate) fn simple_schema_from_args(
             .filter(|v| !v.is_undefined())
             .is_some();
         if has_enum {
-            if let Ok(enum_val) = field_obj.get_property_str(ctx, "enum") {
-                if !enum_val.is_undefined() {
-                    if let Ok(enum_json) = enum_val.to_serde_json(ctx) {
-                        if !enum_json.is_null() {
-                            prop.insert("enum".into(), enum_json);
-                        }
-                    }
-                }
+            if let Ok(enum_val) = field_obj.get_property_str(ctx, "enum")
+                && !enum_val.is_undefined()
+                && let Ok(enum_json) = enum_val.to_serde_json(ctx)
+                && !enum_json.is_null()
+            {
+                prop.insert("enum".into(), enum_json);
             }
         } else if type_str == "array" {
             prop.insert("type".into(), serde_json::Value::String("array".into()));
@@ -138,21 +132,19 @@ pub(crate) fn simple_schema_from_args(
         }
 
         // default
-        if let Some(default_val) = field_obj.get_property_str(ctx, "default").ok() {
-            if let Ok(default_json) = default_val.to_serde_json(ctx) {
-                if !default_json.is_null() {
-                    prop.insert("default".into(), default_json);
-                }
-            }
+        if let Ok(default_val) = field_obj.get_property_str(ctx, "default")
+            && let Ok(default_json) = default_val.to_serde_json(ctx)
+            && !default_json.is_null()
+        {
+            prop.insert("default".into(), default_json);
         }
 
         // required
-        if let Ok(req_val) = field_obj.get_property_str(ctx, "required") {
-            if let Ok(req_json) = req_val.to_serde_json(ctx) {
-                if req_json.as_bool() == Some(true) {
-                    required.push(serde_json::Value::String(field_name.clone()));
-                }
-            }
+        if let Ok(req_val) = field_obj.get_property_str(ctx, "required")
+            && let Ok(req_json) = req_val.to_serde_json(ctx)
+            && req_json.as_bool() == Some(true)
+        {
+            required.push(serde_json::Value::String(field_name.clone()));
         }
 
         properties.insert(field_name, serde_json::Value::Object(prop));

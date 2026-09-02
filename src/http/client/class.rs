@@ -102,57 +102,56 @@ fn read_bool_opt(ctx: &mut ScopedContext, obj: Object, key: &str) -> Option<bool
 fn js_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut cfg = HttpClientConfig::default();
 
-    if cc.length() > 0 {
-        if let Some(opts) = cc.arg(0).as_object() {
-            // P0: Proxy
-            if let Some(s) = read_str_opt(ctx, opts, "proxy") {
-                if !s.is_empty() {
-                    cfg.proxy = Some(s);
-                }
-            }
-            if let Some(s) = read_str_opt(ctx, opts, "noProxy") {
-                cfg.no_proxy = Some(s);
-            }
+    if cc.length() > 0
+        && let Some(opts) = cc.arg(0).as_object()
+    {
+        // P0: Proxy
+        if let Some(s) = read_str_opt(ctx, opts, "proxy")
+            && !s.is_empty()
+        {
+            cfg.proxy = Some(s);
+        }
+        if let Some(s) = read_str_opt(ctx, opts, "noProxy") {
+            cfg.no_proxy = Some(s);
+        }
 
-            // P1: TLS
-            if let Some(b) = read_bool_opt(ctx, opts, "rejectUnauthorized") {
-                cfg.danger_accept_invalid_certs = b;
-            }
-            if let Some(s) = read_str_opt(ctx, opts, "ca") {
-                cfg.root_cert_pem = Some(s);
-            }
-            if let Some(s) = read_str_opt(ctx, opts, "cert") {
-                cfg.client_cert_pem = Some(s);
-            }
-            if let Some(s) = read_str_opt(ctx, opts, "key") {
-                cfg.client_key_pem = Some(s);
-            }
+        // P1: TLS
+        if let Some(b) = read_bool_opt(ctx, opts, "rejectUnauthorized") {
+            cfg.danger_accept_invalid_certs = b;
+        }
+        if let Some(s) = read_str_opt(ctx, opts, "ca") {
+            cfg.root_cert_pem = Some(s);
+        }
+        if let Some(s) = read_str_opt(ctx, opts, "cert") {
+            cfg.client_cert_pem = Some(s);
+        }
+        if let Some(s) = read_str_opt(ctx, opts, "key") {
+            cfg.client_key_pem = Some(s);
+        }
 
-            // P2: Cookie
-            if let Some(b) = read_bool_opt(ctx, opts, "cookieJar") {
-                cfg.cookie_jar = b;
-            }
+        // P2: Cookie
+        if let Some(b) = read_bool_opt(ctx, opts, "cookieJar") {
+            cfg.cookie_jar = b;
+        }
 
-            // P3: DNS / Protocol
-            if let Some(s) = read_str_opt(ctx, opts, "protocol") {
-                cfg.protocol = match s.as_str() {
-                    "http1" => ProtocolMode::Http1Only,
-                    "http2" => ProtocolMode::Http2PriorKnowledge,
-                    _ => ProtocolMode::Auto,
-                };
-            }
+        // P3: DNS / Protocol
+        if let Some(s) = read_str_opt(ctx, opts, "protocol") {
+            cfg.protocol = match s.as_str() {
+                "http1" => ProtocolMode::Http1Only,
+                "http2" => ProtocolMode::Http2PriorKnowledge,
+                _ => ProtocolMode::Auto,
+            };
+        }
 
-            // resolve: TODO — expose Record<string, string> property iteration
-            // (needs zuqe property enumeration API).  Phase 5.
+        // resolve: TODO — expose Record<string, string> property iteration
+        // (needs zuqe property enumeration API).  Phase 5.
 
-            // P4: Connection
-            if let Some(s) = read_str_opt(ctx, opts, "connectTimeout") {
-                if let Ok(n) = s.parse::<f64>() {
-                    if n > 0.0 {
-                        cfg.connect_timeout = Duration::from_secs_f64(n);
-                    }
-                }
-            }
+        // P4: Connection
+        if let Some(s) = read_str_opt(ctx, opts, "connectTimeout")
+            && let Ok(n) = s.parse::<f64>()
+            && n > 0.0
+        {
+            cfg.connect_timeout = Duration::from_secs_f64(n);
         }
     }
 
@@ -213,66 +212,66 @@ fn js_do_request(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut timeout = Duration::from_secs(30);
     let mut signal_val: Option<JSValue> = None;
 
-    if cc.length() > 1 {
-        if let Some(opts) = cc.arg(1).as_object() {
-            // ── Method ──
-            if magic == METHOD_FROM_OPTS {
-                if let Some(m) = read_str_opt(ctx, opts, "method") {
-                    method = crate::http::client::request::normalize_method(&m);
-                }
-            } else {
-                method = match magic {
-                    M_GET => "GET",
-                    M_POST => "POST",
-                    M_PUT => "PUT",
-                    M_DELETE => "DELETE",
-                    M_PATCH => "PATCH",
-                    _ => "GET",
-                }
-                .to_string();
+    if cc.length() > 1
+        && let Some(opts) = cc.arg(1).as_object()
+    {
+        // ── Method ──
+        if magic == METHOD_FROM_OPTS {
+            if let Some(m) = read_str_opt(ctx, opts, "method") {
+                method = crate::http::client::request::normalize_method(&m);
             }
-
-            // ── Headers ──
-            let mut h = opts.get_property_str(ctx, "headers")?;
-            if !h.is_undefined_or_null() {
-                req_headers = header_list_from_js(ctx, &mut h)?;
+        } else {
+            method = match magic {
+                M_GET => "GET",
+                M_POST => "POST",
+                M_PUT => "PUT",
+                M_DELETE => "DELETE",
+                M_PATCH => "PATCH",
+                _ => "GET",
             }
+            .to_string();
+        }
 
-            // ── Body ──
-            let b = opts.get_property_str(ctx, "body")?;
-            if !b.is_undefined_or_null() {
-                req_body = Some(body_to_bytes(ctx, &b)?);
+        // ── Headers ──
+        let mut h = opts.get_property_str(ctx, "headers")?;
+        if !h.is_undefined_or_null() {
+            req_headers = header_list_from_js(ctx, &mut h)?;
+        }
+
+        // ── Body ──
+        let b = opts.get_property_str(ctx, "body")?;
+        if !b.is_undefined_or_null() {
+            req_body = Some(body_to_bytes(ctx, &b)?);
+        }
+
+        // ── Timeout ──
+        let t = opts.get_property_str(ctx, "timeout")?;
+        if !t.is_undefined() {
+            let secs = t.to_number(ctx)?.to_f64();
+            if secs > 0.0 {
+                timeout = Duration::from_secs_f64(secs);
             }
+        }
 
-            // ── Timeout ──
-            let t = opts.get_property_str(ctx, "timeout")?;
-            if !t.is_undefined() {
-                let secs = t.to_number(ctx)?.to_f64();
-                if secs > 0.0 {
-                    timeout = Duration::from_secs_f64(secs);
-                }
-            }
+        // ── Redirect ──
+        // Not supported per-request: reqwest's redirect policy is
+        // client-level; the client always follows up to 10 redirects.
 
-            // ── Redirect ──
-            // Not supported per-request: reqwest's redirect policy is
-            // client-level; the client always follows up to 10 redirects.
-
-            // ── Signal (AbortController / AbortSignal) ──
-            let s = opts.get_property_str(ctx, "signal")?;
-            if !s.is_undefined_or_null() {
-                // Accept anything non-nullish as a signal. Signal-notify and
-                // abort detection use the JS-level aborted property which works
-                // even when the native-object pointer isn't accessible.
-                signal_val = Some(s.clone());
-            }
+        // ── Signal (AbortController / AbortSignal) ──
+        let s = opts.get_property_str(ctx, "signal")?;
+        if !s.is_undefined_or_null() {
+            // Accept anything non-nullish as a signal. Signal-notify and
+            // abort detection use the JS-level aborted property which works
+            // even when the native-object pointer isn't accessible.
+            signal_val = Some(s);
         }
     }
 
     // ── Abort detection (via JS property readout) ──
     let already_aborted = signal_val
         .as_ref()
-        .map_or(false, |s| js_signal_is_aborted(ctx, s));
-    let notify = signal_val.as_ref().and_then(|s| signal_notify(s));
+        .is_some_and(|s| js_signal_is_aborted(ctx, s));
+    let notify = signal_val.as_ref().and_then(signal_notify);
 
     let url_for_closure = url_str.clone();
 
@@ -319,7 +318,7 @@ fn js_do_request(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 RespType::Basic,
                 &url_for_closure,
                 false,
-                signal_val.clone(),
+                signal_val,
             )
         })?;
 

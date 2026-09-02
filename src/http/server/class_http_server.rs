@@ -770,11 +770,10 @@ fn js_listen(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
                 // Backfill the update sender into the payload (mcp-service.md §6).
                 let mut ov = JSValue::from(*obj);
-                if let Some(p_mut) = JSHttpMcp::payload_mut_of(&mut ov) {
-                    if let McpTransport::Http { update_tx, .. } = &mut *p_mut.transport.borrow_mut()
-                    {
-                        *update_tx = Some(utx);
-                    }
+                if let Some(p_mut) = JSHttpMcp::payload_mut_of(&mut ov)
+                    && let McpTransport::Http { update_tx, .. } = &mut *p_mut.transport.borrow_mut()
+                {
+                    *update_tx = Some(utx);
                 }
 
                 mcp_update_rxs.push(urx);
@@ -812,7 +811,7 @@ fn js_listen(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     // Keep a handle to the HttpServer instance for the poller (WS dispatch needs
     // to reach stream_registry / topic_registry). Wrapped in RefCell because the
     // poller closure is `Fn` (shared) but mutates the payload through it.
-    let server_ref = RefCell::new(this.clone());
+    let server_ref = RefCell::new(this);
 
     // Start unified server job on JS thread (handles HTTP, MCP, and WS events)
     if let Some(js_rx) = js_rx_opt {
@@ -849,10 +848,7 @@ fn js_listen(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     // This keeps the server alive as long as the promise is referenced
     // (e.g. after startServer returns handle.exit and handle goes out of scope).
     exit_promise.define_property_value_str(
-        ctx,
-        "_server",
-        this.into(),
-        0, // hidden: not configurable, not writable, not enumerable
+        ctx, "_server", this, 0, // hidden: not configurable, not writable, not enumerable
     )?;
 
     // prop: exit — readonly (no WRITABLE flag)
@@ -883,6 +879,7 @@ fn js_listen(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
 /// Start the unified server job via queue_job — polls crossbeam channel on JS thread.
 /// Handles HTTP, MCP tool call, and WebSocket stream requests through the same channel.
+#[allow(clippy::too_many_arguments)]
 fn js_start_server_job(
     ctx: &mut ScopedContext,
     rx: zuqe::WakeReceiver<IncomingRequest>,
@@ -896,6 +893,7 @@ fn js_start_server_job(
     let is_running2 = is_running.clone();
     // Wrap MCP tables in RefCell for hot-reload support
     let mcp_tables = RefCell::new(mcp_handler_tables);
+
     crate::helpers::start_channel_poller(
         ctx,
         "http_mcp",
@@ -928,12 +926,12 @@ fn js_start_server_job(
                         out_tx,
                         control_tx,
                         &ws_handler_table,
-                        &mut *sv,
+                        &mut sv,
                     );
                 }
                 IncomingRequest::WebSocketData { id, event } => {
                     let mut sv = server_ref.borrow_mut();
-                    dispatch_ws_data(cx, id, event, &mut *sv);
+                    dispatch_ws_data(cx, id, event, &mut sv);
                 }
             }
             true // keep polling
@@ -955,7 +953,7 @@ fn dispatch_http_request(cx: &mut ScopedContext, incoming: HttpRequest, handler_
 
     // Shared close-callback list: both req and res (and later SSE) reference
     // the same Arc so `req.onClose(cb)` fires when SSE detects disconnect.
-    let close_cbs: super::CloseCbs = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let close_cbs: super::CloseCbs = Arc::new(std::sync::Mutex::new(Vec::new()));
 
     let req_val: JSValue = match JSHttpRequest::new_instance(
         cx,
@@ -1233,10 +1231,10 @@ fn js_publish(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     for id in ids {
         if let Some(obj) = p.stream_registry.borrow().get(&id).cloned() {
             let mut ov = JSValue::from(obj);
-            if let Some(ws) = JSWebSocketStream::payload_mut_of(&mut ov) {
-                if let Some(tx) = &ws.sink.tx {
-                    let _ = tx.try_send(msg.clone());
-                }
+            if let Some(ws) = JSWebSocketStream::payload_mut_of(&mut ov)
+                && let Some(tx) = &ws.sink.tx
+            {
+                let _ = tx.try_send(msg.clone());
             }
         }
     }

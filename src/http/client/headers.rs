@@ -105,6 +105,7 @@ impl HeaderList {
     /// Filter entries per the Fetch spec's request-header guard:
     /// - normal request: drop forbidden request-header names;
     /// - `no-cors` request: keep only CORS-safelisted request headers.
+    ///
     /// Used by the `Request` constructor to filter headers given via init or an
     /// input Request (WPT request-headers).
     pub(crate) fn filter_for_request_mode(&mut self, no_cors: bool) {

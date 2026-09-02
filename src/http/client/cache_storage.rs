@@ -14,7 +14,9 @@ use std::{cell::RefCell, collections::HashMap, rc::Rc};
 use linkme::distributed_slice;
 use zuqe::{
     Array, CallContext, ClassCtorDef, ClassID, FieldDef, JSResult, JSValue, Runtime, ScopedContext,
-    builtins::promise::Promise, builtins::typed_array::TypedArray, def_native_object,
+    builtins::promise::Promise,
+    builtins::typed_array::TypedArray,
+    def_native_object,
     gc_lite::{GcTrace, GcTraceCtx},
 };
 
@@ -156,7 +158,7 @@ fn js_cache_storage_open(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 }
 
 fn js_cache_storage_has(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let mut this = cc.this();
+    let this = cc.this();
     let p = JSCacheStorage::payload_of(&this)
         .ok_or_else(|| ctx.throw_type_error("not a CacheStorage instance"))?;
     let name = cc

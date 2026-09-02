@@ -6,7 +6,7 @@
 //! Pending timers live in a single `Vec` kept sorted by `deadline` ascending, so
 //! `entries[0]` is always the nearest deadline.  A single self-requeuing JS job
 //! fires due timers in that order, driven entirely by the engine's job loop
-//! ticking this job (`JobState::Again`); there is no separate timer thread or
+//! ticking this job (`JobState::Block`); there is no separate timer thread or
 //! per-timer sleep task.
 
 use std::{
@@ -111,7 +111,7 @@ pub(crate) fn gc_trace_timeout(tr: &mut GcTraceCtx) {
 /// Enqueue the polling microtask.  Called only when TIMER_STATE is Some
 /// (state already initialized by the caller).
 ///
-/// The job self-requeues (`JobState::Again`) while timers are pending.  On each
+/// The job self-requeues (`JobState::Block`) while timers are pending.  On each
 /// tick it first compares `entries[0].deadline` (the nearest, since `entries`
 /// is sorted) once against `Instant::now()` and bails immediately when nothing
 /// is due, so the idle cost is a single comparison.  When a timer is due it
@@ -145,7 +145,7 @@ fn start_timer_task(ctx: &mut ScopedContext) {
                     // Report the deadline to the event loop so a `Parked`
                     // round suspends until it instead of hot-spinning.
                     cx.set_poll_hint(t);
-                    return Ok(JobState::Again);
+                    return Ok(JobState::Block);
                 }
                 Some(_) => {}
             }
@@ -235,7 +235,7 @@ fn start_timer_task(ctx: &mut ScopedContext) {
                         cx.set_poll_hint(d);
                     }
                 }
-                Ok(JobState::Again)
+                Ok(JobState::Block)
             } else {
                 TIMER_STATE.with_borrow_mut(|s| {
                     s.take();

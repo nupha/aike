@@ -70,7 +70,7 @@ static MCP_STDIO_STATE: OnceLock<StdioMcpShutdown> = OnceLock::new();
 // Thread-local GC roots for JS handler objects (Object is !Send, so can't
 // live in a static). Set in start(), cleared on shutdown.
 thread_local! {
-    static STDIO_JS_HANDLERS: RefCell<Vec<Object>> = RefCell::new(Vec::new());
+    static STDIO_JS_HANDLERS: RefCell<Vec<Object>> = const { RefCell::new(Vec::new()) };
 }
 
 /// GC trace callback for the stdio MCP server's JS handler objects.
@@ -116,10 +116,9 @@ fn js_stdio_define(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         .get_property_str(ctx, "env")
         .ok()
         .filter(|v| !v.is_undefined())
+        && let Some(o) = v.as_object()
     {
-        if let Some(o) = v.as_object() {
-            command_env = parse_env_object(ctx, o)?;
-        }
+        command_env = parse_env_object(ctx, o)?;
     }
 
     // args — string[] | (() => string[]).
@@ -129,7 +128,7 @@ fn js_stdio_define(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         .ok()
         .filter(|v| !v.is_undefined())
     {
-        command_args = if v.as_object().map_or(false, |o| o.is_callable()) {
+        command_args = if v.as_object().is_some_and(|o| o.is_callable()) {
             CommandArgs::Func(v.ensure_callable(ctx)?)
         } else {
             let arr = Array::try_from(v)?;
@@ -164,24 +163,23 @@ fn js_stdio_define(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         .get_property_str(ctx, "extraFiles")
         .ok()
         .filter(|v| !v.is_undefined())
+        && let Some(arr) = v.as_object()
     {
-        if let Some(arr) = v.as_object() {
-            let len = arr
-                .get_property_str(ctx, "length")
-                .and_then(|l| l.to_number(ctx))
-                .map(|n| n.to_i32())? as usize;
-            let mut paths = Vec::with_capacity(len);
-            for i in 0..len {
-                let s = arr
-                    .get_property_u32(ctx, i as u32)?
-                    .to_string(ctx)?
-                    .content()
-                    .encode_utf8(false)
-                    .to_string();
-                paths.push(s);
-            }
-            extra_files = paths;
+        let len = arr
+            .get_property_str(ctx, "length")
+            .and_then(|l| l.to_number(ctx))
+            .map(|n| n.to_i32())? as usize;
+        let mut paths = Vec::with_capacity(len);
+        for i in 0..len {
+            let s = arr
+                .get_property_u32(ctx, i as u32)?
+                .to_string(ctx)?
+                .content()
+                .encode_utf8(false)
+                .to_string();
+            paths.push(s);
         }
+        extra_files = paths;
     }
 
     let transport = McpTransport::Stdio {
@@ -214,7 +212,7 @@ fn js_get(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 let files: Vec<String> = extra_files.clone();
                 let mut lst = Vec::with_capacity(files.len());
                 for f in &files {
-                    lst.push(js_str(ctx, f.clone())?.into());
+                    lst.push(js_str(ctx, f.clone())?);
                 }
                 Ok(Array::from_values(ctx, lst)?.into())
             }
@@ -223,7 +221,7 @@ fn js_get(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         FIELD_BEFORE_RUN => match &*p.transport.borrow() {
             McpTransport::Stdio { before_run, .. } => match before_run {
                 None => Ok(JSValue::NULL),
-                Some(f) => Ok(f.clone().into()),
+                Some(f) => Ok((*f).into()),
             },
             _ => Ok(JSValue::NULL),
         },
@@ -247,12 +245,11 @@ fn js_run(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     // beforeRun — user init hook, run once before serving (memo/mcp-service.md §2.2).
     // On the JS thread here; fire-and-forget (async hook may still be pending when
     // serve starts — awaiting a JS Promise would block this thread).
-    if let McpTransport::Stdio { before_run, .. } = &*p.transport.borrow() {
-        if let Some(hook) = before_run.clone() {
-            if let Err(e) = hook.call(ctx, this, &[]) {
-                return Err(e);
-            }
-        }
+    if let McpTransport::Stdio { before_run, .. } = &*p.transport.borrow()
+        && let Some(hook) = before_run
+        && let Err(e) = hook.call(ctx, this, &[])
+    {
+        return Err(e);
     }
 
     // Launch the stdio server
@@ -310,7 +307,7 @@ fn js_spawn_resolve(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 let mut env = ctx.create_base_object()?;
                 for (k, v) in spawn_env.iter() {
                     let val = match v {
-                        EnvVal::Text(s) => js_str(ctx, s.clone())?.into(),
+                        EnvVal::Text(s) => js_str(ctx, s.clone())?,
                         EnvVal::Func(f) => {
                             let r = f.call(ctx, JSValue::UNDEFINED, &[nsobj.into()])?;
                             if r.is_undefined() {
@@ -328,7 +325,7 @@ fn js_spawn_resolve(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 CommandArgs::Text(v) => {
                     let mut lst = Vec::with_capacity(v.len());
                     for s in v {
-                        lst.push(js_str(ctx, s.clone())?.into());
+                        lst.push(js_str(ctx, s.clone())?);
                     }
                     Ok(Array::from_values(ctx, lst)?.into())
                 }
@@ -540,7 +537,7 @@ fn parse_env_object(
             .encode_utf8(false)
             .to_string();
 
-        let val = if v.as_object().map_or(false, |o| o.is_callable()) {
+        let val = if v.as_object().is_some_and(|o| o.is_callable()) {
             EnvVal::Func(v.ensure_callable(ctx)?)
         } else {
             let s = v.to_string(ctx)?.content().encode_utf8(false).to_string();

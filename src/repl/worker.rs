@@ -88,10 +88,10 @@ impl ConditionalEventHandler for HistNav {
 /// Check if `line` already exists anywhere in the history (global dedup).
 fn history_contains(hist: &impl History, line: &str) -> bool {
     for i in 0..hist.len() {
-        if let Ok(Some(result)) = hist.get(i, SearchDirection::Forward) {
-            if result.entry.as_ref() == line {
-                return true;
-            }
+        if let Ok(Some(result)) = hist.get(i, SearchDirection::Forward)
+            && result.entry.as_ref() == line
+        {
+            return true;
         }
     }
     false
@@ -307,7 +307,7 @@ pub(crate) async fn run<'c>(mut rt: zuqe::Runtime, mut ctx0: zuqe::Context<'c>) 
             // Drive the runtime tick.
             status = rt.run_async() => {
                 if let ExitStatus::Interrupted(code) = status {
-                    break ExitCode::from(code);
+                    break code;
                 }
             }
 

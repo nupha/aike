@@ -146,6 +146,61 @@ pub(crate) fn format_timestamp_compact() -> String {
     now_utc().format("%Y%m%d_%H%M%S").to_string()
 }
 
+/// Start a persistent polling microtask driven by a crossbeam channel.
+///
+/// The poller calls `handler(msg, cx)` for each received message. If the
+/// handler returns `true` the poller continues (`Again`); `false` triggers
+/// a call to `on_finish()` and terminates (`Done`).
+///
+/// When the channel is empty the poller checks `has_entries()`. If there
+/// are still live entries it polls again; otherwise it calls `on_finish()`
+/// and terminates.  A disconnected channel always triggers termination.
+pub(crate) fn start_channel_poller<T, F>(
+    ctx: &mut ScopedContext,
+    label: &'static str,
+    rx: zuqe::WakeReceiver<T>,
+    handler: F,
+    has_entries: impl Fn() -> bool + 'static,
+    on_finish: impl Fn() + 'static,
+) where
+    T: 'static,
+    F: Fn(T, &mut ScopedContext) -> bool + 'static,
+{
+    ctx.queue_job(
+        move |cx| match rx.try_recv() {
+            Ok(msg) => {
+                let cont = handler(msg, cx);
+
+                // ES §9.5: handler returns bool, not Result — clear any
+                // exception it may have set via cx.throw_*().
+                if let exc @ Exception::Error(_) = cx.take_exception() {
+                    log::warn!("[channel poller:{label}] handler left exception: {exc:?}");
+                }
+
+                if cont {
+                    Ok(JobState::Block)
+                } else {
+                    on_finish();
+                    Ok(JobState::Done)
+                }
+            }
+            Err(TryRecvError::Empty) => {
+                if has_entries() {
+                    Ok(JobState::Block)
+                } else {
+                    on_finish();
+                    Ok(JobState::Done)
+                }
+            }
+            Err(TryRecvError::Disconnected) => {
+                on_finish();
+                Ok(JobState::Done)
+            }
+        },
+        (),
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -182,59 +237,4 @@ mod tests {
         assert_eq!(c.len(), 15);
         assert!(c.as_bytes()[8] == b'_');
     }
-}
-
-/// Start a persistent polling microtask driven by a crossbeam channel.
-///
-/// The poller calls `handler(msg, cx)` for each received message. If the
-/// handler returns `true` the poller continues (`Again`); `false` triggers
-/// a call to `on_finish()` and terminates (`Done`).
-///
-/// When the channel is empty the poller checks `has_entries()`. If there
-/// are still live entries it polls again; otherwise it calls `on_finish()`
-/// and terminates.  A disconnected channel always triggers termination.
-pub(crate) fn start_channel_poller<T, F>(
-    ctx: &mut ScopedContext,
-    label: &'static str,
-    rx: zuqe::WakeReceiver<T>,
-    handler: F,
-    has_entries: impl Fn() -> bool + 'static,
-    on_finish: impl Fn() + 'static,
-) where
-    T: 'static,
-    F: Fn(T, &mut ScopedContext) -> bool + 'static,
-{
-    ctx.queue_job(
-        move |cx| match rx.try_recv() {
-            Ok(msg) => {
-                let cont = handler(msg, cx);
-
-                // ES §9.5: handler returns bool, not Result — clear any
-                // exception it may have set via cx.throw_*().
-                if let exc @ Exception::Error(_) = cx.take_exception() {
-                    log::warn!("[channel poller:{label}] handler left exception: {exc:?}");
-                }
-
-                if cont {
-                    Ok(JobState::Again)
-                } else {
-                    on_finish();
-                    Ok(JobState::Done)
-                }
-            }
-            Err(TryRecvError::Empty) => {
-                if has_entries() {
-                    Ok(JobState::Again)
-                } else {
-                    on_finish();
-                    Ok(JobState::Done)
-                }
-            }
-            Err(TryRecvError::Disconnected) => {
-                on_finish();
-                Ok(JobState::Done)
-            }
-        },
-        (),
-    );
 }

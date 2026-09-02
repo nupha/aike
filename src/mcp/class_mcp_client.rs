@@ -38,8 +38,10 @@ use rmcp::{
     },
 };
 use zuqe::{
-    CallContext, ClassCtorDef, ClassID, FieldDef, JSResult, JSValue, Object, PollSender, Runtime,
-    ScopedContext, builtins::promise::Promise, def_native_object,
+    CallContext, ClassCtorDef, ClassID, FieldDef, JSResult, JSValue, Object, Runtime,
+    ScopedContext,
+    builtins::promise::Promise,
+    def_native_object,
     gc_lite::{GcTrace, GcTraceCtx},
 };
 

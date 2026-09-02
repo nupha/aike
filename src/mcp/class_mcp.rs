@@ -9,7 +9,6 @@ use std::{
     sync::{Arc, RwLock},
 };
 
-use crossbeam::channel;
 use linkme::distributed_slice;
 use rmcp::model::{
     Implementation, ProtocolVersion, ServerCapabilities, ServerInfo, Tool, ToolAnnotations,
@@ -221,7 +220,7 @@ impl McpServicePayload {
         let tool = Tool::new(
             name.to_string(),
             description.to_string(),
-            Arc::new(input_schema_obj.into()),
+            Arc::new(input_schema_obj),
         );
 
         let mut guard = self.schemas.write().map_err(|_| "schema lock poisoned")?;
@@ -343,10 +342,10 @@ fn js_add_tool(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let new_handlers = p.register_js_tools(tools, name_to_index, js_handlers);
 
     // HTTP hot-reload: push the new handler table so the running poller picks it up.
-    if let McpTransport::Http { update_tx, .. } = &*p.transport.borrow() {
-        if let Some(tx) = update_tx {
-            let _ = tx.send(new_handlers);
-        }
+    if let McpTransport::Http { update_tx, .. } = &*p.transport.borrow()
+        && let Some(tx) = update_tx
+    {
+        let _ = tx.send(new_handlers);
     }
 
     Ok(this)
@@ -388,10 +387,10 @@ fn js_update_tools(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     p.js_handlers = RefCell::new(js_handlers.clone());
 
     // HTTP hot-reload: push the new handler table so the running poller picks it up.
-    if let McpTransport::Http { update_tx, .. } = &*p.transport.borrow() {
-        if let Some(utx) = update_tx {
-            let _ = utx.send(js_handlers);
-        }
+    if let McpTransport::Http { update_tx, .. } = &*p.transport.borrow()
+        && let Some(utx) = update_tx
+    {
+        let _ = utx.send(js_handlers);
     }
 
     Ok(this)
@@ -564,8 +563,7 @@ pub(crate) fn parse_mcp_tools_object(
         let tool_obj = tools_obj
             .get_property(ctx, pk.atom)?
             .as_object()
-            .ok_or_else(|| ctx.throw_type_error(&format!("tool '{}' must be an object", name)))?
-            .clone();
+            .ok_or_else(|| ctx.throw_type_error(&format!("tool '{}' must be an object", name)))?;
 
         // desc → description
         let description = tool_obj
@@ -585,11 +583,10 @@ pub(crate) fn parse_mcp_tools_object(
             })?;
 
         // Build inputSchema from args DSL (only mode for object-keyed format)
-        let input_schema_json = if let Some(args_val) = tool_obj.get_property_str(ctx, "args").ok()
-        {
+        let input_schema_json = if let Ok(args_val) = tool_obj.get_property_str(ctx, "args") {
             if !args_val.is_undefined() {
                 if let Some(args_obj) = args_val.as_object() {
-                    let args_cloned = args_obj.clone();
+                    let args_cloned = args_obj;
                     simple_schema_from_args(ctx, args_cloned)?
                         .unwrap_or(serde_json::json!({"type": "object"}))
                 } else {
@@ -610,8 +607,7 @@ pub(crate) fn parse_mcp_tools_object(
                 .clone(),
         };
 
-        let annotations = if let Some(ann_val) = tool_obj.get_property_str(ctx, "annotations").ok()
-        {
+        let annotations = if let Ok(ann_val) = tool_obj.get_property_str(ctx, "annotations") {
             if !ann_val.is_undefined() {
                 if let Some(ann_obj) = ann_val.as_object() {
                     Some(build_tool_annotations(ctx, ann_obj)?)

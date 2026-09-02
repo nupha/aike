@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use serde_json::Value as JsonValue;
 use zuqe::{
-    Array, CallContext, JSResult, JSValue, PollSender, ScopedContext,
+    Array, CallContext, JSResult, JSValue, ScopedContext,
     builtins::{iterator::AsyncIterableIterator, promise::Promise},
 };
 
@@ -37,7 +37,7 @@ fn extract_opts(cx: &mut ScopedContext, arg: JSValue) -> Result<OnError, i32> {
 
     let on_error = match obj.get_property_str(cx, "onError") {
         Ok(v) if !v.is_undefined() => match v.to_string(cx) {
-            Ok(s) => on_error_from_str(&s.content().encode_utf8(false).to_string()),
+            Ok(s) => on_error_from_str(s.content().encode_utf8(false).as_ref()),
             Err(_) => OnError::Null,
         },
         _ => OnError::Null,
@@ -89,7 +89,7 @@ pub(crate) fn js_parse(cx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let text = cc.arg(0).to_string(cx)?;
     let content = text.content().encode_utf8(false).to_string();
     let on_error = extract_opts(cx, cc.arg(1))?;
-    let (values, _attempted) = parse_jsonl(cx, &content, on_error).map_err(|code| code)?;
+    let (values, _attempted) = parse_jsonl(cx, &content, on_error)?;
     Array::from_values(cx, values).map(JSValue::from)
 }
 
@@ -129,7 +129,7 @@ fn read_jsonl_impl(cx: &mut ScopedContext, path: PathBuf, on_error: OnError) -> 
                     return Err(cx2.throw_internal_error(&e));
                 }
             };
-            let (values, _attempted) = parse_jsonl(cx2, &text, on_error).map_err(|code| code)?;
+            let (values, _attempted) = parse_jsonl(cx2, &text, on_error)?;
             Array::from_values(cx2, values).map(JSValue::from)
         })?;
 
@@ -186,7 +186,6 @@ fn write_jsonl_impl(
             Ok(JSValue::UNDEFINED)
         })?;
 
-    let wake = cx.wake_handle();
     tokio::spawn(async move {
         let res = async {
             if append {
@@ -242,7 +241,7 @@ pub(crate) fn js_parse_chunk(cx: &mut ScopedContext, cc: CallContext) -> JSResul
     let text = cc.arg(0).to_string(cx)?;
     let content = text.content().encode_utf8(false).to_string();
     let on_error = extract_opts(cx, cc.arg(1))?;
-    let (values, attempted) = parse_jsonl(cx, &content, on_error).map_err(|code| code)?;
+    let (values, attempted) = parse_jsonl(cx, &content, on_error)?;
     let mut obj = cx.create_base_object()?;
     let arr = Array::from_values(cx, values)?;
     obj.define_property_value_str(cx, "values", arr.into(), 0)?;
