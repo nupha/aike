@@ -25,18 +25,32 @@ fn storage_db_path(cli_path: Option<&str>) -> std::path::PathBuf {
 }
 
 /// Eager init — called once from `install_local_storage`.
-fn init_storage(db_path: Option<&str>) {
+/// Returns false when the database is already held by another process
+/// (spawned child), in which case localStorage is silently disabled.
+fn init_storage(db_path: Option<&str>) -> bool {
     LOCAL_STORAGE.with_borrow_mut(|opt| {
         if opt.is_some() {
-            return;
+            return true;
         }
         let path = storage_db_path(db_path);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).ok();
         }
-        let db = Database::create(&path).expect("failed to open localStorage database");
-        *opt = Some(db);
-    });
+        match Database::create(&path) {
+            Ok(db) => {
+                *opt = Some(db);
+                true
+            }
+            Err(e) => {
+                eprintln!(
+                    "[WARN] failed to open localStorage database at '{}': {e}, \
+                     this environment has no localStorage",
+                    path.display()
+                );
+                false
+            }
+        }
+    })
 }
 
 fn with_db<R>(f: impl FnOnce(&Database) -> R) -> R {
@@ -141,12 +155,16 @@ fn js_length(_ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
 }
 
 /// Install `localStorage` on the global object.
+/// Returns Ok(()) even when the database is already held by another process;
+/// in that case localStorage is simply not installed (fire-and-forget spawns).
 pub(crate) fn install_local_storage(
     ctx: &mut ScopedContext,
     global: &mut Object,
     db_path: Option<&str>,
 ) -> Result<(), i32> {
-    init_storage(db_path);
+    if !init_storage(db_path) {
+        return Ok(());
+    }
 
     let mut storage = ctx.create_base_object()?;
 
