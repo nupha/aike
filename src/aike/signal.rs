@@ -8,9 +8,9 @@ use std::{
     thread::ThreadId,
 };
 
-use crossbeam::channel;
 use zuqe::{
-    CallContext, FieldDef, JS_PROP_ENUMERABLE, JSResult, JSValue, ScopedContext,
+    CallContext, FieldDef, JS_PROP_ENUMERABLE, JSResult, JSValue, ScopedContext, WakeReceiver,
+    WakeSender,
     gc_lite::{GcTrace, GcTraceCtx},
 };
 
@@ -22,7 +22,7 @@ thread_local! {
 
 /// All per-thread senders, keyed by ThreadId.
 /// The C signal handler broadcasts to every registered sender.
-static SIGNAL_SENDERS: LazyLock<Mutex<HashMap<ThreadId, channel::Sender<u32>>>> =
+static SIGNAL_SENDERS: LazyLock<Mutex<HashMap<ThreadId, WakeSender<u32>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// Refcount per signal number: how many threads have registered a handler.
@@ -268,7 +268,7 @@ pub fn gc_trace_signals(gcx: &mut GcTraceCtx) {
 /// closure so no thread-local receiver variable is needed.  When the last
 /// sender for this thread is dropped (all handlers removed), the microtask
 /// sees `Disconnected` and returns `Done`.
-fn start_signal_microtask(ctx: &mut ScopedContext, rx: channel::Receiver<u32>) {
+fn start_signal_microtask(ctx: &mut ScopedContext, rx: WakeReceiver<u32>) {
     #[cfg(unix)]
     {
         // Signal wake path: the C handler writes a byte into the event
@@ -278,13 +278,16 @@ fn start_signal_microtask(ctx: &mut ScopedContext, rx: channel::Receiver<u32>) {
         let wake = ctx.wake_handle();
         let write_fd = wake.signal_write_fd();
         SIGNAL_WAKE_FD.store(write_fd, std::sync::atomic::Ordering::Relaxed);
-        let read_fd = unsafe { libc::dup(wake.signal_read_fd()) };
+
         let file = unsafe {
             use std::os::fd::FromRawFd;
+            let read_fd = libc::dup(wake.signal_read_fd());
             std::fs::File::from_raw_fd(read_fd)
         };
+
         tokio::spawn(async move {
             use std::io::Read;
+
             let mut buf = [0u8; 64];
             match tokio::io::unix::AsyncFd::new(file) {
                 Ok(af) => {
@@ -306,7 +309,7 @@ fn start_signal_microtask(ctx: &mut ScopedContext, rx: channel::Receiver<u32>) {
     crate::helpers::start_channel_poller(
         ctx,
         "signal",
-        zuqe::WakeReceiver::new(rx),
+        rx,
         |sig_num, cx| {
             let cb = HANDLER_MAP.with(|map| map.borrow().get(&sig_num).copied());
             if let Some(cb) = cb
@@ -430,11 +433,12 @@ pub(crate) fn register_signal_handler(
     // When HANDLER_MAP was empty, the previous microtask has already
     // exited (Disconnected), so we need a fresh channel + microtask.
     if was_empty {
-        let (tx, rx) = channel::bounded::<u32>(16);
+        let (tx, rx) = ctx.make_channel::<u32>(16);
         SIGNAL_SENDERS
             .lock()
             .unwrap()
             .insert(std::thread::current().id(), tx);
+
         start_signal_microtask(ctx, rx);
     }
 
