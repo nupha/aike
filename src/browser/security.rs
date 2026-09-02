@@ -8,7 +8,6 @@
 
 use std::cell::RefCell;
 
-use crossbeam::channel;
 use zuqe::{CallContext, Callback, JS_PROP_C_W_E, JSResult, JSValue, ScopedContext};
 
 use crate::browser::{
@@ -22,30 +21,30 @@ use crate::browser::{
 
 thread_local! {
     // Registered `handleCertificateError` callback (last wins). GC-traced.
-    pub(crate) static CERT_CALLBACK: RefCell<Option<JSValue>> = RefCell::new(None);
+    pub(crate) static CERT_CALLBACK: RefCell<Option<JSValue>> = const { RefCell::new(None) };
 
     // CDP client used by the generated `accept` closure.
-    static CERT_CLIENT: RefCell<Option<CdpClient>> = RefCell::new(None);
+    static CERT_CLIENT: RefCell<Option<CdpClient>> = const { RefCell::new(None) };
     // eventId of the cert error currently being delivered to the callback.
-    static CERT_EVENT_ID: RefCell<Option<i64>> = RefCell::new(None);
+    static CERT_EVENT_ID: RefCell<Option<i64>> = const { RefCell::new(None) };
 }
 
 const CERT_ACCEPT_MAGIC: i16 = 1;
 
 /// `js_cert_accept` — the `accept(bool)` method attached to the event object.
 /// Resolves the in-flight cert error via `Security.handleCertificateError`.
-fn js_cert_accept(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+fn js_cert_accept(_: &mut ScopedContext, cc: CallContext) -> JSResult {
     let accept = cc.arg(0).to_bool().unwrap_or(false);
     let event_id = CERT_EVENT_ID.with(|e| *e.borrow());
     if let (Some(id), Some(client)) = (event_id, CERT_CLIENT.with(|c| c.borrow().clone())) {
         let action = if accept { "accept" } else { "cancel" };
-        let _ = client.send(
+        client.send(
             "Security.handleCertificateError",
             Some(serde_json::json!({ "eventId": id, "action": action })),
             None,
         );
     }
-    let _ = ctx;
+
     Ok(JSValue::UNDEFINED)
 }
 
@@ -82,7 +81,7 @@ pub(crate) fn js_browser_handle_certificate_error(
     // Enable Security domain (idempotent) so certificateError events arrive.
     let _ = send_browser_void_cmd(ctx, &cc, "Security.enable", None);
 
-    let (tx, rx) = ctx.make_wake_channel::<serde_json::Value>();
+    let (tx, rx) = ctx.make_local_channel::<serde_json::Value>();
     tokio::spawn(async move {
         let mut event_rx = client.subscribe_events();
         loop {

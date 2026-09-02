@@ -204,8 +204,8 @@ fn js_path_parse(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 // path.format(pathObj)
 // ---------------------------------------------------------------------------
 fn js_path_format(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let obj = cc.arg(0).clone();
-    let obj_ref = obj
+    let obj_ref = cc
+        .arg(0)
         .as_object()
         .ok_or_else(|| ctx.throw_type_error("path.format: argument must be an object"))?;
 

@@ -25,14 +25,14 @@ static SPAWNED_BROWSERS: OnceLock<Mutex<Vec<Arc<tokio::sync::Mutex<Option<Child>
 /// Kill every registered `Browser.spawn()` child. Called from the engine's
 /// atexit / signal-handler cleanup alongside `spawn::kill_all_children`.
 pub(crate) fn kill_all_spawned_browsers() {
-    if let Some(reg) = SPAWNED_BROWSERS.get() {
-        if let Ok(guard) = reg.lock() {
-            for arc in guard.iter() {
-                if let Ok(mut slot) = arc.try_lock()
-                    && let Some(child) = slot.as_mut()
-                {
-                    let _ = child.start_kill();
-                }
+    if let Some(reg) = SPAWNED_BROWSERS.get()
+        && let Ok(guard) = reg.lock()
+    {
+        for arc in guard.iter() {
+            if let Ok(mut slot) = arc.try_lock()
+                && let Some(child) = slot.as_mut()
+            {
+                let _ = child.start_kill();
             }
         }
     }
@@ -200,10 +200,10 @@ async fn wait_for_devtools_port(user_data_dir: &std::path::Path) -> Result<Strin
     for _ in 0..300 {
         if let Ok(content) = std::fs::read_to_string(&file) {
             let mut lines = content.lines();
-            if let (Some(port), Some(path)) = (lines.next(), lines.next()) {
-                if let Ok(port) = port.trim().parse::<u16>() {
-                    return Ok(format!("ws://127.0.0.1:{}{}", port, path.trim()));
-                }
+            if let (Some(port), Some(path)) = (lines.next(), lines.next())
+                && let Ok(port) = port.trim().parse::<u16>()
+            {
+                return Ok(format!("ws://127.0.0.1:{}{}", port, path.trim()));
             }
         }
         sleep(Duration::from_millis(100)).await;
@@ -222,15 +222,14 @@ async fn wait_for_debug_url(port: u16) -> Result<String, String> {
             .timeout(Duration::from_secs(1))
             .send()
             .await
+            && let Ok(json) = resp.json::<serde_json::Value>().await
+            && let Some(ws_url) = json.get("webSocketDebuggerUrl").and_then(|v| v.as_str())
         {
-            if let Ok(json) = resp.json::<serde_json::Value>().await {
-                if let Some(ws_url) = json.get("webSocketDebuggerUrl").and_then(|v| v.as_str()) {
-                    return Ok(ws_url.to_string());
-                }
-            }
+            return Ok(ws_url.to_string());
         }
         sleep(Duration::from_millis(500)).await;
     }
+
     Err("Chrome did not start within 30 seconds".into())
 }
 

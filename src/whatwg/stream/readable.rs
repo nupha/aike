@@ -123,11 +123,12 @@ impl ReadableStreamPayload {
         // Spec ReadableStreamClose: for each pending readRequest, perform its
         // close steps ({done:true}). Must happen before notify_peer_closed so
         // read results settle before reader.closed resolves.
-        if state == RsState::Closed {
-            if let Some(cp) = self.controller_payload() {
-                while cp.resolve_pending_read(ctx, JSValue::UNDEFINED, true) {}
-            }
+        if state == RsState::Closed
+            && let Some(cp) = self.controller_payload()
+        {
+            while cp.resolve_pending_read(ctx, JSValue::UNDEFINED, true) {}
         }
+
         notify_peer_closed(ctx, self.reader.map(JSValue::from), reason);
     }
 
@@ -269,7 +270,7 @@ impl JSReadableStream {
                 .global_obj()
                 .get_property_str(ctx, "ReadableStreamBYOBReader")
             {
-                let mut rv = JSValue::from(reader);
+                let rv = JSValue::from(reader);
                 // Set the constructor property on the instance.
                 if let Some(mut obj) = rv.as_object() {
                     let _ = obj.define_property_value_str(
@@ -284,10 +285,9 @@ impl JSReadableStream {
                     .get_property_str(ctx, "prototype")
                     .ok()
                     .and_then(|p| p.as_object())
+                    && let Some(mut obj) = rv.as_object()
                 {
-                    if let Some(mut obj) = rv.as_object() {
-                        let _ = obj.set_prototype(ctx, JSValue::from(byob_proto));
-                    }
+                    let _ = obj.set_prototype(ctx, JSValue::from(byob_proto));
                 }
             }
         }
@@ -328,8 +328,7 @@ def_native_object!(
     JSReadableStream,
     ReadableStreamPayload,
     READABLE_STREAM_PROTO,
-    Some(ClassCtorDef::new(js_readable_stream_constructor, 1, false)
-        .expose_to_global())
+    Some(ClassCtorDef::new(js_readable_stream_constructor, 1, false).expose_to_global())
 );
 
 pub(crate) fn get_readable_stream_payload<'a>(
@@ -393,14 +392,12 @@ fn js_readable_stream_constructor(ctx: &mut ScopedContext, cc: CallContext) -> J
 
     // WHATWG ReadableStream constructor byte-stream path:
     // step 4a: If strategy["size"] exists, throw a RangeError exception.
-    if is_bytes {
-        if let Some(o) = queuing_strategy.as_object() {
-            let size = o.get_property_str(ctx, "size")?;
-            if !size.is_undefined() {
-                return Err(ctx.throw_range_error(
-                    "strategy.size must not be defined when type is \"bytes\"",
-                ));
-            }
+    if is_bytes && let Some(o) = queuing_strategy.as_object() {
+        let size = o.get_property_str(ctx, "size")?;
+        if !size.is_undefined() {
+            return Err(
+                ctx.throw_range_error("strategy.size must not be defined when type is \"bytes\"")
+            );
         }
     }
 
@@ -408,22 +405,21 @@ fn js_readable_stream_constructor(ctx: &mut ScopedContext, cc: CallContext) -> J
     // step 6: if pull exists and is not callable, throw TypeError.
     // step 9: if autoAllocateChunkSize is 0, throw TypeError.
     let mut auto_chunk_size = 0u32;
-    if is_bytes {
-        if let Some(o) = underlying_source.as_object() {
-            let pull = o.get_property_str(ctx, "pull")?;
-            if !pull.is_undefined() && !pull.is_callable() {
-                return Err(ctx.throw_type_error("pull must be a function"));
+    if is_bytes && let Some(o) = underlying_source.as_object() {
+        let pull = o.get_property_str(ctx, "pull")?;
+        if !pull.is_undefined() && !pull.is_callable() {
+            return Err(ctx.throw_type_error("pull must be a function"));
+        }
+
+        let auto = o.get_property_str(ctx, "autoAllocateChunkSize")?;
+        if !auto.is_undefined() {
+            let n = auto.to_number(ctx)?.to_f64();
+            if n == 0.0 {
+                return Err(
+                    ctx.throw_type_error("autoAllocateChunkSize must be a positive integer")
+                );
             }
-            let auto = o.get_property_str(ctx, "autoAllocateChunkSize")?;
-            if !auto.is_undefined() {
-                let n = auto.to_number(ctx)?.to_f64();
-                if n == 0.0 {
-                    return Err(
-                        ctx.throw_type_error("autoAllocateChunkSize must be a positive integer")
-                    );
-                }
-                auto_chunk_size = n as u32;
-            }
+            auto_chunk_size = n as u32;
         }
     }
 
@@ -1524,17 +1520,17 @@ fn start_channel_stream_poller(ctx: &mut ScopedContext) {
                     };
 
                     // Abort check before draining data: abort wins over a chunk.
-                    if let Some(s) = signal_opt {
-                        if signal_is_aborted(&s) {
-                            let reason = signal_reason(&s).unwrap_or_else(|| {
-                                make_dom_exception(cx, "AbortError", "The operation was aborted.")
-                                    .unwrap_or(JSValue::UNDEFINED)
-                            });
-                            let ef = controller.get_property_str(cx, "error")?;
-                            ef.call(cx, JSValue::from(controller), &[reason])?;
-                            to_remove.push(id);
-                            continue;
-                        }
+                    if let Some(s) = signal_opt
+                        && signal_is_aborted(&s)
+                    {
+                        let reason = signal_reason(&s).unwrap_or_else(|| {
+                            make_dom_exception(cx, "AbortError", "The operation was aborted.")
+                                .unwrap_or(JSValue::UNDEFINED)
+                        });
+                        let ef = controller.get_property_str(cx, "error")?;
+                        ef.call(cx, controller, &[reason])?;
+                        to_remove.push(id);
+                        continue;
                     }
 
                     // Re-borrow briefly to receive from the channel, releasing
@@ -1550,7 +1546,7 @@ fn start_channel_stream_poller(ctx: &mut ScopedContext) {
                                 cx.throw_internal_error("TypedArray creation failed")
                             })?;
                             let enqueue_fn = controller.get_property_str(cx, "enqueue")?;
-                            enqueue_fn.call(cx, JSValue::from(controller), &[JSValue::from(ta)])?;
+                            enqueue_fn.call(cx, controller, &[JSValue::from(ta)])?;
                         }
                         Some(Ok(Err(msg))) => {
                             // Underlying network stream failed mid-body: error.
@@ -1563,12 +1559,12 @@ fn start_channel_stream_poller(ctx: &mut ScopedContext) {
                                 )
                                 .ok_or(-1)?;
                             let error_fn = controller.get_property_str(cx, "error")?;
-                            error_fn.call(cx, JSValue::from(controller), &[err.into()])?;
+                            error_fn.call(cx, controller, &[err.into()])?;
                             to_remove.push(id);
                         }
                         Some(Err(TryRecvError::Disconnected)) => {
                             let close_fn = controller.get_property_str(cx, "close")?;
-                            close_fn.call(cx, JSValue::from(controller), &[])?;
+                            close_fn.call(cx, controller, &[])?;
                             to_remove.push(id);
                         }
                         Some(Err(TryRecvError::Empty)) => {
@@ -1583,7 +1579,7 @@ fn start_channel_stream_poller(ctx: &mut ScopedContext) {
                                     .map(JSValue::make_string)
                                     .map_err(|_| -1)?;
                                 let error_fn = controller.get_property_str(cx, "error")?;
-                                error_fn.call(cx, JSValue::from(controller), &[err])?;
+                                error_fn.call(cx, controller, &[err])?;
                                 to_remove.push(id);
                             }
                         }
@@ -1676,17 +1672,14 @@ pub(crate) fn install_readable_stream_statics(
     // Set up prototype chain: ReadableStreamBYOBReader.prototype
     // inherits from ReadableStreamDefaultReader.prototype so that
     // BYOB readers get read()/cancel()/releaseLock()/closed.
-    if let Some(byob_proto) = byob_ctor.get_property_str(ctx, "prototype").ok() {
-        if let Some(default_ctor) = global
+    if let Ok(byob_proto) = byob_ctor.get_property_str(ctx, "prototype")
+        && let Some(default_ctor) = global
             .get_property_str(ctx, "ReadableStreamDefaultReader")
             .ok()
-        {
-            if let Some(default_proto) = default_ctor.get_property_str(ctx, "prototype").ok() {
-                if let Some(mut bp) = byob_proto.as_object() {
-                    let _ = bp.set_prototype(ctx, default_proto);
-                }
-            }
-        }
+        && let Some(default_proto) = default_ctor.get_property_str(ctx, "prototype").ok()
+        && let Some(mut bp) = byob_proto.as_object()
+    {
+        let _ = bp.set_prototype(ctx, default_proto);
     }
 
     Ok(())

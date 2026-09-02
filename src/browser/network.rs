@@ -173,7 +173,7 @@ fn net_obj_to_json(ctx: &mut ScopedContext, obj: &mut zuqe::Object) -> serde_jso
                     key,
                     serde_json::Value::String(s.content().encode_utf8(false).to_string()),
                 );
-            } else if let Some(n) = v.to_number(ctx).ok() {
+            } else if let Ok(n) = v.to_number(ctx) {
                 map.insert(key, serde_json::Value::from(n.to_f64()));
             } else if v.is_bool() {
                 map.insert(key, serde_json::Value::Bool(v.to_bool().unwrap_or(false)));
@@ -202,14 +202,14 @@ pub(crate) fn js_page_set_user_agent(ctx: &mut ScopedContext, cc: CallContext) -
 pub(crate) fn js_page_set_extra_http_headers(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut headers = serde_json::Map::new();
     if cc.length() > 0
-        && let Some(obj) = cc.arg(0).as_object()
+        && let Some(mut obj) = cc.arg(0).as_object()
     {
-        let mut obj = obj.clone();
         let v = net_obj_to_json(ctx, &mut obj);
         if let serde_json::Value::Object(m) = v {
             headers = m;
         }
     }
+
     send_page_void_cmd(
         ctx,
         &cc,

@@ -181,23 +181,21 @@ impl ResponsePayload {
     }
 
     /// Start body streaming (lazily) and return a `BodySource`.
-    /// Returns `Err` if the body was already consumed or is unavailable.
-    /// `wake` is the JS thread's event-loop handle, captured by the caller.
-    fn ensure_cached_body(&mut self, wake: zuqe::WakeHandle) -> Result<BodySource, i32> {
+    /// Returns `None` if the body was already consumed or is unavailable.
+    fn ensure_cached_body(&mut self, ctx: &mut ScopedContext) -> Option<BodySource> {
         if self.body_consumed {
-            return Err(-1);
+            return None;
         }
 
         if let Some(resp) = self.resp.take() {
-            let (tx, rx) = crossbeam::channel::unbounded::<Result<Vec<u8>, String>>();
+            let (tx, rx) = ctx.make_local_channel::<Result<Vec<u8>, String>>();
             self.body_rx = Some(rx);
-            // Chunk sends wake the parked event loop automatically.
-            let tx = zuqe::WakeSender::wrap(tx, wake);
 
             tokio::spawn(async move {
                 use futures_util::StreamExt;
 
                 let mut stream = resp.bytes_stream();
+
                 while let Some(chunk) = stream.next().await {
                     match chunk {
                         Ok(bytes) => {
@@ -214,14 +212,11 @@ impl ResponsePayload {
                     }
                 }
             });
-            Ok(BodySource::Channel(self.body_rx.clone().unwrap()))
+            Some(BodySource::Channel(self.body_rx.clone().unwrap()))
         } else if let Some(bytes) = self.synthetic_body.clone() {
-            Ok(BodySource::Synthetic(bytes))
-        } else if let Some(stream) = self.ctor_stream {
-            // Body given to `new Response(stream)` — drain the stream itself.
-            Ok(BodySource::Stream(stream))
+            Some(BodySource::Synthetic(bytes))
         } else {
-            Err(-1)
+            self.ctor_stream.map(BodySource::Stream)
         }
     }
 }
@@ -743,7 +738,7 @@ fn js_response_body(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         let source = {
             let p = get_response_payload_mut(ctx, &mut this)?;
             if p.resp.is_some() || p.synthetic_body.is_some() {
-                p.ensure_cached_body(ctx.wake_handle()).ok()
+                p.ensure_cached_body(ctx)
             } else {
                 None
             }
@@ -845,7 +840,7 @@ fn js_response_body_as(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 // and lose the body. Reuse the cached stream instance instead.
                 p.cached_body.take().map(BodySource::Stream)
             } else {
-                p.ensure_cached_body(ctx.wake_handle()).ok()
+                p.ensure_cached_body(ctx)
             };
 
             // Mark body as consumed only when consuming via text/json/bytes/etc.,
@@ -928,9 +923,7 @@ fn js_response_body_as(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         }
         // Spec: these methods always return a promise; a disturbed/locked or
         // already-consumed body rejects it rather than throwing synchronously.
-        None => {
-            return reject_type_error_as_promise(ctx, "body already consumed or unavailable");
-        }
+        None => reject_type_error_as_promise(ctx, "body already consumed or unavailable"),
     }
 }
 
@@ -953,7 +946,7 @@ fn js_response_text_stream(ctx: &mut ScopedContext, _cc: CallContext) -> JSResul
             let src = if p.cached_body.is_some() && !p.body_consumed {
                 p.cached_body.take().map(BodySource::Stream)
             } else {
-                p.ensure_cached_body(ctx.wake_handle()).ok()
+                p.ensure_cached_body(ctx)
             };
             p.body_consumed = true;
             Some(src)

@@ -635,7 +635,7 @@ impl ReadableControllerPayload {
 
         // Resolve fully-filled descriptors now that all pending_pull_intos
         // updates are complete — byobRequest will see null for consumers.
-        for (mut resolve_fn, filled) in resolved {
+        for (resolve_fn, filled) in resolved {
             let result = make_iterator_result(ctx, filled, false)?;
             resolve_fn.call(ctx, JSValue::UNDEFINED, &[result])?;
         }
@@ -760,7 +760,7 @@ impl ReadableControllerPayload {
                     let (promise, resolve_funcs) = Promise::create(ctx)?;
                     let desc = PullIntoDescriptor {
                         view,
-                        resolve_fn: JSValue::from(resolve_funcs[0]),
+                        resolve_fn: resolve_funcs[0],
                         promise,
                         bytes_filled: 0,
                         element_size: 1,
@@ -795,7 +795,7 @@ impl ReadableControllerPayload {
         if pull_res.is_err() {
             let err_val = ctx.take_exception().to_value(ctx);
             pulling.set(false);
-            self.reject_all_pending_reads(ctx, err_val.clone());
+            self.reject_all_pending_reads(ctx, err_val);
             self.reject_all_pending_pull_intos(
                 ctx,
                 match &self.kind {
@@ -804,7 +804,7 @@ impl ReadableControllerPayload {
                     } => pending_pull_intos,
                     _ => return Ok(()),
                 },
-                err_val.clone(),
+                err_val,
             );
             self.queue.borrow_mut().clear();
             self.queue_total_size.set(0.0);
@@ -930,9 +930,7 @@ impl ReadableControllerPayload {
                 Ok(JSValue::UNDEFINED)
             }
             ReadableControllerKind::Byte {
-                pending_pull_intos,
-                pending_read,
-                ..
+                pending_pull_intos, ..
             } => {
                 // WHATWG ReadableByteStreamControllerEnqueue steps 2-3:
                 // If closeRequested is true or state is not readable, throw TypeError.
@@ -951,12 +949,12 @@ impl ReadableControllerPayload {
                     // Step 8b: buffer must not be detached.
                     {
                         let descs = pending_pull_intos.borrow();
-                        if let Some(first) = descs.first() {
-                            if first.view.is_detached() {
-                                return Err(ctx.throw_type_error(
+                        if let Some(first) = descs.first()
+                            && first.view.is_detached()
+                        {
+                            return Err(ctx.throw_type_error(
                                     "Cannot enqueue when the pending BYOB request's buffer has been detached",
                                 ));
-                            }
                         }
                     }
 
@@ -1028,10 +1026,7 @@ impl ReadableControllerPayload {
     ) -> Result<JSValue, i32> {
         // Get the transfer list from options. If the getter throws, propagate.
         let transfer_list = match options.as_object() {
-            Some(o) => match o.get_property_str(ctx, "transfer") {
-                Ok(v) => v,
-                Err(e) => return Err(e),
-            },
+            Some(o) => o.get_property_str(ctx, "transfer")?,
             None => JSValue::UNDEFINED,
         };
 
@@ -1118,15 +1113,14 @@ impl ReadableControllerPayload {
                     let byte_offset = chunk
                         .get_property_str(ctx, "byteOffset")
                         .ok()
-                        .map(|v| v.to_number(ctx).ok().map(|n| n.to_f64() as u32))
-                        .flatten()
+                        .and_then(|v| v.to_number(ctx).ok().map(|n| n.to_f64() as u32))
                         .unwrap_or(0);
                     let byte_length = chunk
                         .get_property_str(ctx, "byteLength")
                         .ok()
-                        .map(|v| v.to_number(ctx).ok().map(|n| n.to_f64() as u32))
-                        .flatten()
+                        .and_then(|v| v.to_number(ctx).ok().map(|n| n.to_f64() as u32))
                         .unwrap_or(0);
+
                     // TypedArray(buffer, byteOffset, byteLength)
                     return constructor.call(
                         ctx,
@@ -1139,6 +1133,7 @@ impl ReadableControllerPayload {
                     );
                 }
             }
+
             // Fallback: return chunk as-is (transfer didn't match).
             return Ok(chunk);
         }
@@ -1157,14 +1152,14 @@ impl ReadableControllerPayload {
         if self.close_requested.get() {
             return false;
         }
-        let readable = match self.stream {
+
+        match self.stream {
             Some(rs) => match rs.payload() {
                 Some(sp) => sp.state == RsState::Readable,
                 None => false,
             },
             None => false,
-        };
-        readable
+        }
     }
 
     /// Close the controlled stream. Per WHATWG
@@ -1322,7 +1317,7 @@ impl ReadableControllerPayload {
                     let (promise, resolve_funcs) = Promise::create(ctx)?;
                     let desc = PullIntoDescriptor {
                         view,
-                        resolve_fn: JSValue::from(resolve_funcs[0]),
+                        resolve_fn: resolve_funcs[0],
                         promise,
                         bytes_filled: 0,
                         element_size: aacs,

@@ -45,12 +45,12 @@ struct CronState {
 }
 
 impl CronState {
-    fn new(wake: zuqe::WakeHandle) -> Self {
-        let (tx, rx) = crossbeam::channel::bounded::<CronMsg>(64);
+    fn new(ctx: &mut ScopedContext) -> Self {
+        let (tx, rx) = ctx.make_channel::<CronMsg>(64);
         Self {
             next_id: 1,
             entries: HashMap::new(),
-            tx: zuqe::WakeSender::wrap(tx, wake),
+            tx,
             rx,
         }
     }
@@ -266,13 +266,7 @@ fn js_cron_job_cancel(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
 const CRON_JOB_PROTO: &[FieldDef] = &[FieldDef::FUNC("cancel", 0, js_cron_job_cancel, 0)];
 
-def_native_object!(
-    "CronJob",
-    JSCronJob,
-    CronJobPayload,
-    CRON_JOB_PROTO,
-    None
-);
+def_native_object!("CronJob", JSCronJob, CronJobPayload, CRON_JOB_PROTO, None);
 
 #[distributed_slice(USER_CLASS_DEFS)]
 fn register_class_cron_job(rt: &mut Runtime) -> Result<ClassID, i32> {
@@ -308,7 +302,7 @@ pub(super) fn js_schedule(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
     // Initialize state if needed
     let (id, need_notifier) = CRON_STATE.with_borrow_mut(|opt| {
         let start_job = opt.is_none();
-        let s = opt.get_or_insert_with(|| CronState::new(ctx.wake_handle()));
+        let s = opt.get_or_insert_with(|| CronState::new(ctx));
         let id = s.next_id;
         s.next_id += 1;
         (id, start_job)

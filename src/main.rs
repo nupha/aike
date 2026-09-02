@@ -577,9 +577,11 @@ fn install_exit_cleanup() {
             crate::aike::kill_all_children();
             crate::mcp::kill_all_mcp_children();
             crate::browser::kill_all_spawned_browsers();
+
             // 128+ctrl mirrors the Unix 128+signal convention. Never returns.
-            windows_sys::Win32::System::Threading::ExitProcess(128 + ctrl)
+            unsafe { windows_sys::Win32::System::Threading::ExitProcess(128 + ctrl) }
         }
+
         unsafe {
             windows_sys::Win32::System::Console::SetConsoleCtrlHandler(
                 Some(console_ctrl_handler),
@@ -852,10 +854,10 @@ fn ts_fallback(file_name: &str) -> Option<String> {
         Some(format!("{}.ts", base))
     } else if let Some(base) = file_name.strip_suffix(".mjs") {
         Some(format!("{}.mts", base))
-    } else if let Some(base) = file_name.strip_suffix(".cjs") {
-        Some(format!("{}.cts", base))
     } else {
-        None
+        file_name
+            .strip_suffix(".cjs")
+            .map(|base| format!("{}.cts", base))
     }
 }
 

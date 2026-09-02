@@ -9,7 +9,6 @@
 //! `class_page.rs` and is imported here. JSON→JS conversion uses zuqe's
 //! `JSValue::from_serde_json`.
 
-use crossbeam::channel;
 use zuqe::{
     CallContext, JSResult, JSValue, ScopedContext,
     builtins::promise::{Promise, PromiseResultSlot},
@@ -526,14 +525,14 @@ pub(crate) fn js_page_on_console(ctx: &mut ScopedContext, cc: CallContext) -> JS
     let client = payload.client.clone();
     let session_id = payload.session_id.clone();
 
-    let callback = cc.arg(0).clone();
+    let callback = cc.arg(0);
     CONSOLE_CALLBACK.with(|m| {
         m.borrow_mut().insert(session_id.clone(), callback);
     });
 
     let _ = send_page_void_cmd(ctx, &cc, "Runtime.enable", None);
 
-    let (tx, rx) = ctx.make_wake_channel::<serde_json::Value>();
+    let (tx, rx) = ctx.make_local_channel::<serde_json::Value>();
     let client_ev = client.clone();
     let session_ev = session_id.clone();
     tokio::spawn(async move {

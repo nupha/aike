@@ -192,12 +192,12 @@ fn run_pipe_driver(
     // runs. A non-writable destination is left to the normal path (which must
     // not reject a closed→closed pipe), so the synchronous check is gated on
     // `dest_writable`.
-    if pipe_dest_is_writable(&data[4]) {
-        if let Some(err) = pipe_source_errored(&data[3]) {
-            set_state_bool(ctx, &data[0], "shuttingDown", true)?;
-            pipe_shutdown_with_error(ctx, &data, err)?;
-            return Ok(JSValue::from(promise));
-        }
+    if pipe_dest_is_writable(&data[4])
+        && let Some(err) = pipe_source_errored(&data[3])
+    {
+        set_state_bool(ctx, &data[0], "shuttingDown", true)?;
+        pipe_shutdown_with_error(ctx, &data, err)?;
+        return Ok(JSValue::from(promise));
     }
 
     pipe_to_read(ctx, &data)?;

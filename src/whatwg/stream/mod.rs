@@ -127,9 +127,9 @@ fn queuing_strategy_init<'a>(
     if init_val.is_undefined() || init_val.is_null() || init_val.as_object().is_none() {
         return Err(ctx.throw_type_error("QueuingStrategy requires an object init"));
     }
-    Ok(init_val
+    init_val
         .as_object()
-        .ok_or_else(|| ctx.throw_type_error("QueuingStrategy requires an object init"))?)
+        .ok_or_else(|| ctx.throw_type_error("QueuingStrategy requires an object init"))
 }
 
 /// Extract `highWaterMark` from a `QueuingStrategy`-like init object.
@@ -333,17 +333,16 @@ pub(super) fn notify_peer_closed(
         if let Some(cp) = wp.closed_promise.as_mut() {
             settle(cp);
         }
+
         // When the stream is errored/aborted (a `reason` is present), any
         // outstanding `write()` promise must also reject with that reason
         // (spec: outstanding write() promises reject). The writer's `ready` is
         // handled by `WritableStreamPayload::start_erroring` instead.
-        if reason.is_some() {
-            if let Some(wp_promise) = wp.write_promise.as_mut() {
-                if wp_promise.state() == PromiseState::Pending {
-                    let r = reason.unwrap();
-                    wp_promise.reject(ctx, r);
-                }
-            }
+        if reason.is_some()
+            && let Some(wp_promise) = wp.write_promise.as_mut()
+            && wp_promise.state() == PromiseState::Pending
+        {
+            wp_promise.reject(ctx, reason.unwrap());
         }
     }
 }

@@ -540,12 +540,12 @@ fn collect_sandbox_output(
     mut child: nanosandbox::SandboxChild,
     input: Option<Vec<u8>>,
 ) -> Result<SandboxedOutput, String> {
-    if let Some(data) = input {
-        if let Some(mut si) = child.take_stdin() {
-            use std::io::Write;
-            let _ = si.write_all(&data);
-            let _ = si.flush();
-        }
+    if let Some(data) = input
+        && let Some(mut si) = child.take_stdin()
+    {
+        use std::io::Write;
+        let _ = si.write_all(&data);
+        let _ = si.flush();
     }
     drop(child.take_stdin()); // EOF
 

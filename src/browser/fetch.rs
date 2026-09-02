@@ -10,7 +10,6 @@
 use std::cell::RefCell;
 
 use base64::Engine as _;
-use crossbeam::channel;
 use zuqe::{CallContext, JS_PROP_C_W_E, JSResult, JSValue, ScopedContext};
 
 use crate::browser::{
@@ -40,7 +39,7 @@ pub(crate) fn js_page_set_request_interception(
     let session_id = payload.session_id.clone();
 
     if enabled {
-        let (tx, rx) = ctx.make_wake_channel::<serde_json::Value>();
+        let (tx, rx) = ctx.make_local_channel::<serde_json::Value>();
         let client_ev = client.clone();
         let session_ev = session_id.clone();
         tokio::spawn(async move {
@@ -95,15 +94,15 @@ pub(crate) fn js_page_set_request_interception(
                 if let (Some(cb), Some(_sess)) = (cb, sess) {
                     let mut obj = cx.create_base_object().ok();
                     if let Some(o) = obj.as_mut() {
-                        if let Some(rid) = params.get("requestId").and_then(|v| v.as_str()) {
-                            if let Ok(s) = cx.create_string_from_utf8(rid.as_bytes().to_vec()) {
-                                let _ = o.define_property_value_str(
-                                    cx,
-                                    "requestId",
-                                    JSValue::make_string(s),
-                                    JS_PROP_C_W_E,
-                                );
-                            }
+                        if let Some(rid) = params.get("requestId").and_then(|v| v.as_str())
+                            && let Ok(s) = cx.create_string_from_utf8(rid.as_bytes().to_vec())
+                        {
+                            let _ = o.define_property_value_str(
+                                cx,
+                                "requestId",
+                                JSValue::make_string(s),
+                                JS_PROP_C_W_E,
+                            );
                         }
                         if let Some(req) = params.get("request") {
                             let req_val =
@@ -112,15 +111,15 @@ pub(crate) fn js_page_set_request_interception(
                                 o.define_property_value_str(cx, "request", req_val, JS_PROP_C_W_E);
                         }
                         for key in ["frameId", "resourceType", "networkId"] {
-                            if let Some(v) = params.get(key).and_then(|x| x.as_str()) {
-                                if let Ok(s) = cx.create_string_from_utf8(v.as_bytes().to_vec()) {
-                                    let _ = o.define_property_value_str(
-                                        cx,
-                                        key,
-                                        JSValue::make_string(s),
-                                        JS_PROP_C_W_E,
-                                    );
-                                }
+                            if let Some(v) = params.get(key).and_then(|x| x.as_str())
+                                && let Ok(s) = cx.create_string_from_utf8(v.as_bytes().to_vec())
+                            {
+                                let _ = o.define_property_value_str(
+                                    cx,
+                                    key,
+                                    JSValue::make_string(s),
+                                    JS_PROP_C_W_E,
+                                );
                             }
                         }
                     }
@@ -254,11 +253,11 @@ pub(crate) fn js_page_respond_request(ctx: &mut ScopedContext, cc: CallContext) 
             let b64 = base64::engine::general_purpose::STANDARD.encode(body.as_bytes());
             params["body"] = serde_json::Value::String(b64);
         }
-        if let Some(ct) = get_str_prop(ctx, obj, "contentType") {
-            if params.get("responseHeaders").is_none() {
-                params["responseHeaders"] =
-                    serde_json::json!([{ "name": "Content-Type", "value": ct }]);
-            }
+        if let Some(ct) = get_str_prop(ctx, obj, "contentType")
+            && params.get("responseHeaders").is_none()
+        {
+            params["responseHeaders"] =
+                serde_json::json!([{ "name": "Content-Type", "value": ct }]);
         }
     }
 
@@ -270,7 +269,7 @@ pub(crate) fn js_page_on_request_paused(ctx: &mut ScopedContext, cc: CallContext
     let this = cc.this();
     let payload = get_page_payload(ctx, &this)?;
     let session_id = payload.session_id.clone();
-    let callback = cc.arg(0).clone();
+    let callback = cc.arg(0);
     FETCH_CALLBACK.with(|m| {
         m.borrow_mut().insert(session_id, callback);
     });

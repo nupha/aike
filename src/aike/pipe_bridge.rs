@@ -153,7 +153,7 @@ impl std::os::fd::AsRawFd for BlockingWriteAdapter {
 }
 
 impl BlockingWriteAdapter {
-    fn poll_send(&mut self, cx: &mut Context<'_>, data: Vec<u8>) -> Poll<io::Result<()>> {
+    fn poll_send(&mut self, _: &mut Context, data: Vec<u8>) -> Poll<io::Result<()>> {
         let Some(tx) = &self.tx else {
             return Poll::Ready(Err(io::Error::new(
                 io::ErrorKind::BrokenPipe,
@@ -180,7 +180,7 @@ impl AsyncWrite for BlockingWriteAdapter {
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
         let len = buf.len();
-        self.get_mut().poll_send(cx, buf.to_vec())?;
+        let _ = self.get_mut().poll_send(cx, buf.to_vec())?;
         Poll::Ready(Ok(len)) // accepted into the ordered queue
     }
 

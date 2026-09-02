@@ -138,10 +138,9 @@ pub(crate) fn js_page_key_press(ctx: &mut ScopedContext, cc: CallContext) -> JSR
     let mut modifiers = 0i32;
     if cc.length() > 1
         && let Some(opts) = cc.arg(1).as_object()
+        && let Some(m) = crate::browser::class_page::get_number_prop(ctx, opts, "modifiers")
     {
-        if let Some(m) = crate::browser::class_page::get_number_prop(ctx, opts, "modifiers") {
-            modifiers = m as i32;
-        }
+        modifiers = m as i32;
     }
 
     // Use the first character's code point as the virtual key code

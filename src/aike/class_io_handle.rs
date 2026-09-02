@@ -205,10 +205,7 @@ static PUMP_CHANNEL: std::sync::OnceLock<(zuqe::WakeSender<PumpMsg>, Receiver<Pu
     std::sync::OnceLock::new();
 
 fn pump_channel(ctx: &ScopedContext) -> &'static (zuqe::WakeSender<PumpMsg>, Receiver<PumpMsg>) {
-    PUMP_CHANNEL.get_or_init(|| {
-        let (tx, rx) = crossbeam::channel::bounded(256);
-        (zuqe::WakeSender::wrap(tx, ctx.wake_handle()), rx)
-    })
+    PUMP_CHANNEL.get_or_init(|| ctx.make_channel::<PumpMsg>(256))
 }
 
 /// Whether a read-poller microtask is currently queued/running.
@@ -1070,8 +1067,7 @@ fn js_fh_asyncIterator(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     if matches!(desc, IoPayload::Stdout | IoPayload::Stderr) {
         return Err(ctx.throw_type_error("cannot iterate stdout/stderr"));
     }
-
-    let (tx, rx) = crossbeam::channel::bounded::<FileChunk>(8);
+    let (tx, rx) = ctx.make_channel::<FileChunk>(8);
 
     match desc {
         IoPayload::Stdin => {

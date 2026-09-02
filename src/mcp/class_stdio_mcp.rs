@@ -11,14 +11,13 @@ use std::{
     },
 };
 
-use crossbeam::channel;
 use linkme::distributed_slice;
 use rmcp::service::{RoleServer, serve_server_with_ct};
 use tokio_util::sync::CancellationToken;
 use zuqe::{
     Array, CallContext, Callback, ClassCtorDef, ClassID, FieldDef, JS_GPN_ENUM_ONLY,
-    JS_GPN_STR_OR_INT_MASK, JS_PROP_ENUMERABLE, JSResult, JSValue, NativeObject, Object,
-    PollSender, Runtime, ScopedContext,
+    JS_GPN_STR_OR_INT_MASK, JS_PROP_ENUMERABLE, JSResult, JSValue, NativeObject, Object, Runtime,
+    ScopedContext,
     builtins::promise::Promise,
     def_native_object,
     gc_lite::{GcTrace, GcTraceCtx},
@@ -86,7 +85,7 @@ pub(crate) fn gc_trace_stdio_state(gcx: &mut GcTraceCtx) {
 /// The `StdioMcp` / `HttpMcp` payload type (`McpServicePayload`) and its
 /// `McpTransport` enum now live in `service.rs` (merged from the old
 /// `StdioMcpPayload` + `McpEndpoint`, see mcp-service.md §3).
-
+///
 /// Constructor callback — `StdioMcp` is NOT constructable. Instances must be
 /// created via the static `StdioMcp.define(name, tools, options)`. Calling it
 /// with `new` (or as a plain function) throws a TypeError.
@@ -358,7 +357,7 @@ fn start_stdio_server(ctx: &mut ScopedContext, p: &McpServicePayload) -> Result<
     let js_handlers = p.js_handlers.borrow().clone();
 
     // Create crossbeam channel (same IncomingRequest mechanism as HTTP mode)
-    let (js_tx, js_rx) = ctx.make_wake_channel::<IncomingRequest>();
+    let (js_tx, js_rx) = ctx.make_local_channel::<IncomingRequest>();
     // Build McpService from payload (stdio: no native handlers, single endpoint).
     let service = McpService::from_payload(p, js_tx, 0);
 

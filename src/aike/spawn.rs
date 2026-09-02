@@ -25,7 +25,7 @@ use process_wrap::tokio::{JobObject, KillOnDrop};
 use zuqe::{
     CallContext, Callback, ErrorKind, Exception, IntOrFloat, JS_GPN_ENUM_ONLY,
     JS_GPN_STR_OR_INT_MASK, JS_PROP_C_W_E, JS_PROP_ENUMERABLE, JSResult, JSValue, Object,
-    PollSender, ScopedContext,
+    ScopedContext,
     builtins::{promise::Promise, typed_array::TypedArray},
 };
 

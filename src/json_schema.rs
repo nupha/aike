@@ -76,10 +76,10 @@ fn extract_fenced(text: &str) -> Option<serde_json::Value> {
                     // Ensure this is at line start (start of string or preceded by \n).
                     if j == 0 || bytes[j - 1] == b'\n' {
                         let content = &text[content_start..j].trim();
-                        if !content.is_empty() {
-                            if let Ok(v) = serde_json::from_str::<serde_json::Value>(content) {
-                                return Some(v);
-                            }
+                        if !content.is_empty()
+                            && let Ok(v) = serde_json::from_str::<serde_json::Value>(content)
+                        {
+                            return Some(v);
                         }
                         break;
                     }
@@ -99,13 +99,17 @@ fn extract_fenced(text: &str) -> Option<serde_json::Value> {
 fn extract_bare_object(text: &str) -> Option<serde_json::Value> {
     let bytes = text.as_bytes();
     let len = bytes.len();
+
     for start in 0..len {
         if bytes[start] == b'{' {
             let mut depth = 0i32;
             let mut end = start;
-            for i in start..len {
-                match bytes[i] {
-                    b'{' => depth += 1,
+
+            for (i, &b) in bytes.iter().enumerate().take(len).skip(start) {
+                match b {
+                    b'{' => {
+                        depth += 1;
+                    }
                     b'}' => {
                         depth -= 1;
                         if depth == 0 {
@@ -116,6 +120,7 @@ fn extract_bare_object(text: &str) -> Option<serde_json::Value> {
                     _ => {}
                 }
             }
+
             if depth == 0 {
                 let slice = &text[start..end];
                 if let Ok(v) = serde_json::from_str::<serde_json::Value>(slice) {

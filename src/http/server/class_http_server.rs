@@ -726,7 +726,7 @@ fn js_listen(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         if !has_js {
             (router, None, Vec::new(), Vec::new(), Vec::new(), Vec::new())
         } else {
-            let (js_tx, js_rx) = ctx.make_wake_channel::<IncomingRequest>();
+            let (js_tx, js_rx) = ctx.make_local_channel::<IncomingRequest>();
 
             // --- HTTP routes ---
             let http_table: Vec<Object> = data.js_routes.iter().map(|(_, _, h)| *h).collect();
@@ -766,7 +766,7 @@ fn js_listen(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 mcp_tables.push(p.js_handlers.borrow().clone());
 
                 // Create update channel for hot-reload of tools
-                let (utx, urx) = ctx.make_wake_channel::<Vec<Object>>();
+                let (utx, urx) = ctx.make_local_channel::<Vec<Object>>();
 
                 // Backfill the update sender into the payload (mcp-service.md §6).
                 let mut ov = JSValue::from(*obj);

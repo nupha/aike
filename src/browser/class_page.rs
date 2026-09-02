@@ -438,24 +438,24 @@ fn js_page_capture_screenshot(ctx: &mut ScopedContext, cc: CallContext) -> JSRes
             quality = Some(q as i32);
         }
         // clip: { x, y, width, height, scale? } (all CSS px)
-        if let Ok(clip_val) = opts.get_property_str(ctx, "clip") {
-            if let Some(clip_obj) = clip_val.as_object() {
-                if let (Some(x), Some(y), Some(w), Some(h)) = (
-                    get_number_prop(ctx, clip_obj, "x"),
-                    get_number_prop(ctx, clip_obj, "y"),
-                    get_number_prop(ctx, clip_obj, "width"),
-                    get_number_prop(ctx, clip_obj, "height"),
-                ) {
-                    let mut c = serde_json::json!({
-                        "x": x, "y": y, "width": w, "height": h
-                    });
-                    if let Some(s) = get_number_prop(ctx, clip_obj, "scale") {
-                        c["scale"] = serde_json::json!(s);
-                    }
-                    clip = Some(c);
-                }
+        if let Ok(clip_val) = opts.get_property_str(ctx, "clip")
+            && let Some(clip_obj) = clip_val.as_object()
+            && let (Some(x), Some(y), Some(w), Some(h)) = (
+                get_number_prop(ctx, clip_obj, "x"),
+                get_number_prop(ctx, clip_obj, "y"),
+                get_number_prop(ctx, clip_obj, "width"),
+                get_number_prop(ctx, clip_obj, "height"),
+            )
+        {
+            let mut c = serde_json::json!({
+                "x": x, "y": y, "width": w, "height": h
+            });
+            if let Some(s) = get_number_prop(ctx, clip_obj, "scale") {
+                c["scale"] = serde_json::json!(s);
             }
+            clip = Some(c);
         }
+
         // fullPage is sugar for captureBeyondViewport
         if let Some(fp) = get_bool_prop(ctx, opts, "fullPage") {
             capture_beyond_viewport = Some(fp);
@@ -879,10 +879,9 @@ fn js_page_reload(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut params = serde_json::json!({});
     if cc.length() > 0
         && let Some(opts) = cc.arg(0).as_object()
+        && let Some(v) = get_bool_prop(ctx, opts, "ignoreCache")
     {
-        if let Some(v) = get_bool_prop(ctx, opts, "ignoreCache") {
-            params["ignoreCache"] = serde_json::Value::Bool(v);
-        }
+        params["ignoreCache"] = serde_json::Value::Bool(v);
     }
     send_page_void_cmd(ctx, &cc, "Page.reload", Some(params))
 }
@@ -997,10 +996,9 @@ fn js_page_capture_snapshot(ctx: &mut ScopedContext, cc: CallContext) -> JSResul
     let mut params = serde_json::json!({ "format": "mhtml" });
     if cc.length() > 0
         && let Some(opts) = cc.arg(0).as_object()
+        && let Some(f) = get_str_prop(ctx, opts, "format")
     {
-        if let Some(f) = get_str_prop(ctx, opts, "format") {
-            params["format"] = serde_json::Value::String(f);
-        }
+        params["format"] = serde_json::Value::String(f);
     }
 
     let this = cc.this();

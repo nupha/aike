@@ -19,7 +19,10 @@ use zuqe::{
     gc_lite::{GcTrace, GcTraceCtx},
 };
 
-use crate::{USER_CLASS_DEFS, whatwg::stream::readable::JSReadableStream};
+use crate::{
+    USER_CLASS_DEFS,
+    whatwg::stream::{readable::JSReadableStream, readable_controller::PullIntoDescriptor},
+};
 
 use super::{QueueEntry, RsState, iterator_result_promise};
 
@@ -68,21 +71,22 @@ impl ReaderPayload {
                     cp.reject(ctx, e.into());
                 }
             }
-        } else if let Some(e) = ctx.create_error_object(ErrorKind::Type, "Reader released", false) {
-            if let Ok((mut np, _rr)) = Promise::create(ctx) {
-                np.reject(ctx, e.into());
-                self.closed_promise = Some(np);
-            }
+        } else if let Some(e) = ctx.create_error_object(ErrorKind::Type, "Reader released", false)
+            && let Ok((mut np, _rr)) = Promise::create(ctx)
+        {
+            np.reject(ctx, e.into());
+            self.closed_promise = Some(np);
         }
-        if let Some(mut rs) = self.stream.take() {
-            if let Some(sp) = rs.payload_mut() {
-                sp.reader = None;
-                // spec ReleaseSteps for default controller is a no-op;
-                // no pull trigger here.
-                // Note: spec does NOT reject pending read() promises on
-                // release — they remain pending and are eventually resolved
-                // when the stream closes or errors.
-            }
+
+        if let Some(mut rs) = self.stream.take()
+            && let Some(sp) = rs.payload_mut()
+        {
+            sp.reader = None;
+            // spec ReleaseSteps for default controller is a no-op;
+            // no pull trigger here.
+            // Note: spec does NOT reject pending read() promises on
+            // release — they remain pending and are eventually resolved
+            // when the stream closes or errors.
         }
     }
 
@@ -215,58 +219,56 @@ impl ReaderPayload {
             // For byte controllers with a BYOB view, create a pull-into
             // descriptor instead so the controller fills the view when data
             // arrives.
-            if let Some(view) = byob_view {
-                if let Some(pending) = cp.pending_pull_intos() {
-                    let element_size = view.byte_length() as u32;
-                    // Read byteOffset and buffer.byteLength via JS property access.
-                    let view_jv = JSValue::from(view);
-                    let byte_offset = view_jv
-                        .get_property_str(ctx, "byteOffset")?
+            if let Some(view) = byob_view
+                && let Some(pending) = cp.pending_pull_intos()
+            {
+                let element_size = view.byte_length() as u32;
+                // Read byteOffset and buffer.byteLength via JS property access.
+                let view_jv = JSValue::from(view);
+                let byte_offset = view_jv
+                    .get_property_str(ctx, "byteOffset")?
+                    .to_number(ctx)?
+                    .to_f64() as u32;
+                let buffer_byte_length = {
+                    let buf_jv = view_jv.get_property_str(ctx, "buffer")?;
+                    buf_jv
+                        .get_property_str(ctx, "byteLength")?
                         .to_number(ctx)?
-                        .to_f64() as u32;
-                    let buffer_byte_length = {
-                        let buf_jv = view_jv.get_property_str(ctx, "buffer")?;
-                        buf_jv
-                            .get_property_str(ctx, "byteLength")?
-                            .to_number(ctx)?
-                            .to_f64() as u32
-                    };
-                    let (promise, resolve_funcs) = Promise::create(ctx)?;
-                    // Create the BYOBRequest eagerly to avoid new_instance scope issues
-                    // during the pull callback (call_pull_inner).
-                    let br =
-                        super::readable_byob_request::JSReadableStreamBYOBRequest::new_instance(
-                            ctx,
-                            JSValue::UNDEFINED,
-                            super::readable_byob_request::ByobRequestPayload::new(
-                                controller_val,
-                                JSValue::from(view),
-                            ),
-                        )
-                        .ok()
-                        .map(JSValue::from);
-                    pending
-                        .borrow_mut()
-                        .push(super::readable_controller::PullIntoDescriptor {
-                            view,
-                            resolve_fn: JSValue::from(resolve_funcs[0]),
-                            promise,
-                            bytes_filled: 0,
-                            element_size,
-                            byte_offset,
-                            buffer_byte_length,
-                            byob_request: br,
-                            reader_type: super::readable_controller::ReaderType::Byob,
-                            minimum_fill: min
-                                * if view.length() > 0 {
-                                    (view.byte_length() / view.length()) as u32
-                                } else {
-                                    1
-                                },
-                        });
-                    cp.call_pull(ctx)?;
-                    return Ok(promise);
-                }
+                        .to_f64() as u32
+                };
+                let (promise, resolve_funcs) = Promise::create(ctx)?;
+                // Create the BYOBRequest eagerly to avoid new_instance scope issues
+                // during the pull callback (call_pull_inner).
+                let br = super::readable_byob_request::JSReadableStreamBYOBRequest::new_instance(
+                    ctx,
+                    JSValue::UNDEFINED,
+                    super::readable_byob_request::ByobRequestPayload::new(
+                        controller_val,
+                        JSValue::from(view),
+                    ),
+                )
+                .ok()
+                .map(JSValue::from);
+
+                pending.borrow_mut().push(PullIntoDescriptor {
+                    view,
+                    resolve_fn: resolve_funcs[0],
+                    promise,
+                    bytes_filled: 0,
+                    element_size,
+                    byte_offset,
+                    buffer_byte_length,
+                    byob_request: br,
+                    reader_type: super::readable_controller::ReaderType::Byob,
+                    minimum_fill: min
+                        * if view.length() > 0 {
+                            (view.byte_length() / view.length()) as u32
+                        } else {
+                            1
+                        },
+                });
+                cp.call_pull(ctx)?;
+                return Ok(promise);
             }
 
             let (promise, _rr) = Promise::create(ctx)?;

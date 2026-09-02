@@ -8,7 +8,6 @@
 
 use std::sync::{LazyLock, Mutex};
 
-use crossbeam::channel;
 use zuqe::{CallContext, JSResult, JSValue, Object, ScopedContext};
 
 use crate::browser::class_page::{get_page_payload, send_page_void_cmd};
@@ -38,7 +37,7 @@ pub(crate) fn js_page_on_log(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
 
     let _ = send_page_void_cmd(ctx, &cc, "Log.enable", None);
 
-    let (tx, rx) = ctx.make_wake_channel::<serde_json::Value>();
+    let (tx, rx) = ctx.make_local_channel::<serde_json::Value>();
     let client_ev = client.clone();
     let session_ev = session_id.clone();
     tokio::spawn(async move {
@@ -120,11 +119,12 @@ pub(crate) fn js_page_get_console_messages(ctx: &mut ScopedContext, cc: CallCont
     let session_id = payload.session_id.clone();
 
     let mut messages: Vec<serde_json::Value> = Vec::new();
-    if let Ok(mut guard) = LOG_BUFFER.lock() {
-        if let Some(buf) = guard.get_mut(&session_id) {
-            messages = std::mem::take(buf);
-        }
+    if let Ok(mut guard) = LOG_BUFFER.lock()
+        && let Some(buf) = guard.get_mut(&session_id)
+    {
+        messages = std::mem::take(buf);
     }
+
     if !clear {
         // Put them back if not clearing.
         if let Ok(mut guard) = LOG_BUFFER.lock() {

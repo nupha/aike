@@ -99,17 +99,14 @@ pub(super) fn js_download(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
         }
     };
 
-    let notify = signal.as_ref().and_then(|s| signal_notify(s));
-    let signal_for_reason = signal.clone();
+    let notify = signal.as_ref().and_then(signal_notify);
+    let signal_for_reason = signal;
 
     // Already-aborted signal: reject on a microtask without any network I/O.
-    if signal_for_reason
-        .as_ref()
-        .is_some_and(|s| signal_is_aborted(s))
-    {
+    if signal_for_reason.as_ref().is_some_and(signal_is_aborted) {
         let reason = signal_for_reason
             .as_ref()
-            .and_then(|s| signal_reason(s))
+            .and_then(signal_reason)
             .unwrap_or_else(|| {
                 make_dom_exception(ctx, "AbortError", "The operation was aborted.")
                     .unwrap_or(JSValue::UNDEFINED)
@@ -133,7 +130,7 @@ pub(super) fn js_download(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
                 Err(DownloadError::Abort) => {
                     let reason = signal_for_reason
                         .as_ref()
-                        .and_then(|s| signal_reason(s))
+                        .and_then(signal_reason)
                         .unwrap_or_else(|| {
                             make_dom_exception(cx, "AbortError", "The operation was aborted.")
                                 .unwrap_or(JSValue::UNDEFINED)

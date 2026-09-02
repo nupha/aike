@@ -306,7 +306,7 @@ fn js_engine_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
 
     if is_stream {
         // Streaming: AsyncIterableIterator
-        let (chunk_tx, chunk_rx) = crossbeam::channel::bounded::<crate::ai::output::ChunkSSE>(8);
+        let (chunk_tx, chunk_rx) = ctx.make_channel::<crate::ai::output::ChunkSSE>(8);
         std::thread::spawn(move || {
             redirect_engine_reply_to_chat_sse(
                 rx,
@@ -623,7 +623,7 @@ fn js_engine_responses(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     if is_stream {
         // Streaming: AsyncIterableIterator
-        let (item_tx, item_rx) = crossbeam::channel::bounded::<ChunkSSE>(8);
+        let (item_tx, item_rx) = ctx.make_channel::<ChunkSSE>(8);
         std::thread::spawn(move || {
             redirect_engine_reply_to_responses_sse(
                 rx,
