@@ -185,8 +185,8 @@ fn js_transform_stream_constructor(ctx: &mut ScopedContext, cc: CallContext) -> 
     // path) and the controller's Rc<Cell> (read by the backpressure fast path).
     {
         let (new_promise, _rr) = Promise::create(ctx)?;
-        let ts_val = JSValue::from(instance);
-        if let Some(tsp_mut) = JSTransformStream::payload_mut_of(&mut JSValue::from(ts_val)) {
+        let mut ts_val = JSValue::from(instance);
+        if let Some(tsp_mut) = JSTransformStream::payload_mut_of(&mut ts_val) {
             tsp_mut.backpressure_change_promise = Some(new_promise);
         }
         if let Some(ctrl_handle) = instance.payload().and_then(|p| p.controller) {
@@ -226,10 +226,10 @@ fn js_transform_stream_constructor(ctx: &mut ScopedContext, cc: CallContext) -> 
         // Copy start/close from the original transformer.
         if let Some(tobj) = transformer.as_object() {
             for method in ["start", "close"] {
-                if let Ok(v) = tobj.get_property_str(ctx, method) {
-                    if !v.is_undefined() {
-                        wrapper.define_property_value_str(ctx, method, v, zuqe::JS_PROP_C_W_E)?;
-                    }
+                if let Ok(v) = tobj.get_property_str(ctx, method)
+                    && !v.is_undefined()
+                {
+                    wrapper.define_property_value_str(ctx, method, v, zuqe::JS_PROP_C_W_E)?;
                 }
             }
         }
@@ -363,10 +363,10 @@ fn ts_sink_abort(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     };
 
     // If finishPromise is already set, return it.
-    if let Some(tcp) = controller.payload() {
-        if let Some(fp) = tcp.finish_promise {
-            return Ok(JSValue::from(fp));
-        }
+    if let Some(tcp) = controller.payload()
+        && let Some(fp) = tcp.finish_promise
+    {
+        return Ok(JSValue::from(fp));
     }
 
     // Create finishPromise.
@@ -427,11 +427,12 @@ fn ts_sink_abort(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         }
     }
 
-    if let Some(tcp) = controller.payload() {
-        if let Some(fp) = tcp.finish_promise {
-            return Ok(JSValue::from(fp));
-        }
+    if let Some(tcp) = controller.payload()
+        && let Some(fp) = tcp.finish_promise
+    {
+        return Ok(JSValue::from(fp));
     }
+
     Ok(JSValue::UNDEFINED)
 }
 
@@ -640,16 +641,16 @@ fn ts_perform_transform_cb(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
 fn ts_source_pull(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let stream_val = cc.data(0);
     // The stream parameter here is the TransformStream (we passed it as data).
-    if let Some(tsp) = JSTransformStream::payload_of(&stream_val) {
+    if JSTransformStream::payload_of(&stream_val).is_some() {
         // Backpressure should be true when pull is called.
         // TransformStreamSetBackpressure(stream, false).
         transform_stream_set_backpressure(ctx, &stream_val, false)?;
     }
     // Return the backpressureChangePromise per spec step 3.
-    if let Some(tsp) = JSTransformStream::payload_of(&stream_val) {
-        if let Some(p) = tsp.backpressure_change_promise {
-            return Ok(JSValue::from(p));
-        }
+    if let Some(tsp) = JSTransformStream::payload_of(&stream_val)
+        && let Some(p) = tsp.backpressure_change_promise
+    {
+        return Ok(JSValue::from(p));
     }
     Ok(JSValue::UNDEFINED)
 }
@@ -674,10 +675,10 @@ fn ts_source_cancel(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     };
 
     // If finishPromise is already set, return it (idempotent cancel).
-    if let Some(tcp) = controller.payload() {
-        if let Some(fp) = tcp.finish_promise {
-            return Ok(JSValue::from(fp));
-        }
+    if let Some(tcp) = controller.payload()
+        && let Some(fp) = tcp.finish_promise
+    {
+        return Ok(JSValue::from(fp));
     }
 
     // Create finishPromise (spec step 4).
@@ -739,11 +740,12 @@ fn ts_source_cancel(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         }
     }
 
-    if let Some(tcp) = controller.payload() {
-        if let Some(fp) = tcp.finish_promise {
-            return Ok(JSValue::from(fp));
-        }
+    if let Some(tcp) = controller.payload()
+        && let Some(fp) = tcp.finish_promise
+    {
+        return Ok(JSValue::from(fp));
     }
+
     Ok(JSValue::UNDEFINED)
 }
 
@@ -867,10 +869,9 @@ pub(super) fn transform_stream_set_backpressure(
     let ctrl_handle = tsp.controller;
     if let Some(mut ctrl) = ctrl_handle
         && let Some(tcp) = ctrl.payload_mut()
+        && let Some(mut old_bp) = tcp.backpressure_change_promise.get()
     {
-        if let Some(mut old_bp) = tcp.backpressure_change_promise.get() {
-            old_bp.resolve(ctx, JSValue::UNDEFINED);
-        }
+        old_bp.resolve(ctx, JSValue::UNDEFINED);
     }
 
     // Create new promise and set it everywhere.
@@ -924,7 +925,7 @@ pub(super) fn transform_stream_error_writable_and_unblock_write(
         && let Some(w) = tsp.writable
         && let Some(wsp) = w.payload()
         && wsp.state == crate::whatwg::stream::RsState::Readable
-        && let Some(mut wc) = wsp.controller
+        && let Some(wc) = wsp.controller
         && let Some(wcp) = wc.payload()
         && let Some(mut ws) = wcp.stream
         && let Some(ws_payload) = ws.payload_mut()

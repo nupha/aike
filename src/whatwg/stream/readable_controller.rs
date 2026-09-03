@@ -1223,6 +1223,7 @@ impl ReadableControllerPayload {
     /// `stream.[[state]]` only (not `CanCloseOrEnqueue`):
     ///   1. Let stream be controller.[[stream]].
     ///   2. If stream.[[state]] is not "readable", return.
+    ///
     /// This means `controller.error()` still works after
     /// `controller.terminate()` as long as the readable side hasn't
     /// transitioned away from "readable" (i.e. the queue was non-empty

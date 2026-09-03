@@ -500,15 +500,16 @@ fn check_ext_and_key_ops(
     usages: &[String],
     extractable: bool,
 ) -> Result<(), i32> {
-    if let Some(ext) = jwk_member(ctx, jwk, "ext")? {
-        if (ext == "true") != extractable {
-            return Err(throw_dom_exception(
-                ctx,
-                "DataError",
-                "JWK ext does not match the extractable parameter",
-            ));
-        }
+    if let Some(ext) = jwk_member(ctx, jwk, "ext")?
+        && (ext == "true") != extractable
+    {
+        return Err(throw_dom_exception(
+            ctx,
+            "DataError",
+            "JWK ext does not match the extractable parameter",
+        ));
     }
+
     let kop_val = jwk.get_property_str(ctx, "key_ops")?;
     if !kop_val.is_undefined() {
         let mut kop = get_key_usages(ctx, &kop_val)?;

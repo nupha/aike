@@ -1,9 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-//! The `fetch()` entry point: request construction, the network/cache
-//! pipeline, and installation of the `fetch` global.
-
 use std::{
     cell::{Cell, RefCell},
     collections::HashMap,
@@ -133,7 +130,7 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         method = p.method.clone();
         header_list = p.headers.borrow().clone();
         redirect = p.redirect.clone();
-        signal_val = p.signal.clone();
+        signal_val = p.signal;
         body_bytes = p.synthetic_body.clone();
         // Consuming an input Request's body marks it used (Fetch spec):
         // subsequent body methods on it must reject with TypeError. A null-body
@@ -144,10 +141,8 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         referrer = p.referrer.clone();
         mode = p.mode.clone();
         cache_mode = p.cache.clone();
-        if input_has_body {
-            if let Ok(p) = get_request_payload_mut(ctx, &mut input.clone()) {
-                p.body_consumed = true;
-            }
+        if input_has_body && let Ok(p) = get_request_payload_mut(ctx, &mut input.clone()) {
+            p.body_consumed = true;
         }
     } else if !input.is_undefined_or_null() {
         let href = input.get_property_str(ctx, "href")?;
@@ -190,147 +185,143 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         // (the value behind `import.meta.url`, set by `aike.evalModule`),
         // mirroring Node/Bun semantics. `None` when not inside a script/module
         // frame, in which case the specifier stays as-is.
-        if let Ok(base_u) = url::Url::parse(&base) {
-            if let Ok(joined) = base_u.join(&url_str) {
-                let mut u = joined;
-                u.set_fragment(None);
-                url_str = u.to_string();
-            }
+        if let Ok(base_u) = url::Url::parse(&base)
+            && let Ok(joined) = base_u.join(&url_str)
+        {
+            let mut u = joined;
+            u.set_fragment(None);
+            url_str = u.to_string();
         }
     }
 
     // Apply RequestInit overrides.
-    if !init.is_undefined_or_null() {
-        if let Some(o) = init.as_object() {
-            // `window` may only be null (forbidden legacy option). Any other
-            // value throws a TypeError, and it must take priority over an
-            // already-aborted signal (WPT "TypeError from request constructor
-            // takes priority"). Mirrors `js_request_constructor`.
-            let w = o.get_property_str(ctx, "window")?;
-            if !w.is_undefined() && !w.is_null() {
-                return Err(ctx.throw_type_error("RequestInit.window must be null"));
+    if let Some(o) = init.as_object() {
+        // `window` may only be null (forbidden legacy option). Any other
+        // value throws a TypeError, and it must take priority over an
+        // already-aborted signal (WPT "TypeError from request constructor
+        // takes priority"). Mirrors `js_request_constructor`.
+        let w = o.get_property_str(ctx, "window")?;
+        if !w.is_undefined() && !w.is_null() {
+            return Err(ctx.throw_type_error("RequestInit.window must be null"));
+        }
+        let m = o.get_property_str(ctx, "method")?;
+        if !m.is_undefined() {
+            let raw = m.to_string(ctx)?.content().encode_utf8(false).to_string();
+            method = normalize_method(&raw);
+        }
+        let mut h = o.get_property_str(ctx, "headers")?;
+        if !h.is_undefined_or_null() {
+            header_list = header_list_from_js(ctx, &mut h)?;
+        }
+        // `duplex` must be read whenever a body is present: the spec reads
+        // it off the init dictionary, and a stream body requires it to be
+        // "half". Read it before `body` so a throwing getter still fires.
+        let duplex = o.get_property_str(ctx, "duplex")?;
+        let duplex = match duplex.is_undefined() {
+            true => None,
+            false => Some(
+                duplex
+                    .to_string(ctx)?
+                    .content()
+                    .encode_utf8(false)
+                    .to_string(),
+            ),
+        };
+
+        let b = o.get_property_str(ctx, "body")?;
+        if !b.is_undefined_or_null() {
+            // Fetch spec: a GET/HEAD request must not carry a body.
+            if method.eq_ignore_ascii_case("GET") || method.eq_ignore_ascii_case("HEAD") {
+                return Err(ctx.throw_type_error("Request with GET/HEAD method cannot have body"));
             }
-            let m = o.get_property_str(ctx, "method")?;
-            if !m.is_undefined() {
-                let raw = m.to_string(ctx)?.content().encode_utf8(false).to_string();
-                method = normalize_method(&raw);
+
+            // The body source implies a default Content-Type unless the
+            // caller already supplied one.
+            if let Some(t) = body_content_type(&b)
+                && !header_list.has("content-type")
+            {
+                header_list.set("Content-Type", &t);
             }
-            let mut h = o.get_property_str(ctx, "headers")?;
-            if !h.is_undefined_or_null() {
-                header_list = header_list_from_js(ctx, &mut h)?;
+
+            match JSReadableStream::payload_of(&b).is_some() {
+                // A stream body is only allowed with `duplex: "half"`;
+                // omitting it is a TypeError so that code written against
+                // full-duplex semantics fails loudly instead of silently
+                // buffering.
+                true if duplex.as_deref() != Some("half") => {
+                    return Err(ctx.throw_type_error(
+                        "Request body is a ReadableStream but duplex is not 'half'",
+                    ));
+                }
+                true => stream_body = Some(b),
+                false => body_bytes = Some(body_to_bytes(ctx, &b)?),
             }
-            // `duplex` must be read whenever a body is present: the spec reads
-            // it off the init dictionary, and a stream body requires it to be
-            // "half". Read it before `body` so a throwing getter still fires.
-            let duplex = o.get_property_str(ctx, "duplex")?;
-            let duplex = match duplex.is_undefined() {
-                true => None,
-                false => Some(
-                    duplex
-                        .to_string(ctx)?
+        }
+        let r = o.get_property_str(ctx, "redirect")?;
+        if !r.is_undefined() {
+            redirect = r.to_string(ctx)?.content().encode_utf8(false).to_string();
+        }
+        // Per Fetch spec, an *explicit* `signal: null` in the init clears any
+        // signal inherited from the input Request; an absent `signal` key
+        // leaves the inherited signal in place.
+        let s = o.get_property_str(ctx, "signal")?;
+        if s.is_undefined() {
+            // Key absent: keep the inherited signal.
+        } else if s.is_null() {
+            signal_val = None;
+        } else if s.as_native_object::<JSAbortSignal>().is_some() {
+            signal_val = Some(s);
+        }
+        let t = o.get_property_str(ctx, "timeout")?;
+        if !t.is_undefined() {
+            let secs = t.to_number(ctx)?.to_f64();
+            if secs > 0.0 {
+                timeout = Duration::from_secs_f64(secs);
+            }
+        }
+
+        let mut read_str = |o: Object, key: &str| -> Option<String> {
+            let v = o.get_property_str(ctx, key).ok()?;
+            if v.is_undefined() {
+                None
+            } else {
+                Some(
+                    v.to_string(ctx)
+                        .ok()?
                         .content()
                         .encode_utf8(false)
                         .to_string(),
-                ),
-            };
-
-            let b = o.get_property_str(ctx, "body")?;
-            if !b.is_undefined_or_null() {
-                // Fetch spec: a GET/HEAD request must not carry a body.
-                if method.eq_ignore_ascii_case("GET") || method.eq_ignore_ascii_case("HEAD") {
-                    return Err(
-                        ctx.throw_type_error("Request with GET/HEAD method cannot have body")
-                    );
-                }
-
-                // The body source implies a default Content-Type unless the
-                // caller already supplied one.
-                if let Some(t) = body_content_type(&b)
-                    && !header_list.has("content-type")
-                {
-                    header_list.set("Content-Type", &t);
-                }
-
-                match JSReadableStream::payload_of(&b).is_some() {
-                    // A stream body is only allowed with `duplex: "half"`;
-                    // omitting it is a TypeError so that code written against
-                    // full-duplex semantics fails loudly instead of silently
-                    // buffering.
-                    true if duplex.as_deref() != Some("half") => {
-                        return Err(ctx.throw_type_error(
-                            "Request body is a ReadableStream but duplex is not 'half'",
-                        ));
-                    }
-                    true => stream_body = Some(b.clone()),
-                    false => body_bytes = Some(body_to_bytes(ctx, &b)?),
-                }
+                )
             }
-            let r = o.get_property_str(ctx, "redirect")?;
-            if !r.is_undefined() {
-                redirect = r.to_string(ctx)?.content().encode_utf8(false).to_string();
-            }
-            // Per Fetch spec, an *explicit* `signal: null` in the init clears any
-            // signal inherited from the input Request; an absent `signal` key
-            // leaves the inherited signal in place.
-            let s = o.get_property_str(ctx, "signal")?;
-            if s.is_undefined() {
-                // Key absent: keep the inherited signal.
-            } else if s.is_null() {
-                signal_val = None;
-            } else if s.as_native_object::<JSAbortSignal>().is_some() {
-                signal_val = Some(s.clone());
-            }
-            let t = o.get_property_str(ctx, "timeout")?;
-            if !t.is_undefined() {
-                let secs = t.to_number(ctx)?.to_f64();
-                if secs > 0.0 {
-                    timeout = Duration::from_secs_f64(secs);
-                }
-            }
-
-            let mut read_str = |o: Object, key: &str| -> Option<String> {
-                let v = o.get_property_str(ctx, key).ok()?;
-                if v.is_undefined() {
-                    None
-                } else {
-                    Some(
-                        v.to_string(ctx)
-                            .ok()?
-                            .content()
-                            .encode_utf8(false)
-                            .to_string(),
-                    )
-                }
-            };
-            if let Some(v) = read_str(o, "credentials") {
-                credentials = v;
-            }
-            if let Some(v) = read_str(o, "referrer") {
-                referrer = v;
-            }
-            if let Some(v) = read_str(o, "referrerPolicy") {
-                referrer_policy = v;
-            }
-            if let Some(v) = read_str(o, "integrity") {
-                integrity = v;
-            }
-            if let Some(v) = read_str(o, "mode") {
-                mode = v;
-            }
-            if let Some(v) = read_str(o, "cache") {
-                cache_mode = v;
-            }
-            // Validate `priority` eagerly: an invalid RequestInit member value
-            // must reject the fetch with a TypeError (WPT request-init-priority).
-            // The valid set is `high` | `low` | `auto`; `high`/`low` are accepted
-            // as hints and otherwise ignored, `auto` is the effective default.
-            if let Some(v) = read_str(o, "priority") {
-                const VALID: &[&str] = &["high", "low", "auto"];
-                if !VALID.contains(&v.as_str()) {
-                    return Err(ctx.throw_type_error(&format!(
-                        "invalid value '{v}' for RequestInit.priority"
-                    )));
-                }
+        };
+        if let Some(v) = read_str(o, "credentials") {
+            credentials = v;
+        }
+        if let Some(v) = read_str(o, "referrer") {
+            referrer = v;
+        }
+        if let Some(v) = read_str(o, "referrerPolicy") {
+            referrer_policy = v;
+        }
+        if let Some(v) = read_str(o, "integrity") {
+            integrity = v;
+        }
+        if let Some(v) = read_str(o, "mode") {
+            mode = v;
+        }
+        if let Some(v) = read_str(o, "cache") {
+            cache_mode = v;
+        }
+        // Validate `priority` eagerly: an invalid RequestInit member value
+        // must reject the fetch with a TypeError (WPT request-init-priority).
+        // The valid set is `high` | `low` | `auto`; `high`/`low` are accepted
+        // as hints and otherwise ignored, `auto` is the effective default.
+        if let Some(v) = read_str(o, "priority") {
+            const VALID: &[&str] = &["high", "low", "auto"];
+            if !VALID.contains(&v.as_str()) {
+                return Err(
+                    ctx.throw_type_error(&format!("invalid value '{v}' for RequestInit.priority"))
+                );
             }
         }
     }
@@ -347,14 +338,14 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     // aborts (Fetch spec). Attach it to the signal; `js_controller_abort` cancels
     // it synchronously with a live `cx`, avoiding any cross-async JSValue handle.
 
-    let notify = signal_val.as_ref().and_then(|s| signal_notify(s));
-    let already_aborted = signal_val.as_ref().map_or(false, |s| signal_is_aborted(s));
+    let notify = signal_val.as_ref().and_then(signal_notify);
+    let already_aborted = signal_val.as_ref().is_some_and(signal_is_aborted);
     // When the signal is (already) aborted the fetch must reject with the
     // signal's `reason` (e.g. a DOMException "AbortError"), matching the Fetch
     // spec and WPT's `promise_rejects_exactly`/`promise_rejects_dom`.
     let abort_reason = signal_val
         .as_ref()
-        .and_then(|s| signal_reason(s))
+        .and_then(signal_reason)
         .unwrap_or_else(|| {
             make_dom_exception(ctx, "AbortError", "The operation was aborted.")
                 .unwrap_or(JSValue::UNDEFINED)
@@ -458,7 +449,7 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             RespType::Basic,
             &hit.final_url,
             false,
-            signal_val.clone(),
+            signal_val,
         )?;
 
         // `fetch()` returns a promise; resolve it with the cached Response.
@@ -509,7 +500,7 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                     RespType::Basic,
                     &url_str,
                     false,
-                    signal_val.clone(),
+                    signal_val,
                 )?;
 
                 return Promise::from_resolve_value(ctx, response).map(JSValue::from);
@@ -532,10 +523,7 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     // into the response closure below) reflects *our* revalidation.
     // `no-store`/`reload` never attach revalidation validators (they go to
     // network unconditionally); `default` stale and `no-cache` revalidate.
-    let revalidate = match cache_mode.as_str() {
-        "no-store" | "reload" => false,
-        _ => true,
-    };
+    let revalidate = !matches!(cache_mode.as_str(), "no-store" | "reload");
     // A conditional-header request is treated as no-store: no revalidation
     // validators are added on top of the caller's own conditional headers.
     let cached_validators = if cacheable && revalidate && !has_conditional {
@@ -616,10 +604,10 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         // as a (microtask) job via the promise machinery.
         // Consuming a Request whose signal is already aborted marks its body as
         // used (Fetch spec): `request.bodyUsed` must become true.
-        if input.as_native_object::<JSRequest>().is_some() {
-            if let Ok(p) = get_request_payload_mut(ctx, &mut input.clone()) {
-                p.body_consumed = true;
-            }
+        if input.as_native_object::<JSRequest>().is_some()
+            && let Ok(p) = get_request_payload_mut(ctx, &mut input.clone())
+        {
+            p.body_consumed = true;
         }
         return Promise::from_reject_value(ctx, abort_reason).map(JSValue::from);
     }
@@ -742,7 +730,7 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 n.set(id.wrapping_add(1));
                 id
             });
-            g.borrow_mut().insert(id, s.clone());
+            g.borrow_mut().insert(id, *s);
             id
         }),
         None => 0,
@@ -981,7 +969,7 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         },
     )?;
 
-    let referrer_ctx = manual_redirect.then(|| ReferrerCtx {
+    let referrer_ctx = manual_redirect.then_some(ReferrerCtx {
         referrer: rc_referrer,
         policy: rc_policy,
         client_origin: rc_origin,

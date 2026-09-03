@@ -12,7 +12,7 @@ use crate::aike::signal_number;
 
 thread_local! {
     /// Pending `process.nextTick` callbacks, drained on the next microtask.
-    static NEXT_TICK_QUEUE: RefCell<Vec<JSValue>> = RefCell::new(Vec::new());
+    static NEXT_TICK_QUEUE: RefCell<Vec<JSValue>> = const { RefCell::new(Vec::new()) };
 }
 
 /// GC trace: keep pending nextTick callbacks alive.
