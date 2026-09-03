@@ -148,7 +148,7 @@ impl WritableStreamPayload {
         // writer.ready rejects (or is replaced when already settled).
         if let Some(w) = self.writer {
             let mut wv = JSValue::from(w);
-            if let Some(mut wp) = JSWritableStreamDefaultWriter::payload_mut_of(&mut wv) {
+            if let Some(wp) = JSWritableStreamDefaultWriter::payload_mut_of(&mut wv) {
                 wp.ensure_ready_rejected(ctx, error);
             }
         }
@@ -321,7 +321,7 @@ impl WritableStreamPayload {
         if bp == self.backpressure {
             return;
         }
-        if let Some(mut w) = self.writer {
+        if let Some(w) = self.writer {
             let mut wv = JSValue::from(w);
             if let Some(mut wp) = JSWritableStreamDefaultWriter::payload_mut_of(&mut wv) {
                 if bp {
@@ -479,7 +479,7 @@ impl WritableStreamPayload {
         let mut close_result = match sink_close {
             Some(s) => match s.invoke_str_callable(ctx, "close", &[]) {
                 Ok(Some(Ok(v))) => {
-                    if let Ok(mut p) = Promise::try_from(v) {
+                    if let Ok(p) = Promise::try_from(v) {
                         p
                     } else {
                         Promise::from_resolve_value(ctx, v)?
@@ -679,7 +679,7 @@ impl WritableStreamPayload {
         self.state = RsState::Closed;
         if let Some(w) = self.writer {
             let mut wv = JSValue::from(w);
-            if let Some(mut wp) = JSWritableStreamDefaultWriter::payload_mut_of(&mut wv)
+            if let Some(wp) = JSWritableStreamDefaultWriter::payload_mut_of(&mut wv)
                 && let Some(mut c) = wp.closed_promise
                 && c.state() == PromiseState::Pending
             {
@@ -1069,7 +1069,7 @@ fn flush_close_err(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         sp.stored_error = err;
         if let Some(w) = sp.writer {
             let mut wv = JSValue::from(w);
-            if let Some(mut wp) = JSWritableStreamDefaultWriter::payload_mut_of(&mut wv) {
+            if let Some(wp) = JSWritableStreamDefaultWriter::payload_mut_of(&mut wv) {
                 wp.ensure_closed_rejected(ctx, err);
             }
         }

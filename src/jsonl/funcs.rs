@@ -133,7 +133,6 @@ fn read_jsonl_impl(cx: &mut ScopedContext, path: PathBuf, on_error: OnError) -> 
             Array::from_values(cx2, values).map(JSValue::from)
         })?;
 
-    let wake = cx.wake_handle();
     tokio::spawn(async move {
         let res = tokio::fs::read_to_string(&path)
             .await

@@ -345,9 +345,9 @@ fn js_controller_abort(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             .filter(|v| v.is_callable())
         {
             if cancel_fn.call(ctx, body, &[reason]).is_err() {
-                let exc = ctx.take_exception();
+                let _exc = ctx.take_exception();
                 #[cfg(debug_assertions)]
-                crate::helpers::print_exc(ctx, exc);
+                crate::helpers::print_exc(ctx, _exc);
             }
         }
     }

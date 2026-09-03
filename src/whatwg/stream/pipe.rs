@@ -409,9 +409,9 @@ fn release_pipe_locks(ctx: &mut ScopedContext, reader: JSValue, writer: JSValue)
         if let Ok(rel) = target.get_property_str(ctx, "releaseLock")
             && rel.call(ctx, target, &[]).is_err()
         {
-            let exc = ctx.take_exception();
+            let _exc = ctx.take_exception();
             #[cfg(debug_assertions)]
-            crate::helpers::print_exc(ctx, exc);
+            crate::helpers::print_exc(ctx, _exc);
         }
     }
 }

@@ -232,16 +232,6 @@ fn clone_data_view(
     Ok(clone)
 }
 
-/// The class name of an object (e.g. "Uint8Array", "Float64Array") as a String.
-fn obj_class_name(ctx: &mut ScopedContext, value: &JSValue) -> Result<String, i32> {
-    let name = value
-        .as_object()
-        .ok_or_else(|| ctx.throw_internal_error("not an object"))?
-        .class_name_str()
-        .to_string();
-    Ok(name)
-}
-
 /// Clone a Date via `new Date(timestamp)`.
 fn clone_date(ctx: &mut ScopedContext, value: JSValue) -> Result<JSValue, i32> {
     let ts = value
