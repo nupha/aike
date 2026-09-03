@@ -15,12 +15,14 @@ declare module "http" {
     readonly query: Record<string, string>;
     /** Request headers as key-value pairs (lowercased keys). */
     readonly headers: Record<string, string>;
+
     /** Parse the request body as JSON. Consumes body — can only be called once. */
-    json(): any;
+    json(): Promise<JSONValue>;
     /** Read the request body as a UTF-8 string. Consumes body. */
-    text(): string;
+    text(): Promise<string>;
     /** Read the request body as a Uint8Array. Consumes body. */
-    bytes(): Uint8Array;
+    bytes(): Promise<Uint8Array>;
+
     /**
      * Register a callback fired when the client disconnects (connection closed
      * or response fully sent). Multiple callbacks may be registered; they fire

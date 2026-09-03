@@ -1,7 +1,23 @@
 // Type declarations for the "json-schema" module
 
+/** A valid JSON value (recursive). */
+type JSONValue =
+  | string
+  | number
+  | boolean
+  | null
+  | JSONValue[]
+  | { [key: string]: JSONValue };
+
 /** A type keyword accepted by JSON-Schema. */
-type SchemaType = "string" | "number" | "integer" | "boolean" | "object" | "array" | "null";
+type SchemaType =
+  | "string"
+  | "number"
+  | "integer"
+  | "boolean"
+  | "object"
+  | "array"
+  | "null";
 
 /** A minimal JSON-Schema definition. */
 interface Schema {

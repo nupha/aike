@@ -5,6 +5,7 @@ use linkme::distributed_slice;
 use tokio::sync::{mpsc, oneshot};
 use zuqe::{
     CallContext, ClassID, FieldDef, IntOrFloat, JSResult, JSValue, Runtime, ScopedContext,
+    builtins::json::JSON,
     def_native_object,
     gc_lite::{GcTrace, GcTraceCtx},
 };
@@ -176,7 +177,7 @@ fn js_res_finish(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             // getters/toJSON, and returns undefined for non-encodable input.
             body_str = if cc.length() > 0 {
                 let result =
-                    ctx.json_stringify(cc.arg(0), JSValue::UNDEFINED, JSValue::UNDEFINED)?;
+                    JSON::stringify(ctx, cc.arg(0), JSValue::UNDEFINED, JSValue::UNDEFINED)?;
                 result
                     .to_string(ctx)
                     .ok()

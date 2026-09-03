@@ -6,7 +6,9 @@ use std::sync::{Arc, Mutex};
 
 use linkme::distributed_slice;
 use zuqe::{
-    CallContext, ClassID, FieldDef, JSResult, JSValue, Runtime, ScopedContext, def_native_object,
+    CallContext, ClassID, FieldDef, JSResult, JSValue, Runtime, ScopedContext,
+    builtins::{json::JSON, promise::Promise},
+    def_native_object,
     gc_lite::GcTrace,
 };
 
@@ -121,33 +123,35 @@ fn js_req_headers(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     Ok(obj.into())
 }
 
-fn js_req_json(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let body = get_req_payload_mut(ctx, &mut cc.this())?
-        .body
-        .take()
-        .unwrap_or_default();
-    if body.is_empty() {
-        return Ok(JSValue::UNDEFINED);
-    }
-    let value: serde_json::Value = serde_json::from_slice(&body)
-        .map_err(|e| ctx.throw_type_error(&format!("invalid JSON body: {e}")))?;
-    JSValue::from_serde_json(ctx, &value)
-}
+const BODY_JSON: i32 = 0;
+const BODY_TEXT: i32 = 1;
+const BODY_BYTES: i32 = 2;
 
-fn js_req_text(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+fn js_req_body(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let body = get_req_payload_mut(ctx, &mut cc.this())?
         .body
         .take()
         .unwrap_or_default();
-    ctx.create_string_from_utf8(body).map(JSValue::make_string)
-}
 
-fn js_req_bytes(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let body = get_req_payload_mut(ctx, &mut cc.this())?
-        .body
-        .take()
-        .unwrap_or_default();
-    zuqe::builtins::typed_array::TypedArray::create_from_vec_u8(ctx, body).map(JSValue::from)
+    let value = match cc.magic() {
+        BODY_JSON => {
+            if body.is_empty() {
+                JSValue::UNDEFINED
+            } else {
+                let text = String::from_utf8(body)
+                    .map_err(|e| ctx.throw_type_error(&format!("invalid UTF-8 body: {e}")))?;
+                JSON::parse(ctx, &text)?
+            }
+        }
+        BODY_TEXT => ctx
+            .create_string_from_utf8(body)
+            .map(JSValue::make_string)?,
+        BODY_BYTES => zuqe::builtins::typed_array::TypedArray::create_from_vec_u8(ctx, body)
+            .map(JSValue::from)?,
+        _ => unreachable!(),
+    };
+
+    Promise::from_resolve_value(ctx, value).map(JSValue::from)
 }
 
 /// `req.onClose(cb)` — register a callback fired when the client disconnects.
@@ -171,9 +175,9 @@ const REQ_PROTO: &[FieldDef] = &[
     FieldDef::GETSET("params", Some(js_req_params), None, 0),
     FieldDef::GETSET("query", Some(js_req_query), None, 0),
     FieldDef::GETSET("headers", Some(js_req_headers), None, 0),
-    FieldDef::FUNC("json", 0, js_req_json, 0),
-    FieldDef::FUNC("text", 0, js_req_text, 0),
-    FieldDef::FUNC("bytes", 0, js_req_bytes, 0),
+    FieldDef::FUNC("json", 0, js_req_body, BODY_JSON as _),
+    FieldDef::FUNC("text", 0, js_req_body, BODY_TEXT as _),
+    FieldDef::FUNC("bytes", 0, js_req_body, BODY_BYTES as _),
     FieldDef::FUNC("onClose", 1, js_req_on_close, 0),
 ];
 

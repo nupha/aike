@@ -19,7 +19,7 @@ use linkme::distributed_slice;
 use zuqe::{
     CallContext, ClassCtorDef, ClassID, FieldDef, JSResult, JSValue, NativeObject, Runtime,
     ScopedContext,
-    builtins::promise::Promise,
+    builtins::{json::JSON, promise::Promise},
     def_native_object,
     gc_lite::{GcTrace, GcTraceCtx},
 };
@@ -582,7 +582,7 @@ fn js_response_static_json(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
     // Use the engine's JSON.stringify so spec behavior is inherited: it throws
     // on circular structures, propagates errors from getters/toJSON, and
     // escapes lone surrogates as \uXXXX.
-    let json_val = ctx.json_stringify(cc.arg(0), JSValue::UNDEFINED, JSValue::UNDEFINED)?;
+    let json_val = JSON::stringify(ctx, cc.arg(0), JSValue::UNDEFINED, JSValue::UNDEFINED)?;
     // stringify returns undefined for non-encodable input (symbol, function);
     // Response.json requires a body, so that is a TypeError.
     let Some(s) = json_val.as_string(false) else {
