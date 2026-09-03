@@ -5,8 +5,8 @@
 
 use linkme::distributed_slice;
 use zuqe::{
-    CallContext, Callback, ClassCtorDef, ClassID, FieldDef, JSResult, JSValue, Runtime,
-    ScopedContext,
+    CallContext, Callback, ClassCtorDef, ClassID, FieldDef, JSResult, JSValue, NativeObject,
+    Runtime, ScopedContext,
     builtins::promise::{Promise, PromiseState},
     def_native_object,
     gc_lite::{GcTrace, GcTraceCtx},
@@ -279,7 +279,7 @@ impl WritableStreamPayload {
         }
         if let Some(w) = self.writer {
             let mut wv = JSValue::from(w);
-            if let Some(mut wp) = JSWritableStreamDefaultWriter::payload_mut_of(&mut wv) {
+            if let Some(wp) = JSWritableStreamDefaultWriter::payload_mut_of(&mut wv) {
                 wp.ensure_closed_rejected(ctx, stored);
             }
         }
@@ -323,7 +323,7 @@ impl WritableStreamPayload {
         }
         if let Some(w) = self.writer {
             let mut wv = JSValue::from(w);
-            if let Some(mut wp) = JSWritableStreamDefaultWriter::payload_mut_of(&mut wv) {
+            if let Some(wp) = JSWritableStreamDefaultWriter::payload_mut_of(&mut wv) {
                 if bp {
                     if let Ok((ready, _)) = Promise::create(ctx) {
                         wp.ready_promise = Some(ready);
@@ -834,7 +834,7 @@ impl WritableStreamPayload {
         // `data` layout: [resolve, reject, stream_val, ok_flag, original_promise].
         // ok_flag is `undefined` for the success path (ok); a non-undefined value
         // (here 1) marks the error path, whose reason comes from `cc.arg(0)`.
-        let mut data: Vec<JSValue> = [
+        let data: Vec<JSValue> = [
             resolve,
             reject,
             stream_val,
@@ -844,6 +844,7 @@ impl WritableStreamPayload {
         .to_vec();
         let mut data_err = data.clone();
         data_err[3] = JSValue::from(1);
+
         if let Some(sink) = sink_val.as_object() {
             match sink.invoke_str_callable(ctx, "write", &[chunk, controller_val])? {
                 Some(Ok(v)) => {
@@ -1012,7 +1013,7 @@ impl WritableStreamPayload {
         // Spec WritableStreamClose: if backpressured, resolve `ready` in place.
         if self.backpressure
             && let Some(mut w) = self.writer
-            && let Some(mut wp) = w.payload_mut()
+            && let Some(wp) = w.payload_mut()
             && let Some(mut rp) = wp.ready_promise
             && rp.state() == PromiseState::Pending
         {
@@ -1289,12 +1290,10 @@ fn js_writable_stream_locked(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
 }
 
 fn js_writable_stream_get_writer(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let mut stream = cc
-        .this()
-        .as_native_object::<JSWritableStream>()
-        .ok_or_else(|| ctx.throw_type_error("not a WritableStream"))?;
-
-    stream.acquire_writer(ctx).map(JSValue::from)
+    JSWritableStream::from_value(cc.this())
+        .ok_or_else(|| ctx.throw_type_error("not a WritableStream"))?
+        .acquire_writer(ctx)
+        .map(JSValue::from)
 }
 
 fn js_writable_stream_abort(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {

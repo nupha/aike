@@ -1,24 +1,22 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
+#[cfg(unix)]
+use std::os::fd::AsRawFd;
 use std::{
     cell::RefCell,
     collections::HashMap,
     io::Write,
     sync::{
-        Arc, LazyLock,
+        Arc,
         atomic::{AtomicBool, AtomicI32, Ordering},
     },
 };
 
-#[cfg(unix)]
-use std::os::fd::AsRawFd;
-
-use crossbeam::channel::{Receiver, Sender};
 use linkme::distributed_slice;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use zuqe::{
-    CallContext, ClassCtorDef, ClassID, FieldDef, JSResult, JSValue, Object, PollSender, Runtime,
+    CallContext, ClassCtorDef, ClassID, FieldDef, JSResult, JSValue, Object, Runtime,
     ScopedContext,
     builtins::{iterator::AsyncIterableIterator, promise::Promise, typed_array::TypedArray},
     def_native_object,
@@ -30,6 +28,7 @@ use crate::USER_CLASS_DEFS;
 /// RAII guard for a pipe fd — closes the fd on drop.
 #[cfg(unix)]
 pub(crate) struct PipeFd(i32);
+
 #[cfg(unix)]
 impl Drop for PipeFd {
     fn drop(&mut self) {
@@ -40,6 +39,7 @@ impl Drop for PipeFd {
         }
     }
 }
+
 #[cfg(unix)]
 impl PipeFd {
     fn as_virt_fd(&self) -> i32 {
@@ -50,6 +50,7 @@ impl PipeFd {
 /// No-op fallback for non-Unix platforms.
 #[cfg(not(unix))]
 struct PipeFd(i32);
+
 #[cfg(not(unix))]
 impl PipeFd {
     fn as_virt_fd(&self) -> i32 {

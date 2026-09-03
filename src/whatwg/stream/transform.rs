@@ -5,7 +5,8 @@
 
 use linkme::distributed_slice;
 use zuqe::{
-    CallContext, ClassCtorDef, ClassID, FieldDef, JSResult, JSValue, Runtime, ScopedContext,
+    CallContext, ClassCtorDef, ClassID, FieldDef, JSResult, JSValue, NativeObject, Runtime,
+    ScopedContext,
     builtins::promise::Promise,
     def_native_object,
     gc_lite::{GcTrace, GcTraceCtx},
@@ -438,13 +439,9 @@ fn ts_sink_abort(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
 /// Promise reaction: async transformer.cancel() fulfilled (sink abort path).
 fn ts_sink_abort_ok(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let mut controller = cc
-        .data(0)
-        .as_native_object::<JSTransformStreamDefaultController>()
+    let mut controller = JSTransformStreamDefaultController::from_value(cc.data(0))
         .ok_or_else(|| ctx.throw_internal_error("invalid controller"))?;
-    let readable = cc
-        .data(1)
-        .as_native_object::<JSReadableStream>()
+    let readable = JSReadableStream::from_value(cc.data(1))
         .ok_or_else(|| ctx.throw_internal_error("invalid readable"))?;
     let reason = cc.data(2);
     ts_sink_abort_fulfill(ctx, &mut controller, readable, reason)
@@ -452,13 +449,9 @@ fn ts_sink_abort_ok(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
 /// Promise reaction: async transformer.cancel() rejected (sink abort path).
 fn ts_sink_abort_err(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let mut controller = cc
-        .data(0)
-        .as_native_object::<JSTransformStreamDefaultController>()
+    let mut controller = JSTransformStreamDefaultController::from_value(cc.data(0))
         .ok_or_else(|| ctx.throw_internal_error("invalid controller"))?;
-    let readable = cc
-        .data(1)
-        .as_native_object::<JSReadableStream>()
+    let readable = JSReadableStream::from_value(cc.data(1))
         .ok_or_else(|| ctx.throw_internal_error("invalid readable"))?;
     let error = cc.arg(0);
     ts_sink_abort_reject(ctx, &mut controller, readable, error)

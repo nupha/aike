@@ -151,16 +151,6 @@ pub(crate) fn js_read_jsonl(cx: &mut ScopedContext, cc: CallContext) -> JSResult
     read_jsonl_impl(cx, path, on_error)
 }
 
-// fs.readJSONL — caller already applied sandbox to `path`.
-pub(crate) fn read_jsonl_with_path(
-    cx: &mut ScopedContext,
-    cc: CallContext,
-    path: PathBuf,
-) -> JSResult {
-    let on_error = extract_opts(cx, cc.arg(1))?;
-    read_jsonl_impl(cx, path, on_error)
-}
-
 fn build_jsonl_lines(cx: &mut ScopedContext, cc: CallContext) -> Result<Vec<String>, i32> {
     let mut lines: Vec<String> = Vec::new();
     let argc = cc.length();
@@ -219,17 +209,6 @@ fn write_jsonl_impl(
 pub(crate) fn js_write_jsonl(cx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let path_val = cc.arg(0).to_string(cx)?;
     let path = PathBuf::from(path_val.content().encode_utf8(false).to_string());
-    let append = cc.magic() == JSONL_WRITE_APPEND;
-    let lines = build_jsonl_lines(cx, cc)?;
-    write_jsonl_impl(cx, path, append, lines)
-}
-
-// fs.appendJSONL / fs.writeJSONL — caller already applied sandbox to `path`.
-pub(crate) fn write_jsonl_with_path(
-    cx: &mut ScopedContext,
-    cc: CallContext,
-    path: PathBuf,
-) -> JSResult {
     let append = cc.magic() == JSONL_WRITE_APPEND;
     let lines = build_jsonl_lines(cx, cc)?;
     write_jsonl_impl(cx, path, append, lines)

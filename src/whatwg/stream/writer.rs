@@ -311,7 +311,7 @@ fn js_writer_write(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     // The promise returned by `write()`, kept on the payload so an abort/error
     // can reject any outstanding (in-flight) write.
-    let (mut write_p, write_funcs) = Promise::create(ctx)?;
+    let (mut write_p, _) = Promise::create(ctx)?;
     wp.write_promise = Some(write_p);
 
     // Released writer: `write()` returns a rejected promise (spec).

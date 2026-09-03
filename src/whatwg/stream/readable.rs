@@ -11,7 +11,7 @@ use crossbeam::channel::TryRecvError;
 use linkme::distributed_slice;
 use zuqe::{
     CallContext, Callback, ClassCtorDef, ClassID, ErrorKind, Exception, FieldDef, JSResult,
-    JSValue, JobState, Object, Runtime, ScopedContext,
+    JSValue, JobState, NativeObject, Object, Runtime, ScopedContext,
     builtins::{
         iterator::{AsyncIterableIterator, AsyncIteratorFetcher, IterFetchStatus},
         promise::Promise,
@@ -589,9 +589,7 @@ fn js_readable_stream_state(ctx: &mut ScopedContext, cc: CallContext) -> JSResul
 }
 
 fn js_readable_stream_get_reader(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let mut stream = cc
-        .this()
-        .as_native_object::<JSReadableStream>()
+    let mut stream = JSReadableStream::from_value(cc.this())
         .ok_or_else(|| ctx.throw_type_error("not a ReadableStream"))?;
 
     // options.mode: undefined -> default reader, "byob" -> BYOB reader,

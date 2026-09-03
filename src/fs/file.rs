@@ -8,9 +8,8 @@ use std::{
 };
 
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
-
 use zuqe::{
-    CallContext, JSResult, JSValue, PollSender, ScopedContext,
+    CallContext, JSResult, JSValue, ScopedContext,
     builtins::{promise::Promise, typed_array::TypedArray},
 };
 

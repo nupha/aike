@@ -6,7 +6,6 @@ use std::{
     sync::{Arc, RwLock},
 };
 
-use crossbeam::channel;
 use linkme::distributed_slice;
 use rmcp::{
     ErrorData as McpError,
@@ -23,7 +22,8 @@ use rmcp::{
 };
 use zuqe::{
     CallContext, Callback, ClassID, FieldDef, JSResult, JSValue, Object, Runtime, ScopedContext,
-    builtins::promise::Promise, def_native_object,
+    builtins::promise::Promise,
+    def_native_object,
     gc_lite::{GcTrace, GcTraceCtx},
 };
 

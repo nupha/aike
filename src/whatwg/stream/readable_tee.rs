@@ -11,7 +11,7 @@ use std::{
 };
 
 use zuqe::{
-    Array, CallContext, Callback, JSResult, JSValue, ScopedContext,
+    Array, CallContext, Callback, JSResult, JSValue, NativeObject, ScopedContext,
     builtins::promise::Promise,
     gc_lite::{GcTrace, GcTraceCtx},
 };
@@ -324,8 +324,7 @@ fn tee_cancel_settle(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 //   [3] = branch2 controller
 pub(crate) fn js_readable_stream_tee(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
-    let mut stream = this
-        .as_native_object::<JSReadableStream>()
+    let mut stream = JSReadableStream::from_value(this)
         .ok_or_else(|| ctx.throw_type_error("not a ReadableStream"))?;
 
     let mut reader = stream.acquire_reader(ctx, false)?;

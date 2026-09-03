@@ -96,7 +96,7 @@ fn clone_value(
         return Ok(*clone);
     }
 
-    let mut obj = value
+    let obj = value
         .as_object()
         .ok_or_else(|| ctx.throw_internal_error("not an object"))?;
 

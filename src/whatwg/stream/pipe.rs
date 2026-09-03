@@ -13,7 +13,8 @@
 //!   [3] writer, [4] signal (UNDEFINED if none)
 
 use zuqe::{
-    CallContext, Callback, Exception, JSResult, JSValue, ScopedContext, builtins::promise::Promise,
+    CallContext, Callback, Exception, JSResult, JSValue, NativeObject, ScopedContext,
+    builtins::promise::Promise,
 };
 
 use crate::whatwg::{
@@ -75,8 +76,7 @@ pub(super) fn js_readable_stream_pipe_to(ctx: &mut ScopedContext, cc: CallContex
     // below) instead of calling the JS-layer `getWriter`, which a monkey-patched
     // prototype could redirect. `dest` is already a WritableStream (checked
     // above), and the locked check above guarantees acquire_writer succeeds.
-    let writer = dest
-        .as_native_object::<JSWritableStream>()
+    let writer = JSWritableStream::from_value(dest)
         .ok_or_else(|| ctx.throw_type_error("pipeTo: dest must be a WritableStream"))?
         .acquire_writer(ctx)?;
 
@@ -84,14 +84,19 @@ pub(super) fn js_readable_stream_pipe_to(ctx: &mut ScopedContext, cc: CallContex
     // stream immediately so `locked` is true and a later getReader() throws.
     // `this` is already a ReadableStream (checked above): acquire its reader via
     // the native API instead of the JS-layer `getReader`.
-    let mut this_stream = this
-        .as_native_object::<JSReadableStream>()
+    let mut this_stream = JSReadableStream::from_value(this)
         .ok_or_else(|| ctx.throw_type_error("pipeTo: this must be a ReadableStream"))?;
     let reader = this_stream.acquire_reader(ctx, false)?;
 
     // `signal` is undefined (no signal) or a validated AbortSignal (checked
     // above); hand the driver the native handle.
-    run_pipe_driver(ctx, reader, writer, signal.as_native_object(), options)
+    run_pipe_driver(
+        ctx,
+        reader,
+        writer,
+        JSAbortSignal::from_value(signal),
+        options,
+    )
 }
 
 // Shared pipe driver: drives `reader` -> `writer` microtask-by-microtask.
@@ -701,8 +706,7 @@ pub(super) fn js_readable_stream_pipe_through(
 ) -> JSResult {
     let this = cc.this();
 
-    let mut this_stream = this
-        .as_native_object::<JSReadableStream>()
+    let mut this_stream = JSReadableStream::from_value(this)
         .ok_or_else(|| ctx.throw_type_error("pipeThrough: this must be a ReadableStream"))?;
 
     let transform = cc.arg(0);
@@ -747,15 +751,19 @@ pub(super) fn js_readable_stream_pipe_through(
     // pipeThrough = pipe this into transform.writable, then return transform.readable.
     // Use the shared driver directly (NOT this.pipeTo) so a monkey-patched
     // pipeTo on the prototype/instance is not invoked.
-    let mut writable_stream = writable
-        .as_native_object::<JSWritableStream>()
-        .ok_or_else(|| {
-            ctx.throw_type_error("pipeThrough: transform.writable must be a WritableStream")
-        })?;
+    let mut writable_stream = JSWritableStream::from_value(writable).ok_or_else(|| {
+        ctx.throw_type_error("pipeThrough: transform.writable must be a WritableStream")
+    })?;
     let writer = writable_stream.acquire_writer(ctx)?;
 
     let reader = this_stream.acquire_reader(ctx, false)?;
-    run_pipe_driver(ctx, reader, writer, signal.as_native_object(), options)?;
+    run_pipe_driver(
+        ctx,
+        reader,
+        writer,
+        JSAbortSignal::from_value(signal),
+        options,
+    )?;
 
     Ok(readable)
 }
@@ -801,8 +809,10 @@ fn pipe_to_on_read(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let write_js = writer
         .get_property_str(ctx, "write")?
         .call(ctx, writer, &[value])?;
+
     let mut write_promise: Promise = Promise::try_from(write_js)?;
     pipe_bump_state_num(ctx, &data[0], "pendingWrites", 1)?;
+
     let loop_fn = ctx
         .create_native_function_with_data(
             Callback::Func(pipe_to_on_write_done),

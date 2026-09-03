@@ -15,7 +15,7 @@ use rmcp::model::{
 };
 use zuqe::{
     Array, CallContext, ClassCtorDef, ClassID, FieldDef, JS_GPN_ENUM_ONLY, JS_GPN_STR_OR_INT_MASK,
-    JSResult, JSValue, Object, Runtime, ScopedContext, def_native_object,
+    JSResult, JSValue, NativeObject, Object, Runtime, ScopedContext, def_native_object,
     gc_lite::{GcTrace, GcTraceCtx},
 };
 
@@ -283,8 +283,8 @@ pub(super) fn get_payload_mut<'a>(
     ctx: &mut ScopedContext,
     val: &'a mut JSValue,
 ) -> Result<&'a mut McpServicePayload, i32> {
-    let is_stdio = val.as_native_object::<JSStdioMcp>().is_some();
-    let is_http = val.as_native_object::<JSHttpMcp>().is_some();
+    let is_stdio = JSStdioMcp::from_value(*val).is_some();
+    let is_http = JSHttpMcp::from_value(*val).is_some();
 
     if is_stdio {
         return JSStdioMcp::payload_mut_of(val)

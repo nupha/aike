@@ -9,7 +9,8 @@ use std::{
 };
 
 use zuqe::{
-    CallContext, Callback, Exception, JSResult, JSValue, JobState, Object, ScopedContext,
+    CallContext, Callback, Exception, JSResult, JSValue, JobState, NativeObject, Object,
+    ScopedContext,
     builtins::promise::{Promise, PromiseResultSlot},
     gc_lite::{GcTrace, GcTraceCtx},
 };
@@ -257,10 +258,12 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 false => body_bytes = Some(body_to_bytes(ctx, &b)?),
             }
         }
+
         let r = o.get_property_str(ctx, "redirect")?;
         if !r.is_undefined() {
             redirect = r.to_string(ctx)?.content().encode_utf8(false).to_string();
         }
+
         // Per Fetch spec, an *explicit* `signal: null` in the init clears any
         // signal inherited from the input Request; an absent `signal` key
         // leaves the inherited signal in place.
@@ -269,9 +272,10 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             // Key absent: keep the inherited signal.
         } else if s.is_null() {
             signal_val = None;
-        } else if s.as_native_object::<JSAbortSignal>().is_some() {
+        } else if JSAbortSignal::from_value(s).is_some() {
             signal_val = Some(s);
         }
+
         let t = o.get_property_str(ctx, "timeout")?;
         if !t.is_undefined() {
             let secs = t.to_number(ctx)?.to_f64();
@@ -604,7 +608,7 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         // as a (microtask) job via the promise machinery.
         // Consuming a Request whose signal is already aborted marks its body as
         // used (Fetch spec): `request.bodyUsed` must become true.
-        if input.as_native_object::<JSRequest>().is_some()
+        if JSRequest::from_value(input).is_some()
             && let Ok(p) = get_request_payload_mut(ctx, &mut input.clone())
         {
             p.body_consumed = true;

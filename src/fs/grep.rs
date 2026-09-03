@@ -13,8 +13,10 @@
 //! Returns an array of match objects:
 //!   { file, lineNumber, line, start, end, ranges: [{start,end}] }
 
-use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+};
 
 use grep_matcher::Matcher;
 use grep_regex::{RegexMatcher, RegexMatcherBuilder};
@@ -147,6 +149,7 @@ pub(super) fn js_fs_grep(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut max_results = 1000usize;
     let mut mode: String = "content".to_string();
     let mut invert = false;
+
     if cc.length() > 1 && cc.arg(1).is_object() {
         cwd = opt_str(ctx, &cc, "cwd")?.map(PathBuf::from);
         include = opt_str_array(ctx, &cc, "include")?;
@@ -210,7 +213,6 @@ pub(super) fn js_fs_grep(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 let mut content_hits: Vec<Hit> = Vec::new();
                 let mut files_set: HashSet<PathBuf> = HashSet::new();
                 let mut counts: Vec<(PathBuf, usize)> = Vec::new();
-                let mut truncated = false;
 
                 // Walk the cwd directory so the `ignore` crate can apply
                 // .gitignore/.ignore/hidden rules natively during traversal.
@@ -239,9 +241,6 @@ pub(super) fn js_fs_grep(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 }
 
                 for entry in builder.build() {
-                    if truncated {
-                        break;
-                    }
                     let entry = match entry {
                         Ok(e) => e,
                         Err(_) => continue,
@@ -253,11 +252,13 @@ pub(super) fn js_fs_grep(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                     if !ftype.is_file() {
                         continue;
                     }
+
                     let p = entry.path().to_path_buf();
                     // Restrict to the user `paths` globs (relative match).
                     if !paths.iter().any(|g| path_matches(&p, g, dot, &cwd)) {
                         continue;
                     }
+
                     // Apply user include/exclude globs on the path.
                     if !include.is_empty()
                         && !include.iter().any(|g| path_matches(&p, g, dot, &cwd))
@@ -281,6 +282,7 @@ pub(super) fn js_fs_grep(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                     if searcher.search_path(&matcher, &p, &mut collector).is_err() {
                         // Unreadable / binary — skip silently.
                     }
+
                     let any_match = !collector.hits.is_empty();
 
                     // Retained lines depend on mode and `invert`:
@@ -318,14 +320,12 @@ pub(super) fn js_fs_grep(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
                     // maxResults caps the number of returned lines (content mode).
                     if mode == "content" && content_hits.len() >= max_results {
-                        truncated = true;
                         break;
                     }
                 }
 
                 if mode == "content" && content_hits.len() > max_results {
                     content_hits.truncate(max_results);
-                    truncated = true;
                 }
 
                 let out = match mode.as_str() {

@@ -795,11 +795,11 @@ const HEADER_ITER_PROTO: &[FieldDef] = &[
     FieldDef::FUNC("[Symbol.iterator]", 0, js_headers_iterator_self, 0),
 ];
 
-fn js_headers_iterator_self(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+fn js_headers_iterator_self(_: &mut ScopedContext, cc: CallContext) -> JSResult {
     Ok(cc.this())
 }
 
-fn js_headers_iterator_ctor(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
+fn js_headers_iterator_ctor(_: &mut ScopedContext, _cc: CallContext) -> JSResult {
     Ok(JSValue::UNDEFINED)
 }
 

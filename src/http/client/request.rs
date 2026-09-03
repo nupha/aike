@@ -1,13 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-use std::cell::RefCell;
-use std::rc::Rc;
+use std::{cell::RefCell, rc::Rc};
 
 use linkme::distributed_slice;
 use zuqe::{
-    CallContext, ClassCtorDef, ClassID, Exception, FieldDef, JSResult, JSValue, Object, Runtime,
-    ScopedContext,
+    CallContext, ClassCtorDef, ClassID, Exception, FieldDef, JSResult, JSValue, NativeObject,
+    Object, Runtime, ScopedContext,
     builtins::promise::Promise,
     def_native_object,
     gc_lite::{GcTrace, GcTraceCtx},
@@ -438,14 +437,17 @@ fn js_request_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
                     synthetic_body = Some(body_to_bytes(ctx, &b)?);
                 }
             }
+
             let r = o.get_property_str(ctx, "redirect")?;
             if !r.is_undefined() {
                 redirect = r.to_string(ctx)?.content().encode_utf8(false).to_string();
             }
+
             let s = o.get_property_str(ctx, "signal")?;
-            if !s.is_undefined_or_null() && s.as_native_object::<JSAbortSignal>().is_some() {
+            if JSAbortSignal::from_value(s).is_some() {
                 signal = Some(s);
             }
+
             let mut read_str = |o: Object, key: &str| -> Result<Option<String>, i32> {
                 let v = o.get_property_str(ctx, key)?;
                 if v.is_undefined() {

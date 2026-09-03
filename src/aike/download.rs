@@ -16,7 +16,7 @@ use futures_util::StreamExt;
 use tokio::io::AsyncWriteExt;
 use url::Url;
 use zuqe::{
-    CallContext, ErrorKind, Exception, JSResult, JSValue, ScopedContext,
+    CallContext, ErrorKind, Exception, JSResult, JSValue, NativeObject, ScopedContext,
     builtins::{
         promise::{Promise, PromiseResultSlot},
         typed_array::TypedArray,
@@ -70,7 +70,7 @@ pub(super) fn js_download(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
         };
         let sig = opts.get_property_str(ctx, "signal")?;
         if !sig.is_undefined() {
-            if sig.as_native_object::<JSAbortSignal>().is_none() {
+            if JSAbortSignal::from_value(sig).is_none() {
                 return Err(ctx.throw_type_error("`signal` must be an AbortSignal"));
             }
             signal = Some(sig);
@@ -91,7 +91,8 @@ pub(super) fn js_download(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
             return Promise::from_reject_value(ctx, reason).map(JSValue::from);
         }
     };
-    let mut cfg = HttpClientConfig::default();
+
+    let cfg = HttpClientConfig::default();
     let client = match cfg.build_http_client_ex(insecure) {
         Ok(c) => c,
         Err(e) => {
