@@ -66,6 +66,10 @@ use crate::{
     yaml::init_mod_yaml,
 };
 
+#[cfg(feature = "mimalloc")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 #[derive(Debug, Parser)]
 #[command(version, disable_help_flag = true)]
 struct Args {

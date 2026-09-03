@@ -21,8 +21,9 @@ enable_eval_log = [] # 启用 DeepEval 评估日志采集
 # build where every fetch behaves like a plain HTTP request.
 fetch_browser = []
 local_storage = ["redb"]
+mimalloc = ["dep:mimalloc"]
 
-default = ["typescript", "fetch_browser", "local_storage"]
+default = ["typescript", "fetch_browser", "local_storage", "mimalloc"]
 
 [profile.release]
 panic = "abort"
@@ -165,6 +166,7 @@ aes-gcm = "0.11"
 rand = "0.9"
 subtle = "2"
 nanosandbox = { path = "../nanosandbox" }
+mimalloc = { version = "0.1", optional = true }
 redb = { version = "4.2", optional = true }
 
 # TypeScript transpilation — only compiled when typescript feature is enabled
