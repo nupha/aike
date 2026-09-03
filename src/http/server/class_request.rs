@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
 use linkme::distributed_slice;
 use zuqe::{
@@ -17,9 +16,9 @@ use crate::USER_CLASS_DEFS;
 use super::super::Method;
 
 /// Shared close-callback list: stored in both HttpRequest and HttpResponse;
-/// the SSE payload clones the Arc when `res.sse()` is called, and fires
+/// the SSE payload clones the Rc when `res.sse()` is called, and fires
 /// the callbacks when the underlying channel closes (client disconnect).
-pub type CloseCbs = Arc<Mutex<Vec<JSValue>>>;
+pub(crate) type CloseCbs = Rc<RefCell<Vec<JSValue>>>;
 
 /// Internal payload for HttpRequest classes.
 pub(super) struct HttpRequestPayload {
@@ -34,10 +33,8 @@ pub(super) struct HttpRequestPayload {
 }
 
 fn gc_trace_req(data: &HttpRequestPayload, gcx: &mut zuqe::gc_lite::GcTraceCtx) {
-    if let Ok(cbs) = data.close_cbs.lock() {
-        for v in cbs.iter() {
-            zuqe::gc_lite::GcTrace::trace(v, gcx);
-        }
+    for v in data.close_cbs.borrow().iter() {
+        zuqe::gc_lite::GcTrace::trace(v, gcx);
     }
 }
 
@@ -165,7 +162,7 @@ fn js_req_on_close(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     if !cb.is_callable() {
         return Err(ctx.throw_type_error("`onClose` argument must be a function"));
     }
-    p.close_cbs.lock().unwrap().push(cb);
+    p.close_cbs.borrow_mut().push(cb);
     Ok(JSValue::UNDEFINED)
 }
 

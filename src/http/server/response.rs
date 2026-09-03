@@ -273,10 +273,8 @@ const RES_PROTO: &[FieldDef] = &[
 impl HttpResponsePayload {
     /// GC trace: keep close-callback JS values reachable.
     pub(crate) fn gc_trace(&self, gcx: &mut GcTraceCtx) {
-        if let Ok(cbs) = self.close_cbs.lock() {
-            for v in cbs.iter() {
-                zuqe::gc_lite::GcTrace::trace(v, gcx);
-            }
+        for v in self.close_cbs.borrow().iter() {
+            zuqe::gc_lite::GcTrace::trace(v, gcx);
         }
     }
 }
@@ -285,10 +283,6 @@ impl GcTrace for HttpResponsePayload {
     fn trace(&self, gcx: &mut GcTraceCtx) {
         self.gc_trace(gcx);
     }
-}
-
-fn gc_trace_res(data: &HttpResponsePayload, gcx: &mut zuqe::gc_lite::GcTraceCtx) {
-    data.gc_trace(gcx);
 }
 
 def_native_object!(
@@ -320,23 +314,13 @@ pub(crate) struct HttpResponseSsePayload {
     pub(crate) close_cbs: super::CloseCbs,
 }
 
-fn gc_trace_sse(data: &HttpResponseSsePayload, gcx: &mut zuqe::gc_lite::GcTraceCtx) {
-    if let Ok(cbs) = data.close_cbs.lock() {
-        for v in cbs.iter() {
-            zuqe::gc_lite::GcTrace::trace(v, gcx);
-        }
-    }
-}
-
 impl HttpResponseSsePayload {
     /// GC trace callback wired via `def_native_object!`'s `on_payload_gc`.
     pub(crate) fn gc_trace(&self, gcx: &mut GcTraceCtx) {
         self.sink.trace(gcx);
         // Trace close-callback JS values so they stay reachable.
-        if let Ok(cbs) = self.close_cbs.lock() {
-            for v in cbs.iter() {
-                zuqe::gc_lite::GcTrace::trace(v, gcx);
-            }
+        for v in self.close_cbs.borrow().iter() {
+            zuqe::gc_lite::GcTrace::trace(v, gcx);
         }
     }
 }
@@ -461,7 +445,7 @@ fn js_sse_on_close(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     if !cb.is_callable() {
         return Err(ctx.throw_type_error("`onClose` argument must be a function"));
     }
-    p.close_cbs.lock().unwrap().push(cb);
+    p.close_cbs.borrow_mut().push(cb);
     Ok(JSValue::UNDEFINED)
 }
 

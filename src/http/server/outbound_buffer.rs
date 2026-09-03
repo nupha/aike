@@ -119,13 +119,15 @@ impl OutboundBuffer {
                 }
                 // Closed: the stream is gone — fire disconnect callbacks once.
                 Err(mpsc::error::TrySendError::Closed(_)) => {
-                    if let Some(cbs) = &self.close_cbs
-                        && let Ok(mut guard) = cbs.lock()
-                    {
-                        for cb in guard.drain(..) {
-                            let _ = cb.call(ctx, JSValue::UNDEFINED, &[]);
+                    if let Some(cbs) = &self.close_cbs {
+                        for cb in cbs.borrow_mut().drain(..) {
+                            if cb.call(ctx, JSValue::UNDEFINED, &[]).is_err() {
+                                let e = ctx.take_exception();
+                                eprintln!("Error calling onClose callback: {:?}", e);
+                            }
                         }
                     }
+
                     Ok(None)
                 }
             },

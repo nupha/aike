@@ -20,7 +20,6 @@ use axum::{
     },
     routing::{MethodRouter, delete, get, head, options, patch, post, put},
 };
-use crossbeam::channel;
 use linkme::distributed_slice;
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::wrappers::ReceiverStream;
@@ -28,7 +27,7 @@ use tower_http::services::ServeDir;
 use tower_http::set_header::SetResponseHeaderLayer;
 use zuqe::{
     CallContext, Callback, ClassCtorDef, ClassID, FieldDef, IntOrFloat, JSResult, JSValue, Object,
-    PollSender, Runtime, ScopedContext,
+    Runtime, ScopedContext,
     builtins::promise::Promise,
     def_native_object,
     gc_lite::{GcTrace, GcTraceCtx},
@@ -952,8 +951,8 @@ fn dispatch_http_request(cx: &mut ScopedContext, incoming: HttpRequest, handler_
     eprintln!("[{ms}] dispatch path={}", incoming.path);
 
     // Shared close-callback list: both req and res (and later SSE) reference
-    // the same Arc so `req.onClose(cb)` fires when SSE detects disconnect.
-    let close_cbs: super::CloseCbs = Arc::new(std::sync::Mutex::new(Vec::new()));
+    // the same Rc so `req.onClose(cb)` fires when SSE detects disconnect.
+    let close_cbs: super::CloseCbs = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
 
     let req_val: JSValue = match JSHttpRequest::new_instance(
         cx,
