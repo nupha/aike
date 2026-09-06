@@ -17,6 +17,7 @@ mod helpers;
 mod html;
 mod http;
 mod inspect_value;
+mod jinja2;
 mod json_schema;
 mod jsonl;
 mod mcp;
@@ -391,6 +392,7 @@ async fn main() -> ExitCode {
             init_mod_yaml(cx)?;
             jsonl::init_mod_jsonl(cx)?;
             json_schema::init_mod_json_schema(cx)?;
+            jinja2::init_mod_jinja2(cx)?;
             init_mod_ai(cx)?;
             init_mod_mcp(cx)?;
 

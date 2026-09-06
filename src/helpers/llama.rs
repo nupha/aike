@@ -16,6 +16,51 @@ use minijinja::Environment;
 use minijinja_contrib::pycompat;
 use serde_json::Value as JsonValue;
 
+use crate::jinja2::create_minijinja_env;
+
+/// Create an extended jinja2 environment for llama.cpp chat templates.
+///
+/// Adds `raise_exception`, `strftime_now`, `rsplit` on top of the base
+/// environment.  Only needed when rendering GGUF model chat templates.
+fn create_llama_jinja_env() -> Environment<'static> {
+    let mut env = create_minijinja_env();
+
+    env.add_function(
+        "raise_exception",
+        |msg: String| -> Result<minijinja::Value, minijinja::Error> {
+            Err(minijinja::Error::new(
+                minijinja::ErrorKind::InvalidOperation,
+                format!("Jinja Exception: {msg}"),
+            ))
+        },
+    );
+
+    env.add_function("strftime_now", |format: String| -> String {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        chrono::DateTime::from_timestamp(now.as_secs() as i64, 0)
+            .map(|dt| dt.format(&format).to_string())
+            .unwrap_or_default()
+    });
+
+    env.add_filter(
+        "rsplit",
+        |s: String, sep: Option<String>, maxsplit: Option<i64>| -> Vec<String> {
+            let delim = sep.as_deref().unwrap_or(" ");
+            match maxsplit {
+                Some(n) if n > 0 => s
+                    .rsplitn(n as usize + 1, delim)
+                    .map(|p| p.to_string())
+                    .collect(),
+                _ => s.rsplit(delim).map(|p| p.to_string()).collect(),
+            }
+        },
+    );
+
+    env
+}
+
 #[derive(Debug, serde::Serialize)]
 pub(crate) struct JinjaMessage {
     pub role: String,
@@ -68,57 +113,8 @@ impl<'a> TemplateContext<'a> {
     }
 }
 
-pub(crate) fn create_minijinja_env() -> Environment<'static> {
-    let mut env = Environment::new();
-
-    env.set_unknown_method_callback(pycompat::unknown_method_callback);
-
-    env.add_function(
-        "raise_exception",
-        |msg: String| -> Result<minijinja::Value, minijinja::Error> {
-            Err(minijinja::Error::new(
-                minijinja::ErrorKind::InvalidOperation,
-                format!("Jinja Exception: {msg}"),
-            ))
-        },
-    );
-
-    env.add_function("strftime_now", |format: String| -> String {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default();
-        chrono::DateTime::from_timestamp(now.as_secs() as i64, 0)
-            .map(|dt| dt.format(&format).to_string())
-            .unwrap_or_default()
-    });
-
-    env.add_function("tojson", |value: minijinja::Value| -> String {
-        serde_json::to_string(&value).unwrap_or_default()
-    });
-
-    env.add_filter(
-        "rsplit",
-        |s: String, sep: Option<String>, maxsplit: Option<i64>| -> Vec<String> {
-            let delim = sep.as_deref().unwrap_or(" ");
-            match maxsplit {
-                Some(n) if n > 0 => s
-                    .rsplitn(n as usize + 1, delim)
-                    .map(|p| p.to_string())
-                    .collect(),
-                _ => s.rsplit(delim).map(|p| p.to_string()).collect(),
-            }
-        },
-    );
-
-    env.add_filter("tojson", |value: minijinja::Value| -> String {
-        serde_json::to_string(&value).unwrap_or_default()
-    });
-
-    env
-}
-
 pub(crate) fn render_chat_template(tmpl: &str, ctx: &TemplateContext) -> Result<String, String> {
-    let mut env = create_minijinja_env();
+    let mut env = create_llama_jinja_env();
 
     env.add_template("chat", tmpl)
         .map_err(|e| format!("can't load template: {e}"))?;
