@@ -89,6 +89,8 @@ declare module "ai" {
     maxTokens?: number;
     timeout?: number;
     extraBody?: object;
+    /** Custom HTTP headers sent with every request. */
+    headers?: Record<string, string>;
   }
 
   /** Remote LLM client compatible with OpenAI chat API. */
@@ -101,6 +103,7 @@ declare module "ai" {
     readonly maxTokens: number;
     readonly extraBody: object | null;
     readonly timeout: number;
+    readonly headers: Record<string, string>;
 
     responseNormalizer: ((response: any) => any) | null;
 

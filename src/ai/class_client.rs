@@ -29,10 +29,11 @@ use super::{
 pub(crate) struct ClientPayload {
     pub(crate) base_url: String,
     pub(crate) api_key: String,
+    pub(crate) headers: std::collections::HashMap<String, String>,
     pub(crate) timeout: Duration,
 
     //
-    // default params
+    // model params
     //
     pub(crate) model_name: String,
     pub(crate) max_tokens: usize,
@@ -85,6 +86,7 @@ fn js_client_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             serde_json::Value::Null
         }
     };
+    let mut headers = std::collections::HashMap::new();
     let new_target = cc.this();
 
     let v = cc.arg(0);
@@ -100,11 +102,11 @@ fn js_client_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             base_url = s.content().encode_utf8(false).to_string()
         }
 
+        // apiKey
         let key_val = opts_obj.get_property_str(ctx, "apiKey")?;
-        if !key_val.is_undefined()
-            && let Some(s) = key_val
-                .as_string(true)
-                .map(|s| s.content().encode_utf8(false).to_string())
+        if let Some(s) = key_val
+            .as_string(true)
+            .map(|s| s.content().encode_utf8(false).to_string())
         {
             api_key = s
         }
@@ -147,6 +149,27 @@ fn js_client_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         }
 
         debug_assert!(extra_body.is_null() || extra_body.is_object());
+
+        // headers
+        let headers_val = opts_obj.get_property_str(ctx, "headers")?;
+        if let Some(mut obj) = headers_val.as_object() {
+            for (pk, val) in obj.get_own_property_kvs(
+                ctx,
+                zuqe::JS_GPN_STR_OR_INT_MASK,
+                zuqe::JSIteratorKindEnum::JS_ITERATOR_KIND_KEY_AND_VALUE,
+            )? {
+                if let Some(key) = pk.as_string(true)
+                    && let Some(val_str) = val.as_string(true)
+                {
+                    headers.insert(
+                        key.content().encode_utf8(false).to_string(),
+                        val_str.content().encode_utf8(false).to_string(),
+                    );
+                }
+            }
+        } else if !headers_val.is_undefined_or_null() {
+            return Err(ctx.throw_type_error("headers must be an object"));
+        }
     }
 
     let payload = Arc::new(ClientPayload {
@@ -156,6 +179,7 @@ fn js_client_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         timeout: Duration::from_secs(timeout as u64),
         max_tokens: max_tokens as usize,
         extra_body,
+        headers,
     });
 
     JSLlmClient::new_instance(ctx, new_target, payload).and_then(|mut o| {
@@ -371,6 +395,11 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
         .body(serde_json::to_string(&req_json).unwrap_or_default())
         .header("Content-Type", "application/json")
         .timeout(client.timeout); // client default timeout
+
+    // Apply custom headers (overrides Authorization if same key)
+    for (key, value) in &client.headers {
+        req_builder = req_builder.header(key.as_str(), value.as_str());
+    }
 
     if !client.api_key.is_empty() {
         req_builder = req_builder.header("Authorization", format!("Bearer {}", client.api_key));
@@ -686,6 +715,7 @@ const PROP_BASE_URL: i32 = 2;
 const PROP_EXTRA_BODY: i32 = 4;
 const PROP_TIMEOUT: i32 = 5;
 const PROP_MAX_TOKENS: i32 = 6;
+const PROP_HEADERS: i32 = 7;
 
 /// Internal property key for responseNormalizer, hidden from JS enumeration
 const INNER_PROP_RESPONSE_NORMALIZER: &str = "_responseNormalizer";
@@ -710,6 +740,14 @@ fn js_client_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             }
         }
         PROP_TIMEOUT => Ok(JSValue::from(client.timeout.as_secs() as i32)),
+        PROP_HEADERS => {
+            let mut obj = ctx.create_base_object()?;
+            for (k, v) in &client.headers {
+                let val = ctx.create_string_from_str(v)?;
+                obj.set_property_str(ctx, k, JSValue::make_string(val))?;
+            }
+            Ok(JSValue::from(obj))
+        }
         _ => Ok(JSValue::UNDEFINED),
     }
 }
@@ -784,6 +822,7 @@ const CLASS_CLIENT_PROTO: &[FieldDef] = &[
         PROP_EXTRA_BODY as _,
     ),
     FieldDef::GETSET("timeout", Some(js_client_getter), None, PROP_TIMEOUT as _),
+    FieldDef::GETSET("headers", Some(js_client_getter), None, PROP_HEADERS as _),
     FieldDef::GETSET(
         "responseNormalizer",
         Some(js_client_get_normalizer),
