@@ -1,6 +1,7 @@
 // jinja2.mjs — Test jinja2 template rendering
 import jinja2 from "jinja2";
 const { renderTemplate } = jinja2;
+import { Jinja2 } from "jinja2";
 
 let pass = 0;
 let fail = 0;
@@ -415,9 +416,55 @@ console.log("\n=== Error handling ===");
 }
 
 // ===================================================================
-// Summary
+// Results
 // ===================================================================
 console.log(`\n=== Results: ${pass} passed, ${fail} failed ===\n`);
+
+if (fail > 0) {
+  console.error("Some tests FAILED");
+  process.exit(1);
+}
+
+// ===================================================================
+// Jinja2 class tests
+// ===================================================================
+console.log("\n=== Jinja2 class ===");
+
+// Jinja2 is exposed globally via def_native_object!
+check("Jinja2 is global", typeof Jinja2 === "function");
+
+{
+  const j2 = new Jinja2();
+  check("Jinja2 instance has render", typeof j2.render === "function");
+}
+
+{
+  const j2 = new Jinja2();
+  const r = j2.render("Hello {{ name }}!", { name: "World" });
+  check("Jinja2.render works", r === "Hello World!", `got ${JSON.stringify(r)}`);
+}
+
+{
+  const j2 = new Jinja2({
+    functions: {
+      "greet": (name) => `Hello, ${name}!`,
+    }
+  });
+  const r = j2.render("{{ greet('World') }}", {});
+  check("Jinja2 with callback works", r === "Hello, World!", `got ${JSON.stringify(r)}`);
+}
+
+{
+  const j2 = new Jinja2({
+    functions: {
+      "add": (a, b) => String(Number(a) + Number(b)),
+    }
+  });
+  const r = j2.render("Result: {{ add(2, 3) }}", {});
+  check("Jinja2 callback with multiple args", r === "Result: 5", `got ${JSON.stringify(r)}`);
+}
+
+console.log(`\n=== Final Results: ${pass} passed, ${fail} failed ===\n`);
 
 if (fail > 0) {
   console.error("Some tests FAILED");
