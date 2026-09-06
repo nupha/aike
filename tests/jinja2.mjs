@@ -549,12 +549,48 @@ check("Jinja2 is global", typeof Jinja2 === "function");
   });
   const r1 = j2.render("{% if DEBUG %}Debug mode{% endif %}", {});
   const r2 = j2.render("{% if VERSION == 2 %}New{% else %}Old{% endif %}", {});
-  const r3 = j2.render("{% if ENABLE_FEATURE %}Enabled{% else %}Disabled{% endif %}", {});
+  const r3 = j2.render(
+    "{% if ENABLE_FEATURE %}Enabled{% else %}Disabled{% endif %}",
+    {},
+  );
   check(
     "Jinja2 globals control flow",
     r1 === "Debug mode" && r2 === "New" && r3 === "Disabled",
     `got debug=${r1}, version=${r2}, feature=${r3}`,
   );
+}
+
+{
+  // Test include with basePath and globals
+  const j2 = new Jinja2({
+    basePath: "/tmp/jinja2-test",
+    globals: { APP_NAME: "MyApp", VERSION: "1.0" },
+  });
+  try {
+    const r = j2.render(
+      '{% include "header.j2" %}Main{% include "footer.j2" %}',
+      {},
+    );
+    check(
+      "Jinja2 include with globals",
+      r === "Header: MyAppMainFooter: v1.0",
+      `got ${JSON.stringify(r)}`,
+    );
+  } catch (e) {
+    check("Jinja2 include with globals", false, `error: ${e.message}`);
+  }
+}
+
+{
+  // Test circular include - minijinja should detect
+  const j2 = new Jinja2({ basePath: "/tmp/jinja2-test" });
+  let threw = false;
+  try {
+    j2.render('{% include "a.j2" %}', {});
+  } catch (e) {
+    threw = true;
+  }
+  check("Jinja2 circular include throws", threw);
 }
 
 console.log(`\n=== Final Results: ${pass} passed, ${fail} failed ===\n`);

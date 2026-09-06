@@ -19,18 +19,19 @@ type Jinja2Filters = {
 };
 
 type Jinja2Globals = {
-  [key: string]: any | (() => any);
+  [key: string]: any;
 };
 
 declare module "jinja2" {
   /**
-   * Jinja2 template renderer with custom JS callback, filter and global support.
+   * Jinja2 template renderer with custom JS callback, filter, global and include support.
    *
    * @example
    * ```typescript
    * import { Jinja2 } from "jinja2";
    *
    * const j2 = new Jinja2({
+   *   basePath: "/templates",
    *   functions: {
    *     "getUserName": () => "Alice",
    *   },
@@ -39,12 +40,14 @@ declare module "jinja2" {
    *   },
    *   globals: {
    *     "APP_NAME": "MyApp",
-   *     "VERSION": "1.0.0",
    *   }
    * });
    *
-   * const result = j2.render("Welcome to {{ APP_NAME }} v{{ VERSION }}", {});
-   * // result: "Welcome to MyApp v1.0.0"
+   * // Render inline template
+   * const result = j2.render("Welcome to {{ APP_NAME }}", {});
+   *
+   * // Render template file (with include support)
+   * const result2 = j2.render("main.j2", {});
    * ```
    */
   export class Jinja2 {
@@ -52,12 +55,14 @@ declare module "jinja2" {
       functions?: Jinja2Functions;
       filters?: Jinja2Filters;
       globals?: Jinja2Globals;
+      /** Base path for template includes (default: cwd) */
+      basePath?: string;
     });
 
     /**
-     * Render a jinja2 template string with variables.
+     * Render a jinja2 template string or file with variables.
      *
-     * @param template - jinja2 template string
+     * @param template - jinja2 template string or template filename
      * @param variables - Template variables (object with string keys)
      * @returns Rendered string
      */
@@ -65,7 +70,7 @@ declare module "jinja2" {
   }
 
   /**
-   * Standalone renderTemplate function (no custom callbacks/filters).
+   * Standalone renderTemplate function (no custom callbacks/filters/includes).
    *
    * @example
    * ```typescript

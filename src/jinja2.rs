@@ -7,7 +7,7 @@
 //!   - `import jinja2 from "jinja2"` — standalone renderTemplate()
 //!   - `import { Jinja2 } from "jinja2"` — class with JS callback support
 
-use std::{cell::RefCell, collections::HashMap};
+use std::{cell::RefCell, collections::HashMap, path::PathBuf};
 
 use linkme::distributed_slice;
 use minijinja::{Environment, value::Rest};
@@ -20,7 +20,7 @@ use zuqe::{
 use crate::USER_CLASS_DEFS;
 
 // ---------------------------------------------------------------------------
-// Thread-local storage for JS callbacks and context during render
+// Thread-local storage for JS callbacks, context
 // ---------------------------------------------------------------------------
 
 thread_local! {
@@ -96,6 +96,7 @@ pub(crate) struct Jinja2Payload {
     functions: HashMap<String, JSValue>,
     filters: HashMap<String, JSValue>,
     globals: HashMap<String, JSValue>,
+    base_path: PathBuf,
 }
 
 impl GcTrace for Jinja2Payload {
@@ -191,6 +192,7 @@ fn js_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut functions = HashMap::new();
     let mut filters = HashMap::new();
     let mut globals = HashMap::new();
+    let mut base_path = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
     if cc.length() > 0 {
         let opts = cc.arg(0);
@@ -202,6 +204,24 @@ fn js_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             functions = parse_callable_map(ctx, &obj, "functions")?;
             filters = parse_callable_map(ctx, &obj, "filters")?;
             globals = parse_value_map(ctx, &obj, "globals")?;
+
+            // Parse basePath and convert to absolute path
+            if let Some(path_val) = obj
+                .get_property_str(ctx, "basePath")
+                .ok()
+                .filter(|v| !v.is_undefined() && !v.is_null())
+            {
+                if let Some(path_str) = path_val.as_string(true) {
+                    let p = PathBuf::from(path_str.content().encode_utf8(false).to_string());
+                    base_path = if p.is_absolute() {
+                        p
+                    } else {
+                        std::env::current_dir()
+                            .unwrap_or_else(|_| PathBuf::from("."))
+                            .join(p)
+                    };
+                }
+            }
         }
     }
 
@@ -209,6 +229,7 @@ fn js_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         functions,
         filters,
         globals,
+        base_path,
     };
     JSJinja2::new_instance(ctx, new_target, payload).map(JSValue::from)
 }
@@ -234,6 +255,25 @@ fn js_render(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let _guard = CallbackGuard::new(ctx, &payload);
 
     let mut env = create_minijinja_env();
+
+    // Set up loader with basePath from payload
+    if payload.base_path.exists() && payload.base_path.is_dir() {
+        let base = payload.base_path.clone();
+        env.set_loader(move |name| {
+            // Resolve to absolute path (basePath is fixed, so just join)
+            let path = base.join(name);
+
+            // Read file
+            let content = std::fs::read_to_string(&path).map_err(|e| {
+                minijinja::Error::new(
+                    minijinja::ErrorKind::InvalidOperation,
+                    format!("Failed to read template '{}': {}", name, e),
+                )
+            })?;
+
+            Ok(Some(content))
+        });
+    }
 
     // Register callback function wrappers
     for name in payload.functions.keys() {
@@ -368,6 +408,7 @@ fn js_render(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         }
     }
 
+    // Add template (always inline content)
     env.add_template("template", &template)
         .map_err(|e| ctx.throw_type_error(&format!("template parse error: {e}")))?;
 
