@@ -14,9 +14,17 @@ type Jinja2Functions = {
   [key: string]: (...args: any[]) => any;
 };
 
+type Jinja2Filters = {
+  [key: string]: (value: any, ...args: any[]) => any;
+};
+
+type Jinja2Globals = {
+  [key: string]: any | (() => any);
+};
+
 declare module "jinja2" {
   /**
-   * Jinja2 template renderer with custom JS callback support.
+   * Jinja2 template renderer with custom JS callback, filter and global support.
    *
    * @example
    * ```typescript
@@ -25,16 +33,26 @@ declare module "jinja2" {
    * const j2 = new Jinja2({
    *   functions: {
    *     "getUserName": () => "Alice",
-   *     "formatDate": (d) => new Date(d).toLocaleDateString(),
+   *   },
+   *   filters: {
+   *     "currency": (v) => `$${v}`,
+   *   },
+   *   globals: {
+   *     "APP_NAME": "MyApp",
+   *     "VERSION": "1.0.0",
    *   }
    * });
    *
-   * const result = j2.render("Hello {{ getUserName() }}!", {});
-   * // result: "Hello Alice!"
+   * const result = j2.render("Welcome to {{ APP_NAME }} v{{ VERSION }}", {});
+   * // result: "Welcome to MyApp v1.0.0"
    * ```
    */
   export class Jinja2 {
-    constructor(options?: { functions?: Jinja2Functions });
+    constructor(options?: {
+      functions?: Jinja2Functions;
+      filters?: Jinja2Filters;
+      globals?: Jinja2Globals;
+    });
 
     /**
      * Render a jinja2 template string with variables.
@@ -47,7 +65,7 @@ declare module "jinja2" {
   }
 
   /**
-   * Standalone renderTemplate function (no custom callbacks).
+   * Standalone renderTemplate function (no custom callbacks/filters).
    *
    * @example
    * ```typescript

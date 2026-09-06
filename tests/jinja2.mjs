@@ -1,7 +1,6 @@
 // jinja2.mjs — Test jinja2 template rendering
-import jinja2 from "jinja2";
+import jinja2, { Jinja2 } from "jinja2";
 const { renderTemplate } = jinja2;
-import { Jinja2 } from "jinja2";
 
 let pass = 0;
 let fail = 0;
@@ -441,27 +440,121 @@ check("Jinja2 is global", typeof Jinja2 === "function");
 {
   const j2 = new Jinja2();
   const r = j2.render("Hello {{ name }}!", { name: "World" });
-  check("Jinja2.render works", r === "Hello World!", `got ${JSON.stringify(r)}`);
+  check(
+    "Jinja2.render works",
+    r === "Hello World!",
+    `got ${JSON.stringify(r)}`,
+  );
 }
 
 {
   const j2 = new Jinja2({
     functions: {
-      "greet": (name) => `Hello, ${name}!`,
-    }
+      greet: (name) => `Hello, ${name}!`,
+    },
   });
   const r = j2.render("{{ greet('World') }}", {});
-  check("Jinja2 with callback works", r === "Hello, World!", `got ${JSON.stringify(r)}`);
+  check(
+    "Jinja2 with callback works",
+    r === "Hello, World!",
+    `got ${JSON.stringify(r)}`,
+  );
 }
 
 {
   const j2 = new Jinja2({
     functions: {
-      "add": (a, b) => String(Number(a) + Number(b)),
-    }
+      add: (a, b) => String(Number(a) + Number(b)),
+    },
   });
   const r = j2.render("Result: {{ add(2, 3) }}", {});
-  check("Jinja2 callback with multiple args", r === "Result: 5", `got ${JSON.stringify(r)}`);
+  check(
+    "Jinja2 callback with multiple args",
+    r === "Result: 5",
+    `got ${JSON.stringify(r)}`,
+  );
+}
+
+{
+  const j2 = new Jinja2({
+    filters: {
+      currency: (v) => `$${v}`,
+      repeat: (v, n) => v.repeat(Number(n)),
+    },
+  });
+  const r = j2.render("Price: {{ price|currency }}", { price: 100 });
+  check("Jinja2 filter works", r === "Price: $100", `got ${JSON.stringify(r)}`);
+}
+
+{
+  const j2 = new Jinja2({
+    filters: {
+      repeat: (v, n) => v.repeat(Number(n)),
+    },
+  });
+  const r = j2.render("{{ text|repeat(3) }}", { text: "ab" });
+  check("Jinja2 filter with args", r === "ababab", `got ${JSON.stringify(r)}`);
+}
+
+{
+  const j2 = new Jinja2({
+    functions: { wrap: (v) => `[${v}]` },
+    filters: { wrap: (v) => `(${v})` },
+  });
+  const r1 = j2.render("{{ wrap('test') }}", {});
+  const r2 = j2.render("{{ 'test'|wrap }}", {});
+  check(
+    "functions and filters same name, different syntax",
+    r1 === "[test]" && r2 === "(test)",
+    `got func=${r1}, filter=${r2}`,
+  );
+}
+
+{
+  const j2 = new Jinja2({
+    globals: {
+      APP_NAME: "MyApp",
+      VERSION: "1.0.0",
+    },
+  });
+  const r = j2.render("Welcome to {{ APP_NAME }} v{{ VERSION }}", {});
+  check(
+    "Jinja2 globals work",
+    r === "Welcome to MyApp v1.0.0",
+    `got ${JSON.stringify(r)}`,
+  );
+}
+
+{
+  // Note: globals are constants only, use functions for callable values
+  const j2 = new Jinja2({
+    functions: { now: () => new Date().toISOString().split("T")[0] },
+  });
+  const r = j2.render("Today: {{ now() }}", {});
+  check(
+    "Jinja2 functions for callable globals",
+    r.startsWith("Today: "),
+    `got ${JSON.stringify(r)}`,
+  );
+}
+
+{
+  // globals can control flow with booleans/numbers
+  const j2 = new Jinja2({
+    globals: {
+      DEBUG: true,
+      VERSION: 2,
+      ENABLE_FEATURE: false,
+    },
+  });
+  const r1 = j2.render("{% if DEBUG %}Debug mode{% endif %}", {});
+  const r2 = j2.render("{% if VERSION == 2 %}New{% else %}Old{% endif %}", {});
+  const r3 = j2.render("{% if ENABLE_FEATURE %}Enabled{% else %}Disabled{% endif %}", {});
+  check(
+    "Jinja2 globals control flow",
+    r1 === "Debug mode" && r2 === "New" && r3 === "Disabled",
+    `got debug=${r1}, version=${r2}, feature=${r3}`,
+  );
 }
 
 console.log(`\n=== Final Results: ${pass} passed, ${fail} failed ===\n`);

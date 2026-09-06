@@ -25,11 +25,21 @@ use crate::USER_CLASS_DEFS;
 
 thread_local! {
     static JS_CALLBACKS: RefCell<HashMap<String, JSValue>> = RefCell::new(HashMap::new());
+    static JS_FILTERS: RefCell<HashMap<String, JSValue>> = RefCell::new(HashMap::new());
+    static JS_GLOBALS: RefCell<HashMap<String, JSValue>> = RefCell::new(HashMap::new());
     static JS_CTX: RefCell<Option<*mut ScopedContext<'static>>> = RefCell::new(None);
 }
 
 pub(crate) fn get_callback(name: &str) -> Option<JSValue> {
     JS_CALLBACKS.with(|c| c.borrow().get(name).cloned())
+}
+
+pub(crate) fn get_filter(name: &str) -> Option<JSValue> {
+    JS_FILTERS.with(|c| c.borrow().get(name).cloned())
+}
+
+pub(crate) fn get_global(name: &str) -> Option<JSValue> {
+    JS_GLOBALS.with(|c| c.borrow().get(name).cloned())
 }
 
 /// Get current ScopedContext from thread-local (only valid during render)
@@ -46,13 +56,19 @@ pub(crate) fn with_ctx<R>(f: impl FnOnce(&mut ScopedContext) -> R) -> Option<R> 
     })
 }
 
-/// RAII guard: registers callbacks and context, clears on drop
+/// RAII guard: registers callbacks, filters, globals and context, clears on drop
 struct CallbackGuard;
 
 impl CallbackGuard {
     fn new(ctx: &mut ScopedContext, payload: &Jinja2Payload) -> Self {
         JS_CALLBACKS.with(|c| {
             *c.borrow_mut() = payload.functions.clone();
+        });
+        JS_FILTERS.with(|c| {
+            *c.borrow_mut() = payload.filters.clone();
+        });
+        JS_GLOBALS.with(|c| {
+            *c.borrow_mut() = payload.globals.clone();
         });
         JS_CTX.with(|c| {
             *c.borrow_mut() = Some(ctx as *mut ScopedContext as *mut ScopedContext<'static>);
@@ -64,6 +80,8 @@ impl CallbackGuard {
 impl Drop for CallbackGuard {
     fn drop(&mut self) {
         JS_CALLBACKS.with(|c| c.borrow_mut().clear());
+        JS_FILTERS.with(|c| c.borrow_mut().clear());
+        JS_GLOBALS.with(|c| c.borrow_mut().clear());
         JS_CTX.with(|c| {
             *c.borrow_mut() = None;
         });
@@ -76,6 +94,8 @@ impl Drop for CallbackGuard {
 
 pub(crate) struct Jinja2Payload {
     functions: HashMap<String, JSValue>,
+    filters: HashMap<String, JSValue>,
+    globals: HashMap<String, JSValue>,
 }
 
 impl GcTrace for Jinja2Payload {
@@ -83,12 +103,94 @@ impl GcTrace for Jinja2Payload {
         for v in self.functions.values() {
             JSValue::from(v.clone()).trace(gcx);
         }
+        for v in self.filters.values() {
+            JSValue::from(v.clone()).trace(gcx);
+        }
+        for v in self.globals.values() {
+            JSValue::from(v.clone()).trace(gcx);
+        }
     }
+}
+
+/// Parse a JS object into a HashMap of callable functions
+fn parse_callable_map(
+    ctx: &mut ScopedContext,
+    obj: &zuqe::Object,
+    key: &str,
+) -> Result<HashMap<String, JSValue>, i32> {
+    let mut map = HashMap::new();
+
+    if let Some(val) = obj
+        .get_property_str(ctx, key)
+        .ok()
+        .filter(|v| !v.is_undefined() && !v.is_null())
+    {
+        if let Some(mut inner_obj) = val.as_object() {
+            if let Ok(keys) = inner_obj
+                .get_own_property_names(ctx, zuqe::JS_GPN_ENUM_ONLY | zuqe::JS_GPN_STR_OR_INT_MASK)
+            {
+                for pk in keys.to_vec() {
+                    let key_str = if let Some(i) = pk.atom.to_small_int() {
+                        format!("{i}")
+                    } else if let Ok(kv) = pk.atom.to_value(ctx) {
+                        kv.to_string(ctx)?.content().encode_utf8(false).to_string()
+                    } else {
+                        continue;
+                    };
+
+                    let val = inner_obj.get_property_str(ctx, &key_str)?;
+                    if val.is_callable() {
+                        map.insert(key_str, val);
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(map)
+}
+
+/// Parse a JS object into a HashMap of any values (for globals)
+fn parse_value_map(
+    ctx: &mut ScopedContext,
+    obj: &zuqe::Object,
+    key: &str,
+) -> Result<HashMap<String, JSValue>, i32> {
+    let mut map = HashMap::new();
+
+    if let Some(val) = obj
+        .get_property_str(ctx, key)
+        .ok()
+        .filter(|v| !v.is_undefined() && !v.is_null())
+    {
+        if let Some(mut inner_obj) = val.as_object() {
+            if let Ok(keys) = inner_obj
+                .get_own_property_names(ctx, zuqe::JS_GPN_ENUM_ONLY | zuqe::JS_GPN_STR_OR_INT_MASK)
+            {
+                for pk in keys.to_vec() {
+                    let key_str = if let Some(i) = pk.atom.to_small_int() {
+                        format!("{i}")
+                    } else if let Ok(kv) = pk.atom.to_value(ctx) {
+                        kv.to_string(ctx)?.content().encode_utf8(false).to_string()
+                    } else {
+                        continue;
+                    };
+
+                    let val = inner_obj.get_property_str(ctx, &key_str)?;
+                    map.insert(key_str, val);
+                }
+            }
+        }
+    }
+
+    Ok(map)
 }
 
 fn js_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let new_target = cc.this();
     let mut functions = HashMap::new();
+    let mut filters = HashMap::new();
+    let mut globals = HashMap::new();
 
     if cc.length() > 0 {
         let opts = cc.arg(0);
@@ -97,37 +199,17 @@ fn js_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 .as_object()
                 .ok_or_else(|| ctx.throw_type_error("options must be an object"))?;
 
-            if let Some(funcs_val) = obj
-                .get_property_str(ctx, "functions")
-                .ok()
-                .filter(|v| !v.is_undefined() && !v.is_null())
-            {
-                if let Some(mut funcs_obj) = funcs_val.as_object() {
-                    if let Ok(keys) = funcs_obj.get_own_property_names(
-                        ctx,
-                        zuqe::JS_GPN_ENUM_ONLY | zuqe::JS_GPN_STR_OR_INT_MASK,
-                    ) {
-                        for pk in keys.to_vec() {
-                            let key_str = if let Some(i) = pk.atom.to_small_int() {
-                                format!("{i}")
-                            } else if let Ok(kv) = pk.atom.to_value(ctx) {
-                                kv.to_string(ctx)?.content().encode_utf8(false).to_string()
-                            } else {
-                                continue;
-                            };
-
-                            let val = funcs_obj.get_property_str(ctx, &key_str)?;
-                            if val.is_callable() {
-                                functions.insert(key_str, val);
-                            }
-                        }
-                    }
-                }
-            }
+            functions = parse_callable_map(ctx, &obj, "functions")?;
+            filters = parse_callable_map(ctx, &obj, "filters")?;
+            globals = parse_value_map(ctx, &obj, "globals")?;
         }
     }
 
-    let payload = Jinja2Payload { functions };
+    let payload = Jinja2Payload {
+        functions,
+        filters,
+        globals,
+    };
     JSJinja2::new_instance(ctx, new_target, payload).map(JSValue::from)
 }
 
@@ -207,6 +289,83 @@ fn js_render(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 })
             },
         );
+    }
+
+    // Register filter wrappers
+    for name in payload.filters.keys() {
+        let name_clone = name.clone();
+        env.add_filter(
+            name.clone(),
+            move |value: minijinja::Value,
+                  args: Rest<minijinja::Value>|
+                  -> Result<minijinja::Value, minijinja::Error> {
+                // Get filter from thread-local
+                let func = get_filter(&name_clone).ok_or_else(|| {
+                    minijinja::Error::new(
+                        minijinja::ErrorKind::InvalidOperation,
+                        format!("JS filter '{}' not found", name_clone),
+                    )
+                })?;
+
+                // Get context from thread-local and call JS function
+                with_ctx(|ctx| {
+                    // Convert value and args to JSValue
+                    let mut js_args: Vec<JSValue> = Vec::new();
+
+                    // First arg is the value being filtered
+                    let value_str = value.to_string();
+                    let js_value = ctx
+                        .create_string_from_str(&value_str)
+                        .map(JSValue::make_string)
+                        .unwrap_or(JSValue::UNDEFINED);
+                    js_args.push(js_value);
+
+                    // Additional args
+                    for arg in args.0.iter() {
+                        let s = arg.to_string();
+                        let js_arg = ctx
+                            .create_string_from_str(&s)
+                            .map(JSValue::make_string)
+                            .unwrap_or(JSValue::UNDEFINED);
+                        js_args.push(js_arg);
+                    }
+
+                    // Call JS function
+                    let result = func.call(ctx, JSValue::UNDEFINED, &js_args).map_err(|_| {
+                        let exc = ctx.take_exception_as_text();
+                        minijinja::Error::new(
+                            minijinja::ErrorKind::InvalidOperation,
+                            format!("JS filter '{}' error: {}", name_clone, exc.message),
+                        )
+                    })?;
+
+                    // Convert result to minijinja Value
+                    let result_str = result
+                        .to_string(ctx)
+                        .map(|s| s.content().encode_utf8(false).to_string())
+                        .unwrap_or_default();
+
+                    Ok(minijinja::Value::from(result_str))
+                })
+                .unwrap_or_else(|| {
+                    Err(minijinja::Error::new(
+                        minijinja::ErrorKind::InvalidOperation,
+                        format!("JS filter '{}' called outside render context", name_clone),
+                    ))
+                })
+            },
+        );
+    }
+
+    // Register globals as constants (non-callable values)
+    // For callable globals, use functions instead
+    for (name, value) in payload.globals.iter() {
+        if !value.is_callable() {
+            // Convert JSValue to minijinja Value preserving type
+            let json_val = value.to_serde_json_primitive(ctx);
+            let mv = minijinja::Value::from_serialize(&json_val);
+            env.add_global(name.clone(), mv);
+        }
     }
 
     env.add_template("template", &template)
