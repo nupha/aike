@@ -104,7 +104,7 @@ fn stream_event_to_js(ctx: &mut ScopedContext, event: &ResponseStreamEvent) -> J
 
 pub(super) fn js_client_responses(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
-    let client_arc = get_client(ctx, this)?;
+    let client = get_client(ctx, &this)?;
     let is_stream = cc.magic() == MAGIC_RESPONSES_STREAM;
 
     let opts = cc
@@ -119,7 +119,7 @@ pub(super) fn js_client_responses(ctx: &mut ScopedContext, cc: CallContext) -> J
     let model = if let Some(s) = model_val.as_string(true) {
         s.content().encode_utf8(false).to_string()
     } else {
-        client_arc.model_name.clone()
+        client.model_name.clone()
     };
 
     let mut req_builder = CreateResponseArgs::default();
@@ -194,9 +194,9 @@ pub(super) fn js_client_responses(ctx: &mut ScopedContext, cc: CallContext) -> J
         .build()
         .map_err(|e| ctx.throw_internal_error(&format!("failed to build request: {e}")))?;
 
-    let base_url = client_arc.base_url.clone();
-    let api_key = client_arc.api_key.clone();
-    let timeout = client_arc.timeout;
+    let base_url = client.base_url.clone();
+    let api_key = client.api_key.clone();
+    let timeout = client.timeout;
 
     let url = format!("{}/responses", base_url);
     let http_client = reqwest::Client::new();

@@ -22,11 +22,29 @@ declare module "ai" {
     json_schema?: unknown;
   }
 
-  /** Token usage statistics. */
+  /** Token usage statistics (OpenAI-compatible). */
   export interface ChatUsage {
     prompt_tokens: number;
     completion_tokens: number;
     total_tokens: number;
+    /** Breakdown of prompt tokens (OpenAI extension). */
+    prompt_tokens_details?: {
+      /** Number of tokens served from cache. */
+      cached_tokens?: number;
+      /** Number of audio tokens in the prompt. */
+      audio_tokens?: number;
+    };
+    /** Breakdown of completion tokens (OpenAI extension). */
+    completion_tokens_details?: {
+      /** Number of reasoning tokens. */
+      reasoning_tokens?: number;
+      /** Number of audio tokens in the completion. */
+      audio_tokens?: number;
+      /** Number of accepted prediction tokens. */
+      accepted_prediction_tokens?: number;
+      /** Number of rejected prediction tokens. */
+      rejected_prediction_tokens?: number;
+    };
   }
 
   /** Chat completion request body (snake_case, matching OpenAI API). */
@@ -111,6 +129,14 @@ declare module "ai" {
     chat(options: ChatRequest): AsyncIterableIterator<ChatStreamChunk>;
     responses(options: ChatRequest): AsyncIterableIterator<any>;
     responsesOnce(options: ChatRequest): Promise<any>;
+
+    /** Insert or update a single HTTP header. Pass `null` to remove the entry;
+     * `undefined` is a no-op. Affects every subsequent `chat`/`responses` call. */
+    setHeader(name: string, value: string | null | undefined): void;
+
+    /** Read a single header value, or `undefined` if not set. */
+    getHeader(name: string): string | undefined;
+
     dispose(): void;
   }
 }

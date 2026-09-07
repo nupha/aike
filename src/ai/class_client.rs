@@ -44,13 +44,19 @@ impl GcTrace for ClientPayload {
     fn trace(&self, _gcx: &mut GcTraceCtx) {}
 }
 
-pub(crate) fn get_client(ctx: &mut ScopedContext, val: JSValue) -> Result<Arc<ClientPayload>, i32> {
-    let ob = JSLlmClient::try_from(val).unwrap();
-    if let Some(c) = ob.payload() {
-        Ok(c.clone())
-    } else {
-        Err(ctx.throw_type_error("LlmClient was detached"))
-    }
+pub(super) fn get_client<'a>(
+    ctx: &mut ScopedContext,
+    val: &'a JSValue,
+) -> Result<&'a ClientPayload, i32> {
+    JSLlmClient::payload_of(val).ok_or_else(|| ctx.throw_type_error("not an LlmClient instance"))
+}
+
+pub(super) fn get_client_mut<'a>(
+    ctx: &mut ScopedContext,
+    val: &'a mut JSValue,
+) -> Result<&'a mut ClientPayload, i32> {
+    JSLlmClient::payload_mut_of(val)
+        .ok_or_else(|| ctx.throw_type_error("not an LlmClient instance"))
 }
 
 /// Constructor: new LlmClient({apiKey, baseUrl, model?, timeout?})
@@ -172,7 +178,7 @@ fn js_client_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         }
     }
 
-    let payload = Arc::new(ClientPayload {
+    let payload = ClientPayload {
         model_name: model,
         base_url,
         api_key,
@@ -180,7 +186,7 @@ fn js_client_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         max_tokens: max_tokens as usize,
         extra_body,
         headers,
-    });
+    };
 
     JSLlmClient::new_instance(ctx, new_target, payload).and_then(|mut o| {
         // Initialize hidden internal property for responseNormalizer,
@@ -311,7 +317,7 @@ enum ChatReply {
 
 fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
-    let client = get_client(ctx, this)?;
+    let client = get_client(ctx, &this)?;
     let is_stream = cc.magic() == MAGIC_CHAT_STREAM;
 
     let opts_obj = cc
@@ -722,7 +728,7 @@ const INNER_PROP_RESPONSE_NORMALIZER: &str = "_responseNormalizer";
 
 fn js_client_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
-    let client = get_client(ctx, this)?;
+    let client = get_client(ctx, &this)?;
 
     match cc.magic() {
         PROP_MODEL => ctx
@@ -774,6 +780,60 @@ fn js_client_set_normalizer(ctx: &mut ScopedContext, cc: CallContext) -> JSResul
     Ok(JSValue::UNDEFINED)
 }
 
+fn js_client_set_header(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let mut this = cc.this();
+    let name_val = cc.arg(0);
+    let val = cc.arg(1);
+
+    let name = match name_val.as_string(true) {
+        Some(s) => s.content().encode_utf8(false).to_string(),
+        None => {
+            return Err(ctx.throw_type_error("setHeader: header name must be a string"));
+        }
+    };
+
+    let payload = get_client_mut(ctx, &mut this)?;
+
+    // Undefined → no-op (matches the bulk setter's no-op semantics).
+    if val.is_undefined() {
+        return Ok(JSValue::UNDEFINED);
+    }
+    // Null → delete the entry.
+    if val.is_null() {
+        payload.headers.remove(&name);
+        return Ok(JSValue::UNDEFINED);
+    }
+    // String → insert/update.
+    let s = match val.as_string(true) {
+        Some(s) => s.content().encode_utf8(false).to_string(),
+        None => {
+            return Err(
+                ctx.throw_type_error("setHeader: value must be a string, null, or undefined")
+            );
+        }
+    };
+    payload.headers.insert(name, s);
+    Ok(JSValue::UNDEFINED)
+}
+
+fn js_client_get_header(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let this = cc.this();
+    let name_val = cc.arg(0);
+
+    let name = match name_val.as_string(true) {
+        Some(s) => s.content().encode_utf8(false).to_string(),
+        None => {
+            return Err(ctx.throw_type_error("getHeader: header name must be a string"));
+        }
+    };
+
+    let payload = get_client(ctx, &this)?;
+    match payload.headers.get(&name) {
+        Some(v) => ctx.create_string_from_str(v).map(JSValue::make_string),
+        None => Ok(JSValue::UNDEFINED),
+    }
+}
+
 fn js_client_dispose(_: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut this = cc.this();
     let _ = JSLlmClient::take_payload_of(&mut this);
@@ -807,6 +867,8 @@ const CLASS_CLIENT_PROTO: &[FieldDef] = &[
         MAGIC_RESPONSES_ONCE as i16,
     ),
     FieldDef::FUNC("dispose", 0, js_client_dispose, 0),
+    FieldDef::FUNC("setHeader", 2, js_client_set_header, 0),
+    FieldDef::FUNC("getHeader", 1, js_client_get_header, 0),
     FieldDef::GETSET("model", Some(js_client_getter), None, PROP_MODEL as _),
     FieldDef::GETSET("baseUrl", Some(js_client_getter), None, PROP_BASE_URL as _),
     FieldDef::GETSET(
@@ -834,7 +896,7 @@ const CLASS_CLIENT_PROTO: &[FieldDef] = &[
 def_native_object!(
     "LlmClient",
     JSLlmClient,
-    Arc<ClientPayload>,
+    ClientPayload,
     CLASS_CLIENT_PROTO,
     Some(ClassCtorDef::new(js_client_constructor, 1, false))
 );
