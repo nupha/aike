@@ -38,10 +38,6 @@ pub(crate) fn get_filter(name: &str) -> Option<JSValue> {
     JS_FILTERS.with(|c| c.borrow().get(name).cloned())
 }
 
-pub(crate) fn get_global(name: &str) -> Option<JSValue> {
-    JS_GLOBALS.with(|c| c.borrow().get(name).cloned())
-}
-
 /// Get current ScopedContext from thread-local (only valid during render)
 pub(crate) fn with_ctx<R>(f: impl FnOnce(&mut ScopedContext) -> R) -> Option<R> {
     JS_CTX.with(|c| {

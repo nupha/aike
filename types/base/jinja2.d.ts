@@ -2,6 +2,17 @@
 // import { Jinja2 } from "jinja2";
 // import jinja2 from "jinja2";
 
+// ── Template data rules ──────────────────────────────────────────────
+// 1. Variables are deep-serialized to JSON before rendering. Object
+//    properties (including getters) are readable; functions become null.
+// 2. Injected objects are immutable snapshots — {% set %} cannot modify
+//    the original JS object.
+// 3. Methods on injected objects are not callable (stripped to null).
+// 4. Globals: non-scalar values (object/array/function) become null.
+// 5. Functions/filters: all arguments are stringified; return values
+//    are stringified. No live JS objects cross the boundary.
+// ─────────────────────────────────────────────────────────────────────
+
 type Jinja2Value =
   | string
   | number
@@ -85,10 +96,8 @@ declare module "jinja2" {
    * @param variables - Template variables (object with string keys)
    * @returns Rendered string
    */
-  export default {
-    renderTemplate(
-      template: string,
-      variables?: Record<string, Jinja2Value>,
-    ): string;
-  };
+  export function renderTemplate(
+    template: string,
+    variables?: Record<string, Jinja2Value>,
+  ): string;
 }
