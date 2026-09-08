@@ -1040,6 +1040,15 @@ fn create_stream_async_iterator(
         cached_promise: RefCell<Option<Promise>>,
     }
 
+    impl zuqe::GcTrace for ReaderFetcher {
+        fn trace(&self, tr: &mut zuqe::gc_lite::GcTraceCtx) {
+            self.reader_val.trace(tr);
+            if let Some(p) = self.cached_promise.borrow().as_ref() {
+                p.trace(tr);
+            }
+        }
+    }
+
     impl ReaderFetcher {
         /// Release the reader lock (ReadableStreamDefaultReaderRelease), so the
         /// stream can be locked again by a later getReader()/values() and any

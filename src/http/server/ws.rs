@@ -184,6 +184,10 @@ struct WsReadFetcher {
     control_tx: mpsc::Sender<WsControl>,
 }
 
+impl zuqe::GcTrace for WsReadFetcher {
+    fn trace(&self, _tr: &mut zuqe::gc_lite::GcTraceCtx) {}
+}
+
 impl AsyncIteratorFetcher for WsReadFetcher {
     fn try_fetch(&self, cx: &mut ScopedContext) -> Result<IterFetchStatus, i32> {
         let mut g = self.rx.borrow_mut();
