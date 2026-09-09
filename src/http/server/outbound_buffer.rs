@@ -20,7 +20,6 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use tokio::sync::mpsc;
 use zuqe::{
     JSValue, Object, ScopedContext,
     builtins::promise::Promise,
@@ -41,7 +40,7 @@ pub(crate) const OUTBOUND_CAP: usize = 64;
 /// and flushes the backlog, resolving each parked Promise in turn.
 pub(crate) struct OutboundBuffer {
     /// Bounded sender. `None` once the stream is explicitly closed.
-    pub(crate) tx: Option<mpsc::Sender<String>>,
+    pub(crate) tx: Option<tokio::sync::mpsc::Sender<String>>,
     /// Frames awaiting capacity + the resolver that completes their Promise.
     pending: Arc<Mutex<VecDeque<(zuqe::WakeSender<()>, String)>>>,
     /// Backpressure-relief callback (Bun `drain` semantics), invoked on the JS
@@ -57,8 +56,8 @@ pub(crate) struct OutboundBuffer {
 impl OutboundBuffer {
     /// Create a new buffer together with the `Receiver` the consumer
     /// (bridge task or axum `Sse`) reads frames from.
-    pub(crate) fn new(cap: usize) -> (Self, mpsc::Receiver<String>) {
-        let (tx, rx) = mpsc::channel(cap);
+    pub(crate) fn new(cap: usize) -> (Self, tokio::sync::mpsc::Receiver<String>) {
+        let (tx, rx) = tokio::sync::mpsc::channel(cap);
         (
             Self {
                 tx: Some(tx),
@@ -72,7 +71,7 @@ impl OutboundBuffer {
     }
 
     /// Wrap a sender that was created earlier (e.g. at WS upgrade time).
-    pub(crate) fn from_existing(tx: mpsc::Sender<String>) -> Self {
+    pub(crate) fn from_existing(tx: tokio::sync::mpsc::Sender<String>) -> Self {
         Self {
             tx: Some(tx),
             pending: Arc::new(Mutex::new(VecDeque::new())),
@@ -85,6 +84,29 @@ impl OutboundBuffer {
     /// Attach a shared close-callback list. Fired on first channel-close.
     pub(crate) fn set_close_cbs(&mut self, cbs: class_request::CloseCbs) {
         self.close_cbs = Some(cbs);
+    }
+
+    /// Arm a disconnect watcher. Takes a clone of the mpsc sender so the tokio
+    /// task can await its closure. Returns a `std::sync::mpsc::Receiver<()>`
+    /// that receives a signal when the client disconnects — poll it via
+    /// `queue_job` on the JS thread to fire `close_cbs`.
+    pub(crate) fn arm_disconnect_watcher(
+        &mut self,
+        ctx: &ScopedContext,
+        mpsc_tx: tokio::sync::mpsc::Sender<String>,
+    ) -> zuqe::WakeReceiver<()> {
+        let (wake_tx, wake_rx) = ctx.make_channel::<()>(1);
+
+        // Spawn a tokio task that watches for receiver drop.
+        tokio::spawn(async move {
+            // Wait until the receiver side is dropped (client disconnect or
+            // stream ends). `sender.closed()` resolves when all receivers are gone.
+            mpsc_tx.closed().await;
+            // Signal the JS thread.
+            let _ = wake_tx.send(());
+        });
+
+        wake_rx
     }
 
     /// Drop the sender so the underlying stream ends (SSE close / WS close).
@@ -110,7 +132,7 @@ impl OutboundBuffer {
         match &self.tx {
             Some(tx) => match tx.try_send(frame) {
                 Ok(()) => Ok(None),
-                Err(mpsc::error::TrySendError::Full(f)) => {
+                Err(tokio::sync::mpsc::error::TrySendError::Full(f)) => {
                     let (p, slot) =
                         Promise::create_with_channel::<()>(ctx, |_cx, _| Ok(JSValue::UNDEFINED))?;
                     self.pending.lock().unwrap().push_back((slot, f));
@@ -118,7 +140,7 @@ impl OutboundBuffer {
                     Ok(Some(p.into()))
                 }
                 // Closed: the stream is gone — fire disconnect callbacks once.
-                Err(mpsc::error::TrySendError::Closed(_)) => {
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
                     if let Some(cbs) = &self.close_cbs {
                         for cb in cbs.borrow_mut().drain(..) {
                             if cb.call(ctx, JSValue::UNDEFINED, &[]).is_err() {

@@ -380,6 +380,41 @@ fn js_res_sse(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     // Wire disconnect callbacks so req.onClose(cb) fires when the client leaves.
     sink.set_close_cbs(data.close_cbs.clone());
 
+    // Arm disconnect watcher: when the mpsc receiver is dropped (client
+    // disconnect), a tokio task signals the JS thread via WakeSender, and
+    // the queue_job below fires close_cbs.
+    //
+    // Queue a job that polls the disconnect signal and fires close_cbs.
+    {
+        let close_cbs = data.close_cbs.clone();
+        let disconnect_rx =
+            sink.arm_disconnect_watcher(ctx, sink.tx.clone().expect("sink tx must be present"));
+
+        ctx.queue_job(
+            move |cx| match disconnect_rx.try_recv() {
+                Ok(()) => {
+                    // Client disconnected — fire onClose callbacks.
+                    for cb in close_cbs.borrow_mut().drain(..) {
+                        if cb.call(cx, JSValue::UNDEFINED, &[]).is_err() {
+                            let e = cx.take_exception_as_text();
+                            eprintln!("Error calling onClose callback: {:?}", e.message);
+                        }
+                    }
+                    Ok(zuqe::JobState::Done)
+                }
+                Err(crossbeam::channel::TryRecvError::Empty) => {
+                    // Not yet — re-queue for next tick.
+                    Ok(zuqe::JobState::Block)
+                }
+                Err(crossbeam::channel::TryRecvError::Disconnected) => {
+                    // Watcher gone (shouldn't happen normally).
+                    Ok(zuqe::JobState::Done)
+                }
+            },
+            (),
+        );
+    }
+
     // Open the streaming response immediately (before JS writes the first frame).
     let msg = HttpResponseMessage::Streaming {
         status,
