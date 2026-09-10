@@ -405,7 +405,7 @@ fn js_text_decoder_decode(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
 fn js_text_decoder_encoding_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let decoder = get_decoder(ctx, &this)?;
-    ctx.create_string_from_str(decoder.encoding.label())
+    ctx.create_string_from_utf8(decoder.encoding.label().as_bytes().to_vec())
         .map(JSValue::make_string)
 }
 

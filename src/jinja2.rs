@@ -294,7 +294,7 @@ fn js_render(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                         .iter()
                         .map(|v| {
                             let s = v.to_string();
-                            ctx.create_string_from_str(&s)
+                            ctx.create_string_from_utf8(s.into_bytes())
                                 .map(JSValue::make_string)
                                 .unwrap_or(JSValue::UNDEFINED)
                         })
@@ -351,7 +351,7 @@ fn js_render(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                     // First arg is the value being filtered
                     let value_str = value.to_string();
                     let js_value = ctx
-                        .create_string_from_str(&value_str)
+                        .create_string_from_utf8(value_str.into_bytes())
                         .map(JSValue::make_string)
                         .unwrap_or(JSValue::UNDEFINED);
                     js_args.push(js_value);
@@ -360,7 +360,7 @@ fn js_render(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                     for arg in args.0.iter() {
                         let s = arg.to_string();
                         let js_arg = ctx
-                            .create_string_from_str(&s)
+                            .create_string_from_utf8(s.into_bytes())
                             .map(JSValue::make_string)
                             .unwrap_or(JSValue::UNDEFINED);
                         js_args.push(js_arg);
@@ -421,7 +421,7 @@ fn js_render(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         .render(ctx_val)
         .map_err(|e| ctx.throw_type_error(&format!("template render error: {e}")))?;
 
-    ctx.create_string_from_str(&result)
+    ctx.create_string_from_utf8(result.into_bytes())
         .map(JSValue::make_string)
 }
 
@@ -488,7 +488,7 @@ fn js_render_template(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let result =
         render_template(&template, variables.as_ref()).map_err(|e| ctx.throw_type_error(&e))?;
 
-    ctx.create_string_from_str(&result)
+    ctx.create_string_from_utf8(result.into_bytes())
         .map(JSValue::make_string)
 }
 

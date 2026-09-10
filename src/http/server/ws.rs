@@ -194,7 +194,7 @@ impl AsyncIteratorFetcher for WsReadFetcher {
         match g.as_ref() {
             Some(rx) => match rx.try_recv() {
                 Ok(s) => Ok(IterFetchStatus::Value(JSValue::make_string(
-                    cx.create_string_from_str(&s)?,
+                    cx.create_string_from_utf8(s.as_bytes().to_vec())?,
                 ))),
                 Err(TryRecvError::Empty) => Ok(IterFetchStatus::Wait),
                 Err(TryRecvError::Disconnected) => {
@@ -315,7 +315,7 @@ pub(crate) fn dispatch_ws_data(
             };
             if let Some(cb) = p.on_message {
                 // push mode: deliver to the callback
-                let s = match cx.create_string_from_str(&msg) {
+                let s = match cx.create_string_from_utf8(msg.as_bytes().to_vec()) {
                     Ok(s) => s,
                     Err(_) => return,
                 };

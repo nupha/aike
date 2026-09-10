@@ -65,7 +65,7 @@ fn js_req_method(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         let this = cc.this();
         get_req_payload(ctx, &this)?.method
     };
-    ctx.create_string_from_str(method.as_str())
+    ctx.create_string_from_utf8(method.as_str().as_bytes().to_vec())
         .map(JSValue::make_string)
 }
 

@@ -342,7 +342,10 @@ pub(super) fn js_fs_sha256(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
                 .map(|b| format!("{b:02x}"))
                 .collect::<String>())
         },
-        |cx, s| cx.create_string_from_str(&s).map(JSValue::make_string),
+        |cx, s| {
+            cx.create_string_from_utf8(s.as_bytes().to_vec())
+                .map(JSValue::make_string)
+        },
     )
     .map(JSValue::from)
 }
@@ -360,7 +363,10 @@ pub(super) fn js_fs_realpath(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
                 .map(|p| p.to_string_lossy().to_string())
                 .map_err(|e| e.to_string())
         },
-        |cx, s| cx.create_string_from_str(&s).map(JSValue::make_string),
+        |cx, s| {
+            cx.create_string_from_utf8(s.as_bytes().to_vec())
+                .map(JSValue::make_string)
+        },
     )
     .map(JSValue::from)
 }

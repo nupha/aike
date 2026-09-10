@@ -288,7 +288,7 @@ fn clone_error(ctx: &mut ScopedContext, value: JSValue) -> Result<JSValue, i32> 
         "URIError" => ctx.create_error_object(zuqe::ErrorKind::Uri, &msg_str, false),
         // Plain Error (or any other name → "Error" per spec).
         _ => {
-            let msg_js = ctx.create_string_from_str(&msg_str)?;
+            let msg_js = ctx.create_string_from_utf8(msg_str.as_bytes().to_vec())?;
             let ctor = global_ctor(ctx, "Error")?;
             return ctor.call_ctor(ctx, &[JSValue::make_string(msg_js)]);
         }

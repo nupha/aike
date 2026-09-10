@@ -421,10 +421,12 @@ pub(super) fn js_sh(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         };
     }
 
-    let stdout_js =
-        JSValue::make_string(ctx.create_string_from_str(&String::from_utf8_lossy(&stdout_buf))?);
-    let stderr_js =
-        JSValue::make_string(ctx.create_string_from_str(&String::from_utf8_lossy(&stderr_buf))?);
+    let stdout_js = JSValue::make_string(
+        ctx.create_string_from_utf8(String::from_utf8_lossy(&stdout_buf).as_bytes().to_vec())?,
+    );
+    let stderr_js = JSValue::make_string(
+        ctx.create_string_from_utf8(String::from_utf8_lossy(&stderr_buf).as_bytes().to_vec())?,
+    );
 
     let mut result = ctx.create_base_object()?;
     result.define_property_value_str(ctx, "stdout", stdout_js, JS_PROP_C_W_E)?;
@@ -596,8 +598,13 @@ fn build_sync_result(
     let ta_out = TypedArray::create_from_vec_u8(ctx, stdout_buf)?;
     let ta_err = TypedArray::create_from_vec_u8(ctx, stderr_buf)?;
     let signal_str = signal_code.map_or(Ok(JSValue::NULL), |sig| {
-        ctx.create_string_from_str(signal_name(sig as u32).unwrap_or("UNKNOWN"))
-            .map(JSValue::make_string)
+        ctx.create_string_from_utf8(
+            signal_name(sig as u32)
+                .unwrap_or("UNKNOWN")
+                .as_bytes()
+                .to_vec(),
+        )
+        .map(JSValue::make_string)
     })?;
 
     result.define_property_value_str(ctx, "pid", JSValue::from(pid), JS_PROP_C_W_E)?;
@@ -1006,7 +1013,8 @@ fn js_child_shutdown(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     /// Resolve a promise to a fixed stage string.
     fn resolved_stage(ctx: &mut ScopedContext, stage: &'static str) -> JSResult {
         let (promise, tx) = Promise::create_with_channel::<String>(ctx, |cx, stage| {
-            cx.create_string_from_str(&stage).map(JSValue::make_string)
+            cx.create_string_from_utf8(stage.as_bytes().to_vec())
+                .map(JSValue::make_string)
         })?;
         let _ = tx.send(stage.to_string());
         Ok(promise.into())
@@ -1075,7 +1083,8 @@ fn js_child_shutdown(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     }
 
     let (promise, tx) = Promise::create_with_channel::<String>(ctx, |cx, stage| {
-        cx.create_string_from_str(&stage).map(JSValue::make_string)
+        cx.create_string_from_utf8(stage.as_bytes().to_vec())
+            .map(JSValue::make_string)
     })?;
 
     tokio::spawn(async move {

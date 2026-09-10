@@ -49,10 +49,14 @@ pub(crate) fn js_page_evaluate(ctx: &mut ScopedContext, cc: CallContext) -> JSRe
                 if result.get("objectId").is_some()
                     && let Some(desc) = result.get("description").and_then(|v| v.as_str())
                 {
-                    return cx.create_string_from_str(desc).map(JSValue::make_string);
+                    return cx
+                        .create_string_from_utf8(desc.as_bytes().to_vec())
+                        .map(JSValue::make_string);
                 }
                 if let Some(desc) = result.get("description").and_then(|v| v.as_str()) {
-                    return cx.create_string_from_str(desc).map(JSValue::make_string);
+                    return cx
+                        .create_string_from_utf8(desc.as_bytes().to_vec())
+                        .map(JSValue::make_string);
                 }
             }
 

@@ -83,7 +83,7 @@ fn get_ppid_windows() -> i32 {
 pub(super) fn js_versions(ctx: &mut ScopedContext) -> Result<JSValue, i32> {
     let mut obj = ctx.create_base_object()?;
 
-    let aike_ver = ctx.create_string_from_str(env!("CARGO_PKG_VERSION"))?;
+    let aike_ver = ctx.create_string_from_utf8(env!("CARGO_PKG_VERSION").as_bytes().to_vec())?;
     obj.define_property_value_str(
         ctx,
         "aike",

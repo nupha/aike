@@ -57,7 +57,7 @@ fn get_devices(ctx: &mut ScopedContext, _: CallContext) -> JSResult {
         if let Some(d) = d {
             let mut o = ctx.create_base_object()?;
 
-            let ty = JSValue::make_string(ctx.create_string_from_static(d.dev_type.to_str())?);
+            let ty = JSValue::make_string(ctx.create_string_from_utf8(d.dev_type.to_str().as_bytes().to_vec())?);
             o.define_property_value_str(ctx, "type", ty, JS_PROP_ENUMERABLE)?;
 
             let name = JSValue::make_string(ctx.create_string_from_utf8(d.name.into_bytes())?);

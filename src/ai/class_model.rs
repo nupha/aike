@@ -389,7 +389,7 @@ fn js_mode_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             }
         }
         PROP_CHAT_TEMPLATE => {
-            if let Some(text) = model.with_chat_template(|t| ctx.create_string_from_str(t)) {
+            if let Some(text) = model.with_chat_template(|t| ctx.create_string_from_utf8(t.as_bytes().to_vec())) {
                 text.map(JSValue::make_string)
             } else {
                 Ok(JSValue::NULL)
@@ -827,7 +827,7 @@ fn js_model_lookupTokenText(ctx: &mut ScopedContext, cc: CallContext) -> JSResul
     let token = cc.arg(0).to_number(ctx)?.to_i32();
 
     if let Some(text) = model.lookup_token_text(token) {
-        ctx.create_string_from_str(text).map(JSValue::make_string)
+        ctx.create_string_from_utf8(text.as_bytes().to_vec()).map(JSValue::make_string)
     } else {
         Ok(JSValue::NULL)
     }

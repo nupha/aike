@@ -125,9 +125,9 @@ pub(super) fn js_download(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
                 Ok(DownloadOutcome::Bytes(b)) => {
                     TypedArray::create_from_vec_u8(cx, b).map(JSValue::from)
                 }
-                Ok(DownloadOutcome::Path(p)) => {
-                    cx.create_string_from_str(&p).map(JSValue::make_string)
-                }
+                Ok(DownloadOutcome::Path(p)) => cx
+                    .create_string_from_utf8(p.as_bytes().to_vec())
+                    .map(JSValue::make_string),
                 Err(DownloadError::Abort) => {
                     let reason = signal_for_reason
                         .as_ref()

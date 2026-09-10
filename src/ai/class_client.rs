@@ -732,10 +732,10 @@ fn js_client_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     match cc.magic() {
         PROP_MODEL => ctx
-            .create_string_from_str(&client.model_name)
+            .create_string_from_utf8(client.model_name.as_bytes().to_vec())
             .map(JSValue::make_string),
         PROP_BASE_URL => ctx
-            .create_string_from_str(&client.base_url)
+            .create_string_from_utf8(client.base_url.as_bytes().to_vec())
             .map(JSValue::make_string),
         PROP_MAX_TOKENS => Ok(JSValue::from(client.max_tokens as i32)),
         PROP_EXTRA_BODY => {
@@ -749,7 +749,7 @@ fn js_client_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         PROP_HEADERS => {
             let mut obj = ctx.create_base_object()?;
             for (k, v) in &client.headers {
-                let val = ctx.create_string_from_str(v)?;
+                let val = ctx.create_string_from_utf8(v.as_bytes().to_vec())?;
                 obj.set_property_str(ctx, k, JSValue::make_string(val))?;
             }
             Ok(JSValue::from(obj))
@@ -829,7 +829,7 @@ fn js_client_get_header(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     let payload = get_client(ctx, &this)?;
     match payload.headers.get(&name) {
-        Some(v) => ctx.create_string_from_str(v).map(JSValue::make_string),
+        Some(v) => ctx.create_string_from_utf8(v.as_bytes().to_vec()).map(JSValue::make_string),
         None => Ok(JSValue::UNDEFINED),
     }
 }
