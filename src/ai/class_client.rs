@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-use std::{sync::Arc, time::Duration};
+use std::time::Duration;
 
 use futures_util::StreamExt;
 use linkme::distributed_slice;
@@ -829,7 +829,9 @@ fn js_client_get_header(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     let payload = get_client(ctx, &this)?;
     match payload.headers.get(&name) {
-        Some(v) => ctx.create_string_from_utf8(v.as_bytes().to_vec()).map(JSValue::make_string),
+        Some(v) => ctx
+            .create_string_from_utf8(v.as_bytes().to_vec())
+            .map(JSValue::make_string),
         None => Ok(JSValue::UNDEFINED),
     }
 }

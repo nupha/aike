@@ -239,7 +239,7 @@ fn js_byte_length_size(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let Some(obj) = chunk.as_object() else {
         return Ok(JSValue::UNDEFINED);
     };
-    let atom = zuqe::Atom::from_static(ctx, "byteLength")?;
+    let atom = zuqe::Atom::intern_static(ctx, "byteLength")?;
     if !obj.has_property(ctx, atom)? {
         return Ok(JSValue::UNDEFINED);
     }

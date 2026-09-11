@@ -707,18 +707,18 @@ fn ts_source_cancel(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             if let Ok(mut cancel_promise) = Promise::try_from(v) {
                 // Async cancel: chain .then() to react on settlement.
                 let on_ok = ctx.create_native_function_with_data(
-                    zuqe::Callback::Func(ts_source_cancel_ok),
+                    zuqe::Callback::Func(ts_source_cancel_settle),
                     "tsSourceCancelOk",
                     1,
                     0,
                     [stream_val, JSValue::from(controller), reason].into(),
                 )?;
                 let on_err = ctx.create_native_function_with_data(
-                    zuqe::Callback::Func(ts_source_cancel_err),
+                    zuqe::Callback::Func(ts_source_cancel_settle),
                     "tsSourceCancelErr",
                     1,
-                    0,
-                    [stream_val, JSValue::from(controller)].into(),
+                    1,
+                    [stream_val, JSValue::from(controller), reason].into(),
                 )?;
                 cancel_promise.perform_then(ctx, on_ok.into(), on_err.into())?;
             } else {
@@ -812,36 +812,27 @@ fn ts_cancel_reject(
     Ok(JSValue::UNDEFINED)
 }
 
-/// Promise reaction: async transformer.cancel() fulfilled.
-fn ts_source_cancel_ok(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let stream_val = cc.data(0);
-    let mut controller = cc
-        .data(1)
-        .as_native_object::<JSTransformStreamDefaultController>()
+/// Promise reaction for an async transformer.cancel() result.
+/// magic 0 = fulfilled, 1 = rejected (the callback is shared by both paths).
+fn ts_source_cancel_settle(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let mut controller = JSTransformStreamDefaultController::from_value(cc.data(1))
         .ok_or_else(|| ctx.throw_internal_error("invalid controller"))?;
-    let reason = cc.data(2);
-    let writable = if let Some(tcp) = controller.payload() {
-        tcp.writable_stream
-    } else {
-        return Ok(JSValue::UNDEFINED);
-    };
-    ts_cancel_fulfill(ctx, &stream_val, &mut controller, writable, reason)
-}
 
-/// Promise reaction: async transformer.cancel() rejected.
-fn ts_source_cancel_err(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let stream_val = cc.data(0);
-    let mut controller = cc
-        .data(1)
-        .as_native_object::<JSTransformStreamDefaultController>()
-        .ok_or_else(|| ctx.throw_internal_error("invalid controller"))?;
-    let error = cc.arg(0);
     let writable = if let Some(tcp) = controller.payload() {
         tcp.writable_stream
     } else {
         return Ok(JSValue::UNDEFINED);
     };
-    ts_cancel_reject(ctx, &stream_val, &mut controller, writable, error)
+
+    let stream_val = cc.data(0);
+
+    if cc.magic() == 1 {
+        let error = cc.arg(0);
+        ts_cancel_reject(ctx, &stream_val, &mut controller, writable, error)
+    } else {
+        let reason = cc.data(2);
+        ts_cancel_fulfill(ctx, &stream_val, &mut controller, writable, reason)
+    }
 }
 
 /// TransformStreamSetBackpressure (spec §6.4.1).
