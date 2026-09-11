@@ -147,9 +147,7 @@ fn js_transform_controller_enqueue(ctx: &mut ScopedContext, cc: CallContext) -> 
         if let Some(stream_handle) = p.stream {
             let stream_val = JSValue::from(stream_handle);
             super::transform::transform_stream_error_writable_and_unblock_write(
-                ctx,
-                &stream_val,
-                e,
+                ctx, stream_val, e,
             )?;
         }
         let stored = match rcp.stream() {
@@ -171,7 +169,7 @@ fn js_transform_controller_enqueue(ctx: &mut ScopedContext, cc: CallContext) -> 
         let stream_val = JSValue::from(stream_handle);
         let readable_full = rcp.desired_size(ctx)? <= 0.0;
         if readable_full && !p.backpressure.get() {
-            super::transform::transform_stream_set_backpressure(ctx, &stream_val, true)?;
+            super::transform::transform_stream_set_backpressure(ctx, stream_val, true)?;
         }
     }
 
@@ -194,9 +192,7 @@ fn js_transform_controller_error(ctx: &mut ScopedContext, cc: CallContext) -> JS
     if let Some(stream_handle) = p.stream {
         let stream_val = JSValue::from(stream_handle);
         super::transform::transform_stream_error_writable_and_unblock_write(
-            ctx,
-            &stream_val,
-            reason,
+            ctx, stream_val, reason,
         )?;
     }
 
@@ -232,7 +228,7 @@ fn js_transform_controller_terminate(ctx: &mut ScopedContext, cc: CallContext) -
 
     if let Some(stream_handle) = p.stream {
         let stream_val = JSValue::from(stream_handle);
-        super::transform::transform_stream_error_writable_and_unblock_write(ctx, &stream_val, err)?;
+        super::transform::transform_stream_error_writable_and_unblock_write(ctx, stream_val, err)?;
     }
 
     Ok(JSValue::UNDEFINED)

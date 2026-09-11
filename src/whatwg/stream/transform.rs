@@ -637,14 +637,16 @@ fn ts_source_pull(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     if JSTransformStream::payload_of(&stream_val).is_some() {
         // Backpressure should be true when pull is called.
         // TransformStreamSetBackpressure(stream, false).
-        transform_stream_set_backpressure(ctx, &stream_val, false)?;
+        transform_stream_set_backpressure(ctx, stream_val, false)?;
     }
+
     // Return the backpressureChangePromise per spec step 3.
     if let Some(tsp) = JSTransformStream::payload_of(&stream_val)
         && let Some(p) = tsp.backpressure_change_promise
     {
         return Ok(JSValue::from(p));
     }
+
     Ok(JSValue::UNDEFINED)
 }
 
@@ -723,13 +725,13 @@ fn ts_source_cancel(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 cancel_promise.perform_then(ctx, on_ok.into(), on_err.into())?;
             } else {
                 // Sync cancel (non-promise result): treat as fulfilled.
-                ts_cancel_fulfill(ctx, &stream_val, &mut controller, writable, reason)?;
+                ts_cancel_fulfill(ctx, stream_val, &mut controller, writable, reason)?;
             }
         }
         Err(_) => {
             let e = ctx.take_exception().to_value(ctx);
             // Sync throw: reject finishPromise.
-            ts_cancel_reject(ctx, &stream_val, &mut controller, writable, e)?;
+            ts_cancel_reject(ctx, stream_val, &mut controller, writable, e)?;
         }
     }
 
@@ -748,7 +750,7 @@ fn ts_source_cancel(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 /// and resolve finishPromise.
 fn ts_cancel_fulfill(
     ctx: &mut ScopedContext,
-    stream_val: &JSValue,
+    stream_val: JSValue,
     controller: &mut JSTransformStreamDefaultController,
     writable: JSWritableStream,
     reason: JSValue,
@@ -789,7 +791,7 @@ fn ts_cancel_fulfill(
 /// rejection reason, unblock write, reject finishPromise.
 fn ts_cancel_reject(
     ctx: &mut ScopedContext,
-    stream_val: &JSValue,
+    stream_val: JSValue,
     controller: &mut JSTransformStreamDefaultController,
     writable: JSWritableStream,
     error: JSValue,
@@ -828,10 +830,10 @@ fn ts_source_cancel_settle(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
 
     if cc.magic() == 1 {
         let error = cc.arg(0);
-        ts_cancel_reject(ctx, &stream_val, &mut controller, writable, error)
+        ts_cancel_reject(ctx, stream_val, &mut controller, writable, error)
     } else {
         let reason = cc.data(2);
-        ts_cancel_fulfill(ctx, &stream_val, &mut controller, writable, reason)
+        ts_cancel_fulfill(ctx, stream_val, &mut controller, writable, reason)
     }
 }
 
@@ -841,10 +843,10 @@ fn ts_source_cancel_settle(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
 /// from the write path.
 pub(super) fn transform_stream_set_backpressure(
     ctx: &mut ScopedContext,
-    stream_val: &JSValue,
+    stream_val: JSValue,
     backpressure: bool,
 ) -> JSResult {
-    let Some(tsp) = JSTransformStream::payload_of(stream_val) else {
+    let Some(tsp) = JSTransformStream::payload_of(&stream_val) else {
         return Ok(JSValue::UNDEFINED);
     };
 
@@ -862,11 +864,11 @@ pub(super) fn transform_stream_set_backpressure(
     let (new_promise, _rr) = Promise::create(ctx)?;
 
     // Set on the TransformStream payload.
-    let ts_handle = match stream_val.as_native_object::<JSTransformStream>() {
-        Some(h) => h,
-        None => return Ok(JSValue::UNDEFINED),
+    let Some(ts_handle) = JSTransformStream::from_value(stream_val) else {
+        return Ok(JSValue::UNDEFINED);
     };
     let mut ts_val = JSValue::from(ts_handle);
+
     if let Some(tsp_mut) = JSTransformStream::payload_mut_of(&mut ts_val) {
         tsp_mut.backpressure = backpressure;
         tsp_mut.backpressure_change_promise = Some(new_promise);
@@ -885,9 +887,9 @@ pub(super) fn transform_stream_set_backpressure(
 /// If backpressure is true, set it to false.
 pub(super) fn transform_stream_unblock_write(
     ctx: &mut ScopedContext,
-    stream_val: &JSValue,
+    stream_val: JSValue,
 ) -> JSResult {
-    let needs_unblock = JSTransformStream::payload_of(stream_val)
+    let needs_unblock = JSTransformStream::payload_of(&stream_val)
         .map(|p| p.backpressure)
         .unwrap_or(false);
     if needs_unblock {
@@ -902,10 +904,10 @@ pub(super) fn transform_stream_unblock_write(
 /// enqueue (including the strategy's `size` algorithm) throws.
 pub(super) fn transform_stream_error_writable_and_unblock_write(
     ctx: &mut ScopedContext,
-    stream_val: &JSValue,
+    stream_val: JSValue,
     e: JSValue,
 ) -> JSResult {
-    if let Some(tsp) = JSTransformStream::payload_of(stream_val)
+    if let Some(tsp) = JSTransformStream::payload_of(&stream_val)
         && let Some(w) = tsp.writable
         && let Some(wsp) = w.payload()
         && wsp.state == crate::whatwg::stream::RsState::Readable

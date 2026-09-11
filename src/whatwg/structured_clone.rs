@@ -18,8 +18,8 @@ use zuqe::{
     Array, CallContext, Callback, Exception, JS_CLASS_ARRAY, JS_CLASS_ARRAY_BUFFER,
     JS_CLASS_BOOLEAN, JS_CLASS_DATE, JS_CLASS_ERROR, JS_CLASS_MAP, JS_CLASS_NUMBER,
     JS_CLASS_OBJECT, JS_CLASS_REGEXP, JS_CLASS_SET, JS_CLASS_SHARED_ARRAY_BUFFER, JS_CLASS_STRING,
-    JS_CLASS_WEAKMAP, JS_CLASS_WEAKSET, JS_GPN_ENUM_ONLY, JS_GPN_STR_OR_INT_MASK, JS_PROP_C_W_E,
-    JSResult, JSValue, Object, ScopedContext, builtins::array_buffer::ArrayBuffer,
+    JS_CLASS_WEAKMAP, JS_CLASS_WEAKSET, JS_GPN_ENUM_ONLY, JS_GPN_STR_OR_INT_MASK, JSResult,
+    JSValue, Object, ScopedContext, builtins::array_buffer::ArrayBuffer,
 };
 
 use super::dom::make_dom_exception;
@@ -392,7 +392,7 @@ fn clone_container(
     // Register before recursing so self-references resolve to this clone.
     memory.insert(value, clone);
 
-    let mut clone_obj = clone
+    let clone_obj = clone
         .as_object()
         .ok_or_else(|| ctx.throw_internal_error("failed to create clone"))?;
     let keys = obj.get_own_property_names(ctx, JS_GPN_ENUM_ONLY | JS_GPN_STR_OR_INT_MASK)?;
@@ -400,8 +400,10 @@ fn clone_container(
         let val = obj.get_property(ctx, pk.atom)?;
         let cloned = clone_value(ctx, val, memory, transfer)?;
         let key_js = pk.atom.to_value(ctx)?;
-        clone_obj.set_property_value(ctx, key_js, cloned, JS_PROP_C_W_E)?;
+        let prop = key_js.to_atom(ctx)?;
+        clone_obj.set_property(ctx, prop, cloned)?;
     }
+
     Ok(clone)
 }
 
