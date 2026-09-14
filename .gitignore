@@ -1,6 +1,8 @@
 *
 
 !src/
-!types/**/*.d.ts
-!tests/**/*.js
-!tests/**/*.mjs
+!src/**
+!types/
+!types/**
+!tests/
+!tests/**
