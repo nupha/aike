@@ -20,7 +20,7 @@ use std::{
 
 use grep_matcher::Matcher;
 use grep_regex::{RegexMatcher, RegexMatcherBuilder};
-use grep_searcher::{Searcher, Sink, SinkMatch};
+use grep_searcher::{BinaryDetection, Searcher, Sink, SinkMatch};
 use ignore::WalkBuilder;
 use zuqe::{Array, CallContext, JSResult, JSValue, ScopedContext};
 
@@ -270,7 +270,10 @@ pub(super) fn js_fs_grep(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                     }
 
                     // Determine real matches for this file first.
+                    // Quit at the first NUL byte so binary files (models, etc.)
+                    // are not read in full — matches ripgrep's default behavior.
                     let mut searcher = Searcher::new();
+                    searcher.set_binary_detection(BinaryDetection::quit(b'\x00'));
                     let mut collector = Collector {
                         matcher: &matcher,
                         file: p.clone(),
@@ -278,9 +281,8 @@ pub(super) fn js_fs_grep(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                         max_results,
                         truncated: false,
                     };
-                    // grep-searcher skips binary files automatically.
                     if searcher.search_path(&matcher, &p, &mut collector).is_err() {
-                        // Unreadable / binary — skip silently.
+                        // Unreadable — skip silently.
                     }
 
                     let any_match = !collector.hits.is_empty();
