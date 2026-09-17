@@ -101,8 +101,8 @@ struct Args {
     #[arg(
         long,
         value_name = "n",
-        default_value = "2m",
-        help = "set C-stack recursion limit to n (default: 2m)"
+        help = "set C-stack recursion budget (max native stack below the eval SP); \
+                omit/0 for auto mode derived from the thread stack bottom"
     )]
     stack_overflow: Option<String>,
 
@@ -322,14 +322,18 @@ async fn main() -> ExitCode {
         }
     }
 
-    // stack-overflow (default: 2m)
+    // stack-overflow: omit/0 = auto mode (from thread stack bottom)
     if let Some(ref ss) = args.stack_overflow {
         if let Some(size) = parse_byte_size(ss) {
-            rt.set_stack_overflow(size);
+            rt.set_stack_budget(size);
         } else {
             colorize_println(format!("invalid stack-overflow: {ss}"), RedFg);
             std::process::exit(-1);
         }
+    } else if !zuqe::Runtime::CAN_AUTO_STACK_BUDGET {
+        // Platform can't report the stack bottom: auto mode would leave no
+        // C-stack guard, so fall back to a strict 512 KiB budget.
+        rt.set_stack_budget(512 << 10);
     }
 
     rt.set_module_loader(
