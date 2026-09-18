@@ -11,19 +11,15 @@
 
 use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
-use linkme::distributed_slice;
 use zuqe::{
-    Array, CallContext, ClassCtorDef, ClassID, FieldDef, JSResult, JSValue, Runtime, ScopedContext,
+    Array, CallContext, ClassCtorDef, FieldDef, JSResult, JSValue, ScopedContext,
     builtins::promise::Promise,
     builtins::typed_array::TypedArray,
     def_native_object,
     gc_lite::{GcTrace, GcTraceCtx},
 };
 
-use crate::{
-    USER_CLASS_DEFS,
-    http::client::{request::JSRequest, response::JSResponse},
-};
+use crate::http::client::{request::JSRequest, response::JSResponse};
 
 /// A stored request/response pair keyed by `method + " " + url`.
 struct CacheEntry {
@@ -385,14 +381,4 @@ def_native_object!(
     Some(ClassCtorDef::new(js_cache_storage_ctor, 0, false))
 );
 
-#[distributed_slice(USER_CLASS_DEFS)]
-fn register_class_cache_storage(rt: &mut Runtime) -> Result<ClassID, i32> {
-    JSCacheStorage::register(rt)
-}
-
 def_native_object!("Cache", JSCache, CachePayload, CACHE_PROTO, None);
-
-#[distributed_slice(USER_CLASS_DEFS)]
-fn register_class_cache(rt: &mut Runtime) -> Result<ClassID, i32> {
-    JSCache::register(rt)
-}

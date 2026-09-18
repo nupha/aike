@@ -3,15 +3,12 @@
 
 use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
-use linkme::distributed_slice;
 use zuqe::{
-    CallContext, ClassID, FieldDef, JSResult, JSValue, Runtime, ScopedContext,
+    CallContext, FieldDef, JSResult, JSValue, ScopedContext,
     builtins::{json::JSON, promise::Promise},
     def_native_object,
     gc_lite::GcTrace,
 };
-
-use crate::USER_CLASS_DEFS;
 
 use super::super::Method;
 
@@ -185,8 +182,3 @@ def_native_object!(
     REQ_PROTO,
     None
 );
-
-#[distributed_slice(USER_CLASS_DEFS)]
-fn register_http_request(rt: &mut Runtime) -> Result<ClassID, i32> {
-    JSHttpRequest::register(rt)
-}

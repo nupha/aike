@@ -7,10 +7,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use linkme::distributed_slice;
 use zuqe::{
-    CallContext, ClassCtorDef, ClassID, ErrorKind, Exception, FieldDef, JSResult, JSValue,
-    JobGcTrace, JobState, Runtime, ScopedContext,
+    CallContext, ClassCtorDef, ErrorKind, Exception, FieldDef, JSResult, JSValue, JobGcTrace,
+    JobState, ScopedContext,
     builtins::{
         promise::{Promise, PromiseResultSlot, PromiseState},
         typed_array::TypedArray,
@@ -19,10 +18,7 @@ use zuqe::{
     gc_lite::{GcTrace, GcTraceCtx},
 };
 
-use crate::{
-    USER_CLASS_DEFS,
-    whatwg::stream::{readable::JSReadableStream, readable_controller::PullIntoDescriptor},
-};
+use crate::whatwg::stream::{readable::JSReadableStream, readable_controller::PullIntoDescriptor};
 
 use super::{QueueEntry, RsState, iterator_result_promise};
 
@@ -556,11 +552,6 @@ fn js_reader_closed(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         return Ok(JSValue::from(cp));
     }
     Ok(JSValue::UNDEFINED)
-}
-
-#[distributed_slice(USER_CLASS_DEFS)]
-fn register_readable_stream_default_reader(rt: &mut Runtime) -> Result<ClassID, i32> {
-    JSReadableStreamDefaultReader::register(rt)
 }
 
 /// GC roots for the reader-drain job. The job outlives many event-loop turns,

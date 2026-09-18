@@ -10,11 +10,10 @@ use std::{
     time::Duration,
 };
 
-use linkme::distributed_slice;
 use llama::LlamaContext;
 use zuqe::{
-    CallContext, ClassID, FieldDef, IntOrFloat, JS_PROP_ENUMERABLE, JS_PROP_FORCE, JSResult,
-    JSValue, Runtime, ScopedContext,
+    CallContext, FieldDef, IntOrFloat, JS_PROP_ENUMERABLE, JS_PROP_FORCE, JSResult, JSValue,
+    ScopedContext,
     builtins::{promise::Promise, typed_array::TypedArray},
     def_native_object,
     gc_lite::{GcTrace, GcTraceCtx},
@@ -24,14 +23,16 @@ pub(crate) struct LlamaContextPayload(pub(crate) Arc<Mutex<Option<LlamaContext>>
 
 impl std::ops::Deref for LlamaContextPayload {
     type Target = Arc<Mutex<Option<LlamaContext>>>;
-    fn deref(&self) -> &Self::Target { &self.0 }
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
 }
 
 impl GcTrace for LlamaContextPayload {
     fn trace(&self, _gcx: &mut GcTraceCtx) {}
 }
 
-use crate::{USER_CLASS_DEFS, worker::WorkerPool};
+use crate::worker::WorkerPool;
 
 use super::{
     class_engine::{JSEngine, parse_engine_params},
@@ -492,8 +493,3 @@ def_native_object!(
     CLASS_CONTEXT_PROTO,
     None
 );
-
-#[distributed_slice(USER_CLASS_DEFS)]
-fn register_class_context(rt: &mut Runtime) -> Result<ClassID, i32> {
-    JSLlmContext::register(rt)
-}

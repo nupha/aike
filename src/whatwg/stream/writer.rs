@@ -4,18 +4,17 @@
 //! WritableStreamDefaultWriter: the writer handle returned by
 //! `WritableStream.getWriter()`.
 
-use linkme::distributed_slice;
 use zuqe::{
-    CallContext, ClassCtorDef, ClassID, FieldDef, JSResult, JSValue, NativeObject, Runtime,
-    ScopedContext,
+    CallContext, ClassCtorDef, FieldDef, JSResult, JSValue, NativeObject, ScopedContext,
     builtins::promise::{Promise, PromiseState},
     def_native_object,
     gc_lite::{GcTrace, GcTraceCtx},
 };
 
-use crate::{USER_CLASS_DEFS, whatwg::stream::writable::JSWritableStream};
+use crate::whatwg::stream::writable::JSWritableStream;
 
 use super::RsState;
+
 pub(crate) struct WriterPayload {
     pub(super) stream: Option<JSWritableStream>,
     pub(crate) closed_promise: Option<Promise>,
@@ -470,9 +469,4 @@ fn js_writer_release_lock(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
         p.release_lock(ctx);
     }
     Ok(JSValue::UNDEFINED)
-}
-
-#[distributed_slice(USER_CLASS_DEFS)]
-fn register_writable_stream_default_writer(rt: &mut Runtime) -> Result<ClassID, i32> {
-    JSWritableStreamDefaultWriter::register(rt)
 }

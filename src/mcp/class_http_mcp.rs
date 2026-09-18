@@ -1,13 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-use linkme::distributed_slice;
 use zuqe::{
-    CallContext, ClassCtorDef, ClassID, FieldDef, JSResult, JSValue, NativeObject, Runtime,
-    ScopedContext, def_native_object,
+    CallContext, ClassCtorDef, FieldDef, JSResult, JSValue, NativeObject, ScopedContext,
+    def_native_object,
 };
-
-use crate::USER_CLASS_DEFS;
 
 use super::class_mcp::{
     JSBaseMcp, McpServicePayload, McpTransport, get_payload, js_str, parse_mcp_define,
@@ -64,8 +61,3 @@ def_native_object!(
     Some( ClassCtorDef::new(js_http_constructor, 1, true).entries(HTTP_MCP_STATIC)),
     extends: JSBaseMcp::class_id
 );
-
-#[distributed_slice(USER_CLASS_DEFS)]
-fn register_http_mcp(rt: &mut Runtime) -> Result<ClassID, i32> {
-    JSHttpMcp::register(rt)
-}

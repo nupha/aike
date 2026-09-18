@@ -20,24 +20,20 @@ use axum::{
     },
     routing::{MethodRouter, delete, get, head, options, patch, post, put},
 };
-use linkme::distributed_slice;
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::wrappers::ReceiverStream;
 use tower_http::services::ServeDir;
 use tower_http::set_header::SetResponseHeaderLayer;
 use zuqe::{
-    CallContext, Callback, ClassCtorDef, ClassID, FieldDef, IntOrFloat, JSResult, JSValue, Object,
-    Runtime, ScopedContext,
+    CallContext, Callback, ClassCtorDef, FieldDef, IntOrFloat, JSResult, JSValue, Object,
+    ScopedContext,
     builtins::promise::Promise,
     def_native_object,
     gc_lite::{GcTrace, GcTraceCtx},
 };
 
-use crate::{
-    USER_CLASS_DEFS,
-    mcp::{
-        JSHttpMcp, McpToolCallRequest, McpTransport, build_axum_mcp_route, handle_mcp_tool_call,
-    },
+use crate::mcp::{
+    JSHttpMcp, McpToolCallRequest, McpTransport, build_axum_mcp_route, handle_mcp_tool_call,
 };
 
 #[cfg(feature = "llama_cpp")]
@@ -1268,8 +1264,3 @@ def_native_object!(
     SERVER_PROTO,
     Some(ClassCtorDef::new(js_constructor, 0, false))
 );
-
-#[distributed_slice(USER_CLASS_DEFS)]
-fn register_http_server(rt: &mut Runtime) -> Result<ClassID, i32> {
-    JSHttpServer::register(rt)
-}

@@ -3,17 +3,15 @@
 
 use std::{cell::RefCell, rc::Rc};
 
-use linkme::distributed_slice;
 use zuqe::{
-    CallContext, ClassCtorDef, ClassID, Exception, FieldDef, JSResult, JSValue, NativeObject,
-    Object, Runtime, ScopedContext,
+    CallContext, ClassCtorDef, Exception, FieldDef, JSResult, JSValue, NativeObject, Object,
+    ScopedContext,
     builtins::promise::Promise,
     def_native_object,
     gc_lite::{GcTrace, GcTraceCtx},
 };
 
 use crate::{
-    USER_CLASS_DEFS,
     http::client::{
         body::{
             BODY_AS_ARRAY_BUFFER, BODY_AS_BLOB, BODY_AS_BYTES, BODY_AS_FORM_DATA, BODY_AS_JSON,
@@ -992,8 +990,3 @@ def_native_object!(
     // request-error "without new must throw").
     Some(ClassCtorDef::new(js_request_constructor, 1, false).expose_to_global())
 );
-
-#[distributed_slice(USER_CLASS_DEFS)]
-fn register_class_request(rt: &mut Runtime) -> Result<ClassID, i32> {
-    JSRequest::register(rt)
-}

@@ -8,10 +8,9 @@ use std::{
 };
 
 use crossbeam::channel::TryRecvError;
-use linkme::distributed_slice;
 use zuqe::{
-    CallContext, Callback, ClassCtorDef, ClassID, ErrorKind, Exception, FieldDef, JSResult,
-    JSValue, JobState, NativeObject, Object, Runtime, ScopedContext,
+    CallContext, Callback, ClassCtorDef, ErrorKind, Exception, FieldDef, JSResult, JSValue,
+    JobState, NativeObject, Object, ScopedContext,
     builtins::{
         iterator::{AsyncIterableIterator, AsyncIteratorFetcher, IterFetchStatus},
         promise::Promise,
@@ -22,7 +21,6 @@ use zuqe::{
 };
 
 use crate::{
-    USER_CLASS_DEFS,
     http::client::body::BodySource,
     whatwg::{
         abort::{signal_is_aborted, signal_reason},
@@ -1617,11 +1615,6 @@ fn start_channel_stream_poller(ctx: &mut ScopedContext) {
 // ============================================================================
 // Registration
 // ============================================================================
-
-#[distributed_slice(USER_CLASS_DEFS)]
-fn register_readable_stream(rt: &mut Runtime) -> Result<ClassID, i32> {
-    JSReadableStream::register(rt)
-}
 
 /// `new ReadableStreamBYOBReader(stream)` — validates the stream is a byte
 /// stream (WHATWG SetUpReadableStreamBYOBReader step 2), then acquires a BYOB

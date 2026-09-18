@@ -1,13 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-use linkme::distributed_slice;
 use zuqe::{
-    CallContext, ClassCtorDef, ClassID, FieldDef, JSResult, JSValue, Runtime, ScopedContext,
-    def_native_object,
+    CallContext, ClassCtorDef, FieldDef, JSResult, JSValue, ScopedContext, def_native_object,
 };
-
-use crate::USER_CLASS_DEFS;
 
 use super::{ReadableControllerPayload, readable_controller::get_readable_controller};
 
@@ -77,9 +73,4 @@ fn js_controller_desired_size(ctx: &mut ScopedContext, cc: CallContext) -> JSRes
     } else {
         Ok(JSValue::from(size))
     }
-}
-
-#[distributed_slice(USER_CLASS_DEFS)]
-fn register_readable_stream_default_controller(rt: &mut Runtime) -> Result<ClassID, i32> {
-    JSReadableStreamDefaultController::register(rt)
 }

@@ -8,11 +8,10 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use linkme::distributed_slice;
 use llama::{SamplerChain, SamplerKind};
 use zuqe::{
-    CallContext, ClassID, FieldDef, IntOrFloat, JS_PROP_ENUMERABLE, JSResult, JSValue, Runtime,
-    ScopedContext, def_native_object,
+    CallContext, FieldDef, IntOrFloat, JS_PROP_ENUMERABLE, JSResult, JSValue, ScopedContext,
+    def_native_object,
     gc_lite::{GcTrace, GcTraceCtx},
 };
 
@@ -20,14 +19,14 @@ pub(crate) struct SamplerChainPayload(pub(crate) Arc<Mutex<SamplerChain>>);
 
 impl std::ops::Deref for SamplerChainPayload {
     type Target = Arc<Mutex<SamplerChain>>;
-    fn deref(&self) -> &Self::Target { &self.0 }
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
 }
 
 impl GcTrace for SamplerChainPayload {
     fn trace(&self, _gcx: &mut GcTraceCtx) {}
 }
-
-use crate::USER_CLASS_DEFS;
 
 use super::class_model::get_llama_model;
 
@@ -315,8 +314,3 @@ def_native_object!(
     CLASS_SAMPLER_CHAIN_PROTO,
     None
 );
-
-#[distributed_slice(USER_CLASS_DEFS)]
-fn register_class_sampler(rt: &mut Runtime) -> Result<ClassID, i32> {
-    JSSamplerChain::register(rt)
-}

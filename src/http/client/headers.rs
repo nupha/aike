@@ -3,14 +3,11 @@
 
 use std::{cell::RefCell, rc::Rc};
 
-use linkme::distributed_slice;
 use zuqe::{
-    Array, Atom, CallContext, ClassCtorDef, ClassID, FieldDef, JS_CLASS_ITERATOR, JS_PROP_C_W_E,
-    JSIteratorKindEnum, JSResult, JSValue, Object, Runtime, ScopedContext, def_native_object,
+    Array, Atom, CallContext, ClassCtorDef, FieldDef, JS_CLASS_ITERATOR, JS_PROP_C_W_E,
+    JSIteratorKindEnum, JSResult, JSValue, Object, ScopedContext, def_native_object,
     gc_lite::{GcTrace, GcTraceCtx},
 };
-
-use crate::USER_CLASS_DEFS;
 
 /// Case-insensitive header storage. Names keep their original casing; lookups
 /// are case-insensitive per the Fetch/HTTP spec.
@@ -965,13 +962,3 @@ def_native_object!(
     HEADERS_PROTO,
     Some(ClassCtorDef::new(js_headers_constructor, 1, true).expose_to_global())
 );
-
-#[distributed_slice(USER_CLASS_DEFS)]
-fn register_class_headers(rt: &mut Runtime) -> Result<ClassID, i32> {
-    JSHeaders::register(rt)
-}
-
-#[distributed_slice(USER_CLASS_DEFS)]
-fn register_class_headers_iterator(rt: &mut Runtime) -> Result<ClassID, i32> {
-    HeaderListIterator::register(rt)
-}

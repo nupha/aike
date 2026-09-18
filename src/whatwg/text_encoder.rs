@@ -6,14 +6,12 @@
 //! TextEncoder always encodes to UTF-8.
 //! Per spec: encoding is always "utf-8", no options, no BOM, no streaming.
 
-use linkme::distributed_slice;
 use zuqe::{
-    CallContext, ClassCtorDef, ClassID, FieldDef, JSResult, JSValue, Runtime, ScopedContext,
-    builtins::typed_array::TypedArray, def_native_object,
+    CallContext, ClassCtorDef, FieldDef, JSResult, JSValue, ScopedContext,
+    builtins::typed_array::TypedArray,
+    def_native_object,
     gc_lite::{GcTrace, GcTraceCtx},
 };
-
-use crate::USER_CLASS_DEFS;
 
 pub(crate) struct TextEncoderPayload;
 
@@ -88,8 +86,3 @@ def_native_object!(
     CLASS_TEXT_ENCODER_PROTO,
     Some(ClassCtorDef::new(js_constructor, 0, true).expose_to_global())
 );
-
-#[distributed_slice(USER_CLASS_DEFS)]
-fn register_class_text_encoder(rt: &mut Runtime) -> Result<ClassID, i32> {
-    JSTextEncoder::register(rt)
-}

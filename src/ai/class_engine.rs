@@ -9,10 +9,9 @@ use std::{
 };
 
 use async_openai::types::chat::{ReasoningEffort, StopConfiguration};
-use linkme::distributed_slice;
 use llama::ToolChoice as LarkToolChoice;
 use zuqe::{
-    CallContext, ClassID, FieldDef, JSResult, JSValue, Object, Runtime, ScopedContext,
+    CallContext, FieldDef, JSResult, JSValue, Object, ScopedContext,
     builtins::{
         iterator::AsyncIterableIterator,
         promise::{Promise, PromiseResultSlot},
@@ -22,7 +21,6 @@ use zuqe::{
 };
 
 use crate::{
-    USER_CLASS_DEFS,
     ai::output::{
         ChunkSSE, ParserKind, collect_engine_reply_to_json, redirect_engine_reply_to_chat_sse,
         redirect_engine_reply_to_responses_sse,
@@ -743,8 +741,3 @@ def_native_object!(
     CLASS_ENGINE_PROTO,
     None
 );
-
-#[distributed_slice(USER_CLASS_DEFS)]
-fn register_class_engine(rt: &mut Runtime) -> Result<ClassID, i32> {
-    JSEngine::register(rt)
-}

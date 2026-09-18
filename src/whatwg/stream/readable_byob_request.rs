@@ -8,14 +8,10 @@
 //! instances are created only by the engine via
 //! `ReadableByteStreamControllerGetBYOBRequest`.
 
-use linkme::distributed_slice;
 use zuqe::{
-    CallContext, ClassCtorDef, ClassID, FieldDef, JSResult, JSValue, Runtime, ScopedContext,
-    def_native_object,
+    CallContext, ClassCtorDef, FieldDef, JSResult, JSValue, ScopedContext, def_native_object,
     gc_lite::{GcTrace, GcTraceCtx},
 };
-
-use crate::USER_CLASS_DEFS;
 
 use super::readable_controller::get_readable_controller;
 
@@ -134,8 +130,3 @@ def_native_object!(
     BYOB_REQUEST_PROTO,
     Some(ClassCtorDef::new(js_byob_request_constructor, 2, false).expose_to_global())
 );
-
-#[distributed_slice(USER_CLASS_DEFS)]
-fn register_readable_stream_byob_request(rt: &mut Runtime) -> Result<ClassID, i32> {
-    JSReadableStreamBYOBRequest::register(rt)
-}

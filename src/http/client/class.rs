@@ -3,17 +3,15 @@
 
 use std::time::Duration;
 
-use linkme::distributed_slice;
 use zuqe::{
     ErrorKind, Exception,
     builtins::promise::{Promise, PromiseResultSlot},
     def_native_object,
     gc_lite::{GcTrace, GcTraceCtx},
-    {CallContext, ClassCtorDef, FieldDef, JSResult, JSValue, Object, Runtime, ScopedContext},
+    {CallContext, ClassCtorDef, FieldDef, JSResult, JSValue, Object, ScopedContext},
 };
 
 use crate::{
-    USER_CLASS_DEFS,
     http::client::{
         body::body_to_bytes,
         config::{HttpClientConfig, ProtocolMode},
@@ -386,8 +384,3 @@ def_native_object!(
     CLASS_HTTP_CLIENT_PROTO,
     Some(ClassCtorDef::new(js_constructor, 1, true))
 );
-
-#[distributed_slice(USER_CLASS_DEFS)]
-fn register_class_http_client(rt: &mut Runtime) -> Result<zuqe::ClassID, i32> {
-    JSHttpClient::register(rt)
-}

@@ -8,21 +8,16 @@
 
 use std::sync::Arc;
 
-use linkme::distributed_slice;
 use zuqe::{
-    Array, CallContext, ClassCtorDef, ClassID, FieldDef, JS_PROP_C_W_E, JSResult, JSValue, Runtime,
-    ScopedContext,
+    Array, CallContext, ClassCtorDef, FieldDef, JS_PROP_C_W_E, JSResult, JSValue, ScopedContext,
     builtins::promise::{Promise, PromiseResultSlot},
     def_native_object,
     gc_lite::{GcTrace, GcTraceCtx},
 };
 
-use crate::{
-    USER_CLASS_DEFS,
-    browser::{
-        cdp, chrome,
-        class_page::{JSPage, PageNetworkState, PagePayload, get_number_prop, get_str_prop},
-    },
+use crate::browser::{
+    cdp, chrome,
+    class_page::{JSPage, PageNetworkState, PagePayload, get_number_prop, get_str_prop},
 };
 
 /// Payload attached to every `Browser` instance.
@@ -77,11 +72,6 @@ const BROWSER_PROTO: &[FieldDef] = &[
         0,
     ),
 ];
-
-#[distributed_slice(USER_CLASS_DEFS)]
-fn register_browser(rt: &mut Runtime) -> Result<ClassID, i32> {
-    JSBrowser::register(rt)
-}
 
 /// Data passed from async launch task to JS callback.
 pub(crate) struct LaunchData {
@@ -420,11 +410,6 @@ def_native_object!(
     PROCESS_PROTO,
     Some(PROCESS_CTOR)
 );
-
-#[distributed_slice(USER_CLASS_DEFS)]
-fn register_browser_process(rt: &mut Runtime) -> Result<ClassID, i32> {
-    JSBrowserProcess::register(rt)
-}
 
 /// Extract the `BrowserPayload` from a `Browser` JS value.
 pub(crate) fn get_browser_payload<'a>(

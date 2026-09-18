@@ -13,17 +13,13 @@ use std::{
     },
 };
 
-use linkme::distributed_slice;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use zuqe::{
-    CallContext, ClassCtorDef, ClassID, FieldDef, JSResult, JSValue, Object, Runtime,
-    ScopedContext,
+    CallContext, ClassCtorDef, FieldDef, JSResult, JSValue, Object, ScopedContext,
     builtins::{iterator::AsyncIterableIterator, promise::Promise, typed_array::TypedArray},
     def_native_object,
     gc_lite::{GcTrace, GcTraceCtx},
 };
-
-use crate::USER_CLASS_DEFS;
 
 /// RAII guard for a pipe fd — closes the fd on drop.
 #[cfg(unix)]
@@ -1376,14 +1372,4 @@ impl JSFileHandle {
     fn payload_from(val: &JSValue) -> Option<&IoPayload> {
         JSFileHandle::payload_of(val)
     }
-}
-
-#[distributed_slice(USER_CLASS_DEFS)]
-fn register_class_stdio_handle(rt: &mut Runtime) -> Result<ClassID, i32> {
-    JSStdioHandle::register(rt)
-}
-
-#[distributed_slice(USER_CLASS_DEFS)]
-fn register_class_file_handle(rt: &mut Runtime) -> Result<ClassID, i32> {
-    JSFileHandle::register(rt)
 }

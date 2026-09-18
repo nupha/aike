@@ -8,14 +8,10 @@
 //! `promise_rejects_dom` / `assert_throws_dom` assert against via
 //! `e.constructor === self.DOMException`, `e.name` and `e.code`.
 
-use linkme::distributed_slice;
 use zuqe::{
-    CallContext, ClassCtorDef, ClassID, FieldDef, JSResult, JSValue, Runtime, ScopedContext,
-    def_native_object,
+    CallContext, ClassCtorDef, FieldDef, JSResult, JSValue, ScopedContext, def_native_object,
     gc_lite::{GcTrace, GcTraceCtx},
 };
-
-use crate::USER_CLASS_DEFS;
 
 pub(crate) struct DOMExceptionPayload {
     name: String,
@@ -128,11 +124,6 @@ def_native_object!(
     CLASS_PROTO,
     Some(ClassCtorDef::new(js_dom_exception_constructor, 2, true).expose_to_global())
 );
-
-#[distributed_slice(USER_CLASS_DEFS)]
-fn register_class_dom_exception(rt: &mut Runtime) -> Result<ClassID, i32> {
-    JSDOMException::register(rt)
-}
 
 /// Build a `DOMException` with the given error name and message.
 ///

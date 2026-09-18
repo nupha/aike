@@ -8,15 +8,14 @@
 
 use std::{cell::RefCell, rc::Rc, sync::Arc};
 
-use linkme::distributed_slice;
 use tokio::sync::Notify;
 use zuqe::{
-    CallContext, ClassCtorDef, ClassID, Exception, FieldDef, JSResult, JSValue, Object, Runtime,
-    ScopedContext, def_native_object,
+    CallContext, ClassCtorDef, Exception, FieldDef, JSResult, JSValue, Object, ScopedContext,
+    def_native_object,
     gc_lite::{GcTrace, GcTraceCtx},
 };
 
-use crate::{USER_CLASS_DEFS, whatwg::dom::make_dom_exception};
+use crate::whatwg::dom::make_dom_exception;
 
 // ===========================================================================
 // Shared signal state (Rc<RefCell<>> so both Controller and Signal see updates)
@@ -388,11 +387,6 @@ def_native_object!(
     Some(ClassCtorDef::new(js_signal_constructor, 0, true).expose_to_global())
 );
 
-#[distributed_slice(USER_CLASS_DEFS)]
-fn register_class_abort_signal(rt: &mut Runtime) -> Result<ClassID, i32> {
-    JSAbortSignal::register(rt)
-}
-
 // ===========================================================================
 // Registration: AbortController
 // ===========================================================================
@@ -409,11 +403,6 @@ def_native_object!(
     CLASS_CONTROLLER_PROTO,
     Some(ClassCtorDef::new(js_controller_constructor, 0, true).expose_to_global())
 );
-
-#[distributed_slice(USER_CLASS_DEFS)]
-fn register_class_abort_controller(rt: &mut Runtime) -> Result<ClassID, i32> {
-    JSAbortController::register(rt)
-}
 
 impl AbortSignalPayload {
     pub(crate) fn is_aborted(&self) -> bool {

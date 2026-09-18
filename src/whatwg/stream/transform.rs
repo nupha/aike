@@ -3,26 +3,21 @@
 
 //! TransformStream, wiring a readable and a writable side together.
 
-use linkme::distributed_slice;
 use zuqe::{
-    CallContext, ClassCtorDef, ClassID, FieldDef, JSResult, JSValue, NativeObject, Runtime,
-    ScopedContext,
+    CallContext, ClassCtorDef, FieldDef, JSResult, JSValue, NativeObject, ScopedContext,
     builtins::promise::Promise,
     def_native_object,
     gc_lite::{GcTrace, GcTraceCtx},
 };
 
-use crate::{
-    USER_CLASS_DEFS,
-    whatwg::stream::{
-        JSReadableStreamDefaultController, ReadableControllerPayload, extract_high_water_mark,
-        extract_size_algorithm,
-        readable::{JSReadableStream, ReadableStreamPayload},
-        readable_controller::get_readable_controller,
-        transform_controller::{JSTransformStreamDefaultController, TransformControllerPayload},
-        writable::{JSWritableStream, WritableStreamPayload},
-        writable_controller::{JSWritableStreamDefaultController, WritableControllerPayload},
-    },
+use crate::whatwg::stream::{
+    JSReadableStreamDefaultController, ReadableControllerPayload, extract_high_water_mark,
+    extract_size_algorithm,
+    readable::{JSReadableStream, ReadableStreamPayload},
+    readable_controller::get_readable_controller,
+    transform_controller::{JSTransformStreamDefaultController, TransformControllerPayload},
+    writable::{JSWritableStream, WritableStreamPayload},
+    writable_controller::{JSWritableStreamDefaultController, WritableControllerPayload},
 };
 
 // ============================================================================
@@ -934,9 +929,4 @@ fn js_transform_stream_writable(ctx: &mut ScopedContext, cc: CallContext) -> JSR
     let p = JSTransformStream::payload_of(&this)
         .ok_or_else(|| ctx.throw_type_error("not a TransformStream"))?;
     Ok(p.writable.map_or(JSValue::UNDEFINED, JSValue::from))
-}
-
-#[distributed_slice(USER_CLASS_DEFS)]
-fn register_transform_stream(rt: &mut Runtime) -> Result<ClassID, i32> {
-    JSTransformStream::register(rt)
 }

@@ -5,20 +5,16 @@
 
 use std::{sync::Arc, time::Duration};
 
-use linkme::distributed_slice;
 use tokio::sync::{Mutex as AsyncMutex, broadcast};
 use zuqe::{
-    CallContext, ClassID, FieldDef, JSResult, JSValue, Object, Runtime, ScopedContext,
+    CallContext, FieldDef, JSResult, JSValue, Object, ScopedContext,
     builtins::promise::{Promise, PromiseResultSlot},
     builtins::typed_array::TypedArray,
     def_native_object,
     gc_lite::{GcTrace, GcTraceCtx},
 };
 
-use crate::{
-    USER_CLASS_DEFS,
-    browser::{cdp, input, network},
-};
+use crate::browser::{cdp, input, network};
 
 // ---------------------------------------------------------------------------
 // Network capture state
@@ -313,11 +309,6 @@ const PAGE_PROTO: &[FieldDef] = &[
 ];
 
 def_native_object!("Page", JSPage, PagePayload, PAGE_PROTO, None);
-
-#[distributed_slice(USER_CLASS_DEFS)]
-fn register_page(rt: &mut Runtime) -> Result<ClassID, i32> {
-    JSPage::register(rt)
-}
 
 // ---------------------------------------------------------------------------
 // Payload accessor

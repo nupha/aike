@@ -9,14 +9,13 @@ use std::{
     sync::{Arc, Mutex, OnceLock},
 };
 
-use linkme::distributed_slice;
 use llama::{
     AttentionType, BackendDevice, FlashAttentionType, KVCacheType, LlamaContext, LlamaLoadMode,
     LlamaModel, ModelOptions, PoolingType, RopeScalingType, SplitMode,
 };
 use zuqe::{
-    Array, CallContext, ClassCtorDef, ClassID, FieldDef, JS_PROP_ENUMERABLE, JSResult, JSValue,
-    Object, Runtime, RuntimeImpl, ScopedContext,
+    Array, CallContext, ClassCtorDef, FieldDef, JS_PROP_ENUMERABLE, JSResult, JSValue, Object,
+    ScopedContext,
     builtins::{promise::Promise, typed_array::TypedArray},
     def_native_object,
     gc_lite::{GcTrace, GcTraceCtx},
@@ -33,10 +32,7 @@ impl GcTrace for LlamaModelWrapper {
     fn trace(&self, _gcx: &mut GcTraceCtx) {}
 }
 
-use crate::{
-    USER_CLASS_DEFS,
-    helpers::{JinjaMessage, TemplateContext, create_minijinja_env},
-};
+use crate::helpers::{JinjaMessage, TemplateContext, create_minijinja_env};
 
 use super::{
     class_context::{JSLlmContext, parse_tokens},
@@ -1057,59 +1053,56 @@ def_native_object!(
     JSLlmModel,
     LlamaModelWrapper,
     CLASS_MODEL_PROTO_ENTRIES,
-    Some(ClassCtorDef::new(js_model_constructor, 2, false).entries(CLASS_MODEL_ENTRIES)),
-    on_class_register: JSLlmModel::on_register,
-    on_class_unregister: JSLlmModel::on_unregister
+    Some(ClassCtorDef::new(js_model_constructor, 2, false).entries(CLASS_MODEL_ENTRIES))
 );
 
-impl JSLlmModel {
-    fn on_register(_: &mut RuntimeImpl) {
-        unsafe {
-            extern "C" fn log_callback(
-                level: llama::ggml_log_level,
-                text: *const std::os::raw::c_char,
-                _user_data: *mut std::os::raw::c_void,
-            ) {
-                if text.is_null() {
-                    return;
-                }
-
-                let msg = unsafe { CStr::from_ptr(text).to_string_lossy() };
-
-                match level {
-                    llama::ggml_log_level_GGML_LOG_LEVEL_DEBUG => {
-                        log::debug!("{msg}");
-                    }
-                    llama::ggml_log_level_GGML_LOG_LEVEL_INFO => {
-                        log::info!("{msg}");
-                    }
-                    llama::ggml_log_level_GGML_LOG_LEVEL_WARN => {
-                        log::warn!("{msg}");
-                    }
-                    llama::ggml_log_level_GGML_LOG_LEVEL_ERROR => {
-                        log::error!("{msg}");
-                    }
-                    _ => {
-                        log::info!("{msg}");
-                    }
-                }
-
-                append_llama_log(&msg);
+/// Initialize the llama backend and route llama.cpp logs into the host log.
+///
+/// Called once at process startup (previously the class's `on_class_register`
+/// hook; host classes are now statically registered via `HOST_CLASS_DEFS`).
+pub(crate) fn init_backend() {
+    unsafe {
+        extern "C" fn log_callback(
+            level: llama::ggml_log_level,
+            text: *const std::os::raw::c_char,
+            _user_data: *mut std::os::raw::c_void,
+        ) {
+            if text.is_null() {
+                return;
             }
 
-            llama::llama_log_set(Some(log_callback), std::ptr::null_mut());
-            llama::llama_backend_init();
-        }
-    }
+            let msg = unsafe { CStr::from_ptr(text).to_string_lossy() };
 
-    fn on_unregister(_: &mut RuntimeImpl) {
-        unsafe {
-            llama::llama_backend_free();
+            match level {
+                llama::ggml_log_level_GGML_LOG_LEVEL_DEBUG => {
+                    log::debug!("{msg}");
+                }
+                llama::ggml_log_level_GGML_LOG_LEVEL_INFO => {
+                    log::info!("{msg}");
+                }
+                llama::ggml_log_level_GGML_LOG_LEVEL_WARN => {
+                    log::warn!("{msg}");
+                }
+                llama::ggml_log_level_GGML_LOG_LEVEL_ERROR => {
+                    log::error!("{msg}");
+                }
+                _ => {
+                    log::info!("{msg}");
+                }
+            }
+
+            append_llama_log(&msg);
         }
+
+        llama::llama_log_set(Some(log_callback), std::ptr::null_mut());
+        llama::llama_backend_init();
     }
 }
 
-#[distributed_slice(USER_CLASS_DEFS)]
-fn register_class_model(rt: &mut Runtime) -> Result<ClassID, i32> {
-    JSLlmModel::register(rt)
+/// Release the llama backend at process teardown (previously the class's
+/// `on_class_unregister` hook).
+pub(crate) fn free_backend() {
+    unsafe {
+        llama::llama_backend_free();
+    }
 }

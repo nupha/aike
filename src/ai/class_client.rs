@@ -4,12 +4,10 @@
 use std::time::Duration;
 
 use futures_util::StreamExt;
-use linkme::distributed_slice;
 use tokio::io::AsyncBufReadExt;
 use tokio_util::io::StreamReader;
 use zuqe::{
-    CallContext, ClassCtorDef, ClassID, FieldDef, JS_PROP_WRITABLE, JSResult, JSValue, Runtime,
-    ScopedContext,
+    CallContext, ClassCtorDef, FieldDef, JS_PROP_WRITABLE, JSResult, JSValue, ScopedContext,
     builtins::{
         iterator::AsyncIterableIterator,
         promise::{Promise, PromiseResultSlot},
@@ -18,7 +16,7 @@ use zuqe::{
     gc_lite::{GcTrace, GcTraceCtx},
 };
 
-use crate::{USER_CLASS_DEFS, helpers::json_keys_camel_to_snake};
+use crate::helpers::json_keys_camel_to_snake;
 
 use super::{
     MAGIC_CHAT_ONCE, MAGIC_CHAT_STREAM, MAGIC_RESPONSES_ONCE, MAGIC_RESPONSES_STREAM,
@@ -902,8 +900,3 @@ def_native_object!(
     CLASS_CLIENT_PROTO,
     Some(ClassCtorDef::new(js_client_constructor, 1, false))
 );
-
-#[distributed_slice(USER_CLASS_DEFS)]
-fn register_class_openai(rt: &mut Runtime) -> Result<ClassID, i32> {
-    JSLlmClient::register(rt)
-}

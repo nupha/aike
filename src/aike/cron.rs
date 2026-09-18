@@ -14,14 +14,11 @@ use std::{
 
 use chrono::Utc;
 use cron::Schedule;
-use linkme::distributed_slice;
 use zuqe::{
-    CallContext, ClassID, FieldDef, JS_PROP_C_W_E, JSResult, JSValue, Object, Runtime,
-    ScopedContext, def_native_object,
+    CallContext, FieldDef, JS_PROP_C_W_E, JSResult, JSValue, Object, ScopedContext,
+    def_native_object,
     gc_lite::{GcTrace, GcTraceCtx},
 };
-
-use crate::USER_CLASS_DEFS;
 
 #[derive(Debug, Clone, Copy)]
 enum CronMsg {
@@ -266,11 +263,6 @@ fn js_cron_job_cancel(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 const CRON_JOB_PROTO: &[FieldDef] = &[FieldDef::FUNC("cancel", 0, js_cron_job_cancel, 0)];
 
 def_native_object!("CronJob", JSCronJob, CronJobPayload, CRON_JOB_PROTO, None);
-
-#[distributed_slice(USER_CLASS_DEFS)]
-fn register_class_cron_job(rt: &mut Runtime) -> Result<ClassID, i32> {
-    JSCronJob::register(rt)
-}
 
 /// JS API: Aike.schedule(pattern, callback, options?)
 pub(super) fn js_schedule(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {

@@ -15,17 +15,14 @@ use std::ptr;
 
 use base64::Engine;
 use hmac::{Hmac, KeyInit, Mac};
-use linkme::distributed_slice;
 use sha1::Sha1;
 use sha2::{Digest, Sha256, Sha384, Sha512};
 use subtle::ConstantTimeEq;
 use zuqe::{
-    Array, CallContext, ClassCtorDef, ClassID, Exception, FieldDef, JSResult, JSValue, Object,
-    Runtime, ScopedContext, builtins::array_buffer::ArrayBuffer, builtins::promise::Promise,
+    Array, CallContext, ClassCtorDef, Exception, FieldDef, JSResult, JSValue, Object,
+    ScopedContext, builtins::array_buffer::ArrayBuffer, builtins::promise::Promise,
     def_native_object,
 };
-
-use crate::USER_CLASS_DEFS;
 
 use super::{
     CryptoKeyPayload, JSCryptoKey, algorithm_name, get_buffer_source_bytes, get_key_usages,
@@ -851,8 +848,3 @@ def_native_object!(
     CLASS_SUBTLE_PROTO,
     Some(ClassCtorDef::new(js_subtle_constructor, 0, true).expose_to_global())
 );
-
-#[distributed_slice(USER_CLASS_DEFS)]
-fn register_class_subtle_crypto(rt: &mut Runtime) -> Result<ClassID, i32> {
-    JSCryptoSubtle::register(rt)
-}

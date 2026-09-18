@@ -9,15 +9,12 @@
 
 use std::{cell::RefCell, collections::HashMap, path::PathBuf};
 
-use linkme::distributed_slice;
 use minijinja::{Environment, value::Rest};
 use minijinja_contrib::pycompat;
 use zuqe::{
-    CallContext, ClassCtorDef, ClassID, FieldDef, GcTrace, JSResult, JSValue, NativeObject,
-    Runtime, ScopedContext, def_native_object, gc_lite::GcTraceCtx,
+    CallContext, ClassCtorDef, FieldDef, GcTrace, JSResult, JSValue, NativeObject, ScopedContext,
+    def_native_object, gc_lite::GcTraceCtx,
 };
-
-use crate::USER_CLASS_DEFS;
 
 // ---------------------------------------------------------------------------
 // Thread-local storage for JS callbacks, context
@@ -434,11 +431,6 @@ def_native_object!(
     CLASS_JINJA2_PROTO,
     Some(ClassCtorDef::new(js_constructor, 0, true))
 );
-
-#[distributed_slice(USER_CLASS_DEFS)]
-fn register_class_jinja2(rt: &mut Runtime) -> Result<ClassID, i32> {
-    JSJinja2::register(rt)
-}
 
 // ---------------------------------------------------------------------------
 // Standalone renderTemplate

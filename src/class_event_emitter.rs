@@ -3,13 +3,12 @@
 
 use std::{cell::RefCell, collections::HashMap};
 
-use linkme::distributed_slice;
 use zuqe::{
-    Array, CallContext, ClassCtorDef, ClassID, FieldDef, JSResult, JSValue, Object, Runtime,
-    ScopedContext, def_native_object, gc_lite::GcTrace,
+    Array, CallContext, ClassCtorDef, FieldDef, JSResult, JSValue, Object, ScopedContext,
+    def_native_object, gc_lite::GcTrace,
 };
 
-use crate::{USER_CLASS_DEFS, aike::signal_number};
+use crate::aike::signal_number;
 
 #[derive(Debug)]
 pub(crate) struct EmitterPayload {
@@ -253,8 +252,3 @@ def_native_object!(
     CLASS_EVENT_EMITTER_PROTO,
     Some(ClassCtorDef::new(js_constructor, 0, true).expose_to_global())
 );
-
-#[distributed_slice(USER_CLASS_DEFS)]
-fn register_class_event_emitter(rt: &mut Runtime) -> Result<ClassID, i32> {
-    JSEventEmitter::register(rt)
-}

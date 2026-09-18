@@ -1,13 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-use linkme::distributed_slice;
 use zuqe::{
-    CallContext, ClassCtorDef, ClassID, FieldDef, JSResult, JSValue, Runtime, ScopedContext,
-    def_native_object,
+    CallContext, ClassCtorDef, FieldDef, JSResult, JSValue, ScopedContext, def_native_object,
 };
-
-use crate::USER_CLASS_DEFS;
 
 use super::{ReadableControllerPayload, readable_controller::get_readable_controller};
 
@@ -84,8 +80,3 @@ def_native_object!(
     BYTE_CONTROLLER_PROTO,
     Some(ClassCtorDef::new(js_byte_controller_constructor, 0, false).expose_to_global())
 );
-
-#[distributed_slice(USER_CLASS_DEFS)]
-fn register_readable_byte_stream_controller(rt: &mut Runtime) -> Result<ClassID, i32> {
-    JSReadableByteStreamController::register(rt)
-}

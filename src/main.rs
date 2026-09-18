@@ -37,9 +37,8 @@ use std::{
 
 use clap::{CommandFactory, Parser};
 use color::{Color::*, colorize_println};
-use linkme::distributed_slice;
 use zuqe::{
-    ClassID, EvalFlags, EvalType, Exception, ExitStatus, JSValue, ModuleDef, NativeObject, Runtime,
+    EvalFlags, EvalType, Exception, ExitStatus, JSValue, ModuleDef, NativeObject, Runtime,
     ScopedContext,
 };
 
@@ -170,9 +169,6 @@ fn parse_byte_size(ss: &str) -> Option<usize> {
         None
     }
 }
-
-#[distributed_slice]
-pub(crate) static USER_CLASS_DEFS: [fn(&mut Runtime) -> Result<ClassID, i32>];
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -353,11 +349,6 @@ async fn main() -> ExitCode {
         gc_trace_fetch(gcx);
         gc_trace_next_tick(gcx);
     });
-
-    // register native classes
-    for class_reg_fn in USER_CLASS_DEFS {
-        class_reg_fn(&mut rt).unwrap();
-    }
 
     // create context and setup
     let mut ctx = rt
@@ -548,6 +539,9 @@ async fn main() -> ExitCode {
     // exit without waiting on orphaned tokio tasks. (`ctx` is a Copy handle, so
     // only `rt` holds the heap that needs finalizing.)
     drop(rt);
+
+    #[cfg(feature = "llama_cpp")]
+    ai::free_backend();
 
     // Kill `abortOnParentExit` children synchronously: every script exit
     // (normal end, process.exit, engine error) funnels through here.

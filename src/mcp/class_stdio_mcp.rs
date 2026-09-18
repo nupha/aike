@@ -11,19 +11,17 @@ use std::{
     },
 };
 
-use linkme::distributed_slice;
 use rmcp::service::{RoleServer, serve_server_with_ct};
 use tokio_util::sync::CancellationToken;
 use zuqe::{
-    Array, CallContext, Callback, ClassCtorDef, ClassID, FieldDef, JS_GPN_ENUM_ONLY,
-    JS_GPN_STR_OR_INT_MASK, JS_PROP_ENUMERABLE, JSResult, JSValue, NativeObject, Object, Runtime,
-    ScopedContext,
+    Array, CallContext, Callback, ClassCtorDef, FieldDef, JS_GPN_ENUM_ONLY, JS_GPN_STR_OR_INT_MASK,
+    JS_PROP_ENUMERABLE, JSResult, JSValue, NativeObject, Object, ScopedContext,
     builtins::promise::Promise,
     def_native_object,
     gc_lite::{GcTrace, GcTraceCtx},
 };
 
-use crate::{USER_CLASS_DEFS, http::IncomingRequest};
+use crate::http::IncomingRequest;
 
 use super::{
     CommandArgs, EnvVal,
@@ -581,8 +579,3 @@ def_native_object!(
     Some(STDIO_MCP_CTOR),
     extends: JSBaseMcp::class_id
 );
-
-#[distributed_slice(USER_CLASS_DEFS)]
-fn register_stdio_mcp(rt: &mut Runtime) -> Result<ClassID, i32> {
-    JSStdioMcp::register(rt)
-}

@@ -6,19 +6,15 @@
 
 use std::{cell::Cell, rc::Rc};
 
-use linkme::distributed_slice;
 use zuqe::{
-    CallContext, ClassCtorDef, ClassID, Exception, FieldDef, JSResult, JSValue, Runtime,
-    ScopedContext, def_native_object,
+    CallContext, ClassCtorDef, Exception, FieldDef, JSResult, JSValue, ScopedContext,
+    def_native_object,
     gc_lite::{GcTrace, GcTraceCtx},
 };
 
-use crate::{
-    USER_CLASS_DEFS,
-    whatwg::stream::{
-        readable_controller_default::JSReadableStreamDefaultController,
-        transform::JSTransformStream, writable::JSWritableStream,
-    },
+use crate::whatwg::stream::{
+    readable_controller_default::JSReadableStreamDefaultController, transform::JSTransformStream,
+    writable::JSWritableStream,
 };
 
 use super::RsState;
@@ -256,9 +252,4 @@ fn js_transform_controller_desired_size(ctx: &mut ScopedContext, cc: CallContext
         return Ok(JSValue::from(rcp.high_water_mark() - total));
     }
     Ok(JSValue::ZERO)
-}
-
-#[distributed_slice(USER_CLASS_DEFS)]
-fn register_transform_stream_default_controller(rt: &mut Runtime) -> Result<ClassID, i32> {
-    JSTransformStreamDefaultController::register(rt)
 }

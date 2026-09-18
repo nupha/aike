@@ -4,20 +4,15 @@
 //! WritableStreamDefaultController: the controller handed to an underlying
 //! sink's `start()`/`write()` callbacks.
 
-use linkme::distributed_slice;
 use zuqe::{
-    CallContext, ClassCtorDef, ClassID, FieldDef, JSResult, JSValue, Runtime, ScopedContext,
-    def_native_object,
+    CallContext, ClassCtorDef, FieldDef, JSResult, JSValue, ScopedContext, def_native_object,
     gc_lite::{GcTrace, GcTraceCtx},
 };
 
-use crate::{
-    USER_CLASS_DEFS,
-    whatwg::{
-        abort::make_default_signal,
-        stream::{
-            transform_controller::JSTransformStreamDefaultController, writable::JSWritableStream,
-        },
+use crate::whatwg::{
+    abort::make_default_signal,
+    stream::{
+        transform_controller::JSTransformStreamDefaultController, writable::JSWritableStream,
     },
 };
 
@@ -126,9 +121,4 @@ fn js_writable_controller_signal(ctx: &mut ScopedContext, cc: CallContext) -> JS
     let p = JSWritableStreamDefaultController::payload_mut_of(&mut this)
         .ok_or_else(|| ctx.throw_type_error("not a WritableStreamDefaultController"))?;
     p.ensure_signal(ctx)
-}
-
-#[distributed_slice(USER_CLASS_DEFS)]
-fn register_writable_stream_default_controller(rt: &mut Runtime) -> Result<ClassID, i32> {
-    JSWritableStreamDefaultController::register(rt)
 }

@@ -9,17 +9,16 @@ use std::{
     sync::{Arc, RwLock},
 };
 
-use linkme::distributed_slice;
 use rmcp::model::{
     Implementation, ProtocolVersion, ServerCapabilities, ServerInfo, Tool, ToolAnnotations,
 };
 use zuqe::{
-    Array, CallContext, ClassCtorDef, ClassID, FieldDef, JS_GPN_ENUM_ONLY, JS_GPN_STR_OR_INT_MASK,
-    JSResult, JSValue, NativeObject, Object, Runtime, ScopedContext, def_native_object,
+    Array, CallContext, ClassCtorDef, FieldDef, JS_GPN_ENUM_ONLY, JS_GPN_STR_OR_INT_MASK, JSResult,
+    JSValue, NativeObject, Object, ScopedContext, def_native_object,
     gc_lite::{GcTrace, GcTraceCtx},
 };
 
-use crate::{USER_CLASS_DEFS, helpers::simple_schema_from_args};
+use crate::helpers::simple_schema_from_args;
 
 use super::{CommandArgs, EnvVal, class_http_mcp::JSHttpMcp, class_stdio_mcp::JSStdioMcp};
 
@@ -425,11 +424,6 @@ def_native_object!(
     BASE_MCP_PROTO,
     Some(ClassCtorDef::new(js_base_constructor, 0, false))
 );
-
-#[distributed_slice(USER_CLASS_DEFS)]
-fn register_base_mcp(rt: &mut Runtime) -> Result<ClassID, i32> {
-    JSBaseMcp::register(rt)
-}
 
 /// Shared config parsing for `StdioMcp.define` / `HttpMcp.define`.
 ///

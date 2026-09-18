@@ -10,16 +10,12 @@
 //! - `Document` / `Element`               — internal classes (used via module API)
 
 use ego_tree::NodeId;
-use linkme::distributed_slice;
 use mdka::html_to_markdown;
 use scraper::{ElementRef, Html, Selector};
 use zuqe::{
-    Array, CallContext, ClassID, FieldDef, JSResult, JSValue, Runtime, ScopedContext,
-    def_native_object,
+    Array, CallContext, FieldDef, JSResult, JSValue, ScopedContext, def_native_object,
     gc_lite::{GcTrace, GcTraceCtx},
 };
-
-use crate::USER_CLASS_DEFS;
 
 /// Recover the `NodeId` of an `ElementRef` by scanning the full tree.
 fn find_node_id(html: &Html, target: &ElementRef) -> Option<NodeId> {
@@ -254,11 +250,6 @@ def_native_object!(
     None
 );
 
-#[distributed_slice(USER_CLASS_DEFS)]
-fn register_document(rt: &mut Runtime) -> Result<ClassID, i32> {
-    HtmlDocument::register(rt)
-}
-
 // ---------------------------------------------------------------------------
 // Element
 // ---------------------------------------------------------------------------
@@ -412,8 +403,3 @@ const ELEMENT_PROTO: &[FieldDef] = &[
 ];
 
 def_native_object!("Element", HtmlElement, ElementPayload, ELEMENT_PROTO, None);
-
-#[distributed_slice(USER_CLASS_DEFS)]
-fn register_element(rt: &mut Runtime) -> Result<ClassID, i32> {
-    HtmlElement::register(rt)
-}

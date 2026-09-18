@@ -15,17 +15,14 @@
 
 use std::{cell::RefCell, rc::Rc};
 
-use linkme::distributed_slice;
 use zuqe::{
-    CallContext, ClassCtorDef, ClassID, FieldDef, JSResult, JSValue, NativeObject, Runtime,
-    ScopedContext,
+    CallContext, ClassCtorDef, FieldDef, JSResult, JSValue, NativeObject, ScopedContext,
     builtins::{json::JSON, promise::Promise},
     def_native_object,
     gc_lite::{GcTrace, GcTraceCtx},
 };
 
 use crate::{
-    USER_CLASS_DEFS,
     html::HtmlConvertMode,
     http::client::{
         body::{
@@ -1092,11 +1089,6 @@ def_native_object!(
     )
 );
 
-#[distributed_slice(USER_CLASS_DEFS)]
-fn register_class_response(rt: &mut Runtime) -> Result<ClassID, i32> {
-    JSResponse::register(rt)
-}
-
 // ---------------------------------------------------------------------------
 // HttpClientResponse — HttpClient-enhanced subclass of Response
 // ---------------------------------------------------------------------------
@@ -1139,8 +1131,3 @@ def_native_object!(
     Some(ClassCtorDef::new(js_http_response_constructor, 0, false)),
     extends: JSResponse::class_id
 );
-
-#[distributed_slice(USER_CLASS_DEFS)]
-fn register_class_client_response(rt: &mut Runtime) -> Result<ClassID, i32> {
-    JSHttpClientResponse::register(rt)
-}

@@ -22,10 +22,9 @@ use std::{
 
 use axum::extract::ws::{Message, WebSocket};
 use crossbeam::channel::{Receiver, Sender, TryRecvError, bounded};
-use linkme::distributed_slice;
 use tokio::sync::mpsc;
 use zuqe::{
-    CallContext, ClassID, FieldDef, JSResult, JSValue, Object, Runtime, ScopedContext,
+    CallContext, FieldDef, JSResult, JSValue, Object, ScopedContext,
     builtins::iterator::{AsyncIterableIterator, AsyncIteratorFetcher, IterFetchStatus},
     def_native_object,
     gc_lite::{GcTrace, GcTraceCtx},
@@ -35,8 +34,6 @@ use super::{
     class_http_server::{IncomingRequest, get_server_payload_mut},
     outbound_buffer::{OutboundBuffer, js_stream_write},
 };
-
-use crate::USER_CLASS_DEFS;
 
 /// Capacity of the inbound (client→server) channel feeding the async iterator.
 const INBOUND_CAP: usize = 64;
@@ -507,8 +504,3 @@ def_native_object!(
     WS_PROTO,
     None
 );
-
-#[distributed_slice(USER_CLASS_DEFS)]
-fn register_ws_stream(rt: &mut Runtime) -> Result<ClassID, i32> {
-    JSWebSocketStream::register(rt)
-}

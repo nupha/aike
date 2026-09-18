@@ -8,14 +8,11 @@
 
 use std::cell::{Cell, RefCell};
 
-use linkme::distributed_slice;
 use zuqe::{
-    CallContext, ClassCtorDef, ClassID, FieldDef, JSResult, JSValue, Object, Runtime,
-    ScopedContext, def_native_object,
+    CallContext, ClassCtorDef, FieldDef, JSResult, JSValue, Object, ScopedContext,
+    def_native_object,
     gc_lite::{GcTrace, GcTraceCtx},
 };
-
-use crate::USER_CLASS_DEFS;
 
 /// Supported encodings for TextDecoder
 #[derive(Clone, Copy, PartialEq)]
@@ -444,8 +441,3 @@ def_native_object!(
     CLASS_TEXT_DECODER_PROTO,
     Some(ClassCtorDef::new(js_constructor, 2, true).expose_to_global())
 );
-
-#[distributed_slice(USER_CLASS_DEFS)]
-fn register_class_text_decoder(rt: &mut Runtime) -> Result<ClassID, i32> {
-    JSTextDecoder::register(rt)
-}

@@ -25,7 +25,7 @@ pub(crate) use class_client::JSLlmClient;
 pub(crate) use {
     class_context::JSLlmContext,
     class_engine::{ERR_CANCELLED, ERR_ENGINE_SHUTDOWN, JSEngine},
-    class_model::JSLlmModel,
+    class_model::{JSLlmModel, free_backend, init_backend},
     class_sampler::JSSamplerChain,
 };
 
@@ -57,7 +57,9 @@ fn get_devices(ctx: &mut ScopedContext, _: CallContext) -> JSResult {
         if let Some(d) = d {
             let mut o = ctx.create_base_object()?;
 
-            let ty = JSValue::make_string(ctx.create_string_from_utf8(d.dev_type.to_str().as_bytes().to_vec())?);
+            let ty = JSValue::make_string(
+                ctx.create_string_from_utf8(d.dev_type.to_str().as_bytes().to_vec())?,
+            );
             o.define_property_value_str(ctx, "type", ty, JS_PROP_ENUMERABLE)?;
 
             let name = JSValue::make_string(ctx.create_string_from_utf8(d.name.into_bytes())?);
@@ -244,6 +246,9 @@ const MOD_AI_ENTRIES: &[FieldDef] = &[
 ];
 
 pub fn init_mod_ai(ctx: &mut ScopedContext) -> Result<(), i32> {
+    #[cfg(feature = "llama_cpp")]
+    init_backend();
+
     ctx.create_module("ai", MOD_AI_ENTRIES)?;
     Ok(())
 }

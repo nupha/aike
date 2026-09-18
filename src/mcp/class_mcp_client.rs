@@ -21,7 +21,6 @@ use std::{
     time::Duration,
 };
 
-use linkme::distributed_slice;
 use process_wrap::tokio::CommandWrap;
 #[cfg(windows)]
 use process_wrap::tokio::JobObject;
@@ -38,14 +37,11 @@ use rmcp::{
     },
 };
 use zuqe::{
-    CallContext, ClassCtorDef, ClassID, FieldDef, JSResult, JSValue, Object, Runtime,
-    ScopedContext,
+    CallContext, ClassCtorDef, FieldDef, JSResult, JSValue, Object, ScopedContext,
     builtins::promise::Promise,
     def_native_object,
     gc_lite::{GcTrace, GcTraceCtx},
 };
-
-use crate::USER_CLASS_DEFS;
 
 type Running = RunningService<RoleClient, ClientInfo>;
 
@@ -716,13 +712,3 @@ def_native_object!(
     CLIENT_PROTO,
     Some(HTTP_CLIENT_CTOR)
 );
-
-#[distributed_slice(USER_CLASS_DEFS)]
-fn register_stdio_mcp_client(rt: &mut Runtime) -> Result<ClassID, i32> {
-    JSStdioMcpClient::register(rt)
-}
-
-#[distributed_slice(USER_CLASS_DEFS)]
-fn register_http_mcp_client(rt: &mut Runtime) -> Result<ClassID, i32> {
-    JSHttpMcpClient::register(rt)
-}

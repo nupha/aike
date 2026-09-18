@@ -37,16 +37,12 @@ pub(crate) use {
     writer::JSWritableStreamDefaultWriter,
 };
 
-use linkme::distributed_slice;
 use zuqe::{
-    CallContext, ClassCtorDef, ClassID, FieldDef, IntOrFloat, JSResult, JSValue, Runtime,
-    ScopedContext,
+    CallContext, ClassCtorDef, FieldDef, IntOrFloat, JSResult, JSValue, ScopedContext,
     builtins::promise::{Promise, PromiseState},
     def_native_object,
     gc_lite::{GcTrace, GcTraceCtx},
 };
-
-use crate::USER_CLASS_DEFS;
 
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum RsState {
@@ -342,14 +338,4 @@ pub(super) fn notify_peer_closed(
             wp_promise.reject(ctx, reason.unwrap());
         }
     }
-}
-
-#[distributed_slice(USER_CLASS_DEFS)]
-fn register_byte_length_queuing_strategy(rt: &mut Runtime) -> Result<ClassID, i32> {
-    JSByteLengthQueuingStrategy::register(rt)
-}
-
-#[distributed_slice(USER_CLASS_DEFS)]
-fn register_count_queuing_strategy(rt: &mut Runtime) -> Result<ClassID, i32> {
-    JSCountQueuingStrategy::register(rt)
 }

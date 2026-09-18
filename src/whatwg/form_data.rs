@@ -13,17 +13,13 @@
 
 use std::cell::RefCell;
 
-use linkme::distributed_slice;
 use zuqe::{
-    Array, Atom, CallContext, ClassCtorDef, ClassID, FieldDef, JS_CLASS_ITERATOR, JS_PROP_C_W_E,
-    JSIteratorKindEnum, JSResult, JSValue, Object, Runtime, ScopedContext, def_native_object,
+    Array, Atom, CallContext, ClassCtorDef, FieldDef, JS_CLASS_ITERATOR, JS_PROP_C_W_E,
+    JSIteratorKindEnum, JSResult, JSValue, Object, ScopedContext, def_native_object,
     gc_lite::{GcTrace, GcTraceCtx},
 };
 
-use crate::{
-    USER_CLASS_DEFS,
-    whatwg::blob::{blob_bytes_of, blob_from_bytes, blob_type_of},
-};
+use crate::whatwg::blob::{blob_bytes_of, blob_from_bytes, blob_type_of};
 
 /// A single entry value: a string, or a `Blob`/`File` kept as a JS value.
 #[derive(Clone)]
@@ -714,13 +710,3 @@ def_native_object!(
     FORM_DATA_PROTO,
     Some(ClassCtorDef::new(js_fd_constructor, 0, true).expose_to_global())
 );
-
-#[distributed_slice(USER_CLASS_DEFS)]
-fn register_class_form_data(rt: &mut Runtime) -> Result<ClassID, i32> {
-    JSFormData::register(rt)
-}
-
-#[distributed_slice(USER_CLASS_DEFS)]
-fn register_class_form_data_iterator(rt: &mut Runtime) -> Result<ClassID, i32> {
-    FormDataIterator::register(rt)
-}

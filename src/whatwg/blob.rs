@@ -10,15 +10,14 @@
 
 use std::{ptr::null_mut, sync::Arc};
 
-use linkme::distributed_slice;
 use zuqe::{
-    CallContext, ClassCtorDef, ClassID, FieldDef, JSResult, JSValue, Runtime, ScopedContext,
+    CallContext, ClassCtorDef, FieldDef, JSResult, JSValue, ScopedContext,
     builtins::{array_buffer::ArrayBuffer, promise::Promise, typed_array::TypedArray},
     def_native_object,
     gc_lite::{GcTrace, GcTraceCtx},
 };
 
-use crate::{USER_CLASS_DEFS, whatwg::stream::JSReadableStream};
+use crate::whatwg::stream::JSReadableStream;
 
 /// Immutable blob contents: a shared byte buffer plus its MIME type.
 #[derive(Clone)]
@@ -346,8 +345,3 @@ def_native_object!(
     BLOB_PROTO,
     Some(ClassCtorDef::new(js_blob_constructor, 2, true).expose_to_global())
 );
-
-#[distributed_slice(USER_CLASS_DEFS)]
-fn register_class_blob(rt: &mut Runtime) -> Result<ClassID, i32> {
-    JSBlob::register(rt)
-}

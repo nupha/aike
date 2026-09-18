@@ -1,16 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-use linkme::distributed_slice;
 use tokio::sync::{mpsc, oneshot};
 use zuqe::{
-    CallContext, ClassID, FieldDef, IntOrFloat, JSResult, JSValue, Runtime, ScopedContext,
+    CallContext, FieldDef, IntOrFloat, JSResult, JSValue, ScopedContext,
     builtins::json::JSON,
     def_native_object,
     gc_lite::{GcTrace, GcTraceCtx},
 };
-
-use crate::USER_CLASS_DEFS;
 
 use super::outbound_buffer::{OUTBOUND_CAP, OutboundBuffer, js_stream_write};
 
@@ -293,11 +290,6 @@ def_native_object!(
     None
 );
 
-#[distributed_slice(USER_CLASS_DEFS)]
-fn register_http_response(rt: &mut Runtime) -> Result<ClassID, i32> {
-    JSHttpResponse::register(rt)
-}
-
 // ---------------------------------------------------------------------------
 // SSE response (`HttpResponseSse`) — independent streaming object returned by
 // `res.sse()`. Only exposes write/flush/close; the original `HttpServerResponse`
@@ -498,8 +490,3 @@ def_native_object!(
     SSE_PROTO,
     None
 );
-
-#[distributed_slice(USER_CLASS_DEFS)]
-fn register_http_response_sse(rt: &mut Runtime) -> Result<ClassID, i32> {
-    JSHttpResponseSse::register(rt)
-}

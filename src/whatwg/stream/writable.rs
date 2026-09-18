@@ -3,22 +3,17 @@
 
 //! WritableStream.
 
-use linkme::distributed_slice;
 use zuqe::{
-    CallContext, Callback, ClassCtorDef, ClassID, FieldDef, JSResult, JSValue, NativeObject,
-    Runtime, ScopedContext,
+    CallContext, Callback, ClassCtorDef, FieldDef, JSResult, JSValue, NativeObject, ScopedContext,
     builtins::promise::{Promise, PromiseState},
     def_native_object,
     gc_lite::{GcTrace, GcTraceCtx},
 };
 
-use crate::{
-    USER_CLASS_DEFS,
-    whatwg::stream::{
-        extract_high_water_mark, extract_size_algorithm,
-        writable_controller::{JSWritableStreamDefaultController, WritableControllerPayload},
-        writer::{JSWritableStreamDefaultWriter, WriterPayload},
-    },
+use crate::whatwg::stream::{
+    extract_high_water_mark, extract_size_algorithm,
+    writable_controller::{JSWritableStreamDefaultController, WritableControllerPayload},
+    writer::{JSWritableStreamDefaultWriter, WriterPayload},
 };
 
 use super::RsState;
@@ -1339,9 +1334,4 @@ fn js_writable_stream_close(ctx: &mut ScopedContext, cc: CallContext) -> JSResul
         return stream.close(ctx).map(JSValue::from);
     }
     Err(ctx.throw_type_error("not a WritableStream"))
-}
-
-#[distributed_slice(USER_CLASS_DEFS)]
-fn register_writable_stream(rt: &mut Runtime) -> Result<ClassID, i32> {
-    JSWritableStream::register(rt)
 }

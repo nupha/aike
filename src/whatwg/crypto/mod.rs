@@ -14,19 +14,16 @@
 
 pub(crate) mod subtle;
 
-use linkme::distributed_slice;
 use rand::TryRngCore;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 use zuqe::{
-    Array, CallContext, ClassCtorDef, ClassID, Exception, FieldDef, JSResult, JSValue, Object,
-    Runtime, ScopedContext,
+    Array, CallContext, ClassCtorDef, Exception, FieldDef, JSResult, JSValue, Object,
+    ScopedContext,
     builtins::typed_array::{DataView, TypedArray},
     def_native_object,
     gc_lite::{GcTrace, GcTraceCtx},
 };
-
-use crate::USER_CLASS_DEFS;
 
 use super::dom::make_dom_exception;
 
@@ -248,11 +245,6 @@ def_native_object!(
     Some(ClassCtorDef::new(js_key_constructor, 0, true).expose_to_global())
 );
 
-#[distributed_slice(USER_CLASS_DEFS)]
-fn register_class_crypto_key(rt: &mut Runtime) -> Result<ClassID, i32> {
-    JSCryptoKey::register(rt)
-}
-
 /// Build a `CryptoKey` with the given raw material and metadata.
 pub(crate) fn make_key(
     ctx: &mut ScopedContext,
@@ -378,11 +370,6 @@ def_native_object!(
     CLASS_CRYPTO_PROTO,
     Some(ClassCtorDef::new(js_crypto_constructor, 0, true).expose_to_global())
 );
-
-#[distributed_slice(USER_CLASS_DEFS)]
-fn register_class_crypto(rt: &mut Runtime) -> Result<ClassID, i32> {
-    JSCrypto::register(rt)
-}
 
 // ===========================================================================
 // Installation

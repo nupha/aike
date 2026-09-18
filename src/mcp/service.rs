@@ -6,7 +6,6 @@ use std::{
     sync::{Arc, RwLock},
 };
 
-use linkme::distributed_slice;
 use rmcp::{
     ErrorData as McpError,
     handler::server::ServerHandler,
@@ -21,14 +20,13 @@ use rmcp::{
     },
 };
 use zuqe::{
-    CallContext, Callback, ClassID, FieldDef, JSResult, JSValue, Object, Runtime, ScopedContext,
+    CallContext, Callback, FieldDef, JSResult, JSValue, Object, ScopedContext,
     builtins::promise::Promise,
     def_native_object,
     gc_lite::{GcTrace, GcTraceCtx},
 };
 
 use crate::{
-    USER_CLASS_DEFS,
     helpers::{json_schema_apply_defaults, json_schema_validate_args},
     http::IncomingRequest,
 };
@@ -398,11 +396,6 @@ def_native_object!(
     MCP_BRIDGE_PROTO,
     None
 );
-
-#[distributed_slice(USER_CLASS_DEFS)]
-fn register_mcp_bridge(rt: &mut Runtime) -> Result<ClassID, i32> {
-    JSMcpBridge::register(rt)
-}
 
 /// Create a JSMcpBridge instance wrapping the given mpsc sender.
 fn create_mcp_bridge(
