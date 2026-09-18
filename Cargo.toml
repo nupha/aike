@@ -101,7 +101,6 @@ clap = { version = "4.5", features = ["derive"] }
 env_logger = "0.10"
 log = "0.4"
 smallvec = "1.13"
-linkme = "0.3"
 minijinja = { version = "2", features = ["serde", "json"] }
 minijinja-contrib = { version = "2", features = ["pycompat"] }
 axum = { version = "0.8", default-features = false, features = [

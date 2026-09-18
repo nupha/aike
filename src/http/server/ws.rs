@@ -181,8 +181,8 @@ struct WsReadFetcher {
     control_tx: mpsc::Sender<WsControl>,
 }
 
-impl zuqe::GcTrace for WsReadFetcher {
-    fn trace(&self, _tr: &mut zuqe::gc_lite::GcTraceCtx) {}
+impl GcTrace for WsReadFetcher {
+    fn trace(&self, _tr: &mut GcTraceCtx) {}
 }
 
 impl AsyncIteratorFetcher for WsReadFetcher {

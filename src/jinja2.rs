@@ -12,8 +12,9 @@ use std::{cell::RefCell, collections::HashMap, path::PathBuf};
 use minijinja::{Environment, value::Rest};
 use minijinja_contrib::pycompat;
 use zuqe::{
-    CallContext, ClassCtorDef, FieldDef, GcTrace, JSResult, JSValue, NativeObject, ScopedContext,
-    def_native_object, gc_lite::GcTraceCtx,
+    CallContext, ClassCtorDef, FieldDef, JSResult, JSValue, NativeObject, ScopedContext,
+    def_native_object,
+    gc_lite::{GcTrace, GcTraceCtx},
 };
 
 // ---------------------------------------------------------------------------
