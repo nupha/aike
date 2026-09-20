@@ -399,11 +399,11 @@ declare namespace Aike {
      * NOTE: Ignored on macOS (no seccomp support).
      */
     seccompProfile?:
-      | "disabled"
-      | "strict"
-      | "standard"
-      | "permissive"
-      | string[];
+    | "disabled"
+    | "strict"
+    | "standard"
+    | "permissive"
+    | string[];
 
     /**
      * Run as this UID inside the sandbox.
@@ -675,6 +675,64 @@ declare namespace Aike {
    * malformed/truncated, or a referenced value cannot be reconstructed.
    */
   function restoreValue(bytes: Uint8Array): unknown;
+
+  // --- multi-runtime (Aike 增强) ---
+
+  /** Options for {@link Aike.createRuntime}. */
+  interface RuntimeOptions {
+    /** Heap upper bound in bytes; 0/omitted = unlimited. */
+    memory?: number;
+    /** Per-`run` wall-clock timeout in ms; 0/omitted = unlimited. */
+    timeout?: number;
+    /**
+     * Host capabilities to install in the child runtime:
+     * - `string[]` — whitelist (equivalent to `{ whiteList: [...] }`)
+     * - `{ whiteList }` — install only these
+     * - `{ whiteList, blackList }` — whiteList wins, blackList ignored
+     * - `{ blackList }` — install all host capabilities except these
+     * - omitted — install none (pure ECMA, `eval` stripped): minimum privilege
+     *
+     * Capability names include `"console"`, `"crypto"`, `"fetch"`, `"fs"`,
+     * `"process"`, `"Aike"`, etc. `"localStorage"` is root-only and is
+     * rejected for a child runtime. Process/thread-global APIs (e.g.
+     * `process.exit`, `Aike.onSignal`) are simply not installed in a child
+     * runtime; `Aike.spawn({abortOnParentExit})` is rejected with a
+     * `TypeError`.
+     */
+    global?: string[] | { whiteList?: string[]; blackList?: string[] };
+    /** Optional debug name. */
+    name?: string;
+  }
+
+  /**
+   * A child runtime: an independent GC heap + context on the same thread,
+   * cooperatively driven by the parent's event loop. Values crossing the
+   * boundary must be serializable (functions/promises/symbols throw a
+   * `TypeError`).
+   */
+  interface Runtime {
+    /**
+     * Execute `code` in the child (global scope) and resolve with its
+     * serializable completion value. The child's uncaught exception rejects
+     * with a serialized `{name, message, stack}` object; the parent loop is
+     * unaffected. May be called repeatedly.
+     */
+    run(code: string, name?: string): Promise<any>;
+    /** Send a serializable value to the child's `onmessage`. */
+    postMessage(value: unknown): void;
+    /** Receive values sent from the child via its `postMessage`. */
+    onmessage: ((value: unknown) => void) | null;
+    /** Abort and release the child runtime. Idempotent. */
+    close(): void;
+    /** Optional debug name (present only when set). */
+    readonly name?: string;
+  }
+
+  /**
+   * Create an isolated child runtime on the current thread. Only available in
+   * the host/parent runtime — child runtimes never expose `createRuntime`.
+   */
+  function createRuntime(options?: RuntimeOptions): Runtime;
 }
 
 // ---------------------------------------------------------------------------

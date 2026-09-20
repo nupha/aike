@@ -66,16 +66,18 @@ impl StdioMcpShutdown {
 static MCP_STDIO_STATE: OnceLock<StdioMcpShutdown> = OnceLock::new();
 
 // Thread-local GC roots for JS handler objects (Object is !Send, so can't
-// live in a static). Set in start(), cleared on shutdown.
+// live in a static). Keyed by runtime id; set in start(), cleared on shutdown.
 thread_local! {
-    static STDIO_JS_HANDLERS: RefCell<Vec<Object>> = const { RefCell::new(Vec::new()) };
+    static STDIO_JS_HANDLERS: RefCell<HashMap<usize, Vec<Object>>> = RefCell::new(HashMap::new());
 }
 
 /// GC trace callback for the stdio MCP server's JS handler objects.
-pub(crate) fn gc_trace_stdio_state(gcx: &mut GcTraceCtx) {
-    STDIO_JS_HANDLERS.with(|handlers| {
-        for h in handlers.borrow().iter() {
-            h.trace(gcx);
+pub(crate) fn gc_trace_stdio_state(gcx: &mut GcTraceCtx, runtime_id: usize) {
+    STDIO_JS_HANDLERS.with_borrow(|handlers| {
+        if let Some(hs) = handlers.get(&runtime_id) {
+            for h in hs {
+                h.trace(gcx);
+            }
         }
     });
 }
@@ -390,8 +392,9 @@ fn start_stdio_server(ctx: &mut ScopedContext, p: &McpServicePayload) -> Result<
         Promise::create_with_channel::<Result<(), ()>>(ctx, |_, _| Ok(JSValue::UNDEFINED))?;
 
     // Store js_handlers in thread_local for GC tracing (Object is !Send)
-    STDIO_JS_HANDLERS.with(|h| {
-        *h.borrow_mut() = js_handlers;
+    let runtime_id = ctx.rt().id();
+    STDIO_JS_HANDLERS.with_borrow_mut(|h| {
+        h.insert(runtime_id, js_handlers);
     });
 
     // Initialize shutdown state (only Send+Sync fields in static)

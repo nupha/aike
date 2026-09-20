@@ -155,6 +155,10 @@ pub(super) fn js_spawn(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 return Err(ctx.throw_type_error("`abortOnParentExit` must be a boolean"));
             }
             abort_on_parent_exit = abort_val.to_bool()?;
+            // Process-exit cleanup semantics: root-only.
+            if abort_on_parent_exit {
+                crate::aike::ensure_root_runtime(ctx, "Aike.spawn({abortOnParentExit})")?;
+            }
         }
 
         // input — extract bytes for spawnSync stdin

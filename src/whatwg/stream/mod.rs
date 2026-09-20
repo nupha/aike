@@ -63,13 +63,15 @@ pub(crate) struct QueueEntry {
 }
 
 /// Called by the runtime GC to keep stream-related JSValues alive.
-pub(crate) fn gc_trace_stream(gcx: &mut GcTraceCtx) {
+pub(crate) fn gc_trace_stream(gcx: &mut GcTraceCtx, runtime_id: usize) {
     readable::CHANNEL_STREAMS.with_borrow(|map| {
-        for (c, _, _) in map.values() {
-            c.as_object().trace(gcx);
+        for (c, _, _, rt) in map.values() {
+            if *rt == runtime_id {
+                c.as_object().trace(gcx);
+            }
         }
     });
-    readable_tee::gc_trace_tee_streams(gcx);
+    readable_tee::gc_trace_tee_streams(gcx, runtime_id);
 }
 
 // ============================================================================

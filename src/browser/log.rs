@@ -30,8 +30,9 @@ pub(crate) fn js_page_on_log(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
     // in this native-side map; otherwise the node gets freed and the poller
     // below crashes later with a dangling (dtype != Object) pointer.
     if let Some(callback) = cc.arg(0).as_object() {
-        CONSOLE_CALLBACK.with(|m| {
-            m.borrow_mut().insert(session_id.clone(), callback);
+        let runtime_id = ctx.rt().id();
+        CONSOLE_CALLBACK.with_borrow_mut(|m| {
+            m.insert(session_id.clone(), (callback, runtime_id));
         });
     }
 
@@ -81,8 +82,8 @@ pub(crate) fn js_page_on_log(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
                 .get("params")
                 .cloned()
                 .unwrap_or(serde_json::Value::Null);
-            let cb =
-                CONSOLE_CALLBACK.with(|m| sess.as_ref().and_then(|s| m.borrow().get(s).cloned()));
+            let cb = CONSOLE_CALLBACK
+                .with_borrow(|m| sess.as_ref().and_then(|s| m.get(s).map(|(cb, _)| *cb)));
             if let (Some(cb), Some(_sess)) = (cb, sess) {
                 let obj = JSValue::from_serde_json(cx, &params).unwrap_or(JSValue::UNDEFINED);
                 if cb.call(cx, JSValue::UNDEFINED, &[obj]).is_err() {
@@ -102,8 +103,9 @@ pub(crate) fn js_page_on_log(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
 }
 
 thread_local! {
-    pub(crate) static CONSOLE_CALLBACK: std::cell::RefCell<std::collections::HashMap<String, Object>> =
-        std::cell::RefCell::new(std::collections::HashMap::new());
+    pub(crate) static CONSOLE_CALLBACK: std::cell::RefCell<
+        std::collections::HashMap<String, (Object, usize)>,
+    > = std::cell::RefCell::new(std::collections::HashMap::new());
 }
 
 /// Keep the console-log subscriber callbacks alive across GC cycles.

@@ -64,10 +64,13 @@ pub fn init_process(
         JS_PROP_ENUMERABLE,
     )?;
 
-    let entries: &[FieldDef] = &[
+    // Process/thread-global mutators (exit, chdir, kill, umask, title setter)
+    // are installed only on a root runtime; a child runtime never gets them.
+    let is_root = ctx.rt().is_root();
+
+    let mut entries: Vec<FieldDef> = vec![
         // --- proc ---
         FieldDef::FUNC("cwd", 0, sys::js_cwd, 0),
-        FieldDef::FUNC("exit", 1, sys::js_exit, 0),
         FieldDef::LAZY_VALUE(
             "env",
             |cx| {
@@ -98,18 +101,15 @@ pub fn init_process(
         FieldDef::GETSET(
             "title",
             Some(info::js_title_get),
-            Some(info::js_title_set),
+            is_root.then_some(info::js_title_set),
             0,
         ),
         FieldDef::FUNC("uptime", 0, info::js_uptime, 0),
         // --- control ---
-        FieldDef::FUNC("chdir", 1, control::js_chdir, 0),
-        FieldDef::FUNC("kill", 2, control::js_kill, 0),
         FieldDef::FUNC("nextTick", 1, control::js_nextTick, 0),
         FieldDef::FUNC("memoryUsage", 0, control::js_memoryUsage, 0),
         FieldDef::FUNC("cpuUsage", 0, control::js_cpuUsage, 0),
         FieldDef::FUNC("hrtime", 1, control::js_hrtime, 0),
-        FieldDef::FUNC("umask", 1, control::js_umask, 0),
         // --- stdio ---
         FieldDef::LAZY_VALUE(
             "stdin",
@@ -128,7 +128,14 @@ pub fn init_process(
         ),
     ];
 
-    ns.install_fields(ctx, entries)?;
+    if is_root {
+        entries.push(FieldDef::FUNC("exit", 1, sys::js_exit, 0));
+        entries.push(FieldDef::FUNC("chdir", 1, control::js_chdir, 0));
+        entries.push(FieldDef::FUNC("kill", 2, control::js_kill, 0));
+        entries.push(FieldDef::FUNC("umask", 1, control::js_umask, 0));
+    }
+
+    ns.install_fields(ctx, &entries)?;
 
     // Expose as global `process` — Node.js compatible
     ctx.global_obj()

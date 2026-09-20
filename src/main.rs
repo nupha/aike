@@ -42,15 +42,13 @@ use zuqe::{
     ScopedContext,
 };
 
-use crate::{ai::init_mod_ai, aike::gc_trace_signals, mcp::gc_trace_stdio_state};
-
 #[cfg(feature = "llama_cpp")]
 use crate::ai::{JSEngine, JSLlmContext, JSLlmModel, JSSamplerChain};
 
 use crate::{
-    ai::JSLlmClient,
-    aike::{JSCronJob, JSFileHandle, JSStdioHandle, gc_trace_cron, gc_trace_io},
-    browser::{JSPage, gc_trace_browser, init_mod_browser},
+    ai::{JSLlmClient, init_mod_ai},
+    aike::{JSCronJob, JSFileHandle, JSStdioHandle},
+    browser::{JSPage, init_mod_browser},
     class_event_emitter::JSEventEmitter,
     fs::init_mod_fs,
     global::setup_globals,
@@ -59,10 +57,6 @@ use crate::{
     http::init_mod_http,
     mcp::init_mod_mcp,
     path::init_mod_path,
-    process::gc_trace_next_tick,
-    whatwg::fetch::gc_trace_fetch,
-    whatwg::stream::gc_trace_stream,
-    whatwg::timeout::gc_trace_timeout,
     yaml::init_mod_yaml,
 };
 
@@ -338,17 +332,7 @@ async fn main() -> ExitCode {
         std::ptr::null_mut(),
     );
 
-    rt.gc_set_trace_handler(|gcx| {
-        gc_trace_signals(gcx);
-        gc_trace_timeout(gcx);
-        gc_trace_cron(gcx);
-        gc_trace_io(gcx);
-        gc_trace_stdio_state(gcx);
-        gc_trace_browser(gcx);
-        gc_trace_stream(gcx);
-        gc_trace_fetch(gcx);
-        gc_trace_next_tick(gcx);
-    });
+    crate::aike::register_runtime_traces(&mut rt);
 
     // create context and setup
     let mut ctx = rt
@@ -473,12 +457,13 @@ async fn main() -> ExitCode {
         return repl::run(rt, ctx).await;
     };
 
-    // Eval the entry and drive the event loop to completion. For modules this
-    // also observes the top-level evaluation promise, so a rejected top-level
-    // error surfaces as `ExitStatus::Exception` (uncaught, non-zero exit)
-    // instead of being silently dropped. The error is printed uniformly by the
-    // `result` match below. The host only passes the runtime handle; all loop
-    // driving and promise observation is internal to `eval_wait`.
+    // Register the root runtime/context so child runtimes can attach to it and
+    // child → parent messages can queue delivery jobs on it. The engine drives
+    // the whole runtime tree from the root's tick, so a single `eval_wait`
+    // suffices.
+    crate::aike::set_root_runtime(rt.clone());
+    crate::aike::set_root_ctx(ctx);
+
     let result = ctx
         .eval_wait(
             &mut rt,
@@ -490,8 +475,6 @@ async fn main() -> ExitCode {
                 EvalType::Global
             },
             if args.no_await_result {
-                // Node/bun-compatible exit: don't await a pending completion-value
-                // promise after the loop drains (see EvalFlags::NO_AWAIT_RESULT).
                 EvalFlags::NO_AWAIT_RESULT
             } else {
                 EvalFlags::empty()
@@ -550,6 +533,7 @@ async fn main() -> ExitCode {
     crate::aike::kill_all_children();
     crate::mcp::kill_all_mcp_children();
     crate::browser::kill_all_spawned_browsers();
+
     std::process::exit(exit_code);
 }
 

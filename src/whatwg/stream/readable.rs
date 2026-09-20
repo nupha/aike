@@ -952,7 +952,7 @@ thread_local! {
     /// The deadline is per stream and refreshed on every chunk, so a slow but
     /// live producer is never cut off; only a stalled stream times out.
     pub(super) static CHANNEL_STREAMS: RefCell<
-        HashMap<u64, (JSReadableStreamDefaultController, zuqe::WakeReceiver<Result<Vec<u8>, String>>, Instant)>,
+        HashMap<u64, (JSReadableStreamDefaultController, zuqe::WakeReceiver<Result<Vec<u8>, String>>, Instant, usize)>,
     > = RefCell::new(HashMap::new());
 
     static NEXT_STREAM_ID: Cell<u64> = const { Cell::new(1) };
@@ -1320,15 +1320,15 @@ impl JSReadableStream {
         let sp = stream.payload_mut().unwrap();
         sp.signal = signal;
 
-        let was_empty = CHANNEL_STREAMS.with(|map| {
-            let empty = map.borrow().is_empty();
-            map.borrow_mut()
-                .insert(id, (controller, rx, Instant::now()));
+        let runtime_id = ctx.rt().id();
+        let was_empty = CHANNEL_STREAMS.with_borrow_mut(|map| {
+            let empty = !map.values().any(|(_, _, _, rt)| *rt == runtime_id);
+            map.insert(id, (controller, rx, Instant::now(), runtime_id));
             empty
         });
 
         if was_empty {
-            start_channel_stream_poller(ctx);
+            start_channel_stream_poller(ctx, runtime_id);
         }
 
         Ok(stream)
@@ -1480,7 +1480,7 @@ impl JSReadableStream {
     }
 }
 
-fn start_channel_stream_poller(ctx: &mut ScopedContext) {
+fn start_channel_stream_poller(ctx: &mut ScopedContext, runtime_id: usize) {
     // Idle timeout, applied per stream and refreshed on every received chunk.
     // A stream is only killed when its own producer goes quiet for this long,
     // so neither a slow body nor a long-lived sibling stream can starve it.
@@ -1495,7 +1495,12 @@ fn start_channel_stream_poller(ctx: &mut ScopedContext) {
                 // and (b) leave a dangling controller in the registry if the
                 // stream's payload is collected. Per-id borrowing keeps the map
                 // free during JS work.
-                let ids: Vec<u64> = map.borrow().keys().cloned().collect();
+                let ids: Vec<u64> = map
+                    .borrow()
+                    .iter()
+                    .filter(|(_, (_, _, _, rt))| *rt == runtime_id)
+                    .map(|(id, _)| *id)
+                    .collect();
                 let mut to_remove = Vec::new();
 
                 for id in ids {
@@ -1505,7 +1510,7 @@ fn start_channel_stream_poller(ctx: &mut ScopedContext) {
                     let resolved = {
                         let m = map.borrow();
                         match m.get(&id) {
-                            Some((ctrl, _, _)) => {
+                            Some((ctrl, _, _, rt)) if *rt == runtime_id => {
                                 let maybe_signal = JSReadableStreamDefaultController::payload_of(
                                     &JSValue::from(*ctrl),
                                 )
@@ -1517,7 +1522,7 @@ fn start_channel_stream_poller(ctx: &mut ScopedContext) {
                                 .flatten();
                                 Some((JSValue::from(*ctrl), maybe_signal))
                             }
-                            None => None,
+                            _ => None,
                         }
                     };
                     let (controller, signal_opt) = match resolved {
@@ -1541,7 +1546,7 @@ fn start_channel_stream_poller(ctx: &mut ScopedContext) {
 
                     // Re-borrow briefly to receive from the channel, releasing
                     // before any JS call below.
-                    let recv = map.borrow().get(&id).map(|(_, rx, _)| rx.try_recv());
+                    let recv = map.borrow().get(&id).map(|(_, rx, _, _)| rx.try_recv());
                     match recv {
                         Some(Ok(Ok(data))) => {
                             // Producer alive: refresh deadline, then enqueue.
@@ -1577,7 +1582,7 @@ fn start_channel_stream_poller(ctx: &mut ScopedContext) {
                             let expired = map
                                 .borrow()
                                 .get(&id)
-                                .map(|(_, _, d)| d.elapsed() > STREAM_IDLE_TIMEOUT)
+                                .map(|(_, _, d, _)| d.elapsed() > STREAM_IDLE_TIMEOUT)
                                 .unwrap_or(true);
                             if expired {
                                 let err = cx
@@ -1602,10 +1607,12 @@ fn start_channel_stream_poller(ctx: &mut ScopedContext) {
                 Ok(())
             })?;
 
-            if CHANNEL_STREAMS.with(|map| map.borrow().is_empty()) {
-                Ok(JobState::Done)
-            } else {
+            let any_left = CHANNEL_STREAMS
+                .with(|map| map.borrow().values().any(|(_, _, _, rt)| *rt == runtime_id));
+            if any_left {
                 Ok(JobState::Block)
+            } else {
+                Ok(JobState::Done)
             }
         },
         (),

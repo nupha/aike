@@ -23,7 +23,7 @@ use crate::browser::{
 
 thread_local! {
     // session_id -> registered `onRequestPaused` callback (last wins).
-    pub(crate) static FETCH_CALLBACK: RefCell<std::collections::HashMap<String, JSValue>> =
+    pub(crate) static FETCH_CALLBACK: RefCell<std::collections::HashMap<String, (JSValue, usize)>> =
         RefCell::new(std::collections::HashMap::new());
 }
 
@@ -88,8 +88,8 @@ pub(crate) fn js_page_set_request_interception(
                     .cloned()
                     .unwrap_or(serde_json::Value::Null);
 
-                let cb =
-                    FETCH_CALLBACK.with(|m| sess.as_ref().and_then(|s| m.borrow().get(s).cloned()));
+                let cb = FETCH_CALLBACK
+                    .with_borrow(|m| sess.as_ref().and_then(|s| m.get(s).map(|(cb, _)| *cb)));
 
                 if let (Some(cb), Some(_sess)) = (cb, sess) {
                     let mut obj = cx.create_base_object().ok();
@@ -270,8 +270,9 @@ pub(crate) fn js_page_on_request_paused(ctx: &mut ScopedContext, cc: CallContext
     let payload = get_page_payload(ctx, &this)?;
     let session_id = payload.session_id.clone();
     let callback = cc.arg(0);
-    FETCH_CALLBACK.with(|m| {
-        m.borrow_mut().insert(session_id, callback);
+    let runtime_id = ctx.rt().id();
+    FETCH_CALLBACK.with_borrow_mut(|m| {
+        m.insert(session_id, (callback, runtime_id));
     });
     Ok(JSValue::UNDEFINED)
 }

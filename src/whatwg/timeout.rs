@@ -3,14 +3,16 @@
 
 //! WHATWG Timers Standard: setTimeout, setInterval, clearTimeout, clearInterval.
 //!
-//! Pending timers live in a single `Vec` kept sorted by `deadline` ascending, so
-//! `entries[0]` is always the nearest deadline.  A single self-requeuing JS job
-//! fires due timers in that order, driven entirely by the engine's job loop
-//! ticking this job (`JobState::Block`); there is no separate timer thread or
-//! per-timer sleep task.
+//! Timer state is **per-runtime** (keyed by runtime id): each runtime's pending
+//! timers live in its own list and are driven by a polling job queued in that
+//! runtime's own context, so a child runtime's timer callbacks are always
+//! invoked with the child's context. A single `Vec` per runtime is kept sorted
+//! by `deadline` ascending, so `entries[0]` is the nearest deadline; one
+//! self-requeuing JS job per runtime fires due timers in that order.
 
 use std::{
     cell::{Cell, RefCell},
+    collections::HashMap,
     time::{Duration, Instant},
 };
 
@@ -22,7 +24,7 @@ use zuqe::{
 };
 
 // ---------------------------------------------------------------------------
-// Per-timer entry stored in the registry
+// Per-runtime timer entries
 // ---------------------------------------------------------------------------
 
 struct TimerEntry {
@@ -39,64 +41,35 @@ struct TimerEntry {
     deadline: Instant,
 }
 
-// ---------------------------------------------------------------------------
-// Thread-local global state
-// ---------------------------------------------------------------------------
-
 struct TimerState {
-    next_id: u32,
-    /// Pending timers, kept sorted by `deadline` ascending. `entries[0]` is
-    /// always the nearest deadline, so firing order and the per-tick early
-    /// return need no separate index or cached timestamp.
+    /// Pending timers, sorted by `deadline` ascending.
     entries: Vec<TimerEntry>,
+    /// Whether a polling job is currently queued for this runtime.
+    job_active: bool,
 }
 
-impl TimerState {
-    fn new() -> Self {
-        let next_id = TIMER_SERIAL.with(|t| {
-            let id = t.get();
-            t.set(id + 1);
-            id
-        });
-        Self {
-            next_id,
-            entries: Vec::new(),
-        }
-    }
-
-    fn timer_id(&mut self) -> u32 {
-        let id = TIMER_SERIAL.with(|t| {
-            let id = t.get();
-            t.set(id + 1);
-            id
-        });
-        self.next_id = id;
-        id
-    }
-
-    /// Insert an entry keeping `entries` sorted by `deadline` ascending.
-    fn insert_sorted(&mut self, entry: TimerEntry) {
-        let pos = self
-            .entries
-            .partition_point(|e| e.deadline <= entry.deadline);
-        self.entries.insert(pos, entry);
-    }
-}
+// ---------------------------------------------------------------------------
+// Thread-local registry keyed by runtime id
+// ---------------------------------------------------------------------------
 
 thread_local! {
-    // Some(_) = polling microtask is active; None = no background job running.
-    static TIMER_STATE: RefCell<Option<TimerState>> = const { RefCell::new(None) };
-
+    static TIMER_STATES: RefCell<HashMap<usize, TimerState>> = RefCell::new(HashMap::new());
     static TIMER_SERIAL: Cell<u32> = const { Cell::new(1) };
 }
 
-// ---------------------------------------------------------------------------
-// GC trace — called by the runtime GC to keep all live callbacks alive
-// ---------------------------------------------------------------------------
+fn next_timer_id() -> u32 {
+    TIMER_SERIAL.with(|t| {
+        let id = t.get();
+        t.set(id + 1);
+        id
+    })
+}
 
-pub(crate) fn gc_trace_timeout(tr: &mut GcTraceCtx) {
-    TIMER_STATE.with_borrow(|opt| {
-        if let Some(s) = opt.as_ref() {
+/// GC trace one runtime's timer callbacks — registered on that runtime's trace
+/// handler so each heap only traces its own timers.
+pub(crate) fn gc_trace_timeout(tr: &mut GcTraceCtx, runtime_id: usize) {
+    TIMER_STATES.with_borrow(|m| {
+        if let Some(s) = m.get(&runtime_id) {
             for entry in s.entries.iter() {
                 entry.callback.trace(tr);
             }
@@ -104,60 +77,46 @@ pub(crate) fn gc_trace_timeout(tr: &mut GcTraceCtx) {
     });
 }
 
+/// Insert an entry keeping the runtime's `entries` sorted by deadline.
+fn insert_sorted(entries: &mut Vec<TimerEntry>, entry: TimerEntry) {
+    let pos = entries.partition_point(|e| e.deadline <= entry.deadline);
+    entries.insert(pos, entry);
+}
+
 // ---------------------------------------------------------------------------
-// The single persistent polling microtask
+// The self-requeuing polling job (one per active runtime)
 // ---------------------------------------------------------------------------
 
-/// Enqueue the polling microtask.  Called only when TIMER_STATE is Some
-/// (state already initialized by the caller).
-///
-/// The job self-requeues (`JobState::Block`) while timers are pending.  On each
-/// tick it first compares `entries[0].deadline` (the nearest, since `entries`
-/// is sorted) once against `Instant::now()` and bails immediately when nothing
-/// is due, so the idle cost is a single comparison.  When a timer is due it
-/// fires every elapsed timer in **deadline order**; execution order is
-/// deterministic.  A timer that was cleared (entry removed) is simply never
-/// fired.
-fn start_timer_task(ctx: &mut ScopedContext) {
-    #[cfg(debug_assertions)]
-    TIMER_STATE.with_borrow_mut(|opt| {
-        debug_assert!(opt.is_some());
-    });
-
+/// Enqueue the polling job for `runtime_id` (caller has set `job_active`).
+fn start_timer_task(ctx: &mut ScopedContext, runtime_id: usize) {
     ctx.queue_job(
         move |cx| {
             let now = Instant::now();
 
-            // Fast path: if the nearest timer (`entries[0]`) isn't due yet, or
-            // there are no timers at all, bail.  Costs a single comparison.
-            match TIMER_STATE.with_borrow(|s| {
-                s.as_ref()
+            // Fast path: nearest deadline not due yet (or no timers) → bail.
+            match TIMER_STATES.with_borrow(|m| {
+                m.get(&runtime_id)
                     .and_then(|s| s.entries.first())
                     .map(|e| e.deadline)
             }) {
                 None => {
-                    TIMER_STATE.with_borrow_mut(|s| {
-                        s.take();
+                    TIMER_STATES.with_borrow_mut(|m| {
+                        m.remove(&runtime_id);
                     });
                     return Ok(JobState::Done);
                 }
                 Some(t) if now < t => {
-                    // Report the deadline to the event loop so a `Parked`
-                    // round suspends until it instead of hot-spinning.
                     cx.set_poll_hint(t);
                     return Ok(JobState::Block);
                 }
                 Some(_) => {}
             }
 
-            // At least one timer is due: fire every elapsed timer in deadline
-            // order.  `entries` is sorted, so `entries[0]` is always the nearest;
-            // each poll fires all due timers in order (catch-up).
+            // At least one timer is due: fire every elapsed timer in order.
             loop {
-                // Peek the nearest timer and, if due, pull it out.
                 let step =
-                    TIMER_STATE.with_borrow_mut(|opt| -> Option<(Object, Option<u64>, u32)> {
-                        let s = opt.as_mut()?;
+                    TIMER_STATES.with_borrow_mut(|m| -> Option<(Object, Option<u64>, u32)> {
+                        let s = m.get_mut(&runtime_id)?;
                         let e = s.entries.first_mut()?;
                         if e.deadline > now {
                             return None;
@@ -165,15 +124,13 @@ fn start_timer_task(ctx: &mut ScopedContext) {
                         let cb = e.callback;
                         let id = e.id;
                         match e.interval_ms {
-                            // One-shot: drop it now (before the callback, so a
-                            // clearTimeout inside it is a no-op). The rest stay
-                            // sorted.
+                            // One-shot: drop it before invoking (a clearTimeout
+                            // inside the callback is then a no-op).
                             None => {
                                 s.entries.remove(0);
                                 Some((cb, None, id))
                             }
-                            // Interval: keep the entry; re-arm happens *after*
-                            // the callback, since it may clear itself.
+                            // Interval: keep the entry; re-arm after the callback.
                             Some(ms) => Some((cb, Some(ms), id)),
                         }
                     });
@@ -184,14 +141,9 @@ fn start_timer_task(ctx: &mut ScopedContext) {
                 };
 
                 if cb.call(cx, JSValue::UNDEFINED, &[]).is_err() {
-                    // Take the exception FIRST so cur_exception is cleared before we
-                    // run any more JS (to_text below executes JS to format the message).
-                    // Leaving the exception set while calling to_text() would let that
-                    // inner call trip zhuque's "call returned Ok but left an exception
-                    // set" debug_assert. The error is reported and then discarded — a
-                    // timer callback throwing must not reject/crash the event loop.
+                    // Take the exception FIRST so cur_exception is cleared before
+                    // any further JS runs (to_text).
                     let _exc = cx.take_exception();
-
                     #[cfg(debug_assertions)]
                     {
                         let msg = _exc.to_text(cx);
@@ -200,17 +152,14 @@ fn start_timer_task(ctx: &mut ScopedContext) {
                 }
 
                 if let Some(ms) = interval_ms {
-                    // Re-arm only if the callback didn't clear this timer.
-                    // Pull the entry out, bump its deadline, and re-insert in
-                    // sorted order so `entries[0]` stays the nearest.
                     let new_deadline = Instant::now() + Duration::from_millis(ms);
-                    TIMER_STATE.with_borrow_mut(|opt| {
-                        if let Some(s) = opt.as_mut()
+                    TIMER_STATES.with_borrow_mut(|m| {
+                        if let Some(s) = m.get_mut(&runtime_id)
                             && let Some(pos) = s.entries.iter().position(|e| e.id == id)
                         {
                             let mut e = s.entries.remove(pos);
                             e.deadline = new_deadline;
-                            s.insert_sorted(e);
+                            insert_sorted(&mut s.entries, e);
                         }
                     });
                 }
@@ -221,26 +170,24 @@ fn start_timer_task(ctx: &mut ScopedContext) {
                 // already reported above; just discard.
             }
 
-            let has_entries =
-                TIMER_STATE.with_borrow(|s| s.as_ref().is_some_and(|s| !s.entries.is_empty()));
-            if has_entries {
-                // All due timers fired above, so `entries[0]` is in the
-                // future: report it so the parked loop wakes exactly then.
-                if let Some(d) = TIMER_STATE.with_borrow(|s| {
-                    s.as_ref()
-                        .and_then(|s| s.entries.first())
-                        .map(|e| e.deadline)
-                }) {
+            let next = TIMER_STATES.with_borrow(|m| {
+                m.get(&runtime_id)
+                    .and_then(|s| s.entries.first())
+                    .map(|e| e.deadline)
+            });
+            match next {
+                Some(d) => {
                     if d > now {
                         cx.set_poll_hint(d);
                     }
+                    Ok(JobState::Block)
                 }
-                Ok(JobState::Block)
-            } else {
-                TIMER_STATE.with_borrow_mut(|s| {
-                    s.take();
-                });
-                Ok(JobState::Done)
+                None => {
+                    TIMER_STATES.with_borrow_mut(|m| {
+                        m.remove(&runtime_id);
+                    });
+                    Ok(JobState::Done)
+                }
             }
         },
         (),
@@ -248,7 +195,7 @@ fn start_timer_task(ctx: &mut ScopedContext) {
 }
 
 // ---------------------------------------------------------------------------
-// Register timer: shared logic for setTimeout / setInterval
+// Register / clear
 // ---------------------------------------------------------------------------
 
 fn register_timer(ctx: &mut ScopedContext, cc: CallContext, is_interval: bool) -> JSResult {
@@ -259,34 +206,34 @@ fn register_timer(ctx: &mut ScopedContext, cc: CallContext, is_interval: bool) -
         0
     };
 
-    // If no active job, initialize fresh state and prepare to start one.
-    // If already active, reuse the existing state (don't start a second job).
-    let (id, need_listener) = TIMER_STATE.with_borrow_mut(|opt| {
-        let start_job = opt.is_none();
-        let s = opt.get_or_insert_with(TimerState::new);
-        let id = s.timer_id();
-        // Capture the absolute deadline NOW, synchronously. The `entries` vec is
-        // kept sorted by this, so it is the single source of firing-order truth.
-        let deadline = Instant::now() + Duration::from_millis(delay_ms);
-        s.insert_sorted(TimerEntry {
-            id,
-            callback,
-            interval_ms: if is_interval { Some(delay_ms) } else { None },
-            deadline,
+    let runtime_id = ctx.rt().id();
+    let deadline = Instant::now() + Duration::from_millis(delay_ms);
+    let id = next_timer_id();
+    let need_start = TIMER_STATES.with_borrow_mut(|m| {
+        let s = m.entry(runtime_id).or_insert_with(|| TimerState {
+            entries: Vec::new(),
+            job_active: false,
         });
-        (id, start_job)
+        insert_sorted(
+            &mut s.entries,
+            TimerEntry {
+                id,
+                callback,
+                interval_ms: if is_interval { Some(delay_ms) } else { None },
+                deadline,
+            },
+        );
+        let need = !s.job_active;
+        s.job_active = true;
+        need
     });
 
-    if need_listener {
-        start_timer_task(ctx);
+    if need_start {
+        start_timer_task(ctx, runtime_id);
     }
 
     Ok(JSValue::from(id as i32))
 }
-
-// ---------------------------------------------------------------------------
-// Clear timer: shared logic for clearTimeout / clearInterval
-// ---------------------------------------------------------------------------
 
 fn clear_timer(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let id = cc.arg(0).to_number(ctx)?.to_i32();
@@ -294,12 +241,10 @@ fn clear_timer(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         return Ok(JSValue::UNDEFINED);
     }
     let id = id as u32;
+    let runtime_id = ctx.rt().id();
 
-    // Removing the entry is the entire cancellation: the self-requeuing job only
-    // fires timers still in `entries`, so a cleared timer is never fired. The
-    // rest of the vec stays sorted. No per-timer task needs aborting.
-    TIMER_STATE.with_borrow_mut(|opt| {
-        if let Some(s) = opt.as_mut()
+    TIMER_STATES.with_borrow_mut(|m| {
+        if let Some(s) = m.get_mut(&runtime_id)
             && let Some(pos) = s.entries.iter().position(|e| e.id == id)
         {
             s.entries.remove(pos);
@@ -311,11 +256,8 @@ fn clear_timer(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
 /// `Aike.sleep(ms)` — returns a `Promise` that resolves after `ms` milliseconds.
 ///
-/// Analogous to `Bun.sleep(ms)`. Implemented by creating a `Promise` and using
-/// its native resolve function directly as a one-shot timer callback: when the
-/// timer fires, calling resolve() settles the `Promise` with `undefined`. This
-/// reuses the exact same timer queue as `setTimeout`/`setInterval`, so sleep is
-/// driven by the event loop and never blocks the thread.
+/// Uses the same per-runtime timer queue: the promise's native resolve function
+/// serves as a one-shot timer callback.
 pub(crate) fn js_sleep(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let ms = cc.arg(0).to_number(ctx)?.to_f64();
     let delay_ms = if ms.is_nan() || ms < 0.0 {
@@ -324,27 +266,33 @@ pub(crate) fn js_sleep(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         ms as u64
     };
 
-    // Build the Promise and grab its native resolve function. The resolve fn is
-    // callable, so it can serve directly as the timer callback.
     let (promise, resolving) = Promise::create(ctx)?;
     let resolve_fn = resolving[0].ensure_callable(ctx)?;
 
-    let (_id, need_listener) = TIMER_STATE.with_borrow_mut(|opt| {
-        let start_job = opt.is_none();
-        let s = opt.get_or_insert_with(TimerState::new);
-        let id = s.timer_id();
-        let deadline = Instant::now() + Duration::from_millis(delay_ms);
-        s.insert_sorted(TimerEntry {
-            id,
-            callback: resolve_fn,
-            interval_ms: None,
-            deadline,
+    let runtime_id = ctx.rt().id();
+    let deadline = Instant::now() + Duration::from_millis(delay_ms);
+    let id = next_timer_id();
+    let need_start = TIMER_STATES.with_borrow_mut(|m| {
+        let s = m.entry(runtime_id).or_insert_with(|| TimerState {
+            entries: Vec::new(),
+            job_active: false,
         });
-        (id, start_job)
+        insert_sorted(
+            &mut s.entries,
+            TimerEntry {
+                id,
+                callback: resolve_fn,
+                interval_ms: None,
+                deadline,
+            },
+        );
+        let need = !s.job_active;
+        s.job_active = true;
+        need
     });
 
-    if need_listener {
-        start_timer_task(ctx);
+    if need_start {
+        start_timer_task(ctx, runtime_id);
     }
 
     Ok(promise.into())

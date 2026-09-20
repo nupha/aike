@@ -48,19 +48,20 @@ use super::{
 };
 
 thread_local! {
-    /// In-flight fetch signals kept alive across GC, keyed by an auto-increment
-    /// id. Registered as a global trace handler in `main.rs` (mirrors
-    /// `gc_trace_stream`). Entries are removed when the fetch settles.
-    static FETCH_SIGNAL_GUARD: RefCell<HashMap<usize, JSValue>> = RefCell::new(HashMap::new());
+    /// In-flight fetch signals kept alive across GC, keyed by
+    /// `(runtime id, auto-increment id)`. Each runtime's GC handler traces only
+    /// its own entries. Entries are removed when the fetch settles.
+    static FETCH_SIGNAL_GUARD: RefCell<HashMap<(usize, usize), JSValue>> = RefCell::new(HashMap::new());
     static FETCH_SIGNAL_NEXT_ID: Cell<usize> = const { Cell::new(1) };
 }
 
-/// Keep all in-flight fetch signals alive across GC. Registered as a global
-/// trace handler in `main.rs` (mirrors `gc_trace_stream`).
-pub(crate) fn gc_trace_fetch(gcx: &mut GcTraceCtx) {
-    FETCH_SIGNAL_GUARD.with(|guards| {
-        for v in guards.borrow().values() {
-            v.trace(gcx);
+/// Keep one runtime's in-flight fetch signals alive across GC.
+pub(crate) fn gc_trace_fetch(gcx: &mut GcTraceCtx, runtime_id: usize) {
+    FETCH_SIGNAL_GUARD.with_borrow(|guards| {
+        for ((rt, _), v) in guards.iter() {
+            if *rt == runtime_id {
+                v.trace(gcx);
+            }
         }
     });
 }
@@ -727,14 +728,15 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     // Register the signal as a GC root only when one is present (id 0 is the
     // "no signal" sentinel, since ids start at 1). `signal_for_reason` indexes
     // the entry that the convert closure's Drop guard removes on settle.
+    let runtime_id = ctx.rt().id();
     let signal_for_reason: usize = match &signal_val {
-        Some(s) => FETCH_SIGNAL_GUARD.with(|g| {
+        Some(s) => FETCH_SIGNAL_GUARD.with_borrow_mut(|g| {
             let id = FETCH_SIGNAL_NEXT_ID.with(|n| {
                 let id = n.get();
                 n.set(id.wrapping_add(1));
                 id
             });
-            g.borrow_mut().insert(id, *s);
+            g.insert((runtime_id, id), *s);
             id
         }),
         None => 0,
@@ -747,17 +749,17 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             // Drop guard: remove the signal entry from the GC root set once this
             // convert closure returns (any path), so the AbortSignal can be
             // collected after the fetch settles.
-            struct SignalGuardDrop(usize);
+            struct SignalGuardDrop(usize, usize);
             impl Drop for SignalGuardDrop {
                 fn drop(&mut self) {
-                    if self.0 != 0 {
-                        FETCH_SIGNAL_GUARD.with(|g| {
-                            g.borrow_mut().remove(&self.0);
+                    if self.1 != 0 {
+                        FETCH_SIGNAL_GUARD.with_borrow_mut(|g| {
+                            g.remove(&(self.0, self.1));
                         });
                     }
                 }
             }
-            let _drop_guard = SignalGuardDrop(signal_for_reason);
+            let _drop_guard = SignalGuardDrop(runtime_id, signal_for_reason);
 
             let client_origin = client_origin.clone();
             // Captured for the 401/407 authentication-entry check below: a
@@ -776,7 +778,7 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                             // is on the network). Fall back to the default
                             // "AbortError" DOMException if no signal is present.
                             let reason = FETCH_SIGNAL_GUARD
-                                .with(|g| g.borrow().get(&signal_for_reason).cloned())
+                                .with_borrow(|g| g.get(&(runtime_id, signal_for_reason)).cloned())
                                 .and_then(|s| signal_reason(&s))
                                 .unwrap_or_else(|| {
                                     make_dom_exception(

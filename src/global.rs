@@ -3,7 +3,11 @@
 
 use zuqe::ScopedContext;
 
-use crate::{aike::init_aike, process::init_process, whatwg::install_whatwg};
+use crate::{
+    aike::{install_aike_namespace, save_process_info},
+    process::init_process,
+    whatwg::install_whatwg,
+};
 
 pub fn setup_globals(
     ctx: &mut ScopedContext,
@@ -13,6 +17,10 @@ pub fn setup_globals(
     #[cfg(feature = "local_storage")] local_storage_db: Option<&str>,
 ) -> Result<(), i32> {
     let global = ctx.global_obj();
+
+    // Stash argv/exec info so a child runtime granted the `process` capability
+    // can build an equivalent namespace.
+    save_process_info(argv, exec_argv, exec_path);
 
     // Install all WHATWG-standard global APIs (console, timers, etc.)
     install_whatwg(
@@ -26,7 +34,7 @@ pub fn setup_globals(
     init_process(ctx, argv, exec_argv, exec_path)?;
 
     // Aike — Aike-specific namespace
-    init_aike(ctx)?;
+    install_aike_namespace(ctx)?;
 
     Ok(())
 }

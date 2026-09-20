@@ -6,7 +6,7 @@
 //! `setIgnoreHTTPSErrors` (P0) and `handleCertificateError` (P0, callback).
 //! Underlying CDP: `Security.*`.
 
-use std::cell::RefCell;
+use std::{cell::RefCell, collections::HashMap};
 
 use zuqe::{CallContext, Callback, JS_PROP_C_W_E, JSResult, JSValue, ScopedContext};
 
@@ -20,23 +20,26 @@ use crate::browser::{
 // ---------------------------------------------------------------------------
 
 thread_local! {
-    // Registered `handleCertificateError` callback (last wins). GC-traced.
-    pub(crate) static CERT_CALLBACK: RefCell<Option<JSValue>> = const { RefCell::new(None) };
+    // Registered `handleCertificateError` callback (last wins) per runtime.
+    // GC-traced.
+    pub(crate) static CERT_CALLBACK: RefCell<HashMap<usize, JSValue>> = RefCell::new(HashMap::new());
 
-    // CDP client used by the generated `accept` closure.
-    static CERT_CLIENT: RefCell<Option<CdpClient>> = const { RefCell::new(None) };
+    // CDP client used by the generated `accept` closure, per runtime.
+    static CERT_CLIENT: RefCell<HashMap<usize, CdpClient>> = RefCell::new(HashMap::new());
     // eventId of the cert error currently being delivered to the callback.
-    static CERT_EVENT_ID: RefCell<Option<i64>> = const { RefCell::new(None) };
+    static CERT_EVENT_ID: RefCell<HashMap<usize, i64>> = RefCell::new(HashMap::new());
 }
 
 const CERT_ACCEPT_MAGIC: i16 = 1;
 
 /// `js_cert_accept` — the `accept(bool)` method attached to the event object.
 /// Resolves the in-flight cert error via `Security.handleCertificateError`.
-fn js_cert_accept(_: &mut ScopedContext, cc: CallContext) -> JSResult {
+fn js_cert_accept(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let accept = cc.arg(0).to_bool().unwrap_or(false);
-    let event_id = CERT_EVENT_ID.with(|e| *e.borrow());
-    if let (Some(id), Some(client)) = (event_id, CERT_CLIENT.with(|c| c.borrow().clone())) {
+    let runtime_id = ctx.rt().id();
+    let event_id = CERT_EVENT_ID.with_borrow(|m| m.get(&runtime_id).copied());
+    let client = CERT_CLIENT.with_borrow(|m| m.get(&runtime_id).cloned());
+    if let (Some(id), Some(client)) = (event_id, client) {
         let action = if accept { "accept" } else { "cancel" };
         client.send(
             "Security.handleCertificateError",
@@ -75,8 +78,13 @@ pub(crate) fn js_browser_handle_certificate_error(
     let client = payload.client.clone();
 
     let callback = cc.arg(0).clone();
-    CERT_CALLBACK.with(|m| *m.borrow_mut() = Some(callback));
-    CERT_CLIENT.with(|m| *m.borrow_mut() = Some(client.clone()));
+    let runtime_id = ctx.rt().id();
+    CERT_CALLBACK.with_borrow_mut(|m| {
+        m.insert(runtime_id, callback);
+    });
+    CERT_CLIENT.with_borrow_mut(|m| {
+        m.insert(runtime_id, client.clone());
+    });
 
     // Enable Security domain (idempotent) so certificateError events arrive.
     let _ = send_browser_void_cmd(ctx, &cc, "Security.enable", None);
@@ -102,10 +110,12 @@ pub(crate) fn js_browser_handle_certificate_error(
         "certificateError",
         rx,
         move |params, cx| {
-            let cb = CERT_CALLBACK.with(|m| m.borrow().clone());
+            let cb = CERT_CALLBACK.with_borrow(|m| m.get(&runtime_id).cloned());
             if let Some(cb) = cb {
                 let event_id = params.get("eventId").and_then(|v| v.as_i64()).unwrap_or(0);
-                CERT_EVENT_ID.with(|e| *e.borrow_mut() = Some(event_id));
+                CERT_EVENT_ID.with_borrow_mut(|m| {
+                    m.insert(runtime_id, event_id);
+                });
 
                 let mut obj = cx.create_base_object().ok();
                 if let Some(o) = obj.as_mut() {
@@ -158,14 +168,24 @@ pub(crate) fn js_browser_handle_certificate_error(
                     #[cfg(debug_assertions)]
                     crate::helpers::print_exc(cx, exc);
                 }
-                CERT_EVENT_ID.with(|e| *e.borrow_mut() = None);
+                CERT_EVENT_ID.with_borrow_mut(|m| {
+                    m.remove(&runtime_id);
+                });
             }
 
             true
         },
-        || CERT_CALLBACK.with(|m| m.borrow().is_some()),
-        || {
-            CERT_CALLBACK.with(|m| *m.borrow_mut() = None);
+        move || CERT_CALLBACK.with_borrow(|m| m.contains_key(&runtime_id)),
+        move || {
+            CERT_CALLBACK.with_borrow_mut(|m| {
+                m.remove(&runtime_id);
+            });
+            CERT_CLIENT.with_borrow_mut(|m| {
+                m.remove(&runtime_id);
+            });
+            CERT_EVENT_ID.with_borrow_mut(|m| {
+                m.remove(&runtime_id);
+            });
         },
     );
 

@@ -26,6 +26,8 @@ use super::{
 /// controllers on demand. `pulling` guards against concurrent pulls from both
 /// branches; `done` stops pulling once the source finishes.
 struct TeeShared {
+    /// Runtime that created this tee; only that runtime's GC traces it.
+    runtime_id: usize,
     reader: JSReadableStreamDefaultReader,
     c1: JSValue,
     c2: JSValue,
@@ -55,9 +57,12 @@ thread_local! {
 /// while a tee is active. `TEE_STREAMS` is a plain RefCell the GC does not
 /// scan, so without this the branch controllers are reclaimed mid-tee and the
 /// stored `GcRef`s become dangling (a `payload_of` class-id assertion panics).
-pub(crate) fn gc_trace_tee_streams(gcx: &mut GcTraceCtx) {
+pub(crate) fn gc_trace_tee_streams(gcx: &mut GcTraceCtx, runtime_id: usize) {
     TEE_STREAMS.with_borrow(|map| {
         for shared in map.values() {
+            if shared.runtime_id != runtime_id {
+                continue;
+            }
             shared.c1.trace(gcx);
             shared.c2.trace(gcx);
             shared.reader.as_object().trace(gcx);
@@ -208,6 +213,7 @@ impl JSReadableStreamDefaultReader {
 
         let cancel_promise = Promise::create(ctx)?.0;
         let shared = Rc::new(TeeShared {
+            runtime_id: ctx.rt().id(),
             reader: *self,
             c1,
             c2,

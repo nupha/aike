@@ -161,6 +161,8 @@ impl ReadMode {
 }
 
 struct ReadSlot {
+    /// Runtime that subscribed; only that runtime's GC traces the callback.
+    runtime_id: usize,
     mode: ReadMode,
     callback: Object,
     /// Line mode: raw bytes not yet terminated by `\n`.
@@ -192,28 +194,33 @@ thread_local! {
     /// Pump controls — persist across poller generations so a handle never
     /// accumulates a second concurrent reader.
     static PUMPS: RefCell<HashMap<i32, PumpControl>> = RefCell::new(HashMap::new());
+    /// Per-runtime pump channel. The poller may stop and restart freely; pump
+    /// tasks keep sending into THIS runtime's receiver regardless of generation.
+    /// The sender wakes the parked event loop on every send automatically.
+    static PUMP_CHANNELS:
+        RefCell<HashMap<usize, (zuqe::WakeSender<PumpMsg>, zuqe::WakeReceiver<PumpMsg>)>> =
+        RefCell::new(HashMap::new());
+    /// Per-runtime: whether a read-poller generation is currently queued/running.
+    static READ_POLLER_ACTIVE: RefCell<std::collections::HashSet<usize>> =
+        RefCell::new(std::collections::HashSet::new());
 }
 
-/// Process-global pump channel. The poller may stop and restart freely; pump
-/// tasks keep sending into THIS receiver regardless of generation. The
-/// sender wakes the parked event loop on every send automatically; the
-/// channel is created on first use on the JS thread (needs the wake handle).
-static PUMP_CHANNEL: std::sync::OnceLock<(zuqe::WakeSender<PumpMsg>, zuqe::WakeReceiver<PumpMsg>)> =
-    std::sync::OnceLock::new();
-
-fn pump_channel(
-    ctx: &ScopedContext,
-) -> &'static (zuqe::WakeSender<PumpMsg>, zuqe::WakeReceiver<PumpMsg>) {
-    PUMP_CHANNEL.get_or_init(|| ctx.make_channel::<PumpMsg>(256))
+fn pump_channel(ctx: &ScopedContext) -> (zuqe::WakeSender<PumpMsg>, zuqe::WakeReceiver<PumpMsg>) {
+    let runtime_id = ctx.rt().id();
+    PUMP_CHANNELS.with_borrow_mut(|channels| {
+        channels
+            .entry(runtime_id)
+            .or_insert_with(|| ctx.make_channel::<PumpMsg>(256))
+            .clone()
+    })
 }
 
-/// Whether a read-poller microtask is currently queued/running.
-static READ_POLLER_ACTIVE: AtomicBool = AtomicBool::new(false);
-
-pub(crate) fn gc_trace_io(tr: &mut GcTraceCtx) {
+pub(crate) fn gc_trace_io(tr: &mut GcTraceCtx, runtime_id: usize) {
     READ_SLOTS.with_borrow(|slots| {
         for slot in slots.values() {
-            slot.callback.trace(tr);
+            if slot.runtime_id == runtime_id {
+                slot.callback.trace(tr);
+            }
         }
     });
 }
@@ -360,10 +367,11 @@ fn run_delivery(cx: &mut ScopedContext, d: Delivery) {
 
 /// Poller microtask: converts raw pump chunks into mode-framed deliveries.
 fn start_read_microtask(ctx: &mut ScopedContext) {
-    if READ_POLLER_ACTIVE.swap(true, Ordering::AcqRel) {
-        return; // a poller generation is already running
+    let runtime_id = ctx.rt().id();
+    if READ_POLLER_ACTIVE.with_borrow_mut(|set| !set.insert(runtime_id)) {
+        return; // a poller generation for this runtime is already running
     }
-    let rx = pump_channel(ctx).1.clone();
+    let rx = pump_channel(ctx).1;
 
     crate::helpers::start_channel_poller(
         ctx,
@@ -428,8 +436,12 @@ fn start_read_microtask(ctx: &mut ScopedContext) {
             }
             true // always continue polling
         },
-        || READ_SLOTS.with_borrow(|slots| !slots.is_empty()),
-        || READ_POLLER_ACTIVE.store(false, Ordering::Release),
+        move || READ_SLOTS.with_borrow(|slots| slots.values().any(|s| s.runtime_id == runtime_id)),
+        move || {
+            READ_POLLER_ACTIVE.with_borrow_mut(|set| {
+                set.remove(&runtime_id);
+            })
+        },
     );
 }
 
@@ -444,6 +456,7 @@ fn fh_subscribe(ctx: &mut ScopedContext, cc: CallContext, mode: ReadMode) -> JSR
     let this = cc.this();
     let desc = get_io(ctx, &this)?;
     let raw_fd = desc.as_virt_fd();
+    let runtime_id = ctx.rt().id();
 
     // Cannot read from stdout/stderr
     if matches!(desc, IoPayload::Stdout | IoPayload::Stderr) {
@@ -514,6 +527,7 @@ fn fh_subscribe(ctx: &mut ScopedContext, cc: CallContext, mode: ReadMode) -> JSR
             slots.insert(
                 raw_fd,
                 ReadSlot {
+                    runtime_id,
                     mode,
                     callback,
                     line_pending: Vec::new(),
@@ -543,7 +557,7 @@ fn fh_subscribe(ctx: &mut ScopedContext, cc: CallContext, mode: ReadMode) -> JSR
     };
 
     if spawn_pump {
-        let tx = pump_channel(ctx).0.clone();
+        let tx = pump_channel(ctx).0;
         match desc {
             IoPayload::Stdin => {
                 tokio::spawn(pump_direct(

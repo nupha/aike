@@ -32,25 +32,31 @@ use zuqe::{FieldDef, NativeObject, ScopedContext, gc_lite::GcTrace, gc_lite::GcT
 /// browser-side JS-callback registry so main.rs registers exactly one
 /// handler. Statics are pub(crate) precisely so this one function can
 /// reach into each submodule directly.
-pub(crate) fn gc_trace_browser(gcx: &mut GcTraceCtx) {
-    log::CONSOLE_CALLBACK.with(|m| {
-        for cb in m.borrow().values() {
-            cb.trace(gcx);
+pub(crate) fn gc_trace_browser(gcx: &mut GcTraceCtx, runtime_id: usize) {
+    log::CONSOLE_CALLBACK.with_borrow(|m| {
+        for (cb, rt) in m.values() {
+            if *rt == runtime_id {
+                cb.trace(gcx);
+            }
         }
     });
-    runtime::CONSOLE_CALLBACK.with(|m| {
-        for cb in m.borrow().values() {
-            cb.trace(gcx);
+    runtime::CONSOLE_CALLBACK.with_borrow(|m| {
+        for (cb, rt) in m.values() {
+            if *rt == runtime_id {
+                cb.trace(gcx);
+            }
         }
     });
-    security::CERT_CALLBACK.with(|cb| {
-        if let Some(v) = cb.borrow().as_ref() {
+    security::CERT_CALLBACK.with_borrow(|m| {
+        if let Some(v) = m.get(&runtime_id) {
             v.trace(gcx);
         }
     });
-    fetch::FETCH_CALLBACK.with(|m| {
-        for cb in m.borrow().values() {
-            cb.trace(gcx);
+    fetch::FETCH_CALLBACK.with_borrow(|m| {
+        for (cb, rt) in m.values() {
+            if *rt == runtime_id {
+                cb.trace(gcx);
+            }
         }
     });
 }

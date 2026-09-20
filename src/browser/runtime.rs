@@ -517,8 +517,9 @@ pub(crate) fn js_page_evaluate_handle(ctx: &mut ScopedContext, cc: CallContext) 
 // ---------------------------------------------------------------------------
 
 thread_local! {
-    pub(crate) static CONSOLE_CALLBACK: std::cell::RefCell<std::collections::HashMap<String, JSValue>> =
-        std::cell::RefCell::new(std::collections::HashMap::new());
+    pub(crate) static CONSOLE_CALLBACK: std::cell::RefCell<
+        std::collections::HashMap<String, (JSValue, usize)>,
+    > = std::cell::RefCell::new(std::collections::HashMap::new());
 }
 
 /// `page.onConsole(callback)` — invoke `callback(msg)` for each
@@ -530,8 +531,9 @@ pub(crate) fn js_page_on_console(ctx: &mut ScopedContext, cc: CallContext) -> JS
     let session_id = payload.session_id.clone();
 
     let callback = cc.arg(0);
-    CONSOLE_CALLBACK.with(|m| {
-        m.borrow_mut().insert(session_id.clone(), callback);
+    let runtime_id = ctx.rt().id();
+    CONSOLE_CALLBACK.with_borrow_mut(|m| {
+        m.insert(session_id.clone(), (callback, runtime_id));
     });
 
     let _ = send_page_void_cmd(ctx, &cc, "Runtime.enable", None);
@@ -574,8 +576,8 @@ pub(crate) fn js_page_on_console(ctx: &mut ScopedContext, cc: CallContext) -> JS
                 .get("params")
                 .cloned()
                 .unwrap_or(serde_json::Value::Null);
-            let cb =
-                CONSOLE_CALLBACK.with(|m| sess.as_ref().and_then(|s| m.borrow().get(s).cloned()));
+            let cb = CONSOLE_CALLBACK
+                .with_borrow(|m| sess.as_ref().and_then(|s| m.get(s).map(|(cb, _)| *cb)));
 
             if let (Some(cb), Some(_sess)) = (cb, sess) {
                 let obj = JSValue::from_serde_json(cx, &params).unwrap_or(JSValue::UNDEFINED);
