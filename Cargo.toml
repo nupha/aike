@@ -63,6 +63,7 @@ zuqe = { path = "../../../devel/zhuque", features = [
     "serde_json_support",
     "zapi",
     "persistent",
+    "child_runtime",
     "intl402",
 ] }
 crossbeam = "0.8"
