@@ -33,6 +33,7 @@ mod yaml;
 use std::{
     path::{Path, PathBuf},
     process::ExitCode,
+    sync::{Arc, Mutex},
 };
 
 use clap::{CommandFactory, Parser};
@@ -47,7 +48,7 @@ use crate::ai::{JSEngine, JSLlmContext, JSLlmModel, JSSamplerChain};
 
 use crate::{
     ai::{JSLlmClient, init_mod_ai},
-    aike::{JSCronJob, JSFileHandle, JSStdioHandle},
+    aike::{AikeRuntimeState, JSCronJob, JSFileHandle, JSStdioHandle},
     browser::{JSPage, init_mod_browser},
     class_event_emitter::JSEventEmitter,
     fs::init_mod_fs,
@@ -242,16 +243,16 @@ async fn main() -> ExitCode {
         v
     };
 
-    // Create runtime
-    let mut rt = Runtime::create().unwrap();
+    // Create runtime, attaching aike's per-runtime host state (signal handlers,
+    // and later other state formerly kept in thread-locals).
+    let mut rt = Runtime::create_with(AikeRuntimeState::new()).unwrap();
 
     // Inject the tokio deadline waker: when the event loop parks with a
     // deadline (timer / quantum fallback), a sleep task wakes it. One armed
     // timer at a time — re-arming aborts the previous one.
     {
         let wake = rt.wake_handle();
-        let armed: std::sync::Arc<std::sync::Mutex<Option<tokio::task::AbortHandle>>> =
-            std::sync::Arc::new(std::sync::Mutex::new(None));
+        let armed: Arc<Mutex<Option<tokio::task::AbortHandle>>> = Arc::new(Mutex::new(None));
         rt.set_deadline_waker(std::sync::Arc::new(move |at: std::time::Instant| {
             let mut g = armed.lock().unwrap();
             if let Some(h) = g.take() {

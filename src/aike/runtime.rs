@@ -208,8 +208,9 @@ pub(crate) fn register_runtime_traces(rt: &mut Runtime) {
         crate::mcp::gc_trace_stdio_state(gcx, id);
 
         if root {
-            // Process-global / root-only state.
-            crate::aike::gc_trace_signals(gcx);
+            // Process-global / root-only state. Signal handlers live on the
+            // runtime's `AikeRuntimeState`, which the engine traces as part of
+            // `user_state` (see `AikeRuntimeState::trace`).
             crate::aike::gc_trace_cron(gcx);
             gc_trace_runtime_handles(gcx);
         }

@@ -931,7 +931,7 @@ fn js_start_server_job(
             }
             true // keep polling
         },
-        move || is_running2.load(Ordering::Acquire),
+        move |_cx| is_running2.load(Ordering::Acquire),
         || {},
     );
 }

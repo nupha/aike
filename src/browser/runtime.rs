@@ -590,7 +590,7 @@ pub(crate) fn js_page_on_console(ctx: &mut ScopedContext, cc: CallContext) -> JS
 
             true
         },
-        || true,
+        |_cx| true,
         || {},
     );
 

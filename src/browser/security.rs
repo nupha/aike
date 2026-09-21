@@ -175,7 +175,7 @@ pub(crate) fn js_browser_handle_certificate_error(
 
             true
         },
-        move || CERT_CALLBACK.with_borrow(|m| m.contains_key(&runtime_id)),
+        move |_cx| CERT_CALLBACK.with_borrow(|m| m.contains_key(&runtime_id)),
         move || {
             CERT_CALLBACK.with_borrow_mut(|m| {
                 m.remove(&runtime_id);

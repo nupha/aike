@@ -152,15 +152,16 @@ pub(crate) fn format_timestamp_compact() -> String {
 /// handler returns `true` the poller continues (`Again`); `false` triggers
 /// a call to `on_finish()` and terminates (`Done`).
 ///
-/// When the channel is empty the poller checks `has_entries()`. If there
+/// When the channel is empty the poller checks `has_entries(cx)`. If there
 /// are still live entries it polls again; otherwise it calls `on_finish()`
 /// and terminates.  A disconnected channel always triggers termination.
+/// `has_entries` receives the context so it can consult per-runtime state.
 pub(crate) fn start_channel_poller<T, F>(
     ctx: &mut ScopedContext,
     label: &'static str,
     rx: zuqe::WakeReceiver<T>,
     handler: F,
-    has_entries: impl Fn() -> bool + 'static,
+    has_entries: impl Fn(&mut ScopedContext) -> bool + 'static,
     on_finish: impl Fn() + 'static,
 ) where
     T: 'static,
@@ -185,7 +186,7 @@ pub(crate) fn start_channel_poller<T, F>(
                 }
             }
             Err(TryRecvError::Empty) => {
-                if has_entries() {
+                if has_entries(cx) {
                     Ok(JobState::Block)
                 } else {
                     on_finish();

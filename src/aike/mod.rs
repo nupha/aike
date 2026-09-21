@@ -19,14 +19,50 @@ pub(crate) use {
         ensure_root_runtime, register_runtime_traces, save_process_info, set_root_ctx,
         set_root_runtime,
     },
-    signal::{
-        gc_trace_signals, install_default_signal_handlers, register_signal_handler, signal_number,
-    },
+    signal::{install_default_signal_handlers, register_signal_handler, signal_number},
     spawn::{kill_all_children, terminate_process},
     sys::{get_time_ns, which_executable},
 };
 
-use zuqe::{FieldDef, JS_PROP_ENUMERABLE, ScopedContext};
+use std::collections::HashMap;
+
+use zuqe::{
+    FieldDef, JS_PROP_ENUMERABLE, JSValue, RuntimeUserState, ScopedContext,
+    gc_lite::{GcTrace, GcTraceCtx},
+};
+
+/// Per-runtime host state attached to the root runtime via
+/// `Runtime::create_with` and reached through [`RuntimeImpl::user_state`].
+///
+/// Host state that used to live in thread-locals is consolidated here so that
+/// multiple runtimes on the same thread no longer share it (signals are the
+/// first such state; more will follow). Only the root runtime carries this
+/// state — child runtimes get the engine's `NoUserState`, so root-only
+/// features (signals, cron, terminal control) can keep gating on `is_root()`.
+///
+/// [`RuntimeImpl::user_state`]: zuqe::RuntimeImpl::user_state
+pub(crate) struct AikeRuntimeState {
+    /// Signal number -> JS callback (last `onSignal` wins), per runtime.
+    pub(crate) signals: HashMap<u32, JSValue>,
+}
+
+impl GcTrace for AikeRuntimeState {
+    fn trace(&self, gcx: &mut GcTraceCtx) {
+        for cb in self.signals.values() {
+            cb.trace(gcx);
+        }
+    }
+}
+
+impl AikeRuntimeState {
+    pub(crate) fn new() -> Self {
+        Self {
+            signals: HashMap::new(),
+        }
+    }
+}
+
+impl RuntimeUserState for AikeRuntimeState {}
 
 /// Install the `Aike` namespace. Root-only entries — `Aike.onSignal`,
 /// `Aike.schedule`, `Aike.ttyGetWinSize`, `Aike.ttySetRaw`, plus the host-only

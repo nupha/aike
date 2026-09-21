@@ -382,7 +382,7 @@ fn start_stdio_server(ctx: &mut ScopedContext, p: &McpServicePayload) -> Result<
         },
         {
             let b = is_running.clone();
-            move || b.load(Ordering::Acquire)
+            move |_cx| b.load(Ordering::Acquire)
         },
         || {},
     );

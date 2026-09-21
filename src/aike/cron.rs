@@ -197,7 +197,7 @@ fn add_cron_notifier(ctx: &mut ScopedContext) {
             }
             true // always continue polling
         },
-        || CRON_STATE.with_borrow(|s| s.as_ref().is_some_and(|s| !s.entries.is_empty())),
+        |_cx| CRON_STATE.with_borrow(|s| s.as_ref().is_some_and(|s| !s.entries.is_empty())),
         || {
             CRON_STATE.with_borrow_mut(|s| {
                 s.take();

@@ -2,7 +2,6 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
 use std::{
-    cell::RefCell,
     collections::HashMap,
     sync::{LazyLock, Mutex},
     thread::ThreadId,
@@ -11,14 +10,9 @@ use std::{
 use zuqe::{
     CallContext, FieldDef, JS_PROP_ENUMERABLE, JSResult, JSValue, ScopedContext, WakeReceiver,
     WakeSender,
-    gc_lite::{GcTrace, GcTraceCtx},
 };
 
-thread_local! {
-    // Per-thread signal handler registry.
-    // Signal number -> callback (non-overlapping: last `onSignal` wins).
-    static HANDLER_MAP: RefCell<HashMap<u32, JSValue>> = RefCell::new(HashMap::new());
-}
+use super::AikeRuntimeState;
 
 /// All per-thread senders, keyed by ThreadId.
 /// The C signal handler broadcasts to every registered sender.
@@ -255,16 +249,7 @@ fn uninstall_c_handler(sig_num: u32) {
     }
 }
 
-/// GC trace: visit all stored JSValue callbacks so the GC can keep them alive
-pub fn gc_trace_signals(gcx: &mut GcTraceCtx) {
-    HANDLER_MAP.with(|map| {
-        for cb in map.borrow().values() {
-            cb.trace(gcx);
-        }
-    });
-}
-
-/// Start the per-thread signal polling microtask.  `rx` is moved into the
+/// Start the per-runtime signal polling microtask.  `rx` is moved into the
 /// closure so no thread-local receiver variable is needed.  When the last
 /// sender for this thread is dropped (all handlers removed), the microtask
 /// sees `Disconnected` and returns `Done`.
@@ -311,8 +296,12 @@ fn start_signal_microtask(ctx: &mut ScopedContext, rx: WakeReceiver<u32>) {
         "signal",
         rx,
         |sig_num, cx| {
-            let cb = HANDLER_MAP.with(|map| map.borrow().get(&sig_num).copied());
-            if let Some(cb) = cb
+            if let Some(cb) = cx
+                .rt_mut()
+                .user_state_mut::<AikeRuntimeState>()
+                .signals
+                .get(&sig_num)
+                .copied()
                 && cb.call(cx, JSValue::UNDEFINED, &[]).is_err()
             {
                 let exc = cx.take_exception();
@@ -321,7 +310,12 @@ fn start_signal_microtask(ctx: &mut ScopedContext, rx: WakeReceiver<u32>) {
             }
             true // always continue polling
         },
-        || !HANDLER_MAP.with(|map| map.borrow().is_empty()),
+        |cx| {
+            !cx.rt_mut()
+                .user_state_mut::<AikeRuntimeState>()
+                .signals
+                .is_empty()
+        },
         || {}, // no persistent state to clear for signals
     );
 }
@@ -420,17 +414,24 @@ pub(crate) fn register_signal_handler(
 
     handler.ensure_callable(ctx)?;
 
+    // Signals are a root-only feature; a child runtime carries the engine's
+    // `NoUserState` and has no signal map to register into.
+    if !ctx.rt().is_root() {
+        return Ok(JSValue::UNDEFINED);
+    }
+
     // Atomically: check emptiness, detect new signal, store callback.
-    let (was_empty, is_new) = HANDLER_MAP.with(|map| {
-        let mut b = map.borrow_mut();
-        let was_empty = b.is_empty();
-        let existed = b.contains_key(&sig_num);
-        b.insert(sig_num, handler);
+    let (was_empty, is_new) = {
+        let rt = ctx.rt_mut();
+        let state = rt.user_state_mut::<AikeRuntimeState>();
+        let was_empty = state.signals.is_empty();
+        let existed = state.signals.contains_key(&sig_num);
+        state.signals.insert(sig_num, handler);
         (was_empty, !existed)
-    });
+    };
 
     // Lazy-init the per-thread channel on first registration.
-    // When HANDLER_MAP was empty, the previous microtask has already
+    // When the map was empty, the previous microtask has already
     // exited (Disconnected), so we need a fresh channel + microtask.
     if was_empty {
         let (tx, rx) = ctx.make_channel::<u32>(16);
@@ -452,7 +453,7 @@ pub(crate) fn register_signal_handler(
 /// Unregister the handler for the named signal on the current thread.
 /// Returns true if a handler was actually removed. Used by both
 /// `Aike.onSignal(null)` and internal native code.
-pub(crate) fn unregister_signal_handler(sig_name: &str) -> bool {
+pub(crate) fn unregister_signal_handler(ctx: &mut ScopedContext, sig_name: &str) -> bool {
     let Some(sig_num) = signal_number(sig_name) else {
         return false;
     };
@@ -463,17 +464,23 @@ pub(crate) fn unregister_signal_handler(sig_name: &str) -> bool {
         return false;
     }
 
+    // Signals are a root-only feature; a child runtime has no signal map.
+    if !ctx.rt().is_root() {
+        return false;
+    }
+
     let tid = std::thread::current().id();
 
-    // If this thread has no more handlers, remove its sender
+    // If this runtime has no more handlers, remove its sender
     // from the global broadcast list.  The microtask will detect
     // Disconnected on next poll and return Done.
-    let (is_empty, removed) = HANDLER_MAP.with(|lut| {
-        let mut b = lut.borrow_mut();
-        let removed = b.remove(&sig_num).is_some();
-        let is_empty = b.is_empty();
+    let (is_empty, removed) = {
+        let rt = ctx.rt_mut();
+        let state = rt.user_state_mut::<AikeRuntimeState>();
+        let removed = state.signals.remove(&sig_num).is_some();
+        let is_empty = state.signals.is_empty();
         (is_empty, removed)
-    });
+    };
 
     if is_empty {
         SIGNAL_SENDERS.lock().unwrap().remove(&tid);
@@ -493,7 +500,7 @@ pub(super) fn js_on_signal(ctx: &mut ScopedContext, cc: CallContext) -> JSResult
 
     let handler = cc.arg(1);
     if handler.is_null() {
-        unregister_signal_handler(sig_name.as_ref());
+        unregister_signal_handler(ctx, sig_name.as_ref());
     } else {
         register_signal_handler(ctx, sig_name.as_ref(), handler)?;
     }

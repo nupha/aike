@@ -138,7 +138,7 @@ pub(crate) fn js_page_set_request_interception(
 
                 true
             },
-            || true, // interception stays active until disabled
+            |_cx| true, // interception stays active until disabled
             || {},
         );
 

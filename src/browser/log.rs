@@ -95,7 +95,7 @@ pub(crate) fn js_page_on_log(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
 
             true
         },
-        || true,
+        |_cx| true,
         || {},
     );
 
