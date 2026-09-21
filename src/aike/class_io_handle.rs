@@ -515,10 +515,8 @@ fn start_read_microtask(ctx: &mut ScopedContext) {
             }
             true // always continue polling
         },
-        move |_cx| {
-            READ_SLOTS.with_borrow(|slots| slots.values().any(|s| s.runtime_id == runtime_id))
-        },
-        move || {
+        move |_| READ_SLOTS.with_borrow(|slots| slots.values().any(|s| s.runtime_id == runtime_id)),
+        move |_| {
             READ_POLLER_ACTIVE.with_borrow_mut(|set| {
                 set.remove(&runtime_id);
             })
@@ -1347,10 +1345,10 @@ impl JSStdioHandle {
         ctx: &mut ScopedContext,
         #[cfg(unix)] writer: impl tokio::io::AsyncWrite + Unpin + Send + 'static + AsRawFd,
         #[cfg(windows)] writer: impl tokio::io::AsyncWrite
-            + Unpin
-            + Send
-            + 'static
-            + std::os::windows::io::AsRawHandle,
+        + Unpin
+        + Send
+        + 'static
+        + std::os::windows::io::AsRawHandle,
         #[cfg(not(any(unix, windows)))] _writer: impl tokio::io::AsyncWrite + Unpin + Send + 'static,
         #[allow(unused)] fd: i32,
     ) -> Result<Self, i32> {

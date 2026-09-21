@@ -316,7 +316,7 @@ fn start_signal_microtask(ctx: &mut ScopedContext, rx: WakeReceiver<u32>) {
                 .signals
                 .is_empty()
         },
-        || {}, // no persistent state to clear for signals
+        |_| {}, // no persistent state to clear for signals
     );
 }
 

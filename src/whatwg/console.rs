@@ -1,20 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-use std::{cell::RefCell, collections::HashMap, time::Instant};
+use std::time::Instant;
 
 use zuqe::{CallContext, FieldDef, JSResult, JSValue, Object, ScopedContext};
 
 use crate::{
+    aike::AikeRuntimeState,
     color::{Color, colorize},
     inspect_value::js_inspect,
 };
-
-thread_local! {
-    static GROUP_INDENT: RefCell<usize> = const { RefCell::new(0) };
-    static COUNTERS: RefCell<HashMap<String, usize>> = RefCell::new(HashMap::new());
-    static TIMERS: RefCell<HashMap<String, Instant>> = RefCell::new(HashMap::new());
-}
 
 #[inline(always)]
 fn console_println(msg: String) {
@@ -45,7 +40,7 @@ fn js_console_print(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     };
 
     let mut out = String::new();
-    let indent = GROUP_INDENT.with(|n| *n.borrow());
+    let indent = AikeRuntimeState::of(ctx).console_group_indent;
     for _ in 0..indent {
         out.push_str(&colorize("  ", clr()));
     }
@@ -71,7 +66,7 @@ fn js_console_print(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 fn js_console_assert(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     if cc.length() == 0 || !cc.arg(0).to_bool()? {
         let mut out = String::new();
-        let indent = GROUP_INDENT.with(|n| *n.borrow());
+        let indent = AikeRuntimeState::of(ctx).console_group_indent;
         for _ in 0..indent {
             out.push_str(&colorize("  ", Color::RedFg));
         }
@@ -89,7 +84,7 @@ fn js_console_assert(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 }
 
 fn js_console_trace(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let indent = GROUP_INDENT.with(|n| *n.borrow());
+    let indent = AikeRuntimeState::of(ctx).console_group_indent;
     let mut out = String::new();
     for _ in 0..indent {
         out.push_str(&colorize("  ", Color::Reset));
@@ -122,7 +117,7 @@ fn js_console_trace(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 }
 
 fn js_console_dir(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let indent = GROUP_INDENT.with(|n| *n.borrow());
+    let indent = AikeRuntimeState::of(ctx).console_group_indent;
     let mut out = String::new();
     for _ in 0..indent {
         out.push_str(&colorize("  ", Color::Reset));
@@ -141,15 +136,17 @@ fn js_console_count(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         "default".to_string()
     };
 
-    let count = COUNTERS.with(|c| {
-        let mut map = c.borrow_mut();
-        let n = map.entry(label.clone()).or_insert(0);
+    let count = {
+        let n = AikeRuntimeState::of(ctx)
+            .console_counters
+            .entry(label.clone())
+            .or_insert(0);
         *n += 1;
         *n
-    });
+    };
 
     let mut out = String::new();
-    let indent = GROUP_INDENT.with(|n| *n.borrow());
+    let indent = AikeRuntimeState::of(ctx).console_group_indent;
     for _ in 0..indent {
         out.push_str(&colorize("  ", Color::Reset));
     }
@@ -166,9 +163,7 @@ fn js_console_count_reset(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
         "default".to_string()
     };
 
-    COUNTERS.with(|c| {
-        c.borrow_mut().remove(&label);
-    });
+    AikeRuntimeState::of(ctx).console_counters.remove(&label);
 
     Ok(JSValue::UNDEFINED)
 }
@@ -180,23 +175,22 @@ fn js_console_time(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         "default".to_string()
     };
 
-    TIMERS.with(|t| {
-        let mut map = t.borrow_mut();
-        if map.contains_key(&label) {
-            let mut out = String::new();
-            let indent = GROUP_INDENT.with(|n| *n.borrow());
-            for _ in 0..indent {
-                out.push_str(&colorize("  ", Color::YellowFg));
-            }
-            out.push_str(&colorize(
-                format!("Timer '{label}' already exists"),
-                Color::YellowFg,
-            ));
-            console_println(out);
-        } else {
-            map.insert(label, Instant::now());
+    if AikeRuntimeState::of(ctx).console_timers.contains_key(&label) {
+        let mut out = String::new();
+        let indent = AikeRuntimeState::of(ctx).console_group_indent;
+        for _ in 0..indent {
+            out.push_str(&colorize("  ", Color::YellowFg));
         }
-    });
+        out.push_str(&colorize(
+            format!("Timer '{label}' already exists"),
+            Color::YellowFg,
+        ));
+        console_println(out);
+    } else {
+        AikeRuntimeState::of(ctx)
+            .console_timers
+            .insert(label, Instant::now());
+    }
 
     Ok(JSValue::UNDEFINED)
 }
@@ -208,14 +202,13 @@ fn js_console_time_log(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         "default".to_string()
     };
 
-    let elapsed_ms = TIMERS.with(|t| {
-        let map = t.borrow();
-        map.get(&label)
-            .map(|start| start.elapsed().as_secs_f64() * 1000.0)
-    });
+    let elapsed_ms = AikeRuntimeState::of(ctx)
+        .console_timers
+        .get(&label)
+        .map(|start| start.elapsed().as_secs_f64() * 1000.0);
 
     let mut out = String::new();
-    let indent = GROUP_INDENT.with(|n| *n.borrow());
+    let indent = AikeRuntimeState::of(ctx).console_group_indent;
     for _ in 0..indent {
         out.push_str(&colorize("  ", Color::Reset));
     }
@@ -248,14 +241,13 @@ fn js_console_time_end(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         "default".to_string()
     };
 
-    let elapsed = TIMERS.with(|t| {
-        let mut map = t.borrow_mut();
-        map.remove(&label)
-            .map(|start| start.elapsed().as_secs_f64() * 1000.0)
-    });
+    let elapsed = AikeRuntimeState::of(ctx)
+        .console_timers
+        .remove(&label)
+        .map(|start| start.elapsed().as_secs_f64() * 1000.0);
 
     let mut out = String::new();
-    let indent = GROUP_INDENT.with(|n| *n.borrow());
+    let indent = AikeRuntimeState::of(ctx).console_group_indent;
     for _ in 0..indent {
         out.push_str(&colorize("  ", Color::Reset));
     }
@@ -277,20 +269,14 @@ fn js_console_time_end(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     Ok(JSValue::UNDEFINED)
 }
 
-fn js_console_group(_ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
-    GROUP_INDENT.with(|n| {
-        *n.borrow_mut() += 1;
-    });
+fn js_console_group(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
+    AikeRuntimeState::of(ctx).console_group_indent += 1;
     Ok(JSValue::UNDEFINED)
 }
 
-fn js_console_group_end(_ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
-    GROUP_INDENT.with(|n| {
-        let mut indent = n.borrow_mut();
-        if *indent > 0 {
-            *indent -= 1;
-        }
-    });
+fn js_console_group_end(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
+    let indent = &mut AikeRuntimeState::of(ctx).console_group_indent;
+    *indent = indent.saturating_sub(1);
     Ok(JSValue::UNDEFINED)
 }
 

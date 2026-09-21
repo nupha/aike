@@ -11,7 +11,7 @@ pub(crate) use {
     class_http_mcp::JSHttpMcp,
     class_mcp::{JSBaseMcp, McpTransport},
     class_mcp_client::{JSHttpMcpClient, JSStdioMcpClient, kill_all_mcp_children},
-    class_stdio_mcp::{JSStdioMcp, gc_trace_stdio_state},
+    class_stdio_mcp::JSStdioMcp,
     service::{McpToolCallRequest, build_axum_mcp_route, handle_mcp_tool_call},
 };
 

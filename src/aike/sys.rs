@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-use std::cell::Cell;
 use std::path::Path;
 
 use zuqe::{
     Array, CallContext, EvalFlags, EvalType, JS_PROP_C_W_E, JSResult, JSValue, ScopedContext,
 };
+
+use super::AikeRuntimeState;
 
 // Declare windows crt functions
 #[cfg(windows)]
@@ -75,15 +76,11 @@ pub(super) fn js_evalScript(ctx: &mut ScopedContext, cc: CallContext) -> JSResul
         _ => zuqe::EvalName::Name(name),
     };
 
-    thread_local! {
-        static EVAL_SCRIPT_RECURSE: Cell<u32> = const { Cell::new(0) };
-    }
-
-    let lev = EVAL_SCRIPT_RECURSE.with(|s| {
-        let n = s.get();
-        s.set(n + 1);
-        n + 1
-    });
+    let lev = {
+        let depth = &mut AikeRuntimeState::of(ctx).eval_script_depth;
+        *depth += 1;
+        *depth
+    };
 
     if lev == 1 { /* interrupt handler is now installed in main() at startup */ }
 

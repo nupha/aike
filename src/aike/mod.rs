@@ -24,26 +24,56 @@ pub(crate) use {
     sys::{get_time_ns, which_executable},
 };
 
-use std::collections::HashMap;
+use std::{collections::HashMap, time::Instant};
 
 use zuqe::{
-    FieldDef, JS_PROP_ENUMERABLE, JSValue, RuntimeUserState, ScopedContext,
+    FieldDef, JS_PROP_ENUMERABLE, JSValue, Object, RuntimeUserState, ScopedContext,
     gc_lite::{GcTrace, GcTraceCtx},
 };
 
-/// Per-runtime host state attached to the root runtime via
-/// `Runtime::create_with` and reached through [`RuntimeImpl::user_state`].
+/// Per-runtime host state, attached to every runtime (root and child) via
+/// `Runtime::create_with` / `Runtime::create_child_with` and reached through
+/// [`RuntimeImpl::user_state_mut`].
 ///
-/// Host state that used to live in thread-locals is consolidated here so that
-/// multiple runtimes on the same thread no longer share it (signals are the
-/// first such state; more will follow). Only the root runtime carries this
-/// state — child runtimes get the engine's `NoUserState`, so root-only
-/// features (signals, cron, terminal control) can keep gating on `is_root()`.
+/// Host state that used to live in per-runtime thread-locals is consolidated
+/// here so that two runtimes on the same thread never share it. The engine
+/// traces the whole struct on every collection, replacing the hand-written
+/// `gc_trace_*` hooks.
 ///
-/// [`RuntimeImpl::user_state`]: zuqe::RuntimeImpl::user_state
+/// [`RuntimeImpl::user_state_mut`]: zuqe::RuntimeImpl::user_state_mut
 pub(crate) struct AikeRuntimeState {
-    /// Signal number -> JS callback (last `onSignal` wins), per runtime.
+    /// Signal number -> JS callback (last `onSignal` wins). Root-only in
+    /// practice (the `onSignal` API is not installed on children).
     pub(crate) signals: HashMap<u32, JSValue>,
+    /// `process.nextTick` callbacks pending for the next microtask.
+    pub(crate) next_tick: Vec<JSValue>,
+    /// `Aike.evalScript` nesting depth.
+    pub(crate) eval_script_depth: u32,
+
+    /// `console.group` indentation level.
+    pub(crate) console_group_indent: usize,
+    /// `console.count(label)` counters.
+    pub(crate) console_counters: HashMap<String, usize>,
+    /// `console.time(label)` start instants.
+    pub(crate) console_timers: HashMap<String, Instant>,
+
+    /// Pending setTimeout/setInterval/Aike.sleep timers, sorted by deadline.
+    pub(crate) timers: crate::whatwg::timeout::TimerState,
+    /// Auto-increment timer id counter.
+    pub(crate) timer_serial: u32,
+
+    /// In-flight fetch abort signals kept alive across GC, id -> signal
+    /// (ids start at 1; 0 is the "no signal" sentinel). The entry is removed
+    /// once the fetch settles.
+    pub(crate) fetch_signals: HashMap<usize, JSValue>,
+    /// Auto-increment id for `fetch_signals`.
+    pub(crate) fetch_signal_next_id: usize,
+
+    /// Browser CDP callback registries (cert error, page interception/console).
+    pub(crate) browser: crate::browser::BrowserState,
+
+    /// stdio MCP server's JS handler objects, kept alive across GC.
+    pub(crate) stdio_js_handlers: Vec<Object>,
 }
 
 impl GcTrace for AikeRuntimeState {
@@ -51,6 +81,17 @@ impl GcTrace for AikeRuntimeState {
         for cb in self.signals.values() {
             cb.trace(gcx);
         }
+        for cb in &self.next_tick {
+            cb.trace(gcx);
+        }
+        for v in self.fetch_signals.values() {
+            v.trace(gcx);
+        }
+        self.browser.trace(gcx);
+        for h in &self.stdio_js_handlers {
+            h.trace(gcx);
+        }
+        self.timers.trace(gcx);
     }
 }
 
@@ -58,7 +99,24 @@ impl AikeRuntimeState {
     pub(crate) fn new() -> Self {
         Self {
             signals: HashMap::new(),
+            next_tick: Vec::new(),
+            eval_script_depth: 0,
+            console_group_indent: 0,
+            console_counters: HashMap::new(),
+            console_timers: HashMap::new(),
+            fetch_signals: HashMap::new(),
+            fetch_signal_next_id: 1,
+            browser: Default::default(),
+            stdio_js_handlers: Vec::new(),
+            timers: Default::default(),
+            timer_serial: 1,
         }
+    }
+
+    /// Borrow this runtime's state from a live context. Keeps call sites terse
+    /// (`AikeRuntimeState::of(ctx).field`); the borrow lasts as long as `ctx`.
+    pub(crate) fn of<'a, 'c>(ctx: &'a mut ScopedContext<'c>) -> &'a mut Self {
+        ctx.rt_mut().user_state_mut::<Self>()
     }
 }
 

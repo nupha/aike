@@ -7,25 +7,16 @@
 //! `abortRequest(reqId, reason?)` / `respondRequest(reqId, opts?)` /
 //! `onRequestPaused(callback)`. Underlying CDP: `Fetch.*`.
 
-use std::cell::RefCell;
-
 use base64::Engine as _;
 use zuqe::{CallContext, JS_PROP_C_W_E, JSResult, JSValue, ScopedContext};
 
-use crate::browser::{
-    cdp_network,
-    class_page::{get_number_prop, get_page_payload, get_str_prop, send_page_void_cmd},
+use crate::{
+    aike::AikeRuntimeState,
+    browser::{
+        cdp_network,
+        class_page::{get_number_prop, get_page_payload, get_str_prop, send_page_void_cmd},
+    },
 };
-
-// ---------------------------------------------------------------------------
-// Per-session interception callback
-// ---------------------------------------------------------------------------
-
-thread_local! {
-    // session_id -> registered `onRequestPaused` callback (last wins).
-    pub(crate) static FETCH_CALLBACK: RefCell<std::collections::HashMap<String, (JSValue, usize)>> =
-        RefCell::new(std::collections::HashMap::new());
-}
 
 /// `page.setRequestInterception(enabled)` — enable/disable Fetch interception.
 pub(crate) fn js_page_set_request_interception(
@@ -88,8 +79,13 @@ pub(crate) fn js_page_set_request_interception(
                     .cloned()
                     .unwrap_or(serde_json::Value::Null);
 
-                let cb = FETCH_CALLBACK
-                    .with_borrow(|m| sess.as_ref().and_then(|s| m.get(s).map(|(cb, _)| *cb)));
+                let cb = sess.as_ref().and_then(|s| {
+                    AikeRuntimeState::of(cx)
+                        .browser
+                        .fetch_callbacks
+                        .get(s)
+                        .copied()
+                });
 
                 if let (Some(cb), Some(_sess)) = (cb, sess) {
                     let mut obj = cx.create_base_object().ok();
@@ -138,8 +134,8 @@ pub(crate) fn js_page_set_request_interception(
 
                 true
             },
-            |_cx| true, // interception stays active until disabled
-            || {},
+            |_| true, // interception stays active until disabled
+            |_| {},
         );
 
         // Resolve once Fetch.enable has been issued.
@@ -150,7 +146,10 @@ pub(crate) fn js_page_set_request_interception(
             Some(serde_json::json!({ "patterns": [{ "urlPattern": "*" }] })),
         )
     } else {
-        FETCH_CALLBACK.with(|m| m.borrow_mut().remove(&session_id));
+        AikeRuntimeState::of(ctx)
+            .browser
+            .fetch_callbacks
+            .remove(&session_id);
         send_page_void_cmd(ctx, &cc, "Fetch.disable", None)
     }
 }
@@ -270,9 +269,11 @@ pub(crate) fn js_page_on_request_paused(ctx: &mut ScopedContext, cc: CallContext
     let payload = get_page_payload(ctx, &this)?;
     let session_id = payload.session_id.clone();
     let callback = cc.arg(0);
-    let runtime_id = ctx.rt().id();
-    FETCH_CALLBACK.with_borrow_mut(|m| {
-        m.insert(session_id, (callback, runtime_id));
-    });
+
+    AikeRuntimeState::of(ctx)
+        .browser
+        .fetch_callbacks
+        .insert(session_id, callback);
+
     Ok(JSValue::UNDEFINED)
 }

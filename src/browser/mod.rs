@@ -26,39 +26,48 @@ pub use {class_browser::JSBrowser, class_page::JSPage};
 
 pub(crate) use chrome::kill_all_spawned_browsers;
 
-use zuqe::{FieldDef, NativeObject, ScopedContext, gc_lite::GcTrace, gc_lite::GcTraceCtx};
+use std::collections::HashMap;
 
-/// Single GC entry point for the whole browser module: traces every
-/// browser-side JS-callback registry so main.rs registers exactly one
-/// handler. Statics are pub(crate) precisely so this one function can
-/// reach into each submodule directly.
-pub(crate) fn gc_trace_browser(gcx: &mut GcTraceCtx, runtime_id: usize) {
-    log::CONSOLE_CALLBACK.with_borrow(|m| {
-        for (cb, rt) in m.values() {
-            if *rt == runtime_id {
-                cb.trace(gcx);
-            }
+use zuqe::{
+    FieldDef, JSValue, NativeObject, Object, ScopedContext,
+    gc_lite::{GcTrace, GcTraceCtx},
+};
+
+use cdp::CdpClient;
+
+/// Per-runtime browser-side state (JS callbacks), attached to `AikeRuntimeState`
+/// so the engine traces it and two runtimes on one thread never share it.
+#[derive(Default)]
+pub(crate) struct BrowserState {
+    /// `handleCertificateError` callback (last wins).
+    pub(crate) cert_callback: Option<JSValue>,
+    /// CDP client backing the generated `accept` closure.
+    pub(crate) cert_client: Option<CdpClient>,
+    /// eventId of the certificate error currently being delivered.
+    pub(crate) cert_event_id: Option<i64>,
+    /// session id -> `onRequestPaused` callback (last wins).
+    pub(crate) fetch_callbacks: HashMap<String, JSValue>,
+    /// session id -> `page.onLog` callback.
+    pub(crate) log_console_callbacks: HashMap<String, Object>,
+    /// session id -> `page.onConsole` callback.
+    pub(crate) runtime_console_callbacks: HashMap<String, JSValue>,
+}
+
+impl GcTrace for BrowserState {
+    fn trace(&self, gcx: &mut GcTraceCtx) {
+        if let Some(cb) = &self.cert_callback {
+            cb.trace(gcx);
         }
-    });
-    runtime::CONSOLE_CALLBACK.with_borrow(|m| {
-        for (cb, rt) in m.values() {
-            if *rt == runtime_id {
-                cb.trace(gcx);
-            }
+        for cb in self.fetch_callbacks.values() {
+            cb.trace(gcx);
         }
-    });
-    security::CERT_CALLBACK.with_borrow(|m| {
-        if let Some(v) = m.get(&runtime_id) {
-            v.trace(gcx);
+        for cb in self.log_console_callbacks.values() {
+            cb.trace(gcx);
         }
-    });
-    fetch::FETCH_CALLBACK.with_borrow(|m| {
-        for (cb, rt) in m.values() {
-            if *rt == runtime_id {
-                cb.trace(gcx);
-            }
+        for cb in self.runtime_console_callbacks.values() {
+            cb.trace(gcx);
         }
-    });
+    }
 }
 
 /// Initialize the `browser` JS module (exports the `Browser` class).

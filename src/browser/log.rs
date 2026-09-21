@@ -8,9 +8,12 @@
 
 use std::sync::{LazyLock, Mutex};
 
-use zuqe::{CallContext, JSResult, JSValue, Object, ScopedContext};
+use zuqe::{CallContext, JSResult, JSValue, ScopedContext};
 
-use crate::browser::class_page::{get_page_payload, send_page_void_cmd};
+use crate::{
+    aike::AikeRuntimeState,
+    browser::class_page::{get_page_payload, send_page_void_cmd},
+};
 
 /// Per-session ring buffer of console/log entries.
 static LOG_BUFFER: LazyLock<Mutex<std::collections::HashMap<String, Vec<serde_json::Value>>>> =
@@ -25,15 +28,13 @@ pub(crate) fn js_page_on_log(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
     let client = payload.client.clone();
     let session_id = payload.session_id.clone();
 
-    // Store callback in a thread-local keyed by session. The callback is held
-    // as a traced `Object` so the GC keeps the JS function alive while it lives
-    // in this native-side map; otherwise the node gets freed and the poller
-    // below crashes later with a dangling (dtype != Object) pointer.
+    // Store the callback keyed by session in the runtime's traced state so the
+    // GC keeps the JS function alive while it lives in this native-side map.
     if let Some(callback) = cc.arg(0).as_object() {
-        let runtime_id = ctx.rt().id();
-        CONSOLE_CALLBACK.with_borrow_mut(|m| {
-            m.insert(session_id.clone(), (callback, runtime_id));
-        });
+        AikeRuntimeState::of(ctx)
+            .browser
+            .log_console_callbacks
+            .insert(session_id.clone(), callback);
     }
 
     let _ = send_page_void_cmd(ctx, &cc, "Log.enable", None);
@@ -82,8 +83,13 @@ pub(crate) fn js_page_on_log(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
                 .get("params")
                 .cloned()
                 .unwrap_or(serde_json::Value::Null);
-            let cb = CONSOLE_CALLBACK
-                .with_borrow(|m| sess.as_ref().and_then(|s| m.get(s).map(|(cb, _)| *cb)));
+            let cb = sess.as_ref().and_then(|s| {
+                AikeRuntimeState::of(cx)
+                    .browser
+                    .log_console_callbacks
+                    .get(s)
+                    .copied()
+            });
             if let (Some(cb), Some(_sess)) = (cb, sess) {
                 let obj = JSValue::from_serde_json(cx, &params).unwrap_or(JSValue::UNDEFINED);
                 if cb.call(cx, JSValue::UNDEFINED, &[obj]).is_err() {
@@ -95,23 +101,13 @@ pub(crate) fn js_page_on_log(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
 
             true
         },
-        |_cx| true,
-        || {},
+        |_| true,
+        |_| {},
     );
 
     Ok(JSValue::UNDEFINED)
 }
 
-thread_local! {
-    pub(crate) static CONSOLE_CALLBACK: std::cell::RefCell<
-        std::collections::HashMap<String, (Object, usize)>,
-    > = std::cell::RefCell::new(std::collections::HashMap::new());
-}
-
-/// Keep the console-log subscriber callbacks alive across GC cycles.
-///
-/// The callbacks live in a native-side thread-local map that the GC cannot
-/// see, so they must be explicitly traced here (registered in `main.rs`).
 /// `page.getConsoleMessages(clear?)` — return the buffered console/log entries
 /// for this page. Pass `true` to clear the buffer after reading.
 pub(crate) fn js_page_get_console_messages(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {

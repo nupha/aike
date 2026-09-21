@@ -14,7 +14,10 @@ use zuqe::{
     builtins::promise::{Promise, PromiseResultSlot},
 };
 
-use crate::browser::class_page::{get_page_payload, send_page_void_cmd};
+use crate::{
+    aike::AikeRuntimeState,
+    browser::class_page::{get_page_payload, send_page_void_cmd},
+};
 
 /// `page.evaluate(jsCode)`
 pub(crate) fn js_page_evaluate(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -516,12 +519,6 @@ pub(crate) fn js_page_evaluate_handle(ctx: &mut ScopedContext, cc: CallContext) 
 // Console event callback
 // ---------------------------------------------------------------------------
 
-thread_local! {
-    pub(crate) static CONSOLE_CALLBACK: std::cell::RefCell<
-        std::collections::HashMap<String, (JSValue, usize)>,
-    > = std::cell::RefCell::new(std::collections::HashMap::new());
-}
-
 /// `page.onConsole(callback)` — invoke `callback(msg)` for each
 /// `Runtime.consoleAPICalled` event. `msg` is the raw event params object.
 pub(crate) fn js_page_on_console(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -531,10 +528,10 @@ pub(crate) fn js_page_on_console(ctx: &mut ScopedContext, cc: CallContext) -> JS
     let session_id = payload.session_id.clone();
 
     let callback = cc.arg(0);
-    let runtime_id = ctx.rt().id();
-    CONSOLE_CALLBACK.with_borrow_mut(|m| {
-        m.insert(session_id.clone(), (callback, runtime_id));
-    });
+    AikeRuntimeState::of(ctx)
+        .browser
+        .runtime_console_callbacks
+        .insert(session_id.clone(), callback);
 
     let _ = send_page_void_cmd(ctx, &cc, "Runtime.enable", None);
 
@@ -576,8 +573,13 @@ pub(crate) fn js_page_on_console(ctx: &mut ScopedContext, cc: CallContext) -> JS
                 .get("params")
                 .cloned()
                 .unwrap_or(serde_json::Value::Null);
-            let cb = CONSOLE_CALLBACK
-                .with_borrow(|m| sess.as_ref().and_then(|s| m.get(s).map(|(cb, _)| *cb)));
+            let cb = sess.as_ref().and_then(|s| {
+                AikeRuntimeState::of(cx)
+                    .browser
+                    .runtime_console_callbacks
+                    .get(s)
+                    .copied()
+            });
 
             if let (Some(cb), Some(_sess)) = (cb, sess) {
                 let obj = JSValue::from_serde_json(cx, &params).unwrap_or(JSValue::UNDEFINED);
@@ -591,7 +593,7 @@ pub(crate) fn js_page_on_console(ctx: &mut ScopedContext, cc: CallContext) -> JS
             true
         },
         |_cx| true,
-        || {},
+        |_cx| {},
     );
 
     Ok(JSValue::UNDEFINED)

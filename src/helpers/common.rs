@@ -8,8 +8,7 @@ use crossbeam::channel::TryRecvError;
 use serde_json::Value as JsonValue;
 use zuqe::{Exception, JobState, ScopedContext};
 
-/// Print a taken exception's message (+ traceback) instead of the opaque
-/// Debug form. Diagnostics only — never on a healthy path, never inlined.
+/// Print a taken exception's message (+ traceback) instead of the opaque debug form.
 #[cold]
 #[cfg(debug_assertions)]
 pub(crate) fn print_exc(ctx: &mut ScopedContext, exc: Exception) {
@@ -37,7 +36,7 @@ pub(crate) fn aike_home() -> PathBuf {
 /// path format, e.g. `\\?\C:\Users\...`). This breaks user-facing display and `starts_with`
 /// comparisons. This wrapper strips that prefix for cross-platform consistency.
 ///
-/// Also handles `\\?\UNC\server\share\...` → `\\server\share\...` conversion correctly.
+/// Also handles `\\?\UNC\server\share\...` 鈫?`\\server\share\...` conversion correctly.
 pub(crate) fn canonicalize_path<P: AsRef<std::path::Path>>(
     path: P,
 ) -> std::io::Result<std::path::PathBuf> {
@@ -47,14 +46,14 @@ pub(crate) fn canonicalize_path<P: AsRef<std::path::Path>>(
     {
         let s = p.to_string_lossy();
         if let Some(rest) = s.strip_prefix(r"\\?\") {
-            // UNC paths: `\\?\UNC\server\share\...` → `\\server\share\...`
+            // UNC paths: `\\?\UNC\server\share\...` 鈫?`\\server\share\...`
             if let Some(unc) = rest
                 .strip_prefix("UNC\\")
                 .or_else(|| rest.strip_prefix("UNC/"))
             {
                 return Ok(std::path::PathBuf::from(format!("\\{}", unc)));
             }
-            // Regular paths: `\\?\C:\...` → `C:\...`
+            // Regular paths: `\\?\C:\...` 鈫?`C:\...`
             return Ok(std::path::PathBuf::from(rest));
         }
     }
@@ -153,16 +152,17 @@ pub(crate) fn format_timestamp_compact() -> String {
 /// a call to `on_finish()` and terminates (`Done`).
 ///
 /// When the channel is empty the poller checks `has_entries(cx)`. If there
-/// are still live entries it polls again; otherwise it calls `on_finish()`
+/// are still live entries it polls again; otherwise it calls `on_finish(cx)`
 /// and terminates.  A disconnected channel always triggers termination.
-/// `has_entries` receives the context so it can consult per-runtime state.
+/// Both `has_entries` and `on_finish` receive the context so they can consult
+/// per-runtime state.
 pub(crate) fn start_channel_poller<T, F>(
     ctx: &mut ScopedContext,
     label: &'static str,
     rx: zuqe::WakeReceiver<T>,
     handler: F,
     has_entries: impl Fn(&mut ScopedContext) -> bool + 'static,
-    on_finish: impl Fn() + 'static,
+    on_finish: impl Fn(&mut ScopedContext) + 'static,
 ) where
     T: 'static,
     F: Fn(T, &mut ScopedContext) -> bool + 'static,
@@ -172,7 +172,7 @@ pub(crate) fn start_channel_poller<T, F>(
             Ok(msg) => {
                 let cont = handler(msg, cx);
 
-                // ES §9.5: handler returns bool, not Result — clear any
+                // ES 搂9.5: handler returns bool, not Result 鈥?clear any
                 // exception it may have set via cx.throw_*().
                 if let exc @ Exception::Error(_) = cx.take_exception() {
                     log::warn!("[channel poller:{label}] handler left exception: {exc:?}");
@@ -181,7 +181,7 @@ pub(crate) fn start_channel_poller<T, F>(
                 if cont {
                     Ok(JobState::Block)
                 } else {
-                    on_finish();
+                    on_finish(cx);
                     Ok(JobState::Done)
                 }
             }
@@ -189,12 +189,12 @@ pub(crate) fn start_channel_poller<T, F>(
                 if has_entries(cx) {
                     Ok(JobState::Block)
                 } else {
-                    on_finish();
+                    on_finish(cx);
                     Ok(JobState::Done)
                 }
             }
             Err(TryRecvError::Disconnected) => {
-                on_finish();
+                on_finish(cx);
                 Ok(JobState::Done)
             }
         },

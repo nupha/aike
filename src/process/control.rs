@@ -1,32 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-use std::cell::RefCell;
-use std::collections::HashMap;
+use zuqe::{Array, CallContext, JSResult, JSValue, JobState, ScopedContext};
 
-use zuqe::{
-    Array, CallContext, JSResult, JSValue, JobState, ScopedContext,
-    gc_lite::{GcTrace, GcTraceCtx},
-};
-
-use crate::aike::signal_number;
-
-thread_local! {
-    /// Pending `process.nextTick` callbacks, drained on the next microtask, keyed
-    /// by runtime id (per-runtime).
-    static NEXT_TICK_QUEUE: RefCell<HashMap<usize, Vec<JSValue>>> = RefCell::new(HashMap::new());
-}
-
-/// GC trace: keep one runtime's pending nextTick callbacks alive.
-pub(crate) fn gc_trace_next_tick(gcx: &mut GcTraceCtx, runtime_id: usize) {
-    NEXT_TICK_QUEUE.with_borrow(|m| {
-        if let Some(q) = m.get(&runtime_id) {
-            for cb in q.iter() {
-                cb.trace(gcx);
-            }
-        }
-    });
-}
+use crate::aike::{AikeRuntimeState, signal_number};
 
 /// `process.chdir(dir)` — change the current working directory.
 pub(super) fn js_chdir(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -85,21 +62,19 @@ pub(super) fn js_kill(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 /// `process.nextTick(callback)` — schedule a callback for the next microtask.
 pub(super) fn js_nextTick(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let callback = cc.arg(0).ensure_callable(ctx)?;
-    let runtime_id = ctx.rt().id();
 
-    let need_microtask = NEXT_TICK_QUEUE.with_borrow_mut(|m| {
-        let q = m.entry(runtime_id).or_default();
-        let need = q.is_empty();
-        q.push(callback.into());
+    let need_microtask = {
+        let st = AikeRuntimeState::of(ctx);
+        let need = st.next_tick.is_empty();
+        st.next_tick.push(callback.into());
         need
-    });
+    };
 
     if need_microtask {
         // Queue a job that drains this runtime's nextTick queue.
         ctx.queue_job(
             move |cx| {
-                let callbacks: Vec<JSValue> =
-                    NEXT_TICK_QUEUE.with_borrow_mut(|m| m.remove(&runtime_id).unwrap_or_default());
+                let callbacks = std::mem::take(&mut AikeRuntimeState::of(cx).next_tick);
                 for cb in callbacks {
                     if cb.call(cx, JSValue::UNDEFINED, &[]).is_err() {
                         // Clear exception to continue processing remaining callbacks

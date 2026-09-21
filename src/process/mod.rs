@@ -5,7 +5,7 @@ mod control;
 mod info;
 mod sys;
 
-pub(crate) use {control::gc_trace_next_tick, sys::PROCESS_EXIT_CODE};
+pub(crate) use sys::PROCESS_EXIT_CODE;
 
 use zuqe::{Array, FieldDef, JS_PROP_ENUMERABLE, JSValue, ScopedContext};
 

@@ -3,18 +3,14 @@
 
 //! WHATWG Timers Standard: setTimeout, setInterval, clearTimeout, clearInterval.
 //!
-//! Timer state is **per-runtime** (keyed by runtime id): each runtime's pending
-//! timers live in its own list and are driven by a polling job queued in that
-//! runtime's own context, so a child runtime's timer callbacks are always
-//! invoked with the child's context. A single `Vec` per runtime is kept sorted
-//! by `deadline` ascending, so `entries[0]` is the nearest deadline; one
-//! self-requeuing JS job per runtime fires due timers in that order.
+//! Timer state is **per-runtime**, stored on `AikeRuntimeState`: each runtime's
+//! pending timers live in its own list and are driven by a polling job queued in
+//! that runtime's own context, so a child runtime's timer callbacks are always
+//! invoked with the child's context. The list is kept sorted by `deadline`
+//! ascending, so `entries[0]` is the nearest deadline; one self-requeuing JS
+//! job per runtime fires due timers in that order.
 
-use std::{
-    cell::{Cell, RefCell},
-    collections::HashMap,
-    time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
 
 use zuqe::{
     CallContext, Callback, Exception, JS_PROP_C_W_E, JSResult, JSValue, JobState, Object,
@@ -22,6 +18,8 @@ use zuqe::{
     builtins::promise::Promise,
     gc_lite::{GcTrace, GcTraceCtx},
 };
+
+use crate::aike::AikeRuntimeState;
 
 // ---------------------------------------------------------------------------
 // Per-runtime timer entries
@@ -41,40 +39,28 @@ struct TimerEntry {
     deadline: Instant,
 }
 
-struct TimerState {
+/// Per-runtime timer queue, stored on `AikeRuntimeState`.
+#[derive(Default)]
+pub(crate) struct TimerState {
     /// Pending timers, sorted by `deadline` ascending.
     entries: Vec<TimerEntry>,
     /// Whether a polling job is currently queued for this runtime.
     job_active: bool,
 }
 
-// ---------------------------------------------------------------------------
-// Thread-local registry keyed by runtime id
-// ---------------------------------------------------------------------------
-
-thread_local! {
-    static TIMER_STATES: RefCell<HashMap<usize, TimerState>> = RefCell::new(HashMap::new());
-    static TIMER_SERIAL: Cell<u32> = const { Cell::new(1) };
-}
-
-fn next_timer_id() -> u32 {
-    TIMER_SERIAL.with(|t| {
-        let id = t.get();
-        t.set(id + 1);
-        id
-    })
-}
-
-/// GC trace one runtime's timer callbacks — registered on that runtime's trace
-/// handler so each heap only traces its own timers.
-pub(crate) fn gc_trace_timeout(tr: &mut GcTraceCtx, runtime_id: usize) {
-    TIMER_STATES.with_borrow(|m| {
-        if let Some(s) = m.get(&runtime_id) {
-            for entry in s.entries.iter() {
-                entry.callback.trace(tr);
-            }
+impl GcTrace for TimerState {
+    fn trace(&self, gcx: &mut GcTraceCtx) {
+        for entry in self.entries.iter() {
+            entry.callback.trace(gcx);
         }
-    });
+    }
+}
+
+fn next_timer_id(ctx: &mut ScopedContext) -> u32 {
+    let n = &mut AikeRuntimeState::of(ctx).timer_serial;
+    let id = *n;
+    *n = id + 1;
+    id
 }
 
 /// Insert an entry keeping the runtime's `entries` sorted by deadline.
@@ -88,21 +74,20 @@ fn insert_sorted(entries: &mut Vec<TimerEntry>, entry: TimerEntry) {
 // ---------------------------------------------------------------------------
 
 /// Enqueue the polling job for `runtime_id` (caller has set `job_active`).
-fn start_timer_task(ctx: &mut ScopedContext, runtime_id: usize) {
+fn start_timer_task(ctx: &mut ScopedContext) {
     ctx.queue_job(
         move |cx| {
             let now = Instant::now();
 
             // Fast path: nearest deadline not due yet (or no timers) → bail.
-            match TIMER_STATES.with_borrow(|m| {
-                m.get(&runtime_id)
-                    .and_then(|s| s.entries.first())
-                    .map(|e| e.deadline)
-            }) {
+            let nearest = AikeRuntimeState::of(cx)
+                .timers
+                .entries
+                .first()
+                .map(|e| e.deadline);
+            match nearest {
                 None => {
-                    TIMER_STATES.with_borrow_mut(|m| {
-                        m.remove(&runtime_id);
-                    });
+                    AikeRuntimeState::of(cx).timers.job_active = false;
                     return Ok(JobState::Done);
                 }
                 Some(t) if now < t => {
@@ -114,26 +99,27 @@ fn start_timer_task(ctx: &mut ScopedContext, runtime_id: usize) {
 
             // At least one timer is due: fire every elapsed timer in order.
             loop {
-                let step =
-                    TIMER_STATES.with_borrow_mut(|m| -> Option<(Object, Option<u64>, u32)> {
-                        let s = m.get_mut(&runtime_id)?;
-                        let e = s.entries.first_mut()?;
-                        if e.deadline > now {
-                            return None;
+                let step: Option<(Object, Option<u64>, u32)> = {
+                    let s = &mut AikeRuntimeState::of(cx).timers;
+                    let Some(e) = s.entries.first_mut() else {
+                        break;
+                    };
+                    if e.deadline > now {
+                        break;
+                    }
+                    let cb = e.callback;
+                    let id = e.id;
+                    match e.interval_ms {
+                        // One-shot: drop it before invoking (a clearTimeout
+                        // inside the callback is then a no-op).
+                        None => {
+                            s.entries.remove(0);
+                            Some((cb, None, id))
                         }
-                        let cb = e.callback;
-                        let id = e.id;
-                        match e.interval_ms {
-                            // One-shot: drop it before invoking (a clearTimeout
-                            // inside the callback is then a no-op).
-                            None => {
-                                s.entries.remove(0);
-                                Some((cb, None, id))
-                            }
-                            // Interval: keep the entry; re-arm after the callback.
-                            Some(ms) => Some((cb, Some(ms), id)),
-                        }
-                    });
+                        // Interval: keep the entry; re-arm after the callback.
+                        Some(ms) => Some((cb, Some(ms), id)),
+                    }
+                };
 
                 let (cb, interval_ms, id) = match step {
                     Some(x) => x,
@@ -153,15 +139,12 @@ fn start_timer_task(ctx: &mut ScopedContext, runtime_id: usize) {
 
                 if let Some(ms) = interval_ms {
                     let new_deadline = Instant::now() + Duration::from_millis(ms);
-                    TIMER_STATES.with_borrow_mut(|m| {
-                        if let Some(s) = m.get_mut(&runtime_id)
-                            && let Some(pos) = s.entries.iter().position(|e| e.id == id)
-                        {
-                            let mut e = s.entries.remove(pos);
-                            e.deadline = new_deadline;
-                            insert_sorted(&mut s.entries, e);
-                        }
-                    });
+                    let s = &mut AikeRuntimeState::of(cx).timers;
+                    if let Some(pos) = s.entries.iter().position(|e| e.id == id) {
+                        let mut e = s.entries.remove(pos);
+                        e.deadline = new_deadline;
+                        insert_sorted(&mut s.entries, e);
+                    }
                 }
             }
 
@@ -170,11 +153,11 @@ fn start_timer_task(ctx: &mut ScopedContext, runtime_id: usize) {
                 // already reported above; just discard.
             }
 
-            let next = TIMER_STATES.with_borrow(|m| {
-                m.get(&runtime_id)
-                    .and_then(|s| s.entries.first())
-                    .map(|e| e.deadline)
-            });
+            let next = AikeRuntimeState::of(cx)
+                .timers
+                .entries
+                .first()
+                .map(|e| e.deadline);
             match next {
                 Some(d) => {
                     if d > now {
@@ -183,9 +166,7 @@ fn start_timer_task(ctx: &mut ScopedContext, runtime_id: usize) {
                     Ok(JobState::Block)
                 }
                 None => {
-                    TIMER_STATES.with_borrow_mut(|m| {
-                        m.remove(&runtime_id);
-                    });
+                    AikeRuntimeState::of(cx).timers.job_active = false;
                     Ok(JobState::Done)
                 }
             }
@@ -206,14 +187,10 @@ fn register_timer(ctx: &mut ScopedContext, cc: CallContext, is_interval: bool) -
         0
     };
 
-    let runtime_id = ctx.rt().id();
     let deadline = Instant::now() + Duration::from_millis(delay_ms);
-    let id = next_timer_id();
-    let need_start = TIMER_STATES.with_borrow_mut(|m| {
-        let s = m.entry(runtime_id).or_insert_with(|| TimerState {
-            entries: Vec::new(),
-            job_active: false,
-        });
+    let id = next_timer_id(ctx);
+    let need_start = {
+        let s = &mut AikeRuntimeState::of(ctx).timers;
         insert_sorted(
             &mut s.entries,
             TimerEntry {
@@ -226,10 +203,10 @@ fn register_timer(ctx: &mut ScopedContext, cc: CallContext, is_interval: bool) -
         let need = !s.job_active;
         s.job_active = true;
         need
-    });
+    };
 
     if need_start {
-        start_timer_task(ctx, runtime_id);
+        start_timer_task(ctx);
     }
 
     Ok(JSValue::from(id as i32))
@@ -241,15 +218,11 @@ fn clear_timer(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         return Ok(JSValue::UNDEFINED);
     }
     let id = id as u32;
-    let runtime_id = ctx.rt().id();
 
-    TIMER_STATES.with_borrow_mut(|m| {
-        if let Some(s) = m.get_mut(&runtime_id)
-            && let Some(pos) = s.entries.iter().position(|e| e.id == id)
-        {
-            s.entries.remove(pos);
-        }
-    });
+    let s = &mut AikeRuntimeState::of(ctx).timers;
+    if let Some(pos) = s.entries.iter().position(|e| e.id == id) {
+        s.entries.remove(pos);
+    }
 
     Ok(JSValue::UNDEFINED)
 }
@@ -269,14 +242,10 @@ pub(crate) fn js_sleep(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let (promise, resolving) = Promise::create(ctx)?;
     let resolve_fn = resolving[0].ensure_callable(ctx)?;
 
-    let runtime_id = ctx.rt().id();
     let deadline = Instant::now() + Duration::from_millis(delay_ms);
-    let id = next_timer_id();
-    let need_start = TIMER_STATES.with_borrow_mut(|m| {
-        let s = m.entry(runtime_id).or_insert_with(|| TimerState {
-            entries: Vec::new(),
-            job_active: false,
-        });
+    let id = next_timer_id(ctx);
+    let need_start = {
+        let s = &mut AikeRuntimeState::of(ctx).timers;
         insert_sorted(
             &mut s.entries,
             TimerEntry {
@@ -289,10 +258,10 @@ pub(crate) fn js_sleep(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         let need = !s.job_active;
         s.job_active = true;
         need
-    });
+    };
 
     if need_start {
-        start_timer_task(ctx, runtime_id);
+        start_timer_task(ctx);
     }
 
     Ok(promise.into())

@@ -1,19 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-use std::{
-    cell::{Cell, RefCell},
-    collections::HashMap,
-    rc::Rc,
-    time::Duration,
-};
+use std::{cell::RefCell, rc::Rc, time::Duration};
 
 use zuqe::{
     CallContext, Callback, Exception, JSResult, JSValue, JobState, NativeObject, Object,
     ScopedContext,
     builtins::promise::{Promise, PromiseResultSlot},
-    gc_lite::{GcTrace, GcTraceCtx},
 };
+
+use crate::aike::AikeRuntimeState;
 
 use crate::http::client::{
     body::{BODY_TIMEOUT, body_content_type, body_to_bytes},
@@ -46,25 +42,6 @@ use super::{
     origin::resolve_client_origin,
     referrer::compute_request_referrer,
 };
-
-thread_local! {
-    /// In-flight fetch signals kept alive across GC, keyed by
-    /// `(runtime id, auto-increment id)`. Each runtime's GC handler traces only
-    /// its own entries. Entries are removed when the fetch settles.
-    static FETCH_SIGNAL_GUARD: RefCell<HashMap<(usize, usize), JSValue>> = RefCell::new(HashMap::new());
-    static FETCH_SIGNAL_NEXT_ID: Cell<usize> = const { Cell::new(1) };
-}
-
-/// Keep one runtime's in-flight fetch signals alive across GC.
-pub(crate) fn gc_trace_fetch(gcx: &mut GcTraceCtx, runtime_id: usize) {
-    FETCH_SIGNAL_GUARD.with_borrow(|guards| {
-        for ((rt, _), v) in guards.iter() {
-            if *rt == runtime_id {
-                v.trace(gcx);
-            }
-        }
-    });
-}
 
 /// Error type carried through the fetch result slot.
 enum FetchError {
@@ -728,17 +705,14 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     // Register the signal as a GC root only when one is present (id 0 is the
     // "no signal" sentinel, since ids start at 1). `signal_for_reason` indexes
     // the entry that the convert closure's Drop guard removes on settle.
-    let runtime_id = ctx.rt().id();
     let signal_for_reason: usize = match &signal_val {
-        Some(s) => FETCH_SIGNAL_GUARD.with_borrow_mut(|g| {
-            let id = FETCH_SIGNAL_NEXT_ID.with(|n| {
-                let id = n.get();
-                n.set(id.wrapping_add(1));
-                id
-            });
-            g.insert((runtime_id, id), *s);
+        Some(s) => {
+            let st = AikeRuntimeState::of(ctx);
+            let id = st.fetch_signal_next_id;
+            st.fetch_signal_next_id = id.wrapping_add(1);
+            st.fetch_signals.insert(id, *s);
             id
-        }),
+        }
         None => 0,
     };
 
@@ -746,20 +720,17 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         ctx,
         result_slot.clone(),
         move |cx, data| -> JSResult {
-            // Drop guard: remove the signal entry from the GC root set once this
-            // convert closure returns (any path), so the AbortSignal can be
-            // collected after the fetch settles.
-            struct SignalGuardDrop(usize, usize);
-            impl Drop for SignalGuardDrop {
-                fn drop(&mut self) {
-                    if self.1 != 0 {
-                        FETCH_SIGNAL_GUARD.with_borrow_mut(|g| {
-                            g.remove(&(self.0, self.1));
-                        });
-                    }
-                }
-            }
-            let _drop_guard = SignalGuardDrop(runtime_id, signal_for_reason);
+            // Release the GC root now and keep the signal in a local for the
+            // abort-reason path below. The convert closure runs exactly once
+            // (on commit), so this mirrors the previous Drop guard while
+            // needing no context in a destructor.
+            let signal_root = if signal_for_reason != 0 {
+                AikeRuntimeState::of(cx)
+                    .fetch_signals
+                    .remove(&signal_for_reason)
+            } else {
+                None
+            };
 
             let client_origin = client_origin.clone();
             // Captured for the 401/407 authentication-entry check below: a
@@ -777,9 +748,9 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                             // when the abort fires mid-flight (while the request
                             // is on the network). Fall back to the default
                             // "AbortError" DOMException if no signal is present.
-                            let reason = FETCH_SIGNAL_GUARD
-                                .with_borrow(|g| g.get(&(runtime_id, signal_for_reason)).cloned())
-                                .and_then(|s| signal_reason(&s))
+                            let reason = signal_root
+                                .as_ref()
+                                .and_then(signal_reason)
                                 .unwrap_or_else(|| {
                                     make_dom_exception(
                                         cx,
@@ -795,6 +766,7 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                     };
                 }
             };
+
             let status = tr.status;
 
             // Fetch spec (HTTP-network fetch, authentication entries): a 401 or

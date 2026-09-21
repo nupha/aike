@@ -197,15 +197,11 @@ fn remove_child(id: u32) -> Option<Rc<Child>> {
 pub(crate) fn register_runtime_traces(rt: &mut Runtime) {
     let id = rt.id();
     let root = rt.is_root();
+
     rt.gc_set_trace_handler(move |gcx| {
         // Per-runtime state (each runtime traces only its own entries).
-        crate::whatwg::timeout::gc_trace_timeout(gcx, id);
-        crate::process::gc_trace_next_tick(gcx, id);
-        crate::whatwg::fetch::gc_trace_fetch(gcx, id);
         crate::whatwg::stream::gc_trace_stream(gcx, id);
         crate::aike::gc_trace_io(gcx, id);
-        crate::browser::gc_trace_browser(gcx, id);
-        crate::mcp::gc_trace_stdio_state(gcx, id);
 
         if root {
             // Process-global / root-only state. Signal handlers live on the
@@ -619,7 +615,7 @@ pub(crate) fn js_create_runtime(ctx: &mut ScopedContext, cc: CallContext) -> JSR
     let Some(root) = root_runtime() else {
         return Err(ctx.throw_internal_error("no root runtime"));
     };
-    let mut rt = Runtime::create_child(&root)
+    let mut rt = Runtime::create_child_with(&root, super::AikeRuntimeState::new())
         .map_err(|_| ctx.throw_internal_error("cannot create runtime"))?;
     if let Some(mem) = opts.memory
         && mem > 0
@@ -861,7 +857,9 @@ fn take_slot(shared: &SharedSlot) -> Option<PromiseResultSlot<RunOutcome>> {
 }
 
 fn commit_value(cx: &mut ScopedContext, shared: &SharedSlot, val: JSValue) {
-    let Some(slot) = take_slot(shared) else { return };
+    let Some(slot) = take_slot(shared) else {
+        return;
+    };
     let outcome = match JSValue::dump(cx, val) {
         Ok(blob) => RunOutcome::Value(blob.to_vec()),
         Err(e) => RunOutcome::Error {
@@ -874,7 +872,9 @@ fn commit_value(cx: &mut ScopedContext, shared: &SharedSlot, val: JSValue) {
 }
 
 fn commit_error(cx: &mut ScopedContext, shared: &SharedSlot, exc: Exception) {
-    let Some(slot) = take_slot(shared) else { return };
+    let Some(slot) = take_slot(shared) else {
+        return;
+    };
     let outcome = match exc {
         Exception::OutOfMemory => RunOutcome::Error {
             name: "MemoryLimitError".into(),
@@ -895,13 +895,17 @@ fn commit_error(cx: &mut ScopedContext, shared: &SharedSlot, exc: Exception) {
 }
 
 fn commit_rejection(cx: &mut ScopedContext, shared: &SharedSlot, reason: JSValue) {
-    let Some(slot) = take_slot(shared) else { return };
+    let Some(slot) = take_slot(shared) else {
+        return;
+    };
     let outcome = error_outcome_from_value(cx, reason, "Error");
     let _ = slot.commit(outcome);
 }
 
 fn commit_timeout(shared: &SharedSlot) {
-    let Some(slot) = take_slot(shared) else { return };
+    let Some(slot) = take_slot(shared) else {
+        return;
+    };
     let _ = slot.commit(RunOutcome::Error {
         name: "TimeoutError".into(),
         message: "runtime.run timed out".into(),
