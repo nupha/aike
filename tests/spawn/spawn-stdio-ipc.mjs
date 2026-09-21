@@ -10,6 +10,7 @@
 //   D. conflict handling (first-registration-wins, same-mode replace)
 
 import * as path from "path";
+import { sleepCmd } from "./fixtures/platform.mjs";
 
 let pass = 0;
 let fail = 0;
@@ -92,15 +93,22 @@ const stubber = Aike.spawn(process.execPath, ["-m", "-e", `
 const t2 = Date.now();
 const stageK = await stubber.shutdown({ eofTimeoutMs: 200, termTimeoutMs: 300, killTimeoutMs: 2000 });
 const dtK = Date.now() - t2;
-check(`shutdown stage "kill"`, stageK === "kill", `got ${stageK}`);
-check("kill stage within bounds", dtK >= 200 && dtK < 2500, `${dtK}ms`);
+if (process.platform === "windows") {
+  // Windows has no catchable SIGTERM: process.kill terminates the child
+  // outright, so shutdown resolves at the "term" stage (never "kill").
+  check(`shutdown resolves at "term" on windows`, stageK === "term", `got ${stageK}`);
+} else {
+  check(`shutdown stage "kill"`, stageK === "kill", `got ${stageK}`);
+  check("kill stage within bounds", dtK >= 200 && dtK < 2500, `${dtK}ms`);
+}
 
 // Idempotent: second close resolves immediately.
 const stageK2 = await stubber.shutdown();
 check("second shutdown is idempotent", stageK2 === "already_closed");
 
 // Strict validation: negative timeout → RangeError.
-const bad = Aike.spawn("/bin/sleep", ["0"], { stdout: "ignore" });
+const [badCmd, badArgs] = sleepCmd(5);
+const bad = Aike.spawn(badCmd, badArgs, { stdout: "ignore" });
 let ve = false;
 try { await bad.shutdown({ eofTimeoutMs: -5 }); } catch (e) { ve = e instanceof RangeError; }
 check("negative timeout rejected as RangeError", ve);

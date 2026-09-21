@@ -110,7 +110,15 @@ impl AsyncRead for BlockingReadAdapter {
 pub struct BlockingWriteAdapter {
     tx: Option<mpsc::UnboundedSender<Vec<u8>>>,
     join: Option<thread::JoinHandle<()>>,
+
+    #[cfg(unix)]
     fd: i32,
+    /// Raw pipe handle as `isize` (RawHandle is a raw pointer, which is not
+    /// `Send`), captured before the writer is moved into the worker thread. The
+    /// worker owns the writer, so the handle stays valid as long as the adapter
+    /// (and thus the thread) lives.
+    #[cfg(windows)]
+    handle: isize,
 }
 
 #[cfg(unix)]
@@ -118,15 +126,27 @@ pub fn bridge_writer(
     w: impl io::Write + Send + std::os::fd::AsRawFd + 'static,
 ) -> BlockingWriteAdapter {
     let fd = w.as_raw_fd();
-    bridge_writer_impl(w, fd)
+    let mut adapter = bridge_writer_impl(w);
+    adapter.fd = fd;
+    adapter
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+pub fn bridge_writer(
+    w: impl io::Write + Send + std::os::windows::io::AsRawHandle + 'static,
+) -> BlockingWriteAdapter {
+    let handle = std::os::windows::io::AsRawHandle::as_raw_handle(&w) as isize;
+    let mut adapter = bridge_writer_impl(w);
+    adapter.handle = handle;
+    adapter
+}
+
+#[cfg(not(any(unix, windows)))]
 pub fn bridge_writer(w: impl io::Write + Send + 'static) -> BlockingWriteAdapter {
-    bridge_writer_impl(w, -1)
+    bridge_writer_impl(w)
 }
 
-fn bridge_writer_impl(w: impl io::Write + Send + 'static, fd: i32) -> BlockingWriteAdapter {
+fn bridge_writer_impl(w: impl io::Write + Send + 'static) -> BlockingWriteAdapter {
     let (tx, rx) = mpsc::unbounded_channel::<Vec<u8>>();
     let join = thread::spawn(move || {
         let mut w = w;
@@ -141,7 +161,10 @@ fn bridge_writer_impl(w: impl io::Write + Send + 'static, fd: i32) -> BlockingWr
     BlockingWriteAdapter {
         tx: Some(tx),
         join: Some(join),
-        fd,
+        #[cfg(unix)]
+        fd: -1,
+        #[cfg(windows)]
+        handle: 0,
     }
 }
 
@@ -149,6 +172,13 @@ fn bridge_writer_impl(w: impl io::Write + Send + 'static, fd: i32) -> BlockingWr
 impl std::os::fd::AsRawFd for BlockingWriteAdapter {
     fn as_raw_fd(&self) -> std::os::fd::RawFd {
         self.fd
+    }
+}
+
+#[cfg(windows)]
+impl std::os::windows::io::AsRawHandle for BlockingWriteAdapter {
+    fn as_raw_handle(&self) -> std::os::windows::io::RawHandle {
+        self.handle as *mut _
     }
 }
 

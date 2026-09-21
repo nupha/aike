@@ -21,7 +21,14 @@ use zuqe::{
     gc_lite::{GcTrace, GcTraceCtx},
 };
 
-/// RAII guard for a pipe fd — closes the fd on drop.
+/// Write half of a child pipe.
+///
+/// Unix owns a raw fd (closed on drop). Windows owns a raw pipe `HANDLE`; the
+/// writer it came from is leaked by `new_instance_pipe_write` so the handle
+/// stays valid (same lifetime trick as the Unix fd). Windows must NOT go
+/// through `libc::write`: an invalid/`-1` CRT fd trips ucrt's invalid-parameter
+/// handler, which `__fastfail`s the process (exit 0xC0000409). `WriteFile` is
+/// used instead.
 #[cfg(unix)]
 pub(crate) struct PipeFd(i32);
 
@@ -41,16 +48,88 @@ impl PipeFd {
     fn as_virt_fd(&self) -> i32 {
         self.0
     }
+
+    /// Blocking write-all; `false` on error (mirrors `write(2)` short writes).
+    fn write_all(&self, data: &[u8]) -> bool {
+        let mut offset = 0;
+        while offset < data.len() {
+            let n = unsafe {
+                libc::write(
+                    self.0,
+                    data[offset..].as_ptr() as *const _,
+                    data[offset..].len() as _,
+                )
+            };
+            if n < 0 {
+                return false;
+            }
+            offset += n as usize;
+        }
+        true
+    }
 }
 
-/// No-op fallback for non-Unix platforms.
-#[cfg(not(unix))]
-struct PipeFd(i32);
+/// Stored as `isize` (not `RawHandle`) so the owning `IoPayload` stays `Send`.
+#[cfg(windows)]
+pub(crate) struct PipeFd(isize);
 
-#[cfg(not(unix))]
+// Closing the write HANDLE is what delivers EOF to the child (mirrors
+// `libc::close` on Unix); the leaked writer never touches it again.
+#[cfg(windows)]
+impl Drop for PipeFd {
+    fn drop(&mut self) {
+        if self.0 != 0 {
+            unsafe {
+                windows_sys::Win32::Foundation::CloseHandle(self.0 as *mut _);
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+impl PipeFd {
+    fn as_virt_fd(&self) -> i32 {
+        -1
+    }
+
+    /// Blocking write-all via `WriteFile` on the pipe `HANDLE`.
+    fn write_all(&self, data: &[u8]) -> bool {
+        use windows_sys::Win32::Storage::FileSystem::WriteFile;
+        let mut offset = 0usize;
+        while offset < data.len() {
+            let chunk = &data[offset..];
+            let len = chunk.len().min(u32::MAX as usize) as u32;
+            let mut written = 0u32;
+            let ok = unsafe {
+                WriteFile(
+                    self.0 as *mut _,
+                    chunk.as_ptr() as *const _,
+                    len,
+                    &mut written,
+                    std::ptr::null_mut(),
+                )
+            };
+            if ok == 0 || written == 0 {
+                return false;
+            }
+            offset += written as usize;
+        }
+        true
+    }
+}
+
+/// Fallback for platforms that are neither Unix nor Windows.
+#[cfg(not(any(unix, windows)))]
+pub(crate) struct PipeFd(i32);
+
+#[cfg(not(any(unix, windows)))]
 impl PipeFd {
     fn as_virt_fd(&self) -> i32 {
         self.0
+    }
+
+    fn write_all(&self, _data: &[u8]) -> bool {
+        false
     }
 }
 
@@ -436,7 +515,9 @@ fn start_read_microtask(ctx: &mut ScopedContext) {
             }
             true // always continue polling
         },
-        move || READ_SLOTS.with_borrow(|slots| slots.values().any(|s| s.runtime_id == runtime_id)),
+        move |_cx| {
+            READ_SLOTS.with_borrow(|slots| slots.values().any(|s| s.runtime_id == runtime_id))
+        },
         move || {
             READ_POLLER_ACTIVE.with_borrow_mut(|set| {
                 set.remove(&runtime_id);
@@ -866,25 +947,7 @@ fn js_fh_writeAll(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         }
         IoPayload::PipeWrite(fd) => {
             // Pipe write(2) is a synchronous memcpy to kernel buffer
-            let ok = (|| -> std::io::Result<()> {
-                let mut offset = 0;
-                while offset < data.len() {
-                    // SAFETY: fd is a valid pipe fd owned by this IoHandle.
-                    let n = unsafe {
-                        libc::write(
-                            fd.as_virt_fd() as _,
-                            data[offset..].as_ptr() as *const _,
-                            data[offset..].len() as _,
-                        )
-                    };
-                    if n < 0 {
-                        return Err(std::io::Error::last_os_error());
-                    }
-                    offset += n as usize;
-                }
-                Ok(())
-            })()
-            .is_ok();
+            let ok = fd.write_all(&data);
             Ok(JSValue::from(ok))
         }
         IoPayload::PipeRead(..) => Err(ctx.throw_type_error("cannot write to pipe reader")),
@@ -1218,24 +1281,7 @@ fn js_fh_writeSync(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             Ok(JSValue::from(ok))
         }
         IoPayload::PipeWrite(fd) => {
-            let ok = (|| -> std::io::Result<()> {
-                let mut offset = 0;
-                while offset < data.len() {
-                    let n = unsafe {
-                        libc::write(
-                            fd.as_virt_fd() as _,
-                            data[offset..].as_ptr() as *const _,
-                            data[offset..].len() as _,
-                        )
-                    };
-                    if n < 0 {
-                        return Err(std::io::Error::last_os_error());
-                    }
-                    offset += n as usize;
-                }
-                Ok(())
-            })()
-            .is_ok();
+            let ok = fd.write_all(&data);
             Ok(JSValue::from(ok))
         }
         _ => Err(ctx.throw_type_error("cannot write to this handle")),
@@ -1300,17 +1346,33 @@ impl JSStdioHandle {
     pub fn new_instance_pipe_write(
         ctx: &mut ScopedContext,
         #[cfg(unix)] writer: impl tokio::io::AsyncWrite + Unpin + Send + 'static + AsRawFd,
-        #[cfg(not(unix))] _writer: impl tokio::io::AsyncWrite + Unpin + Send + 'static,
+        #[cfg(windows)] writer: impl tokio::io::AsyncWrite
+            + Unpin
+            + Send
+            + 'static
+            + std::os::windows::io::AsRawHandle,
+        #[cfg(not(any(unix, windows)))] _writer: impl tokio::io::AsyncWrite + Unpin + Send + 'static,
         #[allow(unused)] fd: i32,
     ) -> Result<Self, i32> {
+        // Leak the writer so its fd/HANDLE stays valid for the handle's whole
+        // lifetime; the payload keeps only the raw descriptor.
         #[cfg(unix)]
         let pipe_fd = {
             let raw_fd = writer.as_raw_fd();
             std::mem::forget(writer);
             PipeFd(raw_fd)
         };
-        #[cfg(not(unix))]
-        let pipe_fd = PipeFd(fd);
+        #[cfg(windows)]
+        let pipe_fd = {
+            let handle = writer.as_raw_handle() as isize;
+            std::mem::forget(writer);
+            PipeFd(handle)
+        };
+        #[cfg(not(any(unix, windows)))]
+        let pipe_fd = {
+            let _ = _writer;
+            PipeFd(fd)
+        };
         Self::new_instance(ctx, JSValue::UNDEFINED, IoPayload::PipeWrite(pipe_fd))
     }
 
