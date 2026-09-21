@@ -24,11 +24,15 @@ mod writable_controller;
 mod writer;
 
 pub(crate) use {
-    readable::{JSReadableStream, ReadableStreamPayload, install_readable_stream_statics},
+    readable::{
+        ChannelStreamState, JSReadableStream, ReadableStreamPayload,
+        install_readable_stream_statics,
+    },
     readable_byob_request::JSReadableStreamBYOBRequest,
     readable_controller::ReadableControllerPayload,
     readable_controller_byte::JSReadableByteStreamController,
     readable_controller_default::JSReadableStreamDefaultController,
+    readable_tee::TeeStreamState,
     reader::JSReadableStreamDefaultReader,
     transform::JSTransformStream,
     transform_controller::JSTransformStreamDefaultController,
@@ -41,7 +45,6 @@ use zuqe::{
     CallContext, ClassCtorDef, FieldDef, IntOrFloat, JSResult, JSValue, ScopedContext,
     builtins::promise::{Promise, PromiseState},
     def_native_object,
-    gc_lite::{GcTrace, GcTraceCtx},
 };
 
 #[derive(Clone, Copy, PartialEq)]
@@ -60,18 +63,6 @@ pub(crate) struct QueueEntry {
     /// Strategy `size` of the chunk (default 1); can be fractional or large, so
     /// stored as f64.
     pub(crate) size: f64,
-}
-
-/// Called by the runtime GC to keep stream-related JSValues alive.
-pub(crate) fn gc_trace_stream(gcx: &mut GcTraceCtx, runtime_id: usize) {
-    readable::CHANNEL_STREAMS.with_borrow(|map| {
-        for (c, _, _, rt) in map.values() {
-            if *rt == runtime_id {
-                c.as_object().trace(gcx);
-            }
-        }
-    });
-    readable_tee::gc_trace_tee_streams(gcx, runtime_id);
 }
 
 // ============================================================================

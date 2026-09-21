@@ -13,8 +13,8 @@ mod spawn;
 mod sys;
 
 pub(crate) use {
-    class_io_handle::{JSFileHandle, JSStdioHandle, gc_trace_io, make_stats},
-    cron::{JSCronJob, gc_trace_cron},
+    class_io_handle::{JSFileHandle, JSStdioHandle, make_stats},
+    cron::JSCronJob,
     runtime::{
         ensure_root_runtime, register_runtime_traces, save_process_info, set_root_ctx,
         set_root_runtime,
@@ -74,6 +74,17 @@ pub(crate) struct AikeRuntimeState {
 
     /// stdio MCP server's JS handler objects, kept alive across GC.
     pub(crate) stdio_js_handlers: Vec<Object>,
+
+    /// `Aike.schedule` cron jobs (root-only), lazily created on first use.
+    pub(crate) cron: Option<cron::CronState>,
+
+    /// Channel-backed readable streams being polled.
+    pub(crate) channel_streams: crate::whatwg::stream::ChannelStreamState,
+    /// Active `ReadableStream.tee()` splits.
+    pub(crate) tee_streams: crate::whatwg::stream::TeeStreamState,
+
+    /// I/O handle read subscriptions and pump channel (`PUMPS` stays global).
+    pub(crate) io: class_io_handle::IoState,
 }
 
 impl GcTrace for AikeRuntimeState {
@@ -92,6 +103,12 @@ impl GcTrace for AikeRuntimeState {
             h.trace(gcx);
         }
         self.timers.trace(gcx);
+        if let Some(cron) = &self.cron {
+            cron.trace(gcx);
+        }
+        self.channel_streams.trace(gcx);
+        self.tee_streams.trace(gcx);
+        self.io.trace(gcx);
     }
 }
 
@@ -110,6 +127,10 @@ impl AikeRuntimeState {
             stdio_js_handlers: Vec::new(),
             timers: Default::default(),
             timer_serial: 1,
+            cron: None,
+            channel_streams: crate::whatwg::stream::ChannelStreamState::new(),
+            tee_streams: crate::whatwg::stream::TeeStreamState::new(),
+            io: Default::default(),
         }
     }
 

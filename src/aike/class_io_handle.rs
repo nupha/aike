@@ -21,6 +21,8 @@ use zuqe::{
     gc_lite::{GcTrace, GcTraceCtx},
 };
 
+use super::AikeRuntimeState;
+
 /// Write half of a child pipe.
 ///
 /// Unix owns a raw fd (closed on drop). Windows owns a raw pipe `HANDLE`; the
@@ -240,8 +242,6 @@ impl ReadMode {
 }
 
 struct ReadSlot {
-    /// Runtime that subscribed; only that runtime's GC traces the callback.
-    runtime_id: usize,
     mode: ReadMode,
     callback: Object,
     /// Line mode: raw bytes not yet terminated by `\n`.
@@ -267,41 +267,42 @@ impl PumpControl {
     }
 }
 
-thread_local! {
-    /// Active subscriptions (at most one per fd). Wiped when the poller stops.
-    static READ_SLOTS: RefCell<HashMap<i32, ReadSlot>> = RefCell::new(HashMap::new());
-    /// Pump controls — persist across poller generations so a handle never
-    /// accumulates a second concurrent reader.
-    static PUMPS: RefCell<HashMap<i32, PumpControl>> = RefCell::new(HashMap::new());
-    /// Per-runtime pump channel. The poller may stop and restart freely; pump
-    /// tasks keep sending into THIS runtime's receiver regardless of generation.
-    /// The sender wakes the parked event loop on every send automatically.
-    static PUMP_CHANNELS:
-        RefCell<HashMap<usize, (zuqe::WakeSender<PumpMsg>, zuqe::WakeReceiver<PumpMsg>)>> =
-        RefCell::new(HashMap::new());
-    /// Per-runtime: whether a read-poller generation is currently queued/running.
-    static READ_POLLER_ACTIVE: RefCell<std::collections::HashSet<usize>> =
-        RefCell::new(std::collections::HashSet::new());
+/// Per-runtime read-subscription state, stored on `AikeRuntimeState`.
+/// `PUMPS` stays thread-global: it is keyed by fd (an OS resource), not by
+/// runtime, and must persist across poller generations for a handle.
+#[derive(Default)]
+pub(crate) struct IoState {
+    /// Active subscriptions (at most one per fd).
+    read_slots: HashMap<i32, ReadSlot>,
+    /// This runtime's pump channel. The poller may stop and restart freely;
+    /// pump tasks keep sending into this receiver regardless of generation.
+    pump_channel: Option<(zuqe::WakeSender<PumpMsg>, zuqe::WakeReceiver<PumpMsg>)>,
+    /// Whether a read-poller generation is currently queued/running.
+    read_poller_active: bool,
 }
 
-fn pump_channel(ctx: &ScopedContext) -> (zuqe::WakeSender<PumpMsg>, zuqe::WakeReceiver<PumpMsg>) {
-    let runtime_id = ctx.rt().id();
-    PUMP_CHANNELS.with_borrow_mut(|channels| {
-        channels
-            .entry(runtime_id)
-            .or_insert_with(|| ctx.make_channel::<PumpMsg>(256))
-            .clone()
-    })
-}
-
-pub(crate) fn gc_trace_io(tr: &mut GcTraceCtx, runtime_id: usize) {
-    READ_SLOTS.with_borrow(|slots| {
-        for slot in slots.values() {
-            if slot.runtime_id == runtime_id {
-                slot.callback.trace(tr);
-            }
+impl GcTrace for IoState {
+    fn trace(&self, gcx: &mut GcTraceCtx) {
+        for slot in self.read_slots.values() {
+            slot.callback.trace(gcx);
         }
-    });
+    }
+}
+
+thread_local! {
+    /// Pump controls — persist across poller generations so a handle never
+    /// accumulates a second concurrent reader. Keyed by fd (a process resource).
+    static PUMPS: RefCell<HashMap<i32, PumpControl>> = RefCell::new(HashMap::new());
+}
+
+fn pump_channel(
+    ctx: &mut ScopedContext,
+) -> (zuqe::WakeSender<PumpMsg>, zuqe::WakeReceiver<PumpMsg>) {
+    if AikeRuntimeState::of(ctx).io.pump_channel.is_none() {
+        let ch = ctx.make_channel::<PumpMsg>(256);
+        AikeRuntimeState::of(ctx).io.pump_channel = Some(ch);
+    }
+    AikeRuntimeState::of(ctx).io.pump_channel.clone().unwrap()
 }
 
 /// Block until `ctrl.active`. Registers wakeup interest BEFORE re-checking
@@ -446,10 +447,10 @@ fn run_delivery(cx: &mut ScopedContext, d: Delivery) {
 
 /// Poller microtask: converts raw pump chunks into mode-framed deliveries.
 fn start_read_microtask(ctx: &mut ScopedContext) {
-    let runtime_id = ctx.rt().id();
-    if READ_POLLER_ACTIVE.with_borrow_mut(|set| !set.insert(runtime_id)) {
+    if AikeRuntimeState::of(ctx).io.read_poller_active {
         return; // a poller generation for this runtime is already running
     }
+    AikeRuntimeState::of(ctx).io.read_poller_active = true;
     let rx = pump_channel(ctx).1;
 
     crate::helpers::start_channel_poller(
@@ -458,68 +459,80 @@ fn start_read_microtask(ctx: &mut ScopedContext) {
         rx,
         |msg, cx| {
             let delivery = match msg {
-                PumpMsg::Chunk(fd, data) => READ_SLOTS.with_borrow_mut(|slots| {
-                    let slot = slots.get_mut(&fd)?;
-                    Some(match slot.mode {
-                        ReadMode::Data => Delivery::Data(slot.callback, data),
-                        ReadMode::Line => {
-                            slot.line_pending.extend_from_slice(&data);
-                            let mut lines = Vec::new();
-                            while let Some(pos) = slot.line_pending.iter().position(|&b| b == b'\n')
-                            {
-                                let line_bytes: Vec<u8> = slot.line_pending.drain(..=pos).collect();
-                                let line_bytes = &line_bytes[..line_bytes.len() - 1];
-                                let line_bytes = strip_trailing_cr(line_bytes);
-                                if line_bytes.is_empty() || line_bytes.len() > MAX_LINE_BYTES {
-                                    continue;
+                PumpMsg::Chunk(fd, data) => {
+                    let slots = &mut AikeRuntimeState::of(cx).io.read_slots;
+                    match slots.get_mut(&fd) {
+                        None => None,
+                        Some(slot) => Some(match slot.mode {
+                            ReadMode::Data => Delivery::Data(slot.callback, data),
+                            ReadMode::Line => {
+                                slot.line_pending.extend_from_slice(&data);
+                                let mut lines = Vec::new();
+                                while let Some(pos) =
+                                    slot.line_pending.iter().position(|&b| b == b'\n')
+                                {
+                                    let line_bytes: Vec<u8> =
+                                        slot.line_pending.drain(..=pos).collect();
+                                    let line_bytes = &line_bytes[..line_bytes.len() - 1];
+                                    let line_bytes = strip_trailing_cr(line_bytes);
+                                    if line_bytes.is_empty() || line_bytes.len() > MAX_LINE_BYTES {
+                                        continue;
+                                    }
+                                    lines.push(String::from_utf8_lossy(line_bytes).into_owned());
                                 }
-                                lines.push(String::from_utf8_lossy(line_bytes).into_owned());
+                                Delivery::Lines(slot.callback, lines)
                             }
-                            Delivery::Lines(slot.callback, lines)
-                        }
-                    })
-                }),
-                PumpMsg::Eof(fd) => READ_SLOTS.with_borrow_mut(|slots| {
+                        }),
+                    }
+                }
+                PumpMsg::Eof(fd) => {
                     // Mark the pump dead so a later subscribe respawns it.
                     PUMPS.with_borrow(|pumps| {
                         if let Some(ctrl) = pumps.get(&fd) {
                             ctrl.dead.store(true, Ordering::Release);
                         }
                     });
-                    let slot = slots.remove(&fd)?;
-                    let partial = if slot.mode == ReadMode::Line && !slot.line_pending.is_empty() {
-                        let stripped = strip_trailing_cr(&slot.line_pending);
-                        if !stripped.is_empty() && stripped.len() <= MAX_LINE_BYTES {
-                            Some(String::from_utf8_lossy(stripped).into_owned())
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    };
-                    let was_line = slot.mode == ReadMode::Line;
-                    Some(Delivery::Eof(slot.callback, partial, was_line))
-                }),
-                PumpMsg::Error(fd, err_msg) => READ_SLOTS.with_borrow_mut(|slots| {
+                    AikeRuntimeState::of(cx)
+                        .io
+                        .read_slots
+                        .remove(&fd)
+                        .map(|slot| {
+                            let partial =
+                                if slot.mode == ReadMode::Line && !slot.line_pending.is_empty() {
+                                    let stripped = strip_trailing_cr(&slot.line_pending);
+                                    if !stripped.is_empty() && stripped.len() <= MAX_LINE_BYTES {
+                                        Some(String::from_utf8_lossy(stripped).into_owned())
+                                    } else {
+                                        None
+                                    }
+                                } else {
+                                    None
+                                };
+                            let was_line = slot.mode == ReadMode::Line;
+                            Delivery::Eof(slot.callback, partial, was_line)
+                        })
+                }
+                PumpMsg::Error(fd, err_msg) => {
                     PUMPS.with_borrow(|pumps| {
                         if let Some(ctrl) = pumps.get(&fd) {
                             ctrl.dead.store(true, Ordering::Release);
                         }
                     });
-                    let slot = slots.remove(&fd)?;
-                    Some(Delivery::Error(slot.callback, err_msg))
-                }),
+                    AikeRuntimeState::of(cx)
+                        .io
+                        .read_slots
+                        .remove(&fd)
+                        .map(|slot| Delivery::Error(slot.callback, err_msg))
+                }
             };
             if let Some(d) = delivery {
                 run_delivery(cx, d);
             }
             true // always continue polling
         },
-        move |_| READ_SLOTS.with_borrow(|slots| slots.values().any(|s| s.runtime_id == runtime_id)),
-        move |_| {
-            READ_POLLER_ACTIVE.with_borrow_mut(|set| {
-                set.remove(&runtime_id);
-            })
+        |cx| !AikeRuntimeState::of(cx).io.read_slots.is_empty(),
+        |cx| {
+            AikeRuntimeState::of(cx).io.read_poller_active = false;
         },
     );
 }
@@ -535,7 +548,6 @@ fn fh_subscribe(ctx: &mut ScopedContext, cc: CallContext, mode: ReadMode) -> JSR
     let this = cc.this();
     let desc = get_io(ctx, &this)?;
     let raw_fd = desc.as_virt_fd();
-    let runtime_id = ctx.rt().id();
 
     // Cannot read from stdout/stderr
     if matches!(desc, IoPayload::Stdout | IoPayload::Stderr) {
@@ -546,10 +558,12 @@ fn fh_subscribe(ctx: &mut ScopedContext, cc: CallContext, mode: ReadMode) -> JSR
     if arg.is_null() {
         // Unsubscribe: drop the slot and pause the pump so nothing is
         // consumed while nobody listens.
-        READ_SLOTS.with_borrow_mut(|slots| {
-            if slots.remove(&raw_fd).is_none() {
-                return;
-            }
+        let removed = AikeRuntimeState::of(ctx)
+            .io
+            .read_slots
+            .remove(&raw_fd)
+            .is_some();
+        if removed {
             PUMPS.with_borrow(|pumps| {
                 if let Some(ctrl) = pumps.get(&raw_fd)
                     && !ctrl.dead.load(Ordering::Acquire)
@@ -558,7 +572,7 @@ fn fh_subscribe(ctx: &mut ScopedContext, cc: CallContext, mode: ReadMode) -> JSR
                     ctrl.wake.notify_one();
                 }
             });
-        });
+        }
         return Ok(JSValue::UNDEFINED);
     }
     let callback = arg.ensure_callable(ctx)?;
@@ -571,24 +585,27 @@ fn fh_subscribe(ctx: &mut ScopedContext, cc: CallContext, mode: ReadMode) -> JSR
         WarnIgnore,
         Subscribe,
     }
-    let action = READ_SLOTS.with_borrow_mut(|slots| match slots.get_mut(&raw_fd) {
-        Some(slot) if slot.mode != mode => SubAction::WarnIgnore,
-        Some(slot) => {
-            slot.callback = callback;
-            SubAction::Replace
+    let action = {
+        let slots = &mut AikeRuntimeState::of(ctx).io.read_slots;
+        match slots.get_mut(&raw_fd) {
+            Some(slot) if slot.mode != mode => SubAction::WarnIgnore,
+            Some(slot) => {
+                slot.callback = callback;
+                SubAction::Replace
+            }
+            None => SubAction::Subscribe,
         }
-        None => SubAction::Subscribe,
-    });
+    };
 
     match action {
         SubAction::Replace => return Ok(JSValue::UNDEFINED),
         SubAction::WarnIgnore => {
-            let existing = READ_SLOTS.with_borrow(|slots| {
-                slots
-                    .get(&raw_fd)
-                    .map(|slot| slot.mode.name())
-                    .unwrap_or("?")
-            });
+            let existing = AikeRuntimeState::of(ctx)
+                .io
+                .read_slots
+                .get(&raw_fd)
+                .map(|slot| slot.mode.name())
+                .unwrap_or("?");
             eprintln!(
                 "[aike] warning: {}() ignored — this handle already has an active {} listener (first registration wins). Call {}(null) first to switch modes.",
                 mode.name(),
@@ -601,18 +618,15 @@ fn fh_subscribe(ctx: &mut ScopedContext, cc: CallContext, mode: ReadMode) -> JSR
     }
 
     // Fresh subscription: insert the slot and ensure a live pump.
+    AikeRuntimeState::of(ctx).io.read_slots.insert(
+        raw_fd,
+        ReadSlot {
+            mode,
+            callback,
+            line_pending: Vec::new(),
+        },
+    );
     let (ctrl, spawn_pump) = {
-        READ_SLOTS.with_borrow_mut(|slots| {
-            slots.insert(
-                raw_fd,
-                ReadSlot {
-                    runtime_id,
-                    mode,
-                    callback,
-                    line_pending: Vec::new(),
-                },
-            );
-        });
         let (ctrl, needs_spawn) = PUMPS.with_borrow_mut(|pumps| match pumps.get(&raw_fd) {
             // Live pump: reuse and resume.
             Some(c) if !c.dead.load(Ordering::Acquire) => {

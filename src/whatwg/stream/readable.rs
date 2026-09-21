@@ -21,6 +21,7 @@ use zuqe::{
 };
 
 use crate::{
+    aike::AikeRuntimeState,
     http::client::body::BodySource,
     whatwg::{
         abort::{signal_is_aborted, signal_reason},
@@ -947,15 +948,37 @@ fn js_readable_stream_async_iterator_getter(ctx: &mut ScopedContext, cc: CallCon
     cc.this().get_property_str(ctx, "values")
 }
 
-thread_local! {
-    /// Channel-backed streams being polled: id -> (controller, receiver, idle deadline).
-    /// The deadline is per stream and refreshed on every chunk, so a slow but
-    /// live producer is never cut off; only a stalled stream times out.
-    pub(super) static CHANNEL_STREAMS: RefCell<
-        HashMap<u64, (JSReadableStreamDefaultController, zuqe::WakeReceiver<Result<Vec<u8>, String>>, Instant, usize)>,
-    > = RefCell::new(HashMap::new());
+/// A channel-backed stream being polled. The idle deadline is per stream and
+/// refreshed on every chunk, so a slow but live producer is never cut off; only
+/// a stalled stream times out.
+pub(crate) struct ChannelStream {
+    pub(crate) controller: JSReadableStreamDefaultController,
+    pub(crate) rx: zuqe::WakeReceiver<Result<Vec<u8>, String>>,
+    pub(crate) idle_deadline: Instant,
+}
 
-    static NEXT_STREAM_ID: Cell<u64> = const { Cell::new(1) };
+/// Per-runtime channel-backed streams, stored on `AikeRuntimeState`.
+pub(crate) struct ChannelStreamState {
+    pub(crate) streams: HashMap<u64, ChannelStream>,
+    /// Ids start at 1.
+    pub(crate) next_id: u64,
+}
+
+impl ChannelStreamState {
+    pub(crate) fn new() -> Self {
+        Self {
+            streams: HashMap::new(),
+            next_id: 1,
+        }
+    }
+}
+
+impl GcTrace for ChannelStreamState {
+    fn trace(&self, gcx: &mut GcTraceCtx) {
+        for s in self.streams.values() {
+            s.controller.as_object().trace(gcx);
+        }
+    }
 }
 
 fn create_readable_stream_controller(
@@ -1309,26 +1332,29 @@ impl JSReadableStream {
         )?;
         stream.payload_mut().unwrap().controller = Some(controller.into());
 
-        let id = NEXT_STREAM_ID.with(|n| {
-            let cur = n.get();
-            n.set(cur + 1);
-            cur
-        });
-
         // Keep the abort signal alive on the stream payload (GC-traced), not just in
         // the channel registry, so it cannot be reclaimed while the body is live.
         let sp = stream.payload_mut().unwrap();
         sp.signal = signal;
 
-        let runtime_id = ctx.rt().id();
-        let was_empty = CHANNEL_STREAMS.with_borrow_mut(|map| {
-            let empty = !map.values().any(|(_, _, _, rt)| *rt == runtime_id);
-            map.insert(id, (controller, rx, Instant::now(), runtime_id));
-            empty
-        });
+        let was_empty = {
+            let st = AikeRuntimeState::of(ctx);
+            let id = st.channel_streams.next_id;
+            st.channel_streams.next_id = id + 1;
+            let was_empty = st.channel_streams.streams.is_empty();
+            st.channel_streams.streams.insert(
+                id,
+                ChannelStream {
+                    controller,
+                    rx,
+                    idle_deadline: Instant::now(),
+                },
+            );
+            was_empty
+        };
 
         if was_empty {
-            start_channel_stream_poller(ctx, runtime_id);
+            start_channel_stream_poller(ctx);
         }
 
         Ok(stream)
@@ -1480,7 +1506,7 @@ impl JSReadableStream {
     }
 }
 
-fn start_channel_stream_poller(ctx: &mut ScopedContext, runtime_id: usize) {
+fn start_channel_stream_poller(ctx: &mut ScopedContext) {
     // Idle timeout, applied per stream and refreshed on every received chunk.
     // A stream is only killed when its own producer goes quiet for this long,
     // so neither a slow body nor a long-lived sibling stream can starve it.
@@ -1488,127 +1514,127 @@ fn start_channel_stream_poller(ctx: &mut ScopedContext, runtime_id: usize) {
 
     ctx.queue_job(
         move |cx| {
-            CHANNEL_STREAMS.with(|map| -> Result<(), i32> {
-                // Snapshot ids first, then release the borrow before any JS call.
-                // Holding borrow_mut across the loop would (a) panic on a second
-                // borrow_mut if a GC fires mid-loop (gc_trace removes entries),
-                // and (b) leave a dangling controller in the registry if the
-                // stream's payload is collected. Per-id borrowing keeps the map
-                // free during JS work.
-                let ids: Vec<u64> = map
-                    .borrow()
-                    .iter()
-                    .filter(|(_, (_, _, _, rt))| *rt == runtime_id)
-                    .map(|(id, _)| *id)
-                    .collect();
-                let mut to_remove = Vec::new();
+            // Snapshot ids first, then access one stream at a time so the state
+            // borrow is never held across a JS call (which can trigger GC; the
+            // engine traces the whole state).
+            let ids: Vec<u64> = AikeRuntimeState::of(cx)
+                .channel_streams
+                .streams
+                .keys()
+                .copied()
+                .collect();
+            let mut to_remove = Vec::new();
 
-                for id in ids {
-                    // Resolve abort signal from the GC-traced stream payload
-                    // (controller -> stream -> signal). Never read a dangling
-                    // handle: only visit entries that still map to a live stream.
-                    let resolved = {
-                        let m = map.borrow();
-                        match m.get(&id) {
-                            Some((ctrl, _, _, rt)) if *rt == runtime_id => {
-                                let maybe_signal = JSReadableStreamDefaultController::payload_of(
-                                    &JSValue::from(*ctrl),
-                                )
+            for id in ids {
+                // Resolve abort signal from the GC-traced stream payload
+                // (controller -> stream -> signal). Never read a dangling
+                // handle: only visit entries that still map to a live stream.
+                let resolved = AikeRuntimeState::of(cx)
+                    .channel_streams
+                    .streams
+                    .get(&id)
+                    .map(|s| s.controller)
+                    .and_then(|ctrl| {
+                        let maybe_signal =
+                            JSReadableStreamDefaultController::payload_of(&JSValue::from(ctrl))
                                 .and_then(|cp| cp.stream())
                                 .and_then(|stream| {
                                     JSReadableStream::payload_of(&JSValue::from(stream))
                                         .map(|sp| sp.signal)
                                 })
                                 .flatten();
-                                Some((JSValue::from(*ctrl), maybe_signal))
-                            }
-                            _ => None,
-                        }
-                    };
-                    let (controller, signal_opt) = match resolved {
-                        Some(v) => v,
-                        None => continue,
-                    };
+                        Some((JSValue::from(ctrl), maybe_signal))
+                    });
+                let (controller, signal_opt) = match resolved {
+                    Some(v) => v,
+                    None => continue,
+                };
 
-                    // Abort check before draining data: abort wins over a chunk.
-                    if let Some(s) = signal_opt
-                        && signal_is_aborted(&s)
-                    {
-                        let reason = signal_reason(&s).unwrap_or_else(|| {
-                            make_dom_exception(cx, "AbortError", "The operation was aborted.")
-                                .unwrap_or(JSValue::UNDEFINED)
-                        });
-                        let ef = controller.get_property_str(cx, "error")?;
-                        ef.call(cx, controller, &[reason])?;
+                // Abort check before draining data: abort wins over a chunk.
+                if let Some(s) = signal_opt
+                    && signal_is_aborted(&s)
+                {
+                    let reason = signal_reason(&s).unwrap_or_else(|| {
+                        make_dom_exception(cx, "AbortError", "The operation was aborted.")
+                            .unwrap_or(JSValue::UNDEFINED)
+                    });
+                    let ef = controller.get_property_str(cx, "error")?;
+                    ef.call(cx, controller, &[reason])?;
+                    to_remove.push(id);
+                    continue;
+                }
+
+                // Receive from the channel, releasing the state borrow before
+                // any JS call below.
+                let recv = AikeRuntimeState::of(cx)
+                    .channel_streams
+                    .streams
+                    .get(&id)
+                    .map(|s| s.rx.try_recv());
+                match recv {
+                    Some(Ok(Ok(data))) => {
+                        // Producer alive: refresh deadline, then enqueue.
+                        if let Some(s) = AikeRuntimeState::of(cx)
+                            .channel_streams
+                            .streams
+                            .get_mut(&id)
+                        {
+                            s.idle_deadline = Instant::now();
+                        }
+                        let ta = TypedArray::create_from_vec_u8(cx, data).map_err(|_| {
+                            cx.throw_internal_error("TypedArray creation failed")
+                        })?;
+                        let enqueue_fn = controller.get_property_str(cx, "enqueue")?;
+                        enqueue_fn.call(cx, controller, &[JSValue::from(ta)])?;
+                    }
+                    Some(Ok(Err(msg))) => {
+                        // Underlying network stream failed mid-body: error.
+                        let bytes = msg.into_bytes();
+                        let err = cx
+                            .create_error_object(
+                                ErrorKind::Type,
+                                &String::from_utf8_lossy(&bytes),
+                                false,
+                            )
+                            .ok_or(-1)?;
+                        let error_fn = controller.get_property_str(cx, "error")?;
+                        error_fn.call(cx, controller, &[err.into()])?;
                         to_remove.push(id);
-                        continue;
                     }
-
-                    // Re-borrow briefly to receive from the channel, releasing
-                    // before any JS call below.
-                    let recv = map.borrow().get(&id).map(|(_, rx, _, _)| rx.try_recv());
-                    match recv {
-                        Some(Ok(Ok(data))) => {
-                            // Producer alive: refresh deadline, then enqueue.
-                            if let Some(d) = map.borrow_mut().get_mut(&id) {
-                                d.2 = Instant::now();
-                            }
-                            let ta = TypedArray::create_from_vec_u8(cx, data).map_err(|_| {
-                                cx.throw_internal_error("TypedArray creation failed")
-                            })?;
-                            let enqueue_fn = controller.get_property_str(cx, "enqueue")?;
-                            enqueue_fn.call(cx, controller, &[JSValue::from(ta)])?;
-                        }
-                        Some(Ok(Err(msg))) => {
-                            // Underlying network stream failed mid-body: error.
-                            let bytes = msg.into_bytes();
+                    Some(Err(TryRecvError::Disconnected)) => {
+                        let close_fn = controller.get_property_str(cx, "close")?;
+                        close_fn.call(cx, controller, &[])?;
+                        to_remove.push(id);
+                    }
+                    Some(Err(TryRecvError::Empty)) => {
+                        let expired = AikeRuntimeState::of(cx)
+                            .channel_streams
+                            .streams
+                            .get(&id)
+                            .map(|s| s.idle_deadline.elapsed() > STREAM_IDLE_TIMEOUT)
+                            .unwrap_or(true);
+                        if expired {
                             let err = cx
-                                .create_error_object(
-                                    ErrorKind::Type,
-                                    &String::from_utf8_lossy(&bytes),
-                                    false,
-                                )
-                                .ok_or(-1)?;
+                                .create_string_from_utf8(b"channel stream timeout".to_vec())
+                                .map(JSValue::make_string)
+                                .map_err(|_| -1)?;
                             let error_fn = controller.get_property_str(cx, "error")?;
-                            error_fn.call(cx, controller, &[err.into()])?;
+                            error_fn.call(cx, controller, &[err])?;
                             to_remove.push(id);
                         }
-                        Some(Err(TryRecvError::Disconnected)) => {
-                            let close_fn = controller.get_property_str(cx, "close")?;
-                            close_fn.call(cx, controller, &[])?;
-                            to_remove.push(id);
-                        }
-                        Some(Err(TryRecvError::Empty)) => {
-                            let expired = map
-                                .borrow()
-                                .get(&id)
-                                .map(|(_, _, d, _)| d.elapsed() > STREAM_IDLE_TIMEOUT)
-                                .unwrap_or(true);
-                            if expired {
-                                let err = cx
-                                    .create_string_from_utf8(b"channel stream timeout".to_vec())
-                                    .map(JSValue::make_string)
-                                    .map_err(|_| -1)?;
-                                let error_fn = controller.get_property_str(cx, "error")?;
-                                error_fn.call(cx, controller, &[err])?;
-                                to_remove.push(id);
-                            }
-                        }
-                        None => {}
                     }
+                    None => {}
                 }
+            }
 
-                if !to_remove.is_empty() {
-                    let mut m = map.borrow_mut();
-                    for id in &to_remove {
-                        m.remove(id);
-                    }
+            if !to_remove.is_empty() {
+                let st = AikeRuntimeState::of(cx);
+                for id in &to_remove {
+                    st.channel_streams.streams.remove(id);
                 }
-                Ok(())
-            })?;
+            }
 
-            let any_left = CHANNEL_STREAMS
-                .with(|map| map.borrow().values().any(|(_, _, _, rt)| *rt == runtime_id));
+            let any_left = !AikeRuntimeState::of(cx).channel_streams.streams.is_empty();
             if any_left {
                 Ok(JobState::Block)
             } else {

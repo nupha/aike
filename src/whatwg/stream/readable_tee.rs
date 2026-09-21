@@ -16,6 +16,8 @@ use zuqe::{
     gc_lite::{GcTrace, GcTraceCtx},
 };
 
+use crate::aike::AikeRuntimeState;
+
 use super::{
     JSReadableByteStreamController, JSReadableStream, JSReadableStreamDefaultController,
     ReadableControllerPayload, ReadableStreamPayload, RsState,
@@ -25,9 +27,7 @@ use super::{
 /// Shared state for a `tee()` split: one source reader feeding two branch
 /// controllers on demand. `pulling` guards against concurrent pulls from both
 /// branches; `done` stops pulling once the source finishes.
-struct TeeShared {
-    /// Runtime that created this tee; only that runtime's GC traces it.
-    runtime_id: usize,
+pub(crate) struct TeeShared {
     reader: JSReadableStreamDefaultReader,
     c1: JSValue,
     c2: JSValue,
@@ -48,35 +48,48 @@ struct TeeShared {
     cancel_promise: RefCell<Option<Promise>>,
 }
 
-thread_local! {
-    static TEE_STREAMS: RefCell<HashMap<u32, Rc<TeeShared>>> = RefCell::new(HashMap::new());
-    static NEXT_TEE_ID: Cell<u32> = const { Cell::new(1) };
+/// Keep the shared tee state alive: the branch controllers/reader must be
+/// traced while a tee is active, otherwise they are reclaimed mid-tee and the
+/// stored `GcRef`s become dangling (a `payload_of` class-id assertion panics).
+impl GcTrace for TeeShared {
+    fn trace(&self, gcx: &mut GcTraceCtx) {
+        self.c1.trace(gcx);
+        self.c2.trace(gcx);
+        self.reader.as_object().trace(gcx);
+        if let Some(reason) = *self.cancel_reason1.borrow() {
+            reason.trace(gcx);
+        }
+        if let Some(reason) = *self.cancel_reason2.borrow() {
+            reason.trace(gcx);
+        }
+        if let Some(p) = *self.cancel_promise.borrow() {
+            JSValue::from(p).trace(gcx);
+        }
+    }
 }
 
-/// GC-trace the shared tee state so the branch controllers/reader stay alive
-/// while a tee is active. `TEE_STREAMS` is a plain RefCell the GC does not
-/// scan, so without this the branch controllers are reclaimed mid-tee and the
-/// stored `GcRef`s become dangling (a `payload_of` class-id assertion panics).
-pub(crate) fn gc_trace_tee_streams(gcx: &mut GcTraceCtx, runtime_id: usize) {
-    TEE_STREAMS.with_borrow(|map| {
-        for shared in map.values() {
-            if shared.runtime_id != runtime_id {
-                continue;
-            }
-            shared.c1.trace(gcx);
-            shared.c2.trace(gcx);
-            shared.reader.as_object().trace(gcx);
-            if let Some(reason) = *shared.cancel_reason1.borrow() {
-                reason.trace(gcx);
-            }
-            if let Some(reason) = *shared.cancel_reason2.borrow() {
-                reason.trace(gcx);
-            }
-            if let Some(p) = *shared.cancel_promise.borrow() {
-                JSValue::from(p).trace(gcx);
-            }
+/// Per-runtime active `tee()` splits, stored on `AikeRuntimeState`.
+pub(crate) struct TeeStreamState {
+    pub(crate) streams: HashMap<u32, Rc<TeeShared>>,
+    /// Ids start at 1 (0 is not a valid tee id).
+    pub(crate) next_id: u32,
+}
+
+impl TeeStreamState {
+    pub(crate) fn new() -> Self {
+        Self {
+            streams: HashMap::new(),
+            next_id: 1,
         }
-    });
+    }
+}
+
+impl GcTrace for TeeStreamState {
+    fn trace(&self, gcx: &mut GcTraceCtx) {
+        for shared in self.streams.values() {
+            shared.trace(gcx);
+        }
+    }
 }
 
 impl JSReadableStreamDefaultReader {
@@ -106,11 +119,12 @@ impl JSReadableStreamDefaultReader {
         // keyed by a tee id that resolves to the shared state (source reader + both
         // branch controllers). Pull only fires when a branch actually needs data, so
         // an infinite source is never drained unless a branch asks for it.
-        let tee_id = NEXT_TEE_ID.with(|c| {
-            let id = c.get();
-            c.set(id + 1);
+        let tee_id = {
+            let st = AikeRuntimeState::of(ctx);
+            let id = st.tee_streams.next_id;
+            st.tee_streams.next_id = id + 1;
             id
-        });
+        };
 
         // Check if the source stream is a byte stream so branches use
         // byte controllers when needed (WHATWG: tee branches mirror source type).
@@ -213,7 +227,6 @@ impl JSReadableStreamDefaultReader {
 
         let cancel_promise = Promise::create(ctx)?.0;
         let shared = Rc::new(TeeShared {
-            runtime_id: ctx.rt().id(),
             reader: *self,
             c1,
             c2,
@@ -227,7 +240,10 @@ impl JSReadableStreamDefaultReader {
             cancel_reason2: RefCell::new(None),
             cancel_promise: RefCell::new(Some(cancel_promise)),
         });
-        TEE_STREAMS.with(|map| map.borrow_mut().insert(tee_id, shared));
+        AikeRuntimeState::of(ctx)
+            .tee_streams
+            .streams
+            .insert(tee_id, shared);
 
         Ok([b1, b2])
     }
@@ -242,7 +258,7 @@ fn tee_cancel(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let tee_id = cc.data(0).to_number(ctx)?.to_u32();
     let branch = cc.data(1).to_number(ctx)?.to_u32();
     let reason = cc.arg(0);
-    let shared = TEE_STREAMS.with(|m| m.borrow().get(&tee_id).cloned());
+    let shared = AikeRuntimeState::of(ctx).tee_streams.streams.get(&tee_id).cloned();
     let Some(shared) = shared else {
         return Ok(JSValue::UNDEFINED);
     };
@@ -348,7 +364,7 @@ pub(crate) fn js_readable_stream_tee(ctx: &mut ScopedContext, cc: CallContext) -
 // both branches; a shared `done` stops pulling after the source finishes.
 fn tee_pull(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let tee_id = cc.data(0).to_number(ctx)?.to_u32();
-    let shared = TEE_STREAMS.with(|m| m.borrow().get(&tee_id).cloned());
+    let shared = AikeRuntimeState::of(ctx).tee_streams.streams.get(&tee_id).cloned();
     let Some(shared) = shared else {
         return Ok(JSValue::UNDEFINED);
     };
@@ -359,7 +375,7 @@ fn tee_pull(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 // pulling guard. Close both when the source is done.
 fn tee_pull_fulfilled(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let tee_id = cc.data(0).to_number(ctx)?.to_u32();
-    let shared = TEE_STREAMS.with(|m| m.borrow().get(&tee_id).cloned());
+    let shared = AikeRuntimeState::of(ctx).tee_streams.streams.get(&tee_id).cloned();
     let Some(shared) = shared else {
         return Ok(JSValue::UNDEFINED);
     };
@@ -378,7 +394,7 @@ fn tee_pull_fulfilled(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 cp.close(ctx)?;
             }
         }
-        TEE_STREAMS.with(|m| m.borrow_mut().remove(&tee_id));
+        AikeRuntimeState::of(ctx).tee_streams.streams.remove(&tee_id);
         return Ok(JSValue::UNDEFINED);
     }
 
@@ -437,7 +453,7 @@ fn tee_pull_fulfilled(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 // was fanned out, when a branch still wants data).
 fn tee_pull_continue(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let tee_id = cc.data(0).to_number(ctx)?.to_u32();
-    if let Some(shared) = TEE_STREAMS.with(|m| m.borrow().get(&tee_id).cloned()) {
+    if let Some(shared) = AikeRuntimeState::of(ctx).tee_streams.streams.get(&tee_id).cloned() {
         tee_do_pull(ctx, tee_id, &shared)?;
     }
     Ok(JSValue::UNDEFINED)
@@ -465,7 +481,7 @@ fn tee_do_pull(ctx: &mut ScopedContext, tee_id: u32, shared: &TeeShared) -> JSRe
                     c.invoke_str(ctx, "error", &[reason])?;
                 }
             }
-            TEE_STREAMS.with(|m| m.borrow_mut().remove(&tee_id));
+            AikeRuntimeState::of(ctx).tee_streams.streams.remove(&tee_id);
             return Ok(JSValue::UNDEFINED);
         }
     }
@@ -500,7 +516,7 @@ fn tee_do_pull(ctx: &mut ScopedContext, tee_id: u32, shared: &TeeShared) -> JSRe
 // Source read rejected: error both branches and clear the pulling guard.
 fn tee_pull_rejected(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let tee_id = cc.data(0).to_number(ctx)?.to_u32();
-    let shared = TEE_STREAMS.with(|m| m.borrow().get(&tee_id).cloned());
+    let shared = AikeRuntimeState::of(ctx).tee_streams.streams.get(&tee_id).cloned();
     let Some(shared) = shared else {
         return Ok(JSValue::UNDEFINED);
     };
@@ -512,7 +528,7 @@ fn tee_pull_rejected(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             c.invoke_str(ctx, "error", &[reason])?;
         }
     }
-    TEE_STREAMS.with(|m| m.borrow_mut().remove(&tee_id));
+    AikeRuntimeState::of(ctx).tee_streams.streams.remove(&tee_id);
     Ok(JSValue::UNDEFINED)
 }
 

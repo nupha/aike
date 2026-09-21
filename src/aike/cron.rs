@@ -2,7 +2,6 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
 use std::{
-    cell::RefCell,
     collections::HashMap,
     str::FromStr,
     sync::{
@@ -20,6 +19,8 @@ use zuqe::{
     gc_lite::{GcTrace, GcTraceCtx},
 };
 
+use super::AikeRuntimeState;
+
 #[derive(Debug, Clone, Copy)]
 enum CronMsg {
     Fired(u32),
@@ -33,39 +34,22 @@ struct CronEntry {
     active: bool,
 }
 
-struct CronState {
+/// `Aike.schedule` state, stored on `AikeRuntimeState` (root-only). Lazily
+/// created on the first `Aike.schedule` call, dropped with the runtime.
+pub(crate) struct CronState {
     next_id: u32,
     entries: HashMap<u32, CronEntry>,
     tx: zuqe::WakeSender<CronMsg>,
     rx: zuqe::WakeReceiver<CronMsg>,
 }
 
-impl CronState {
-    fn new(ctx: &mut ScopedContext) -> Self {
-        let (tx, rx) = ctx.make_channel::<CronMsg>(64);
-        Self {
-            next_id: 1,
-            entries: HashMap::new(),
-            tx,
-            rx,
+impl GcTrace for CronState {
+    fn trace(&self, gcx: &mut GcTraceCtx) {
+        for entry in self.entries.values() {
+            entry.callback.trace(gcx);
+            entry.job_obj.trace(gcx);
         }
     }
-}
-
-thread_local! {
-    static CRON_STATE: RefCell<Option<CronState>> = const { RefCell::new(None) };
-}
-
-/// GC trace — keep all live callbacks and job objects alive
-pub(crate) fn gc_trace_cron(tr: &mut GcTraceCtx) {
-    CRON_STATE.with_borrow(|opt| {
-        if let Some(s) = opt.as_ref() {
-            for entry in s.entries.values() {
-                entry.callback.trace(tr);
-                entry.job_obj.trace(tr);
-            }
-        }
-    });
 }
 
 /// Compute delay in milliseconds to the next cron fire time.
@@ -95,13 +79,9 @@ fn normalize_cron_expr(expr: &str) -> String {
     }
 }
 
-/// Spawn a tokio task that sleeps until next fire time
-fn spawn_cron_timer(id: u32, schedule: &Schedule) {
-    // Clone the (wake-carrying) tx on the JS thread before moving into the
-    // tokio worker; sends wake the parked loop automatically.
-    let tx = CRON_STATE.with_borrow(|opt| opt.as_ref().map(|s| s.tx.clone()));
-    let Some(tx) = tx else { return };
-
+/// Spawn a tokio task that sleeps until next fire time. `tx` is cloned on the
+/// JS thread before moving into the tokio worker; sends wake the parked loop.
+fn spawn_cron_timer(tx: zuqe::WakeSender<CronMsg>, id: u32, schedule: &Schedule) {
     let Some(delay_ms) = next_delay_ms(schedule) else {
         // No more future occurrences — auto-expire
         let _ = tx.send(CronMsg::Cancelled(id));
@@ -116,7 +96,7 @@ fn spawn_cron_timer(id: u32, schedule: &Schedule) {
 
 /// The persistent polling microtask
 fn add_cron_notifier(ctx: &mut ScopedContext) {
-    let rx = CRON_STATE.with_borrow(|opt| opt.as_ref().unwrap().rx.clone());
+    let rx = AikeRuntimeState::of(ctx).cron.as_ref().unwrap().rx.clone();
 
     crate::helpers::start_channel_poller(
         ctx,
@@ -125,16 +105,13 @@ fn add_cron_notifier(ctx: &mut ScopedContext) {
         |msg, cx| {
             match msg {
                 CronMsg::Cancelled(id) => {
-                    CRON_STATE.with_borrow_mut(|opt| {
-                        if let Some(s) = opt.as_mut() {
-                            s.entries.remove(&id);
-                        }
-                    });
+                    if let Some(s) = AikeRuntimeState::of(cx).cron.as_mut() {
+                        s.entries.remove(&id);
+                    }
                 }
                 CronMsg::Fired(id) => {
                     // Extract callback and job object, check active
-                    let fire_info = CRON_STATE.with_borrow_mut(|opt| {
-                        let s = opt.as_mut()?;
+                    let fire_info = AikeRuntimeState::of(cx).cron.as_mut().and_then(|s| {
                         let e = s.entries.get_mut(&id)?;
                         if !e.active {
                             return None;
@@ -150,28 +127,29 @@ fn add_cron_notifier(ctx: &mut ScopedContext) {
                         }
 
                         // Re-schedule if still active
-                        let still_active = CRON_STATE.with_borrow(|opt| {
-                            opt.as_ref()
-                                .and_then(|s| s.entries.get(&id))
-                                .map(|e| e.active)
-                                .unwrap_or(false)
-                        });
+                        let still_active = AikeRuntimeState::of(cx)
+                            .cron
+                            .as_ref()
+                            .and_then(|s| s.entries.get(&id))
+                            .map(|e| e.active)
+                            .unwrap_or(false);
 
                         if still_active {
-                            CRON_STATE.with_borrow(|opt| {
-                                if let Some(s) = opt.as_ref()
-                                    && let Some(e) = s.entries.get(&id)
-                                {
-                                    spawn_cron_timer(id, &e.schedule);
-                                }
+                            let rearm = AikeRuntimeState::of(cx).cron.as_ref().and_then(|s| {
+                                s.entries
+                                    .get(&id)
+                                    .map(|e| (s.tx.clone(), e.schedule.clone()))
                             });
+                            if let Some((tx, schedule)) = rearm {
+                                spawn_cron_timer(tx, id, &schedule);
+                            }
 
                             // Update nextRun on job object
-                            let next_iso = CRON_STATE.with_borrow(|opt| {
-                                opt.as_ref()
-                                    .and_then(|s| s.entries.get(&id))
-                                    .and_then(|e| format_next_run(&e.schedule))
-                            });
+                            let next_iso = AikeRuntimeState::of(cx)
+                                .cron
+                                .as_ref()
+                                .and_then(|s| s.entries.get(&id))
+                                .and_then(|e| format_next_run(&e.schedule));
                             if let Some(iso) = next_iso {
                                 let _ =
                                     cx.create_string_from_utf8(iso.into_bytes()).and_then(|s| {
@@ -197,11 +175,14 @@ fn add_cron_notifier(ctx: &mut ScopedContext) {
             }
             true // always continue polling
         },
-        |_| CRON_STATE.with_borrow(|s| s.as_ref().is_some_and(|s| !s.entries.is_empty())),
-        |_| {
-            CRON_STATE.with_borrow_mut(|s| {
-                s.take();
-            })
+        |cx| {
+            AikeRuntimeState::of(cx)
+                .cron
+                .as_ref()
+                .is_some_and(|s| !s.entries.is_empty())
+        },
+        |cx| {
+            AikeRuntimeState::of(cx).cron = None;
         },
     );
 }
@@ -242,15 +223,13 @@ fn js_cron_job_cancel(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     }
 
     // Remove from state and cancel pending timer
-    CRON_STATE.with_borrow_mut(|opt| {
-        if let Some(s) = opt.as_mut() {
-            if let Some(entry) = s.entries.get_mut(&id) {
-                entry.active = false;
-            }
-            let _ = s.tx.send(CronMsg::Cancelled(id));
-            s.entries.remove(&id);
+    if let Some(s) = AikeRuntimeState::of(ctx).cron.as_mut() {
+        if let Some(entry) = s.entries.get_mut(&id) {
+            entry.active = false;
         }
-    });
+        let _ = s.tx.send(CronMsg::Cancelled(id));
+        s.entries.remove(&id);
+    }
 
     // Update active property on the JS object
     if let Some(mut obj) = cc.this().as_object() {
@@ -290,14 +269,33 @@ pub(super) fn js_schedule(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
         ctx.throw_internal_error(&format!("invalid cron expression '{}': {}", pattern_str, e))
     })?;
 
-    // Initialize state if needed
-    let (id, need_notifier) = CRON_STATE.with_borrow_mut(|opt| {
-        let start_job = opt.is_none();
-        let s = opt.get_or_insert_with(|| CronState::new(ctx));
+    // Initialize state if needed. The channel is created *before* borrowing the
+    // state, since `make_channel` needs `&mut ctx`.
+    let need_notifier = AikeRuntimeState::of(ctx).cron.is_none();
+    let new_channel = if need_notifier {
+        Some(ctx.make_channel::<CronMsg>(64))
+    } else {
+        None
+    };
+    let (id, tx) = {
+        let st = AikeRuntimeState::of(ctx);
+        let s = match &mut st.cron {
+            Some(s) => s,
+            None => {
+                let (tx, rx) = new_channel.unwrap();
+                st.cron = Some(CronState {
+                    next_id: 1,
+                    entries: HashMap::new(),
+                    tx,
+                    rx,
+                });
+                st.cron.as_mut().unwrap()
+            }
+        };
         let id = s.next_id;
         s.next_id += 1;
-        (id, start_job)
-    });
+        (id, s.tx.clone())
+    };
 
     // Compute nextRun
     let next_run_val: JSValue = match format_next_run(&schedule) {
@@ -334,22 +332,20 @@ pub(super) fn js_schedule(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
     job_obj.define_property_value_str(ctx, "active", JSValue::TRUE, JS_PROP_C_W_E)?;
 
     // Store entry
-    CRON_STATE.with_borrow_mut(|opt| {
-        if let Some(s) = opt.as_mut() {
-            s.entries.insert(
-                id,
-                CronEntry {
-                    schedule: schedule.clone(),
-                    callback,
-                    job_obj: job_obj.clone(),
-                    active: true,
-                },
-            );
-        }
-    });
+    if let Some(s) = AikeRuntimeState::of(ctx).cron.as_mut() {
+        s.entries.insert(
+            id,
+            CronEntry {
+                schedule: schedule.clone(),
+                callback,
+                job_obj: job_obj.clone(),
+                active: true,
+            },
+        );
+    }
 
     // Spawn first timer
-    spawn_cron_timer(id, &schedule);
+    spawn_cron_timer(tx, id, &schedule);
 
     // Start poller if this is the first job
     if need_notifier {

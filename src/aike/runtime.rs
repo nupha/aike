@@ -195,22 +195,13 @@ fn remove_child(id: u32) -> Option<Rc<Child>> {
 /// plus (root only) process-global / not-yet-per-runtime state and the
 /// parent-heap child handles.
 pub(crate) fn register_runtime_traces(rt: &mut Runtime) {
-    let id = rt.id();
-    let root = rt.is_root();
-
-    rt.gc_set_trace_handler(move |gcx| {
-        // Per-runtime state (each runtime traces only its own entries).
-        crate::whatwg::stream::gc_trace_stream(gcx, id);
-        crate::aike::gc_trace_io(gcx, id);
-
-        if root {
-            // Process-global / root-only state. Signal handlers live on the
-            // runtime's `AikeRuntimeState`, which the engine traces as part of
-            // `user_state` (see `AikeRuntimeState::trace`).
-            crate::aike::gc_trace_cron(gcx);
+    if rt.is_root() {
+        rt.gc_set_trace_handler(move |gcx| {
+            // Per-runtime state is traced via `AikeRuntimeState::trace`; only the
+            // root's child-runtime handles need a trace handler here.
             gc_trace_runtime_handles(gcx);
-        }
-    });
+        });
+    }
 }
 
 /// Gate a process/thread-global capability: reject when running inside a child
