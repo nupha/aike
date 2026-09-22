@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
+use std::sync::Arc;
+
 use async_openai::types::responses::{
     CreateResponseArgs, EasyInputContent, EasyInputMessage, InputItem, InputParam, MessageType,
     Reasoning, Response, ResponseStreamEvent, Role,
@@ -13,7 +15,15 @@ use zuqe::{
     },
 };
 
-use super::{MAGIC_RESPONSES_STREAM, class_client::get_client};
+use crate::whatwg::{
+    abort::{JSAbortSignal, signal_is_aborted, signal_notify, signal_reason},
+    dom::make_dom_exception,
+};
+
+use super::{
+    MAGIC_RESPONSES_STREAM,
+    class_client::{ABORT_MSG, LlmStreamFetcher, StreamCancel, get_client},
+};
 
 enum ResponsesReply {
     Event(Box<ResponseStreamEvent>),
@@ -111,6 +121,14 @@ pub(super) fn js_client_responses(ctx: &mut ScopedContext, cc: CallContext) -> J
         .arg(0)
         .as_object()
         .ok_or_else(|| ctx.throw_type_error("responses() requires an options object"))?;
+
+    // Abort support via AbortSignal; local-only, not part of the request body.
+    let signal_val = opts.get_property_str(ctx, "signal")?;
+    if !signal_val.is_undefined_or_null() && JSAbortSignal::payload_of(&signal_val).is_none() {
+        return Err(ctx.throw_type_error("`signal` must be an AbortSignal"));
+    }
+    let abort_notify = signal_notify(&signal_val);
+    let already_aborted = signal_is_aborted(&signal_val);
 
     let input_val = opts.get_property_str(ctx, "input")?;
     let input = parse_responses_input(ctx, &input_val)?;
@@ -213,69 +231,120 @@ pub(super) fn js_client_responses(ctx: &mut ScopedContext, cc: CallContext) -> J
 
     if is_stream {
         let result_slot = PromiseResultSlot::<ResponsesReply>::new();
+        // Commits from the reading task wake the parked event loop so the
+        // custom fetcher below polls the slot promptly.
+        result_slot.attach_runtime_wake(ctx);
+        let cancel = Arc::new(StreamCancel::new());
         let slot = result_slot.clone();
+        let task_cancel = cancel.clone();
 
         tokio::spawn(async move {
-            async fn commit_slot(
-                slot: &PromiseResultSlot<ResponsesReply>,
-                mut msg: ResponsesReply,
-            ) {
-                loop {
-                    match slot.commit(msg) {
-                        Ok(()) => return,
-                        Err(ret) => {
-                            msg = ret;
-                            tokio::task::yield_now().await;
+            // `return()`/`break` on the JS iterator fires `task_cancel`, dropping
+            // `body` — and with it the in-flight response — closing the upstream.
+            let body = async {
+                async fn commit_slot(
+                    slot: &PromiseResultSlot<ResponsesReply>,
+                    mut msg: ResponsesReply,
+                ) {
+                    loop {
+                        match slot.commit(msg) {
+                            Ok(()) => return,
+                            Err(ret) => {
+                                msg = ret;
+                                tokio::task::yield_now().await;
+                            }
                         }
                     }
                 }
-            }
 
-            match req_builder.send().await {
-                Ok(response) => {
-                    use futures_util::StreamExt;
-                    use tokio::io::AsyncBufReadExt;
-                    use tokio_util::io::StreamReader;
+                // Fail-fast: a pre-aborted signal never leaves the process.
+                if already_aborted {
+                    commit_slot(&slot, ResponsesReply::Error(ABORT_MSG.to_string())).await;
+                    return;
+                }
 
-                    let byte_stream = response
-                        .bytes_stream()
-                        .map(|r| r.map_err(std::io::Error::other));
-                    let reader = StreamReader::new(byte_stream);
-                    let mut lines = tokio::io::BufReader::new(reader).lines();
+                match req_builder.send().await {
+                    Ok(response) => {
+                        use futures_util::StreamExt;
+                        use tokio::io::AsyncBufReadExt;
+                        use tokio_util::io::StreamReader;
 
-                    while let Ok(Some(line)) = lines.next_line().await {
-                        let line = line.trim().to_string();
-                        if let Some(data) = line.strip_prefix("data: ") {
-                            if data == "[DONE]" {
+                        let byte_stream = response
+                            .bytes_stream()
+                            .map(|r| r.map_err(std::io::Error::other));
+                        let reader = StreamReader::new(byte_stream);
+                        let mut lines = tokio::io::BufReader::new(reader).lines();
+
+                        loop {
+                            let line = match &abort_notify {
+                                Some(n) => tokio::select! {
+                                    biased;
+                                    _ = n.notified() => {
+                                        commit_slot(&slot, ResponsesReply::Error(ABORT_MSG.to_string())).await;
+                                        break;
+                                    }
+                                    r = lines.next_line() => r,
+                                },
+                                None => lines.next_line().await,
+                            };
+                            // EOF/read error ends the stream silently (legacy).
+                            let Ok(Some(line)) = line else {
                                 break;
-                            }
+                            };
 
-                            if let Ok(event) = serde_json::from_str::<ResponseStreamEvent>(data) {
-                                commit_slot(&slot, ResponsesReply::Event(Box::new(event))).await;
+                            let line = line.trim().to_string();
+                            if let Some(data) = line.strip_prefix("data: ") {
+                                if data == "[DONE]" {
+                                    break;
+                                }
+
+                                if let Ok(event) = serde_json::from_str::<ResponseStreamEvent>(data)
+                                {
+                                    commit_slot(&slot, ResponsesReply::Event(Box::new(event)))
+                                        .await;
+                                }
                             }
                         }
+                        commit_slot(&slot, ResponsesReply::Done).await;
                     }
-                    commit_slot(&slot, ResponsesReply::Done).await;
+                    Err(e) => {
+                        commit_slot(&slot, ResponsesReply::Error(e.to_string())).await;
+                    }
                 }
-                Err(e) => {
-                    commit_slot(&slot, ResponsesReply::Error(e.to_string())).await;
-                }
+            };
+            tokio::select! {
+                biased;
+                _ = task_cancel.notified() => {}
+                _ = body => {}
             }
         });
 
-        AsyncIterableIterator::create_with_result_slot(
+        AsyncIterableIterator::create(
             ctx,
-            result_slot,
-            |cx, msg| -> Result<Option<JSValue>, i32> {
-                match msg {
-                    ResponsesReply::Event(event) => stream_event_to_js(cx, &event).map(Some),
-                    ResponsesReply::Done => Ok(None),
-                    ResponsesReply::Error(e) => Err(cx.throw_internal_error(&e)),
-                }
-            },
+            LlmStreamFetcher::new(
+                result_slot,
+                cancel,
+                JSValue::UNDEFINED,
+                |cx, msg| -> Result<Option<JSValue>, i32> {
+                    match msg {
+                        ResponsesReply::Event(event) => stream_event_to_js(cx, &event).map(Some),
+                        ResponsesReply::Done => Ok(None),
+                        ResponsesReply::Error(e) => Err(cx.throw_internal_error(&e)),
+                    }
+                },
+            ),
         )
         .map(JSValue::from)
     } else {
+        // Fail-fast: reject with the signal's reason without sending.
+        if already_aborted {
+            let reason = match signal_reason(&signal_val) {
+                Some(r) => r,
+                None => make_dom_exception(ctx, "AbortError", "The operation was aborted.")?,
+            };
+            return Promise::from_reject_value(ctx, reason).map(JSValue::from);
+        }
+
         let result_slot = PromiseResultSlot::<Result<Response, String>>::new();
         let promise =
             Promise::create_with_result_slot(ctx, result_slot.clone(), |cx, result| -> JSResult {
@@ -286,20 +355,34 @@ pub(super) fn js_client_responses(ctx: &mut ScopedContext, cc: CallContext) -> J
             })?;
 
         tokio::spawn(async move {
-            let result = match req_builder.send().await {
-                Ok(response) => {
-                    let status = response.status();
-                    let body = response.text().await.unwrap_or_default();
-                    if status.is_success() {
-                        match serde_json::from_str::<Response>(&body) {
-                            Ok(resp) => Ok(resp),
-                            Err(e) => Err(format!("Failed to parse response: {}", e)),
+            // Abort races the whole request; dropping `result_fut` closes the
+            // upstream connection, so generation stops server-side too.
+            let result_fut = async {
+                let result = match req_builder.send().await {
+                    Ok(response) => {
+                        let status = response.status();
+                        let body = response.text().await.unwrap_or_default();
+                        if status.is_success() {
+                            match serde_json::from_str::<Response>(&body) {
+                                Ok(resp) => Ok(resp),
+                                Err(e) => Err(format!("Failed to parse response: {}", e)),
+                            }
+                        } else {
+                            Err(format!("HTTP {} : {}", status, body))
                         }
-                    } else {
-                        Err(format!("HTTP {} : {}", status, body))
                     }
-                }
-                Err(e) => Err(e.to_string()),
+                    Err(e) => Err(e.to_string()),
+                };
+                result
+            };
+
+            let result = match abort_notify {
+                Some(n) => tokio::select! {
+                    biased;
+                    _ = n.notified() => Err(ABORT_MSG.to_string()),
+                    r = result_fut => r,
+                },
+                None => result_fut.await,
             };
             let _ = result_slot.commit(result);
         });

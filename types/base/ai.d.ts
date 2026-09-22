@@ -49,6 +49,19 @@ declare module "ai" {
 
   /** Chat completion request body (snake_case, matching OpenAI API). */
   export interface ChatRequest {
+    /** AbortSignal to cancel this request mid-flight. When aborted, `chat`/
+     * `responses` iterators reject and `chatOnce`/`responsesOnce` promises
+     * reject; the upstream connection is dropped. NOT sent to the API. */
+    signal?: AbortSignal;
+    /** Per-request HTTP total timeout in seconds. NOT sent to the API. */
+    timeout?: number;
+    /**
+     * Per-request stream-idle timeout in seconds: abort with an error when no
+     * SSE data arrives for this long (any received byte resets the timer).
+     * Streaming only; NOT sent to the API.
+     */
+    idle_timeout?: number;
+
     messages: ChatMessage[];
     model?: string;
     temperature?: number;
@@ -61,14 +74,7 @@ declare module "ai" {
     reasoning_effort?: string;
     response_format?: ResponseFormat;
     stream_options?: { include_usage?: boolean };
-    /** Per-request HTTP total timeout in seconds. NOT sent to the API. */
-    timeout?: number;
-    /**
-     * Per-request stream-idle timeout in seconds: abort with an error when no
-     * SSE data arrives for this long (any received byte resets the timer).
-     * Streaming only; NOT sent to the API.
-     */
-    idle_timeout?: number;
+
     [key: string]: any;
   }
 
@@ -125,17 +131,16 @@ declare module "ai" {
 
     responseNormalizer: ((response: any) => any) | null;
 
-    chatOnce(options: ChatRequest): Promise<ChatResponse>;
-    chat(options: ChatRequest): AsyncIterableIterator<ChatStreamChunk>;
-    responses(options: ChatRequest): AsyncIterableIterator<any>;
-    responsesOnce(options: ChatRequest): Promise<any>;
-
     /** Insert or update a single HTTP header. Pass `null` to remove the entry;
      * `undefined` is a no-op. Affects every subsequent `chat`/`responses` call. */
     setHeader(name: string, value: string | null | undefined): void;
-
     /** Read a single header value, or `undefined` if not set. */
     getHeader(name: string): string | undefined;
+
+    chat(req: ChatRequest): AsyncIterableIterator<ChatStreamChunk>;
+    chatOnce(req: ChatRequest): Promise<ChatResponse>;
+    responses(req: ChatRequest): AsyncIterableIterator<any>;
+    responsesOnce(req: ChatRequest): Promise<any>;
 
     dispose(): void;
   }

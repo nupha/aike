@@ -1,22 +1,132 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-use std::time::Duration;
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 
 use futures_util::StreamExt;
 use tokio::io::AsyncBufReadExt;
+use tokio::sync::Notify;
 use tokio_util::io::StreamReader;
 use zuqe::{
     CallContext, ClassCtorDef, FieldDef, JS_PROP_WRITABLE, JSResult, JSValue, ScopedContext,
     builtins::{
-        iterator::AsyncIterableIterator,
+        iterator::{AsyncIterableIterator, AsyncIteratorFetcher, IterFetchStatus},
         promise::{Promise, PromiseResultSlot},
     },
     def_native_object,
     gc_lite::{GcTrace, GcTraceCtx},
 };
 
-use crate::helpers::json_keys_camel_to_snake;
+use crate::{
+    helpers::json_keys_camel_to_snake,
+    whatwg::{
+        abort::{JSAbortSignal, signal_is_aborted, signal_notify, signal_reason},
+        dom::make_dom_exception,
+    },
+};
+
+/// Error surfaced to JS when a request is cancelled via `ChatRequest.signal`.
+pub(super) const ABORT_MSG: &str = "request aborted by AbortSignal";
+
+/// Cancellation shared by a streaming iterator's JS side and its reading task.
+///
+/// `cancel()` runs on the JS thread when the consumer abandons iteration early
+/// (`for await ... break`, iterator `.return()`); the reading task's outer
+/// `tokio::select!` then drops the request in flight, closing the upstream
+/// connection so generation stops server-side too.
+pub(super) struct StreamCancel {
+    cancelled: AtomicBool,
+    notify: Notify,
+}
+
+impl StreamCancel {
+    pub(super) fn new() -> Self {
+        Self {
+            cancelled: AtomicBool::new(false),
+            notify: Notify::new(),
+        }
+    }
+
+    pub(super) fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Release);
+        self.notify.notify_one();
+    }
+
+    pub(super) fn notified(&self) -> impl std::future::Future<Output = ()> + '_ {
+        self.notify.notified()
+    }
+}
+
+impl Default for StreamCancel {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Stream-consumer half of a `LlmClient.chat()`/`responses()` iterator.
+///
+/// Polls the result slot on the JS thread (`try_fetch`), applies the response
+/// normalizer to yielded chunks, and forwards early `return()`/`break` to
+/// [`StreamCancel`]. Not `Send`: it holds the `normalizer` JS value and lives
+/// behind the engine's `Rc`.
+pub(super) struct LlmStreamFetcher<D: Send> {
+    slot: PromiseResultSlot<D>,
+    cancel: Arc<StreamCancel>,
+    normalizer: JSValue,
+    convert: Box<dyn Fn(&mut ScopedContext, D) -> Result<Option<JSValue>, i32>>,
+}
+
+impl<D: Send + 'static> LlmStreamFetcher<D> {
+    pub(super) fn new(
+        slot: PromiseResultSlot<D>,
+        cancel: Arc<StreamCancel>,
+        normalizer: JSValue,
+        convert: impl Fn(&mut ScopedContext, D) -> Result<Option<JSValue>, i32> + 'static,
+    ) -> Self {
+        Self {
+            slot,
+            cancel,
+            normalizer,
+            convert: Box::new(convert),
+        }
+    }
+}
+
+impl<D: Send + 'static> GcTrace for LlmStreamFetcher<D> {
+    fn trace(&self, gcx: &mut GcTraceCtx) {
+        self.normalizer.trace(gcx);
+    }
+}
+
+impl<D: Send + 'static> AsyncIteratorFetcher for LlmStreamFetcher<D> {
+    fn try_fetch(&self, cx: &mut ScopedContext) -> Result<IterFetchStatus, i32> {
+        let Some(data) = self.slot.try_take() else {
+            return Ok(IterFetchStatus::Wait);
+        };
+        match (self.convert)(cx, data) {
+            Ok(Some(v)) => {
+                let v = if self.normalizer.is_callable() {
+                    self.normalizer.call(cx, JSValue::UNDEFINED, &[v])?
+                } else {
+                    v
+                };
+                Ok(IterFetchStatus::Value(v))
+            }
+            Ok(None) => Ok(IterFetchStatus::Done),
+            Err(e) => Err(e),
+        }
+    }
+
+    fn close(&self) {
+        self.cancel.cancel();
+    }
+}
 
 use super::{
     MAGIC_CHAT_ONCE, MAGIC_CHAT_STREAM, MAGIC_RESPONSES_ONCE, MAGIC_RESPONSES_STREAM,
@@ -323,10 +433,21 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
         .as_object()
         .ok_or_else(|| ctx.throw_type_error("chat() requires an options object"))?;
 
+    // Abort support via AbortSignal. Local-only; never sent to the API.
+    let signal_val = opts_obj.get_property_str(ctx, "signal")?;
+    if !signal_val.is_undefined_or_null() && JSAbortSignal::payload_of(&signal_val).is_none() {
+        return Err(ctx.throw_type_error("`signal` must be an AbortSignal"));
+    }
+    let abort_notify = signal_notify(&signal_val);
+    let already_aborted = signal_is_aborted(&signal_val);
+
     // Convert JS options to raw JSON, preserving all fields (including extension
     // fields like reasoning_content) that async-openai typed structs would drop.
     // LlmClient is a remote API proxy — it should forward everything, not filter.
     let mut req_json = opts_obj.to_serde_json(ctx)?;
+    if let Some(obj) = req_json.as_object_mut() {
+        obj.remove("signal");
+    }
 
     // Extract per-request timeout (seconds), defaults to client-level timeout
     // This field is NOT sent to the API — it controls HTTP timeout only
@@ -425,220 +546,275 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
     if is_stream {
         // Streaming: AsyncIterableIterator
         let result_slot = PromiseResultSlot::<ChatReply>::new();
+        // Commits from the reading task wake the parked event loop so the
+        // custom fetcher below polls the slot promptly.
+        result_slot.attach_runtime_wake(ctx);
+        let cancel = Arc::new(StreamCancel::new());
         let slot = result_slot.clone();
+        let task_cancel = cancel.clone();
 
         tokio::spawn(async move {
-            async fn flush_buf(
-                slot: &PromiseResultSlot<ChatReply>,
-                buf: &mut Option<ToolCallBuffer>,
-            ) {
-                if let Some(state) = buf.take() {
-                    slot.commit_async(ChatReply::Chunk(state.into_chunk()))
+            // `return()`/`break` on the JS iterator (`close()` on the fetcher)
+            // fires `task_cancel`, dropping `body` — and with it the in-flight
+            // response — so the upstream connection closes.
+            let body = async {
+                // Fail-fast: a pre-aborted signal never leaves the process.
+                if already_aborted {
+                    slot.commit_async(ChatReply::Error(ABORT_MSG.to_string()))
                         .await;
+                    return;
                 }
-            }
 
-            match req_builder.send().await {
-                Ok(response) => {
-                    // Check HTTP status before reading SSE stream.
-                    // non-2xx bodies are plain JSON, not SSE — they would be
-                    // silently swallowed by the "data: " prefix filter otherwise.
-                    let status = response.status();
-                    if !status.is_success() {
-                        let body = response.text().await.unwrap_or_default();
-                        // Try to extract error message from OpenAI-style JSON body
-                        let msg = serde_json::from_str::<serde_json::Value>(&body)
-                            .ok()
-                            .and_then(|j| j["error"]["message"].as_str().map(String::from))
-                            .unwrap_or_else(|| format!("HTTP {} : {}", status, body));
-                        slot.commit_async(ChatReply::Error(msg)).await;
-                        return;
+                async fn flush_buf(
+                    slot: &PromiseResultSlot<ChatReply>,
+                    buf: &mut Option<ToolCallBuffer>,
+                ) {
+                    if let Some(state) = buf.take() {
+                        slot.commit_async(ChatReply::Chunk(state.into_chunk()))
+                            .await;
                     }
+                }
 
-                    // parse SSE manually
-                    let byte_stream = response
-                        .bytes_stream()
-                        .map(|r| r.map_err(std::io::Error::other));
+                match req_builder.send().await {
+                    Ok(response) => {
+                        // Check HTTP status before reading SSE stream.
+                        // non-2xx bodies are plain JSON, not SSE — they would be
+                        // silently swallowed by the "data: " prefix filter otherwise.
+                        let status = response.status();
+                        if !status.is_success() {
+                            let body = response.text().await.unwrap_or_default();
+                            // Try to extract error message from OpenAI-style JSON body
+                            let msg = serde_json::from_str::<serde_json::Value>(&body)
+                                .ok()
+                                .and_then(|j| j["error"]["message"].as_str().map(String::from))
+                                .unwrap_or_else(|| format!("HTTP {} : {}", status, body));
+                            slot.commit_async(ChatReply::Error(msg)).await;
+                            return;
+                        }
 
-                    let reader = StreamReader::new(byte_stream);
-                    let mut lines = tokio::io::BufReader::new(reader).lines();
-                    let mut buf: Option<ToolCallBuffer> = None;
+                        // parse SSE manually
+                        let byte_stream = response
+                            .bytes_stream()
+                            .map(|r| r.map_err(std::io::Error::other));
 
-                    // Idle guard: wrap each frame read with a per-call timeout.
-                    // tokio::time::timeout measures the gap between consecutive
-                    // SSE lines, so any received byte naturally resets it. When
-                    // it fires, an Error is committed and the buffered
-                    // tool-call fragment is intentionally dropped (stalled
-                    // partial output is worthless).
-                    let mut idle_aborted = false;
-                    let idle_limit = idle_timeout_secs.map(|s| std::time::Duration::from_secs(s));
+                        let reader = StreamReader::new(byte_stream);
+                        let mut lines = tokio::io::BufReader::new(reader).lines();
+                        let mut buf: Option<ToolCallBuffer> = None;
 
-                    'sse: loop {
-                        let next = match idle_limit {
-                            Some(idle) => {
-                                match tokio::time::timeout(idle, lines.next_line()).await {
-                                    Ok(inner) => inner,
-                                    Err(_) => {
-                                        idle_aborted = true;
-                                        slot.commit_async(ChatReply::Error(format!(
-                                            "llm stream idle timeout: no data for {}s",
-                                            idle.as_secs()
-                                        )))
-                                        .await;
+                        // Idle guard: wrap each frame read with a per-call timeout.
+                        // tokio::time::timeout measures the gap between consecutive
+                        // SSE lines, so any received byte naturally resets it. When
+                        // it fires, an Error is committed and the buffered
+                        // tool-call fragment is intentionally dropped (stalled
+                        // partial output is worthless).
+                        let mut idle_aborted = false;
+                        let idle_limit =
+                            idle_timeout_secs.map(|s| std::time::Duration::from_secs(s));
+                        let notify = abort_notify.clone();
+
+                        'sse: loop {
+                            // Line read raced against the idle timeout and the user
+                            // abort signal. `biased` lets a fired signal win even when
+                            // a line is simultaneously ready.
+                            let line_fut = async {
+                                match idle_limit {
+                                    Some(idle) => tokio::time::timeout(idle, lines.next_line())
+                                        .await
+                                        .map_err(|_| ()),
+                                    None => Ok(lines.next_line().await),
+                                }
+                            };
+                            let next = match &notify {
+                                Some(n) => tokio::select! {
+                                    biased;
+                                    _ = n.notified() => {
+                                        slot.commit_async(ChatReply::Error(ABORT_MSG.to_string())).await;
                                         break 'sse;
                                     }
+                                    r = line_fut => r,
+                                },
+                                None => line_fut.await,
+                            };
+                            let next_result = match next {
+                                Ok(inner) => inner,
+                                Err(()) => {
+                                    idle_aborted = true;
+                                    slot.commit_async(ChatReply::Error(format!(
+                                        "llm stream idle timeout: no data for {}s",
+                                        idle_limit.map(|d| d.as_secs()).unwrap_or(0)
+                                    )))
+                                    .await;
+                                    break 'sse;
                                 }
-                            }
-                            None => lines.next_line().await,
-                        };
-                        // Preserve legacy end semantics: Ok(Some)=frame,
-                        // Ok(None)=EOF, Err=end silently.
-                        let Ok(Some(line)) = next else {
-                            break 'sse;
-                        };
-                        let line = line.trim().to_string();
+                            };
+                            // Preserve legacy end semantics: Ok(Some)=frame,
+                            // Ok(None)=EOF, Err=end silently.
+                            let Ok(Some(line)) = next_result else {
+                                break 'sse;
+                            };
+                            let line = line.trim().to_string();
 
-                        if let Some(data) = line.strip_prefix("data: ") {
-                            if data == "[DONE]" {
-                                if buf.is_some() {
-                                    flush_buf(&slot, &mut buf).await;
-                                }
-                                break;
-                            }
-
-                            if let Ok(mut json) = serde_json::from_str::<serde_json::Value>(data) {
-                                if json.get("error").is_some() {
+                            if let Some(data) = line.strip_prefix("data: ") {
+                                if data == "[DONE]" {
                                     if buf.is_some() {
                                         flush_buf(&slot, &mut buf).await;
                                     }
-
-                                    let err_msg = json["error"]["message"]
-                                        .as_str()
-                                        .unwrap_or(data)
-                                        .to_string();
-                                    slot.commit_async(ChatReply::Error(err_msg)).await;
                                     break;
                                 }
 
-                                // Check for tool_calls in this chunk
-                                if let Some(tcs) =
-                                    json[OUTMSG_FIELD_CHOICES][0]["delta"]["tool_calls"].as_array()
-                                    && !tcs.is_empty()
+                                if let Ok(mut json) =
+                                    serde_json::from_str::<serde_json::Value>(data)
                                 {
-                                    // A chunk may carry content/reasoning alongside tool_calls.
-                                    // Since we only buffer tool_calls here, emit that text now —
-                                    // otherwise it is lost when finish_reason arrives in a later,
-                                    // content-less chunk.
-                                    let has_finish = json[OUTMSG_FIELD_CHOICES][0]["finish_reason"]
-                                        .as_str()
-                                        .is_some();
-                                    let delta = &json[OUTMSG_FIELD_CHOICES][0]["delta"];
-                                    if !has_finish
-                                        && (delta.get("content").is_some()
-                                            || delta.get("reasoning_content").is_some())
-                                    {
-                                        let mut text_chunk = json.clone();
-                                        if let Some(obj) =
-                                            text_chunk[OUTMSG_FIELD_CHOICES][0]["delta"]
-                                                .as_object_mut()
-                                        {
-                                            obj.remove("tool_calls");
-                                        }
-                                        if !has_normalizer {
-                                            normalize_message_shape(&mut text_chunk);
-                                        }
-                                        slot.commit_async(ChatReply::Chunk(text_chunk)).await;
-                                    }
-
-                                    // Accumulate tool_call deltas
-                                    for tc in tcs {
-                                        let idx = tc["index"].as_i64().unwrap_or(0) as usize;
-                                        // Got a new index → flush previous buffered tool_call (matches openai-node logic)
-                                        if let Some(ref cur) = buf
-                                            && cur.idx != idx
-                                        {
+                                    if json.get("error").is_some() {
+                                        if buf.is_some() {
                                             flush_buf(&slot, &mut buf).await;
                                         }
 
-                                        let state =
-                                            buf.get_or_insert_with(|| ToolCallBuffer::new(idx));
-                                        state.apply_delta(tc, &json);
+                                        let err_msg = json["error"]["message"]
+                                            .as_str()
+                                            .unwrap_or(data)
+                                            .to_string();
+                                        slot.commit_async(ChatReply::Error(err_msg)).await;
+                                        break;
                                     }
 
-                                    // check finish_reason AFTER processing tool_calls
-                                    // (non-standard servers may emit both in one chunk)
-                                    if json[OUTMSG_FIELD_CHOICES][0]["finish_reason"]
-                                        .as_str()
-                                        .is_some()
+                                    // Check for tool_calls in this chunk
+                                    if let Some(tcs) =
+                                        json[OUTMSG_FIELD_CHOICES][0]["delta"]["tool_calls"]
+                                            .as_array()
+                                        && !tcs.is_empty()
                                     {
-                                        flush_buf(&slot, &mut buf).await;
-
-                                        // MUST NOT emit the original json as-is: it still carries the last
-                                        // tool_calls delta. Emit a clean finish-only chunk instead.
-                                        let mut finish = json.clone();
-                                        if let Some(obj) =
-                                            finish[OUTMSG_FIELD_CHOICES][0]["delta"].as_object_mut()
+                                        // A chunk may carry content/reasoning alongside tool_calls.
+                                        // Since we only buffer tool_calls here, emit that text now —
+                                        // otherwise it is lost when finish_reason arrives in a later,
+                                        // content-less chunk.
+                                        let has_finish =
+                                            json[OUTMSG_FIELD_CHOICES][0]["finish_reason"]
+                                                .as_str()
+                                                .is_some();
+                                        let delta = &json[OUTMSG_FIELD_CHOICES][0]["delta"];
+                                        if !has_finish
+                                            && (delta.get("content").is_some()
+                                                || delta.get("reasoning_content").is_some())
                                         {
-                                            obj.remove("tool_calls");
+                                            let mut text_chunk = json.clone();
+                                            if let Some(obj) =
+                                                text_chunk[OUTMSG_FIELD_CHOICES][0]["delta"]
+                                                    .as_object_mut()
+                                            {
+                                                obj.remove("tool_calls");
+                                            }
+                                            if !has_normalizer {
+                                                normalize_message_shape(&mut text_chunk);
+                                            }
+                                            slot.commit_async(ChatReply::Chunk(text_chunk)).await;
                                         }
+
+                                        // Accumulate tool_call deltas
+                                        for tc in tcs {
+                                            let idx = tc["index"].as_i64().unwrap_or(0) as usize;
+                                            // Got a new index → flush previous buffered tool_call (matches openai-node logic)
+                                            if let Some(ref cur) = buf
+                                                && cur.idx != idx
+                                            {
+                                                flush_buf(&slot, &mut buf).await;
+                                            }
+
+                                            let state =
+                                                buf.get_or_insert_with(|| ToolCallBuffer::new(idx));
+                                            state.apply_delta(tc, &json);
+                                        }
+
+                                        // check finish_reason AFTER processing tool_calls
+                                        // (non-standard servers may emit both in one chunk)
+                                        if json[OUTMSG_FIELD_CHOICES][0]["finish_reason"]
+                                            .as_str()
+                                            .is_some()
+                                        {
+                                            flush_buf(&slot, &mut buf).await;
+
+                                            // MUST NOT emit the original json as-is: it still carries the last
+                                            // tool_calls delta. Emit a clean finish-only chunk instead.
+                                            let mut finish = json.clone();
+                                            if let Some(obj) =
+                                                finish[OUTMSG_FIELD_CHOICES][0]["delta"]
+                                                    .as_object_mut()
+                                            {
+                                                obj.remove("tool_calls");
+                                            }
+                                            // Normalize message format in choices[] delta
+                                            if !has_normalizer {
+                                                normalize_message_shape(&mut finish);
+                                            }
+                                            slot.commit_async(ChatReply::Chunk(finish)).await;
+                                        }
+                                    } else {
+                                        // Non-tool_call (content, finish_reason, etc.) → flush then passthrough
+                                        flush_buf(&slot, &mut buf).await;
                                         // Normalize message format in choices[] delta
                                         if !has_normalizer {
-                                            normalize_message_shape(&mut finish);
+                                            normalize_message_shape(&mut json);
                                         }
-                                        slot.commit_async(ChatReply::Chunk(finish)).await;
+                                        slot.commit_async(ChatReply::Chunk(json)).await;
                                     }
-                                } else {
-                                    // Non-tool_call (content, finish_reason, etc.) → flush then passthrough
-                                    flush_buf(&slot, &mut buf).await;
-                                    // Normalize message format in choices[] delta
-                                    if !has_normalizer {
-                                        normalize_message_shape(&mut json);
-                                    }
-                                    slot.commit_async(ChatReply::Chunk(json)).await;
                                 }
                             }
                         }
-                    }
 
-                    // Stream ended without [DONE] (server closed early): flush
-                    // any still-buffered tool_call so it is not silently lost.
-                    // On the normal [DONE] path the buffer is already empty.
-                    // Skipped when the idle guard aborted the stream.
-                    if !idle_aborted {
-                        if buf.is_some() {
-                            flush_buf(&slot, &mut buf).await;
+                        // Stream ended without [DONE] (server closed early): flush
+                        // any still-buffered tool_call so it is not silently lost.
+                        // On the normal [DONE] path the buffer is already empty.
+                        // Skipped when the idle guard aborted the stream.
+                        if !idle_aborted {
+                            if buf.is_some() {
+                                flush_buf(&slot, &mut buf).await;
+                            }
+                            slot.commit_async(ChatReply::Done).await;
                         }
-                        slot.commit_async(ChatReply::Done).await;
+                    }
+                    Err(e) => {
+                        slot.commit_async(ChatReply::Error(e.to_string())).await;
                     }
                 }
-                Err(e) => {
-                    slot.commit_async(ChatReply::Error(e.to_string())).await;
-                }
+            };
+
+            tokio::select! {
+                biased;
+                _ = task_cancel.notified() => {}
+                _ = body => {}
             }
         });
 
-        AsyncIterableIterator::create_with_result_slot(
+        AsyncIterableIterator::create(
             ctx,
-            result_slot,
-            move |cx, msg| -> Result<Option<JSValue>, i32> {
-                match msg {
-                    ChatReply::Chunk(chunk) => {
-                        let val = JSValue::from_serde_json(cx, &chunk)?;
-                        let val = if normalizer.is_callable() {
-                            normalizer.call(cx, JSValue::UNDEFINED, &[val])?
-                        } else {
-                            val
-                        };
-                        Ok(Some(val))
+            LlmStreamFetcher::new(
+                result_slot,
+                cancel,
+                normalizer,
+                |cx, msg| -> Result<Option<JSValue>, i32> {
+                    match msg {
+                        ChatReply::Chunk(chunk) => {
+                            let val = JSValue::from_serde_json(cx, &chunk)?;
+                            Ok(Some(val))
+                        }
+                        ChatReply::Done => Ok(None),
+                        ChatReply::Error(e) => Err(cx.throw_internal_error(&e)),
                     }
-                    ChatReply::Done => Ok(None),
-                    ChatReply::Error(e) => Err(cx.throw_internal_error(&e)),
-                }
-            },
+                },
+            ),
         )
         .map(JSValue::from)
     } else {
         // Non-streaming: Promise - Use reqwest to preserve extension fields
+        if already_aborted {
+            // Fail-fast: reject with the signal's reason without sending.
+            let reason = match signal_reason(&signal_val) {
+                Some(r) => r,
+                None => make_dom_exception(ctx, "AbortError", "The operation was aborted.")?,
+            };
+            return Promise::from_reject_value(ctx, reason).map(JSValue::from);
+        }
+
         let result_slot = PromiseResultSlot::<Result<serde_json::Value, String>>::new();
         let normalizer_ns = normalizer;
         let promise = Promise::create_with_result_slot(
@@ -661,50 +837,65 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
         )?;
 
         tokio::spawn(async move {
-            let result = match req_builder.send().await {
-                Ok(response) => {
-                    let status = response.status();
-                    let body = response.text().await.unwrap_or_default();
+            // Abort races the whole request; dropping `result_fut` closes the
+            // upstream connection, so generation stops server-side too.
+            let result_fut = async {
+                let result = match req_builder.send().await {
+                    Ok(response) => {
+                        let status = response.status();
+                        let body = response.text().await.unwrap_or_default();
 
-                    if status.is_success() {
-                        if body.is_empty() {
-                            // HTTP success, but empty response body -> upstream failure
-                            Err(format!("HTTP {} but returns empty body", status))
-                        } else {
-                            match serde_json::from_str::<serde_json::Value>(&body) {
-                                Ok(mut json) => {
-                                    // Check for error in response
-                                    if json.get("error").is_some() {
-                                        let err_msg = json["error"]["message"]
-                                            .as_str()
-                                            .unwrap_or(&body)
-                                            .to_string();
-                                        Err(err_msg)
-                                    } else {
-                                        // Normalize message format in choices[] message
-                                        if !has_normalizer {
-                                            normalize_message_shape(&mut json);
+                        if status.is_success() {
+                            if body.is_empty() {
+                                // HTTP success, but empty response body -> upstream failure
+                                Err(format!("HTTP {} but returns empty body", status))
+                            } else {
+                                match serde_json::from_str::<serde_json::Value>(&body) {
+                                    Ok(mut json) => {
+                                        // Check for error in response
+                                        if json.get("error").is_some() {
+                                            let err_msg = json["error"]["message"]
+                                                .as_str()
+                                                .unwrap_or(&body)
+                                                .to_string();
+                                            Err(err_msg)
+                                        } else {
+                                            // Normalize message format in choices[] message
+                                            if !has_normalizer {
+                                                normalize_message_shape(&mut json);
+                                            }
+                                            Ok(json)
                                         }
-                                        Ok(json)
+                                    }
+                                    Err(e) => {
+                                        let snippet = if body.len() > 200 {
+                                            &body[..200]
+                                        } else {
+                                            &body
+                                        };
+                                        Err(format!(
+                                            "Failed to parse JSON: {} | body: {}",
+                                            e, snippet
+                                        ))
                                     }
                                 }
-                                Err(e) => {
-                                    let snippet = if body.len() > 200 {
-                                        &body[..200]
-                                    } else {
-                                        &body
-                                    };
-                                    Err(format!("Failed to parse JSON: {} | body: {}", e, snippet))
-                                }
                             }
+                        } else {
+                            Err(format!("HTTP {} : {}", status, body))
                         }
-                    } else {
-                        Err(format!("HTTP {} : {}", status, body))
                     }
-                }
-                Err(e) => Err(e.to_string()),
+                    Err(e) => Err(e.to_string()),
+                };
+                result
             };
-
+            let result = match abort_notify {
+                Some(n) => tokio::select! {
+                    biased;
+                    _ = n.notified() => Err(ABORT_MSG.to_string()),
+                    r = result_fut => r,
+                },
+                None => result_fut.await,
+            };
             let _ = result_slot.commit(result);
         });
 
