@@ -155,7 +155,7 @@ fn js_emit(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     };
 
     for i in start..start + n {
-        let (_, cb) = emitter.dispatching.borrow()[i].clone();
+        let (_, cb) = emitter.dispatching.borrow()[i];
         if cb.call(ctx, JSValue::UNDEFINED, args).is_err() {
             // Ignore listener errors
             let exc = ctx.take_exception();
