@@ -235,7 +235,7 @@ pub(super) fn js_client_responses(ctx: &mut ScopedContext, cc: CallContext) -> J
     }
 
     if is_stream {
-        let idle_limit = opts.idle_timeout.map(Duration::from_secs);
+        let stall_limit = opts.stallTimeout.map(Duration::from_secs);
         let result_slot = PromiseResultSlot::<ResponsesReply>::new();
         // Commits from the reading task wake the parked event loop so the
         // custom fetcher below polls the slot promptly.
@@ -281,15 +281,15 @@ pub(super) fn js_client_responses(ctx: &mut ScopedContext, cc: CallContext) -> J
                         let reader = StreamReader::new(byte_stream);
                         let mut lines = tokio::io::BufReader::new(reader).lines();
 
-                        // Idle guard: each line read races a per-call timeout so
+                        // Stall guard: each line read races a per-call timeout so
                         // any received byte resets it. On fire, an Error is
                         // committed and Done is skipped (stalled output dropped).
-                        let mut idle_aborted = false;
+                        let mut stall_aborted = false;
 
                         loop {
                             let line_fut = async {
-                                match idle_limit {
-                                    Some(idle) => tokio::time::timeout(idle, lines.next_line())
+                                match stall_limit {
+                                    Some(stall) => tokio::time::timeout(stall, lines.next_line())
                                         .await
                                         .map_err(|_| ()),
                                     None => Ok(lines.next_line().await),
@@ -309,11 +309,14 @@ pub(super) fn js_client_responses(ctx: &mut ScopedContext, cc: CallContext) -> J
                             let next_result = match next {
                                 Ok(inner) => inner,
                                 Err(()) => {
-                                    idle_aborted = true;
-                                    commit_slot(&slot, ResponsesReply::Error(format!(
-                                        "llm stream idle timeout: no data for {}s",
-                                        idle_limit.map(|d| d.as_secs()).unwrap_or(0)
-                                    )))
+                                    stall_aborted = true;
+                                    commit_slot(
+                                        &slot,
+                                        ResponsesReply::Error(format!(
+                                            "llm stream stall timeout: no data for {}s",
+                                            stall_limit.map(|d| d.as_secs()).unwrap_or(0)
+                                        )),
+                                    )
                                     .await;
                                     break;
                                 }
@@ -336,7 +339,7 @@ pub(super) fn js_client_responses(ctx: &mut ScopedContext, cc: CallContext) -> J
                                 }
                             }
                         }
-                        if !idle_aborted {
+                        if !stall_aborted {
                             commit_slot(&slot, ResponsesReply::Done).await;
                         }
                     }

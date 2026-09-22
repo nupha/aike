@@ -74,7 +74,11 @@ svr.post("/v1/chat/completions", async (req, res) => {
         object: "chat.completion",
         model: "mock",
         choices: [
-          { index: 0, message: { role: "assistant", content: "slow reply" }, finish_reason: "stop" },
+          {
+            index: 0,
+            message: { role: "assistant", content: "slow reply" },
+            finish_reason: "stop",
+          },
         ],
       }),
     );
@@ -171,8 +175,16 @@ function reset() {
   } catch (e) {
     e2 = e;
   }
-  check("chatOnce non-AbortSignal throws TypeError", e1 instanceof TypeError, String(e1));
-  check("chat non-AbortSignal throws TypeError", e2 instanceof TypeError, String(e2));
+  check(
+    "chatOnce non-AbortSignal throws TypeError",
+    e1 instanceof TypeError,
+    String(e1),
+  );
+  check(
+    "chat non-AbortSignal throws TypeError",
+    e2 instanceof TypeError,
+    String(e2),
+  );
 }
 
 // ---- 2. pre-aborted chatOnce: rejects with reason, request never sent ----
@@ -188,7 +200,11 @@ function reset() {
     got = e;
   }
   check("pre-aborted chatOnce rejects", got !== undefined, String(got));
-  check("pre-aborted chatOnce rejects with signal reason", got === reason, String(got));
+  check(
+    "pre-aborted chatOnce rejects with signal reason",
+    got === reason,
+    String(got),
+  );
   check("pre-aborted chatOnce sends no request", hits === 0, `hits=${hits}`);
 }
 
@@ -207,7 +223,11 @@ function reset() {
     threw = true;
     got = e;
   }
-  check("pre-aborted chat stream rejects", threw, "iterator completed without error");
+  check(
+    "pre-aborted chat stream rejects",
+    threw,
+    "iterator completed without error",
+  );
   check(
     "pre-aborted chat stream abort message",
     got && String(got.message || got).includes(ABORT_MSG),
@@ -237,7 +257,11 @@ function reset() {
     got && String(got.message || got).includes(ABORT_MSG),
     `got ${got && (got.message || got)}`,
   );
-  check("in-flight chatOnce rejects promptly", elapsed < 1000, `took ${elapsed}ms`);
+  check(
+    "in-flight chatOnce rejects promptly",
+    elapsed < 1000,
+    `took ${elapsed}ms`,
+  );
   // No server-side close check here: aike arms the disconnect watcher only on
   // the SSE path, so req.onClose never fires for a non-stream res.end().
   // (The TCP drop itself is real — verified with lsof during development.)
@@ -251,7 +275,10 @@ function reset() {
   let got;
   let threw = false;
   try {
-    for await (const chunk of cli.chat({ messages: [] }, { signal: c.signal })) {
+    for await (const chunk of cli.chat(
+      { messages: [] },
+      { signal: c.signal },
+    )) {
       chunks.push(chunk);
       if (chunks.length === 2) c.abort();
     }
@@ -259,8 +286,16 @@ function reset() {
     threw = true;
     got = e;
   }
-  check("stream yielded before abort", chunks.length >= 2, `got ${chunks.length}`);
-  check("in-flight stream rejects after abort", threw, "iterator completed without error");
+  check(
+    "stream yielded before abort",
+    chunks.length >= 2,
+    `got ${chunks.length}`,
+  );
+  check(
+    "in-flight stream rejects after abort",
+    threw,
+    "iterator completed without error",
+  );
   check(
     "in-flight stream abort message",
     got && String(got.message || got).includes(ABORT_MSG),
@@ -293,14 +328,17 @@ function reset() {
 {
   reset();
   const c = new AbortController();
-  await cli.chatOnce({ messages: [] }, { signal: c.signal, timeout: 30, idle_timeout: 5 });
+  await cli.chatOnce(
+    { messages: [] },
+    { signal: c.signal, timeout: 30, stallTimeout: 5 },
+  );
   check("request reached server", hits === 1, `hits=${hits}`);
   check(
-    "signal/timeout/idle_timeout absent from body",
+    "signal/timeout/stallTimeout absent from body",
     bodyKeys &&
       !bodyKeys.includes("signal") &&
       !bodyKeys.includes("timeout") &&
-      !bodyKeys.includes("idle_timeout"),
+      !bodyKeys.includes("stallTimeout"),
     JSON.stringify(bodyKeys),
   );
 }
@@ -317,8 +355,16 @@ function reset() {
   } catch (e) {
     got = e;
   }
-  check("pre-aborted responsesOnce rejects with reason", got === reason, String(got));
-  check("pre-aborted responsesOnce sends no request", hits === 0, `hits=${hits}`);
+  check(
+    "pre-aborted responsesOnce rejects with reason",
+    got === reason,
+    String(got),
+  );
+  check(
+    "pre-aborted responsesOnce sends no request",
+    hits === 0,
+    `hits=${hits}`,
+  );
 }
 
 // ---- 9. responsesOnce in-flight abort ----
@@ -351,7 +397,10 @@ function reset() {
   let got;
   let threw = false;
   try {
-    for await (const ev of cli.responses({ input: "hi" }, { signal: c.signal })) {
+    for await (const ev of cli.responses(
+      { input: "hi" },
+      { signal: c.signal },
+    )) {
       chunks.push(ev);
       if (chunks.length === 2) c.abort();
     }
@@ -359,8 +408,16 @@ function reset() {
     threw = true;
     got = e;
   }
-  check("responses stream yielded before abort", chunks.length >= 2, `got ${chunks.length}`);
-  check("responses stream rejects after abort", threw, "iterator completed without error");
+  check(
+    "responses stream yielded before abort",
+    chunks.length >= 2,
+    `got ${chunks.length}`,
+  );
+  check(
+    "responses stream rejects after abort",
+    threw,
+    "iterator completed without error",
+  );
   check(
     "responses stream abort message",
     got && String(got.message || got).includes(ABORT_MSG),

@@ -174,7 +174,7 @@ pub(super) fn get_client_mut<'a>(
 pub(super) struct CallOpts {
     pub(super) signal: JSValue,
     pub(super) timeout: Option<u64>,
-    pub(super) idle_timeout: Option<u64>,
+    pub(super) stallTimeout: Option<u64>,
 }
 
 /// Read an optional positive-integer seconds control option.
@@ -207,7 +207,7 @@ pub(super) fn parse_call_opts(ctx: &mut ScopedContext, cc: &CallContext) -> Resu
         return Ok(CallOpts {
             signal: JSValue::UNDEFINED,
             timeout: None,
-            idle_timeout: None,
+            stallTimeout: None,
         });
     }
     let obj = v
@@ -222,7 +222,7 @@ pub(super) fn parse_call_opts(ctx: &mut ScopedContext, cc: &CallContext) -> Resu
     Ok(CallOpts {
         signal,
         timeout: opt_secs_prop(ctx, &obj, "timeout")?,
-        idle_timeout: opt_secs_prop(ctx, &obj, "idle_timeout")?,
+        stallTimeout: opt_secs_prop(ctx, &obj, "stallTimeout")?,
     })
 }
 
@@ -493,7 +493,7 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
         .as_object()
         .ok_or_else(|| ctx.throw_type_error("chat() requires a request object"))?;
 
-    // arg(1): control-only opts (signal/timeout/idle_timeout) — never submitted.
+    // arg(1): control-only opts (signal/timeout/stallTimeout) — never submitted.
     let opts = parse_call_opts(ctx, &cc)?;
     let abort_notify = signal_notify(&opts.signal);
     let already_aborted = signal_is_aborted(&opts.signal);
@@ -507,9 +507,9 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
     // NOT sent to the API — controls HTTP timeout only.
     let req_timeout_secs = opts.timeout;
 
-    // Per-request stream-idle timeout (seconds): abort when no SSE data has
-    // arrived for this long. Also NOT sent to the API.
-    let idle_timeout_secs = opts.idle_timeout;
+    // Per-request stream-stall timeout (seconds): abort when no stream data has
+    // arrived for this long (the stream "stalled"). Also NOT sent to the API.
+    let stall_timeout_secs = opts.stallTimeout;
 
     // camelCase → snake_case for OpenAI API compatibility
     json_keys_camel_to_snake(&mut req_json);
@@ -643,24 +643,24 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
                         let mut lines = tokio::io::BufReader::new(reader).lines();
                         let mut buf: Option<ToolCallBuffer> = None;
 
-                        // Idle guard: wrap each frame read with a per-call timeout.
+                        // Stall guard: wrap each frame read with a per-call timeout.
                         // tokio::time::timeout measures the gap between consecutive
                         // SSE lines, so any received byte naturally resets it. When
                         // it fires, an Error is committed and the buffered
                         // tool-call fragment is intentionally dropped (stalled
                         // partial output is worthless).
-                        let mut idle_aborted = false;
-                        let idle_limit =
-                            idle_timeout_secs.map(|s| std::time::Duration::from_secs(s));
+                        let mut stall_aborted = false;
+                        let stall_limit =
+                            stall_timeout_secs.map(|s| std::time::Duration::from_secs(s));
                         let notify = abort_notify.clone();
 
                         'sse: loop {
-                            // Line read raced against the idle timeout and the user
+                            // Line read raced against the stall timeout and the user
                             // abort signal. `biased` lets a fired signal win even when
                             // a line is simultaneously ready.
                             let line_fut = async {
-                                match idle_limit {
-                                    Some(idle) => tokio::time::timeout(idle, lines.next_line())
+                                match stall_limit {
+                                    Some(stall) => tokio::time::timeout(stall, lines.next_line())
                                         .await
                                         .map_err(|_| ()),
                                     None => Ok(lines.next_line().await),
@@ -680,10 +680,10 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
                             let next_result = match next {
                                 Ok(inner) => inner,
                                 Err(()) => {
-                                    idle_aborted = true;
+                                    stall_aborted = true;
                                     slot.commit_async(ChatReply::Error(format!(
-                                        "llm stream idle timeout: no data for {}s",
-                                        idle_limit.map(|d| d.as_secs()).unwrap_or(0)
+                                        "llm stream stall timeout: no data for {}s",
+                                        stall_limit.map(|d| d.as_secs()).unwrap_or(0)
                                     )))
                                     .await;
                                     break 'sse;
@@ -806,8 +806,8 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
                         // Stream ended without [DONE] (server closed early): flush
                         // any still-buffered tool_call so it is not silently lost.
                         // On the normal [DONE] path the buffer is already empty.
-                        // Skipped when the idle guard aborted the stream.
-                        if !idle_aborted {
+                        // Skipped when the stall guard aborted the stream.
+                        if !stall_aborted {
                             if buf.is_some() {
                                 flush_buf(&slot, &mut buf).await;
                             }

@@ -99,11 +99,11 @@ declare module "ai" {
     /** Per-request HTTP total timeout in seconds. */
     timeout?: number;
     /**
-     * Per-request stream-idle timeout in seconds: abort with an error when no
-     * SSE data arrives for this long (any received byte resets the timer).
-     * Streaming only.
+     * Per-request stream-stall timeout in seconds: abort with an error when no
+     * stream data arrives for this long (the stream stalled; any received byte
+     * resets the timer). Streaming only.
      */
-    idle_timeout?: number;
+    stallTimeout?: number;
   }
 
   export interface ChatResponse {
