@@ -57,8 +57,9 @@ function testControllerAbort() {
   ac1.abort();
   check("after abort aborted true", ac1.signal.aborted === true, "");
   check(
-    "after abort reason undefined",
-    ac1.signal.reason === undefined,
+    "after abort default reason is AbortError",
+    ac1.signal.reason instanceof DOMException &&
+      ac1.signal.reason.name === "AbortError",
     `got ${ac1.signal.reason}`,
   );
 
@@ -143,7 +144,11 @@ function testSignalStaticAbort() {
   const s1 = AbortSignal.abort();
   check("static abort is AbortSignal", s1 instanceof AbortSignal, "");
   check("static abort aborted", s1.aborted === true, "");
-  check("static abort reason", s1.reason === undefined, `got ${s1.reason}`);
+  check(
+    "static abort default reason is AbortError",
+    s1.reason instanceof DOMException && s1.reason.name === "AbortError",
+    `got ${s1.reason}`,
+  );
 
   // With reason
   const s2 = AbortSignal.abort("custom");
@@ -159,17 +164,32 @@ function testSignalStaticAbort() {
 // 5. AbortSignal.timeout() static
 // ===================================================================
 
-function testSignalStaticTimeout() {
+async function testSignalStaticTimeout() {
   console.log("\n=== AbortSignal.timeout() static ===");
 
-  // Note: current implementation always returns immediately-aborted signal
-  const s = AbortSignal.timeout(1000);
+  // timeout() returns a non-aborted signal that aborts after the delay with
+  // a "TimeoutError" DOMException (WHATWG DOM §3.2).
+  const s = AbortSignal.timeout(10);
   check("static timeout is AbortSignal", s instanceof AbortSignal, "");
-  check("static timeout aborted", s.aborted === true, "");
   check(
-    "static timeout reason is string",
-    typeof s.reason === "string",
-    `got ${typeof s.reason}`,
+    "static timeout not immediately aborted",
+    s.aborted === false,
+    `got ${s.aborted}`,
+  );
+  check(
+    "static timeout reason initially undefined",
+    s.reason === undefined,
+    `got ${s.reason}`,
+  );
+
+  await new Promise((resolve) => {
+    s.onabort = () => resolve();
+  });
+  check("static timeout aborted after delay", s.aborted === true, "");
+  check(
+    "static timeout reason is TimeoutError",
+    s.reason instanceof DOMException && s.reason.name === "TimeoutError",
+    `got ${s.reason}`,
   );
 }
 
@@ -252,12 +272,12 @@ function testSignalIdentity() {
 // Runner
 // ===================================================================
 
-function runAll() {
+async function runAll() {
   testControllerBasics();
   testControllerAbort();
   testThrowIfAborted();
   testSignalStaticAbort();
-  testSignalStaticTimeout();
+  await testSignalStaticTimeout();
   testSignalConstructor();
   testIndependentSignals();
   testSignalSources();
@@ -269,4 +289,6 @@ function runAll() {
   console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
 }
 
-runAll();
+runAll().catch((e) => {
+  console.log("UNEXPECTED ERROR:", e);
+});

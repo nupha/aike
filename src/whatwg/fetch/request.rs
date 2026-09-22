@@ -316,10 +316,6 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         credentials = String::from("include");
     }
 
-    // A `ReadableStream` body is canceled with the abort reason when the signal
-    // aborts (Fetch spec). Attach it to the signal; `js_controller_abort` cancels
-    // it synchronously with a live `cx`, avoiding any cross-async JSValue handle.
-
     let notify = signal_val.as_ref().and_then(signal_notify);
     let already_aborted = signal_val.as_ref().is_some_and(signal_is_aborted);
     // When the signal is (already) aborted the fetch must reject with the

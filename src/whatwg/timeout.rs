@@ -267,6 +267,40 @@ pub(crate) fn js_sleep(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     Ok(promise.into())
 }
 
+/// Register a one-shot timer that invokes the JS callable `callback` after
+/// `ms` milliseconds, reusing the runtime timer queue. Used by
+/// `AbortSignal.timeout()` to abort the returned signal after the delay.
+pub(crate) fn register_timer_once(
+    ctx: &mut ScopedContext,
+    callback: JSValue,
+    ms: u64,
+) -> Result<(), i32> {
+    let callback = callback.ensure_callable(ctx)?;
+    let deadline = Instant::now() + Duration::from_millis(ms);
+    let id = next_timer_id(ctx);
+    let need_start = {
+        let s = &mut AikeRuntimeState::of(ctx).timers;
+        insert_sorted(
+            &mut s.entries,
+            TimerEntry {
+                id,
+                callback,
+                interval_ms: None,
+                deadline,
+            },
+        );
+        let need = !s.job_active;
+        s.job_active = true;
+        need
+    };
+
+    if need_start {
+        start_timer_task(ctx);
+    }
+
+    Ok(())
+}
+
 const MAGIC_SET_TIMEOUT: i16 = 0;
 const MAGIC_SET_INTERVAL: i16 = 1;
 const MAGIC_CLEAR: i16 = 2; // clearTimeout and clearInterval share the same impl

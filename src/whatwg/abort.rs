@@ -6,7 +6,12 @@
 //! Provides `AbortController` and `AbortSignal` for cooperative cancellation
 //! of asynchronous operations, following the WHATWG spec.
 
-use std::{cell::RefCell, rc::Rc, sync::Arc};
+use std::{
+    cell::RefCell,
+    collections::VecDeque,
+    rc::{Rc, Weak},
+    sync::Arc,
+};
 
 use tokio::sync::Notify;
 use zuqe::{
@@ -26,15 +31,24 @@ struct SignalInner {
     reason: JSValue,
     // The associated AbortController (for follow signal to find controller)
     controller: Option<Object>,
+    /// This signal's own JS object, used as the `abort` event's `target`.
+    /// A back-ref inside the object graph is fine for mark-sweep GC (a
+    /// self-loop never keeps an unreachable object alive).
+    signal: Option<Object>,
     /// Notifies waiters (e.g. an in-flight fetch) when this signal aborts.
     notify: Arc<Notify>,
-    /// A request body (e.g. a `ReadableStream`) that must be canceled with the
-    /// abort reason when this signal aborts, per the Fetch spec. Set by `fetch`
-    /// when it uploads a streaming body. GC-traced via the signal payload.
-    on_abort_body: Option<JSValue>,
-    /// Follower signals created via `Request`'s "follow" semantics. When this
-    /// signal aborts, each follower is aborted with the same reason.
-    followers: Vec<Rc<RefCell<SignalInner>>>,
+    /// Whether this signal was created by `AbortSignal.any()` (a dependent).
+    dependent: bool,
+    /// Source signals a dependent flattens onto (spec: source signals).
+    /// Weak refs: the source is kept alive by its owner, never by the
+    /// dependent, so no Rc cycle is formed.
+    sources: Vec<Weak<RefCell<SignalInner>>>,
+    /// Dependent signals aborted together with this one (spec: dependent
+    /// signals, also used for `Request`'s "follow" semantics). Strong refs:
+    /// per spec a non-aborted dependent must not be GC'd while its sources
+    /// are alive. Rc cycle is avoided because dependents only hold Weak refs
+    /// back to their sources.
+    dependents: Vec<Rc<RefCell<SignalInner>>>,
     /// Event listeners registered via `addEventListener` (EventTarget subset).
     /// Only the `abort` event type is meaningful for AbortSignal.
     listeners: Vec<(String, JSValue)>,
@@ -100,13 +114,18 @@ fn js_signal_throw_if_aborted(ctx: &mut ScopedContext, cc: CallContext) -> JSRes
 /// any borrow of `inner` before calling this (the listener callbacks may
 /// re-enter the signal).
 fn fire_abort_events(ctx: &mut ScopedContext, inner: &Rc<RefCell<SignalInner>>) {
-    let listeners: Vec<JSValue> = inner
-        .borrow()
-        .listeners
-        .iter()
-        .filter(|(t, _)| t == "abort")
-        .map(|(_, cb)| *cb)
-        .collect();
+    let (listeners, target) = {
+        let i = inner.borrow();
+        let listeners: Vec<JSValue> = i
+            .listeners
+            .iter()
+            // Both `addEventListener("abort")` and the `onabort` event handler
+            // IDL attribute (whose event handler type is "abort") fire.
+            .filter(|(t, _)| t == "abort" || t == "onabort")
+            .map(|(_, cb)| *cb)
+            .collect();
+        (listeners, i.signal)
+    };
     if listeners.is_empty() {
         return;
     }
@@ -116,8 +135,14 @@ fn fire_abort_events(ctx: &mut ScopedContext, inner: &Rc<RefCell<SignalInner>>) 
     };
     let type_val = JSValue::make_string(ctx.create_string_from_utf8(b"abort".to_vec()).unwrap());
     let _ = event.set_property_str(ctx, "type", type_val);
+    let _ = event.set_property_str(
+        ctx,
+        "target",
+        target.map(|o| o.into()).unwrap_or(JSValue::UNDEFINED),
+    );
     let _ = event.set_property_str(ctx, "bubbles", JSValue::from(false));
     let _ = event.set_property_str(ctx, "cancelable", JSValue::from(false));
+    let _ = event.set_property_str(ctx, "isTrusted", JSValue::from(true));
 
     for cb in listeners {
         if cb.is_callable() && cb.call(ctx, JSValue::UNDEFINED, &[event.into()]).is_err() {
@@ -206,6 +231,20 @@ fn js_signal_onabort_setter(ctx: &mut ScopedContext, cc: CallContext) -> JSResul
     Ok(JSValue::UNDEFINED)
 }
 
+/// Create an `AbortSignal` JS object for `inner` and back-fill `inner.signal`
+/// (used as the `abort` event's `target`).
+fn new_signal(ctx: &mut ScopedContext, inner: Rc<RefCell<SignalInner>>) -> JSResult {
+    let signal = JSAbortSignal::new_instance(
+        ctx,
+        JSValue::UNDEFINED,
+        AbortSignalPayload {
+            inner: inner.clone(),
+        },
+    )?;
+    inner.borrow_mut().signal = Some(signal.0);
+    Ok(signal.into())
+}
+
 /// Static method: AbortSignal.abort(reason?)
 fn js_signal_static_abort(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     // Spec: `AbortSignal.abort(reason = new DOMException('...', 'AbortError'))`.
@@ -220,41 +259,132 @@ fn js_signal_static_abort(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
         aborted: true,
         reason,
         controller: None,
+        signal: None,
         notify: Arc::new(Notify::new()),
-        on_abort_body: None,
-        followers: Vec::new(),
+        dependent: false,
+        sources: Vec::new(),
+        dependents: Vec::new(),
         listeners: Vec::new(),
     }));
     inner.borrow().notify.notify_waiters();
 
-    let signal =
-        JSAbortSignal::new_instance(ctx, JSValue::UNDEFINED, AbortSignalPayload { inner })?;
-    Ok(signal.into())
+    new_signal(ctx, inner)
+}
+///
+/// Returns a non-aborted signal that aborts with a "TimeoutError"
+/// DOMException after `milliseconds`. The signal is kept alive for the
+/// duration by the timer callback's GC-traced binding data (spec: a strong
+/// reference is required while the timeout is pending).
+fn js_signal_static_timeout(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let ms = cc.arg(0).to_number(ctx)?.to_i32().max(0) as u64;
+
+    let signal_val = make_default_signal(ctx)?;
+
+    let fire_fn = ctx.create_native_function_with_data(
+        zuqe::Callback::Func(js_signal_timeout_fire),
+        "signal-timeout",
+        0,
+        0,
+        Box::new([signal_val]),
+    )?;
+    crate::whatwg::timeout::register_timer_once(ctx, fire_fn.into(), ms)?;
+
+    Ok(signal_val)
 }
 
-/// Static method: AbortSignal.timeout(delay)
-///
-/// TODO: The proper implementation requires scheduling a JS microtask.
-/// For now, returns a signal that aborts immediately.
-fn js_signal_static_timeout(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let _ = cc.length(); // consume the delay param silently
-
+/// Timer callback for `AbortSignal.timeout()`: aborts the bound signal with a
+/// "TimeoutError" DOMException (spec: queue a task to signal abort).
+fn js_signal_timeout_fire(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let signal_val = cc.data(0);
     let reason = make_dom_exception(ctx, "TimeoutError", "The operation timed out.")?;
+    if let Some(p) = JSAbortSignal::payload_of(&signal_val) {
+        do_signal_abort(ctx, &p.inner, reason);
+    }
+    Ok(JSValue::UNDEFINED)
+}
 
-    let inner = Rc::new(RefCell::new(SignalInner {
-        aborted: true,
-        reason,
+/// Static method: AbortSignal.any(signals)
+///
+/// Returns a new signal aborted with the same reason as soon as any of
+/// `signals` aborts. Per the spec it is a "dependent" signal that flattens
+/// onto the non-dependent source signals, so nesting (`any([any([s])])`)
+/// keeps every dependency one hop deep and abort events fire in registration
+/// order.
+fn js_signal_static_any(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let signals_val = cc.arg(0);
+    if !signals_val.is_object() {
+        return Err(ctx.throw_type_error("`signals` must be a sequence of AbortSignal"));
+    }
+    let obj = signals_val.as_object().unwrap();
+    let len = obj
+        .get_property_str(ctx, "length")?
+        .to_number(ctx)?
+        .to_i32()
+        .max(0) as u32;
+    let mut signals: Vec<JSValue> = Vec::with_capacity(len as usize);
+    for i in 0..len {
+        signals.push(obj.get_property_u32(ctx, i)?);
+    }
+
+    let result_inner = Rc::new(RefCell::new(SignalInner {
+        aborted: false,
+        reason: JSValue::UNDEFINED,
         controller: None,
+        signal: None,
         notify: Arc::new(Notify::new()),
-        on_abort_body: None,
-        followers: Vec::new(),
+        dependent: true,
+        sources: Vec::new(),
+        dependents: Vec::new(),
         listeners: Vec::new(),
     }));
-    inner.borrow().notify.notify_waiters();
 
-    let signal =
-        JSAbortSignal::new_instance(ctx, JSValue::UNDEFINED, AbortSignalPayload { inner })?;
-    Ok(signal.into())
+    // Spec: if any input is already aborted, adopt the first one's reason and
+    // return immediately (the result is already aborted).
+    for s in &signals {
+        let Some(p) = JSAbortSignal::payload_of(s) else {
+            return Err(ctx.throw_type_error("`signals` must be a sequence of AbortSignal"));
+        };
+        if p.is_aborted() {
+            let reason = p.inner.borrow().reason;
+            {
+                let mut r = result_inner.borrow_mut();
+                r.aborted = true;
+                r.reason = reason;
+                r.notify.notify_waiters();
+            }
+            let signal = new_signal(ctx, result_inner)?;
+            return Ok(signal);
+        }
+    }
+
+    // Spec: flatten sources — a dependent's own sources are linked directly,
+    // never the intermediate dependent.
+    for s in &signals {
+        let Some(p) = JSAbortSignal::payload_of(s) else {
+            return Err(ctx.throw_type_error("`signals` must be a sequence of AbortSignal"));
+        };
+        let s_inner = p.inner.clone();
+        let s_sources: Vec<Rc<RefCell<SignalInner>>> = {
+            let si = s_inner.borrow();
+            if si.dependent {
+                si.sources.iter().filter_map(|w| w.upgrade()).collect()
+            } else {
+                vec![s_inner.clone()]
+            }
+        };
+        for source in s_sources {
+            result_inner
+                .borrow_mut()
+                .sources
+                .push(Rc::downgrade(&source));
+            let mut sr = source.borrow_mut();
+            if !sr.dependents.iter().any(|d| Rc::ptr_eq(d, &result_inner)) {
+                sr.dependents.push(result_inner.clone());
+            }
+        }
+    }
+
+    new_signal(ctx, result_inner)
 }
 
 // ===========================================================================
@@ -281,9 +411,11 @@ fn js_controller_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
         aborted: false,
         reason: JSValue::UNDEFINED,
         controller: None,
+        signal: None,
         notify: Arc::new(Notify::new()),
-        on_abort_body: None,
-        followers: Vec::new(),
+        dependent: false,
+        sources: Vec::new(),
+        dependents: Vec::new(),
         listeners: Vec::new(),
     }));
 
@@ -294,6 +426,7 @@ fn js_controller_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
             inner: inner.clone(),
         },
     )?;
+    inner.borrow_mut().signal = Some(signal.0);
 
     let payload = AbortControllerPayload {
         signal: signal.0,
@@ -318,45 +451,62 @@ fn js_controller_abort(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let controller = get_controller(ctx, &this)?;
 
-    let (reason, on_abort_body) = {
-        let mut inner = controller.inner.borrow_mut();
-        if inner.aborted {
-            return Ok(JSValue::UNDEFINED);
-        }
-        inner.aborted = true;
-        // Spec: `AbortController.abort(reason = new DOMException('...', 'AbortError'))`.
-        // An explicitly passed `undefined` still triggers the default.
-        let reason = if cc.length() > 0 && !cc.arg(0).is_undefined() {
-            cc.arg(0)
-        } else {
-            make_dom_exception(ctx, "AbortError", "The operation was aborted.")?
-        };
-        inner.reason = reason;
-        let body = inner.on_abort_body;
-        inner.notify.notify_waiters();
-        (reason, body)
+    // Spec: `AbortController.abort(reason = new DOMException('...', 'AbortError'))`.
+    // An explicitly passed `undefined` still triggers the default.
+    let reason = if cc.length() > 0 && !cc.arg(0).is_undefined() {
+        cc.arg(0)
+    } else {
+        make_dom_exception(ctx, "AbortError", "The operation was aborted.")?
     };
-
-    if let Some(body) = on_abort_body {
-        if let Some(cancel_fn) = body
-            .get_property_str(ctx, "cancel")
-            .ok()
-            .filter(|v| v.is_callable())
-        {
-            if cancel_fn.call(ctx, body, &[reason]).is_err() {
-                let _exc = ctx.take_exception();
-                #[cfg(debug_assertions)]
-                crate::helpers::print_exc(ctx, _exc);
-            }
-        }
-    }
-
-    // Fire this signal's own `abort` listeners, then propagate to any "follow"
-    // signals (e.g. `request.signal`).
-    fire_abort_events(ctx, &controller.inner);
-    propagate_abort(ctx, &controller.inner, reason);
+    do_signal_abort(ctx, &controller.inner, reason);
 
     Ok(JSValue::UNDEFINED)
+}
+
+/// Spec "signal abort" on an `AbortSignal`'s shared state: mark it (and all
+/// non-aborted dependents) as aborted with `reason`, then run the abort steps
+/// — fire `abort` events for this signal first, then for each dependent in
+/// registration order. Dependents are marked aborted *before* any event fires
+/// so listeners observe a consistent aborted state.
+fn do_signal_abort(ctx: &mut ScopedContext, inner: &Rc<RefCell<SignalInner>>, reason: JSValue) {
+    let dependents: Vec<Rc<RefCell<SignalInner>>> = {
+        let mut i = inner.borrow_mut();
+        if i.aborted {
+            return;
+        }
+        i.aborted = true;
+        i.reason = reason;
+        i.notify.notify_waiters();
+        i.dependents.clone()
+    };
+    // Mark all *non-aborted* dependents aborted first (spec step 3), walking
+    // the whole dependent chain BFS so `Request`'s nested "follow" signals
+    // (controller → request.signal → clone.signal) propagate too. `any()`
+    // flattens its dependencies, so there the walk is a single hop and the
+    // spec's registration-order event firing is preserved. A dependent already
+    // aborted (e.g. reentrantly by another source) is left untouched and does
+    // not get its event re-fired.
+    let mut queue: VecDeque<Rc<RefCell<SignalInner>>> = dependents.into();
+    let mut to_fire: Vec<Rc<RefCell<SignalInner>>> = Vec::new();
+    while let Some(cur) = queue.pop_front() {
+        let children: Vec<Rc<RefCell<SignalInner>>> = {
+            let mut d = cur.borrow_mut();
+            if d.aborted {
+                continue;
+            }
+            d.aborted = true;
+            d.reason = reason;
+            d.notify.notify_waiters();
+            d.dependents.clone()
+        };
+        to_fire.push(cur);
+        queue.extend(children);
+    }
+    // Then run abort steps: source first, dependents in order (spec steps 4-6).
+    fire_abort_events(ctx, inner);
+    for dep in to_fire {
+        fire_abort_events(ctx, &dep);
+    }
 }
 
 // ===========================================================================
@@ -416,14 +566,35 @@ impl AbortSignalPayload {
     fn gc_trace(&self, gcx: &mut GcTraceCtx) {
         let inner = self.inner.borrow();
         inner.reason.trace(gcx);
-        if let Some(ref body) = inner.on_abort_body {
-            body.trace(gcx);
+        if let Some(ref s) = inner.signal {
+            s.trace(gcx);
         }
         if let Some(ref c) = inner.controller {
             c.trace(gcx);
         }
         for (_, cb) in &inner.listeners {
             cb.trace(gcx);
+        }
+        // Dependents are held by strong Rc refs but their JS payloads
+        // (signal object/reason/listeners) still need tracing; per spec a
+        // non-aborted dependent must not be GC'd while its source is alive.
+        // The dependent's `signal` (its own JS object) is traced so the
+        // `abort` event's `target` can never dangle.
+        let dependents = inner.dependents.clone();
+        drop(inner);
+
+        for dep in dependents {
+            let d = dep.borrow();
+            if let Some(ref s) = d.signal {
+                s.trace(gcx);
+            }
+            d.reason.trace(gcx);
+            if let Some(ref c) = d.controller {
+                c.trace(gcx);
+            }
+            for (_, cb) in &d.listeners {
+                cb.trace(gcx);
+            }
         }
     }
 }
@@ -488,35 +659,12 @@ pub(crate) fn signal_attach_follower(ctx: &mut ScopedContext, parent: &JSValue, 
     };
     let parent_inner = parent_p.inner.clone();
     let child_inner = child_p.inner.clone();
-    let mut p = parent_inner.borrow_mut();
-    if p.aborted {
+    if parent_inner.borrow().aborted {
         // Already aborted: mirror the state onto the child right now.
-        let mut c = child_inner.borrow_mut();
-        c.aborted = true;
-        c.reason = p.reason;
-        c.notify.notify_waiters();
-        drop(c);
-        fire_abort_events(ctx, &child_inner);
+        let reason = parent_inner.borrow().reason;
+        do_signal_abort(ctx, &child_inner, reason);
     } else {
-        p.followers.push(child_inner);
-    }
-}
-
-/// Propagate an abort (with `reason`) to `self` and all of its followers.
-/// Called by `AbortController.abort()` / `AbortSignal.abort()` once the
-/// controller's own signal is aborted.
-fn propagate_abort(ctx: &mut ScopedContext, inner: &Rc<RefCell<SignalInner>>, reason: JSValue) {
-    // Collect followers first so we don't recurse while borrowing `inner`.
-    let followers: Vec<Rc<RefCell<SignalInner>>> = inner.borrow().followers.clone();
-    for f in &followers {
-        {
-            let mut fi = f.borrow_mut();
-            fi.aborted = true;
-            fi.reason = reason;
-            fi.notify.notify_waiters();
-        }
-        fire_abort_events(ctx, f);
-        propagate_abort(ctx, f, reason);
+        parent_inner.borrow_mut().dependents.push(child_inner);
     }
 }
 
@@ -541,14 +689,7 @@ pub(crate) fn abort_signal(
         } else {
             reason
         };
-        let inner = payload.inner.clone();
-        {
-            let mut gi = inner.borrow_mut();
-            gi.aborted = true;
-            gi.reason = reason;
-            gi.notify.notify_waiters();
-        }
-        fire_abort_events(ctx, &inner);
+        do_signal_abort(ctx, &payload.inner, reason);
     }
     Ok(())
 }
@@ -560,14 +701,14 @@ pub(crate) fn make_default_signal(ctx: &mut ScopedContext) -> JSResult {
         aborted: false,
         reason: JSValue::UNDEFINED,
         controller: None,
+        signal: None,
         notify: Arc::new(Notify::new()),
-        on_abort_body: None,
-        followers: Vec::new(),
+        dependent: false,
+        sources: Vec::new(),
+        dependents: Vec::new(),
         listeners: Vec::new(),
     }));
-    let signal =
-        JSAbortSignal::new_instance(ctx, JSValue::UNDEFINED, AbortSignalPayload { inner })?;
-    Ok(signal.into())
+    new_signal(ctx, inner)
 }
 
 pub(crate) fn install_abort_signal_statics(
@@ -595,6 +736,15 @@ pub(crate) fn install_abort_signal_statics(
     let ctor_val = global.get_property_str(ctx, "AbortSignal")?;
     if let Some(mut ctor) = ctor_val.as_object() {
         ctor.define_property_value_str(ctx, "timeout", timeout_fn.into(), zuqe::JS_PROP_C_W_E)?;
+    }
+
+    // Register AbortSignal.any() static method
+    let any_fn =
+        ctx.create_native_function(zuqe::Callback::Func(js_signal_static_any), "any", 1, 0)?;
+
+    let ctor_val = global.get_property_str(ctx, "AbortSignal")?;
+    if let Some(mut ctor) = ctor_val.as_object() {
+        ctor.define_property_value_str(ctx, "any", any_fn.into(), zuqe::JS_PROP_C_W_E)?;
     }
 
     Ok(())
