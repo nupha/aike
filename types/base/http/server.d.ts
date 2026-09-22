@@ -66,7 +66,12 @@ declare module "http" {
    * write/flush/close — `json`/`setHeader`/`end` are intentionally absent.
    */
   export class HttpResponseSse {
-    /** Push one SSE frame. Returns a Promise that resolves when the write drains. */
+    /**
+     * Push one SSE event payload. The framework wraps it as a wire frame
+     * (`data: <payload>\n\n`) automatically — pass only the payload (e.g.
+     * `JSON.stringify(chunk)` or `"[DONE]"`), never a `data:` prefix or `\n\n`.
+     * Returns a Promise that resolves when the write drains.
+     */
     write(data: string): void | Promise<void>;
     /** Force-flush buffered frames (no-op here; frames are sent immediately). */
     flush(): void;
