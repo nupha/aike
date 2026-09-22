@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
+#[cfg(unix)]
+use std::os::{fd::AsRawFd, unix::process::CommandExt};
 use std::{
     collections::HashMap,
     io::{Read, Write},
@@ -13,9 +15,6 @@ use std::{
     thread,
     time::Duration,
 };
-
-#[cfg(unix)]
-use std::os::{fd::AsRawFd, unix::process::CommandExt};
 
 #[cfg(unix)]
 use process_wrap::tokio::ProcessGroup;

@@ -57,10 +57,13 @@ declare function queueMicrotask(callback: () => void): void;
  * `DataCloneError` DOMException. `options.transfer` transfers (detaches) the
  * listed ArrayBuffers instead of cloning them.
  */
-declare function structuredClone<T>(value: T, options?: {
-  /** ArrayBuffers to transfer (detached in the source) instead of clone. */
-  transfer?: ArrayBuffer[];
-}): T;
+declare function structuredClone<T>(
+  value: T,
+  options?: {
+    /** ArrayBuffers to transfer (detached in the source) instead of clone. */
+    transfer?: ArrayBuffer[];
+  },
+): T;
 
 /**
  * WHATWG Fetch `Response` class (strict spec subset, no aike extensions).
