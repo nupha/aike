@@ -1,4 +1,5 @@
-// Smoke test for LlmClient abort + break-cancellation via `ChatRequest.signal`.
+// Smoke test for LlmClient abort + break-cancellation via the `signal` call
+// option (second argument of chat/chatOnce/responses/responsesOnce).
 //
 // Verifies mid-flight cancellation (stream + once), pre-aborted fail-fast,
 // reason propagation, signal type validation, that abort actually closes the
@@ -126,10 +127,10 @@ async function run() {
   // ── 1. streaming chat: abort mid-flight ──
   {
     const ctrl = new AbortController();
-    const it = client.chat({
-      messages: [{ role: "user", content: "hi" }],
-      signal: ctrl.signal,
-    });
+    const it = client.chat(
+      { messages: [{ role: "user", content: "hi" }] },
+      { signal: ctrl.signal },
+    );
     let chunks = 0;
     let abortErr = "";
     try {
@@ -149,10 +150,10 @@ async function run() {
   // ── 2. chatOnce: abort mid-flight ──
   {
     const ctrl = new AbortController();
-    const p = client.chatOnce({
-      messages: [{ role: "user", content: "hi" }],
-      signal: ctrl.signal,
-    });
+    const p = client.chatOnce(
+      { messages: [{ role: "user", content: "hi" }] },
+      { signal: ctrl.signal },
+    );
     setTimeout(() => ctrl.abort(), 150);
     let abortErr = "";
     try {
@@ -170,10 +171,10 @@ async function run() {
     const before = totalRequests;
     let err = null;
     try {
-      await client.chatOnce({
-        messages: [{ role: "user", content: "hi" }],
-        signal: ctrl.signal,
-      });
+      await client.chatOnce(
+        { messages: [{ role: "user", content: "hi" }] },
+        { signal: ctrl.signal },
+      );
     } catch (e) {
       err = e;
     }
@@ -190,10 +191,10 @@ async function run() {
     const before = totalRequests;
     let reason = undefined;
     try {
-      await client.chatOnce({
-        messages: [{ role: "user", content: "hi" }],
-        signal: ctrl.signal,
-      });
+      await client.chatOnce(
+        { messages: [{ role: "user", content: "hi" }] },
+        { signal: ctrl.signal },
+      );
     } catch (e) {
       reason = e;
     }
@@ -208,10 +209,10 @@ async function run() {
     const before = totalRequests;
     let abortErr = "";
     try {
-      for await (const _chunk of client.chat({
-        messages: [{ role: "user", content: "hi" }],
-        signal: ctrl.signal,
-      })) {
+      for await (const _chunk of client.chat(
+        { messages: [{ role: "user", content: "hi" }] },
+        { signal: ctrl.signal },
+      )) {
         // unreachable
       }
     } catch (e) {
@@ -225,7 +226,7 @@ async function run() {
   {
     let threw = false;
     try {
-      client.chat({ messages: [], signal: {} });
+      client.chat({ messages: [] }, { signal: {} });
     } catch (e) {
       threw = true;
       assert(
@@ -239,10 +240,7 @@ async function run() {
   // ── 7. responsesOnce + responses (stream) abort mid-flight ──
   {
     const ctrl = new AbortController();
-    const p = client.responsesOnce({
-      input: "hi",
-      signal: ctrl.signal,
-    });
+    const p = client.responsesOnce({ input: "hi" }, { signal: ctrl.signal });
     setTimeout(() => ctrl.abort(), 150);
     let abortErr = "";
     try {
@@ -254,7 +252,7 @@ async function run() {
   }
   {
     const ctrl = new AbortController();
-    const it = client.responses({ input: "hi", signal: ctrl.signal });
+    const it = client.responses({ input: "hi" }, { signal: ctrl.signal });
     setTimeout(() => ctrl.abort(), 300);
     let abortErr = "";
     try {
@@ -270,14 +268,13 @@ async function run() {
     assert(closedResponsesStreams >= 1, `responses abort closes the server-side stream (closed=${closedResponsesStreams})`);
   }
 
-  // ── 8. signal is NOT forwarded to the API body ──
+  // ── 8. control opts are NOT forwarded to the API body ──
   {
     const ctrl = new AbortController();
-    const it = client.chat({
-      messages: [{ role: "user", content: "hi" }],
-      signal: ctrl.signal,
-      stream_options: { include_usage: true },
-    });
+    const it = client.chat(
+      { messages: [{ role: "user", content: "hi" }], stream_options: { include_usage: true } },
+      { signal: ctrl.signal },
+    );
     let saw = false;
     try {
       for await (const _c of it) {
@@ -307,10 +304,10 @@ async function run() {
     const ctrl = new AbortController();
     let n = 0;
     try {
-      for await (const _chunk of client.chat({
-        messages: [{ role: "user", content: "hi" }],
-        signal: ctrl.signal,
-      })) {
+      for await (const _chunk of client.chat(
+        { messages: [{ role: "user", content: "hi" }] },
+        { signal: ctrl.signal },
+      )) {
         n++;
         if (n >= 3) ctrl.abort();
       }

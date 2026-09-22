@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use async_openai::types::responses::{
     CreateResponseArgs, EasyInputContent, EasyInputMessage, InputItem, InputParam, MessageType,
@@ -16,13 +16,13 @@ use zuqe::{
 };
 
 use crate::whatwg::{
-    abort::{JSAbortSignal, signal_is_aborted, signal_notify, signal_reason},
+    abort::{signal_is_aborted, signal_notify, signal_reason},
     dom::make_dom_exception,
 };
 
 use super::{
     MAGIC_RESPONSES_STREAM,
-    class_client::{ABORT_MSG, LlmStreamFetcher, StreamCancel, get_client},
+    class_client::{ABORT_MSG, LlmStreamFetcher, StreamCancel, get_client, parse_call_opts},
 };
 
 enum ResponsesReply {
@@ -117,23 +117,19 @@ pub(super) fn js_client_responses(ctx: &mut ScopedContext, cc: CallContext) -> J
     let client = get_client(ctx, &this)?;
     let is_stream = cc.magic() == MAGIC_RESPONSES_STREAM;
 
-    let opts = cc
-        .arg(0)
+    // arg(0): the pure-data request; arg(1): control-only opts.
+    let req_val = cc.arg(0);
+    let req_obj = req_val
         .as_object()
-        .ok_or_else(|| ctx.throw_type_error("responses() requires an options object"))?;
+        .ok_or_else(|| ctx.throw_type_error("responses() requires a request object"))?;
+    let opts = parse_call_opts(ctx, &cc)?;
+    let abort_notify = signal_notify(&opts.signal);
+    let already_aborted = signal_is_aborted(&opts.signal);
 
-    // Abort support via AbortSignal; local-only, not part of the request body.
-    let signal_val = opts.get_property_str(ctx, "signal")?;
-    if !signal_val.is_undefined_or_null() && JSAbortSignal::payload_of(&signal_val).is_none() {
-        return Err(ctx.throw_type_error("`signal` must be an AbortSignal"));
-    }
-    let abort_notify = signal_notify(&signal_val);
-    let already_aborted = signal_is_aborted(&signal_val);
-
-    let input_val = opts.get_property_str(ctx, "input")?;
+    let input_val = req_obj.get_property_str(ctx, "input")?;
     let input = parse_responses_input(ctx, &input_val)?;
 
-    let model_val = opts.get_property_str(ctx, "model")?;
+    let model_val = req_obj.get_property_str(ctx, "model")?;
     let model = if let Some(s) = model_val.as_string(true) {
         s.content().encode_utf8(false).to_string()
     } else {
@@ -142,34 +138,39 @@ pub(super) fn js_client_responses(ctx: &mut ScopedContext, cc: CallContext) -> J
 
     let mut req_builder = CreateResponseArgs::default();
     req_builder.input(input).model(&model);
+    // Streaming branch must ask the server for SSE — without `stream: true`
+    // the server returns a plain JSON body and the iterator sees no events.
+    if is_stream {
+        req_builder.stream(true);
+    }
 
-    let instructions_val = opts.get_property_str(ctx, "instructions")?;
+    let instructions_val = req_obj.get_property_str(ctx, "instructions")?;
     if let Some(s) = instructions_val.as_string(true) {
         req_builder.instructions(s.content().encode_utf8(false).to_string());
     }
 
-    let temperature_val = opts.get_property_str(ctx, "temperature")?;
+    let temperature_val = req_obj.get_property_str(ctx, "temperature")?;
     if !temperature_val.is_undefined() {
         req_builder.temperature(temperature_val.to_number(ctx)?.to_f64() as f32);
     }
 
-    let top_p_val = opts.get_property_str(ctx, "topP")?;
+    let top_p_val = req_obj.get_property_str(ctx, "topP")?;
     if !top_p_val.is_undefined() {
         req_builder.top_p(top_p_val.to_number(ctx)?.to_f64() as f32);
     }
 
-    let max_output_tokens_val = opts.get_property_str(ctx, "maxOutputTokens")?;
+    let max_output_tokens_val = req_obj.get_property_str(ctx, "maxOutputTokens")?;
     if !max_output_tokens_val.is_undefined() {
         req_builder.max_output_tokens(max_output_tokens_val.to_number(ctx)?.to_f64() as u32);
     }
 
-    let reasoning_val = opts.get_property_str(ctx, "reasoning")?;
+    let reasoning_val = req_obj.get_property_str(ctx, "reasoning")?;
     if !reasoning_val.is_undefined() {
         let reasoning = parse_responses_reasoning(ctx, &reasoning_val)?;
         req_builder.reasoning(reasoning);
     }
 
-    let tools_val = opts.get_property_str(ctx, "tools")?;
+    let tools_val = req_obj.get_property_str(ctx, "tools")?;
     if !tools_val.is_undefined() {
         let tools: Vec<async_openai::types::responses::Tool> = serde_json::from_value(
             tools_val
@@ -182,7 +183,7 @@ pub(super) fn js_client_responses(ctx: &mut ScopedContext, cc: CallContext) -> J
         }
     }
 
-    let tool_choice_val = opts.get_property_str(ctx, "toolChoice")?;
+    let tool_choice_val = req_obj.get_property_str(ctx, "toolChoice")?;
     if !tool_choice_val.is_undefined() {
         let json_val = tool_choice_val
             .to_serde_json(ctx)
@@ -193,7 +194,7 @@ pub(super) fn js_client_responses(ctx: &mut ScopedContext, cc: CallContext) -> J
         req_builder.tool_choice(tool_choice);
     }
 
-    let metadata_val = opts.get_property_str(ctx, "metadata")?;
+    let metadata_val = req_obj.get_property_str(ctx, "metadata")?;
     if !metadata_val.is_undefined() {
         let json_val = metadata_val
             .to_serde_json(ctx)
@@ -203,7 +204,7 @@ pub(super) fn js_client_responses(ctx: &mut ScopedContext, cc: CallContext) -> J
         req_builder.metadata(metadata);
     }
 
-    let user_val = opts.get_property_str(ctx, "user")?;
+    let user_val = req_obj.get_property_str(ctx, "user")?;
     if let Some(s) = user_val.as_string(true) {
         req_builder.safety_identifier(s.content().encode_utf8(false).to_string());
     }
@@ -214,7 +215,11 @@ pub(super) fn js_client_responses(ctx: &mut ScopedContext, cc: CallContext) -> J
 
     let base_url = client.base_url.clone();
     let api_key = client.api_key.clone();
-    let timeout = client.timeout;
+    // Per-request timeout (seconds) overrides the client-level default.
+    let timeout = opts
+        .timeout
+        .map(Duration::from_secs)
+        .unwrap_or(client.timeout);
 
     let url = format!("{}/responses", base_url);
     let http_client = reqwest::Client::new();
@@ -230,6 +235,7 @@ pub(super) fn js_client_responses(ctx: &mut ScopedContext, cc: CallContext) -> J
     }
 
     if is_stream {
+        let idle_limit = opts.idle_timeout.map(Duration::from_secs);
         let result_slot = PromiseResultSlot::<ResponsesReply>::new();
         // Commits from the reading task wake the parked event loop so the
         // custom fetcher below polls the slot promptly.
@@ -275,20 +281,45 @@ pub(super) fn js_client_responses(ctx: &mut ScopedContext, cc: CallContext) -> J
                         let reader = StreamReader::new(byte_stream);
                         let mut lines = tokio::io::BufReader::new(reader).lines();
 
+                        // Idle guard: each line read races a per-call timeout so
+                        // any received byte resets it. On fire, an Error is
+                        // committed and Done is skipped (stalled output dropped).
+                        let mut idle_aborted = false;
+
                         loop {
-                            let line = match &abort_notify {
+                            let line_fut = async {
+                                match idle_limit {
+                                    Some(idle) => tokio::time::timeout(idle, lines.next_line())
+                                        .await
+                                        .map_err(|_| ()),
+                                    None => Ok(lines.next_line().await),
+                                }
+                            };
+                            let next = match &abort_notify {
                                 Some(n) => tokio::select! {
                                     biased;
                                     _ = n.notified() => {
                                         commit_slot(&slot, ResponsesReply::Error(ABORT_MSG.to_string())).await;
                                         break;
                                     }
-                                    r = lines.next_line() => r,
+                                    r = line_fut => r,
                                 },
-                                None => lines.next_line().await,
+                                None => line_fut.await,
+                            };
+                            let next_result = match next {
+                                Ok(inner) => inner,
+                                Err(()) => {
+                                    idle_aborted = true;
+                                    commit_slot(&slot, ResponsesReply::Error(format!(
+                                        "llm stream idle timeout: no data for {}s",
+                                        idle_limit.map(|d| d.as_secs()).unwrap_or(0)
+                                    )))
+                                    .await;
+                                    break;
+                                }
                             };
                             // EOF/read error ends the stream silently (legacy).
-                            let Ok(Some(line)) = line else {
+                            let Ok(Some(line)) = next_result else {
                                 break;
                             };
 
@@ -305,7 +336,9 @@ pub(super) fn js_client_responses(ctx: &mut ScopedContext, cc: CallContext) -> J
                                 }
                             }
                         }
-                        commit_slot(&slot, ResponsesReply::Done).await;
+                        if !idle_aborted {
+                            commit_slot(&slot, ResponsesReply::Done).await;
+                        }
                     }
                     Err(e) => {
                         commit_slot(&slot, ResponsesReply::Error(e.to_string())).await;
@@ -338,7 +371,7 @@ pub(super) fn js_client_responses(ctx: &mut ScopedContext, cc: CallContext) -> J
     } else {
         // Fail-fast: reject with the signal's reason without sending.
         if already_aborted {
-            let reason = match signal_reason(&signal_val) {
+            let reason = match signal_reason(&opts.signal) {
                 Some(r) => r,
                 None => make_dom_exception(ctx, "AbortError", "The operation was aborted.")?,
             };

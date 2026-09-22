@@ -14,7 +14,8 @@ use tokio::io::AsyncBufReadExt;
 use tokio::sync::Notify;
 use tokio_util::io::StreamReader;
 use zuqe::{
-    CallContext, ClassCtorDef, FieldDef, JS_PROP_WRITABLE, JSResult, JSValue, ScopedContext,
+    CallContext, ClassCtorDef, FieldDef, IntOrFloat, JS_PROP_WRITABLE, JSResult, JSValue, Object,
+    ScopedContext,
     builtins::{
         iterator::{AsyncIterableIterator, AsyncIteratorFetcher, IterFetchStatus},
         promise::{Promise, PromiseResultSlot},
@@ -31,7 +32,7 @@ use crate::{
     },
 };
 
-/// Error surfaced to JS when a request is cancelled via `ChatRequest.signal`.
+/// Error surfaced to JS when a request is cancelled via the `signal` call opt.
 pub(super) const ABORT_MSG: &str = "request aborted by AbortSignal";
 
 /// Cancellation shared by a streaming iterator's JS side and its reading task.
@@ -165,6 +166,64 @@ pub(super) fn get_client_mut<'a>(
 ) -> Result<&'a mut ClientPayload, i32> {
     JSLlmClient::payload_mut_of(val)
         .ok_or_else(|| ctx.throw_type_error("not an LlmClient instance"))
+}
+
+/// Per-call control options — the second argument of
+/// `chat`/`chatOnce`/`responses`/`responsesOnce`. Never serialized into the
+/// request body; only steers cancellation and timeouts.
+pub(super) struct CallOpts {
+    pub(super) signal: JSValue,
+    pub(super) timeout: Option<u64>,
+    pub(super) idle_timeout: Option<u64>,
+}
+
+/// Read an optional positive-integer seconds control option.
+/// TypeError for non-numbers, RangeError for non-positive or fractional values.
+fn opt_secs_prop(ctx: &mut ScopedContext, obj: &Object, key: &str) -> Result<Option<u64>, i32> {
+    let v = obj.get_property_str(ctx, key)?;
+    if v.is_undefined() {
+        return Ok(None);
+    }
+    if !v.is_number() {
+        return Err(ctx.throw_type_error(&format!("`{key}` must be a number")));
+    }
+    let n = v.to_number(ctx)?;
+    let ok = matches!(n, IntOrFloat::Int64(i) if i > 0)
+        || matches!(n, IntOrFloat::Float64(d) if d > 0.0 && d.fract() == 0.0);
+    if !ok {
+        return Err(ctx.throw_range_error(&format!("`{key}` must be a positive integer")));
+    }
+    Ok(Some(match n {
+        IntOrFloat::Int64(i) => i as u64,
+        IntOrFloat::Float64(d) => d as u64,
+    }))
+}
+
+/// Parse the optional control-opts second argument. `undefined` → all defaults;
+/// anything but an object (including `null`) → TypeError.
+pub(super) fn parse_call_opts(ctx: &mut ScopedContext, cc: &CallContext) -> Result<CallOpts, i32> {
+    let v = cc.arg(1);
+    if v.is_undefined() {
+        return Ok(CallOpts {
+            signal: JSValue::UNDEFINED,
+            timeout: None,
+            idle_timeout: None,
+        });
+    }
+    let obj = v
+        .as_object()
+        .ok_or_else(|| ctx.throw_type_error("opts must be an object"))?;
+
+    let signal = obj.get_property_str(ctx, "signal")?;
+    if !signal.is_undefined_or_null() && JSAbortSignal::payload_of(&signal).is_none() {
+        return Err(ctx.throw_type_error("`signal` must be an AbortSignal"));
+    }
+
+    Ok(CallOpts {
+        signal,
+        timeout: opt_secs_prop(ctx, &obj, "timeout")?,
+        idle_timeout: opt_secs_prop(ctx, &obj, "idle_timeout")?,
+    })
 }
 
 /// Constructor: new LlmClient({apiKey, baseUrl, model?, timeout?})
@@ -428,46 +487,29 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
     let client = get_client(ctx, &this)?;
     let is_stream = cc.magic() == MAGIC_CHAT_STREAM;
 
-    let opts_obj = cc
-        .arg(0)
+    // arg(0): the pure-data request body, serialized as-is into the API JSON.
+    let req_val = cc.arg(0);
+    let req_obj = req_val
         .as_object()
-        .ok_or_else(|| ctx.throw_type_error("chat() requires an options object"))?;
+        .ok_or_else(|| ctx.throw_type_error("chat() requires a request object"))?;
 
-    // Abort support via AbortSignal. Local-only; never sent to the API.
-    let signal_val = opts_obj.get_property_str(ctx, "signal")?;
-    if !signal_val.is_undefined_or_null() && JSAbortSignal::payload_of(&signal_val).is_none() {
-        return Err(ctx.throw_type_error("`signal` must be an AbortSignal"));
-    }
-    let abort_notify = signal_notify(&signal_val);
-    let already_aborted = signal_is_aborted(&signal_val);
+    // arg(1): control-only opts (signal/timeout/idle_timeout) — never submitted.
+    let opts = parse_call_opts(ctx, &cc)?;
+    let abort_notify = signal_notify(&opts.signal);
+    let already_aborted = signal_is_aborted(&opts.signal);
 
     // Convert JS options to raw JSON, preserving all fields (including extension
     // fields like reasoning_content) that async-openai typed structs would drop.
     // LlmClient is a remote API proxy — it should forward everything, not filter.
-    let mut req_json = opts_obj.to_serde_json(ctx)?;
-    if let Some(obj) = req_json.as_object_mut() {
-        obj.remove("signal");
-    }
+    let mut req_json = req_obj.to_serde_json(ctx)?;
 
-    // Extract per-request timeout (seconds), defaults to client-level timeout
-    // This field is NOT sent to the API — it controls HTTP timeout only
-    let req_timeout_secs = req_json
-        .as_object()
-        .and_then(|obj| obj.get("timeout")?.as_f64())
-        .map(|n| n as u64);
-    if let Some(obj) = req_json.as_object_mut() {
-        obj.remove("timeout");
-    }
+    // Per-request timeout (seconds), defaults to client-level timeout.
+    // NOT sent to the API — controls HTTP timeout only.
+    let req_timeout_secs = opts.timeout;
 
     // Per-request stream-idle timeout (seconds): abort when no SSE data has
     // arrived for this long. Also NOT sent to the API.
-    let idle_timeout_secs = req_json
-        .as_object()
-        .and_then(|obj| obj.get("idle_timeout")?.as_f64())
-        .map(|n| n as u64);
-    if let Some(obj) = req_json.as_object_mut() {
-        obj.remove("idle_timeout");
-    }
+    let idle_timeout_secs = opts.idle_timeout;
 
     // camelCase → snake_case for OpenAI API compatibility
     json_keys_camel_to_snake(&mut req_json);
@@ -808,7 +850,7 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
         // Non-streaming: Promise - Use reqwest to preserve extension fields
         if already_aborted {
             // Fail-fast: reject with the signal's reason without sending.
-            let reason = match signal_reason(&signal_val) {
+            let reason = match signal_reason(&opts.signal) {
                 Some(r) => r,
                 None => make_dom_exception(ctx, "AbortError", "The operation was aborted.")?,
             };
@@ -1035,25 +1077,25 @@ fn js_client_dispose(_: &mut ScopedContext, cc: CallContext) -> JSResult {
 const CLASS_CLIENT_PROTO: &[FieldDef] = &[
     FieldDef::FUNC(
         "chat",
-        1,
+        2,
         js_client_chatCompletions,
         MAGIC_CHAT_STREAM as i16,
     ),
     FieldDef::FUNC(
         "chatOnce",
-        1,
+        2,
         js_client_chatCompletions,
         MAGIC_CHAT_ONCE as i16,
     ),
     FieldDef::FUNC(
         "responses",
-        1,
+        2,
         js_client_responses,
         MAGIC_RESPONSES_STREAM as i16,
     ),
     FieldDef::FUNC(
         "responsesOnce",
-        1,
+        2,
         js_client_responses,
         MAGIC_RESPONSES_ONCE as i16,
     ),
