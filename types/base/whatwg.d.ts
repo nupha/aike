@@ -320,6 +320,21 @@ declare class AbortSignal {
   readonly reason: any;
   /** Throws the abort reason if this signal has been aborted. */
   throwIfAborted(): void;
+
+  /**
+   * EventTarget subset (AbortSignal is an EventTarget per WHATWG). Only the
+   * `"abort"` event is dispatched; the listener is called with a minimal
+   * `{ type: "abort", target }` event object.
+   */
+  addEventListener(type: string, callback: (...args: unknown[]) => void): void;
+  /** EventTarget subset — remove a listener previously added. */
+  removeEventListener(
+    type: string,
+    callback: (...args: unknown[]) => void,
+  ): void;
+  /** EventTarget subset — spec-compliant no-op for AbortSignal (returns true). */
+  dispatchEvent(event: unknown): boolean;
+
   /**
    * Returns an AbortSignal that is already aborted with the given reason.
    * @param reason - Optional abort reason.

@@ -112,7 +112,8 @@ declare module "http" {
     body?: string;
     /** Total request timeout in seconds (default: 30). */
     timeout?: number;
-    /** AbortSignal — currently unsupported on HttpClient; use `fetch()` for abort. */
+    /** AbortSignal to cancel an in-flight request. On abort the promise
+     *  rejects with an AbortError (pre-aborted signals reject immediately). */
     signal?: AbortSignal;
   }
 }
