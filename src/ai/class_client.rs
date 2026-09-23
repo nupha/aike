@@ -178,6 +178,11 @@ pub(super) struct CallOpts {
     pub(super) signal: JSValue,
     pub(super) timeout: Option<u64>,
     pub(super) stallTimeout: Option<u64>,
+    /// Merge consecutive pure-content chunks arriving within this window into
+    /// one chunk, amortizing the per-chunk commit/wake/JS-convert cost. Window
+    /// in milliseconds; 0 (or negative) disables coalescing. Changes the
+    /// yielded chunk granularity, so it defaults to off.
+    pub(super) coalesce_ms: u64,
 }
 
 /// Read an optional positive-integer seconds control option.
@@ -211,6 +216,7 @@ pub(super) fn parse_call_opts(ctx: &mut ScopedContext, cc: &CallContext) -> Resu
             signal: JSValue::UNDEFINED,
             timeout: None,
             stallTimeout: None,
+            coalesce_ms: 0,
         });
     }
     let obj = v
@@ -222,10 +228,30 @@ pub(super) fn parse_call_opts(ctx: &mut ScopedContext, cc: &CallContext) -> Resu
         return Err(ctx.throw_type_error("`signal` must be an AbortSignal"));
     }
 
+    // Coalesce window in ms: any integer; <= 0 disables coalescing.
+    let coalesce_val = obj.get_property_str(ctx, "coalesce")?;
+    let coalesce_ms = if coalesce_val.is_undefined() {
+        0
+    } else if !coalesce_val.is_number() {
+        return Err(ctx.throw_type_error("`coalesce` must be a number"));
+    } else {
+        let n = coalesce_val.to_number(ctx)?;
+        let ok = matches!(n, IntOrFloat::Int64(_))
+            || matches!(n, IntOrFloat::Float64(d) if d.is_finite() && d.fract() == 0.0);
+        if !ok {
+            return Err(ctx.throw_range_error("`coalesce` must be an integer"));
+        }
+        match n {
+            IntOrFloat::Int64(i) => i.max(0) as u64,
+            IntOrFloat::Float64(d) => d.max(0.0) as u64,
+        }
+    };
+
     Ok(CallOpts {
         signal,
         timeout: opt_secs_prop(ctx, &obj, "timeout")?,
         stallTimeout: opt_secs_prop(ctx, &obj, "stallTimeout")?,
+        coalesce_ms,
     })
 }
 
@@ -486,6 +512,68 @@ enum ChatReply {
     Error(String),
 }
 
+/// Accumulates consecutive pure-content deltas into a single chunk. Active only
+/// with the `coalesce` call opt: a fast (char-per-chunk) stream then amortizes
+/// the per-chunk commit/wake/JS-convert cost over several deltas.
+struct CoalescedChunk {
+    id: Option<String>,
+    object: Option<String>,
+    created: Option<i64>,
+    model: Option<String>,
+    content: String,
+    reasoning: String,
+}
+
+impl CoalescedChunk {
+    fn new(json: &serde_json::Value) -> Self {
+        Self {
+            id: json["id"].as_str().map(String::from),
+            object: json["object"].as_str().map(String::from),
+            created: json["created"].as_i64(),
+            model: json["model"].as_str().map(String::from),
+            content: String::new(),
+            reasoning: String::new(),
+        }
+    }
+
+    fn apply_delta(&mut self, json: &serde_json::Value) {
+        let delta = &json[OUTMSG_FIELD_CHOICES][0]["delta"];
+        if let Some(c) = delta["content"].as_str() {
+            self.content.push_str(c);
+        }
+        // Some servers emit "reasoning", others "reasoning_content".
+        if let Some(r) = delta[OUTMSG_FIELD_REASONING].as_str() {
+            self.reasoning.push_str(r);
+        } else if let Some(r) = delta["reasoning"].as_str() {
+            self.reasoning.push_str(r);
+        }
+    }
+
+    fn into_chunk(self) -> serde_json::Value {
+        let mut delta = serde_json::Map::new();
+        if !self.content.is_empty() {
+            delta.insert("content".into(), serde_json::Value::String(self.content));
+        }
+        if !self.reasoning.is_empty() {
+            delta.insert(
+                OUTMSG_FIELD_REASONING.into(),
+                serde_json::Value::String(self.reasoning),
+            );
+        }
+        serde_json::json!({
+            "id": self.id,
+            "object": self.object,
+            "created": self.created,
+            "model": self.model,
+            "choices": [{
+                "index": 0,
+                "delta": delta,
+                "finish_reason": null
+            }]
+        })
+    }
+}
+
 fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let client = get_client(ctx, &this)?;
@@ -592,6 +680,7 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
 
     if is_stream {
         // Streaming: AsyncIterableIterator
+        let coalesce_ms = opts.coalesce_ms;
         let result_slot = PromiseResultSlot::<ChatReply>::new();
         // Commits from the reading task wake the parked event loop so the
         // custom fetcher below polls the slot promptly.
@@ -619,6 +708,15 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
                     if let Some(state) = buf.take() {
                         slot.commit_async(ChatReply::Chunk(state.into_chunk()))
                             .await;
+                    }
+                }
+
+                async fn flush_acc(
+                    slot: &PromiseResultSlot<ChatReply>,
+                    acc: &mut Option<CoalescedChunk>,
+                ) {
+                    if let Some(c) = acc.take() {
+                        slot.commit_async(ChatReply::Chunk(c.into_chunk())).await;
                     }
                 }
 
@@ -659,39 +757,58 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
                             stall_timeout_secs.map(|s| std::time::Duration::from_secs(s));
                         let notify = abort_notify.clone();
 
+                        // Accumulated coalesced content chunk and a line stashed
+                        // by the coalesce window for the main loop to process.
+                        let mut acc: Option<CoalescedChunk> = None;
+                        let mut stash: Option<String> = None;
+
                         'sse: loop {
-                            // Line read raced against the stall timeout and the user
-                            // abort signal. `biased` lets a fired signal win even when
-                            // a line is simultaneously ready.
-                            let line_fut = async {
-                                match stall_limit {
-                                    Some(stall) => tokio::time::timeout(stall, lines.next_line())
-                                        .await
-                                        .map_err(|_| ()),
-                                    None => Ok(lines.next_line().await),
-                                }
-                            };
-                            let next = match &notify {
-                                Some(n) => tokio::select! {
-                                    biased;
-                                    _ = n.notified() => {
-                                        slot.commit_async(ChatReply::Error(ABORT_MSG.to_string())).await;
+                            // Fast path: no abort signal and no stall guard —
+                            // read the next line directly, skipping the per-line
+                            // select!/timeout scaffolding.
+                            let next_result: std::io::Result<Option<String>> = if let Some(
+                                stashed,
+                            ) = stash.take()
+                            {
+                                Ok(Some(stashed))
+                            } else if notify.is_none() && stall_limit.is_none() {
+                                lines.next_line().await
+                            } else {
+                                // Line read raced against the stall timeout and the user
+                                // abort signal. `biased` lets a fired signal win even when
+                                // a line is simultaneously ready.
+                                let line_fut = async {
+                                    match stall_limit {
+                                        Some(stall) => {
+                                            tokio::time::timeout(stall, lines.next_line())
+                                                .await
+                                                .map_err(|_| ())
+                                        }
+                                        None => Ok(lines.next_line().await),
+                                    }
+                                };
+                                let next = match &notify {
+                                    Some(n) => tokio::select! {
+                                        biased;
+                                        _ = n.notified() => {
+                                            slot.commit_async(ChatReply::Error(ABORT_MSG.to_string())).await;
+                                            break 'sse;
+                                        }
+                                        r = line_fut => r,
+                                    },
+                                    None => line_fut.await,
+                                };
+                                match next {
+                                    Ok(inner) => inner,
+                                    Err(()) => {
+                                        stall_aborted = true;
+                                        slot.commit_async(ChatReply::Error(format!(
+                                            "llm stream stall timeout: no data for {}s",
+                                            stall_limit.map(|d| d.as_secs()).unwrap_or(0)
+                                        )))
+                                        .await;
                                         break 'sse;
                                     }
-                                    r = line_fut => r,
-                                },
-                                None => line_fut.await,
-                            };
-                            let next_result = match next {
-                                Ok(inner) => inner,
-                                Err(()) => {
-                                    stall_aborted = true;
-                                    slot.commit_async(ChatReply::Error(format!(
-                                        "llm stream stall timeout: no data for {}s",
-                                        stall_limit.map(|d| d.as_secs()).unwrap_or(0)
-                                    )))
-                                    .await;
-                                    break 'sse;
                                 }
                             };
                             // Preserve legacy end semantics: Ok(Some)=frame,
@@ -699,120 +816,184 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
                             let Ok(Some(line)) = next_result else {
                                 break 'sse;
                             };
-                            let line = line.trim().to_string();
-
-                            if let Some(data) = line.strip_prefix("data: ") {
-                                if data == "[DONE]" {
-                                    if buf.is_some() {
-                                        flush_buf(&slot, &mut buf).await;
-                                    }
-                                    break;
+                            let line = line.trim();
+                            let Some(data) = line.strip_prefix("data: ") else {
+                                continue;
+                            };
+                            if data == "[DONE]" {
+                                flush_acc(&slot, &mut acc).await;
+                                if buf.is_some() {
+                                    flush_buf(&slot, &mut buf).await;
                                 }
-
-                                if let Ok(mut json) =
-                                    serde_json::from_str::<serde_json::Value>(data)
-                                {
-                                    if json.get("error").is_some() {
-                                        if buf.is_some() {
-                                            flush_buf(&slot, &mut buf).await;
-                                        }
-
-                                        let err_msg = json["error"]["message"]
-                                            .as_str()
-                                            .unwrap_or(data)
-                                            .to_string();
-                                        slot.commit_async(ChatReply::Error(err_msg)).await;
-                                        break;
-                                    }
-
-                                    // Check for tool_calls in this chunk
-                                    if let Some(tcs) =
-                                        json[OUTMSG_FIELD_CHOICES][0]["delta"]["tool_calls"]
-                                            .as_array()
-                                        && !tcs.is_empty()
-                                    {
-                                        // A chunk may carry content/reasoning alongside tool_calls.
-                                        // Since we only buffer tool_calls here, emit that text now —
-                                        // otherwise it is lost when finish_reason arrives in a later,
-                                        // content-less chunk.
-                                        let has_finish =
-                                            json[OUTMSG_FIELD_CHOICES][0]["finish_reason"]
-                                                .as_str()
-                                                .is_some();
-                                        let delta = &json[OUTMSG_FIELD_CHOICES][0]["delta"];
-                                        if !has_finish
-                                            && (delta.get("content").is_some()
-                                                || delta.get("reasoning_content").is_some())
-                                        {
-                                            let mut text_chunk = json.clone();
-                                            if let Some(obj) =
-                                                text_chunk[OUTMSG_FIELD_CHOICES][0]["delta"]
-                                                    .as_object_mut()
-                                            {
-                                                obj.remove("tool_calls");
-                                            }
-                                            if !has_normalizer {
-                                                normalize_message_shape(&mut text_chunk);
-                                            }
-                                            slot.commit_async(ChatReply::Chunk(text_chunk)).await;
-                                        }
-
-                                        // Accumulate tool_call deltas
-                                        for tc in tcs {
-                                            let idx = tc["index"].as_i64().unwrap_or(0) as usize;
-                                            // Got a new index → flush previous buffered tool_call (matches openai-node logic)
-                                            if let Some(ref cur) = buf
-                                                && cur.idx != idx
-                                            {
-                                                flush_buf(&slot, &mut buf).await;
-                                            }
-
-                                            let state =
-                                                buf.get_or_insert_with(|| ToolCallBuffer::new(idx));
-                                            state.apply_delta(tc, &json);
-                                        }
-
-                                        // check finish_reason AFTER processing tool_calls
-                                        // (non-standard servers may emit both in one chunk)
-                                        if json[OUTMSG_FIELD_CHOICES][0]["finish_reason"]
-                                            .as_str()
-                                            .is_some()
-                                        {
-                                            flush_buf(&slot, &mut buf).await;
-
-                                            // MUST NOT emit the original json as-is: it still carries the last
-                                            // tool_calls delta. Emit a clean finish-only chunk instead.
-                                            let mut finish = json.clone();
-                                            if let Some(obj) =
-                                                finish[OUTMSG_FIELD_CHOICES][0]["delta"]
-                                                    .as_object_mut()
-                                            {
-                                                obj.remove("tool_calls");
-                                            }
-                                            // Normalize message format in choices[] delta
-                                            if !has_normalizer {
-                                                normalize_message_shape(&mut finish);
-                                            }
-                                            slot.commit_async(ChatReply::Chunk(finish)).await;
-                                        }
-                                    } else {
-                                        // Non-tool_call (content, finish_reason, etc.) → flush then passthrough
-                                        flush_buf(&slot, &mut buf).await;
-                                        // Normalize message format in choices[] delta
-                                        if !has_normalizer {
-                                            normalize_message_shape(&mut json);
-                                        }
-                                        slot.commit_async(ChatReply::Chunk(json)).await;
-                                    }
-                                }
+                                break;
                             }
+
+                            let Ok(mut json) = serde_json::from_str::<serde_json::Value>(data)
+                            else {
+                                continue;
+                            };
+                            if json.get("error").is_some() {
+                                flush_acc(&slot, &mut acc).await;
+                                if buf.is_some() {
+                                    flush_buf(&slot, &mut buf).await;
+                                }
+
+                                let err_msg = json["error"]["message"]
+                                    .as_str()
+                                    .unwrap_or(data)
+                                    .to_string();
+                                slot.commit_async(ChatReply::Error(err_msg)).await;
+                                break;
+                            }
+
+                            // Check for tool_calls in this chunk
+                            if let Some(tcs) =
+                                json[OUTMSG_FIELD_CHOICES][0]["delta"]["tool_calls"].as_array()
+                                && !tcs.is_empty()
+                            {
+                                flush_acc(&slot, &mut acc).await;
+                                // A chunk may carry content/reasoning alongside tool_calls.
+                                // Since we only buffer tool_calls here, emit that text now —
+                                // otherwise it is lost when finish_reason arrives in a later,
+                                // content-less chunk.
+                                let has_finish = json[OUTMSG_FIELD_CHOICES][0]["finish_reason"]
+                                    .as_str()
+                                    .is_some();
+                                let delta = &json[OUTMSG_FIELD_CHOICES][0]["delta"];
+                                if !has_finish
+                                    && (delta.get("content").is_some()
+                                        || delta.get("reasoning_content").is_some())
+                                {
+                                    let mut text_chunk = json.clone();
+                                    if let Some(obj) =
+                                        text_chunk[OUTMSG_FIELD_CHOICES][0]["delta"].as_object_mut()
+                                    {
+                                        obj.remove("tool_calls");
+                                    }
+                                    if !has_normalizer {
+                                        normalize_message_shape(&mut text_chunk);
+                                    }
+                                    slot.commit_async(ChatReply::Chunk(text_chunk)).await;
+                                }
+
+                                // Accumulate tool_call deltas
+                                for tc in tcs {
+                                    let idx = tc["index"].as_i64().unwrap_or(0) as usize;
+                                    // Got a new index → flush previous buffered tool_call (matches openai-node logic)
+                                    if let Some(ref cur) = buf
+                                        && cur.idx != idx
+                                    {
+                                        flush_buf(&slot, &mut buf).await;
+                                    }
+
+                                    let state = buf.get_or_insert_with(|| ToolCallBuffer::new(idx));
+                                    state.apply_delta(tc, &json);
+                                }
+
+                                // check finish_reason AFTER processing tool_calls
+                                // (non-standard servers may emit both in one chunk)
+                                if json[OUTMSG_FIELD_CHOICES][0]["finish_reason"]
+                                    .as_str()
+                                    .is_some()
+                                {
+                                    flush_buf(&slot, &mut buf).await;
+
+                                    // MUST NOT emit the original json as-is: it still carries the last
+                                    // tool_calls delta. Emit a clean finish-only chunk instead.
+                                    let mut finish = json.clone();
+                                    if let Some(obj) =
+                                        finish[OUTMSG_FIELD_CHOICES][0]["delta"].as_object_mut()
+                                    {
+                                        obj.remove("tool_calls");
+                                    }
+                                    // Normalize message format in choices[] delta
+                                    if !has_normalizer {
+                                        normalize_message_shape(&mut finish);
+                                    }
+                                    slot.commit_async(ChatReply::Chunk(finish)).await;
+                                }
+                                continue;
+                            }
+
+                            // Non-tool_call (content, finish_reason, etc.) → flush
+                            // then passthrough.
+                            flush_buf(&slot, &mut buf).await;
+
+                            // Coalesce pure-content deltas when enabled: accumulate
+                            // and keep pulling lines within a short idle window
+                            // before committing one merged chunk. Non-mergable
+                            // lines are stashed for the next loop iteration.
+                            let delta = &json[OUTMSG_FIELD_CHOICES][0]["delta"];
+                            let is_pure_content = json[OUTMSG_FIELD_CHOICES][0]["finish_reason"]
+                                .as_str()
+                                .is_none()
+                                && (delta.get("content").is_some()
+                                    || delta.get("reasoning_content").is_some()
+                                    || delta.get("reasoning").is_some());
+                            if coalesce_ms > 0 && is_pure_content {
+                                let a = acc.get_or_insert_with(|| CoalescedChunk::new(&json));
+                                a.apply_delta(&json);
+                                let window = std::time::Duration::from_millis(coalesce_ms);
+                                loop {
+                                    match tokio::time::timeout(window, lines.next_line()).await {
+                                        Ok(Ok(Some(next))) => {
+                                            let next = next.trim();
+                                            // SSE frames are separated by blank
+                                            // lines — skip them, keep coalescing.
+                                            if next.is_empty() {
+                                                continue;
+                                            }
+                                            let Some(d) = next.strip_prefix("data: ") else {
+                                                stash = Some(next.to_string());
+                                                flush_acc(&slot, &mut acc).await;
+                                                break;
+                                            };
+                                            let Ok(j) =
+                                                serde_json::from_str::<serde_json::Value>(d)
+                                            else {
+                                                stash = Some(next.to_string());
+                                                flush_acc(&slot, &mut acc).await;
+                                                break;
+                                            };
+                                            let nd = &j[OUTMSG_FIELD_CHOICES][0]["delta"];
+                                            let npure = j[OUTMSG_FIELD_CHOICES][0]["finish_reason"]
+                                                .as_str()
+                                                .is_none()
+                                                && (nd.get("content").is_some()
+                                                    || nd.get("reasoning_content").is_some()
+                                                    || nd.get("reasoning").is_some());
+                                            if !npure {
+                                                stash = Some(next.to_string());
+                                                flush_acc(&slot, &mut acc).await;
+                                                break;
+                                            }
+                                            let a =
+                                                acc.get_or_insert_with(|| CoalescedChunk::new(&j));
+                                            a.apply_delta(&j);
+                                        }
+                                        _ => {
+                                            flush_acc(&slot, &mut acc).await;
+                                            break;
+                                        }
+                                    }
+                                }
+                                continue;
+                            }
+
+                            // Normalize message format in choices[] delta
+                            flush_acc(&slot, &mut acc).await;
+                            if !has_normalizer {
+                                normalize_message_shape(&mut json);
+                            }
+                            slot.commit_async(ChatReply::Chunk(json)).await;
                         }
 
                         // Stream ended without [DONE] (server closed early): flush
                         // any still-buffered tool_call so it is not silently lost.
-                        // On the normal [DONE] path the buffer is already empty.
+                        // On the normal [DONE] path the buffers are already empty.
                         // Skipped when the stall guard aborted the stream.
                         if !stall_aborted {
+                            flush_acc(&slot, &mut acc).await;
                             if buf.is_some() {
                                 flush_buf(&slot, &mut buf).await;
                             }
