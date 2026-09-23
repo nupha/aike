@@ -222,7 +222,7 @@ pub(super) fn js_client_responses(ctx: &mut ScopedContext, cc: CallContext) -> J
         .unwrap_or(client.timeout);
 
     let url = format!("{}/responses", base_url);
-    let http_client = reqwest::Client::new();
+    let http_client = client.http.clone();
     let request_body = serde_json::to_string(&req).unwrap_or_default();
     let mut req_builder = http_client
         .post(&url)

@@ -140,6 +140,9 @@ pub(crate) struct ClientPayload {
     pub(crate) api_key: String,
     pub(crate) headers: std::collections::HashMap<String, String>,
     pub(crate) timeout: Duration,
+    /// Shared reqwest client: built once, reused across requests so the
+    /// connection pool / keep-alive survives between calls.
+    pub(crate) http: reqwest::Client,
 
     //
     // model params
@@ -353,6 +356,7 @@ fn js_client_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         max_tokens: max_tokens as usize,
         extra_body,
         headers,
+        http: reqwest::Client::new(),
     };
 
     JSLlmClient::new_instance(ctx, new_target, payload).and_then(|mut o| {
@@ -557,7 +561,8 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
     }
 
     // Use reqwest to make HTTP request, build client
-    let mut req_builder = reqwest::Client::new()
+    let http = client.http.clone();
+    let mut req_builder = http
         .post(format!("{}/chat/completions", client.base_url))
         .body(serde_json::to_string(&req_json).unwrap_or_default())
         .header("Content-Type", "application/json")
