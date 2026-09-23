@@ -104,6 +104,14 @@ declare module "ai" {
      * resets the timer). Streaming only.
      */
     stallTimeout?: number;
+    /**
+     * Coalescing window in milliseconds for streaming: consecutive
+     * pure-content chunks arriving within this window are merged into one
+     * chunk before being yielded, reducing per-chunk overhead. 0 (or negative)
+     * disables coalescing; defaults to 0. Non-integer values throw
+     * RangeError. Changes yielded chunk granularity. Streaming only.
+     */
+    coalesce?: number;
   }
 
   export interface ChatResponse {
