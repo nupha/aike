@@ -41,6 +41,19 @@ function mkChunk(delta, finish) {
 
 function sseFor(messages) {
   const last = messages[messages.length - 1].content || "";
+  if (last.indexOf("STRAY") >= 0) {
+    // A stray fragment with no id/name (truncated args only) arrives first,
+    // then a valid call. The incomplete fragment must be dropped, not emitted
+    // as a bogus tool_call (id:null, name:null) — it would poison the next
+    // request with HTTP 422.
+    return (
+      mkChunk({ role: "assistant" }) +
+      mkChunk({ tool_calls: [{ index: 0, function: { arguments: '": "Param Incorrect"}' } }] }) +
+      mkChunk({ tool_calls: [{ index: 1, id: "call_ok", type: "function", function: { name: "sh", arguments: '{"command":"ls"}' } }] }) +
+      mkChunk({}, "tool_calls") +
+      "data: [DONE]\n\n"
+    );
+  }
   if (last.indexOf("TOOLCALL") >= 0) {
     // tool_call deltas split across chunks; one chunk carries content too
     return (
@@ -153,6 +166,25 @@ check("new LlmClient({}) with env/defaults", envCli instanceof LlmClient);
       toolCalls[0].id === "call_1" &&
       toolCalls[0].function.name === "get_weather" &&
       toolCalls[0].function.arguments === '{"city":"Shanghai"}',
+  );
+}
+
+// ---- incomplete tool_call fragment is dropped ----
+
+{
+  const toolCalls = [];
+  for await (const chunk of cli.chat({
+    messages: [{ role: "user", content: "STRAY please" }],
+  })) {
+    const d = chunk.choices[0].delta;
+    if (d.tool_calls) for (const tc of d.tool_calls) toolCalls.push(tc);
+  }
+  check(
+    "incomplete fragment dropped, valid call kept",
+    toolCalls.length === 1 &&
+      toolCalls[0].id === "call_ok" &&
+      toolCalls[0].function.name === "sh" &&
+      toolCalls[0].function.arguments === '{"command":"ls"}',
   );
 }
 

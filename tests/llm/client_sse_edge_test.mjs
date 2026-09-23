@@ -70,6 +70,15 @@ const routes = {
     mk({ tool_calls: [{ index: 0, id: "ch", type: "function", function: { name: "lookup", arguments: '{"q":"x"}' } }] }) +
     mk({}, "tool_calls") +
     "data: [DONE]\n\n",
+
+  // I: stray id/name-less fragment whose ONLY flush trigger is finish_reason
+  //    arriving in the same chunk — must be dropped, valid call kept
+  "/stray-finish": () =>
+    mk({ role: "assistant" }) +
+    mk({ tool_calls: [{ index: 0, function: { arguments: '{"path":"ravenclaw"' } }] }, "tool_calls") +
+    mk({ tool_calls: [{ index: 1, id: "ci", type: "function", function: { name: "sh", arguments: '{"command":"ls"}' } }] }) +
+    mk({}, "tool_calls") +
+    "data: [DONE]\n\n",
 };
 
 svr.post("/v1/chat/completions", async (req, res) => {
@@ -136,6 +145,7 @@ console.log("E garbage       :", JSON.stringify(summarize(await run("/garbage"))
 console.log("F mid-error     :", JSON.stringify(await run("/mid-error")));
 console.log("G empty-args    :", JSON.stringify(summarize(await run("/empty-args"))));
 console.log("H text-then-tool:", JSON.stringify(summarize(await run("/text-then-tool"))));
+console.log("I stray-finish  :", JSON.stringify(summarize(await run("/stray-finish"))));
 console.log("done: all scenarios executed");
 globalThis.h.shutdown();
 await globalThis.h.exit;

@@ -481,6 +481,13 @@ impl ToolCallBuffer {
         }
     }
 
+    /// A tool_call is complete only once the stream has supplied its `id` and
+    /// `function.name`. Until then it is a partial fragment that must not be
+    /// surfaced or stored.
+    fn is_complete(&self) -> bool {
+        self.id.is_some() && self.name.is_some()
+    }
+
     fn into_chunk(self) -> serde_json::Value {
         serde_json::json!({
             "id": self.chunk_id,
@@ -701,13 +708,29 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
                     return;
                 }
 
+                // Emit the buffered tool_call only when it is complete (id + name
+                // present). A stream may deliver a stray/truncated fragment that
+                // never carries an id or name — emitting it would forge a bogus
+                // tool_call (`id: null`, `name: null`) into the history and poison
+                // the next request. An incomplete fragment is dropped (it is
+                // neither a valid call nor model prose) and logged for visibility;
+                // it is also discarded on a fresh index, on [DONE], on error, and
+                // at stream end.
                 async fn flush_buf(
                     slot: &PromiseResultSlot<ChatReply>,
                     buf: &mut Option<ToolCallBuffer>,
                 ) {
                     if let Some(state) = buf.take() {
-                        slot.commit_async(ChatReply::Chunk(state.into_chunk()))
-                            .await;
+                        if state.is_complete() {
+                            slot.commit_async(ChatReply::Chunk(state.into_chunk()))
+                                .await;
+                        } else {
+                            log::warn!(
+                                "dropping incomplete tool_call fragment: index={}, arguments={:?}",
+                                state.idx,
+                                state.arguments
+                            );
+                        }
                     }
                 }
 
