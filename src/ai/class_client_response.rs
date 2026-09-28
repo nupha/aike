@@ -289,48 +289,50 @@ pub(super) fn js_client_responses(ctx: &mut ScopedContext, cc: CallContext) -> J
                         loop {
                             // Fast path: no abort signal and no stall guard —
                             // read the next line directly.
-                            let next_result: std::io::Result<Option<String>> =
-                                if abort_notify.is_none() && stall_limit.is_none() {
-                                    lines.next_line().await
-                                } else {
-                                    let line_fut = async {
-                                        match stall_limit {
-                                            Some(stall) => tokio::time::timeout(
-                                                stall,
-                                                lines.next_line(),
-                                            )
-                                            .await
-                                            .map_err(|_| ()),
-                                            None => Ok(lines.next_line().await),
+                            let next_result: std::io::Result<Option<String>> = if abort_notify
+                                .is_none()
+                                && stall_limit.is_none()
+                            {
+                                lines.next_line().await
+                            } else {
+                                let line_fut = async {
+                                    match stall_limit {
+                                        Some(stall) => {
+                                            tokio::time::timeout(stall, lines.next_line())
+                                                .await
+                                                .map_err(|_| ())
                                         }
-                                    };
-                                    let next = match &abort_notify {
-                                        Some(n) => tokio::select! {
-                                            biased;
-                                            _ = n.notified() => {
-                                                commit_slot(&slot, ResponsesReply::Error(ABORT_MSG.to_string())).await;
-                                                break;
-                                            }
-                                            r = line_fut => r,
-                                        },
-                                        None => line_fut.await,
-                                    };
-                                    match next {
-                                        Ok(inner) => inner,
-                                        Err(()) => {
-                                            stall_aborted = true;
-                                            commit_slot(
-                                                &slot,
-                                                ResponsesReply::Error(format!(
-                                                    "llm stream stall timeout: no data for {}s",
-                                                    stall_limit.map(|d| d.as_secs()).unwrap_or(0)
-                                                )),
-                                            )
-                                            .await;
-                                            break;
-                                        }
+                                        None => Ok(lines.next_line().await),
                                     }
                                 };
+                                let next = match &abort_notify {
+                                    Some(n) => tokio::select! {
+                                        biased;
+                                        _ = n.notified() => {
+                                            commit_slot(&slot, ResponsesReply::Error(ABORT_MSG.to_string())).await;
+                                            break;
+                                        }
+                                        r = line_fut => r,
+                                    },
+                                    None => line_fut.await,
+                                };
+                                match next {
+                                    Ok(inner) => inner,
+                                    Err(()) => {
+                                        stall_aborted = true;
+                                        commit_slot(
+                                            &slot,
+                                            ResponsesReply::Error(format!(
+                                                "llm stream stall timeout: no data for {}s",
+                                                stall_limit.map(|d| d.as_secs()).unwrap_or(0)
+                                            )),
+                                        )
+                                        .await;
+                                        break;
+                                    }
+                                }
+                            };
+
                             // EOF/read error ends the stream silently (legacy).
                             let Ok(Some(line)) = next_result else {
                                 break;
@@ -404,7 +406,7 @@ pub(super) fn js_client_responses(ctx: &mut ScopedContext, cc: CallContext) -> J
             // Abort races the whole request; dropping `result_fut` closes the
             // upstream connection, so generation stops server-side too.
             let result_fut = async {
-                let result = match req_builder.send().await {
+                match req_builder.send().await {
                     Ok(response) => {
                         let status = response.status();
                         let body = response.text().await.unwrap_or_default();
@@ -418,8 +420,7 @@ pub(super) fn js_client_responses(ctx: &mut ScopedContext, cc: CallContext) -> J
                         }
                     }
                     Err(e) => Err(e.to_string()),
-                };
-                result
+                }
             };
 
             let result = match abort_notify {
