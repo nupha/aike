@@ -33,7 +33,7 @@ use zuqe::{
 };
 
 use crate::{
-    ai, browser, fs, html, http, jinja2, json_schema, jsonl, mcp, path, process,
+    ai, browser, fs, html, http, jinja2, json_schema, jsonl, mcp, os, path, process,
     whatwg::{
         abort, base64, blob, console, crypto, dom, fetch, form_data, microtask, stream,
         structured_clone, text_decoder, text_encoder, timeout, url,
@@ -281,6 +281,7 @@ const ALL_CAPS: &[&str] = &[
     "Aike",
     "fs",
     "path",
+    "os",
     "http",
     "html",
     "browser",
@@ -457,7 +458,9 @@ fn cap_classes(cap: &str) -> Vec<ClassID> {
             super::JSFileHandle::class_id(),
         ],
         "fs" => vec![super::JSFileHandle::class_id()],
-        "path" | "yaml" | "jsonl" | "jsonSchema" | "jinja2" | "http" | "mcp" => Vec::new(),
+        "path" | "os" | "yaml" | "jsonl" | "jsonSchema" | "jinja2" | "http" | "mcp" => {
+            Vec::new()
+        }
         "html" => vec![
             html::HtmlDocument::class_id(),
             html::HtmlElement::class_id(),
@@ -494,6 +497,7 @@ fn install_cap(cx: &mut ScopedContext, cap: &str) -> Result<(), i32> {
         "Aike" => super::install_aike_namespace(cx)?,
         "fs" => fs::init_mod_fs(cx)?,
         "path" => path::init_mod_path(cx)?,
+        "os" => os::init_mod_os(cx)?,
         "http" => http::init_mod_http(cx)?,
         "html" => html::init_mod_html(cx)?,
         "browser" => browser::init_mod_browser(cx)?,

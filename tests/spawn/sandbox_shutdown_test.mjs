@@ -11,7 +11,7 @@
  * Usage:  aike -m tests/spawn/sandbox_shutdown_test.mjs
  */
 
-const isWin = process.platform === "windows";
+const isWin = process.platform === "win32";
 
 const dec = new TextDecoder();
 function strip(s) {

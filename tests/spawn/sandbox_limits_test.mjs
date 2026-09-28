@@ -45,7 +45,7 @@ const ws = `${base}/ws`;
 const ro = `${base}/ro-data`;
 const rw = `${base}/rw-data`;
 const isMacos = process.platform === "darwin";
-const isWin = process.platform === "windows";
+const isWin = process.platform === "win32";
 
 async function setup() {
   await Promise.all([

@@ -10,8 +10,9 @@
 
 import { HttpServer } from "http";
 import * as fs from "fs";
+import * as os from "os";
 
-const IS_WIN = process.platform === "windows";
+const IS_WIN = process.platform === "win32";
 const PORT = 18777;
 const BASE = `http://127.0.0.1:${PORT}`;
 
@@ -76,7 +77,7 @@ function testShape() {
 async function testToFile() {
   console.log("\n=== Aike.download — to file ===");
 
-  const dest = Aike.tmpdir() + "/aike-dl-test.txt";
+  const dest = os.tmpdir() + "/aike-dl-test.txt";
   const resolved = await Aike.download(`${BASE}/data`, dest);
   check("resolves with the dest path", resolved === dest, `got ${resolved}`);
 
@@ -166,7 +167,7 @@ async function testPreAborted() {
 async function testInFlightAbort() {
   console.log("\n=== Aike.download — in-flight abort (mid-stream) ===");
 
-  const dest = Aike.tmpdir() + "/aike-dl-slow.txt";
+  const dest = os.tmpdir() + "/aike-dl-slow.txt";
   const c = new AbortController();
   const p = Aike.download(`${BASE}/slow`, dest, { signal: c.signal });
 

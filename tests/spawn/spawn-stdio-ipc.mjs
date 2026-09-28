@@ -93,7 +93,7 @@ const stubber = Aike.spawn(process.execPath, ["-m", "-e", `
 const t2 = Date.now();
 const stageK = await stubber.shutdown({ eofTimeoutMs: 200, termTimeoutMs: 300, killTimeoutMs: 2000 });
 const dtK = Date.now() - t2;
-if (process.platform === "windows") {
+if (process.platform === "win32") {
   // Windows has no catchable SIGTERM: process.kill terminates the child
   // outright, so shutdown resolves at the "term" stage (never "kill").
   check(`shutdown resolves at "term" on windows`, stageK === "term", `got ${stageK}`);

@@ -49,7 +49,7 @@ function runFixture(flags, { timeout } = {}) {
 }
 
 function alivePid(pid) {
-  if (process.platform === "windows") {
+  if (process.platform === "win32") {
     const r = Aike.spawnSync("tasklist", ["/FI", `PID eq ${pid}`]);
     return out(r).includes(String(pid));
   }
@@ -58,7 +58,7 @@ function alivePid(pid) {
 }
 
 function reap(pid) {
-  if (process.platform === "windows") {
+  if (process.platform === "win32") {
     Aike.spawnSync("taskkill", ["/F", "/PID", String(pid)]);
   } else {
     Aike.spawnSync("kill", ["-9", String(pid)]);
@@ -123,7 +123,7 @@ async function testAsyncTimeout() {
 function testTreeKill() {
   console.log("\n=== timeout kills the whole tree ===");
 
-  if (process.platform !== "windows") {
+  if (process.platform !== "win32") {
     console.log("  ⏭ skipped (Windows-only tree-kill check)");
     return;
   }
@@ -267,7 +267,7 @@ function testAbortProcessExit() {
 async function testAbortSignal() {
   console.log("\n=== abortOnParentExit, parent SIGTERMed ===");
 
-  if (process.platform === "windows") {
+  if (process.platform === "win32") {
     console.log("  ⏭ signal test skipped on windows (no SIGTERM)");
     return;
   }

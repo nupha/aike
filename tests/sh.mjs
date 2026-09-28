@@ -1,11 +1,14 @@
 // 🐚 Aike.sh — 平台 shell 执行 + 捕获测试
 //
-// Import-free: runs in any JS environment with the Aike namespace.
+// Only imports the built-in `os` module (for tmpdir); otherwise runs in any JS
+// environment with the Aike namespace.
 // 非 WHATWG 标准（memo §5.4）：命令字符串交给平台 shell 解释
 // （POSIX `/bin/sh -c`，Windows `%COMSPEC%` i.e. cmd.exe /d /s /c），
 // stdout/stderr 恒捕获并以 string 返回。
 
-const IS_WIN = process.platform === "windows";
+import * as os from "os";
+
+const IS_WIN = process.platform === "win32";
 
 let pass = 0;
 let fail = 0;
@@ -122,7 +125,7 @@ function testEnv() {
 function testCwd() {
   console.log("\n=== Aike.sh — cwd option ===");
 
-  const tmp = Aike.tmpdir();
+  const tmp = os.tmpdir();
   const r = Aike.sh(IS_WIN ? "cd" : "pwd", { cwd: tmp });
   check("command runs in cwd", normPath(r.stdout) === normPath(tmp), `got ${JSON.stringify(r.stdout)} vs ${tmp}`);
 }

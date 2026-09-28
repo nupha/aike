@@ -8,9 +8,9 @@ mod persistent;
 pub(crate) mod pipe_bridge;
 mod runtime;
 pub(crate) mod sandbox;
-mod signal;
+pub(crate) mod signal;
 mod spawn;
-mod sys;
+pub(crate) mod sys;
 
 pub(crate) use {
     class_io_handle::{JSFileHandle, JSStdioHandle, make_stats},
@@ -162,14 +162,12 @@ pub(crate) fn install_aike_namespace(ctx: &mut ScopedContext) -> Result<(), i32>
         FieldDef::FUNC("gc", 0, sys::js_gc, 0),
         FieldDef::FUNC("isatty", 1, sys::js_isatty, 0),
         FieldDef::FUNC("now", 0, sys::js_now, 0),
-        FieldDef::FUNC("homedir", 0, sys::js_homedir, 0),
-        FieldDef::FUNC("tmpdir", 0, sys::js_tmpdir, 0),
+        // `homedir`/`tmpdir`/signal numbers live on the `os` module, not here.
         FieldDef::FUNC("which", 1, sys::js_which, 0),
         FieldDef::FUNC("gzip", 1, crate::gzip::js_gzip, 0),
         FieldDef::FUNC("gunzip", 1, crate::gzip::js_gunzip, 0),
         FieldDef::FUNC("sh", 1, spawn::js_sh, 0),
         FieldDef::FUNC("download", 2, download::js_download, 0),
-        FieldDef::LAZY_VALUE("signals", signal::js_signals, JS_PROP_ENUMERABLE),
         // --- timer ---
         FieldDef::FUNC("sleep", 0, crate::whatwg::timeout::js_sleep, 0),
         // --- persistent ---

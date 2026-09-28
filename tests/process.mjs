@@ -79,7 +79,7 @@ function testRuntime() {
 
   check("platform is a string", typeof process.platform === "string", `got ${typeof process.platform}`);
   check("platform is non-empty", process.platform.length > 0);
-  const knownPlatforms = ["windows", "darwin", "linux", "android", "freebsd", "openbsd", "aix", "sunos"];
+  const knownPlatforms = ["win32", "darwin", "linux", "android", "freebsd", "openbsd", "aix", "sunos"];
   check(
     "platform is a known value",
     knownPlatforms.includes(process.platform),
@@ -182,7 +182,7 @@ function testUmask() {
   console.log("\n=== process.umask ===");
 
   check("umask is a function", typeof process.umask === "function");
-  if (process.platform !== "windows") {
+  if (process.platform !== "win32") {
     const prev = process.umask();
     check("umask() returns a number", typeof prev === "number", `got ${typeof prev}`);
     const next = process.umask(0o022);

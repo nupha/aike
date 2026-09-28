@@ -7,7 +7,7 @@
 
 import * as path from "path";
 
-const IS_WIN = process.platform === "windows";
+const IS_WIN = process.platform === "win32";
 
 let pass = 0;
 let fail = 0;

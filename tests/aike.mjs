@@ -1,3 +1,4 @@
+import * as OS from "os";
 import * as Path from "path";
 
 // --- Helpers ---
@@ -333,13 +334,14 @@ async function testEventEmitter() {
 function testOnSignal() {
   console.log("\n=== Aike.onSignal ===");
 
-  // 0. Aike.signals exists and contains platform-available signals
-  check("Aike.signals is an object", typeof Aike.signals === "object" && Aike.signals !== null);
-  check("Aike.signals.SIGINT is a number", typeof Aike.signals.SIGINT === "number");
-  check("Aike.signals.SIGTERM is a number", typeof Aike.signals.SIGTERM === "number");
+  // 0. The signal table is owned by `os.constants.signals`.
+  const SIG = OS.constants.signals;
+  check("os.constants.signals is an object", typeof SIG === "object" && SIG !== null);
+  check("signals.SIGINT is a number", typeof SIG.SIGINT === "number");
+  check("signals.SIGTERM is a number", typeof SIG.SIGTERM === "number");
   check(
-    "Aike.signals.SIGUSR1 may be undefined (Windows) or number (Unix)",
-    Aike.signals.SIGUSR1 === undefined || typeof Aike.signals.SIGUSR1 === "number",
+    "signals.SIGUSR1 may be undefined (Windows) or number (Unix)",
+    SIG.SIGUSR1 === undefined || typeof SIG.SIGUSR1 === "number",
   );
 
   // 1. onSignal exists and is a function
@@ -368,7 +370,7 @@ function testOnSignal() {
   check("non-function handler throws", nonFuncError);
 
   // 4-6. Unix-only signals (e.g. SIGUSR1) — test only if available on this platform
-  if (Aike.signals.SIGUSR1 !== undefined) {
+  if (SIG.SIGUSR1 !== undefined) {
     // 4. Register a handler returns `this` (Aike for chaining)
     const ret = Aike.onSignal("SIGUSR1", () => {});
     check("onSignal returns this", ret === Aike, `got ${typeof ret}`);
@@ -413,7 +415,7 @@ function testOnSignal() {
   // Cleanup: remove all handlers registered in this test
   Aike.onSignal("SIGINT", null);
   Aike.onSignal("SIGTERM", null);
-  if (Aike.signals.SIGUSR1 !== undefined) {
+  if (SIG.SIGUSR1 !== undefined) {
     Aike.onSignal("SIGUSR1", null);
   }
 }
@@ -428,7 +430,7 @@ async function testSpawnSync() {
   check("spawnSync exists", typeof Aike.spawnSync === "function");
 
   // 2-10. Unix-only spawnSync tests (skip on Windows)
-  if (process.platform !== "windows") {
+  if (process.platform !== "win32") {
     // 2. Basic echo with args array
     {
       const r = Aike.spawnSync("echo", ["hello spawnSync"]);
@@ -544,7 +546,7 @@ async function testSpawn() {
   check("spawn exists", typeof Aike.spawn === "function");
 
   // 2-12. Unix-only async spawn tests (skip on Windows)
-  if (process.platform !== "windows") {
+  if (process.platform !== "win32") {
     // 2. Basic async echo — read stdout via FileHandle.text()
     {
       const p = Aike.spawn("echo", ["hello async"]);
@@ -869,7 +871,7 @@ function testTty() {
 
   // ttySetRaw on invalid fd throws TypeError (Unix only — Windows impl doesn't validate fd)
   let ttyRawError = false;
-  if (process.platform !== "windows") {
+  if (process.platform !== "win32") {
     try {
       Aike.ttySetRaw(999);
     } catch (e) {
@@ -1008,7 +1010,7 @@ async function testSleep() {
 }
 
 // ===================================================================
-// process runtime properties (argv, execArgv, execPath) + Aike.homedir
+// process runtime properties (argv, execArgv, execPath)
 // ===================================================================
 function testRuntimeProps() {
   console.log("\n=== process.runtime ===");
@@ -1017,7 +1019,7 @@ function testRuntimeProps() {
   check("platform is non-empty", process.platform.length > 0);
 
   // Platform should match one of the standard Node.js values
-  const knownPlatforms = ["windows", "darwin", "linux", "android", "freebsd", "openbsd", "aix", "sunos"];
+  const knownPlatforms = ["win32", "darwin", "linux", "android", "freebsd", "openbsd", "aix", "sunos"];
   check(
     "platform is a known value",
     knownPlatforms.includes(process.platform),
@@ -1025,11 +1027,7 @@ function testRuntimeProps() {
   );
 
   // ── homedir ──
-  check("homedir is a function", typeof Aike.homedir === "function");
-  const home = Aike.homedir();
-  check("homedir returns a string", typeof home === "string", `got ${typeof home}`);
-  check("homedir is non-empty", home.length > 0, `got ${JSON.stringify(home)}`);
-  check("homedir is absolute path", Path.isAbsolute(home), `got ${home}`);
+  // `os.homedir()` is tested in tests/os.mjs; it is not on `Aike`.
 
   check("argv is an array", Array.isArray(process.argv));
   check("argv has at least 1 element", process.argv.length >= 1);
@@ -1048,18 +1046,13 @@ function testRuntimeProps() {
 }
 
 // ===================================================================
-// Aike.tmpdir + Aike.which tests
+// Aike.which tests. `os.tmpdir()` is covered in tests/os.mjs.
 // ===================================================================
-function testTmpdirWhich() {
-  console.log("\n=== Aike.tmpdir / Aike.which ===");
-
-  check("tmpdir is a function", typeof Aike.tmpdir === "function");
-  const tmp = Aike.tmpdir();
-  check("tmpdir returns a string", typeof tmp === "string", `got ${typeof tmp}`);
-  check("tmpdir is non-empty", tmp.length > 0, `got ${JSON.stringify(tmp)}`);
+function testWhich() {
+  console.log("\n=== Aike.which ===");
 
   check("which is a function", typeof Aike.which === "function");
-  const exe = Aike.which(process.platform === "windows" ? "cmd" : "sh");
+  const exe = Aike.which(process.platform === "win32" ? "cmd" : "sh");
   check("which finds a PATH command", typeof exe === "string" && exe.length > 0, `got ${exe}`);
   check("which result is absolute", exe !== null && Path.isAbsolute(exe), `got ${exe}`);
   check("which missing command is null", Aike.which("aike_no_such_cmd_xyz") === null);
@@ -1093,7 +1086,7 @@ await testTty();
 await testNow();
 await testSchedule();
 await testSleep();
-await testTmpdirWhich();
+await testWhich();
 await testRuntimeProps();
 
 // Summary

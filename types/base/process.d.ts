@@ -234,16 +234,23 @@ declare namespace process {
 
   // --- runtime ---
 
-  /** Operating system platform. ('windows', 'darwin', 'linux', etc.) */
+  /**
+   * Operating system platform, Node-style — `"win32"` on Windows, not
+   * `"windows"`. `os.platform()` returns the same value.
+   *
+   * The set is closed; do not widen it with `| string`, which would erase the
+   * literal types.
+   */
   const platform:
-    | "windows"
+    | "win32"
     | "darwin"
     | "linux"
     | "android"
     | "freebsd"
     | "openbsd"
+    | "netbsd"
     | "aix"
-    | string;
+    | "sunos";
 
   /** Command-line arguments (argv[1:]). */
   const argv: readonly string[];
@@ -514,11 +521,8 @@ declare namespace Aike {
   /** Returns the current monotonic time in milliseconds. */
   function now(): number;
 
-  /** Returns the current user's home directory path. */
-  function homedir(): string;
-
-  /** Returns the system temporary directory path. */
-  function tmpdir(): string;
+  // `homedir()` / `tmpdir()` live on the `os` module — use `os.homedir()` and
+  // `os.tmpdir()`. Not re-exported here.
 
   /**
    * Resolve a command name to its absolute executable path by searching `PATH`,
@@ -591,32 +595,8 @@ declare namespace Aike {
 
   // --- signal ---
 
-  /**
-   * Platform-available signal name → number mapping.
-   * On Windows, only SIGINT, SIGABRT, SIGFPE, SIGILL, SIGSEGV, SIGTERM are present.
-   * On Unix, all POSIX signals are available (including SIGQUIT, SIGUSR1, etc.).
-   * Check `Aike.signals.SIGUSR1 !== undefined` to detect platform support.
-   */
-  const signals: {
-    SIGINT: number;
-    SIGABRT: number;
-    SIGFPE: number;
-    SIGILL: number;
-    SIGSEGV: number;
-    SIGTERM: number;
-    // Unix-only signals (optional — check via !== undefined before use):
-    SIGQUIT?: number;
-    SIGPIPE?: number;
-    SIGALRM?: number;
-    SIGUSR1?: number;
-    SIGUSR2?: number;
-    SIGCHLD?: number;
-    SIGCONT?: number;
-    SIGSTOP?: number;
-    SIGTSTP?: number;
-    SIGTTIN?: number;
-    SIGTTOU?: number;
-  };
+  // The signal name → number table lives at `os.constants.signals`.
+  // `Aike.onSignal` takes a name directly, so the table is not needed here.
 
   /**
    * Register or unregister a signal handler.

@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
 mod control;
-mod info;
+pub(crate) mod info;
 mod sys;
 
 pub(crate) use sys::PROCESS_EXIT_CODE;
@@ -83,20 +83,13 @@ pub fn init_process(
             },
             JS_PROP_ENUMERABLE,
         ),
-        FieldDef::STR(
-            "platform",
-            {
-                match std::env::consts::OS {
-                    "windows" => "windows",
-                    "macos" => "darwin",
-                    other => other,
-                }
-            },
-            JS_PROP_ENUMERABLE,
-        ),
+        // Node's `process.platform` uses "win32" (not Rust's "windows"), and
+        // Node documents `os.platform()` as returning the same value — both are
+        // kept in sync so `os.platform() === process.platform` holds.
+        FieldDef::STR("platform", info::platform_str(), JS_PROP_ENUMERABLE),
         // --- info ---
         FieldDef::STR("arch", info::arch_str(), JS_PROP_ENUMERABLE),
-        FieldDef::STR("version", info::version_str(), JS_PROP_ENUMERABLE),
+        FieldDef::STR("version", info::VERSION_STR, JS_PROP_ENUMERABLE),
         FieldDef::LAZY_VALUE("versions", info::js_versions, JS_PROP_ENUMERABLE),
         FieldDef::GETSET(
             "title",

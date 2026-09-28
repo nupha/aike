@@ -320,10 +320,10 @@ fn start_signal_microtask(ctx: &mut ScopedContext, rx: WakeReceiver<u32>) {
     );
 }
 
-/// Build a platform-aware `Aike.signals` object.
+/// Build a platform-aware signals object, installed as `os.constants.signals`.
 /// Only signals available on the current platform are included.
-/// The value is the numeric signal number (e.g. `Aike.signals.SIGTERM === 15`).
-pub(super) fn js_signals(ctx: &mut ScopedContext) -> Result<JSValue, i32> {
+/// The value is the numeric signal number (e.g. `SIGTERM === 15`).
+pub(crate) fn js_signals(ctx: &mut ScopedContext) -> Result<JSValue, i32> {
     let mut obj = ctx.create_base_object()?;
 
     // Cross-platform signals (available on Windows CRT)

@@ -7,6 +7,8 @@
 // http:  mount an HttpMcp on an HttpServer and do the same over
 //        streamable HTTP with custom headers.
 
+import * as os from "os";
+
 let pass = 0;
 let fail = 0;
 function check(label, condition, detail) {
@@ -53,7 +55,7 @@ await server.run();
 export default server;
 `;
 
-const scriptPath = Aike.tmpdir() + "/mcp-client-test-server.mjs";
+const scriptPath = os.tmpdir() + "/mcp-client-test-server.mjs";
 await fs.writeText(scriptPath, serverScript);
 // pathToFileURL, not the raw path: embedding a Windows path in module source
 // would eat "\U" etc. as escape sequences.
@@ -117,7 +119,7 @@ await httpServer.shutdown();
 // Parent script connects, then exits WITHOUT calling close(). The engine's
 // exit cleanup (kill_all_mcp_children) has to take the spawned server down.
 {
-  const markerPath = Aike.tmpdir() + "/mcp-exit-kill-marker-" + Date.now() + ".mjs";
+  const markerPath = os.tmpdir() + "/mcp-exit-kill-marker-" + Date.now() + ".mjs";
   await fs.writeText(
     markerPath,
     `import { StdioMcp } from "mcp";
@@ -125,7 +127,7 @@ await httpServer.shutdown();
      await s.run();\nexport default s;`,
   );
 
-  const parentScript = Aike.tmpdir() + "/mcp-exit-kill-parent-" + Date.now() + ".mjs";
+  const parentScript = os.tmpdir() + "/mcp-exit-kill-parent-" + Date.now() + ".mjs";
   await fs.writeText(
     parentScript,
     `const { StdioMcpClient } = await import("mcp");

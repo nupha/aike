@@ -13,7 +13,10 @@ static PROCESS_TITLE: LazyLock<std::sync::Mutex<String>> =
     LazyLock::new(|| std::sync::Mutex::new(String::new()));
 
 /// Map Rust `std::env::consts::ARCH` to Node.js-style architecture names.
-pub(super) fn arch_str() -> &'static str {
+///
+/// Not a `const fn` — `str` matching is not allowed in const context, so
+/// `FieldDef::STR` callers must reach this through `LAZY_VALUE`.
+pub(crate) fn arch_str() -> &'static str {
     match std::env::consts::ARCH {
         "x86_64" => "x64",
         "x86" => "ia32",
@@ -24,10 +27,20 @@ pub(super) fn arch_str() -> &'static str {
     }
 }
 
-/// Runtime version string, e.g. `"v0.1.0"`.
-pub(super) fn version_str() -> &'static str {
-    concat!("v", env!("CARGO_PKG_VERSION"))
+/// Map Rust `std::env::consts::OS` to Node.js-style platform names.
+///
+/// Shared by `process.platform` and `os.platform()` — Node documents the two
+/// as equivalent, so the mapping must not drift apart.
+pub(crate) fn platform_str() -> &'static str {
+    match std::env::consts::OS {
+        "windows" => "win32",
+        "macos" => "darwin",
+        other => other,
+    }
 }
+
+/// Runtime version string, e.g. `"v0.1.0"`.
+pub(crate) const VERSION_STR: &str = concat!("v", env!("CARGO_PKG_VERSION"));
 
 /// Get the parent process ID.
 pub(super) fn get_ppid() -> i32 {

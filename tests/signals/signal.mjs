@@ -13,6 +13,7 @@
 //
 // Usage: aike -m tests/signals/signal.mjs
 
+import * as OS from "os";
 import * as Path from "path";
 
 // Resolve the fixture next to this test (works on Windows paths too).
@@ -33,10 +34,11 @@ function check(label, condition, detail) {
 // ─────────────────────────────────────────────────────────────────────────
 // 1. namespace & argument validation
 // ─────────────────────────────────────────────────────────────────────────
-console.log("\n=== Aike.signals ===");
-check("Aike.signals is an object", typeof Aike.signals === "object" && Aike.signals !== null);
-check("Aike.signals.SIGINT is a number", typeof Aike.signals.SIGINT === "number");
-check("Aike.signals.SIGTERM is a number", typeof Aike.signals.SIGTERM === "number");
+console.log("\n=== os.constants.signals ===");
+check("os.constants.signals is an object", typeof OS.constants.signals === "object" && OS.constants.signals !== null);
+check("signals.SIGINT is a number", typeof OS.constants.signals.SIGINT === "number");
+check("signals.SIGTERM is a number", typeof OS.constants.signals.SIGTERM === "number");
+check("Aike.signals is not aliased", !("signals" in Aike));
 check("onSignal is a function", typeof Aike.onSignal === "function");
 
 let err = null;
@@ -135,7 +137,7 @@ async function runScenario(scenario) {
   return { out, code, signal, sent };
 }
 
-if (process.platform === "windows") {
+if (process.platform === "win32") {
   console.log("\n=== real delivery ===");
   console.log("  (skipped on Windows \u2014 run tests/signals/ctrlc-test.ps1 for CTRL_C_EVENT delivery)");
 } else {

@@ -21,6 +21,7 @@ mod jinja2;
 mod json_schema;
 mod jsonl;
 mod mcp;
+mod os;
 mod path;
 mod process;
 mod repl;
@@ -367,6 +368,7 @@ async fn main() -> ExitCode {
             init_mod_fs(cx)?;
             init_mod_http(cx)?;
             init_mod_path(cx)?;
+            os::init_mod_os(cx)?;
             init_mod_html(cx)?;
             init_mod_browser(cx)?;
             init_mod_yaml(cx)?;
