@@ -1,5 +1,8 @@
 // jinja2.mjs — Test jinja2 template rendering
+import * as fs from "fs";
 import jinja2, { Jinja2 } from "jinja2";
+import * as os from "os";
+import * as path from "path";
 const { renderTemplate } = jinja2;
 
 let pass = 0;
@@ -561,9 +564,13 @@ check("Jinja2 is global", typeof Jinja2 === "function");
 }
 
 {
-  // Test include with basePath and globals
+  // include 从 basePath 磁盘解析，模板必须真实存在；用平台临时目录而非 /tmp。
+  const base = path.join(os.tmpdir(), "jinja2-include-test");
+  await fs.ensureDir(base);
+  await fs.writeText(path.join(base, "header.j2"), "Header: {{ APP_NAME }}");
+  await fs.writeText(path.join(base, "footer.j2"), "Footer: v{{ VERSION }}");
   const j2 = new Jinja2({
-    basePath: "/tmp/jinja2-test",
+    basePath: base,
     globals: { APP_NAME: "MyApp", VERSION: "1.0" },
   });
   try {
@@ -579,11 +586,15 @@ check("Jinja2 is global", typeof Jinja2 === "function");
   } catch (e) {
     check("Jinja2 include with globals", false, `error: ${e.message}`);
   }
+  await fs.removeDir(base, { recursive: true });
 }
 
 {
-  // Test circular include - minijinja should detect
-  const j2 = new Jinja2({ basePath: "/tmp/jinja2-test" });
+  // 循环 include：a.j2 include 自己，minijinja 应检测到。
+  const base = path.join(os.tmpdir(), "jinja2-circular-test");
+  await fs.ensureDir(base);
+  await fs.writeText(path.join(base, "a.j2"), 'x{% include "a.j2" %}');
+  const j2 = new Jinja2({ basePath: base });
   let threw = false;
   try {
     j2.render('{% include "a.j2" %}', {});
@@ -591,6 +602,7 @@ check("Jinja2 is global", typeof Jinja2 === "function");
     threw = true;
   }
   check("Jinja2 circular include throws", threw);
+  await fs.removeDir(base, { recursive: true });
 }
 
 console.log(`\n=== Final Results: ${pass} passed, ${fail} failed ===\n`);

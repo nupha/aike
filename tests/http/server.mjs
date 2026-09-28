@@ -2,10 +2,13 @@
 //
 // Covers: JS routes (GET/POST/PUT/DELETE + params/query/headers/body/redirect/
 // crash/204), static file serving from the tests dir, SSE streaming, and a
-// WebSocket echo. The LLM/OpenAI part lives in server_llama.mjs (optional).
+// WebSocket echo. The LLM/OpenAI part lives in server_openai.mjs (optional).
 //
-// Run:  cargo run -- tests/http/server.mjs
+// Run:  aike tests/http/server.mjs
 // Then verify with the printed curl commands.
+//
+// This is a manual fixture, not an automated test: it serves forever by design,
+// so exclude it from test sweeps (and note it binds a fixed port 8080).
 
 import { HttpServer } from "http";
 

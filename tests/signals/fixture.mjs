@@ -13,6 +13,13 @@ const scenario = process.argv[2];
 // the "restore default action" cases.
 const sig = process.argv[3] || "SIGINT";
 
+// Bare invocation is not a test: a sweep that runs every .mjs would otherwise
+// score this fixture as a failure. Report usage and leave.
+if (!scenario) {
+  console.log("usage: aike -m tests/signals/fixture.mjs <scenario> [signal]");
+  process.exit(0);
+}
+
 switch (scenario) {
   // no handler at all: the OS/default handler must act and terminate.
   case "control":

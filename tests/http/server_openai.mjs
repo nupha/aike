@@ -3,10 +3,11 @@
 // `llama_cpp` build feature — run it only when you want to exercise the LLM
 // serving path.
 //
-// Run:  AIKE_MODEL_PATH=../models/.../model.gguf cargo run -- tests/http/server_llama.mjs
+// Run:  AIKE_MODEL_PATH=../models/.../model.gguf mbx run --features llama_cpp -- tests/http/server_openai.mjs
 // Or pass the path inline (see MODEL_PATH below).
+//
+// Without AIKE_MODEL_PATH this exits immediately, so a test sweep does not hang.
 
-import { Model } from "ai";
 import { HttpServer } from "http";
 
 // Model path: override via AIKE_MODEL_PATH env var (set on the cargo command),
@@ -19,9 +20,15 @@ if (!MODEL_PATH) {
   console.log(
     "  example: AIKE_MODEL_PATH=../models/qwen35/Qwen3.5-4B-Q4_K_M.gguf \\",
   );
-  console.log("           cargo run -- tests/http/server_llama.mjs");
-  await new Promise(() => {});
-  throw new Error("no model path");
+  console.log("           mbx run --features llama_cpp -- tests/http/server_openai.mjs");
+  process.exit(0);
+}
+
+// `Model` ships only in llama_cpp builds, so it must be imported dynamically: a
+// static import fails at link time in a default build, before the skip above.
+const { Model } = await import("ai");
+if (!Model) {
+  throw new Error("`ai` exports no `Model` — rebuild with --features llama_cpp");
 }
 
 console.log("[server_llama] loading model:", MODEL_PATH);

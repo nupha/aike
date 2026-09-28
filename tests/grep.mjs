@@ -16,6 +16,10 @@ function check(label, condition, detail) {
 function eq(a, b) {
   return JSON.stringify(a) === JSON.stringify(b);
 }
+// grep 返回平台原生分隔符（Windows 为 \，与 fs.glob 一致），故用 path.join
+// 构造期望路径，避免把 POSIX 写法写死在断言里。
+const HIDDEN_RS = path.join("sub", ".hidden.rs");
+const LIB_RS = path.join("src", "lib.rs");
 const sort = (a) => a.slice().sort();
 
 // ===================================================================
@@ -235,7 +239,7 @@ console.log("\n=== dot ===");
   const r = await fs.grep("hidden", { ...cwd, dot: true });
   check(
     "dot=true 命中隐藏文件",
-    r.some((m) => m.file === "sub/.hidden.rs"),
+    r.some((m) => m.file === HIDDEN_RS),
     JSON.stringify(r.map((m) => m.file)),
   );
 }
@@ -286,7 +290,7 @@ console.log("\n=== paths / include / exclude ===");
   const r = await fs.grep("nothing", { ...cwd, include: ["**/*.rs"] });
   check(
     "include=**/*.rs 递归命中 src/lib.rs",
-    r.some((m) => m.file === "src/lib.rs"),
+    r.some((m) => m.file === LIB_RS),
     JSON.stringify(r.map((m) => m.file)),
   );
 }
@@ -381,7 +385,7 @@ console.log("\n=== mode: files / count / invert ===");
   // dot 默认 false，sub/.hidden.rs 不在；b.rs/src/lib.rs 无 hello
   check(
     "mode=files + invert (--files-without-match)",
-    eq(sort(r), ["b.rs", "src/lib.rs"]),
+    eq(sort(r), ["b.rs", LIB_RS]),
     JSON.stringify(r),
   );
 }
@@ -392,7 +396,7 @@ console.log("\n=== mode: files / count / invert ===");
   // a.txt 3 行 - 2 命中 = 1 非匹配；src/lib.rs 1 行非匹配；b.rs 1 行非匹配
   check(
     "mode=count + invert 统计非匹配行数",
-    map["a.txt"] === 1 && map["src/lib.rs"] === 1 && map["b.rs"] === 1,
+    map["a.txt"] === 1 && map[LIB_RS] === 1 && map["b.rs"] === 1,
     JSON.stringify(map),
   );
 }
