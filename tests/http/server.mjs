@@ -2,7 +2,8 @@
 //
 // Covers: JS routes (GET/POST/PUT/DELETE + params/query/headers/body/redirect/
 // crash/204), static file serving from the tests dir, SSE streaming, and a
-// WebSocket echo. The LLM/OpenAI part lives in server_openai.mjs (optional).
+// WebSocket echo. The LLM/OpenAI part lives in the aike-llama zapi module
+// (aike-llama/examples/openai_server.mjs).
 //
 // Run:  aike tests/http/server.mjs
 // Then verify with the printed curl commands.
