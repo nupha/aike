@@ -11,9 +11,6 @@ typescript = [
     "swc_ecma_codegen",
     "swc_ecma_transforms_typescript",
 ]
-llama_cpp = ["llama"]
-cuda = ["llama/cuda"]
-metal = ["llama/metal"]
 enable_eval_log = [] # 启用 DeepEval 评估日志采集
 # Browser-security layer of the Fetch API (WHATWG CORS protocol, request
 # modes/tainting, client-origin resolution, referrer policy inputs). Disable
@@ -87,7 +84,6 @@ reqwest = { version = "0.13", default-features = false, features = [
     "rustls",
     "cookies",
 ] }
-llama = { path = "../llama", features = ["cmake_static"], optional = true }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"

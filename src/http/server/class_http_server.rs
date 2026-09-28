@@ -36,12 +36,6 @@ use crate::mcp::{
     JSHttpMcp, McpToolCallRequest, McpTransport, build_axum_mcp_route, handle_mcp_tool_call,
 };
 
-#[cfg(feature = "llama_cpp")]
-use crate::ai::{
-    JSEngine,
-    engine::{Engine, serve::engine_openai_router},
-};
-
 use super::{
     super::Method,
     JSWebSocketStream,
@@ -90,9 +84,6 @@ pub(super) struct HttpServerPayload {
     ws_routes: Vec<(String, Object)>,
     /// Static file mounts registered via `server.staticFiles(mount, dir)`.
     static_dirs: Vec<(String, String)>,
-
-    #[cfg(feature = "llama_cpp")]
-    openai: Option<(Arc<std::sync::Mutex<Engine>>, String)>,
 
     shutdown_tx: Option<oneshot::Sender<()>>,
     is_running: Arc<AtomicBool>,
@@ -184,9 +175,6 @@ fn js_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             ws_routes: Vec::new(),
             static_dirs: Vec::new(),
 
-            #[cfg(feature = "llama_cpp")]
-            openai: None,
-
             shutdown_tx: None,
             is_running: Arc::new(AtomicBool::new(false)),
             frozen: false,
@@ -196,50 +184,6 @@ fn js_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         },
     )
     .map(|v| v.into())
-}
-
-/// HttpServer.openai(engine, mountPath) — mount OpenAI-compatible routes.
-///
-/// `engine` must be an Engine instance (ownership is transferred).
-/// `mountPath` must start with '/', e.g. "/v1".
-/// Calling after listen() raises an error.
-#[cfg(feature = "llama_cpp")]
-fn js_openai(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let mut this = cc.this();
-
-    // Validate engine argument
-    let mut v = cc.arg(0);
-    let engine = if v.as_native_object::<JSEngine>().is_some() {
-        match JSEngine::take_payload_of(&mut v) {
-            Some(payload) => *payload,
-            None => {
-                return Err(ctx.throw_type_error("Engine object has already been detached"));
-            }
-        }
-    } else {
-        return Err(ctx.throw_type_error("engine must be an Engine instance"));
-    };
-
-    // Validate mountPath argument
-    let mount_path = {
-        let s = cc
-            .arg(1)
-            .to_string(ctx)
-            .map_err(|_| ctx.throw_type_error("mountPath must be a string"))?;
-        let text = s.content().encode_utf8(false).to_string();
-        if !text.starts_with('/') {
-            return Err(ctx.throw_type_error("mountPath must start with '/'"));
-        }
-        text
-    };
-
-    let p = get_server_payload_mut(ctx, &mut this)?;
-    if p.frozen {
-        return Err(ctx.throw_type_error("cannot call openai() after listen()"));
-    }
-    p.openai = Some((engine, mount_path));
-
-    Ok(this)
 }
 
 fn js_route_add(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -681,13 +625,8 @@ fn js_listen(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         let data = get_server_payload_mut(ctx, &mut this)?;
         data.frozen = true;
 
-        // Base router with optional OpenAI engine routes
+        // Base router
         let mut router: Router = Router::new();
-        #[cfg(feature = "llama_cpp")]
-        if let Some((ref eng, ref mount_path)) = data.openai {
-            let engine_router = engine_openai_router(eng.clone());
-            router = router.nest(mount_path, engine_router);
-        }
 
         // --- Static file mounts: served directly by axum, no poller needed ---
         // `no-cache` forces the browser to revalidate (If-Modified-Since → 304)
@@ -1250,8 +1189,6 @@ const SERVER_PROTO: &[FieldDef] = &[
     FieldDef::FUNC("ws", 2, js_route_ws, 0),
     FieldDef::FUNC("staticFiles", 2, js_static_files, 0),
     FieldDef::FUNC("publish", 2, js_publish, 0),
-    #[cfg(feature = "llama_cpp")]
-    FieldDef::FUNC("openai", 2, js_openai, 0),
     FieldDef::GETSET("isRunning", Some(js_is_running), None, 0),
     FieldDef::FUNC("listen", 1, js_listen, 0),
     FieldDef::FUNC("shutdown", 0, js_shutdown, 0),

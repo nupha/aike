@@ -3,7 +3,6 @@
 
 use std::path::PathBuf;
 
-use async_openai::types::chat::CreateChatCompletionRequest;
 use crossbeam::channel::TryRecvError;
 use serde_json::Value as JsonValue;
 use zuqe::{Exception, JobState, ScopedContext};
@@ -98,32 +97,6 @@ pub(crate) fn json_keys_camel_to_snake(val: &mut JsonValue) {
         }
         _ => {}
     }
-}
-
-pub(crate) fn parse_chat_completion_req(
-    mut json_val: serde_json::Value,
-) -> Result<CreateChatCompletionRequest, serde_json::Error> {
-    // Convert camelCase JS keys to snake_case for serde deserialization
-    json_keys_camel_to_snake(&mut json_val);
-
-    // Note: model is required, set default if missing
-    if let Some(obj) = json_val.as_object_mut()
-        && !obj.contains_key("model")
-    {
-        obj.insert(
-            "model".to_string(),
-            serde_json::Value::String("".to_string()),
-        );
-    }
-
-    serde_json::from_value(json_val)
-}
-
-pub(crate) fn now_unix_s() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64
 }
 
 fn now_utc() -> chrono::DateTime<chrono::Utc> {

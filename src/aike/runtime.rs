@@ -384,20 +384,6 @@ fn validate_cap(ctx: &mut ScopedContext, name: &str) -> Result<(), i32> {
 // Child context construction
 // ---------------------------------------------------------------------------
 
-#[cfg(feature = "llama_cpp")]
-fn llama_classes() -> Vec<ClassID> {
-    vec![
-        ai::JSLlmModel::class_id(),
-        ai::JSLlmContext::class_id(),
-        ai::JSEngine::class_id(),
-        ai::JSSamplerChain::class_id(),
-    ]
-}
-#[cfg(not(feature = "llama_cpp"))]
-fn llama_classes() -> Vec<ClassID> {
-    Vec::new()
-}
-
 fn stream_classes() -> Vec<ClassID> {
     vec![
         stream::JSReadableStream::class_id(),
@@ -458,19 +444,13 @@ fn cap_classes(cap: &str) -> Vec<ClassID> {
             super::JSFileHandle::class_id(),
         ],
         "fs" => vec![super::JSFileHandle::class_id()],
-        "path" | "os" | "yaml" | "jsonl" | "jsonSchema" | "jinja2" | "http" | "mcp" => {
-            Vec::new()
-        }
+        "path" | "os" | "yaml" | "jsonl" | "jsonSchema" | "jinja2" | "http" | "mcp" => Vec::new(),
         "html" => vec![
             html::HtmlDocument::class_id(),
             html::HtmlElement::class_id(),
         ],
         "browser" => vec![browser::JSPage::class_id()],
-        "ai" => {
-            let mut v = vec![ai::JSLlmClient::class_id()];
-            v.extend(llama_classes());
-            v
-        }
+        "ai" => vec![ai::JSLlmClient::class_id()],
         _ => Vec::new(),
     }
 }

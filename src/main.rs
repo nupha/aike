@@ -27,8 +27,6 @@ mod process;
 mod repl;
 mod transpile;
 mod whatwg;
-#[cfg(feature = "llama_cpp")]
-mod worker;
 mod yaml;
 
 use std::{
@@ -43,9 +41,6 @@ use zuqe::{
     EvalFlags, EvalType, Exception, ExitStatus, JSValue, ModuleDef, NativeObject, Runtime,
     ScopedContext,
 };
-
-#[cfg(feature = "llama_cpp")]
-use crate::ai::{JSEngine, JSLlmContext, JSLlmModel, JSSamplerChain};
 
 use crate::{
     ai::{JSLlmClient, init_mod_ai},
@@ -356,14 +351,6 @@ async fn main() -> ExitCode {
                 JSLlmClient::class_id(),
             ])?;
 
-            #[cfg(feature = "llama_cpp")]
-            cx.use_classes(&[
-                JSLlmModel::class_id(),
-                JSLlmContext::class_id(),
-                JSEngine::class_id(),
-                JSSamplerChain::class_id(),
-            ])?;
-
             // initialize native modules
             init_mod_fs(cx)?;
             init_mod_http(cx)?;
@@ -525,9 +512,6 @@ async fn main() -> ExitCode {
     // exit without waiting on orphaned tokio tasks. (`ctx` is a Copy handle, so
     // only `rt` holds the heap that needs finalizing.)
     drop(rt);
-
-    #[cfg(feature = "llama_cpp")]
-    ai::free_backend();
 
     // Kill `abortOnParentExit` children synchronously: every script exit
     // (normal end, process.exit, engine error) funnels through here.
