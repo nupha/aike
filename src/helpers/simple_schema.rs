@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
+// SPDX-FileCopyrightText: Copyright (c) 2026 John Ray <996351336@qq.com>
 
 //! `SimpleSchema` DSL operations — reading tool-argument definitions
 //! (the TS `SimpleSchema` / alias `ToolArgDef` interface) and converting
@@ -10,6 +10,45 @@
 //! (rmcp `Tool::inputSchema` and the `json_schema_*` runtime validators).
 
 use zuqe::{JS_GPN_ENUM_ONLY, JS_GPN_STR_OR_INT_MASK, Object, ScopedContext};
+
+/// Keywords beyond the core DSL fields (`desc`/`type`/`required`/`enum`/
+/// `default`/`items`) that are copied verbatim from an `args` entry into the
+/// produced JSON Schema property. Mirrors the keywords the validator
+/// (`helpers/json_schema.rs`) understands.
+const EXTRA_KEYWORDS: &[&str] = &[
+    // validation
+    "const",
+    "multipleOf",
+    "minimum",
+    "exclusiveMinimum",
+    "maximum",
+    "exclusiveMaximum",
+    "minLength",
+    "maxLength",
+    "pattern",
+    "minItems",
+    "maxItems",
+    "uniqueItems",
+    "minProperties",
+    "maxProperties",
+    "dependentRequired",
+    // applicator
+    "additionalProperties",
+    "patternProperties",
+    "propertyNames",
+    "prefixItems",
+    "contains",
+    "minContains",
+    "maxContains",
+    "not",
+    "allOf",
+    "anyOf",
+    "oneOf",
+    "if",
+    "then",
+    "else",
+    "dependentSchemas",
+];
 
 /// Convert DSL `args` object to standard JSON Schema `inputSchema`.
 ///
@@ -70,21 +109,9 @@ pub(crate) fn simple_schema_from_args(
             .map(|s| s.content().encode_utf8(false).to_string())
             .unwrap_or_else(|| "string".into());
 
-        // enum
-        let has_enum = field_obj
-            .get_property_str(ctx, "enum")
-            .ok()
-            .filter(|v| !v.is_undefined())
-            .is_some();
-        if has_enum {
-            if let Ok(enum_val) = field_obj.get_property_str(ctx, "enum")
-                && !enum_val.is_undefined()
-                && let Ok(enum_json) = enum_val.to_serde_json(ctx)
-                && !enum_json.is_null()
-            {
-                prop.insert("enum".into(), enum_json);
-            }
-        } else if type_str == "array" {
+        // type (array carries `items`). Emitted even when `enum` is present so
+        // the schema declares both the element type and the value whitelist.
+        if type_str == "array" {
             prop.insert("type".into(), serde_json::Value::String("array".into()));
 
             // Parse items schema (defaults to { type: "string" })
@@ -129,6 +156,33 @@ pub(crate) fn simple_schema_from_args(
             prop.insert("items".into(), serde_json::Value::Object(items));
         } else {
             prop.insert("type".into(), serde_json::Value::String(type_str));
+        }
+
+        // enum (independent of type)
+        let has_enum = field_obj
+            .get_property_str(ctx, "enum")
+            .ok()
+            .filter(|v| !v.is_undefined())
+            .is_some();
+        if has_enum
+            && let Ok(enum_val) = field_obj.get_property_str(ctx, "enum")
+            && !enum_val.is_undefined()
+            && let Ok(enum_json) = enum_val.to_serde_json(ctx)
+            && !enum_json.is_null()
+        {
+            prop.insert("enum".into(), enum_json);
+        }
+
+        // Extra keywords: copied verbatim (as JSON) when present. `type`,
+        // `required`, `enum`, `default`, `desc`, `items` are handled above.
+        for key in EXTRA_KEYWORDS {
+            if let Ok(v) = field_obj.get_property_str(ctx, key)
+                && !v.is_undefined()
+                && let Ok(j) = v.to_serde_json(ctx)
+                && !j.is_null()
+            {
+                prop.insert((*key).into(), j);
+            }
         }
 
         // default

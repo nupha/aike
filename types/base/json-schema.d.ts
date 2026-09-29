@@ -86,6 +86,54 @@ interface SimpleSchema {
     /** Enum values for elements. */
     enum?: string[];
   };
+  /** Exact-value constraint. */
+  const?: unknown;
+  /** Numeric: value must be a multiple of this. */
+  multipleOf?: number;
+  /** Numeric lower bound (inclusive). */
+  minimum?: number;
+  /** Numeric lower bound (exclusive). */
+  exclusiveMinimum?: number;
+  /** Numeric upper bound (inclusive). */
+  maximum?: number;
+  /** Numeric upper bound (exclusive). */
+  exclusiveMaximum?: number;
+  /** String length bounds (Unicode code points). */
+  minLength?: number;
+  maxLength?: number;
+  /** String must match this regular expression. */
+  pattern?: string;
+  /** Array length bounds. */
+  minItems?: number;
+  maxItems?: number;
+  /** Array items must be unique. */
+  uniqueItems?: boolean;
+  /** Object size bounds. */
+  minProperties?: number;
+  maxProperties?: number;
+  /** Object: if the key is present, the listed keys must also be present. */
+  dependentRequired?: Record<string, string[]>;
+  /** Object applicator: false forbids undeclared keys; a schema validates them. */
+  additionalProperties?: boolean | Record<string, unknown>;
+  /** Object applicator: subschemas for property names matching each regex. */
+  patternProperties?: Record<string, unknown>;
+  /** Object applicator: subschema every property name must satisfy. */
+  propertyNames?: Record<string, unknown>;
+  /** Array applicator: positional subschemas for the leading items. */
+  prefixItems?: Record<string, unknown>[];
+  /** Array applicator: subschema at least `minContains` items must satisfy. */
+  contains?: Record<string, unknown>;
+  minContains?: number;
+  maxContains?: number;
+  /** Composition / conditional applicators. */
+  not?: Record<string, unknown>;
+  allOf?: Record<string, unknown>[];
+  anyOf?: Record<string, unknown>[];
+  oneOf?: Record<string, unknown>[];
+  if?: Record<string, unknown>;
+  then?: Record<string, unknown>;
+  else?: Record<string, unknown>;
+  dependentSchemas?: Record<string, unknown>;
 }
 
 /** Result of `JSONSchema.validate()`. */

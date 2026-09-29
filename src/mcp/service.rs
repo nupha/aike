@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
+// SPDX-FileCopyrightText: Copyright (c) 2026 John Ray <996351336@qq.com>
 
 use std::{
     collections::HashMap,
@@ -719,6 +719,109 @@ mod tests {
         let s = schema(serde_json::json!({ "depth": { "type": "integer" } }), &[]);
         let args = serde_json::json!({ "depth": "not-an-int" });
         assert!(json_schema_validate_args(&s, &args).is_err());
+    }
+
+    #[test]
+    fn validate_integer_is_strict() {
+        // MCP tool args use the strict integer contract: a whole float (2.0) is
+        // rejected where `type: "integer"` is declared (unlike the JS API).
+        let s = schema(serde_json::json!({ "depth": { "type": "integer" } }), &[]);
+        assert!(json_schema_validate_args(&s, &serde_json::json!({ "depth": 2 })).is_ok());
+        assert!(json_schema_validate_args(&s, &serde_json::json!({ "depth": 2.0 })).is_err());
+    }
+
+    #[test]
+    fn validate_recurses_into_nested_objects() {
+        // Nested `properties` are validated recursively. The DSL does not emit
+        // nested objects yet, but the shared validator handles any schema.
+        let s = schema(
+            serde_json::json!({
+                "user": { "type": "object", "properties": { "age": { "type": "integer" } } },
+            }),
+            &[],
+        );
+        assert!(
+            json_schema_validate_args(&s, &serde_json::json!({ "user": { "age": 30 } })).is_ok()
+        );
+        assert!(
+            json_schema_validate_args(&s, &serde_json::json!({ "user": { "age": "old" } }))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn validate_accepts_unknown_or_absent_type() {
+        // A property with no `type` (or an unknown type keyword) passes the type
+        // check — the validator never false-rejects on keywords it doesn't know.
+        let s = schema(
+            serde_json::json!({
+                "anything": {},
+                "weird": { "type": "custom_type" },
+            }),
+            &[],
+        );
+        let args = serde_json::json!({ "anything": [1, 2], "weird": "ok" });
+        assert!(json_schema_validate_args(&s, &args).is_ok());
+    }
+
+    #[test]
+    fn validate_numeric_bounds_and_string_constraints() {
+        let s = schema(
+            serde_json::json!({
+                "n": { "type": "number", "exclusiveMinimum": 0 },
+                "s": { "type": "string", "minLength": 2, "pattern": "^[a-z]+$" },
+            }),
+            &[],
+        );
+        assert!(json_schema_validate_args(&s, &serde_json::json!({ "n": 1, "s": "ab" })).is_ok());
+        assert!(json_schema_validate_args(&s, &serde_json::json!({ "n": 0, "s": "ab" })).is_err());
+        assert!(json_schema_validate_args(&s, &serde_json::json!({ "n": 1, "s": "A" })).is_err());
+    }
+
+    #[test]
+    fn validate_const_and_unique_items() {
+        let s = schema(
+            serde_json::json!({
+                "mode": { "const": "fixed" },
+                "xs": { "type": "array", "items": { "type": "integer" }, "uniqueItems": true },
+            }),
+            &[],
+        );
+        assert!(
+            json_schema_validate_args(&s, &serde_json::json!({ "mode": "fixed", "xs": [1, 2] }))
+                .is_ok()
+        );
+        assert!(
+            json_schema_validate_args(&s, &serde_json::json!({ "mode": "other", "xs": [1, 2] }))
+                .is_err()
+        );
+        assert!(
+            json_schema_validate_args(&s, &serde_json::json!({ "mode": "fixed", "xs": [1, 1] }))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn validate_anyof_and_additional_properties() {
+        // `anyOf` expresses "content or cache_file" — a rule the tool layer used
+        // to enforce in JS; it now lives in the schema.
+        let mut s = schema(serde_json::json!({ "content": {}, "cache_file": {} }), &[]);
+        s.insert(
+            "anyOf".into(),
+            serde_json::json!([ { "required": ["content"] }, { "required": ["cache_file"] } ]),
+        );
+        assert!(json_schema_validate_args(&s, &serde_json::json!({ "content": "x" })).is_ok());
+        assert!(json_schema_validate_args(&s, &serde_json::json!({ "cache_file": "c" })).is_ok());
+        assert!(json_schema_validate_args(&s, &serde_json::json!({ "other": "x" })).is_err());
+
+        // additionalProperties defaults to open; an explicit `false` closes it.
+        let open = schema(serde_json::json!({ "a": { "type": "integer" } }), &[]);
+        assert!(json_schema_validate_args(&open, &serde_json::json!({ "a": 1, "z": 9 })).is_ok());
+        let mut closed = open.clone();
+        closed.insert("additionalProperties".into(), serde_json::json!(false));
+        assert!(
+            json_schema_validate_args(&closed, &serde_json::json!({ "a": 1, "z": 9 })).is_err()
+        );
     }
 
     #[test]

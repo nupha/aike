@@ -1,16 +1,35 @@
 // SPDX-License-Identifier: Apache-2.0
-// SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
+// SPDX-FileCopyrightText: Copyright (c) 2026 John Ray <996351336@qq.com>
 
 //! Shared JSON-Schema operations — the single home for schema type matching,
-//! recursive validation/coercion, example synthesis, and MCP tool-argument
-//! checking. Both the `json-schema` JS module and the MCP server consume
-//! these instead of keeping private copies.
+//! the recursive validator ([`json_schema_check`]), example synthesis, and MCP
+//! tool-argument checking. Both the `json-schema` JS module and the MCP server
+//! run the *same* validator; only error rendering differs per surface.
 //!
-//! Two `integer` contracts coexist on purpose (frozen behavior per caller):
-//! - lenient ([`json_schema_type_matches`]): JS `jsonSchema` API; accepts
+//! Two `integer` contracts coexist on purpose (frozen behavior per caller),
+//! selected via [`IntegerPolicy`]:
+//! - `Lenient` ([`json_schema_type_matches`]): JS `jsonSchema` API; accepts
 //!   i64/u64 and whole-number floats like `2.0`.
-//! - strict ([`json_schema_type_strict`] / [`json_schema_item_type_strict`]):
-//!   MCP tool-arg validation; only i64-representable values pass.
+//! - `Strict` ([`json_schema_type_strict`]): MCP tool-arg validation; only
+//!   i64-representable values pass.
+//!
+//! # Implemented keywords
+//!
+//! validation — `type`, `enum`, `const`, `multipleOf`,
+//! `minimum` / `exclusiveMinimum` / `maximum` / `exclusiveMaximum`,
+//! `minLength` / `maxLength`, `pattern`, `minItems` / `maxItems`,
+//! `uniqueItems`, `minProperties` / `maxProperties`, `dependentRequired`.
+//!
+//! applicator — `properties`, `required`, `patternProperties`,
+//! `additionalProperties`, `propertyNames`, `dependentSchemas`,
+//! `prefixItems`, `items`, `contains` (+`minContains`/`maxContains`),
+//! `not`, `allOf`, `anyOf`, `oneOf`, `if` / `then` / `else`.
+//!
+//! annotation — `description`, `default`, `example` (non-validating;
+//! `default` is applied for MCP by [`json_schema_apply_defaults`]).
+//!
+//! Unknown keywords are ignored (never false-reject). See the "Not yet
+//! implemented" note at the end of this file.
 
 // ── type matching ──
 
@@ -43,17 +62,6 @@ pub(crate) fn json_schema_type_strict(value: &serde_json::Value, schema_type: &s
     }
 }
 
-/// Element-type check inside an array's `items`, under the MCP tool-args
-/// contract. Historical quirk preserved: no `array` arm — an item typed
-/// `array` accepts any element.
-pub(crate) fn json_schema_item_type_strict(value: &serde_json::Value, item_type: &str) -> bool {
-    match item_type {
-        "integer" => value.as_i64().is_some(),
-        "array" => true,
-        _ => json_schema_type_matches(value, item_type),
-    }
-}
-
 /// Check if a value matches a type which may be a string or array of strings.
 pub(crate) fn json_schema_matches_type_field(
     value: &serde_json::Value,
@@ -72,116 +80,167 @@ pub(crate) fn json_schema_matches_type_field(
     }
 }
 
-// ── recursive validation / coercion ──
+/// Whether a schema's `enum` keyword (when present) admits `value`. A schema
+/// with no `enum` admits anything. Used by the shared validator
+/// ([`json_schema_check`]).
+pub(crate) fn json_schema_enum_allows(
+    schema: &serde_json::Value,
+    value: &serde_json::Value,
+) -> bool {
+    match schema.get("enum").and_then(|v| v.as_array()) {
+        Some(list) => list.iter().any(|v| v == value),
+        None => true,
+    }
+}
 
-/// Recursively validate a value against a JSON-Schema, optionally coercing.
-/// Returns the (possibly coerced) value and collects errors.
-///
-/// `changed` is set to true iff at least one coercion produced a new value;
-/// callers use it to skip re-emitting an unchanged value.
-pub(crate) fn json_schema_coerce_or_check(
+// ── unified validation ──
+
+/// Integer matching policy — frozen per caller:
+/// - `Lenient`: the JS `jsonSchema` API; accepts i64/u64 and whole-number
+///   floats like `2.0`.
+/// - `Strict`: MCP tool-arg validation; only i64-representable values pass.
+#[derive(Clone, Copy)]
+pub(crate) enum IntegerPolicy {
+    Lenient,
+    Strict,
+}
+
+impl IntegerPolicy {
+    fn matches(self, value: &serde_json::Value, schema_type: &str) -> bool {
+        match self {
+            IntegerPolicy::Lenient => json_schema_type_matches(value, schema_type),
+            IntegerPolicy::Strict => json_schema_type_strict(value, schema_type),
+        }
+    }
+}
+
+/// One schema violation, in schema/property order. Rendered per caller surface
+/// by [`json_schema_error_js`] / [`json_schema_error_mcp`].
+pub(crate) struct Violation {
+    path: String,
+    kind: ViolationKind,
+}
+
+enum ViolationKind {
+    NotObject,
+    NotArray,
+    /// Wrong (or missing) `type`; carries the expected type keyword.
+    Type(String),
+    /// A `required` property is absent.
+    Missing,
+    /// Value not in the declared `enum`.
+    NotInEnum {
+        allowed: Vec<serde_json::Value>,
+        value: serde_json::Value,
+    },
+    /// Any other keyword failure. `phrase` reads after the subject, e.g.
+    /// `must be >= 3` / `must have at most 5 items` / `must match "^a"`.
+    Keyword(String),
+}
+
+/// The single recursive JSON-Schema validator used by BOTH the JS
+/// `validateSchema` and the MCP tool-arg validator. Walks `value` against
+/// `schema`, pushing structured [`Violation`]s and returning the possibly
+/// coerced value. `coerce` repairs str↔num↔bool mismatches (JS "coerce" mode;
+/// MCP passes `false`). Only error rendering differs per surface.
+pub(crate) fn json_schema_check(
     value: serde_json::Value,
     schema: &serde_json::Value,
     path: &str,
-    errors: &mut Vec<String>,
+    policy: IntegerPolicy,
     coerce: bool,
     changed: &mut bool,
+    out: &mut Vec<Violation>,
 ) -> serde_json::Value {
     let obj = match schema.as_object() {
         Some(o) => o,
         None => return value,
     };
 
-    // Determine the schema type.
+    // `enum` / `const` — checked before the type, reported regardless of type.
+    if !json_schema_enum_allows(schema, &value) {
+        out.push(Violation {
+            path: path.to_string(),
+            kind: ViolationKind::NotInEnum {
+                allowed: obj
+                    .get("enum")
+                    .and_then(|e| e.as_array())
+                    .cloned()
+                    .unwrap_or_default(),
+                value: value.clone(),
+            },
+        });
+    }
+    if let Some(c) = obj.get("const")
+        && c != &value
+    {
+        push_kw(out, path, format!("must be {}", json_str(c)));
+    }
+
     let schema_type = obj.get("type");
 
-    // Object type: schema declares type:"object", or has properties but no explicit type.
-    let schema_is_object = schema_type.map_or(
-        obj.contains_key("properties"), // no type field → infer object from properties
-        |t| t.as_str() == Some("object"),
-    );
+    // Object: explicit `type:"object"`, or inferred from any object keyword.
+    let schema_is_object = schema_type
+        .map_or(OBJECT_KEYWORDS.iter().any(|k| obj.contains_key(*k)), |t| {
+            t.as_str() == Some("object")
+        });
 
     if schema_is_object {
         if !value.is_object() {
-            errors.push(format!("{path}: expected object"));
+            out.push(Violation {
+                path: path.to_string(),
+                kind: ViolationKind::NotObject,
+            });
             return value;
         }
-        let props = obj.get("properties").and_then(|p| p.as_object());
-        let required = obj.get("required").and_then(|r| r.as_array());
-        if let Some(props) = props {
-            let mut result = value.as_object().cloned().unwrap_or_default();
-            for (k, prop_schema) in props {
-                if let Some(v) = result.get(k) {
-                    let coerced = json_schema_coerce_or_check(
-                        v.clone(),
-                        prop_schema,
-                        &format!("{path}.{k}"),
-                        errors,
-                        coerce,
-                        changed,
-                    );
-                    result.insert(k.clone(), coerced);
-                } else if let Some(req) = required
-                    && req.iter().any(|r| r.as_str() == Some(k.as_str()))
-                {
-                    errors.push(format!("{path}.{k}: missing required property"));
-                }
-            }
-            return serde_json::Value::Object(result);
-        }
-        return value;
+        let mut map = value.as_object().cloned().unwrap_or_default();
+        check_object_keywords(obj, &mut map, path, policy, coerce, changed, out);
+        let result = serde_json::Value::Object(map);
+        apply_composition(obj, &result, path, policy, changed, out);
+        return result;
     }
 
-    // Array type
-    let schema_is_array = schema_type.is_some_and(|t| t.as_str() == Some("array"));
-    if schema_is_array || (schema_type.is_none() && !value.is_null() && value.is_array()) {
+    // Array: explicit `type:"array"`, or (untyped) an array value.
+    let schema_is_array = schema_type.is_some_and(|t| t.as_str() == Some("array"))
+        || (schema_type.is_none() && !value.is_null() && value.is_array());
+    if schema_is_array {
         if !value.is_array() {
-            errors.push(format!("{path}: expected array"));
+            out.push(Violation {
+                path: path.to_string(),
+                kind: ViolationKind::NotArray,
+            });
             return value;
         }
-        if let Some(items_schema) = obj.get("items") {
-            let arr = value.as_array().cloned().unwrap_or_default();
-            let coerced: Vec<serde_json::Value> = arr
-                .into_iter()
-                .enumerate()
-                .map(|(i, v)| {
-                    json_schema_coerce_or_check(
-                        v,
-                        items_schema,
-                        &format!("{path}[{i}]"),
-                        errors,
-                        coerce,
-                        changed,
-                    )
-                })
-                .collect();
-            return serde_json::Value::Array(coerced);
-        }
-        return value;
+        let arr = value.as_array().cloned().unwrap_or_default();
+        let result = check_array_keywords(obj, arr, path, policy, coerce, changed, out);
+        apply_composition(obj, &result, path, policy, changed, out);
+        return result;
     }
 
-    // Primitive types
-    if let Some(type_field) = schema_type
-        && let Some(type_str) = type_field.as_str()
-    {
+    // Primitive / untyped value.
+    let mut value = value;
+    if let Some(type_str) = schema_type.and_then(|t| t.as_str()) {
         match type_str {
             "string" => {
-                if !json_schema_type_matches(&value, "string") {
+                if !policy.matches(&value, "string") {
                     if coerce && (value.is_number() || value.is_boolean()) {
-                        let s = match &value {
+                        value = serde_json::Value::String(match &value {
                             serde_json::Value::Number(n) => n.to_string(),
                             serde_json::Value::Bool(b) => b.to_string(),
                             _ => String::new(),
-                        };
+                        });
                         *changed = true;
-                        return serde_json::Value::String(s);
+                    } else {
+                        out.push(Violation {
+                            path: path.to_string(),
+                            kind: ViolationKind::Type("string".into()),
+                        });
                     }
-                    errors.push(format!("{path}: expected string"));
                 }
-                return value;
             }
             "number" | "integer" => {
-                if !json_schema_type_matches(&value, type_str) {
+                if !policy.matches(&value, type_str) {
+                    let mut coerced = None;
                     if coerce {
                         let n = match &value {
                             serde_json::Value::String(s) => s.parse::<f64>().ok(),
@@ -191,52 +250,507 @@ pub(crate) fn json_schema_coerce_or_check(
                         };
                         if let Some(n) = n {
                             if type_str == "integer" && n.fract() != 0.0 {
-                                errors.push(format!("{path}: expected integer"));
+                                out.push(Violation {
+                                    path: path.to_string(),
+                                    kind: ViolationKind::Type("integer".into()),
+                                });
                             }
                             if let Some(num) = serde_json::Number::from_f64(n) {
-                                *changed = true;
-                                return serde_json::Value::Number(num);
+                                coerced = Some(serde_json::Value::Number(num));
                             }
                         }
                     }
-                    errors.push(format!("{path}: expected {type_str}"));
-                    return value;
+                    match coerced {
+                        Some(v) => {
+                            *changed = true;
+                            value = v;
+                        }
+                        None => out.push(Violation {
+                            path: path.to_string(),
+                            kind: ViolationKind::Type(type_str.into()),
+                        }),
+                    }
                 }
-                if type_str == "integer" && !json_schema_type_matches(&value, "integer") {
-                    errors.push(format!("{path}: expected integer"));
-                }
-                return value;
             }
             "boolean" => {
-                if !json_schema_type_matches(&value, "boolean") {
+                if !policy.matches(&value, "boolean") {
+                    let mut coerced = None;
                     if coerce {
                         match &value {
                             serde_json::Value::String(s) if s == "true" => {
-                                *changed = true;
-                                return serde_json::Value::Bool(true);
+                                coerced = Some(serde_json::Value::Bool(true));
                             }
                             serde_json::Value::String(s) if s == "false" => {
-                                *changed = true;
-                                return serde_json::Value::Bool(false);
+                                coerced = Some(serde_json::Value::Bool(false));
                             }
                             _ => {}
                         }
                     }
-                    errors.push(format!("{path}: expected boolean"));
+                    match coerced {
+                        Some(v) => {
+                            *changed = true;
+                            value = v;
+                        }
+                        None => out.push(Violation {
+                            path: path.to_string(),
+                            kind: ViolationKind::Type("boolean".into()),
+                        }),
+                    }
                 }
-                return value;
             }
             "null" => {
                 if !value.is_null() {
-                    errors.push(format!("{path}: expected null"));
+                    out.push(Violation {
+                        path: path.to_string(),
+                        kind: ViolationKind::Type("null".into()),
+                    });
                 }
-                return value;
             }
-            _ => return value, // unknown type → accept
+            _ => {} // unknown type keyword → accept
         }
     }
 
+    check_scalar_keywords(obj, &value, path, out);
+    apply_composition(obj, &value, path, policy, changed, out);
     value
+}
+
+/// Object keywords handled by [`json_schema_check`] (used to infer `object`).
+const OBJECT_KEYWORDS: &[&str] = &[
+    "properties",
+    "patternProperties",
+    "additionalProperties",
+    "propertyNames",
+    "required",
+    "dependentRequired",
+    "dependentSchemas",
+    "minProperties",
+    "maxProperties",
+];
+
+fn push_kw(out: &mut Vec<Violation>, path: &str, phrase: impl Into<String>) {
+    out.push(Violation {
+        path: path.to_string(),
+        kind: ViolationKind::Keyword(phrase.into()),
+    });
+}
+
+fn json_str(v: &serde_json::Value) -> String {
+    serde_json::to_string(v).unwrap_or_default()
+}
+
+/// Regex match for the `pattern` / `patternProperties` keywords. Uses
+/// `regex-automata`'s meta engine — the minimal core (the umbrella `regex`
+/// crate is only a façade over it) — which aike already compiles via
+/// `globset`/`grep-regex`. An invalid pattern is treated as "matches" (never
+/// false-rejects), matching the "unknown keyword accepts" philosophy.
+fn regex_is_match(pattern: &str, s: &str) -> bool {
+    regex_automata::meta::Regex::new(pattern)
+        .map(|re| re.is_match(s.as_bytes()))
+        .unwrap_or(true)
+}
+
+/// Whether `value` satisfies `sub` (no coercion). Used by compositors.
+fn subschema_matches(
+    sub: &serde_json::Value,
+    value: &serde_json::Value,
+    path: &str,
+    policy: IntegerPolicy,
+    changed: &mut bool,
+) -> bool {
+    let mut s = Vec::new();
+    json_schema_check(value.clone(), sub, path, policy, false, changed, &mut s);
+    s.is_empty()
+}
+
+/// Object-shape keywords: propertyNames / properties / patternProperties /
+/// additionalProperties / required / dependent* / min|maxProperties.
+fn check_object_keywords(
+    obj: &serde_json::Map<String, serde_json::Value>,
+    map: &mut serde_json::Map<String, serde_json::Value>,
+    path: &str,
+    policy: IntegerPolicy,
+    coerce: bool,
+    changed: &mut bool,
+    out: &mut Vec<Violation>,
+) {
+    // propertyNames — every key validates against the subschema.
+    if let Some(pn) = obj.get("propertyNames") {
+        for k in map.keys() {
+            let mut scratch = Vec::new();
+            json_schema_check(
+                serde_json::Value::String(k.clone()),
+                pn,
+                &format!("{path}.{k}"),
+                policy,
+                false,
+                changed,
+                &mut scratch,
+            );
+            if !scratch.is_empty() {
+                push_kw(out, path, format!("property name \"{k}\" is invalid"));
+            }
+        }
+    }
+
+    let declared = obj.get("properties").and_then(|p| p.as_object());
+    let patterns = obj.get("patternProperties").and_then(|p| p.as_object());
+    let additional = obj.get("additionalProperties");
+    let keys: Vec<String> = map.keys().cloned().collect();
+    for k in &keys {
+        let v = map.get(k).cloned().unwrap_or(serde_json::Value::Null);
+        let mut matched = false;
+        if let Some(ps) = declared.and_then(|d| d.get(k)) {
+            matched = true;
+            let c = json_schema_check(
+                v.clone(),
+                ps,
+                &format!("{path}.{k}"),
+                policy,
+                coerce,
+                changed,
+                out,
+            );
+            map.insert(k.clone(), c);
+        }
+        if let Some(pp) = patterns {
+            for (pat, ps) in pp {
+                if regex_is_match(pat, k) {
+                    matched = true;
+                    let c = json_schema_check(
+                        v.clone(),
+                        ps,
+                        &format!("{path}.{k}"),
+                        policy,
+                        coerce,
+                        changed,
+                        out,
+                    );
+                    map.insert(k.clone(), c);
+                }
+            }
+        }
+        if !matched {
+            match additional {
+                Some(serde_json::Value::Bool(false)) => push_kw(
+                    out,
+                    &format!("{path}.{k}"),
+                    "is not allowed (additionalProperties: false)",
+                ),
+                Some(ap) if ap.is_object() => {
+                    let c = json_schema_check(
+                        v,
+                        ap,
+                        &format!("{path}.{k}"),
+                        policy,
+                        coerce,
+                        changed,
+                        out,
+                    );
+                    map.insert(k.clone(), c);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    if let Some(req) = obj.get("required").and_then(|r| r.as_array()) {
+        for r in req {
+            if let Some(name) = r.as_str()
+                && !map.contains_key(name)
+            {
+                out.push(Violation {
+                    path: format!("{path}.{name}"),
+                    kind: ViolationKind::Missing,
+                });
+            }
+        }
+    }
+
+    if let Some(dr) = obj.get("dependentRequired").and_then(|d| d.as_object()) {
+        for (k, reqs) in dr {
+            if map.contains_key(k)
+                && let Some(arr) = reqs.as_array()
+            {
+                for r in arr {
+                    if let Some(n) = r.as_str()
+                        && !map.contains_key(n)
+                    {
+                        push_kw(out, &format!("{path}.{k}"), format!("requires \"{n}\""));
+                    }
+                }
+            }
+        }
+    }
+
+    if let Some(ds) = obj.get("dependentSchemas").and_then(|d| d.as_object()) {
+        for (k, sub) in ds {
+            if map.contains_key(k) {
+                json_schema_check(
+                    serde_json::Value::Object(map.clone()),
+                    sub,
+                    path,
+                    policy,
+                    coerce,
+                    changed,
+                    out,
+                );
+            }
+        }
+    }
+
+    let np = map.len() as u64;
+    if let Some(m) = obj.get("minProperties").and_then(|v| v.as_u64())
+        && np < m
+    {
+        push_kw(out, path, format!("must have at least {m} properties"));
+    }
+    if let Some(m) = obj.get("maxProperties").and_then(|v| v.as_u64())
+        && np > m
+    {
+        push_kw(out, path, format!("must have at most {m} properties"));
+    }
+}
+
+/// Array-shape keywords: prefixItems / items / min|maxItems / uniqueItems /
+/// contains (+min|maxContains).
+fn check_array_keywords(
+    obj: &serde_json::Map<String, serde_json::Value>,
+    arr: Vec<serde_json::Value>,
+    path: &str,
+    policy: IntegerPolicy,
+    coerce: bool,
+    changed: &mut bool,
+    out: &mut Vec<Violation>,
+) -> serde_json::Value {
+    let prefix = obj.get("prefixItems").and_then(|p| p.as_array());
+    let items = obj.get("items");
+    let mut coerced: Vec<serde_json::Value> = Vec::with_capacity(arr.len());
+    for (i, v) in arr.into_iter().enumerate() {
+        // `prefixItems` covers the leading positions; `items` the rest.
+        let sub = if prefix.is_some() {
+            prefix.and_then(|p| p.get(i))
+        } else {
+            items
+        };
+        match sub {
+            Some(ps) => coerced.push(json_schema_check(
+                v,
+                ps,
+                &format!("{path}[{i}]"),
+                policy,
+                coerce,
+                changed,
+                out,
+            )),
+            None => coerced.push(v),
+        }
+    }
+
+    let n = coerced.len() as u64;
+    if let Some(m) = obj.get("minItems").and_then(|v| v.as_u64())
+        && n < m
+    {
+        push_kw(out, path, format!("must have at least {m} items"));
+    }
+    if let Some(m) = obj.get("maxItems").and_then(|v| v.as_u64())
+        && n > m
+    {
+        push_kw(out, path, format!("must have at most {m} items"));
+    }
+    if obj.get("uniqueItems").and_then(|v| v.as_bool()) == Some(true) {
+        'outer: for i in 0..coerced.len() {
+            for j in (i + 1)..coerced.len() {
+                if coerced[i] == coerced[j] {
+                    push_kw(out, path, "items must be unique");
+                    break 'outer;
+                }
+            }
+        }
+    }
+    if let Some(cs) = obj.get("contains") {
+        let cnt = coerced
+            .iter()
+            .filter(|v| {
+                let mut s = Vec::new();
+                json_schema_check((*v).clone(), cs, path, policy, false, changed, &mut s);
+                s.is_empty()
+            })
+            .count() as i64;
+        let min = obj.get("minContains").and_then(|v| v.as_i64()).unwrap_or(1);
+        if cnt < min {
+            push_kw(
+                out,
+                path,
+                format!("must contain at least {min} matching item(s)"),
+            );
+        }
+        if let Some(mx) = obj.get("maxContains").and_then(|v| v.as_i64())
+            && cnt > mx
+        {
+            push_kw(
+                out,
+                path,
+                format!("must contain at most {mx} matching item(s)"),
+            );
+        }
+    }
+
+    serde_json::Value::Array(coerced)
+}
+
+/// Scalar keywords: string min|maxLength / pattern and numeric multipleOf /
+/// min|max|exclusiveMin|exclusiveMax. Only the ones matching the value's shape fire.
+fn check_scalar_keywords(
+    obj: &serde_json::Map<String, serde_json::Value>,
+    value: &serde_json::Value,
+    path: &str,
+    out: &mut Vec<Violation>,
+) {
+    if let Some(s) = value.as_str() {
+        let len = s.chars().count() as u64;
+        if let Some(m) = obj.get("minLength").and_then(|v| v.as_u64())
+            && len < m
+        {
+            push_kw(out, path, format!("must be at least {m} characters"));
+        }
+        if let Some(m) = obj.get("maxLength").and_then(|v| v.as_u64())
+            && len > m
+        {
+            push_kw(out, path, format!("must be at most {m} characters"));
+        }
+        if let Some(p) = obj.get("pattern").and_then(|v| v.as_str())
+            && !regex_is_match(p, s)
+        {
+            push_kw(out, path, format!("must match pattern {:?}", p));
+        }
+    }
+    if let Some(n) = value.as_f64() {
+        if let Some(m) = obj.get("multipleOf").and_then(|v| v.as_f64())
+            && m > 0.0
+        {
+            let q = n / m;
+            if (q - q.round()).abs() > 1e-9 {
+                push_kw(out, path, format!("must be a multiple of {m}"));
+            }
+        }
+        if let Some(m) = obj.get("minimum").and_then(|v| v.as_f64())
+            && n < m
+        {
+            push_kw(out, path, format!("must be >= {m}"));
+        }
+        if let Some(m) = obj.get("exclusiveMinimum").and_then(|v| v.as_f64())
+            && n <= m
+        {
+            push_kw(out, path, format!("must be > {m}"));
+        }
+        if let Some(m) = obj.get("maximum").and_then(|v| v.as_f64())
+            && n > m
+        {
+            push_kw(out, path, format!("must be <= {m}"));
+        }
+        if let Some(m) = obj.get("exclusiveMaximum").and_then(|v| v.as_f64())
+            && n >= m
+        {
+            push_kw(out, path, format!("must be < {m}"));
+        }
+    }
+}
+
+/// Applicator keywords: `not` / `allOf` / `anyOf` / `oneOf` / `if`-`then`-`else`.
+/// Subschemas run in pure-check mode (no coercion).
+fn apply_composition(
+    obj: &serde_json::Map<String, serde_json::Value>,
+    value: &serde_json::Value,
+    path: &str,
+    policy: IntegerPolicy,
+    changed: &mut bool,
+    out: &mut Vec<Violation>,
+) {
+    if let Some(sub) = obj.get("not")
+        && subschema_matches(sub, value, path, policy, changed)
+    {
+        push_kw(out, path, "must not match the `not` schema");
+    }
+    if let Some(arr) = obj.get("allOf").and_then(|v| v.as_array()) {
+        for sub in arr {
+            json_schema_check(value.clone(), sub, path, policy, false, changed, out);
+        }
+    }
+    if let Some(arr) = obj.get("anyOf").and_then(|v| v.as_array())
+        && !arr
+            .iter()
+            .any(|sub| subschema_matches(sub, value, path, policy, changed))
+    {
+        push_kw(out, path, "must match at least one of the `anyOf` schemas");
+    }
+    if let Some(arr) = obj.get("oneOf").and_then(|v| v.as_array()) {
+        let count = arr
+            .iter()
+            .filter(|sub| subschema_matches(sub, value, path, policy, changed))
+            .count();
+        if count != 1 {
+            push_kw(
+                out,
+                path,
+                format!("must match exactly one of the `oneOf` schemas (matched {count})"),
+            );
+        }
+    }
+    if let Some(if_s) = obj.get("if") {
+        if subschema_matches(if_s, value, path, policy, changed) {
+            if let Some(t) = obj.get("then") {
+                json_schema_check(value.clone(), t, path, policy, false, changed, out);
+            }
+        } else if let Some(e) = obj.get("else") {
+            json_schema_check(value.clone(), e, path, policy, false, changed, out);
+        }
+    }
+}
+
+/// JS `validateSchema` surface: run the shared validator (lenient integers) and
+/// render each violation as `"{path}: ..."`.
+pub(crate) fn json_schema_error_js(v: &Violation) -> String {
+    let what = match &v.kind {
+        ViolationKind::NotObject => "expected object".to_string(),
+        ViolationKind::NotArray => "expected array".to_string(),
+        ViolationKind::Type(t) => format!("expected {t}"),
+        ViolationKind::Missing => "missing required property".to_string(),
+        ViolationKind::NotInEnum { allowed, .. } => {
+            format!(
+                "must be one of {}",
+                serde_json::to_string(allowed).unwrap_or_default()
+            )
+        }
+        ViolationKind::Keyword(phrase) => phrase.clone(),
+    };
+    format!("{}: {}", v.path, what)
+}
+
+/// Run the shared validator (lenient integers) collecting JS error strings.
+/// Returns the (possibly coerced) value; `changed` is set iff a coercion fired.
+pub(crate) fn json_schema_coerce_or_check(
+    value: serde_json::Value,
+    schema: &serde_json::Value,
+    path: &str,
+    errors: &mut Vec<String>,
+    coerce: bool,
+    changed: &mut bool,
+) -> serde_json::Value {
+    let mut violations = Vec::new();
+    let out = json_schema_check(
+        value,
+        schema,
+        path,
+        IntegerPolicy::Lenient,
+        coerce,
+        changed,
+        &mut violations,
+    );
+    for v in &violations {
+        errors.push(json_schema_error_js(v));
+    }
+    out
 }
 
 // ── example synthesis ──
@@ -291,28 +805,11 @@ pub(crate) fn json_schema_example(schema: &serde_json::Value) -> serde_json::Val
 
 // ── MCP tool-argument checking ──
 //
-// Coverage (current):
-//   required  — missing required field rejected
-//   enum      — whitelist check
-//   type      — string / integer / number / boolean / object / null / array
-//               (incl. array `items` element type); unknown type keywords pass
-//   default   — missing optional args filled by [`json_schema_apply_defaults`],
-//               then the inserted value is validated like any provided value
-//
-// Not yet implemented (standard JSON Schema "Validation" vocabulary; the MCP
-// DSL `SimpleSchema` (alias `ToolArgDef`) does not expose them yet, so they
-// never appear in the schemas `simple_schema_from_args` produces):
-//   minLength/maxLength (string, Unicode code points)
-//   pattern             (string must match a regex)
-//   minimum/maximum / exclusiveMinimum/exclusiveMaximum (numeric bounds)
-//   multipleOf          (number must be a multiple)
-//   minItems/maxItems, uniqueItems (array)
-//   minProperties/maxProperties (object)
-//   format              (semantic hint: email/date-time/uri/ipv4… — in
-//                       2020-12 it is Format-Annotation, default non-enforcing)
-// When the DSL is extended, propagate the new fields in
-// `simple_schema_from_args` (helpers/simple_schema.rs) and add checks here.
-// Schema matches `memo/mcp-schema-validation.md`.
+// `json_schema_validate_args` runs the SAME validator as the JS
+// `validateSchema` (see the module docs for the implemented keyword set) under
+// the strict integer contract. `json_schema_apply_defaults` fills missing
+// optional args from their schema `default` before validation, so a bad
+// default is rejected like a bad provided value.
 
 /// Validate MCP tool-call `arguments` against a tool's `inputSchema` before
 /// dispatch.
@@ -325,30 +822,28 @@ pub(crate) fn json_schema_validate_args(
     schema: &serde_json::Map<String, serde_json::Value>,
     arguments: &serde_json::Value,
 ) -> Result<(), String> {
-    let Some(obj) = arguments.as_object() else {
+    if !arguments.is_object() {
         return Err("arguments must be a JSON object".to_string());
-    };
-
-    // required fields
-    if let Some(required) = schema.get("required").and_then(|v| v.as_array()) {
-        for name in required {
-            let Some(name) = name.as_str() else { continue };
-            if !obj.contains_key(name) {
-                return Err(format!("missing required argument: \"{}\"", name));
-            }
-        }
     }
 
-    let Some(properties) = schema.get("properties").and_then(|v| v.as_object()) else {
-        return Ok(());
-    };
-    for (prop_name, prop_schema) in properties {
-        if let Some(value) = obj.get(prop_name) {
-            json_schema_validate_property(prop_name, prop_schema, value)?;
-        }
-    }
+    // Run the SAME validator the JS `validateSchema` path uses — strict integer
+    // contract for tool args — and report the first violation in MCP wording.
+    let mut violations = Vec::new();
+    let mut changed = false;
+    json_schema_check(
+        arguments.clone(),
+        &serde_json::Value::Object(schema.clone()),
+        "root",
+        IntegerPolicy::Strict,
+        false,
+        &mut changed,
+        &mut violations,
+    );
 
-    Ok(())
+    match violations.first() {
+        Some(v) => Err(json_schema_error_mcp(v)),
+        None => Ok(()),
+    }
 }
 
 /// Fill missing optional MCP tool arguments with their schema `default` values.
@@ -385,60 +880,61 @@ pub(crate) fn json_schema_apply_defaults(
     }
 }
 
-/// Validate one property value against its property schema (MCP contract).
+/// MCP tool-arg surface: render a [`Violation`] as the protocol error string.
 ///
-/// Enum is checked before type; error wording is part of the MCP protocol
-/// surface and must not change.
-fn json_schema_validate_property(
-    name: &str,
-    schema: &serde_json::Value,
-    value: &serde_json::Value,
-) -> Result<(), String> {
-    // enum whitelist
-    if let Some(list) = schema.get("enum").and_then(|v| v.as_array())
-        && !list.iter().any(|v| v == value)
+/// Enum is checked before type; wording is part of the MCP protocol surface and
+/// must not change.
+fn json_schema_error_mcp(v: &Violation) -> String {
+    // Array-item violations (`<parent>[<i>]`) report the parent field.
+    if let Some((parent_path, _idx)) = v.path.rsplit_once('[')
+        && let ViolationKind::Type(item_type) = &v.kind
     {
-        return Err(format!(
+        let parent = parent_path.rsplit('.').next().unwrap_or(parent_path);
+        return format!("items of \"{}\" must be {}", parent, item_type);
+    }
+
+    let name = v.path.rsplit('.').next().unwrap_or(&v.path);
+    match &v.kind {
+        ViolationKind::Missing => format!("missing required argument: \"{}\"", name),
+        ViolationKind::NotInEnum { value, .. } => format!(
             "invalid value for \"{}\": {}",
             name,
             serde_json::to_string(value).unwrap_or_default()
-        ));
-    }
-
-    match schema.get("type").and_then(|v| v.as_str()) {
-        None => Ok(()),
-        Some(t @ ("string" | "integer" | "boolean" | "number" | "object" | "null")) => {
-            if json_schema_type_strict(value, t) {
-                Ok(())
-            } else {
-                // Wording below is protocol surface (asserted in tests): keep
-                // exact articles — "an integer"/"an object", bare "null".
-                let noun = match t {
-                    "integer" | "object" => format!("an {t}"),
-                    "null" => "null".to_string(),
-                    _ => format!("a {t}"),
-                };
-                Err(format!("\"{}\" must be {}", name, noun))
-            }
-        }
-        Some("array") => {
-            let Some(items) = value.as_array() else {
-                return Err(format!("\"{}\" must be an array", name));
+        ),
+        ViolationKind::NotObject => format!("\"{}\" must be an object", name),
+        ViolationKind::NotArray => format!("\"{}\" must be an array", name),
+        ViolationKind::Type(t) => {
+            // Wording below is protocol surface (asserted in tests): keep exact
+            // articles — "an integer"/"an object", bare "null".
+            let noun = match t.as_str() {
+                "integer" | "object" => format!("an {t}"),
+                "null" => "null".to_string(),
+                _ => format!("a {t}"),
             };
-            // Validate each item against the item type (default: string)
-            let item_type = schema
-                .get("items")
-                .and_then(|i| i.get("type"))
-                .and_then(|t| t.as_str())
-                .unwrap_or("string");
-            for item in items {
-                if !json_schema_item_type_strict(item, item_type) {
-                    return Err(format!("items of \"{}\" must be {}", name, item_type));
-                }
-            }
-            Ok(())
+            format!("\"{}\" must be {}", name, noun)
         }
-        // Unknown type keyword — don't enforce.
-        Some(_) => Ok(()),
+        ViolationKind::Keyword(phrase) => format!("\"{}\" {}", name, phrase),
     }
 }
+
+// ── Not yet implemented ─────────────────────────────────────────────────────
+//
+// Standard JSON Schema 2020-12 keywords this validator does NOT enforce.
+// Unknown keywords are ignored (the validator never false-rejects), so a
+// schema that uses them still validates — only the extra check is missing.
+//
+// Core / references — need a schema resolver (URI handling + $ref recursion):
+//   $id, $schema, $vocabulary, $anchor, $dynamicAnchor, $dynamicRef,
+//   $ref, $defs, $comment
+//
+// Applicator — need full annotation ("evaluated") tracking:
+//   unevaluatedItems, unevaluatedProperties
+//
+// Format — `format` is a non-enforcing annotation by default; the assertion
+//   vocabulary (email / date-time / uri / ipv4 / …) is not implemented.
+//
+// Content:
+//   contentEncoding, contentMediaType, contentSchema
+//
+// Meta-data — non-validating annotations, intentionally ignored:
+//   title, deprecated, readOnly, writeOnly, examples
