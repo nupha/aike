@@ -209,4 +209,96 @@ declare module "os" {
    * Directory spec, which only Linux implements. Check for null before use.
    */
   function runtimeDir(): string | null;
+
+  /**
+   * Per-user local config directory, or null if undeterminable. Differs from
+   * {@link configDir} on Windows only (`%LocalAppData%`). Same value as
+   * `configDir()` elsewhere.
+   */
+  function configLocalDir(): string | null;
+
+  /**
+   * Directory for user-installed executables, or null if undeterminable.
+   *
+   * Linux: `$XDG_BIN_HOME`, `$XDG_DATA_HOME/..//bin` or `$HOME/.local/bin`.
+   * **null on Windows and macOS** — no per-user executable directory is
+   * defined there. Check for null before use.
+   */
+  function executableDir(): string | null;
+
+  /**
+   * Per-user application preferences directory, or null if undeterminable.
+   *
+   * macOS: `$HOME/Library/Preferences`
+   * Windows: `%AppData%` (same as {@link configDir})
+   * Linux: same as {@link configDir}
+   */
+  function preferenceDir(): string | null;
+
+  /**
+   * User's music directory, or null if undeterminable
+   * (e.g. when the "Music" folder has not been created).
+   *
+   * macOS: `$HOME/Music`; Windows: `%Music%`; Linux: `XDG_MUSIC_DIR`.
+   */
+  function audioDir(): string | null;
+
+  /**
+   * User's desktop directory, or null if undeterminable.
+   *
+   * macOS: `$HOME/Desktop`; Windows: `%Desktop%`; Linux: `XDG_DESKTOP_DIR`.
+   */
+  function desktopDir(): string | null;
+
+  /**
+   * User's documents directory, or null if undeterminable.
+   *
+   * macOS: `$HOME/Documents`; Windows: `%Documents%`; Linux: `XDG_DOCUMENTS_DIR`.
+   */
+  function documentDir(): string | null;
+
+  /**
+   * User's downloads directory, or null if undeterminable.
+   *
+   * macOS: `$HOME/Downloads`; Windows: `%Downloads%`; Linux: `XDG_DOWNLOAD_DIR`.
+   */
+  function downloadDir(): string | null;
+
+  /**
+   * Directory for installed fonts, or null if undeterminable.
+   *
+   * macOS: `$HOME/Library/Fonts`; Windows: `%Fonts%`; Linux: `XDG_DATA_HOME/fonts`.
+   */
+  function fontDir(): string | null;
+
+  /**
+   * User's pictures directory, or null if undeterminable.
+   *
+   * macOS: `$HOME/Pictures`; Windows: `%Pictures%`; Linux: `XDG_PICTURES_DIR`.
+   */
+  function pictureDir(): string | null;
+
+  /**
+   * Public directory for sharing data between users, or null if
+   * undeterminable.
+   *
+   * macOS: `$HOME/Public`; Windows: `%Public%`; Linux: `XDG_PUBLICSHARE_DIR`.
+   */
+  function publicDir(): string | null;
+
+  /**
+   * User's templates directory, or null if undeterminable.
+   *
+   * Linux: `XDG_TEMPLATES_DIR`.
+   * **null on Windows and macOS** — no per-user template directory is defined
+   * there. Check for null before use.
+   */
+  function templateDir(): string | null;
+
+  /**
+   * User's videos/movies directory, or null if undeterminable.
+   *
+   * macOS: `$HOME/Movies`; Windows: `%Videos%`; Linux: `XDG_VIDEOS_DIR`.
+   */
+  function videoDir(): string | null;
 }

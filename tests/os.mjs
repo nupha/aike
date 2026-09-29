@@ -3,9 +3,14 @@
 // Node-compatible: EOL, devNull, arch(), platform(), type(), version(),
 // uptime(), endianness(), availableParallelism(), homedir(), tmpdir(),
 // constants.{signals, priority, dlopen}.
-// aike extensions: configDir, dataDir, dataLocalDir, cacheDir, stateDir,
-// runtimeDir. These return `string | null` — runtimeDir() is always null off
-// Linux, and the others are null when $HOME is undeterminable.
+// aike extensions: configDir, configLocalDir, dataDir, dataLocalDir,
+// cacheDir, stateDir, runtimeDir, executableDir, preferenceDir, audioDir,
+// desktopDir, documentDir, downloadDir, fontDir, pictureDir, publicDir,
+// templateDir, videoDir. These return `string | null` — runtimeDir(),
+// templateDir() and executableDir() are always null off Linux, and the
+// others are null when $HOME (or the platform directory) is
+// undeterminable. All 20 directory lookups share one native handler
+// (`js_dir` in src/os.rs) distinguished by a magic constant.
 
 import * as os from "os";
 import * as path from "path";
@@ -43,21 +48,49 @@ function checkDir(label, v) {
 function testIdentity() {
   console.log("\n=== os — platform identity ===");
 
-  check("arch() is a string", typeof os.arch() === "string" && os.arch().length > 0);
+  check(
+    "arch() is a string",
+    typeof os.arch() === "string" && os.arch().length > 0,
+  );
   check("platform() is a string", typeof os.platform() === "string");
   check("type() is a string", typeof os.type() === "string");
-  check("version() is a string", typeof os.version() === "string" && os.version().length > 0);
-  check("uptime() is a number > 0", typeof os.uptime() === "number" && os.uptime() > 0, `got ${os.uptime()}`);
+  check(
+    "version() is a string",
+    typeof os.version() === "string" && os.version().length > 0,
+  );
+  check(
+    "uptime() is a number > 0",
+    typeof os.uptime() === "number" && os.uptime() > 0,
+    `got ${os.uptime()}`,
+  );
   check("endianness() is LE or BE", ["LE", "BE"].includes(os.endianness()));
-  check("availableParallelism() >= 1", os.availableParallelism() >= 1, `got ${os.availableParallelism()}`);
+  check(
+    "availableParallelism() >= 1",
+    os.availableParallelism() >= 1,
+    `got ${os.availableParallelism()}`,
+  );
 
   // Node-compatible spellings.
-  check(`platform() is "win32" on Windows`, IS_WIN ? os.platform() === "win32" : true, `got ${os.platform()}`);
-  check(`type() is "Windows_NT" on Windows`, IS_WIN ? os.type() === "Windows_NT" : true, `got ${os.type()}`);
+  check(
+    `platform() is "win32" on Windows`,
+    IS_WIN ? os.platform() === "win32" : true,
+    `got ${os.platform()}`,
+  );
+  check(
+    `type() is "Windows_NT" on Windows`,
+    IS_WIN ? os.type() === "Windows_NT" : true,
+    `got ${os.type()}`,
+  );
 
   // EOL and devNull are properties in Node, not functions.
-  check("EOL is a string property", typeof os.EOL === "string" && os.EOL.length > 0);
-  check("devNull is a string property", typeof os.devNull === "string" && os.devNull.length > 0);
+  check(
+    "EOL is a string property",
+    typeof os.EOL === "string" && os.EOL.length > 0,
+  );
+  check(
+    "devNull is a string property",
+    typeof os.devNull === "string" && os.devNull.length > 0,
+  );
   check(
     `EOL is "\\r\\n" on Windows, "\\n" elsewhere`,
     IS_WIN ? os.EOL === "\r\n" : os.EOL === "\n",
@@ -70,8 +103,16 @@ function testIdentity() {
   );
 
   // Node documents os.platform() and process.platform as equivalent.
-  check("arch() matches process.arch", os.arch() === process.arch, `${os.arch()} vs ${process.arch}`);
-  check("platform() matches process.platform", os.platform() === process.platform, `${os.platform()} vs ${process.platform}`);
+  check(
+    "arch() matches process.arch",
+    os.arch() === process.arch,
+    `${os.arch()} vs ${process.arch}`,
+  );
+  check(
+    "platform() matches process.platform",
+    os.platform() === process.platform,
+    `${os.platform()} vs ${process.platform}`,
+  );
 
   // os.version() is the OS/kernel version, not the runtime version.
   check(
@@ -80,7 +121,11 @@ function testIdentity() {
     `both are ${os.version()}`,
   );
   // System uptime, not process uptime — it must exceed process uptime.
-  check("uptime() exceeds process.uptime()", os.uptime() > process.uptime() + 1, `os ${os.uptime()} vs proc ${process.uptime()}`);
+  check(
+    "uptime() exceeds process.uptime()",
+    os.uptime() > process.uptime() + 1,
+    `os ${os.uptime()} vs proc ${process.uptime()}`,
+  );
 }
 
 // ===================================================================
@@ -111,10 +156,121 @@ function testDirs() {
 
   // runtimeDir() is XDG-only: always null on Windows and macOS.
   if (!IS_WIN && process.platform !== "darwin") {
-    check("runtimeDir() resolves on this POSIX platform", os.runtimeDir() !== null);
+    check(
+      "runtimeDir() resolves on this POSIX platform",
+      os.runtimeDir() !== null,
+    );
   } else {
     check("runtimeDir() → null on Windows/macOS", os.runtimeDir() === null);
   }
+
+  // --- dirs 6.0.0 extensions: local config / executable / preference ---
+  checkDir("configLocalDir()", os.configLocalDir());
+  checkDir("executableDir()", os.executableDir());
+  checkDir("preferenceDir()", os.preferenceDir());
+
+  // executableDir() is the per-user bin dir; dirs only defines it off
+  // Windows/macOS.
+  if (!IS_WIN && process.platform !== "darwin") {
+    check(
+      "executableDir() resolves on this POSIX platform",
+      os.executableDir() !== null,
+    );
+  } else {
+    check(
+      "executableDir() → null on Windows/macOS",
+      os.executableDir() === null,
+    );
+  }
+  // preferenceDir(): a separate path only on macOS; elsewhere it equals
+  // configDir().
+  if (process.platform === "darwin") {
+    check(
+      "preferenceDir() is ~/Library/Preferences on macOS",
+      os.preferenceDir() !== null &&
+        os.preferenceDir().endsWith("/Library/Preferences"),
+      `got ${JSON.stringify(os.preferenceDir())}`,
+    );
+  } else if (os.configDir() !== null) {
+    check(
+      "preferenceDir() === configDir() off macOS",
+      os.preferenceDir() === os.configDir(),
+      `${JSON.stringify(os.preferenceDir())} vs ${JSON.stringify(os.configDir())}`,
+    );
+  }
+  // configLocalDir() differs from configDir() on Windows only.
+  if (IS_WIN) {
+    check(
+      "configLocalDir() !== configDir() on Windows",
+      os.configLocalDir() !== os.configDir(),
+    );
+  } else if (os.configDir() !== null) {
+    check(
+      "configLocalDir() === configDir() off Windows",
+      os.configLocalDir() === os.configDir(),
+    );
+  }
+
+  // --- dirs 6.0.0 extensions: user media / shell directories ---
+  for (const name of [
+    "audioDir",
+    "desktopDir",
+    "documentDir",
+    "downloadDir",
+    "fontDir",
+    "pictureDir",
+    "publicDir",
+    "templateDir",
+    "videoDir",
+  ]) {
+    check(`${name}() is a function`, typeof os[name] === "function");
+    checkDir(`${name}()`, os[name]());
+  }
+
+  // templateDir() is XDG-only like runtimeDir(): null on Windows/macOS.
+  if (!IS_WIN && process.platform !== "darwin") {
+    check(
+      "templateDir() resolves on this POSIX platform",
+      os.templateDir() !== null,
+    );
+  } else {
+    check("templateDir() → null on Windows/macOS", os.templateDir() === null);
+  }
+
+  // All 20 directory lookups share one native handler (js_dir in src/os.rs,
+  // magic-selected) — assert the full surface is exported, and none of these
+  // names leaks onto the Aike namespace.
+  const dirFns = [
+    "homedir",
+    "tmpdir",
+    "configDir",
+    "configLocalDir",
+    "dataDir",
+    "dataLocalDir",
+    "cacheDir",
+    "stateDir",
+    "runtimeDir",
+    "executableDir",
+    "preferenceDir",
+    "audioDir",
+    "desktopDir",
+    "documentDir",
+    "downloadDir",
+    "fontDir",
+    "pictureDir",
+    "publicDir",
+    "templateDir",
+    "videoDir",
+  ];
+  check(
+    "all 20 directory APIs are exported as functions",
+    dirFns.every((n) => typeof os[n] === "function"),
+    dirFns.filter((n) => typeof os[n] !== "function").join(", "),
+  );
+  check(
+    "directory APIs are not aliased on Aike",
+    dirFns.every((n) => !(n in Aike)),
+  );
 }
 
 // ===================================================================
@@ -134,9 +290,15 @@ function testOwnership() {
 function testConstants() {
   console.log("\n=== os.constants ===");
 
-  check("constants is an object", typeof os.constants === "object" && os.constants !== null);
+  check(
+    "constants is an object",
+    typeof os.constants === "object" && os.constants !== null,
+  );
   const sig = os.constants.signals;
-  check("constants.signals is an object", typeof sig === "object" && sig !== null);
+  check(
+    "constants.signals is an object",
+    typeof sig === "object" && sig !== null,
+  );
   check("signals.SIGINT is a number", typeof sig.SIGINT === "number");
   check("signals.SIGTERM is a number", typeof sig.SIGTERM === "number");
   check(
@@ -150,8 +312,12 @@ function testConstants() {
   const pri = os.constants.priority;
   check("priority is an object", typeof pri === "object" && pri !== null);
   for (const k of ["PRIORITY_LOW", "PRIORITY_NORMAL", "PRIORITY_HIGHEST"]) {
-    check(`priority.${k} is a number`, typeof pri[k] === "number", `got ${pri[k]}`);
-  }  // Node maps these to six priority constants, but the *numbers* are only
+    check(
+      `priority.${k} is a number`,
+      typeof pri[k] === "number",
+      `got ${pri[k]}`,
+    );
+  } // Node maps these to six priority constants, but the *numbers* are only
   // monotonic on POSIX: on Windows they are priority classes, whose ordering
   // differs. So check the platform's actual value set instead of ordering.
   const expectedPriority = IS_WIN
@@ -164,11 +330,11 @@ function testConstants() {
   if (!IS_WIN) {
     check(
       "priority ordering is monotonic (POSIX nice values)",
-      pri.PRIORITY_LOW > pri.PRIORITY_BELOW_NORMAL
-        && pri.PRIORITY_BELOW_NORMAL > pri.PRIORITY_NORMAL
-        && pri.PRIORITY_NORMAL > pri.PRIORITY_ABOVE_NORMAL
-        && pri.PRIORITY_ABOVE_NORMAL > pri.PRIORITY_HIGH
-        && pri.PRIORITY_HIGH > pri.PRIORITY_HIGHEST,
+      pri.PRIORITY_LOW > pri.PRIORITY_BELOW_NORMAL &&
+        pri.PRIORITY_BELOW_NORMAL > pri.PRIORITY_NORMAL &&
+        pri.PRIORITY_NORMAL > pri.PRIORITY_ABOVE_NORMAL &&
+        pri.PRIORITY_ABOVE_NORMAL > pri.PRIORITY_HIGH &&
+        pri.PRIORITY_HIGH > pri.PRIORITY_HIGHEST,
       JSON.stringify(pri),
     );
   }
@@ -177,7 +343,11 @@ function testConstants() {
   const dlo = os.constants.dlopen;
   check("dlopen is an object", typeof dlo === "object" && dlo !== null);
   if (IS_WIN) {
-    check("dlopen is empty on Windows", Object.keys(dlo).length === 0, JSON.stringify(dlo));
+    check(
+      "dlopen is empty on Windows",
+      Object.keys(dlo).length === 0,
+      JSON.stringify(dlo),
+    );
   } else {
     check("dlopen.RTLD_LAZY is a number", typeof dlo.RTLD_LAZY === "number");
     check("dlopen.RTLD_NOW is a number", typeof dlo.RTLD_NOW === "number");

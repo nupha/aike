@@ -6,8 +6,6 @@
 //! Aike extensions live here rather than on the `Aike` namespace, matching how
 //! `fs.sha256` / `fs.glob` sit on `fs` rather than on `Aike`.
 
-use std::path::PathBuf;
-
 #[cfg(windows)]
 use windows_sys::Win32::System::SystemInformation::{
     GetTickCount64, GetVersionExW, OSVERSIONINFOW,
@@ -39,14 +37,61 @@ fn js_str(ctx: &mut ScopedContext, s: &str) -> Result<JSValue, i32> {
         .map(JSValue::make_string)
 }
 
-/// A directory lookup that may legitimately be undeterminable on this
-/// platform (e.g. `runtimeDir()` off Linux) reports `null` rather than throwing.
-fn js_dir(ctx: &mut ScopedContext, path: Option<PathBuf>) -> JSResult {
+/// `os.homedir()` and the XDG/user-directory lookups share one native
+/// handler; `magic` selects which lookup to perform. A lookup that may
+/// legitimately be undeterminable on this platform (e.g. `runtimeDir()`
+/// off Linux) reports `null` rather than throwing.
+fn js_dir(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let path = match cc.magic() {
+        DIR_HOME => dirs::home_dir(),
+        DIR_TMP => return js_str(ctx, &std::env::temp_dir().to_string_lossy()),
+        DIR_CONFIG => dirs::config_dir(),
+        DIR_CONFIG_LOCAL => dirs::config_local_dir(),
+        DIR_DATA => dirs::data_dir(),
+        DIR_DATA_LOCAL => dirs::data_local_dir(),
+        DIR_CACHE => dirs::cache_dir(),
+        DIR_STATE => dirs::state_dir(),
+        DIR_RUNTIME => dirs::runtime_dir(),
+        DIR_EXECUTABLE => dirs::executable_dir(),
+        DIR_PREFERENCE => dirs::preference_dir(),
+        DIR_AUDIO => dirs::audio_dir(),
+        DIR_DESKTOP => dirs::desktop_dir(),
+        DIR_DOCUMENT => dirs::document_dir(),
+        DIR_DOWNLOAD => dirs::download_dir(),
+        DIR_FONT => dirs::font_dir(),
+        DIR_PICTURE => dirs::picture_dir(),
+        DIR_PUBLIC => dirs::public_dir(),
+        DIR_TEMPLATE => dirs::template_dir(),
+        DIR_VIDEO => dirs::video_dir(),
+        _ => unreachable!(),
+    };
     match path {
         Some(p) => js_str(ctx, &p.to_string_lossy()),
         None => Ok(JSValue::NULL),
     }
 }
+
+// magic constants for js_dir — one native handler, `magic` picks the lookup.
+const DIR_HOME: i32 = 0;
+const DIR_TMP: i32 = 1;
+const DIR_CONFIG: i32 = 2;
+const DIR_CONFIG_LOCAL: i32 = 3;
+const DIR_DATA: i32 = 4;
+const DIR_DATA_LOCAL: i32 = 5;
+const DIR_CACHE: i32 = 6;
+const DIR_STATE: i32 = 7;
+const DIR_RUNTIME: i32 = 8;
+const DIR_EXECUTABLE: i32 = 9;
+const DIR_PREFERENCE: i32 = 10;
+const DIR_AUDIO: i32 = 11;
+const DIR_DESKTOP: i32 = 12;
+const DIR_DOCUMENT: i32 = 13;
+const DIR_DOWNLOAD: i32 = 14;
+const DIR_FONT: i32 = 15;
+const DIR_PICTURE: i32 = 16;
+const DIR_PUBLIC: i32 = 17;
+const DIR_TEMPLATE: i32 = 18;
+const DIR_VIDEO: i32 = 19;
 
 fn js_arch(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
     js_str(ctx, arch_str())
@@ -242,40 +287,6 @@ fn host_uptime() -> f64 {
     (now - boot.tv_sec as f64 - boot.tv_usec as f64 / 1e6).max(0.0)
 }
 
-fn js_config_dir(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
-    js_dir(ctx, dirs::config_dir())
-}
-
-fn js_data_dir(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
-    js_dir(ctx, dirs::data_dir())
-}
-
-fn js_data_local_dir(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
-    js_dir(ctx, dirs::data_local_dir())
-}
-
-fn js_cache_dir(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
-    js_dir(ctx, dirs::cache_dir())
-}
-
-fn js_state_dir(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
-    js_dir(ctx, dirs::state_dir())
-}
-
-fn js_runtime_dir(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
-    js_dir(ctx, dirs::runtime_dir())
-}
-
-/// `os.homedir()` — `null` when undeterminable, matching the XDG lookups below.
-fn js_homedir(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
-    js_dir(ctx, dirs::home_dir())
-}
-
-/// `os.tmpdir()` — the system temporary directory. Never null.
-fn js_tmpdir(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
-    js_str(ctx, &std::env::temp_dir().to_string_lossy())
-}
-
 /// `os.constants.priority` — Windows priority classes / POSIX nice values.
 #[cfg(windows)]
 const PRIORITY: &[(&str, i32)] = &[
@@ -381,15 +392,27 @@ const MOD_OS_ENTRIES: &[FieldDef] = &[
         },
         JS_PROP_ENUMERABLE,
     ),
-    // --- directories ---
-    FieldDef::FUNC("homedir", 0, js_homedir, 0),
-    FieldDef::FUNC("tmpdir", 0, js_tmpdir, 0),
-    FieldDef::FUNC("configDir", 0, js_config_dir, 0),
-    FieldDef::FUNC("dataDir", 0, js_data_dir, 0),
-    FieldDef::FUNC("dataLocalDir", 0, js_data_local_dir, 0),
-    FieldDef::FUNC("cacheDir", 0, js_cache_dir, 0),
-    FieldDef::FUNC("stateDir", 0, js_state_dir, 0),
-    FieldDef::FUNC("runtimeDir", 0, js_runtime_dir, 0),
+    // --- directories --- (single native handler, magic selects the lookup)
+    FieldDef::FUNC("homedir", 0, js_dir, DIR_HOME as _),
+    FieldDef::FUNC("tmpdir", 0, js_dir, DIR_TMP as _),
+    FieldDef::FUNC("configDir", 0, js_dir, DIR_CONFIG as _),
+    FieldDef::FUNC("configLocalDir", 0, js_dir, DIR_CONFIG_LOCAL as _),
+    FieldDef::FUNC("dataDir", 0, js_dir, DIR_DATA as _),
+    FieldDef::FUNC("dataLocalDir", 0, js_dir, DIR_DATA_LOCAL as _),
+    FieldDef::FUNC("cacheDir", 0, js_dir, DIR_CACHE as _),
+    FieldDef::FUNC("stateDir", 0, js_dir, DIR_STATE as _),
+    FieldDef::FUNC("runtimeDir", 0, js_dir, DIR_RUNTIME as _),
+    FieldDef::FUNC("executableDir", 0, js_dir, DIR_EXECUTABLE as _),
+    FieldDef::FUNC("preferenceDir", 0, js_dir, DIR_PREFERENCE as _),
+    FieldDef::FUNC("audioDir", 0, js_dir, DIR_AUDIO as _),
+    FieldDef::FUNC("desktopDir", 0, js_dir, DIR_DESKTOP as _),
+    FieldDef::FUNC("documentDir", 0, js_dir, DIR_DOCUMENT as _),
+    FieldDef::FUNC("downloadDir", 0, js_dir, DIR_DOWNLOAD as _),
+    FieldDef::FUNC("fontDir", 0, js_dir, DIR_FONT as _),
+    FieldDef::FUNC("pictureDir", 0, js_dir, DIR_PICTURE as _),
+    FieldDef::FUNC("publicDir", 0, js_dir, DIR_PUBLIC as _),
+    FieldDef::FUNC("templateDir", 0, js_dir, DIR_TEMPLATE as _),
+    FieldDef::FUNC("videoDir", 0, js_dir, DIR_VIDEO as _),
 ];
 
 pub fn init_mod_os(ctx: &mut ScopedContext) -> Result<(), i32> {
