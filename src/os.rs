@@ -109,8 +109,8 @@ fn js_uptime(_ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
 #[cfg(windows)]
 fn host_version() -> String {
     use windows_sys::Win32::System::Registry::{
-        RegCloseKey, RegGetValueW, RegOpenKeyExW, HKEY, HKEY_LOCAL_MACHINE, KEY_QUERY_VALUE,
-        KEY_WOW64_64KEY, RRF_RT_REG_SZ,
+        HKEY, HKEY_LOCAL_MACHINE, KEY_QUERY_VALUE, KEY_WOW64_64KEY, RRF_RT_REG_SZ, RegCloseKey,
+        RegGetValueW, RegOpenKeyExW,
     };
 
     // Major/minor/build come from the version resource; the human-readable
@@ -130,7 +130,10 @@ fn host_version() -> String {
         .encode_utf16()
         .chain(std::iter::once(0))
         .collect();
-    let value: Vec<u16> = "ProductName".encode_utf16().chain(std::iter::once(0)).collect();
+    let value: Vec<u16> = "ProductName"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
     // Both Win32 calls report success as ERROR_SUCCESS (0), not != 0.
     let ok = unsafe {
         RegOpenKeyExW(
@@ -155,7 +158,10 @@ fn host_version() -> String {
     }
 
     let name = if ok {
-        let n = product.iter().position(|&c| c == 0).unwrap_or(product.len());
+        let n = product
+            .iter()
+            .position(|&c| c == 0)
+            .unwrap_or(product.len());
         String::from_utf16_lossy(&product[..n])
     } else {
         String::new()
@@ -216,7 +222,7 @@ fn host_uptime() -> f64 {
     // No CLOCK_BOOTTIME on macOS/BSD; sysctl KERN_BOOTTIME gives boot time.
     let mut mib = [libc::CTL_KERN, libc::KERN_BOOTTIME];
     let mut boot: libc::timeval = unsafe { std::mem::zeroed() };
-    let mut len = std::mem::size_of::<libc::timeval>() as libc::c_uint;
+    let mut len = std::mem::size_of::<libc::timeval>() as libc::c_uint as usize;
     let rc = unsafe {
         libc::sysctl(
             mib.as_mut_ptr(),
@@ -273,7 +279,10 @@ fn js_tmpdir(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
 /// `os.constants.priority` — Windows priority classes / POSIX nice values.
 #[cfg(windows)]
 const PRIORITY: &[(&str, i32)] = &[
-    ("PRIORITY_LOW", windows_sys::Win32::System::Threading::IDLE_PRIORITY_CLASS as i32),
+    (
+        "PRIORITY_LOW",
+        windows_sys::Win32::System::Threading::IDLE_PRIORITY_CLASS as i32,
+    ),
     (
         "PRIORITY_BELOW_NORMAL",
         windows_sys::Win32::System::Threading::BELOW_NORMAL_PRIORITY_CLASS as i32,
