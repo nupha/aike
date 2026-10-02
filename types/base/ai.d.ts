@@ -139,6 +139,161 @@ declare module "ai" {
   }
 
   // ---------------------------------------------------------------------------
+  // System1Client — TypeSafe System One Models (Jev): typed, probabilistic
+  // decisions instead of generated text. Mirrors `@typesafe-ai/sdk`.
+  // ---------------------------------------------------------------------------
+
+  /** Text, a JSON object, an array, or `null`. */
+  export type System1Entry = string | object | unknown[] | null;
+
+  /** Yes/no question with optional descriptions of either outcome. */
+  export interface NoulQuestion {
+    type: "noul";
+    instructions?: System1Entry;
+    criteria?: { true?: System1Entry; false?: System1Entry } | null;
+  }
+
+  /** One-of-N question; `criteria` maps a label to its description. */
+  export interface ChoiceQuestion {
+    type: "choice";
+    instructions?: System1Entry;
+    criteria: Record<string, System1Entry>;
+  }
+
+  /**
+   * Ordered-rubric question; `criteria` holds the level descriptions, indexed
+   * from zero. At least two levels are required. The documented upper bound is
+   * 10 levels, but it is not enforced client-side — the server rejects it.
+   */
+  export interface ScoreQuestion {
+    type: "score";
+    instructions?: System1Entry;
+    criteria: System1Entry[];
+  }
+
+  export type System1Question = NoulQuestion | ChoiceQuestion | ScoreQuestion;
+
+  /** `state` plus the questions answered in one parallel pass. */
+  export interface SystemOneRequest {
+    state: System1Entry;
+    questions: Record<string, System1Question>;
+    /** Overrides the client's model for this call. */
+    model?: string;
+    [key: string]: any;
+  }
+
+  export interface System1Usage {
+    /** Number of input tokens used. */
+    readonly input_tokens: number;
+    /** Number of output tokens used. Reported even on the free tier. */
+    readonly output_tokens: number;
+  }
+
+  export interface NoulResponse {
+    readonly type: "noul";
+    /** Probability of a yes answer, 0 to 1. No confidence field: the number is the belief. */
+    readonly noul: number;
+  }
+
+  export interface ChoiceResponse {
+    readonly type: "choice";
+    /** One of the labels declared in the question's `criteria`. */
+    readonly choice: string;
+    readonly confidence: number;
+    /** Probabilities keyed by label; sums to ~1. */
+    readonly probabilities: Record<string, number>;
+  }
+
+  export interface ScoreResponse {
+    readonly type: "score";
+    /** Expected score in `[0, levels-1]`; may fall between levels (e.g. 1.035). */
+    readonly score: number;
+    readonly confidence: number;
+    /** Rubric descriptions keyed by level index (`"0"`, `"1"`, …). */
+    readonly legend: Record<string, System1Entry>;
+    /** Probabilities keyed by level index; sums to ~1. */
+    readonly probabilities: Record<string, number>;
+  }
+
+  export type System1Answer = NoulResponse | ChoiceResponse | ScoreResponse;
+
+  export interface SystemOneResult {
+    /** The versioned model id that answered. */
+    readonly model: string;
+    readonly answers: Record<string, System1Answer>;
+    readonly usage: System1Usage;
+  }
+
+  /**
+   * Per-call control options — never serialized into the request body. There is
+   * no streaming, so the stream-only knobs of `ChatOpts` do not apply.
+   */
+  export interface SystemOneOpts {
+    /** AbortSignal cancelling the in-flight request. */
+    signal?: AbortSignal;
+    /** Per-request HTTP timeout in seconds. */
+    timeout?: number;
+  }
+
+  interface System1ClientOptions {
+    /** API root. `{baseUrl}/v1/systemone` is the request URL. Required. */
+    baseUrl: string;
+    /**
+     * Model id to answer with, e.g. `jev-1.13`. Required — pin it, since a
+     * versionless alias can move and change every answer.
+     */
+    model: string;
+    /** Sent as `Authorization: Bearer <apiKey>`. Omit for a keyless gateway. */
+    apiKey?: string;
+    /** HTTP timeout in seconds. Default: 60. */
+    timeout?: number;
+    /** Custom HTTP headers sent with every request. */
+    headers?: Record<string, string>;
+  }
+
+  /**
+   * Client for System One Models (Jev).
+   *
+   * Answers typed questions about a `state` with probabilities instead of
+   * generating text. Reads no environment variables: `baseUrl` and `model`
+   * must be given explicitly.
+   */
+  export class System1Client {
+    constructor(options: System1ClientOptions);
+
+    readonly model: string;
+    readonly baseUrl: string;
+    readonly timeout: number;
+    readonly headers: Record<string, string>;
+
+    /** Insert or update a single HTTP header. `null` removes it, `undefined` is a no-op. */
+    setHeader(name: string, value: string | null | undefined): void;
+    /** Read a single header value, or `undefined` if not set. */
+    getHeader(name: string): string | undefined;
+
+    /** Answer every question about `state` in one pass. */
+    systemOne(req: SystemOneRequest, opts?: SystemOneOpts): Promise<SystemOneResult>;
+
+    dispose(): void;
+  }
+
+  /** Build a one-of-N question. `criteria` maps a label to its description. */
+  export function choice(
+    instructions: System1Entry,
+    criteria: Record<string, System1Entry>,
+  ): ChoiceQuestion;
+  /** Build an ordered-rubric question; `criteria` needs at least two levels. */
+  export function score(
+    instructions: System1Entry,
+    criteria: System1Entry[],
+  ): ScoreQuestion;
+  /** Build a yes/no question answered with a probability. */
+  export function noul(
+    instructions?: System1Entry,
+    criteria?: { true?: System1Entry; false?: System1Entry } | null,
+  ): NoulQuestion;
+
+  // ---------------------------------------------------------------------------
   // LlmClient — remote LLM client (always available)
   // ---------------------------------------------------------------------------
 

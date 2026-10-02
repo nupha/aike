@@ -187,7 +187,11 @@ pub(super) struct CallOpts {
 
 /// Read an optional positive-integer seconds control option.
 /// TypeError for non-numbers, RangeError for non-positive or fractional values.
-fn opt_secs_prop(ctx: &mut ScopedContext, obj: &Object, key: &str) -> Result<Option<u64>, i32> {
+pub(super) fn opt_secs_prop(
+    ctx: &mut ScopedContext,
+    obj: &Object,
+    key: &str,
+) -> Result<Option<u64>, i32> {
     let v = obj.get_property_str(ctx, key)?;
     if v.is_undefined() {
         return Ok(None);
@@ -207,30 +211,58 @@ fn opt_secs_prop(ctx: &mut ScopedContext, obj: &Object, key: &str) -> Result<Opt
     }))
 }
 
-/// Parse the optional control-opts second argument. `undefined` → all defaults;
-/// anything but an object (including `null`) → TypeError.
-pub(super) fn parse_call_opts(ctx: &mut ScopedContext, cc: &CallContext) -> Result<CallOpts, i32> {
+/// Resolve the control-opts second argument to an object; `None` when omitted.
+/// `undefined` → defaults; anything but an object (including `null`) → TypeError.
+fn opts_obj(ctx: &mut ScopedContext, cc: &CallContext) -> Result<Option<Object>, i32> {
     let v = cc.arg(1);
     if v.is_undefined() {
+        return Ok(None);
+    }
+    Ok(Some(v.as_object().ok_or_else(|| {
+        ctx.throw_type_error("opts must be an object")
+    })?))
+}
+
+/// Parse the control-only options every client call shares: cancellation and
+/// per-request timeout. Streaming knobs (`stallTimeout`, `coalesce`) are added
+/// on top by `parse_call_opts`.
+pub(super) fn parse_basic_call_opts(
+    ctx: &mut ScopedContext,
+    cc: &CallContext,
+) -> Result<CallOpts, i32> {
+    let Some(obj) = opts_obj(ctx, cc)? else {
         return Ok(CallOpts {
             signal: JSValue::UNDEFINED,
             timeout: None,
             stallTimeout: None,
             coalesce_ms: 0,
         });
-    }
-    let obj = v
-        .as_object()
-        .ok_or_else(|| ctx.throw_type_error("opts must be an object"))?;
+    };
 
     let signal = obj.get_property_str(ctx, "signal")?;
     if !signal.is_undefined_or_null() && JSAbortSignal::payload_of(&signal).is_none() {
         return Err(ctx.throw_type_error("`signal` must be an AbortSignal"));
     }
 
+    Ok(CallOpts {
+        signal,
+        timeout: opt_secs_prop(ctx, &obj, "timeout")?,
+        stallTimeout: None,
+        coalesce_ms: 0,
+    })
+}
+
+/// Parse the optional control-opts second argument. `undefined` → all defaults;
+/// anything but an object (including `null`) → TypeError.
+pub(super) fn parse_call_opts(ctx: &mut ScopedContext, cc: &CallContext) -> Result<CallOpts, i32> {
+    let mut opts = parse_basic_call_opts(ctx, cc)?;
+    let Some(obj) = opts_obj(ctx, cc)? else {
+        return Ok(opts);
+    };
+
     // Coalesce window in ms: any integer; <= 0 disables coalescing.
     let coalesce_val = obj.get_property_str(ctx, "coalesce")?;
-    let coalesce_ms = if coalesce_val.is_undefined() {
+    opts.coalesce_ms = if coalesce_val.is_undefined() {
         0
     } else if !coalesce_val.is_number() {
         return Err(ctx.throw_type_error("`coalesce` must be a number"));
@@ -247,12 +279,54 @@ pub(super) fn parse_call_opts(ctx: &mut ScopedContext, cc: &CallContext) -> Resu
         }
     };
 
-    Ok(CallOpts {
-        signal,
-        timeout: opt_secs_prop(ctx, &obj, "timeout")?,
-        stallTimeout: opt_secs_prop(ctx, &obj, "stallTimeout")?,
-        coalesce_ms,
-    })
+    opts.stallTimeout = opt_secs_prop(ctx, &obj, "stallTimeout")?;
+    Ok(opts)
+}
+
+/// Read an optional string constructor option. `undefined` → keep the current
+/// value; any non-string (including `null`) → TypeError.
+pub(super) fn opt_str_prop(
+    ctx: &mut ScopedContext,
+    obj: &Object,
+    key: &str,
+) -> Result<Option<String>, i32> {
+    let v = obj.get_property_str(ctx, key)?;
+    if v.is_undefined() {
+        return Ok(None);
+    }
+    match v.as_string(true) {
+        Some(s) => Ok(Some(s.content().encode_utf8(false).to_string())),
+        None => Err(ctx.throw_type_error(&format!("`{key}` must be a string"))),
+    }
+}
+
+/// Read an optional `{headers}` constructor option into a string map. Non-string
+/// keys/values are skipped (a header value must be a string to be sendable).
+pub(super) fn parse_headers_prop(
+    ctx: &mut ScopedContext,
+    obj: &Object,
+) -> Result<std::collections::HashMap<String, String>, i32> {
+    let mut headers = std::collections::HashMap::new();
+    let headers_val = obj.get_property_str(ctx, "headers")?;
+    if let Some(mut o) = headers_val.as_object() {
+        for (pk, val) in o.get_own_property_kvs(
+            ctx,
+            zuqe::JS_GPN_STR_OR_INT_MASK,
+            zuqe::JSIteratorKindEnum::JS_ITERATOR_KIND_KEY_AND_VALUE,
+        )? {
+            if let Some(key) = pk.as_string(true)
+                && let Some(val_str) = val.as_string(true)
+            {
+                headers.insert(
+                    key.content().encode_utf8(false).to_string(),
+                    val_str.content().encode_utf8(false).to_string(),
+                );
+            }
+        }
+    } else if !headers_val.is_undefined_or_null() {
+        return Err(ctx.throw_type_error("headers must be an object"));
+    }
+    Ok(headers)
 }
 
 /// Constructor: new LlmClient({apiKey, baseUrl, model?, timeout?})
@@ -353,25 +427,7 @@ fn js_client_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         debug_assert!(extra_body.is_null() || extra_body.is_object());
 
         // headers
-        let headers_val = opts_obj.get_property_str(ctx, "headers")?;
-        if let Some(mut obj) = headers_val.as_object() {
-            for (pk, val) in obj.get_own_property_kvs(
-                ctx,
-                zuqe::JS_GPN_STR_OR_INT_MASK,
-                zuqe::JSIteratorKindEnum::JS_ITERATOR_KIND_KEY_AND_VALUE,
-            )? {
-                if let Some(key) = pk.as_string(true)
-                    && let Some(val_str) = val.as_string(true)
-                {
-                    headers.insert(
-                        key.content().encode_utf8(false).to_string(),
-                        val_str.content().encode_utf8(false).to_string(),
-                    );
-                }
-            }
-        } else if !headers_val.is_undefined_or_null() {
-            return Err(ctx.throw_type_error("headers must be an object"));
-        }
+        headers = parse_headers_prop(ctx, &opts_obj)?;
     }
 
     let payload = ClientPayload {

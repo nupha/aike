@@ -43,7 +43,7 @@ use zuqe::{
 };
 
 use crate::{
-    ai::{JSLlmClient, init_mod_ai},
+    ai::{JSLlmClient, JSSystem1Client, init_mod_ai},
     aike::{AikeRuntimeState, JSCronJob, JSFileHandle, JSStdioHandle},
     // [temporarily disabled] browser is provided by the external aike-browser
     // zapi extension during testing.
@@ -346,6 +346,7 @@ async fn main() -> ExitCode {
                 crate::http::client::cache_storage::JSCacheStorage::class_id(),
                 crate::http::client::cache_storage::JSCache::class_id(),
                 JSLlmClient::class_id(),
+                JSSystem1Client::class_id(),
             ])?;
 
             // initialize native modules

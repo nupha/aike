@@ -451,7 +451,7 @@ fn cap_classes(cap: &str) -> Vec<ClassID> {
         // [temporarily disabled] "browser" is now loaded as an external zapi
         // extension (aike-browser) instead of being statically built in.
         // "browser" => vec![browser::JSPage::class_id()],
-        "ai" => vec![ai::JSLlmClient::class_id()],
+        "ai" => vec![ai::JSLlmClient::class_id(), ai::JSSystem1Client::class_id()],
         _ => Vec::new(),
     }
 }
