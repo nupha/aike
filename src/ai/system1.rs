@@ -11,7 +11,7 @@
 //! Unlike chat completions there is no text generation and no streaming: a
 //! call answers every question in one pass and returns a Promise.
 
-use std::{collections::HashMap, time::Duration};
+use std::time::Duration;
 
 use zuqe::{
     CallContext, ClassCtorDef, FieldDef, JSResult, JSValue, Object, ScopedContext,
@@ -25,8 +25,14 @@ use crate::whatwg::{
     dom::make_dom_exception,
 };
 
-use super::class_client::{
-    ABORT_MSG, opt_secs_prop, opt_str_prop, parse_basic_call_opts, parse_headers_prop,
+use super::{
+    class_client::{
+        ABORT_MSG, opt_secs_prop, opt_str_prop, parse_basic_call_opts, parse_headers_prop,
+    },
+    common::{
+        ClientCommon, MAGIC_BASE_URL, MAGIC_HEADERS, MAGIC_MODEL, MAGIC_TIMEOUT,
+        js_client_get_header, js_client_set_header, js_common_getter,
+    },
 };
 
 /// The protocol defines exactly one inference endpoint.
@@ -34,22 +40,10 @@ const SYSTEMONE_PATH: &str = "/v1/systemone";
 /// The three question kinds a System One model answers.
 const QUESTION_TYPES: &[&str] = &["choice", "score", "noul"];
 
-/// Getter magic constants.
-const PROP_MODEL: i32 = 0;
-const PROP_BASE_URL: i32 = 1;
-const PROP_TIMEOUT: i32 = 2;
-const PROP_HEADERS: i32 = 3;
-
 #[derive(Debug)]
 pub(crate) struct System1Payload {
-    pub(crate) base_url: String,
-    pub(crate) api_key: String,
-    pub(crate) headers: HashMap<String, String>,
-    pub(crate) timeout: Duration,
-    /// Shared reqwest client: built once so the connection pool / keep-alive
-    /// survives between calls.
-    pub(crate) http: reqwest::Client,
-    pub(crate) model_name: String,
+    /// Connection config shared with `LlmClient` (see `common.rs`).
+    pub(crate) common: ClientCommon,
 }
 
 impl GcTrace for System1Payload {
@@ -58,14 +52,6 @@ impl GcTrace for System1Payload {
 
 fn get_client<'a>(ctx: &mut ScopedContext, val: &'a JSValue) -> Result<&'a System1Payload, i32> {
     JSSystem1Client::payload_of(val)
-        .ok_or_else(|| ctx.throw_type_error("not a System1Client instance"))
-}
-
-fn get_client_mut<'a>(
-    ctx: &mut ScopedContext,
-    val: &'a mut JSValue,
-) -> Result<&'a mut System1Payload, i32> {
-    JSSystem1Client::payload_mut_of(val)
         .ok_or_else(|| ctx.throw_type_error("not a System1Client instance"))
 }
 
@@ -108,12 +94,14 @@ fn js_client_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     }
 
     let payload = System1Payload {
-        base_url,
-        api_key,
-        timeout: Duration::from_secs(timeout),
-        headers,
-        http: reqwest::Client::new(),
-        model_name: model,
+        common: ClientCommon {
+            base_url,
+            api_key,
+            timeout: Duration::from_secs(timeout),
+            headers,
+            http: reqwest::Client::new(),
+            model_name: model,
+        },
     };
 
     JSSystem1Client::new_instance(ctx, new_target, payload).map(JSValue::from)
@@ -269,7 +257,7 @@ fn js_client_system_one(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     let model = match opt_str_prop(ctx, &req_obj, "model")? {
         Some(m) => m,
-        None => client.model_name.clone(),
+        None => client.common.model_name.clone(),
     };
 
     let mut questions_obj = req_obj
@@ -310,15 +298,15 @@ fn js_client_system_one(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         return Promise::from_reject_value(ctx, reason).map(JSValue::from);
     }
 
-    let http = client.http.clone();
-    let api_key = client.api_key.clone();
-    let headers = client.headers.clone();
-    let url = format!("{}{}", client.base_url, SYSTEMONE_PATH);
+    let http = client.common.http.clone();
+    let api_key = client.common.api_key.clone();
+    let headers = client.common.headers.clone();
+    let url = format!("{}{}", client.common.base_url, SYSTEMONE_PATH);
     // Per-request timeout (seconds) overrides the client-level default.
     let timeout = opts
         .timeout
         .map(Duration::from_secs)
-        .unwrap_or(client.timeout);
+        .unwrap_or(client.common.timeout);
 
     let mut req_builder = http
         .post(&url)
@@ -389,78 +377,6 @@ fn js_client_system_one(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     });
 
     Ok(promise.into())
-}
-
-fn js_client_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let this = cc.this();
-    let client = get_client(ctx, &this)?;
-
-    match cc.magic() {
-        PROP_MODEL => ctx
-            .create_string_from_utf8(client.model_name.as_bytes().to_vec())
-            .map(JSValue::make_string),
-        PROP_BASE_URL => ctx
-            .create_string_from_utf8(client.base_url.as_bytes().to_vec())
-            .map(JSValue::make_string),
-        PROP_TIMEOUT => Ok(JSValue::from(client.timeout.as_secs() as i32)),
-        PROP_HEADERS => {
-            let mut obj = ctx.create_base_object()?;
-            for (k, v) in &client.headers {
-                let val = ctx.create_string_from_utf8(v.as_bytes().to_vec())?;
-                obj.set_property_str(ctx, k, JSValue::make_string(val))?;
-            }
-            Ok(JSValue::from(obj))
-        }
-        _ => Ok(JSValue::UNDEFINED),
-    }
-}
-
-fn js_client_set_header(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let mut this = cc.this();
-    let name = opt_str_arg(ctx, cc.arg(0), "setHeader: header name")?;
-
-    let payload = get_client_mut(ctx, &mut this)?;
-
-    // Undefined → no-op (matches the bulk setter's no-op semantics).
-    let val = cc.arg(1);
-    if val.is_undefined() {
-        return Ok(JSValue::UNDEFINED);
-    }
-    // Null → delete the entry.
-    if val.is_null() {
-        payload.headers.remove(&name);
-        return Ok(JSValue::UNDEFINED);
-    }
-    // String → insert/update.
-    match val.as_string(true) {
-        Some(s) => {
-            payload
-                .headers
-                .insert(name, s.content().encode_utf8(false).to_string());
-            Ok(JSValue::UNDEFINED)
-        }
-        None => Err(ctx.throw_type_error("setHeader: value must be a string, null, or undefined")),
-    }
-}
-
-/// Read a required string argument of a header accessor.
-fn opt_str_arg(ctx: &mut ScopedContext, v: JSValue, label: &str) -> Result<String, i32> {
-    v.as_string(true)
-        .map(|s| s.content().encode_utf8(false).to_string())
-        .ok_or_else(|| ctx.throw_type_error(&format!("{label} must be a string")))
-}
-
-fn js_client_get_header(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let this = cc.this();
-    let name = opt_str_arg(ctx, cc.arg(0), "getHeader: header name")?;
-
-    let payload = get_client(ctx, &this)?;
-    match payload.headers.get(&name) {
-        Some(v) => ctx
-            .create_string_from_utf8(v.as_bytes().to_vec())
-            .map(JSValue::make_string),
-        None => Ok(JSValue::UNDEFINED),
-    }
 }
 
 fn js_client_dispose(_: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -537,10 +453,12 @@ const CLASS_SYSTEM1_PROTO: &[FieldDef] = &[
     FieldDef::FUNC("dispose", 0, js_client_dispose, 0),
     FieldDef::FUNC("setHeader", 2, js_client_set_header, 0),
     FieldDef::FUNC("getHeader", 1, js_client_get_header, 0),
-    FieldDef::GETSET("model", Some(js_client_getter), None, PROP_MODEL as _),
-    FieldDef::GETSET("baseUrl", Some(js_client_getter), None, PROP_BASE_URL as _),
-    FieldDef::GETSET("timeout", Some(js_client_getter), None, PROP_TIMEOUT as _),
-    FieldDef::GETSET("headers", Some(js_client_getter), None, PROP_HEADERS as _),
+    // Every property this class exposes is shared with `LlmClient`: same magics,
+    // same getter.
+    FieldDef::GETSET("model", Some(js_common_getter), None, MAGIC_MODEL as _),
+    FieldDef::GETSET("baseUrl", Some(js_common_getter), None, MAGIC_BASE_URL as _),
+    FieldDef::GETSET("timeout", Some(js_common_getter), None, MAGIC_TIMEOUT as _),
+    FieldDef::GETSET("headers", Some(js_common_getter), None, MAGIC_HEADERS as _),
 ];
 
 def_native_object!(

@@ -3,6 +3,7 @@
 
 mod class_client;
 mod class_client_response;
+mod common;
 mod system1;
 
 pub(crate) use class_client::JSLlmClient;

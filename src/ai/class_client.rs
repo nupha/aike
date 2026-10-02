@@ -131,23 +131,22 @@ impl<D: Send + 'static> AsyncIteratorFetcher for LlmStreamFetcher<D> {
 
 use super::{
     MAGIC_CHAT_ONCE, MAGIC_CHAT_STREAM, MAGIC_RESPONSES_ONCE, MAGIC_RESPONSES_STREAM,
-    OUTMSG_FIELD_CHOICES, OUTMSG_FIELD_REASONING, class_client_response::js_client_responses,
+    OUTMSG_FIELD_CHOICES, OUTMSG_FIELD_REASONING,
+    class_client_response::js_client_responses,
+    common::{
+        ClientCommon, MAGIC_BASE_URL, MAGIC_EXTRA_BASE, MAGIC_HEADERS, MAGIC_MODEL, MAGIC_TIMEOUT,
+        js_client_get_header, js_client_set_header, js_common_getter,
+    },
 };
 
 #[derive(Debug)]
 pub(crate) struct ClientPayload {
-    pub(crate) base_url: String,
-    pub(crate) api_key: String,
-    pub(crate) headers: std::collections::HashMap<String, String>,
-    pub(crate) timeout: Duration,
-    /// Shared reqwest client: built once, reused across requests so the
-    /// connection pool / keep-alive survives between calls.
-    pub(crate) http: reqwest::Client,
+    /// Connection config shared with `System1Client` (see `common.rs`).
+    pub(crate) common: ClientCommon,
 
     //
     // model params
     //
-    pub(crate) model_name: String,
     pub(crate) max_tokens: usize,
     pub(crate) extra_body: serde_json::Value,
 }
@@ -163,15 +162,7 @@ pub(super) fn get_client<'a>(
     JSLlmClient::payload_of(val).ok_or_else(|| ctx.throw_type_error("not an LlmClient instance"))
 }
 
-pub(super) fn get_client_mut<'a>(
-    ctx: &mut ScopedContext,
-    val: &'a mut JSValue,
-) -> Result<&'a mut ClientPayload, i32> {
-    JSLlmClient::payload_mut_of(val)
-        .ok_or_else(|| ctx.throw_type_error("not an LlmClient instance"))
-}
-
-/// Per-call control options — the second argument of
+/// Per-call control options 鈥?the second argument of
 /// `chat`/`chatOnce`/`responses`/`responsesOnce`. Never serialized into the
 /// request body; only steers cancellation and timeouts.
 pub(super) struct CallOpts {
@@ -212,7 +203,7 @@ pub(super) fn opt_secs_prop(
 }
 
 /// Resolve the control-opts second argument to an object; `None` when omitted.
-/// `undefined` → defaults; anything but an object (including `null`) → TypeError.
+/// `undefined` 鈫?defaults; anything but an object (including `null`) 鈫?TypeError.
 fn opts_obj(ctx: &mut ScopedContext, cc: &CallContext) -> Result<Option<Object>, i32> {
     let v = cc.arg(1);
     if v.is_undefined() {
@@ -252,8 +243,8 @@ pub(super) fn parse_basic_call_opts(
     })
 }
 
-/// Parse the optional control-opts second argument. `undefined` → all defaults;
-/// anything but an object (including `null`) → TypeError.
+/// Parse the optional control-opts second argument. `undefined` 鈫?all defaults;
+/// anything but an object (including `null`) 鈫?TypeError.
 pub(super) fn parse_call_opts(ctx: &mut ScopedContext, cc: &CallContext) -> Result<CallOpts, i32> {
     let mut opts = parse_basic_call_opts(ctx, cc)?;
     let Some(obj) = opts_obj(ctx, cc)? else {
@@ -283,8 +274,8 @@ pub(super) fn parse_call_opts(ctx: &mut ScopedContext, cc: &CallContext) -> Resu
     Ok(opts)
 }
 
-/// Read an optional string constructor option. `undefined` → keep the current
-/// value; any non-string (including `null`) → TypeError.
+/// Read an optional string constructor option. `undefined` 鈫?keep the current
+/// value; any non-string (including `null`) 鈫?TypeError.
 pub(super) fn opt_str_prop(
     ctx: &mut ScopedContext,
     obj: &Object,
@@ -431,14 +422,16 @@ fn js_client_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     }
 
     let payload = ClientPayload {
-        model_name: model,
-        base_url,
-        api_key,
-        timeout: Duration::from_secs(timeout as u64),
+        common: ClientCommon {
+            model_name: model,
+            base_url,
+            api_key,
+            timeout: Duration::from_secs(timeout as u64),
+            headers,
+            http: reqwest::Client::new(),
+        },
         max_tokens: max_tokens as usize,
         extra_body,
-        headers,
-        http: reqwest::Client::new(),
     };
 
     JSLlmClient::new_instance(ctx, new_target, payload).and_then(|mut o| {
@@ -460,7 +453,7 @@ fn js_client_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 fn normalize_message_shape(obj: &mut serde_json::Value) {
     if let Some(choices) = obj[OUTMSG_FIELD_CHOICES].as_array_mut() {
         for choice in choices.iter_mut() {
-            // The target is either ‘delta’ (streaming) or ‘message’ (non-streaming).
+            // The target is either 鈥榙elta鈥?(streaming) or 鈥榤essage鈥?(non-streaming).
             let target = match choice.as_object_mut() {
                 Some(m) => {
                     if let Some(v) = m.get_mut("delta") {
@@ -475,7 +468,7 @@ fn normalize_message_shape(obj: &mut serde_json::Value) {
             };
 
             if let Some(target) = target {
-                // 1. fix reasoning → reasoning_content
+                // 1. fix reasoning 鈫?reasoning_content
                 if let Some(val) = target.remove("reasoning")
                     && !target.contains_key(OUTMSG_FIELD_REASONING)
                 {
@@ -648,25 +641,25 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
         .as_object()
         .ok_or_else(|| ctx.throw_type_error("chat() requires a request object"))?;
 
-    // arg(1): control-only opts (signal/timeout/stallTimeout) — never submitted.
+    // arg(1): control-only opts (signal/timeout/stallTimeout) 鈥?never submitted.
     let opts = parse_call_opts(ctx, &cc)?;
     let abort_notify = signal_notify(&opts.signal);
     let already_aborted = signal_is_aborted(&opts.signal);
 
     // Convert JS options to raw JSON, preserving all fields (including extension
     // fields like reasoning_content) that async-openai typed structs would drop.
-    // LlmClient is a remote API proxy — it should forward everything, not filter.
+    // LlmClient is a remote API proxy 鈥?it should forward everything, not filter.
     let mut req_json = req_obj.to_serde_json(ctx)?;
 
     // Per-request timeout (seconds), defaults to client-level timeout.
-    // NOT sent to the API — controls HTTP timeout only.
+    // NOT sent to the API 鈥?controls HTTP timeout only.
     let req_timeout_secs = opts.timeout;
 
     // Per-request stream-stall timeout (seconds): abort when no stream data has
     // arrived for this long (the stream "stalled"). Also NOT sent to the API.
     let stall_timeout_secs = opts.stallTimeout;
 
-    // camelCase → snake_case for OpenAI API compatibility
+    // camelCase 鈫?snake_case for OpenAI API compatibility
     json_keys_camel_to_snake(&mut req_json);
 
     if let Some(req) = req_json.as_object_mut() {
@@ -674,7 +667,7 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
         if req.get("model").is_none_or(|v| !v.is_string()) {
             req.insert(
                 "model".into(),
-                serde_json::Value::String(client.model_name.to_string()),
+                serde_json::Value::String(client.common.model_name.to_string()),
             );
         }
 
@@ -712,20 +705,21 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
     }
 
     // Use reqwest to make HTTP request, build client
-    let http = client.http.clone();
+    let http = client.common.http.clone();
     let mut req_builder = http
-        .post(format!("{}/chat/completions", client.base_url))
+        .post(format!("{}/chat/completions", client.common.base_url))
         .body(serde_json::to_string(&req_json).unwrap_or_default())
         .header("Content-Type", "application/json")
-        .timeout(client.timeout); // client default timeout
+        .timeout(client.common.timeout); // client default timeout
 
     // Apply custom headers (overrides Authorization if same key)
-    for (key, value) in &client.headers {
+    for (key, value) in &client.common.headers {
         req_builder = req_builder.header(key.as_str(), value.as_str());
     }
 
-    if !client.api_key.is_empty() {
-        req_builder = req_builder.header("Authorization", format!("Bearer {}", client.api_key));
+    if !client.common.api_key.is_empty() {
+        req_builder =
+            req_builder.header("Authorization", format!("Bearer {}", client.common.api_key));
     }
 
     // Per-request timeout
@@ -754,8 +748,8 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
 
         tokio::spawn(async move {
             // `return()`/`break` on the JS iterator (`close()` on the fetcher)
-            // fires `task_cancel`, dropping `body` — and with it the in-flight
-            // response — so the upstream connection closes.
+            // fires `task_cancel`, dropping `body` 鈥?and with it the in-flight
+            // response 鈥?so the upstream connection closes.
             let body = async {
                 // Fail-fast: a pre-aborted signal never leaves the process.
                 if already_aborted {
@@ -766,7 +760,7 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
 
                 // Emit the buffered tool_call only when it is complete (id + name
                 // present). A stream may deliver a stray/truncated fragment that
-                // never carries an id or name — emitting it would forge a bogus
+                // never carries an id or name 鈥?emitting it would forge a bogus
                 // tool_call (`id: null`, `name: null`) into the history and poison
                 // the next request. An incomplete fragment is dropped (it is
                 // neither a valid call nor model prose) and logged for visibility;
@@ -804,7 +798,7 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
                 match req_builder.send().await {
                     Ok(response) => {
                         // Check HTTP status before reading SSE stream.
-                        // non-2xx bodies are plain JSON, not SSE — they would be
+                        // non-2xx bodies are plain JSON, not SSE 鈥?they would be
                         // silently swallowed by the "data: " prefix filter otherwise.
                         let status = response.status();
                         if !status.is_success() {
@@ -844,8 +838,7 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
                         let mut stash: Option<String> = None;
 
                         'sse: loop {
-                            // Fast path: no abort signal and no stall guard —
-                            // read the next line directly, skipping the per-line
+                            // Fast path: no abort signal and no stall guard 鈥?                            // read the next line directly, skipping the per-line
                             // select!/timeout scaffolding.
                             let next_result: std::io::Result<Option<String>> = if let Some(
                                 stashed,
@@ -934,8 +927,7 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
                             {
                                 flush_acc(&slot, &mut acc).await;
                                 // A chunk may carry content/reasoning alongside tool_calls.
-                                // Since we only buffer tool_calls here, emit that text now —
-                                // otherwise it is lost when finish_reason arrives in a later,
+                                // Since we only buffer tool_calls here, emit that text now 鈥?                                // otherwise it is lost when finish_reason arrives in a later,
                                 // content-less chunk.
                                 let has_finish = json[OUTMSG_FIELD_CHOICES][0]["finish_reason"]
                                     .as_str()
@@ -960,7 +952,7 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
                                 // Accumulate tool_call deltas
                                 for tc in tcs {
                                     let idx = tc["index"].as_i64().unwrap_or(0) as usize;
-                                    // Got a new index → flush previous buffered tool_call (matches openai-node logic)
+                                    // Got a new index 鈫?flush previous buffered tool_call (matches openai-node logic)
                                     if let Some(ref cur) = buf
                                         && cur.idx != idx
                                     {
@@ -996,11 +988,11 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
                                 continue;
                             }
 
-                            // Non-tool_call chunk → passthrough. Flush the tool
+                            // Non-tool_call chunk 鈫?passthrough. Flush the tool
                             // buffer ONLY on finish_reason: flushing on a plain
                             // content frame would emit a fragment whose id+name
                             // are present but whose arguments arrive in a LATER
-                            // fragment — that later fragment then has neither id
+                            // fragment 鈥?that later fragment then has neither id
                             // nor name and would be dropped as a stray, silently
                             // losing the arguments. finish/done/index-switch
                             // remain the only points where the call is final.
@@ -1037,7 +1029,7 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
                                         Ok(Ok(Some(next))) => {
                                             let next = next.trim();
                                             // SSE frames are separated by blank
-                                            // lines — skip them, keep coalescing.
+                                            // lines 鈥?skip them, keep coalescing.
                                             if next.is_empty() {
                                                 continue;
                                             }
@@ -1058,7 +1050,7 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
                                             // tool_calls and its text fields are actual
                                             // strings. Gateways (opencode zen) emit tool
                                             // frames as `{content: null, reasoning_content:
-                                            // null, tool_calls: [...]}` — `get()` returns
+                                            // null, tool_calls: [...]}` 鈥?`get()` returns
                                             // Some(null), so a bare is_some() check would
                                             // misclassify them as pure text and silently
                                             // swallow the tool_call into CoalescedChunk.
@@ -1248,29 +1240,23 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
     }
 }
 
-/// Getter magic constants
-const PROP_MODEL: i32 = 0;
-const PROP_RESPONSE_NORMALIZER: i32 = 1;
-const PROP_BASE_URL: i32 = 2;
-const PROP_EXTRA_BODY: i32 = 4;
-const PROP_TIMEOUT: i32 = 5;
-const PROP_MAX_TOKENS: i32 = 6;
-const PROP_HEADERS: i32 = 7;
+/// Getter magic constants for this class's own properties. The shared
+/// `model`/`baseUrl`/`timeout`/`headers` magics live in `common.rs`; extras
+/// start at `MAGIC_EXTRA_BASE` so the two sets never collide.
+const PROP_MAX_TOKENS: i32 = MAGIC_EXTRA_BASE;
+const PROP_EXTRA_BODY: i32 = MAGIC_EXTRA_BASE + 1;
+const PROP_RESPONSE_NORMALIZER: i32 = MAGIC_EXTRA_BASE + 2;
 
 /// Internal property key for responseNormalizer, hidden from JS enumeration
 const INNER_PROP_RESPONSE_NORMALIZER: &str = "_responseNormalizer";
 
+/// Getter for the properties only `LlmClient` has. Shared properties are
+/// served by `common::js_common_getter`.
 fn js_client_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let client = get_client(ctx, &this)?;
 
     match cc.magic() {
-        PROP_MODEL => ctx
-            .create_string_from_utf8(client.model_name.as_bytes().to_vec())
-            .map(JSValue::make_string),
-        PROP_BASE_URL => ctx
-            .create_string_from_utf8(client.base_url.as_bytes().to_vec())
-            .map(JSValue::make_string),
         PROP_MAX_TOKENS => Ok(JSValue::from(client.max_tokens as i32)),
         PROP_EXTRA_BODY => {
             if client.extra_body.is_null() {
@@ -1278,15 +1264,6 @@ fn js_client_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             } else {
                 JSValue::from_serde_json(ctx, &client.extra_body)
             }
-        }
-        PROP_TIMEOUT => Ok(JSValue::from(client.timeout.as_secs() as i32)),
-        PROP_HEADERS => {
-            let mut obj = ctx.create_base_object()?;
-            for (k, v) in &client.headers {
-                let val = ctx.create_string_from_utf8(v.as_bytes().to_vec())?;
-                obj.set_property_str(ctx, k, JSValue::make_string(val))?;
-            }
-            Ok(JSValue::from(obj))
         }
         _ => Ok(JSValue::UNDEFINED),
     }
@@ -1312,62 +1289,6 @@ fn js_client_set_normalizer(ctx: &mut ScopedContext, cc: CallContext) -> JSResul
         obj.set_property_str(ctx, INNER_PROP_RESPONSE_NORMALIZER, val)?;
     }
     Ok(JSValue::UNDEFINED)
-}
-
-fn js_client_set_header(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let mut this = cc.this();
-    let name_val = cc.arg(0);
-    let val = cc.arg(1);
-
-    let name = match name_val.as_string(true) {
-        Some(s) => s.content().encode_utf8(false).to_string(),
-        None => {
-            return Err(ctx.throw_type_error("setHeader: header name must be a string"));
-        }
-    };
-
-    let payload = get_client_mut(ctx, &mut this)?;
-
-    // Undefined → no-op (matches the bulk setter's no-op semantics).
-    if val.is_undefined() {
-        return Ok(JSValue::UNDEFINED);
-    }
-    // Null → delete the entry.
-    if val.is_null() {
-        payload.headers.remove(&name);
-        return Ok(JSValue::UNDEFINED);
-    }
-    // String → insert/update.
-    let s = match val.as_string(true) {
-        Some(s) => s.content().encode_utf8(false).to_string(),
-        None => {
-            return Err(
-                ctx.throw_type_error("setHeader: value must be a string, null, or undefined")
-            );
-        }
-    };
-    payload.headers.insert(name, s);
-    Ok(JSValue::UNDEFINED)
-}
-
-fn js_client_get_header(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let this = cc.this();
-    let name_val = cc.arg(0);
-
-    let name = match name_val.as_string(true) {
-        Some(s) => s.content().encode_utf8(false).to_string(),
-        None => {
-            return Err(ctx.throw_type_error("getHeader: header name must be a string"));
-        }
-    };
-
-    let payload = get_client(ctx, &this)?;
-    match payload.headers.get(&name) {
-        Some(v) => ctx
-            .create_string_from_utf8(v.as_bytes().to_vec())
-            .map(JSValue::make_string),
-        None => Ok(JSValue::UNDEFINED),
-    }
 }
 
 fn js_client_dispose(_: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -1405,8 +1326,11 @@ const CLASS_CLIENT_PROTO: &[FieldDef] = &[
     FieldDef::FUNC("dispose", 0, js_client_dispose, 0),
     FieldDef::FUNC("setHeader", 2, js_client_set_header, 0),
     FieldDef::FUNC("getHeader", 1, js_client_get_header, 0),
-    FieldDef::GETSET("model", Some(js_client_getter), None, PROP_MODEL as _),
-    FieldDef::GETSET("baseUrl", Some(js_client_getter), None, PROP_BASE_URL as _),
+    // Shared properties: same magics and getter as `System1Client`.
+    FieldDef::GETSET("model", Some(js_common_getter), None, MAGIC_MODEL as _),
+    FieldDef::GETSET("baseUrl", Some(js_common_getter), None, MAGIC_BASE_URL as _),
+    FieldDef::GETSET("timeout", Some(js_common_getter), None, MAGIC_TIMEOUT as _),
+    FieldDef::GETSET("headers", Some(js_common_getter), None, MAGIC_HEADERS as _),
     FieldDef::GETSET(
         "maxTokens",
         Some(js_client_getter),
@@ -1419,8 +1343,6 @@ const CLASS_CLIENT_PROTO: &[FieldDef] = &[
         None,
         PROP_EXTRA_BODY as _,
     ),
-    FieldDef::GETSET("timeout", Some(js_client_getter), None, PROP_TIMEOUT as _),
-    FieldDef::GETSET("headers", Some(js_client_getter), None, PROP_HEADERS as _),
     FieldDef::GETSET(
         "responseNormalizer",
         Some(js_client_get_normalizer),

@@ -133,12 +133,12 @@ pub(super) fn js_client_responses(ctx: &mut ScopedContext, cc: CallContext) -> J
     let model = if let Some(s) = model_val.as_string(true) {
         s.content().encode_utf8(false).to_string()
     } else {
-        client.model_name.clone()
+        client.common.model_name.clone()
     };
 
     let mut req_builder = CreateResponseArgs::default();
     req_builder.input(input).model(&model);
-    // Streaming branch must ask the server for SSE — without `stream: true`
+    // Streaming branch must ask the server for SSE 鈥?without `stream: true`
     // the server returns a plain JSON body and the iterator sees no events.
     if is_stream {
         req_builder.stream(true);
@@ -213,16 +213,16 @@ pub(super) fn js_client_responses(ctx: &mut ScopedContext, cc: CallContext) -> J
         .build()
         .map_err(|e| ctx.throw_internal_error(&format!("failed to build request: {e}")))?;
 
-    let base_url = client.base_url.clone();
-    let api_key = client.api_key.clone();
+    let base_url = client.common.base_url.clone();
+    let api_key = client.common.api_key.clone();
     // Per-request timeout (seconds) overrides the client-level default.
     let timeout = opts
         .timeout
         .map(Duration::from_secs)
-        .unwrap_or(client.timeout);
+        .unwrap_or(client.common.timeout);
 
     let url = format!("{}/responses", base_url);
-    let http_client = client.http.clone();
+    let http_client = client.common.http.clone();
     let request_body = serde_json::to_string(&req).unwrap_or_default();
     let mut req_builder = http_client
         .post(&url)
@@ -246,7 +246,7 @@ pub(super) fn js_client_responses(ctx: &mut ScopedContext, cc: CallContext) -> J
 
         tokio::spawn(async move {
             // `return()`/`break` on the JS iterator fires `task_cancel`, dropping
-            // `body` — and with it the in-flight response — closing the upstream.
+            // `body` 鈥?and with it the in-flight response 鈥?closing the upstream.
             let body = async {
                 async fn commit_slot(
                     slot: &PromiseResultSlot<ResponsesReply>,
@@ -287,8 +287,7 @@ pub(super) fn js_client_responses(ctx: &mut ScopedContext, cc: CallContext) -> J
                         let mut stall_aborted = false;
 
                         loop {
-                            // Fast path: no abort signal and no stall guard —
-                            // read the next line directly.
+                            // Fast path: no abort signal and no stall guard 鈥?                            // read the next line directly.
                             let next_result: std::io::Result<Option<String>> = if abort_notify
                                 .is_none()
                                 && stall_limit.is_none()
