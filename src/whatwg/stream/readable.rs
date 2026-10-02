@@ -1581,9 +1581,8 @@ fn start_channel_stream_poller(ctx: &mut ScopedContext) {
                         {
                             s.idle_deadline = Instant::now();
                         }
-                        let ta = TypedArray::create_from_vec_u8(cx, data).map_err(|_| {
-                            cx.throw_internal_error("TypedArray creation failed")
-                        })?;
+                        let ta = TypedArray::create_from_vec_u8(cx, data)
+                            .map_err(|_| cx.throw_internal_error("TypedArray creation failed"))?;
                         let enqueue_fn = controller.get_property_str(cx, "enqueue")?;
                         enqueue_fn.call(cx, controller, &[JSValue::from(ta)])?;
                     }

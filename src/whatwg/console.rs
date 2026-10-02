@@ -175,7 +175,10 @@ fn js_console_time(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         "default".to_string()
     };
 
-    if AikeRuntimeState::of(ctx).console_timers.contains_key(&label) {
+    if AikeRuntimeState::of(ctx)
+        .console_timers
+        .contains_key(&label)
+    {
         let mut out = String::new();
         let indent = AikeRuntimeState::of(ctx).console_group_indent;
         for _ in 0..indent {

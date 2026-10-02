@@ -258,7 +258,11 @@ fn tee_cancel(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let tee_id = cc.data(0).to_number(ctx)?.to_u32();
     let branch = cc.data(1).to_number(ctx)?.to_u32();
     let reason = cc.arg(0);
-    let shared = AikeRuntimeState::of(ctx).tee_streams.streams.get(&tee_id).cloned();
+    let shared = AikeRuntimeState::of(ctx)
+        .tee_streams
+        .streams
+        .get(&tee_id)
+        .cloned();
     let Some(shared) = shared else {
         return Ok(JSValue::UNDEFINED);
     };
@@ -364,7 +368,11 @@ pub(crate) fn js_readable_stream_tee(ctx: &mut ScopedContext, cc: CallContext) -
 // both branches; a shared `done` stops pulling after the source finishes.
 fn tee_pull(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let tee_id = cc.data(0).to_number(ctx)?.to_u32();
-    let shared = AikeRuntimeState::of(ctx).tee_streams.streams.get(&tee_id).cloned();
+    let shared = AikeRuntimeState::of(ctx)
+        .tee_streams
+        .streams
+        .get(&tee_id)
+        .cloned();
     let Some(shared) = shared else {
         return Ok(JSValue::UNDEFINED);
     };
@@ -375,7 +383,11 @@ fn tee_pull(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 // pulling guard. Close both when the source is done.
 fn tee_pull_fulfilled(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let tee_id = cc.data(0).to_number(ctx)?.to_u32();
-    let shared = AikeRuntimeState::of(ctx).tee_streams.streams.get(&tee_id).cloned();
+    let shared = AikeRuntimeState::of(ctx)
+        .tee_streams
+        .streams
+        .get(&tee_id)
+        .cloned();
     let Some(shared) = shared else {
         return Ok(JSValue::UNDEFINED);
     };
@@ -394,7 +406,10 @@ fn tee_pull_fulfilled(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 cp.close(ctx)?;
             }
         }
-        AikeRuntimeState::of(ctx).tee_streams.streams.remove(&tee_id);
+        AikeRuntimeState::of(ctx)
+            .tee_streams
+            .streams
+            .remove(&tee_id);
         return Ok(JSValue::UNDEFINED);
     }
 
@@ -453,7 +468,12 @@ fn tee_pull_fulfilled(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 // was fanned out, when a branch still wants data).
 fn tee_pull_continue(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let tee_id = cc.data(0).to_number(ctx)?.to_u32();
-    if let Some(shared) = AikeRuntimeState::of(ctx).tee_streams.streams.get(&tee_id).cloned() {
+    if let Some(shared) = AikeRuntimeState::of(ctx)
+        .tee_streams
+        .streams
+        .get(&tee_id)
+        .cloned()
+    {
         tee_do_pull(ctx, tee_id, &shared)?;
     }
     Ok(JSValue::UNDEFINED)
@@ -481,7 +501,10 @@ fn tee_do_pull(ctx: &mut ScopedContext, tee_id: u32, shared: &TeeShared) -> JSRe
                     c.invoke_str(ctx, "error", &[reason])?;
                 }
             }
-            AikeRuntimeState::of(ctx).tee_streams.streams.remove(&tee_id);
+            AikeRuntimeState::of(ctx)
+                .tee_streams
+                .streams
+                .remove(&tee_id);
             return Ok(JSValue::UNDEFINED);
         }
     }
@@ -516,7 +539,11 @@ fn tee_do_pull(ctx: &mut ScopedContext, tee_id: u32, shared: &TeeShared) -> JSRe
 // Source read rejected: error both branches and clear the pulling guard.
 fn tee_pull_rejected(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let tee_id = cc.data(0).to_number(ctx)?.to_u32();
-    let shared = AikeRuntimeState::of(ctx).tee_streams.streams.get(&tee_id).cloned();
+    let shared = AikeRuntimeState::of(ctx)
+        .tee_streams
+        .streams
+        .get(&tee_id)
+        .cloned();
     let Some(shared) = shared else {
         return Ok(JSValue::UNDEFINED);
     };
@@ -528,7 +555,10 @@ fn tee_pull_rejected(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             c.invoke_str(ctx, "error", &[reason])?;
         }
     }
-    AikeRuntimeState::of(ctx).tee_streams.streams.remove(&tee_id);
+    AikeRuntimeState::of(ctx)
+        .tee_streams
+        .streams
+        .remove(&tee_id);
     Ok(JSValue::UNDEFINED)
 }
 
