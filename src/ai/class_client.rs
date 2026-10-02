@@ -726,8 +726,10 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
                                 .await;
                         } else {
                             log::warn!(
-                                "dropping incomplete tool_call fragment: index={}, arguments={:?}",
+                                "dropping incomplete tool_call fragment: index={}, id_present={}, name_present={}, arguments={:?}",
                                 state.idx,
+                                state.id.is_some(),
+                                state.name.is_some(),
                                 state.arguments
                             );
                         }
@@ -938,21 +940,38 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
                                 continue;
                             }
 
-                            // Non-tool_call (content, finish_reason, etc.) → flush
-                            // then passthrough.
-                            flush_buf(&slot, &mut buf).await;
+                            // Non-tool_call chunk → passthrough. Flush the tool
+                            // buffer ONLY on finish_reason: flushing on a plain
+                            // content frame would emit a fragment whose id+name
+                            // are present but whose arguments arrive in a LATER
+                            // fragment — that later fragment then has neither id
+                            // nor name and would be dropped as a stray, silently
+                            // losing the arguments. finish/done/index-switch
+                            // remain the only points where the call is final.
+                            if json[OUTMSG_FIELD_CHOICES][0]["finish_reason"]
+                                .as_str()
+                                .is_some()
+                            {
+                                flush_buf(&slot, &mut buf).await;
+                            }
 
                             // Coalesce pure-content deltas when enabled: accumulate
                             // and keep pulling lines within a short idle window
                             // before committing one merged chunk. Non-mergable
                             // lines are stashed for the next loop iteration.
                             let delta = &json[OUTMSG_FIELD_CHOICES][0]["delta"];
+
+                            // Same rule as the inner window: only actual STRING text
+                            // fields count (a null `content` key must not qualify).
+                            let is_text_field =
+                                |key: &str| delta.get(key).is_some_and(|v| v.is_string());
                             let is_pure_content = json[OUTMSG_FIELD_CHOICES][0]["finish_reason"]
                                 .as_str()
                                 .is_none()
-                                && (delta.get("content").is_some()
-                                    || delta.get("reasoning_content").is_some()
-                                    || delta.get("reasoning").is_some());
+                                && (is_text_field("content")
+                                    || is_text_field("reasoning_content")
+                                    || is_text_field("reasoning"));
+
                             if coalesce_ms > 0 && is_pure_content {
                                 let a = acc.get_or_insert_with(|| CoalescedChunk::new(&json));
                                 a.apply_delta(&json);
@@ -979,12 +998,31 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
                                                 break;
                                             };
                                             let nd = &j[OUTMSG_FIELD_CHOICES][0]["delta"];
-                                            let npure = j[OUTMSG_FIELD_CHOICES][0]["finish_reason"]
-                                                .as_str()
-                                                .is_none()
-                                                && (nd.get("content").is_some()
-                                                    || nd.get("reasoning_content").is_some()
-                                                    || nd.get("reasoning").is_some());
+                                            // A frame is mergeable ONLY when it carries no
+                                            // tool_calls and its text fields are actual
+                                            // strings. Gateways (opencode zen) emit tool
+                                            // frames as `{content: null, reasoning_content:
+                                            // null, tool_calls: [...]}` — `get()` returns
+                                            // Some(null), so a bare is_some() check would
+                                            // misclassify them as pure text and silently
+                                            // swallow the tool_call into CoalescedChunk.
+                                            let is_text_field = |key: &str| {
+                                                nd.get(key).is_some_and(|v| v.is_string())
+                                            };
+                                            let has_tool_calls =
+                                                nd.get("tool_calls").is_some_and(|t| {
+                                                    !t.is_null()
+                                                        && t.as_array()
+                                                            .map_or(true, |a| !a.is_empty())
+                                                });
+                                            let npure = !has_tool_calls
+                                                && j[OUTMSG_FIELD_CHOICES][0]["finish_reason"]
+                                                    .as_str()
+                                                    .is_none()
+                                                && (is_text_field("content")
+                                                    || is_text_field("reasoning_content")
+                                                    || is_text_field("reasoning"));
+
                                             if !npure {
                                                 stash = Some(next.to_string());
                                                 flush_acc(&slot, &mut acc).await;
