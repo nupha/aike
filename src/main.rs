@@ -45,7 +45,9 @@ use zuqe::{
 use crate::{
     ai::{JSLlmClient, init_mod_ai},
     aike::{AikeRuntimeState, JSCronJob, JSFileHandle, JSStdioHandle},
-    browser::{JSPage, init_mod_browser},
+    // [temporarily disabled] browser is provided by the external aike-browser
+    // zapi extension during testing.
+    // browser::{JSPage, init_mod_browser},
     class_event_emitter::JSEventEmitter,
     fs::init_mod_fs,
     global::setup_globals,
@@ -115,13 +117,6 @@ struct Args {
         conflicts_with = "filename"
     )]
     eval: Option<String>,
-
-    #[arg(
-        long,
-        value_name = "path",
-        help = "custom path for localStorage database file"
-    )]
-    local_storage_db: Option<String>,
 
     #[arg(help = "file to execute (omit for REPL mode)")]
     filename: Option<String>,
@@ -344,7 +339,9 @@ async fn main() -> ExitCode {
                 JSCronJob::class_id(),
                 HtmlDocument::class_id(),
                 HtmlElement::class_id(),
-                JSPage::class_id(),
+                // [temporarily disabled] JSPage is provided by the external
+                // aike-browser zapi extension during testing.
+                // JSPage::class_id(),
                 crate::http::client::headers::HeaderListIterator::class_id(),
                 crate::http::client::cache_storage::JSCacheStorage::class_id(),
                 crate::http::client::cache_storage::JSCache::class_id(),
@@ -357,7 +354,9 @@ async fn main() -> ExitCode {
             init_mod_path(cx)?;
             os::init_mod_os(cx)?;
             init_mod_html(cx)?;
-            init_mod_browser(cx)?;
+            // [temporarily disabled] "browser" is loaded as an external zapi
+            // extension (aike-browser) during testing.
+            // init_mod_browser(cx)?;
             init_mod_yaml(cx)?;
             jsonl::init_mod_jsonl(cx)?;
             json_schema::init_mod_json_schema(cx)?;
@@ -365,14 +364,7 @@ async fn main() -> ExitCode {
             init_mod_ai(cx)?;
             init_mod_mcp(cx)?;
 
-            setup_globals(
-                cx,
-                &argv,
-                &exec_argv,
-                &exe_path,
-                #[cfg(feature = "local_storage")]
-                args.local_storage_db.as_deref(),
-            )
+            setup_globals(cx, &argv, &exec_argv, &exe_path)
         })
         .inspect_err(|_| {
             let _ = rt.create_context(|cx| {

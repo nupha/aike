@@ -276,7 +276,6 @@ const ALL_CAPS: &[&str] = &[
     "dom",
     "base64",
     "structuredClone",
-    "localStorage",
     "process",
     "Aike",
     "fs",
@@ -295,7 +294,7 @@ const ALL_CAPS: &[&str] = &[
 
 /// Capabilities that may only be installed in the root runtime (they back onto
 /// process/thread-global state). Requesting one for a child is a TypeError.
-const ROOT_ONLY_CAPS: &[&str] = &["localStorage"];
+const ROOT_ONLY_CAPS: &[&str] = &[];
 
 struct RuntimeOpts {
     memory: Option<u64>,
@@ -405,7 +404,7 @@ fn stream_classes() -> Vec<ClassID> {
 /// is idempotent, so overlaps with installers that also init classes are safe.
 fn cap_classes(cap: &str) -> Vec<ClassID> {
     match cap {
-        "console" | "timers" | "microtask" | "base64" | "localStorage" => Vec::new(),
+        "console" | "timers" | "microtask" | "base64" => Vec::new(),
         "crypto" => vec![
             crypto::JSCrypto::class_id(),
             crypto::subtle::JSCryptoSubtle::class_id(),
@@ -449,7 +448,9 @@ fn cap_classes(cap: &str) -> Vec<ClassID> {
             html::HtmlDocument::class_id(),
             html::HtmlElement::class_id(),
         ],
-        "browser" => vec![browser::JSPage::class_id()],
+        // [temporarily disabled] "browser" is now loaded as an external zapi
+        // extension (aike-browser) instead of being statically built in.
+        // "browser" => vec![browser::JSPage::class_id()],
         "ai" => vec![ai::JSLlmClient::class_id()],
         _ => Vec::new(),
     }
@@ -480,17 +481,15 @@ fn install_cap(cx: &mut ScopedContext, cap: &str) -> Result<(), i32> {
         "os" => os::init_mod_os(cx)?,
         "http" => http::init_mod_http(cx)?,
         "html" => html::init_mod_html(cx)?,
-        "browser" => browser::init_mod_browser(cx)?,
+        // [temporarily disabled] "browser" is now loaded as an external zapi
+        // extension (aike-browser) instead of being statically built in.
+        // "browser" => browser::init_mod_browser(cx)?,
         "yaml" => crate::yaml::init_mod_yaml(cx)?,
         "jsonl" => jsonl::init_mod_jsonl(cx)?,
         "jsonSchema" => json_schema::init_mod_json_schema(cx)?,
         "jinja2" => jinja2::init_mod_jinja2(cx)?,
         "ai" => ai::init_mod_ai(cx)?,
         "mcp" => mcp::init_mod_mcp(cx)?,
-        #[cfg(feature = "local_storage")]
-        "localStorage" => {
-            crate::whatwg::local_storage::install_local_storage(cx, &mut global, None)?
-        }
         // Capabilities without an installer are pure class exposures
         // (`dom`, `blob`, `formData`, `textEncoder`, `textDecoder`); their
         // constructors were exposed by `use_classes`.

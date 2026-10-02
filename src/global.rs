@@ -14,7 +14,6 @@ pub fn setup_globals(
     argv: &[String],
     exec_argv: &[String],
     exec_path: &str,
-    #[cfg(feature = "local_storage")] local_storage_db: Option<&str>,
 ) -> Result<(), i32> {
     let global = ctx.global_obj();
 
@@ -23,12 +22,7 @@ pub fn setup_globals(
     save_process_info(argv, exec_argv, exec_path);
 
     // Install all WHATWG-standard global APIs (console, timers, etc.)
-    install_whatwg(
-        ctx,
-        global,
-        #[cfg(feature = "local_storage")]
-        local_storage_db,
-    )?;
+    install_whatwg(ctx, global)?;
 
     // process — Node.js-compatible namespace
     init_process(ctx, argv, exec_argv, exec_path)?;

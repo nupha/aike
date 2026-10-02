@@ -11,8 +11,6 @@ pub mod crypto;
 pub mod dom;
 pub mod fetch;
 pub mod form_data;
-#[cfg(feature = "local_storage")]
-pub mod local_storage;
 pub mod microtask;
 pub mod stream;
 pub mod structured_clone;
@@ -24,11 +22,7 @@ pub mod url;
 use zuqe::{NativeObject, Object, ScopedContext};
 
 /// Install all WHATWG-standard global APIs.
-pub(crate) fn install_whatwg(
-    ctx: &mut ScopedContext,
-    mut global: Object,
-    #[cfg(feature = "local_storage")] local_storage_db: Option<&str>,
-) -> Result<(), i32> {
+pub(crate) fn install_whatwg(ctx: &mut ScopedContext, mut global: Object) -> Result<(), i32> {
     ctx.use_classes(&[
         abort::JSAbortController::class_id(),
         abort::JSAbortSignal::class_id(),
@@ -67,9 +61,6 @@ pub(crate) fn install_whatwg(
     base64::install_encoding(ctx, global)?;
     structured_clone::install_structured_clone(ctx, global)?;
     crypto::install_crypto(ctx, global)?;
-
-    #[cfg(feature = "local_storage")]
-    local_storage::install_local_storage(ctx, &mut global, local_storage_db)?;
 
     Ok(())
 }

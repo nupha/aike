@@ -17,10 +17,9 @@ enable_eval_log = [] # 启用 DeepEval 评估日志采集
 # (`--no-default-features -F typescript`) for a lean server/general-purpose
 # build where every fetch behaves like a plain HTTP request.
 fetch_browser = []
-local_storage = ["redb"]
 mimalloc = ["dep:mimalloc"]
 
-default = ["typescript", "fetch_browser", "local_storage", "mimalloc"]
+default = ["typescript", "fetch_browser", "mimalloc"]
 
 [profile.release]
 panic = "abort"
