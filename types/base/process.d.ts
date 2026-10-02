@@ -406,11 +406,11 @@ declare namespace Aike {
      * NOTE: Ignored on macOS (no seccomp support).
      */
     seccompProfile?:
-    | "disabled"
-    | "strict"
-    | "standard"
-    | "permissive"
-    | string[];
+      | "disabled"
+      | "strict"
+      | "standard"
+      | "permissive"
+      | string[];
 
     /**
      * Run as this UID inside the sandbox.
@@ -673,8 +673,7 @@ declare namespace Aike {
      * - omitted — install none (pure ECMA, `eval` stripped): minimum privilege
      *
      * Capability names include `"console"`, `"crypto"`, `"fetch"`, `"fs"`,
-     * `"process"`, `"Aike"`, etc. `"localStorage"` is root-only and is
-     * rejected for a child runtime. Process/thread-global APIs (e.g.
+     * `"process"`, `"Aike"`, etc. Process/thread-global APIs (e.g.
      * `process.exit`, `Aike.onSignal`) are simply not installed in a child
      * runtime; `Aike.spawn({abortOnParentExit})` is rejected with a
      * `TypeError`.

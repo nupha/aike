@@ -27,12 +27,18 @@ async function testBasic() {
   const obj = await rt.run("({ a: 1, b: [1, 2, 3], s: 'hi' })");
   check(
     "run returns structured value",
-    obj && obj.a === 1 && Array.isArray(obj.b) && obj.b[2] === 3 && obj.s === "hi",
+    obj &&
+      obj.a === 1 &&
+      Array.isArray(obj.b) &&
+      obj.b[2] === 3 &&
+      obj.s === "hi",
     JSON.stringify(obj),
   );
 
   // run twice on the same handle
-  const a = await rt.run("let x = (globalThis.__x || 0) + 1; globalThis.__x = x; x");
+  const a = await rt.run(
+    "let x = (globalThis.__x || 0) + 1; globalThis.__x = x; x",
+  );
   const b = await rt.run("globalThis.__x");
   check("state persists across runs", a === 1 && b === 1, `${a},${b}`);
 
@@ -50,41 +56,85 @@ async function testBasic() {
 async function testIsolation() {
   console.log("\n=== isolation ===");
   const rt = Aike.createRuntime();
-  check("child has no Aike.createRuntime", (await rt.run("typeof Aike")) === "undefined");
-  check("child has no process", (await rt.run("typeof process")) === "undefined");
-  check("child has no console by default", (await rt.run("typeof console")) === "undefined");
-  check("child eval is stripped", (await rt.run("typeof eval")) === "undefined");
+  check(
+    "child has no Aike.createRuntime",
+    (await rt.run("typeof Aike")) === "undefined",
+  );
+  check(
+    "child has no process",
+    (await rt.run("typeof process")) === "undefined",
+  );
+  check(
+    "child has no console by default",
+    (await rt.run("typeof console")) === "undefined",
+  );
+  check(
+    "child eval is stripped",
+    (await rt.run("typeof eval")) === "undefined",
+  );
   check("child is pure ECMA", (await rt.run("typeof Object")) === "function");
   rt.close();
 
   const rt2 = Aike.createRuntime({ global: ["console"] });
-  check("whitelist installs console", (await rt2.run("typeof console")) === "object");
-  check("whitelist excludes process", (await rt2.run("typeof process")) === "undefined");
+  check(
+    "whitelist installs console",
+    (await rt2.run("typeof console")) === "object",
+  );
+  check(
+    "whitelist excludes process",
+    (await rt2.run("typeof process")) === "undefined",
+  );
   rt2.close();
 
   const rt3 = Aike.createRuntime({ global: { blackList: ["process"] } });
-  check("blacklist excludes process", (await rt3.run("typeof process")) === "undefined");
-  check("blacklist keeps console", (await rt3.run("typeof console")) === "object");
+  check(
+    "blacklist excludes process",
+    (await rt3.run("typeof process")) === "undefined",
+  );
+  check(
+    "blacklist keeps console",
+    (await rt3.run("typeof console")) === "object",
+  );
   rt3.close();
 
   // object form: { whiteList }
   const rt5 = Aike.createRuntime({ global: { whiteList: ["console"] } });
-  check("object whiteList installs console", (await rt5.run("typeof console")) === "object");
-  check("object whiteList excludes process", (await rt5.run("typeof process")) === "undefined");
+  check(
+    "object whiteList installs console",
+    (await rt5.run("typeof console")) === "object",
+  );
+  check(
+    "object whiteList excludes process",
+    (await rt5.run("typeof process")) === "undefined",
+  );
   rt5.close();
 
   // whiteList wins; blackList is ignored
-  const rt6 = Aike.createRuntime({ global: { whiteList: ["console"], blackList: ["console"] } });
-  check("whiteList wins over blackList", (await rt6.run("typeof console")) === "object");
+  const rt6 = Aike.createRuntime({
+    global: { whiteList: ["console"], blackList: ["console"] },
+  });
+  check(
+    "whiteList wins over blackList",
+    (await rt6.run("typeof console")) === "object",
+  );
   rt6.close();
 
   // empty array / empty object forms
   const rt7 = Aike.createRuntime({ global: [] });
-  check("empty array = pure ECMA", (await rt7.run("typeof console")) === "undefined");
+  check(
+    "empty array = pure ECMA",
+    (await rt7.run("typeof console")) === "undefined",
+  );
   rt7.close();
   const rt8 = Aike.createRuntime({ global: {} });
-  check("empty object = fail-open (all caps)", (await rt8.run("typeof console")) === "object");
-  check("empty object installs process", (await rt8.run("typeof process")) === "object");
+  check(
+    "empty object = fail-open (all caps)",
+    (await rt8.run("typeof console")) === "object",
+  );
+  check(
+    "empty object installs process",
+    (await rt8.run("typeof process")) === "object",
+  );
   rt8.close();
 
   // child never exposes host entry points, even when Aike is whitelisted
@@ -101,7 +151,10 @@ async function testIsolation() {
     "child Aike has no evalModule",
     (await rt4.run("typeof Aike.evalModule")) === "undefined",
   );
-  check("child Aike has now()", (await rt4.run("typeof Aike.now")) === "function");
+  check(
+    "child Aike has now()",
+    (await rt4.run("typeof Aike.now")) === "function",
+  );
   rt4.close();
 
   // invalid capability names / option types
@@ -142,14 +195,20 @@ async function testMessaging() {
   console.log("\n=== messaging ===");
   const rt = Aike.createRuntime();
 
-  await rt.run("onmessage = (m) => { postMessage({ echo: m.n, doubled: m.n * 2 }); }");
+  await rt.run(
+    "onmessage = (m) => { postMessage({ echo: m.n, doubled: m.n * 2 }); }",
+  );
   const got = [];
   rt.onmessage = (v) => got.push(v);
   rt.postMessage({ n: 21 });
 
   // Give the parent loop a few ticks to deliver both ways.
   await Aike.sleep(20);
-  check("child received and replied", got.length === 1 && got[0].doubled === 42, JSON.stringify(got));
+  check(
+    "child received and replied",
+    got.length === 1 && got[0].doubled === 42,
+    JSON.stringify(got),
+  );
 
   // function cannot cross
   let fnThrew = false;
@@ -165,7 +224,10 @@ async function testMessaging() {
 
 async function testErrorsAndTimeout() {
   console.log("\n=== errors / timeout ===");
-  const rt = Aike.createRuntime({ timeout: 200, global: ["console", "timers"] });
+  const rt = Aike.createRuntime({
+    timeout: 200,
+    global: ["console", "timers"],
+  });
 
   let err = null;
   try {
@@ -174,8 +236,16 @@ async function testErrorsAndTimeout() {
     err = e;
   }
   check("child throw rejects", err !== null);
-  check("error name surfaced", err && err.name === "TypeError", JSON.stringify(err));
-  check("error message surfaced", err && /boom/.test(err.message), err && err.message);
+  check(
+    "error name surfaced",
+    err && err.name === "TypeError",
+    JSON.stringify(err),
+  );
+  check(
+    "error message surfaced",
+    err && /boom/.test(err.message),
+    err && err.message,
+  );
 
   let to = null;
   try {
@@ -183,7 +253,11 @@ async function testErrorsAndTimeout() {
   } catch (e) {
     to = e;
   }
-  check("timeout aborts busy loop", to !== null && to.name === "TimeoutError", JSON.stringify(to));
+  check(
+    "timeout aborts busy loop",
+    to !== null && to.name === "TimeoutError",
+    JSON.stringify(to),
+  );
 
   // async wait (never-settling promise) also times out via the run deadline
   let to2 = null;
@@ -201,7 +275,11 @@ async function testErrorsAndTimeout() {
   // timeout is per-run: each run gets its own budget
   const t1 = await rt.run("new Promise((r) => setTimeout(() => r('a'), 30))");
   const t2 = await rt.run("new Promise((r) => setTimeout(() => r('b'), 30))");
-  check("timeout budget resets per run", t1 === "a" && t2 === "b", `${t1},${t2}`);
+  check(
+    "timeout budget resets per run",
+    t1 === "a" && t2 === "b",
+    `${t1},${t2}`,
+  );
 
   // runtime still usable after a timeout
   const ok = await rt.run("1 + 1");
@@ -223,14 +301,20 @@ async function testAsyncChild() {
   const v = await rt.run("Promise.resolve(123)");
   check("awaits completion promise", v === 123, `got ${v}`);
 
-  const t = await rt.run("new Promise((r) => setTimeout(() => r('later'), 30))");
+  const t = await rt.run(
+    "new Promise((r) => setTimeout(() => r('later'), 30))",
+  );
   check("child timer fires", t === "later", `got ${t}`);
 
   // Two runs issued without awaiting: both complete (independent jobs).
   const p1 = rt.run("new Promise((r) => setTimeout(() => r(1), 20))");
   const p2 = rt.run("2");
   const both = await Promise.all([p1, p2]);
-  check("concurrent runs both complete", both[0] === 1 && both[1] === 2, JSON.stringify(both));
+  check(
+    "concurrent runs both complete",
+    both[0] === 1 && both[1] === 2,
+    JSON.stringify(both),
+  );
 
   // Per-runtime timers: a timer scheduled by a run keeps running *between*
   // runs, so the child can post a message with no run in flight. The root also
@@ -239,7 +323,11 @@ async function testAsyncChild() {
   rt.onmessage = (x) => got.push(x);
   await rt.run("setTimeout(() => postMessage('bg'), 30); 'ok'");
   await Aike.sleep(80);
-  check("child timer fires between runs", got.length === 1 && got[0] === "bg", JSON.stringify(got));
+  check(
+    "child timer fires between runs",
+    got.length === 1 && got[0] === "bg",
+    JSON.stringify(got),
+  );
 
   rt.close();
 }
@@ -252,7 +340,9 @@ async function testMemoryLimit() {
   // `aike --memory-limit=1m -e "..."`). So this suite only verifies the option
   // is parsed/plumbed and normal runs are unaffected — NOT enforcement.
   const rt = Aike.createRuntime({ memory: 1 << 20 });
-  const v = await rt.run("const a = []; for (let i = 0; i < 100; i++) a.push(i); a.length");
+  const v = await rt.run(
+    "const a = []; for (let i = 0; i < 100; i++) a.push(i); a.length",
+  );
   check("run works with memory limit set", v === 100, `got ${v}`);
   rt.close();
 
@@ -296,9 +386,15 @@ async function testRootOnly() {
   // Child granted `Aike`: root-only entries are simply not installed.
   const rt2 = Aike.createRuntime({ global: ["Aike"] });
   for (const name of ["onSignal", "schedule", "ttyGetWinSize", "ttySetRaw"]) {
-    check(`child Aike.${name} absent`, (await rt2.run(`typeof Aike.${name}`)) === "undefined");
+    check(
+      `child Aike.${name} absent`,
+      (await rt2.run(`typeof Aike.${name}`)) === "undefined",
+    );
   }
-  check("child Aike has now()", (await rt2.run("typeof Aike.now")) === "function");
+  check(
+    "child Aike has now()",
+    (await rt2.run("typeof Aike.now")) === "function",
+  );
   // The abortOnParentExit option is option-level (spawn itself is allowed).
   let spawnErr = null;
   try {
@@ -316,26 +412,27 @@ async function testRootOnly() {
   // Child granted `process`: process-global mutators are simply not installed.
   const rt3 = Aike.createRuntime({ global: ["process"] });
   for (const name of ["exit", "chdir", "kill", "umask"]) {
-    check(`child process.${name} absent`, (await rt3.run(`typeof process.${name}`)) === "undefined");
-  }
-  check("child process.cwd still present", (await rt3.run("typeof process.cwd")) === "function");
-  // `title` is read-only in a child: assignment is ignored (no setter).
-  const title = await rt3.run("process.title = 'child-title'; process.title");
-  check("child process.title is read-only", title !== "child-title", JSON.stringify(title));
-  rt3.close();
-
-  // localStorage is a root-only capability: requesting it for a child fails.
-  let lsErr = null;
-  try {
-    Aike.createRuntime({ global: ["localStorage"] });
-  } catch (e) {
-    lsErr = e;
+    check(
+      `child process.${name} absent`,
+      (await rt3.run(`typeof process.${name}`)) === "undefined",
+    );
   }
   check(
-    "child localStorage cap rejected",
-    lsErr !== null && lsErr.name === "TypeError" && /root runtime/.test(lsErr.message),
-    JSON.stringify(lsErr),
+    "child process.cwd still present",
+    (await rt3.run("typeof process.cwd")) === "function",
   );
+  // `title` is read-only in a child: assignment is ignored (no setter).
+  const title = await rt3.run("process.title = 'child-title'; process.title");
+  check(
+    "child process.title is read-only",
+    title !== "child-title",
+    JSON.stringify(title),
+  );
+  rt3.close();
+
+  // `localStorage` was removed from the aike globals — there is no root-only
+  // capability left to probe here (the `process` block above is the remaining
+  // root-only surface).
 }
 
 async function main() {
