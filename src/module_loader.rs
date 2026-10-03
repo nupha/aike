@@ -52,7 +52,6 @@ pub(crate) fn js_module_normalizer(
     _: &mut ScopedContext,
     base_name: &url::Url,
     name: &str,
-    _: *mut std::ffi::c_void,
 ) -> Result<url::Url, i32> {
     if is_bare_specifier(name) {
         let importer_dir = zuqe::url_to_abspath(base_name)
@@ -75,7 +74,6 @@ pub(crate) fn js_module_loader(
     ctx: &mut ScopedContext,
     file_name: &url::Url,
     attrs: JSValue,
-    _: *mut std::ffi::c_void,
 ) -> Result<ModuleDef, i32> {
     // Convert URL back to absolute path for filesystem access.
     let Some(file_path) = zuqe::url_to_abspath(file_name) else {

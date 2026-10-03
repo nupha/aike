@@ -317,11 +317,8 @@ async fn main() -> ExitCode {
         rt.set_stack_budget(512 << 10);
     }
 
-    rt.set_module_loader(
-        Some(module_loader::js_module_normalizer),
-        module_loader::js_module_loader,
-        std::ptr::null_mut(),
-    );
+    rt.set_module_normalizer(module_loader::js_module_normalizer);
+    rt.set_module_loader(module_loader::js_module_loader);
 
     crate::aike::register_runtime_traces(&mut rt);
 
