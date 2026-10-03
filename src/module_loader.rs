@@ -198,7 +198,7 @@ fn is_bare_specifier(name: &str) -> bool {
 ///    weakest, since a planted CWD can forge it via the auto-loaded `.env`.
 fn module_search_dirs(importer_dir: Option<&Path>) -> Vec<PathBuf> {
     let mut dirs = Vec::with_capacity(4);
-    if let Some(dir) = default_modules_dir() {
+    if let Some(dir) = dist_modules_dir() {
         dirs.push(dir);
     }
     if let Some(dir) = importer_dir {
@@ -217,7 +217,7 @@ fn module_search_dirs(importer_dir: Option<&Path>) -> Vec<PathBuf> {
 
 /// Distribution-layout modules directory: `<prefix>/lib/aike/modules`.
 /// where <prefix> is ../../ of the aike executable path.
-fn default_modules_dir() -> Option<PathBuf> {
+fn dist_modules_dir() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?.canonicalize().ok()?;
     let prefix = exe.parent()?.parent()?;
     Some(prefix.join("lib").join("aike").join("modules"))
@@ -493,7 +493,7 @@ mod search_tests {
     fn default_modules_dir_follows_dist_layout() {
         // The test binary lives at `<target>/debug/deps/<bin>`, so a grandparent
         // always exists here (unlike a root-level install).
-        let dir = default_modules_dir().expect("prefix derivable from test exe path");
+        let dir = dist_modules_dir().expect("prefix derivable from test exe path");
         let tail: Vec<&str> = dir
             .components()
             .rev()
@@ -505,7 +505,7 @@ mod search_tests {
 
     #[test]
     fn search_path_is_prefix_importer_cwd_then_lib_env() {
-        let prefix = default_modules_dir().expect("prefix derivable from test exe path");
+        let prefix = dist_modules_dir().expect("prefix derivable from test exe path");
         let importer = Path::new("/some/importer/dir");
         let dirs = module_search_dirs(Some(importer));
 
