@@ -8,8 +8,8 @@
 //   B. onData pause/resume (unsubscribe preserves unread stream data)
 //   C. child.shutdown() stages (eof, term, kill, idempotent, validation)
 //   D. conflict handling (first-registration-wins, same-mode replace)
+//   E. burst delivery while the parent event loop is otherwise idle
 
-import * as path from "path";
 import { sleepCmd } from "./fixtures/platform.mjs";
 
 let pass = 0;
@@ -159,3 +159,72 @@ check("old collector stopped at replacement", JSON.stringify(got) === JSON.strin
 const t3 = Date.now();
 const stageE = await echo.shutdown({ eofTimeoutMs: 1000 });
 check(`shutdown stage "eof" (child exits on stdin close)`, stageE === "eof", `got ${stageE}`);
+
+// ═══════════════════════════════════════════════════════════════════════════
+// E. burst delivery with an idle parent — the read pump must drain the whole
+//    burst even though the loop has no other wake source.
+//
+//    Loop wakeups coalesce into a single pending flag, so a reader handling
+//    one message per wake stranded the rest of a burst with nothing left to
+//    wake it. Visible only when the parent awaits with NOTHING else pending:
+//    any timer (Aike.sleep above) is exactly the unrelated tick that hides it.
+// ═══════════════════════════════════════════════════════════════════════════
+
+const BURST = 12;
+// Frames exceed the pump's 4 KiB read buffer, so one read yields one frame
+// and the burst arrives as N separate channel messages. Small frames
+// collapse into a single read — one message — and hide the failure.
+const PAD = "x".repeat(8192);
+const STALL_MS = 4000;
+
+// The child parks forever; `timeout` reaps it after the checks.
+const idle = Aike.spawn(process.execPath, ["-m", "-e", `
+  const enc = new TextEncoder();
+  process.stdin.onLine(() => {
+    for (let i = 1; i <= ${BURST}; i++) process.stdout.writeSync(enc.encode(i + ":${PAD}\\n"));
+  });
+  await new Promise(() => {});
+`], { stdin: "pipe", stdout: "pipe", stderr: "inherit", timeout: 60_000 });
+
+// One reader for the whole section; `seen` resets per round.
+const lastFrame = `${BURST}:`;
+let seen = [];
+let arrive = () => {};
+idle.stdout.onLine((l) => {
+  if (l === null) return;
+  seen.push(l);
+  if (l.startsWith(lastFrame)) arrive();
+});
+
+for (let round = 1; round <= 4; round++) {
+  seen = [];
+  const burstDone = new Promise((resolve) => { arrive = resolve; });
+  idle.stdin.writeSync(`burst-${round}\n`);
+  idle.stdin.flush();
+
+  // Raced against one late timer so a regression reports instead of hanging
+  // the suite (a stall also strands the child's own EOF, so the spawn
+  // `timeout` cannot unblock it). One wake drains at most one message — far
+  // short of BURST — so this cannot paper over the failure it catches.
+  const complete = await Promise.race([
+    burstDone.then(() => true),
+    Aike.sleep(STALL_MS).then(() => false),
+  ]);
+  const frames = seen.filter((l) => /^\d+:x+$/.test(l));
+
+  check(
+    `idle-parent burst ${round}: all ${BURST} frames delivered`,
+    complete && frames.length === BURST,
+    complete ? `${frames.length}/${BURST} frames` : `stalled at ${frames.length}/${BURST}`,
+  );
+}
+
+await idle.shutdown({ termTimeoutMs: 1000 });
+
+console.log(`\n${"=".repeat(40)}`);
+console.log(`  Pass: ${pass}  Fail: ${fail}`);
+if (fail > 0) {
+  console.log("  SOME TESTS FAILED");
+} else {
+  console.log("  ALL TESTS PASSED");
+}

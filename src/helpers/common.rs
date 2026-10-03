@@ -124,11 +124,18 @@ pub(crate) fn format_timestamp_compact() -> String {
 /// handler returns `true` the poller continues (`Again`); `false` triggers
 /// a call to `on_finish()` and terminates (`Done`).
 ///
-/// When the channel is empty the poller checks `has_entries(cx)`. If there
-/// are still live entries it polls again; otherwise it calls `on_finish(cx)`
-/// and terminates.  A disconnected channel always triggers termination.
-/// Both `has_entries` and `on_finish` receive the context so they can consult
-/// per-runtime state.
+/// One job run handles EVERY message already queued, then checks
+/// `has_entries(cx)`: live entries keep it polling (`Block`), otherwise
+/// `on_finish(cx)` runs and it terminates. A disconnected channel always
+/// triggers termination. Both `has_entries` and `on_finish` receive the
+/// context so they can consult per-runtime state.
+///
+/// Draining per run is required, not an optimisation: `WakeSender` wakes the
+/// loop through a single pending flag, so N messages sent while the loop was
+/// running coalesce into ONE wakeup. Handling a single message per run would
+/// then strand the other N-1 in the channel with no wake source left, and they
+/// would sit there until unrelated work (a timer, another channel) happened to
+/// tick the loop.
 pub(crate) fn start_channel_poller<T, F>(
     ctx: &mut ScopedContext,
     label: &'static str,
@@ -141,34 +148,34 @@ pub(crate) fn start_channel_poller<T, F>(
     F: Fn(T, &mut ScopedContext) -> bool + 'static,
 {
     ctx.queue_job(
-        move |cx| match rx.try_recv() {
-            Ok(msg) => {
-                let cont = handler(msg, cx);
+        move |cx| loop {
+            match rx.try_recv() {
+                Ok(msg) => {
+                    let cont = handler(msg, cx);
 
-                // ES 搂9.5: handler returns bool, not Result 鈥?clear any
-                // exception it may have set via cx.throw_*().
-                if let exc @ Exception::Error(_) = cx.take_exception() {
-                    log::warn!("[channel poller:{label}] handler left exception: {exc:?}");
-                }
+                    // ES 搂9.5: handler returns bool, not Result 鈥?clear any
+                    // exception it may have set via cx.throw_*().
+                    if let exc @ Exception::Error(_) = cx.take_exception() {
+                        log::warn!("[channel poller:{label}] handler left exception: {exc:?}");
+                    }
 
-                if cont {
-                    Ok(JobState::Block)
-                } else {
-                    on_finish(cx);
-                    Ok(JobState::Done)
+                    if !cont {
+                        on_finish(cx);
+                        return Ok(JobState::Done);
+                    }
                 }
-            }
-            Err(TryRecvError::Empty) => {
-                if has_entries(cx) {
-                    Ok(JobState::Block)
-                } else {
-                    on_finish(cx);
-                    Ok(JobState::Done)
+                Err(TryRecvError::Empty) => {
+                    return Ok(if has_entries(cx) {
+                        JobState::Block
+                    } else {
+                        on_finish(cx);
+                        JobState::Done
+                    });
                 }
-            }
-            Err(TryRecvError::Disconnected) => {
-                on_finish(cx);
-                Ok(JobState::Done)
+                Err(TryRecvError::Disconnected) => {
+                    on_finish(cx);
+                    return Ok(JobState::Done);
+                }
             }
         },
         (),
