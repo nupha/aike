@@ -21,6 +21,7 @@ mod jinja2;
 mod json_schema;
 mod jsonl;
 mod mcp;
+mod module_loader;
 mod os;
 mod path;
 mod process;
@@ -30,7 +31,6 @@ mod whatwg;
 mod yaml;
 
 use std::{
-    path::{Path, PathBuf},
     process::ExitCode,
     sync::{Arc, Mutex},
 };
@@ -38,8 +38,7 @@ use std::{
 use clap::{CommandFactory, Parser};
 use color::{Color::*, colorize_println};
 use zuqe::{
-    EvalFlags, EvalType, Exception, ExitStatus, JSValue, ModuleDef, NativeObject, Runtime,
-    ScopedContext,
+    EvalFlags, EvalType, Exception, ExitStatus, ModuleDef, NativeObject, Runtime, ScopedContext,
 };
 
 use crate::{
@@ -319,8 +318,8 @@ async fn main() -> ExitCode {
     }
 
     rt.set_module_loader(
-        Some(js_module_normalizer),
-        js_module_loader,
+        Some(module_loader::js_module_normalizer),
+        module_loader::js_module_loader,
         std::ptr::null_mut(),
     );
 
@@ -385,7 +384,7 @@ async fn main() -> ExitCode {
         //
         // Run script file
         //
-        let (script_bytes, script_path) = match read_script(&ref_filename) {
+        let (script_bytes, script_path) = match module_loader::read_script(&ref_filename) {
             Ok((buf, name)) => (buf, name),
             Err(e) => {
                 colorize_println(e, RedFg);
@@ -561,274 +560,6 @@ fn install_exit_cleanup() {
     crate::aike::install_default_signal_handlers();
 }
 
-/// Extract the `type` value from import attributes, returning `None` if
-/// the attrs object is absent or has no `type` property.
-fn get_attr_type(ctx: &mut ScopedContext, attrs: JSValue) -> Option<String> {
-    if !attrs.is_object() {
-        return None;
-    }
-    attrs.get_property_str(ctx, "type").ok().and_then(|v| {
-        v.as_string(true)
-            .map(|s| s.content().encode_utf8(false).to_string())
-    })
-}
-
-/// Module name normalizer: resolves bare specifiers (e.g. `mymod`,
-/// `vendor/lib`) via the (importer dir, CWD, AIKE_LIB_PATH) search; everything
-/// else keeps the engine's default base-relative resolution.
-///
-/// The search runs here (not in the loader) so the module is compiled under
-/// the real file URL: that keeps cache identity stable across repeated
-/// imports, makes `import.meta.url` point at the actual file, lets relative
-/// imports inside the module resolve correctly, and lets the loader dispatch
-/// searched `.aike` hits to `load_zapi_extension`.
-fn js_module_normalizer(
-    _ctx: &mut ScopedContext,
-    base_name: &url::Url,
-    name: &str,
-    _: *mut std::ffi::c_void,
-) -> Result<url::Url, i32> {
-    if is_bare_specifier(name) {
-        // Importer dir first so module-local deps are not hijacked by CWD.
-        let mut dirs = Vec::new();
-        if let Some(p) = zuqe::url_to_abspath(base_name)
-            && let Some(parent) = p.parent()
-        {
-            dirs.push(parent.to_path_buf());
-        }
-        dirs.extend(module_search_dirs());
-
-        if let Some(path) = search_module(name, &dirs) {
-            return zuqe::path_to_url(&path.to_string_lossy()).map_err(|_| -1);
-        }
-    }
-
-    // Default resolution (mirrors js_default_module_normalize_name).
-    if Path::new(name).is_absolute() {
-        zuqe::path_to_url(name).map_err(|_| -1)
-    } else {
-        base_name.join(name).map_err(|_| -1)
-    }
-}
-
-/// A bare specifier: not empty, not relative (`./x`, `../x`), not absolute,
-/// not a URL — only these go through the search-path resolution.
-fn is_bare_specifier(name: &str) -> bool {
-    !name.is_empty()
-        && !name.starts_with('.')
-        && !Path::new(name).is_absolute()
-        && url::Url::parse(name).is_err()
-}
-
-/// Directories searched for bare specifiers, in order: CWD, then
-/// `$AIKE_LIB_PATH` (single directory, skipped when unset or empty).
-fn module_search_dirs() -> Vec<PathBuf> {
-    let mut dirs = Vec::new();
-    if let Ok(cwd) = std::env::current_dir() {
-        dirs.push(cwd);
-    }
-    if let Ok(lib) = std::env::var("AIKE_LIB_PATH")
-        && !lib.is_empty()
-    {
-        dirs.push(PathBuf::from(lib));
-    }
-    dirs
-}
-
-/// Resolve a bare specifier against `dirs`, returning the first existing file.
-///
-/// Per directory (in order): if the joined path is a directory (dotted names
-/// like `abc.def` can be directories too), look for `index.js` / `index.ts`
-/// inside it; otherwise try `name.js`, `name.ts`, `name.aike` (native
-/// zapi extension), in that order.
-///
-/// The first hit wins; a directory without index files falls through to the
-/// next directory. `None` means not found in any directory.
-fn search_module(name: &str, dirs: &[PathBuf]) -> Option<PathBuf> {
-    // Extension is taken from the last path component so dotted directories
-    // (e.g. `my.pkg/mod`) don't make the specifier look extension-terminated.
-    let has_ext = Path::new(name)
-        .file_name()
-        .and_then(|f| f.to_str())
-        .is_some_and(|f| f.rsplit_once('.').is_some_and(|(_, e)| !e.is_empty()));
-
-    for dir in dirs {
-        let cand = dir.join(name);
-        // dir check first: `abc.def/` is a valid directory name
-        if cand.is_dir() {
-            for f in ["index.js", "index.ts"] {
-                let p = cand.join(f);
-                if p.is_file() {
-                    return Some(p);
-                }
-            }
-            continue;
-        }
-
-        if has_ext {
-            if cand.is_file() {
-                return Some(cand);
-            }
-        } else {
-            for ext in ["js", "ts", "aike"] {
-                let p = cand.with_extension(ext);
-                if p.is_file() {
-                    return Some(p);
-                }
-            }
-        }
-    }
-
-    None
-}
-
-fn js_module_loader(
-    ctx: &mut ScopedContext,
-    file_name: &url::Url,
-    attrs: JSValue,
-    _: *mut std::ffi::c_void,
-) -> Result<ModuleDef, i32> {
-    // Convert URL back to absolute path for filesystem access.
-    let Some(file_path) = zuqe::url_to_abspath(file_name) else {
-        return Err(ctx.throw_reference_error(&format!(
-            "could not load module '{file_name}': not a file:// URL"
-        )));
-    };
-
-    let is_native_lib = file_path
-        .extension()
-        .and_then(|e| e.to_str())
-        .is_some_and(|e| e == "aike");
-
-    if is_native_lib {
-        return ctx.load_zapi_extension(&file_path);
-    }
-
-    let attr_type = get_attr_type(ctx, attrs);
-
-    // Use resolved filename (may be .ts fallback from .js)
-    let file_path_str = file_path.as_os_str().to_str().unwrap();
-    let resolved = read_script(file_path_str);
-    let (buf, resolved_name) = match resolved {
-        Ok((b, n)) => (b, n),
-        Err(e) => {
-            return Err(
-                ctx.throw_reference_error(&format!("could not load module '{file_name}'. {e}"))
-            );
-        }
-    };
-
-    // `resolved_name` is the path actually read from disk; it differs from
-    // `file_path_str` only when a `.js` import falls back to `.ts` (or
-    // `.mjs`→`.mts` / `.cjs`→`.cts`). That fallback is expected and legal —
-    // the canonical module name stays `file_name` (used below in
-    // `compile_module`), so `resolved_name` must never be used as the key.
-    // Assert agreement only when no fallback happened, which still guards
-    // against accidentally using `resolved_name` as the canonical name.
-    #[cfg(debug_assertions)]
-    if ts_fallback(file_path_str).as_deref() != Some(resolved_name.as_str()) {
-        debug_assert_eq!(resolved_name, file_path_str);
-    }
-
-    // Import-attribute `type` dispatch (mirrors zjs): `json` / `text` wrap the
-    // content as a default export; any other type errors; `None` falls through
-    // to normal compilation.
-    match attr_type.as_deref() {
-        Some("json") => {
-            // JSON module: wrap as `export default <json>;\n`
-            let content = String::from_utf8_lossy(&buf);
-            let mut src = String::from("export default ");
-            src.push_str(&content);
-            src.push('\n');
-            ctx.compile_module(src.as_bytes(), file_name, false)
-        }
-        Some("text") => {
-            // Text module: wrap as `export default "<escaped>";\n`
-            let content = String::from_utf8_lossy(&buf);
-            let mut src = String::from("export default \"");
-            src.push_str(&escape_js_string(&content));
-            src.push_str("\";\n");
-            ctx.compile_module(src.as_bytes(), file_name, false)
-        }
-        Some(a) => Err(ctx.throw_type_error(&format!("unsupported import attribute type '{a}'"))),
-        None => {
-            let code = if transpile::needs_transpile(&resolved_name) {
-                if resolved_name.ends_with(".d.ts") {
-                    return ctx.compile_module(b"export {}", file_name, false);
-                }
-
-                let source = String::from_utf8_lossy(&buf);
-                match transpile::transpile(&source) {
-                    Ok(result) => result.code.into_bytes(),
-                    Err(e) => {
-                        return Err(ctx.throw_syntax_error(&format!(
-                            "failed to transpile module '{resolved_name}': {e}"
-                        )));
-                    }
-                }
-            } else {
-                buf.to_vec()
-            };
-
-            // Note: should use original file URL (not resolved path) as module name
-            ctx.compile_module(&code, file_name, false)
-        }
-    }
-}
-
-/// Escape a string for embedding inside a JS double-quoted string literal.
-fn escape_js_string(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    for ch in s.chars() {
-        match ch {
-            '\\' => out.push_str("\\\\"),
-            '"' => out.push_str("\\\""),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            '\x00'..='\x1f' => out.push_str(&format!("\\x{:02x}", ch as u8)),
-            c => out.push(c),
-        }
-    }
-    out
-}
-
-/// Read file with JS → TS fallback.
-/// If `foo.js` not found, tries `foo.ts`. Same for `.mjs` → `.mts`, `.cjs` → `.cts`.
-/// Returns (content bytes, resolved filename).
-fn read_script(file_name: &str) -> Result<(Vec<u8>, String), String> {
-    // Try exact path first
-    if let Ok(buf) = std::fs::read(file_name) {
-        return Ok((buf, file_name.to_string()));
-    }
-
-    // Try TS/MTS/CTS fallback
-    if let Some(ts_name) = ts_fallback(file_name)
-        && let Ok(buf) = std::fs::read(&ts_name)
-    {
-        return Ok((buf, ts_name));
-    }
-
-    // Report original error
-    match std::fs::read(file_name) {
-        Ok(buf) => Ok((buf, file_name.to_string())),
-        Err(e) => Err(format!("cannot load '{file_name}': {e}")),
-    }
-}
-
-/// Map `.js` → `.ts`, `.mjs` → `.mts`, `.cjs` → `.cts`
-fn ts_fallback(file_name: &str) -> Option<String> {
-    if let Some(base) = file_name.strip_suffix(".js") {
-        Some(format!("{}.ts", base))
-    } else if let Some(base) = file_name.strip_suffix(".mjs") {
-        Some(format!("{}.mts", base))
-    } else {
-        file_name
-            .strip_suffix(".cjs")
-            .map(|base| format!("{}.cts", base))
-    }
-}
-
 /// Check if we're running in a legacy Windows console (conhost.exe)
 /// and suggest a modern terminal if so.
 #[cfg(windows)]
@@ -857,181 +588,5 @@ fn check_terminal() {
             \n      Consider using VS Code terminal, Windows Terminal, or WezTerm for the best experience.\
             \n"
         );
-    }
-}
-
-#[cfg(test)]
-mod search_tests {
-    use super::*;
-
-    /// Self-cleaning scratch dir; `write(rel)` creates parent dirs.
-    struct TempDir(PathBuf);
-    impl TempDir {
-        fn new(tag: &str) -> Self {
-            let p = std::env::temp_dir().join(format!(
-                "aike_search_{}_{}_{}",
-                tag,
-                std::process::id(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos()
-            ));
-            std::fs::create_dir_all(&p).unwrap();
-            TempDir(p)
-        }
-        fn write(&self, rel: &str) {
-            let p = self.0.join(rel);
-            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
-            std::fs::write(&p, "").unwrap();
-        }
-        fn mkdir(&self, rel: &str) {
-            std::fs::create_dir_all(self.0.join(rel)).unwrap();
-        }
-        fn path(&self) -> &Path {
-            &self.0
-        }
-    }
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
-
-    fn find(name: &str, dirs: &[&TempDir]) -> Option<PathBuf> {
-        let owned: Vec<PathBuf> = dirs.iter().map(|d| d.0.clone()).collect();
-        search_module(name, &owned)
-    }
-
-    #[test]
-    fn finds_js_extension() {
-        let d = TempDir::new("js");
-        d.write("foo.js");
-        assert_eq!(find("foo", &[&d]), Some(d.0.join("foo.js")));
-    }
-
-    #[test]
-    fn js_beats_ts_beats_aike() {
-        let d = TempDir::new("order1");
-        d.write("foo.js");
-        d.write("foo.ts");
-        d.write("foo.aike");
-        assert_eq!(find("foo", &[&d]), Some(d.0.join("foo.js")));
-
-        let d = TempDir::new("order2");
-        d.write("foo.ts");
-        d.write("foo.aike");
-        assert_eq!(find("foo", &[&d]), Some(d.0.join("foo.ts")));
-
-        let d = TempDir::new("order3");
-        d.write("foo.aike");
-        assert_eq!(find("foo", &[&d]), Some(d.0.join("foo.aike")));
-
-        // raw platform suffixes are not module candidates
-        let d = TempDir::new("order4");
-        d.write("foo.dylib");
-        d.write("foo.so");
-        d.write("foo.dll");
-        assert_eq!(find("foo", &[&d]), None);
-    }
-
-    #[test]
-    fn dir_uses_index_files() {
-        let d = TempDir::new("index1");
-        d.write("pkg/index.js");
-        d.write("pkg/index.ts");
-        d.write("pkg.js");
-        // directory wins over sibling extension candidates
-        assert_eq!(find("pkg", &[&d]), Some(d.0.join("pkg/index.js")));
-
-        let d = TempDir::new("index2");
-        d.write("pkg/index.ts");
-        assert_eq!(find("pkg", &[&d]), Some(d.0.join("pkg/index.ts")));
-    }
-
-    #[test]
-    fn dir_without_index_falls_through_to_next_dir() {
-        let d1 = TempDir::new("fall1");
-        d1.mkdir("pkg");
-        let d2 = TempDir::new("fall2");
-        d2.write("pkg.js");
-        assert_eq!(find("pkg", &[&d1, &d2]), Some(d2.0.join("pkg.js")));
-    }
-
-    #[test]
-    fn extension_name_is_literal_only() {
-        let d = TempDir::new("lit1");
-        d.write("bar.js");
-        assert_eq!(find("bar.js", &[&d]), Some(d.0.join("bar.js")));
-
-        // has extension → no .ts fallback in search (loader fallback covers that)
-        let d = TempDir::new("lit2");
-        d.write("bar.ts");
-        assert_eq!(find("bar.js", &[&d]), None);
-    }
-
-    #[test]
-    fn first_dir_wins() {
-        let d1 = TempDir::new("first1");
-        let d2 = TempDir::new("first2");
-        d2.write("foo.js");
-        assert_eq!(find("foo", &[&d1, &d2]), Some(d2.0.join("foo.js")));
-        d1.write("foo.ts");
-        assert_eq!(find("foo", &[&d1, &d2]), Some(d1.0.join("foo.ts")));
-    }
-
-    #[test]
-    fn subpath_specifier() {
-        let d = TempDir::new("sub1");
-        d.write("vendor/lib.js");
-        assert_eq!(find("vendor/lib", &[&d]), Some(d.0.join("vendor/lib.js")));
-
-        let d = TempDir::new("sub2");
-        d.write("vendor/lib/index.js");
-        assert_eq!(
-            find("vendor/lib", &[&d]),
-            Some(d.0.join("vendor/lib/index.js"))
-        );
-    }
-
-    #[test]
-    fn dotted_dir_name_gets_index_lookup() {
-        let d = TempDir::new("dotdir");
-        d.write("abc.def.js");
-        d.write("abc.def/index.js");
-        // directory check wins over the sibling extension candidate
-        assert_eq!(find("abc.def", &[&d]), Some(d.0.join("abc.def/index.js")));
-    }
-
-    #[test]
-    fn dotted_dir_component_is_not_extension() {
-        let d = TempDir::new("dot1");
-        d.write("my.pkg/mod.js");
-        assert_eq!(find("my.pkg/mod", &[&d]), Some(d.0.join("my.pkg/mod.js")));
-
-        // "my.pkg" itself ends with an extension → literal lookup
-        let d = TempDir::new("dot2");
-        d.write("my.pkg");
-        assert_eq!(find("my.pkg", &[&d]), Some(d.0.join("my.pkg")));
-    }
-
-    #[test]
-    fn not_found() {
-        let d = TempDir::new("none1");
-        d.mkdir("pkg");
-        assert_eq!(find("missing", &[&d]), None);
-        assert_eq!(find("pkg", &[&d]), None); // dir without index files
-    }
-
-    #[test]
-    fn bare_specifier_detection() {
-        assert!(is_bare_specifier("mymod"));
-        assert!(is_bare_specifier("vendor/lib"));
-        assert!(is_bare_specifier("mylib.dylib"));
-        assert!(!is_bare_specifier("./mymod"));
-        assert!(!is_bare_specifier("../mymod"));
-        assert!(!is_bare_specifier("/abs/mymod.js"));
-        assert!(!is_bare_specifier("file:///abs/mymod.js"));
-        assert!(!is_bare_specifier(""));
     }
 }
