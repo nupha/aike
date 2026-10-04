@@ -81,7 +81,13 @@ declare module "jinja2" {
   }
 
   /**
-   * Standalone renderTemplate function (no custom callbacks/filters/includes).
+   * The module's default export — a standalone `renderTemplate` with no custom
+   * callbacks / filters / includes.
+   *
+   * It lives on the default export, not on the module namespace: the Rust entry
+   * table registers it as `FieldDef::OBJECT("default", …)`, so
+   * `import { renderTemplate } from "jinja2"` throws
+   * `Could not find export 'renderTemplate' in module 'jinja2'` at load time.
    *
    * @example
    * ```typescript
@@ -91,13 +97,17 @@ declare module "jinja2" {
    * const result = renderTemplate("Hello {{ name }}!", { name: "World" });
    * // result: "Hello World!"
    * ```
-   *
-   * @param template - jinja2 template string
-   * @param variables - Template variables (object with string keys)
-   * @returns Rendered string
    */
-  export function renderTemplate(
-    template: string,
-    variables?: Record<string, Jinja2Value>,
-  ): string;
+  const _default: {
+    /**
+     * @param template - jinja2 template string
+     * @param variables - Template variables (object with string keys)
+     * @returns Rendered string
+     */
+    renderTemplate(
+      template: string,
+      variables?: Record<string, Jinja2Value>,
+    ): string;
+  };
+  export default _default;
 }

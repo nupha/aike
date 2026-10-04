@@ -8,6 +8,12 @@
 /** Binary data source: an ArrayBuffer or any ArrayBufferView (TypedArray, DataView). */
 type BufferSource = ArrayBuffer | ArrayBufferView;
 
+/** Base for algorithm parameter dictionaries: identifies the algorithm by name.
+ *  (Web Crypto `Algorithm`; the `*Params` interfaces below extend it.) */
+interface Algorithm {
+  name: string;
+}
+
 /** An algorithm identifier: a case-insensitive algorithm name string, or a
  *  dictionary with a `name` member. */
 type AlgorithmIdentifier = string | { name: string; [key: string]: any };
@@ -137,7 +143,10 @@ declare class SubtleCrypto {
     keyUsages: KeyUsage[],
   ): Promise<CryptoKey>;
   /** Export a symmetric key as raw bytes or a JSON Web Key. */
-  exportKey(format: KeyFormat, key: CryptoKey): Promise<ArrayBuffer | JsonWebKey>;
+  exportKey(
+    format: KeyFormat,
+    key: CryptoKey,
+  ): Promise<ArrayBuffer | JsonWebKey>;
 }
 
 // ---------------------------------------------------------------------------
