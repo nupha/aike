@@ -69,9 +69,6 @@ pub(crate) struct AikeRuntimeState {
     /// Auto-increment id for `fetch_signals`.
     pub(crate) fetch_signal_next_id: usize,
 
-    /// Browser CDP callback registries (cert error, page interception/console).
-    pub(crate) browser: crate::browser::BrowserState,
-
     /// stdio MCP server's JS handler objects, kept alive across GC.
     pub(crate) stdio_js_handlers: Vec<Object>,
 
@@ -98,7 +95,6 @@ impl GcTrace for AikeRuntimeState {
         for v in self.fetch_signals.values() {
             v.trace(gcx);
         }
-        self.browser.trace(gcx);
         for h in &self.stdio_js_handlers {
             h.trace(gcx);
         }
@@ -123,7 +119,6 @@ impl AikeRuntimeState {
             console_timers: HashMap::new(),
             fetch_signals: HashMap::new(),
             fetch_signal_next_id: 1,
-            browser: Default::default(),
             stdio_js_handlers: Vec::new(),
             timers: Default::default(),
             timer_serial: 1,

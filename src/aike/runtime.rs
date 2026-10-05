@@ -32,12 +32,9 @@ use zuqe::{
     gc_lite::{GcTrace, GcTraceCtx},
 };
 
-use crate::{
-    ai, browser, fs, html, http, jinja2, json_schema, jsonl, mcp, os, path, process,
-    whatwg::{
-        abort, base64, blob, console, crypto, dom, fetch, form_data, microtask, stream,
-        structured_clone, text_decoder, text_encoder, timeout, url,
-    },
+use crate::whatwg::{
+    abort, base64, blob, console, crypto, dom, fetch, form_data, microtask, stream,
+    structured_clone, text_decoder, text_encoder, timeout, url,
 };
 
 /// Child global prefix for an in-flight run's completion promise (one key per
@@ -445,13 +442,13 @@ fn cap_classes(cap: &str) -> Vec<ClassID> {
         "fs" => vec![super::JSFileHandle::class_id()],
         "path" | "os" | "yaml" | "jsonl" | "jsonSchema" | "jinja2" | "http" | "mcp" => Vec::new(),
         "html" => vec![
-            html::HtmlDocument::class_id(),
-            html::HtmlElement::class_id(),
+            crate::html::HtmlDocument::class_id(),
+            crate::html::HtmlElement::class_id(),
         ],
-        // [temporarily disabled] "browser" is now loaded as an external zapi
-        // extension (aike-browser) instead of being statically built in.
-        // "browser" => vec![browser::JSPage::class_id()],
-        "ai" => vec![ai::JSLlmClient::class_id(), ai::JSSystem1Client::class_id()],
+        "ai" => vec![
+            crate::ai::JSLlmClient::class_id(),
+            crate::ai::JSSystem1Client::class_id(),
+        ],
         _ => Vec::new(),
     }
 }
@@ -473,28 +470,26 @@ fn install_cap(cx: &mut ScopedContext, cap: &str) -> Result<(), i32> {
         "fetch" => fetch::install_fetch(cx, global)?,
         "process" => {
             let (argv, exec_argv, exec_path) = PROCESS_INFO.with(|p| p.borrow().clone());
-            process::init_process(cx, &argv, &exec_argv, &exec_path)?;
+            crate::process::init_process(cx, &argv, &exec_argv, &exec_path)?;
         }
         "Aike" => super::install_aike_namespace(cx)?,
-        "fs" => fs::init_mod_fs(cx)?,
-        "path" => path::init_mod_path(cx)?,
-        "os" => os::init_mod_os(cx)?,
-        "http" => http::init_mod_http(cx)?,
-        "html" => html::init_mod_html(cx)?,
-        // [temporarily disabled] "browser" is now loaded as an external zapi
-        // extension (aike-browser) instead of being statically built in.
-        // "browser" => browser::init_mod_browser(cx)?,
+        "fs" => crate::fs::init_mod_fs(cx)?,
+        "path" => crate::path::init_mod_path(cx)?,
+        "os" => crate::os::init_mod_os(cx)?,
+        "http" => crate::http::init_mod_http(cx)?,
+        "html" => crate::html::init_mod_html(cx)?,
         "yaml" => crate::yaml::init_mod_yaml(cx)?,
-        "jsonl" => jsonl::init_mod_jsonl(cx)?,
-        "jsonSchema" => json_schema::init_mod_json_schema(cx)?,
-        "jinja2" => jinja2::init_mod_jinja2(cx)?,
-        "ai" => ai::init_mod_ai(cx)?,
-        "mcp" => mcp::init_mod_mcp(cx)?,
+        "jsonl" => crate::jsonl::init_mod_jsonl(cx)?,
+        "jsonSchema" => crate::json_schema::init_mod_json_schema(cx)?,
+        "jinja2" => crate::jinja2::init_mod_jinja2(cx)?,
+        "ai" => crate::ai::init_mod_ai(cx)?,
+        "mcp" => crate::mcp::init_mod_mcp(cx)?,
         // Capabilities without an installer are pure class exposures
         // (`dom`, `blob`, `formData`, `textEncoder`, `textDecoder`); their
         // constructors were exposed by `use_classes`.
         _ => {}
     }
+
     Ok(())
 }
 

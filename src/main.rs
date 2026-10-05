@@ -5,7 +5,6 @@
 
 mod ai;
 mod aike;
-mod browser;
 mod class_event_emitter;
 mod color;
 #[cfg(feature = "enable_eval_log")]
@@ -44,9 +43,6 @@ use zuqe::{
 use crate::{
     ai::{JSLlmClient, JSSystem1Client, init_mod_ai},
     aike::{AikeRuntimeState, JSCronJob, JSFileHandle, JSStdioHandle},
-    // [temporarily disabled] browser is provided by the external aike-browser
-    // zapi extension during testing.
-    // browser::{JSPage, init_mod_browser},
     class_event_emitter::JSEventEmitter,
     fs::init_mod_fs,
     global::setup_globals,
@@ -351,9 +347,6 @@ async fn main() -> ExitCode {
             init_mod_path(cx)?;
             os::init_mod_os(cx)?;
             init_mod_html(cx)?;
-            // [temporarily disabled] "browser" is loaded as an external zapi
-            // extension (aike-browser) during testing.
-            // init_mod_browser(cx)?;
             init_mod_yaml(cx)?;
             jsonl::init_mod_jsonl(cx)?;
             json_schema::init_mod_json_schema(cx)?;
@@ -508,7 +501,6 @@ async fn main() -> ExitCode {
     // atexit entirely, so this must happen explicitly before it.
     crate::aike::kill_all_children();
     crate::mcp::kill_all_mcp_children();
-    crate::browser::kill_all_spawned_browsers();
 
     std::process::exit(exit_code);
 }
@@ -527,7 +519,6 @@ fn install_exit_cleanup() {
         extern "C" fn exit_kill_children() {
             crate::aike::kill_all_children();
             crate::mcp::kill_all_mcp_children();
-            crate::browser::kill_all_spawned_browsers();
         }
         unsafe {
             libc::atexit(exit_kill_children);

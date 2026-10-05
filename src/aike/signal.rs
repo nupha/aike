@@ -36,7 +36,6 @@ static DEFAULT_HANDLER_SIGS: LazyLock<Mutex<Vec<u32>>> = LazyLock::new(|| Mutex:
 extern "C" fn default_c_signal_handler(sig_num: i32) {
     super::spawn::kill_all_children();
     crate::mcp::kill_all_mcp_children();
-    crate::browser::kill_all_spawned_browsers();
     unsafe { libc::_exit(128 + sig_num) }
 }
 
