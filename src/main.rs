@@ -531,7 +531,6 @@ fn install_exit_cleanup() {
         unsafe extern "system" fn console_ctrl_handler(ctrl: u32) -> i32 {
             crate::aike::kill_all_children();
             crate::mcp::kill_all_mcp_children();
-            crate::browser::kill_all_spawned_browsers();
 
             // 128+ctrl mirrors the Unix 128+signal convention. Never returns.
             unsafe { windows_sys::Win32::System::Threading::ExitProcess(128 + ctrl) }
