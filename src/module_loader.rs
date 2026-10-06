@@ -180,8 +180,25 @@ fn get_attr_type(ctx: &mut ScopedContext, attrs: JSValue) -> Option<String> {
 fn is_bare_specifier(name: &str) -> bool {
     !name.is_empty()
         && !name.starts_with('.')
-        && !Path::new(name).is_absolute()
+        && !is_absolute_specifier(name)
         && url::Url::parse(name).is_err()
+}
+
+/// Rooted or drive-qualified, in the sense that matters for an import.
+///
+/// `Path::is_absolute` answers the *native* question, and the two disagree on
+/// Windows: a rooted path there needs a drive letter, so `/abs/mod.js` and
+/// `\abs\mod.js` are rejected even though a Windows user means them as
+/// absolute. Treating those as bare sends an absolute path into the search
+/// path, where `dir.join(name)` resolves it against each directory instead —
+/// silently finding the wrong file, or nothing, with no diagnostic.
+fn is_absolute_specifier(name: &str) -> bool {
+    if Path::new(name).is_absolute() {
+        return true;
+    }
+    // Windows only. On Unix a leading `/` already satisfies the check above,
+    // and a leading `\` is an ordinary filename character, not a separator.
+    cfg!(windows) && (name.starts_with('/') || name.starts_with('\\'))
 }
 
 /// Directories searched for bare specifiers, highest priority first:
@@ -487,6 +504,30 @@ mod search_tests {
         assert!(!is_bare_specifier("/abs/mymod.js"));
         assert!(!is_bare_specifier("file:///abs/mymod.js"));
         assert!(!is_bare_specifier(""));
+    }
+
+    /// A rooted path is absolute on every platform. On Windows `is_absolute`
+    /// alone rejects `/abs/mod.js` for want of a drive letter, which used to
+    /// send it into the search path and resolve it as `<dir>/abs/mod.js`.
+    #[test]
+    fn rooted_paths_are_never_bare() {
+        assert!(is_absolute_specifier("/abs/mod.js"));
+        assert!(!is_bare_specifier("/abs/mod.js"));
+
+        if cfg!(windows) {
+            // The separator and the drive-qualified form are Windows-only.
+            assert!(is_absolute_specifier(r"\abs\mod.js"));
+            assert!(!is_bare_specifier(r"\abs\mod.js"));
+            assert!(is_absolute_specifier(r"C:\abs\mod.js"));
+            assert!(!is_bare_specifier(r"C:\abs\mod.js"));
+            // Drive-*relative* (`C:mod.js`) is not rooted: it resolves against
+            // that drive's current directory, so it is a path, not a bare name.
+            assert!(!is_absolute_specifier(r"C:mod.js"));
+        }
+
+        // A leading dot is a relative marker even when it looks rooted.
+        assert!(!is_bare_specifier("./mod.js"));
+        assert!(!is_absolute_specifier("./mod.js"));
     }
 
     #[test]
