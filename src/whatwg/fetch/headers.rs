@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
+// SPDX-FileCopyrightText: Copyright (c) 2026 John Ray <996351336@qq.com>
 
 //! Request-header policy: Fetch-spec default headers and the forbidden
 //! request-header filter (including the conditional method-override headers).

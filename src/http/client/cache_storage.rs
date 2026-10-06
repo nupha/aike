@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
+// SPDX-FileCopyrightText: Copyright (c) 2026 John Ray <996351336@qq.com>
 
 //! WPT `fetch/api/abort/cache.https.any.js` ("Signals are not stored in the
 //! cache API") requires the [Cache Storage API][1]. This is a *separate*

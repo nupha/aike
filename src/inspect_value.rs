@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
+// SPDX-FileCopyrightText: Copyright (c) 2026 John Ray <996351336@qq.com>
 
 use zuqe::{
     Atom, JS_GPN_ENUM_ONLY, JS_GPN_STR_OR_INT_MASK, JS_GPN_SYMBOL_MASK, JS_PROP_GETSET, JSValue,

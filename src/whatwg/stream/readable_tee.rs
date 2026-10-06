@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
+// SPDX-FileCopyrightText: Copyright (c) 2026 John Ray <996351336@qq.com>
 
 //! ReadableStream `tee()`: split one source into two branches that both receive
 //! every chunk. Shared on-demand pull state and the pump callbacks live here.

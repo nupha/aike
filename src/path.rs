@@ -1,39 +1,121 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-use std::path::{Component, Path, PathBuf};
+use std::path::{Component, MAIN_SEPARATOR, Path, PathBuf};
 
 use url::Url;
 use zuqe::{CallContext, FieldDef, JS_PROP_ENUMERABLE, JSResult, JSValue, ScopedContext};
 
 use crate::whatwg::url::{new_url, url_arg_to_str};
 
-/// Normalize a path by resolving `.` and `..` components without following symlinks.
-fn normalize_path(path: &Path) -> PathBuf {
-    let mut result = PathBuf::new();
-    let mut rooted = false;
+/// A path broken into the pieces normalization needs: an optional drive, whether
+/// it is rooted, and the ordinary segments after them.
+struct Segments {
+    drive: Option<std::ffi::OsString>,
+    rooted: bool,
+    /// `..` segments that could not be cancelled by a real name. They are counted
+    /// rather than stored, because one must not cancel another: Node keeps
+    /// `..\..\z` as `..\..\z`, where popping the first `..` against the second
+    /// would leave just `z`.
+    dots: usize,
+    names: Vec<std::ffi::OsString>,
+}
+
+/// Split `path` into drive / root / segments, resolving `.` and `..` without
+/// touching the filesystem.
+///
+/// Accumulating into a `PathBuf` does not work here. `PathBuf::push` discards the
+/// buffer whenever the argument carries a prefix, and Rust reports an *interior*
+/// `C:` as a prefix, so `join('C:\a', 'C:\a\..\..')` lost everything before it and
+/// came out `C:` where Node says `C:\a`. Node reads an interior drive as an
+/// ordinary segment name, so the segments are kept as plain strings and only
+/// reassembled once at the end.
+fn split_normalized(path: &Path) -> Segments {
+    let mut out = Segments {
+        drive: None,
+        rooted: false,
+        dots: 0,
+        names: Vec::new(),
+    };
 
     for component in path.components() {
         match component {
             Component::Prefix(p) => {
-                result.push(p.as_os_str());
-            }
-            Component::RootDir => {
-                if !rooted {
-                    result.push(component.as_os_str());
-                    rooted = true;
+                if out.drive.is_none() && !out.rooted && out.names.is_empty() {
+                    out.drive = Some(p.as_os_str().to_os_string());
+                } else {
+                    out.names.push(p.as_os_str().to_os_string());
                 }
             }
-            Component::Normal(name) => result.push(name),
+            Component::RootDir => {
+                if !out.rooted {
+                    out.rooted = true;
+                }
+            }
+            Component::Normal(name) => out.names.push(name.to_os_string()),
             Component::ParentDir => {
-                if !result.as_os_str().is_empty() {
-                    result.pop();
+                // Pop a real segment if there is one. Two cases must not pop.
+                //
+                // A rooted path has nothing above its root, so `/..` stays `/`.
+                //
+                // A relative path with nothing left to pop has to *keep* the `..`:
+                // Node gives `path.join("..", "models")` === `..\models`. Dropping
+                // it instead silently moves the path — `join("..", "models")` came
+                // out as `models`, which resolves one directory too deep and made a
+                // relative SPEECH_MODELS_DIR point at the wrong place entirely.
+                //
+                // The counter is separate from `names` on purpose: a pending `..`
+                // must not cancel another pending `..`.
+                if out.names.pop().is_none() && !out.rooted {
+                    out.dots += 1;
                 }
             }
             Component::CurDir => {}
         }
     }
-    result
+    out
+}
+
+/// Reassemble segments into a path. `OsString::push` appends verbatim, so a
+/// segment that happens to look like a drive (`C:`) stays a name here.
+fn assemble(parts: &Segments) -> PathBuf {
+    let mut s = std::ffi::OsString::new();
+    if let Some(drive) = &parts.drive {
+        s.push(drive);
+    }
+    // The root contributes a separator that the first segment must not double up
+    // on, so whether one is owed is tracked rather than inferred from emptiness.
+    let mut owed = parts.rooted;
+    for _ in 0..parts.dots {
+        if owed {
+            s.push(MAIN_SEPARATOR.to_string());
+        }
+        s.push("..");
+        owed = true;
+    }
+    for name in &parts.names {
+        if owed {
+            s.push(MAIN_SEPARATOR.to_string());
+        }
+        s.push(name);
+        owed = true;
+    }
+    // A bare root still needs its separator: `C:\`, not `C:`.
+    if parts.rooted && parts.dots == 0 && parts.names.is_empty() {
+        s.push(MAIN_SEPARATOR.to_string());
+    }
+    // A drive with nothing after it names that drive's current directory, so Node
+    // spells it `C:.`: `normalize('C:')` is `C:.`, not `C:`. Only an unrooted
+    // drive — `C:x` is drive-relative, `C:\x` is not.
+    if parts.drive.is_some() && !parts.rooted && parts.dots == 0 && parts.names.is_empty() {
+        s.push(".");
+    }
+    PathBuf::from(s)
+}
+
+/// Normalize a path by resolving `.` and `..` components without following symlinks.
+fn normalize_path(path: &Path) -> PathBuf {
+    assemble(&split_normalized(path))
 }
 
 /// Helper: extract Rust String from a JS argument.
@@ -109,14 +191,46 @@ fn js_path_combine(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     let buf = match cc.magic() {
         COMBINE_JOIN => {
-            // join: accumulate segments left to right (no `.`/`..` normalization
-            // beyond PathBuf::push collapsing them; caller normalizes at the end).
-            let mut buf = PathBuf::new();
+            // Node's `join` concatenates the arguments with the separator and
+            // normalizes the result *once*. A later absolute-looking segment does
+            // NOT reset what came before it — that is `resolve`, not `join`:
+            // `join('C:\a', 'C:\a\..\..')` is `C:\a`, not `C:\`.
+            //
+            // Accumulating into a PathBuf cannot express that, because
+            // `PathBuf::push` discards the buffer whenever the argument is
+            // absolute. So the segments are joined as text first and normalized
+            // afterwards. Rust parses an interior `C:` as an ordinary name, which
+            // is what makes `C:\a\b\C:\c` come out right.
+            let mut joined = String::new();
             for i in 0..argc {
                 let seg = arg_to_string(ctx, &cc, i)?;
-                buf.push(&seg);
+                // Node skips empty arguments outright rather than letting them
+                // contribute a separator: `join('..', '')` is `..`, not `..\`.
+                if seg.is_empty() {
+                    continue;
+                }
+                if !joined.is_empty() {
+                    joined.push(MAIN_SEPARATOR);
+                }
+                joined.push_str(&seg);
             }
-            buf
+            // Node keeps a trailing separator here too: `join('..\\')` is `..\`.
+            // Noted on the joined text, because by the time it has been normalized
+            // the information is gone.
+            let had_trailing = ends_with_separator(&joined);
+            let normalized = normalize_path(Path::new(&joined));
+            let mut s = normalized.to_string_lossy().into_owned();
+            if s.is_empty() {
+                s.push('.');
+                if had_trailing {
+                    s.push(MAIN_SEPARATOR);
+                }
+            } else if had_trailing && !ends_with_separator(&s) {
+                s.push(MAIN_SEPARATOR);
+            }
+            // Falls through to the shared normalize_path call below only for
+            // `resolve`; return early for `join`.
+            return js_str(ctx, &s);
         }
         COMBINE_RESOLVE => {
             // resolve: like Node's path.resolve — process segments right to left;
@@ -127,14 +241,53 @@ fn js_path_combine(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             for i in (0..argc).rev() {
                 let seg = arg_to_string(ctx, &cc, i)?;
                 buf = Path::new(&seg).to_path_buf().join(&buf);
-                if Path::new(&seg).is_absolute() {
+                // `has_root`, not `is_absolute`: Rust's `is_absolute` also demands
+                // a drive, so `/b` did not count as absolute and failed to discard
+                // the arguments to its left. Node treats it as absolute and puts it
+                // on the current drive.
+                if has_root(Path::new(&seg)) {
                     break;
                 }
             }
             if !buf.is_absolute() {
-                let cwd = std::env::current_dir()
-                    .map_err(|e| ctx.throw_internal_error(&e.to_string()))?;
-                buf = cwd.join(&buf);
+                // Anchor at the right base. A path carrying a drive but no root is
+                // drive-relative and belongs to *that* drive's cwd, not the
+                // process cwd: `resolve('C:x')` is `<cwd of C:>\x`. Joining the
+                // buffer onto the cwd would not do, because the buffer's own drive
+                // makes `PathBuf::push` clear the base again — which is how this
+                // ended up answering the bare `C:x`.
+                let parts = split_normalized(&buf);
+                let base = match &parts.drive {
+                    Some(drive) => drive_cwd(&drive.to_string_lossy()),
+                    None => {
+                        let cwd = std::env::current_dir()
+                            .map_err(|e| ctx.throw_internal_error(&e.to_string()))?;
+                        if !parts.rooted {
+                            cwd
+                        } else {
+                            // Rooted with no drive: Node puts it on the *root* of the
+                            // current drive, so `resolve('/x')` is `C:\x` rather than
+                            // `<cwd>\x`.
+                            let drive = cwd
+                                .components()
+                                .next()
+                                .map(|c| c.as_os_str().to_os_string())
+                                .unwrap_or_else(|| std::ffi::OsString::from("C:"));
+                            PathBuf::from(format!("{}\\", drive.to_string_lossy()))
+                        }
+                    }
+                };
+                let tail = relative_tail(&parts);
+                if tail.is_empty() {
+                    buf = base;
+                } else {
+                    let mut text = base.to_string_lossy().into_owned();
+                    if !ends_with_separator(&text) {
+                        text.push(MAIN_SEPARATOR);
+                    }
+                    text.push_str(&tail.to_string_lossy());
+                    buf = PathBuf::from(text);
+                }
             }
             buf
         }
@@ -267,13 +420,94 @@ fn js_path_inspect(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let path = Path::new(&p);
     match cc.magic() {
         INSPECT_NORMALIZE => {
+            // Node keeps a trailing separator: `normalize('a\..\')` is `.\`, not
+            // `.`. Whether the input had one is a property of the input alone, so
+            // it is captured before normalization and re-applied after — unless the
+            // result already ends in one (the root, `\`, is already just that).
+            let had_trailing = ends_with_separator(&p);
             let result = normalize_path(path);
-            let s = result.to_string_lossy();
-            js_str(ctx, if s.is_empty() { "." } else { &s })
+            let mut s = result.to_string_lossy().into_owned();
+            if s.is_empty() {
+                // Normalizing to nothing means "here". Node still honours a
+                // trailing separator on that: `normalize('./')` is `.\`, not `.`.
+                s.push('.');
+                if had_trailing {
+                    s.push(MAIN_SEPARATOR);
+                }
+            } else if had_trailing && !ends_with_separator(&s) {
+                s.push(MAIN_SEPARATOR);
+            }
+            js_str(ctx, &s)
         }
-        INSPECT_IS_ABSOLUTE => Ok(JSValue::from(path.is_absolute())),
+        // Node's rule is "starts with a separator, or is drive+rooted", which is
+        // exactly "has a root". `Path::is_absolute` is stricter on Windows — it
+        // also demands a drive prefix, so it called `isAbsolute('/x')` false.
+        INSPECT_IS_ABSOLUTE => Ok(JSValue::from(has_root(path))),
         _ => unreachable!(),
     }
+}
+
+/// Whether the string ends in a path separator, either flavour.
+fn ends_with_separator(s: &str) -> bool {
+    s.ends_with('/') || s.ends_with('\\')
+}
+
+/// Whether the path is rooted, with or without a drive prefix.
+fn has_root(path: &Path) -> bool {
+    path.components().any(|c| matches!(c, Component::RootDir))
+}
+
+/// `path.resolve` for one argument: a rooted path stands on its own, anything else
+/// is taken relative to the cwd.
+fn resolve_from(cwd: &Path, raw: &str) -> PathBuf {
+    let p = Path::new(raw);
+    if has_root(p) {
+        normalize_path(p)
+    } else {
+        normalize_path(&cwd.join(p))
+    }
+}
+
+/// The current directory of `drive`, which is what a drive-relative path such as
+/// `C:x` is measured from.
+///
+/// Windows keeps one current directory *per drive* and publishes it as a hidden
+/// environment variable named `=C:`, which is where Node looks too. When that is
+/// absent — a process that never visited `C:` in `cmd` — the process cwd stands in
+/// if it is already on that drive, and otherwise the drive's root.
+fn drive_cwd(drive: &str) -> PathBuf {
+    let key = format!("={}", drive);
+    if let Some(dir) = std::env::var_os(&key) {
+        let p = PathBuf::from(dir);
+        if has_root(&p) {
+            return normalize_path(&p);
+        }
+    }
+    if let Ok(cwd) = std::env::current_dir()
+        && cwd.components().next() == Path::new(drive).components().next()
+    {
+        return cwd;
+    }
+    PathBuf::from(format!("{}\\", drive))
+}
+
+/// The part of a non-rooted path that has to be appended to a base directory:
+/// pending `..` first, then the segments, which is the order they normalize to.
+fn relative_tail(parts: &Segments) -> std::ffi::OsString {
+    let mut tail = std::ffi::OsString::new();
+    for i in 0..parts.dots {
+        if i > 0 {
+            tail.push(MAIN_SEPARATOR.to_string());
+        }
+        tail.push("..");
+    }
+    for (i, name) in parts.names.iter().enumerate() {
+        if i > 0 || parts.dots > 0 {
+            tail.push(MAIN_SEPARATOR.to_string());
+        }
+        tail.push(name);
+    }
+    tail
 }
 
 // ---------------------------------------------------------------------------
@@ -284,28 +518,49 @@ fn js_path_relative(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let from_str = arg_to_string(ctx, &cc, 0)?;
     let to_str = arg_to_string(ctx, &cc, 1)?;
 
-    let from_norm = normalize_path(Path::new(&from_str));
-    let to_norm = normalize_path(Path::new(&to_str));
+    // Node resolves both sides against the cwd before comparing them, so they are
+    // always absolute and the common prefix is meaningful. Normalizing the raw
+    // arguments instead made a relative `from` collapse against a relative `to`:
+    // `relative('..', 'models')` came out `..\models` where Node says `models` is
+    // *under* cwd, i.e. `aike\models`.
+    let cwd = std::env::current_dir().map_err(|e| ctx.throw_internal_error(&e.to_string()))?;
+    let from = split_normalized(&resolve_from(&cwd, &from_str));
+    let to = split_normalized(&resolve_from(&cwd, &to_str));
 
-    // Find common prefix length (in component count)
-    let from_comps: Vec<Component> = from_norm.components().collect();
-    let to_comps: Vec<Component> = to_norm.components().collect();
-    let common = from_comps
+    // Two named drives have nothing in common, so there is no relative path
+    // between them and Node answers with the destination as-is. A missing drive
+    // means "the current one", which is the same drive, so only compare when both
+    // sides actually name one.
+    if let (Some(a), Some(b)) = (&from.drive, &to.drive)
+        && a != b
+    {
+        return js_str(ctx, &assemble(&to).to_string_lossy());
+    }
+
+    // Common prefix, counted in segments. Comparing `Component`s instead let the
+    // destination's drive clear the `..` already emitted, because pushing a
+    // prefixed component resets a `PathBuf`.
+    let common = from
+        .names
         .iter()
-        .zip(to_comps.iter())
+        .zip(to.names.iter())
         .take_while(|(a, b)| a == b)
         .count();
 
-    // Build relative path: go up from `from` then down to `to`
-    let mut result = PathBuf::new();
-    for _ in common..from_comps.len() {
-        result.push("..");
+    // Go up out of `from`, then down into `to`.
+    let mut result = Segments {
+        drive: None,
+        rooted: false,
+        dots: 0,
+        names: Vec::new(),
+    };
+    for _ in common..from.names.len() {
+        result.names.push(std::ffi::OsString::from(".."));
     }
-    for comp in &to_comps[common..] {
-        result.push(comp.as_os_str());
-    }
+    result.names.extend_from_slice(&to.names[common..]);
 
-    let s = result.to_string_lossy();
+    let built = assemble(&result);
+    let s = built.to_string_lossy();
     js_str(ctx, if s.is_empty() { "" } else { &s })
 }
 
