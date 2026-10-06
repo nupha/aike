@@ -32,7 +32,7 @@ use super::{JSStdioHandle, signal::signal_name};
 
 /// PIDs of children spawned with `abortOnParentExit: true`, killed together
 /// when aike exits (normal exit, `process.exit`, or a catchable signal).
-/// Only populated when the option is set �?the default is zero overhead.
+/// Only populated when the option is set; the default is zero overhead.
 static SPAWNED_PIDS: LazyLock<Mutex<Vec<i32>>> = LazyLock::new(|| Mutex::new(Vec::new()));
 
 pub(crate) fn register_child(pid: i32) {
@@ -135,17 +135,17 @@ pub(super) fn js_spawn(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             return Err(ctx.throw_type_error("spawn options must be an object"));
         };
 
-        // cwd �?string
+        // cwd: string
         if let Some(dir) = get_str_prop_strict(ctx, &opts, "cwd")? {
             cwd = Some(dir);
         }
 
-        // env �?object; replaces entire env when provided
+        // env: object; replaces entire env when provided
         if let Some(env_map) = parse_env_obj_strict(ctx, &opts)? {
             env_opt = Some(env_map);
         }
 
-        // abortOnParentExit �?boolean; when true the child is killed
+        // abortOnParentExit: boolean; when true the child is killed
         // synchronously when aike exits. Meaningless for spawnSync/sh (the
         // child is already gone on return) but still validated.
         let abort_val = opts.get_property_str(ctx, "abortOnParentExit")?;
@@ -193,7 +193,7 @@ pub(super) fn js_spawn(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         }
     }
 
-    // timeout (ms) �?positive integer; kill the child if it runs longer than this.
+    // timeout (ms): positive integer; kill the child if it runs longer than this.
     let timeout_limit: Option<u64> = match cc.arg(2).as_object() {
         Some(opts) => get_timeout_prop(ctx, &opts)?,
         None => None,
@@ -251,7 +251,7 @@ pub(super) fn js_spawn(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             cmd_wrap.wrap(KillOnDrop);
         }
 
-        // Linux: kernel sends SIGKILL to the child when aike dies �?covers
+        // Linux: kernel sends SIGKILL to the child when aike dies; covers
         // SIGKILL/abort/crash that no user-space handler can catch. The child
         // is reaped by `kill(-pid)` too when aike exits normally; PDEATHSIG is
         // the fallback for the uncatchable paths.
@@ -312,7 +312,7 @@ pub(super) fn js_spawn(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     }
 }
 
-/// `Aike.sh(command, options?)` �?`{ stdout, stderr, exitCode }`.
+/// `Aike.sh(command, options?)` `{ stdout, stderr, exitCode }`.
 ///
 /// Run a command through the platform shell and capture its output. A
 /// convenience sugar over `spawnSync` (memo §5.4): the command string is
@@ -335,7 +335,7 @@ pub(super) fn js_sh(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut timeout_ms = None;
     let mut check = false;
 
-    // options (optional object) �?strict parsing, same schema as spawnSync
+    // options (optional object): strict parsing, same schema as spawnSync
     if cc.length() > 1 {
         let opts_val = cc.arg(1);
         let Some(opts) = opts_val.as_object() else {
@@ -646,7 +646,7 @@ fn spawn_async(
 ) -> JSResult {
     // Take stdin pipe before moving child into async task,
     // so we can create a PipeWrite FileHandle while ScopedContext is available.
-    // When stdin is not piped, this will be None �?null.
+    // When stdin is not piped, this will be None, not null.
     let stdin_val = match child.stdin().take() {
         Some(child_stdin) => {
             #[cfg(unix)]
@@ -664,7 +664,7 @@ fn spawn_async(
 
     // Take stdout pipe before moving child into async task,
     // so we can create a PipeRead StdioHandle while ScopedContext is available.
-    // When stdout is not piped, this will be None �?null.
+    // When stdout is not piped, this will be None, not null.
     let stdout_val = match child.stdout().take() {
         Some(child_stdout) => {
             #[cfg(unix)]
@@ -736,16 +736,16 @@ fn spawn_async(
     result.define_property_value_str(ctx, "signalCode", prom_signal.into(), JS_PROP_C_W_E)?;
     result.define_property_value_str(ctx, "killedByTimeout", prom_killed.into(), JS_PROP_C_W_E)?;
 
-    // kill(signal?) �?send signal to child process, default SIGTERM
+    // kill(signal?) sends a signal to the child process, default SIGTERM
     let kill_fn = ctx.create_native_function(Callback::Func(js_child_kill), "kill", 1, 0)?;
     result.define_property_value_str(ctx, "kill", kill_fn.into(), JS_PROP_C_W_E)?;
 
-    // isRunning() �?check if child process is still alive
+    // isRunning() checks if the child process is still alive
     let is_running_fn =
         ctx.create_native_function(Callback::Func(js_child_isRunning), "isRunning", 0, 0)?;
     result.define_property_value_str(ctx, "isRunning", is_running_fn.into(), JS_PROP_C_W_E)?;
 
-    // shutdown(options?) �?graceful close (EOF �?term �?SIGKILL)
+    // shutdown(options?) graceful close (EOF, then SIGTERM, then SIGKILL)
     let shutdown_fn =
         ctx.create_native_function(Callback::Func(js_child_shutdown), "shutdown", 1, 0)?;
     result.define_property_value_str(ctx, "shutdown", shutdown_fn.into(), JS_PROP_C_W_E)?;
@@ -754,7 +754,7 @@ fn spawn_async(
     // shutdown() can subscribe even if the child exits immediately.
     register_child_exit(pid);
 
-    // Spawn a pure async task �?wait for child exit and resolve
+    // Spawn a pure async task: wait for child exit and resolve
     // exitCode/signalCode/killedByTimeout. stdout/stderr are exposed as
     // FileHandle objects for the consumer to read.
     if abort_on_parent_exit {
@@ -769,8 +769,8 @@ fn spawn_async(
                 Ok(r) => r,
                 Err(_elapsed) => {
                     killed = true;
-                    // Group/job-aware kill: ProcessGroup �?killpg(SIGKILL) to
-                    // the whole tree; JobObject �?TerminateJobObject.
+                    // Group/job-aware kill: ProcessGroup uses killpg(SIGKILL) to
+                    // the whole tree; JobObject uses TerminateJobObject.
                     let _ = Box::into_pin(child.kill()).await;
                     child.wait().await
                 }
@@ -807,8 +807,8 @@ fn spawn_async(
 }
 
 /// kill(signal?)
-/// �?Windows: terminate process by pid (ignores signal arg).
-/// �?Unix: send signal to child process.
+/// - Windows: terminate process by pid (ignores signal arg).
+/// - Unix: send signal to child process.
 fn js_child_kill(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     #[cfg(unix)]
     {
@@ -871,8 +871,8 @@ pub(crate) unsafe fn terminate_process(pid: i32) -> bool {
 }
 
 /// isRunning()
-/// �?Unix: check if child process is still alive using kill(pid, 0).
-/// �?Windows: check if process is alive via WaitForSingleObject.
+/// - Unix: check if child process is still alive using kill(pid, 0).
+/// - Windows: check if process is alive via WaitForSingleObject.
 fn js_child_isRunning(_ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     #[cfg(unix)]
     {
@@ -948,7 +948,7 @@ pub(crate) async fn wait_child_exit(
             return true;
         }
         match tokio::time::timeout(timeout, rx.changed()).await {
-            // changed() errors when the sender is dropped �?the state was
+            // changed() errors when the sender is dropped; the state was
             // removed from the registry, which only happens on exit/cleanup.
             Ok(Ok(())) => continue,
             _ => return false,
@@ -968,7 +968,7 @@ pub(crate) fn send_child_signal(pid: i32, sig: i32) {
     }
 }
 
-/// The EOF �?term �?SIGKILL shutdown ladder. Returns the stage at which the
+/// The EOF, SIGTERM, SIGKILL shutdown ladder. Returns the stage at which the
 /// child exited. Removes the registry entry when done.
 pub(crate) async fn shutdown_ladder(
     pid: i32,
@@ -1008,8 +1008,8 @@ pub(crate) async fn shutdown_ladder(
     finish!("timed_out")
 }
 
-/// shutdown(options?) �?gracefully shut the child down:
-/// close stdin (EOF), then `termSignal`, then SIGKILL �?each stage bounded by
+/// shutdown(options?) gracefully shuts the child down:
+/// close stdin (EOF), then `termSignal`, then SIGKILL; each stage bounded by
 /// its timeout. Resolves with the stage at which the child exited:
 /// "eof" | "term" | "kill" | "timed_out" | "already_closed".
 fn js_child_shutdown(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -1059,8 +1059,8 @@ fn js_child_shutdown(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     let pid = pid_from_this(ctx, &cc);
 
-    // Claim the child's exit state: absent �?never spawned by us or already
-    // reaped; already shutting down �?report without re-running the ladder.
+    // Claim the child's exit state: absent, never spawned by us or already
+    // reaped; already shutting down. Report without re-running the ladder.
     let rx = {
         let mut map = CHILD_EXITS.lock().unwrap();
         let Some(state) = map.get_mut(&pid) else {
@@ -1230,7 +1230,7 @@ fn job_assign_child(child: &std::process::Child) -> windows_sys::Win32::Foundati
 
 /// Windows std spawns cannot limit handle inheritance on stable Rust (no
 /// stable PROC_THREAD_ATTRIBUTE_HANDLE_LIST), so CreateProcess duplicates
-/// every inheritable handle into the child �?including our own stdio. A
+/// every inheritable handle into the child, including our own stdio. A
 /// detached grandchild then keeps our stdout/stderr pipes open forever,
 /// hanging read-to-EOF collectors (spawnSync/sh). Temporarily clearing the
 /// inherit bit on the streams a spawn does NOT pass as "inherit" closes that
@@ -1329,7 +1329,7 @@ fn std_handle_set_flags(
         if h.is_null() || h == INVALID_HANDLE_VALUE {
             return false;
         }
-        // Only touch the INHERIT bit �?never other flag bits (e.g. protect-
+        // Only touch the INHERIT bit, never other flag bits (e.g. protect-
         // from-close) that may be present in `flags`.
         SetHandleInformation(h, HANDLE_FLAG_INHERIT, flags & HANDLE_FLAG_INHERIT) != 0
     }
