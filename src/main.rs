@@ -59,7 +59,7 @@ use crate::{
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 #[derive(Debug, Parser)]
-#[command(version, disable_help_flag = true)]
+#[command(version = process::info::version_banner(), disable_help_flag = true)]
 struct Args {
     #[arg(short = 'h', long = "help", help = "Print help")]
     help: bool,

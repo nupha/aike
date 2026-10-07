@@ -118,6 +118,15 @@ pub(crate) fn format_timestamp_compact() -> String {
     now_utc().format("%Y%m%d_%H%M%S").to_string()
 }
 
+/// Format a Unix epoch second count as RFC 3339 (e.g. "2025-05-31T12:00:00Z").
+/// Out-of-range input falls back to the epoch, matching [`now_utc`].
+pub(crate) fn format_epoch_rfc3339(secs: i64) -> String {
+    chrono::DateTime::from_timestamp(secs, 0)
+        .unwrap_or(chrono::DateTime::UNIX_EPOCH)
+        .format("%Y-%m-%dT%H:%M:%SZ")
+        .to_string()
+}
+
 /// Start a persistent polling microtask driven by a crossbeam channel.
 ///
 /// The poller calls `handler(msg, cx)` for each received message. If the

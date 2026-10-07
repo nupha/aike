@@ -42,6 +42,36 @@ pub(crate) fn platform_str() -> &'static str {
 /// Runtime version string, e.g. `"v0.1.0"`.
 pub(crate) const VERSION_STR: &str = concat!("v", env!("CARGO_PKG_VERSION"));
 
+/// Build timestamp, baked in by the build script as a Unix epoch second count.
+///
+/// `str::parse` is not const, so this stays a function rather than a `const`.
+fn build_epoch() -> i64 {
+    // The build script only ever emits a decimal `u64`, so the `unwrap_or`
+    // arm is unreachable; fall back to the epoch rather than panicking.
+    env!("AIKE_BUILD_EPOCH").parse().unwrap_or(0)
+}
+
+/// The `-V` / `--version` banner: runtime version, the zapi ABI/API contract
+/// this build speaks (and the lowest it still accepts), and the build time.
+///
+/// Leaked to `'static` because clap wants a `&'static str`; there is exactly
+/// one, so the leak is bounded.
+pub(crate) fn version_banner() -> &'static str {
+    use zuqe::zapi::{ZQ_ABI_BASE, ZQ_ABI_VERSION, ZQ_API_BASE, ZQ_API_VERSION};
+
+    Box::leak(
+        format!(
+            "{ver}\n\
+             zapi abi {ZQ_ABI_VERSION}, api {ZQ_API_VERSION} \
+             (min abi {ZQ_ABI_BASE}, min api {ZQ_API_BASE})\n\
+             build {ts}",
+            ver = env!("CARGO_PKG_VERSION"),
+            ts = crate::helpers::format_epoch_rfc3339(build_epoch()),
+        )
+        .into_boxed_str(),
+    )
+}
+
 /// Get the parent process ID.
 pub(super) fn get_ppid() -> i32 {
     #[cfg(unix)]
