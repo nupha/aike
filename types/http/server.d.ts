@@ -126,6 +126,16 @@ declare module "http" {
     port?: number;
     /** Host address to bind. Default: "0.0.0.0" */
     host?: string;
+    /**
+     * Whether to attach a permissive CORS layer
+     * (`Access-Control-Allow-Origin: *`, all methods/headers allowed).
+     * Default: true.
+     *
+     * Set false to serve without any `Access-Control-*` response headers —
+     * needed when a browser (or a CORS-enforcing `fetch()`) must be able to
+     * observe a missing-`Access-Control-Allow-Origin` failure.
+     */
+    cors?: boolean;
   }
 
   /** HTTP server with Express-like routing and JSON-RPC support. */

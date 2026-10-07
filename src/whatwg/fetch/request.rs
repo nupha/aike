@@ -308,10 +308,10 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         }
     }
 
-    // Server builds (`fetch_browser` off) have no client-origin concept, so
+    // Server builds (`fetch_cors` off) have no client-origin concept, so
     // `same-origin` cookie scoping cannot be evaluated; treat it like
     // `include` so cookies still flow.
-    #[cfg(not(feature = "fetch_browser"))]
+    #[cfg(not(feature = "fetch_cors"))]
     if credentials == "same-origin" {
         credentials = String::from("include");
     }
@@ -332,7 +332,7 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     // Client origin/URL for same-origin checks (used by the cache
     // short-circuit and the response handler below). In a browser this is the
     // document's origin; resolved from the `self.location` shim / WPT runner
-    // globals. Server builds (`fetch_browser` off) have no location concept
+    // globals. Server builds (`fetch_cors` off) have no location concept
     // and get a null origin.
     let (client_origin, client_url) = resolve_client_origin(ctx);
 
@@ -990,7 +990,7 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         before_hop: make_before_hop_hook(preflight),
         // Server builds have no origin concept: the transport's cors-mode
         // rules (per-hop Origin recomputation, opaque-origin rule) never apply.
-        cors_mode: cfg!(feature = "fetch_browser") && mode == "cors",
+        cors_mode: cfg!(feature = "fetch_cors") && mode == "cors",
         cors_tainted,
         cors_client_origin: client_origin_str,
         credentials_mode: credentials.clone(),

@@ -3,7 +3,15 @@
 // 按 WHATWG 标准测试全局 fetch() API 及其相关接口，与底层 HttpClient
 // 实现解耦。所有实现细节在 src/http/client/ 中，本文件只验证标准行为。
 //
+// 本文件只测 fetch 自身的标准行为，不测 CORS —— 后者由 fetch_cors.mjs 专测。
+// 因此把客户端 origin 钉成 example.com：下面的请求是同源的，不会被 CORS
+// 检查拦下，无论 fetch_cors feature 开关如何都能走完网络。
+//
 // 运行：aike -m tests/whatwg/fetch.js
+
+globalThis.self = {
+  location: { origin: "https://example.com", href: "https://example.com/" },
+};
 
 let pass = 0;
 let fail = 0;

@@ -431,7 +431,12 @@ interface RequestInit {
   timeout?: number;
   /** Request mode (structural only): "cors" | "no-cors" | "same-origin" | "navigate". */
   mode?: string;
-  /** Credentials mode: "omit" | "same-origin" | "include". */
+  /**
+   * Credentials mode: "omit" | "same-origin" | "include". Default "include".
+   *
+   * Aike default (no `fetch_cors` feature): "same-origin" also behaves as
+   * "include", as there is no client origin to scope cookies to.
+   */
   credentials?: "omit" | "same-origin" | "include";
   /** Cache mode (structural only). */
   cache?: string;
@@ -460,9 +465,9 @@ declare class Request {
   readonly referrer: string;
   /** Referrer policy. */
   readonly referrerPolicy: string;
-  /** Request mode. */
+  /** Request mode. Default "cors"; not enforced without `fetch_cors`. */
   readonly mode: string;
-  /** Credentials mode. */
+  /** Credentials mode, as given. See {@link RequestInit.credentials}. */
   readonly credentials: string;
   /** Cache mode. */
   readonly cache: string;

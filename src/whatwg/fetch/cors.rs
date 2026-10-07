@@ -7,7 +7,7 @@
 //! gate driven through the transport's neutral [`BeforeHopHook`](crate::
 //! http::client::transport::BeforeHopHook).
 //!
-//! Gated by the `fetch_browser` feature. With the feature disabled the
+//! Gated by the `fetch_cors` feature. With the feature disabled the
 //! decision functions below compile to constant stubs (`false` / always-pass),
 //! which lets LLVM fold away every browser-only branch in the fetch pipeline;
 //! the engine then behaves like a plain HTTP client. The preflight execution
@@ -48,7 +48,7 @@ pub(crate) fn serialized_origin(client_origin: Option<&str>) -> String {
 /// algorithm (their origin is the client's), so they are never cross-origin.
 /// Treating them as cross-origin would wrongly CORS-taint `fetch("data:...")`
 /// (default `cors` mode) and fail the response CORS check.
-#[cfg(feature = "fetch_browser")]
+#[cfg(feature = "fetch_cors")]
 pub(crate) fn is_cross_origin(client_origin: Option<&str>, url: &str) -> bool {
     if url.to_ascii_lowercase().starts_with("data:") {
         return false;
@@ -64,7 +64,7 @@ pub(crate) fn is_cross_origin(client_origin: Option<&str>, url: &str) -> bool {
 
 /// Server build: no client-origin concept exists, so nothing is ever
 /// cross-origin (every fetch behaves like a plain same-origin request).
-#[cfg(not(feature = "fetch_browser"))]
+#[cfg(not(feature = "fetch_cors"))]
 pub(crate) fn is_cross_origin(_client_origin: Option<&str>, _url: &str) -> bool {
     false
 }
@@ -76,20 +76,20 @@ pub(crate) fn is_cross_origin(_client_origin: Option<&str>, _url: &str) -> bool 
 ///
 /// The transport layer inlines the identical rule for per-hop recomputation;
 /// this copy drives the initial request header built here.
-#[cfg(feature = "fetch_browser")]
+#[cfg(feature = "fetch_cors")]
 pub(crate) fn should_append_origin(method: &str, cors_tainted: bool) -> bool {
     let safe_method = method.eq_ignore_ascii_case("GET") || method.eq_ignore_ascii_case("HEAD");
     !safe_method || cors_tainted
 }
 
 /// Server build: no `Origin` header is ever appended.
-#[cfg(not(feature = "fetch_browser"))]
+#[cfg(not(feature = "fetch_cors"))]
 pub(crate) fn should_append_origin(_method: &str, _cors_tainted: bool) -> bool {
     false
 }
 
 /// CORS-safelisted method (Fetch spec): GET, HEAD, or POST (case-insensitive).
-#[cfg(feature = "fetch_browser")]
+#[cfg(feature = "fetch_cors")]
 pub(crate) fn cors_safelisted_method(method: &str) -> bool {
     matches!(
         method.to_ascii_uppercase().as_str(),
@@ -127,7 +127,7 @@ fn is_cors_unsafe_request_header(name: &str, value: &str) -> bool {
 /// A preflight is required when the method is not CORS-safelisted, or when any
 /// request header is CORS-unsafe (non-safelisted and not UA-controlled).
 /// Credentials mode on its own does not force a preflight.
-#[cfg(feature = "fetch_browser")]
+#[cfg(feature = "fetch_cors")]
 pub(crate) fn needs_preflight(
     method: &str,
     headers: &[(String, String)],
@@ -145,7 +145,7 @@ pub(crate) fn needs_preflight(
 }
 
 /// Server build: no CORS taint exists, so no request ever needs a preflight.
-#[cfg(not(feature = "fetch_browser"))]
+#[cfg(not(feature = "fetch_cors"))]
 pub(crate) fn needs_preflight(
     _method: &str,
     _headers: &[(String, String)],
@@ -202,7 +202,7 @@ pub(crate) fn cors_check(
 ///
 /// `data:` URLs are same-origin with any client per the Fetch scheme fetch
 /// algorithm, so they never trip the check regardless of the client origin.
-#[cfg(feature = "fetch_browser")]
+#[cfg(feature = "fetch_cors")]
 pub(crate) fn same_origin_violation(
     client_origin: Option<&str>,
     final_url: &str,
@@ -225,7 +225,7 @@ pub(crate) fn same_origin_violation(
 }
 
 /// Server build: no same-origin mode semantics; the check never fires.
-#[cfg(not(feature = "fetch_browser"))]
+#[cfg(not(feature = "fetch_cors"))]
 pub(crate) fn same_origin_violation(
     _client_origin: Option<&str>,
     _final_url: &str,
@@ -315,7 +315,7 @@ pub(crate) fn join_request_headers(names: &[String]) -> String {
 ///
 /// Constructed by the shared fetch pipeline in both builds; only browser
 /// builds ever read the fields.
-#[cfg_attr(not(feature = "fetch_browser"), allow(dead_code))]
+#[cfg_attr(not(feature = "fetch_cors"), allow(dead_code))]
 pub(crate) struct PreflightCtx {
     /// Whether a preflight is ever needed for this request (method or header
     /// not CORS-safelisted). Drives the per-hop decision once tainted.
@@ -337,7 +337,7 @@ pub(crate) struct PreflightCtx {
     pub user_agent: String,
 }
 
-#[cfg(feature = "fetch_browser")]
+#[cfg(feature = "fetch_cors")]
 mod preflight {
     use std::{
         collections::HashMap,
@@ -720,11 +720,11 @@ mod preflight {
     }
 }
 
-#[cfg(feature = "fetch_browser")]
+#[cfg(feature = "fetch_cors")]
 pub(crate) use preflight::make_before_hop_hook;
 
 /// Server build: no client-origin concept exists, so no hop ever needs a gate.
-#[cfg(not(feature = "fetch_browser"))]
+#[cfg(not(feature = "fetch_cors"))]
 pub(crate) fn make_before_hop_hook(
     _pf: Option<PreflightCtx>,
 ) -> Option<crate::http::client::transport::BeforeHopHook> {

@@ -583,6 +583,7 @@ fn js_listen(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     // are rejected rather than coerced)
     let mut port: u16 = 8080;
     let mut host: String = "0.0.0.0".into();
+    let mut cors = true;
 
     if cc.length() > 0 {
         let Some(opts) = cc.arg(0).as_object() else {
@@ -610,6 +611,14 @@ fn js_listen(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 return Err(ctx.throw_type_error("`host` must be a string"));
             };
             host = s.content().encode_utf8(false).to_string();
+        }
+
+        let v = opts.get_property_str(ctx, "cors")?;
+        if !v.is_undefined() {
+            let Some(b) = v.as_bool() else {
+                return Err(ctx.throw_type_error("`cors` must be a boolean"));
+            };
+            cors = b;
         }
     }
 
@@ -725,7 +734,7 @@ fn js_listen(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     };
 
     // Spawn the unified axum service
-    let handle = match spawn_http_server(router, host, port) {
+    let handle = match spawn_http_server(router, host, port, cors) {
         Ok(h) => h,
         Err(e) => {
             return Err(ctx.throw_internal_error(&e));

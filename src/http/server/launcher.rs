@@ -29,8 +29,13 @@ pub(crate) fn spawn_http_server(
     router: Router,
     host: String,
     port: u16,
+    cors: bool,
 ) -> Result<ServerHandle, String> {
-    let router = router.layer(CorsLayer::permissive());
+    let router = if cors {
+        router.layer(CorsLayer::permissive())
+    } else {
+        router
+    };
 
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
     let is_running = Arc::new(AtomicBool::new(true));

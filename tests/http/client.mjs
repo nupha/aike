@@ -20,6 +20,13 @@ const TIMEOUT = 10;
 // （example.com 等外部站点超时/缺头会导致测试随机失败）
 const PORT = 18123;
 const BASE = `http://127.0.0.1:${PORT}`;
+
+// 把客户端 origin 钉成本服务器，测试请求就是同源的。
+// 开启 fetch_cors 时，无 document origin 的脚本发起的请求会被判为跨域，
+// `fetch()` 合法地返回 `type: "cors"`；钉住 origin 后响应才是 `basic`，
+// 与不受 CORS 约束的 HttpClient 一致。CORS 行为由 tests/whatwg/fetch_cors.mjs 专测。
+globalThis.self = { location: { origin: BASE, href: `${BASE}/` } };
+
 const svr = new HttpServer();
 svr.get("/", (req, res) => {
   res.setHeader("content-type", "text/html");
@@ -346,29 +353,32 @@ function testResponseBody() {
           );
         });
       })
-      // Response.blob()
+      // Response.blob() — 按 WHATWG 返回 Blob（不是 Uint8Array）
       .then(() => {
         const r = new Response("blobby");
         return r.blob().then((b) => {
-          check(
-            "Response.blob() Uint8Array",
-            b instanceof Uint8Array,
-            `got ${b.constructor.name}`,
-          );
-          check("Response.blob() length", b.length === 6, `got ${b.length}`);
+          check("Response.blob() Blob", b instanceof Blob, `got ${b.constructor.name}`);
+          check("Response.blob() size", b.size === 6, `got ${b.size}`);
+          return b.bytes();
         });
       })
-      // Response.formData() 应同步抛 TypeError
-      .then(() => {
-        const r = new Response("x");
-        let threw = false;
-        try {
-          r.formData();
-        } catch (e) {
-          threw = true;
-        }
-        check("Response.formData throws", threw);
-      })
+      .then((bytes) =>
+        check("Response.blob() bytes()", bytes.length === 6, `got ${bytes.length}`),
+      )
+      // Response.formData() 按规范返回 rejected promise，而非同步抛
+      .then(() =>
+        new Response("x")
+          .formData()
+          .then(
+            () => check("Response.formData rejects", false, "unexpectedly resolved"),
+            (e) =>
+              check(
+                "Response.formData rejects TypeError",
+                e instanceof TypeError,
+                `got ${e}`,
+              ),
+          ),
+      )
       // Response.body async iteration
       .then(() => {
         const r = new Response("iterable");
@@ -419,7 +429,9 @@ function testRequest() {
     req.redirect === "follow",
     `got ${req.redirect}`,
   );
-  check("Request signal null (no signal)", req.signal === null);
+  // 按 WHATWG，Request.signal 恒为 AbortSignal 对象（无 signal 时是新建的
+  // 默认 signal），不会是 null。
+  check("Request signal default AbortSignal", req.signal instanceof AbortSignal);
   check("Request bodyUsed pre", req.bodyUsed === false);
 
   // RequestInit 字段透传
