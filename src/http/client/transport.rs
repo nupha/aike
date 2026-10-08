@@ -3,8 +3,7 @@
 
 use std::{error::Error, future::Future, pin::Pin, sync::Arc, time::Duration};
 
-use base64::Engine;
-use reqwest::cookie::CookieStore;
+use base64::{Engine, alphabet, engine::general_purpose};
 use zuqe::{ErrorKind, Exception, JSResult, JSValue, ScopedContext};
 
 use super::headers::normalize_header_value;
@@ -96,39 +95,187 @@ pub(crate) struct TransportResponse {
     pub origin_opaque: bool,
 }
 
-/// Decode a `data:` URL (RFC 2397) into body bytes and a media type.
-/// Returns `(content_type, body)`. Decoding failures produce an error
-/// description string rather than panicking.
+/// WHATWG "data: URL processor": returns `(mimeType, body)`. A missing comma
+/// or invalid base64 is a failure (a network error in fetch).
 fn decode_data_url(url: &str) -> Result<(String, Vec<u8>), String> {
-    // Strip the "data:" prefix (already validated by caller).
-    let rest = &url["data:".len()..];
-    // Split mediatype from data at the first comma.
-    let (meta, data) = match rest.find(',') {
-        Some(i) => (&rest[..i], &rest[i + 1..]),
-        None => return Err("data: URL has no comma separator".into()),
-    };
-    let is_base64 = meta.to_ascii_lowercase().ends_with(";base64");
-    let media_type = if is_base64 {
-        &meta[..meta.len() - ";base64".len()]
-    } else {
-        meta
-    };
-    let content_type = if media_type.is_empty() {
-        "text/plain;charset=US-ASCII".to_string()
-    } else {
-        media_type.to_string()
+    // Exclude the fragment, then strip the "data:" scheme.
+    let input = url["data:".len()..].split('#').next().unwrap_or_default();
+    let (mime_raw, body) = input
+        .split_once(',')
+        .ok_or_else(|| "data: URL has no comma separator".to_string())?;
+
+    // A trailing ";base64" (case-insensitive, spaces allowed before ';') marks a base64 body.
+    let trimmed = mime_raw.trim_matches(is_ascii_ws);
+    let (mime, is_base64) = match trimmed.len().checked_sub("base64".len()) {
+        Some(i) if trimmed.is_char_boundary(i) && trimmed[i..].eq_ignore_ascii_case("base64") => {
+            match trimmed[..i].trim_end_matches(' ').strip_suffix(';') {
+                Some(m) => (m, true),
+                None => (trimmed, false),
+            }
+        }
+        _ => (trimmed, false),
     };
 
-    // Payload is percent-decoded unless base64.
-    let bytes = if is_base64 {
-        let trimmed: String = data.chars().filter(|c| !c.is_whitespace()).collect();
-        base64::engine::general_purpose::STANDARD
-            .decode(trimmed)
-            .map_err(|e| format!("invalid base64 in data: URL: {e}"))?
+    // An empty or unparsable MIME type falls back to the spec default.
+    let mime = if mime.starts_with(';') {
+        format!("text/plain{mime}")
     } else {
-        percent_decode(data.as_bytes())
+        mime.to_string()
+    };
+    let content_type =
+        parse_mime(&mime).unwrap_or_else(|| "text/plain;charset=US-ASCII".to_string());
+
+    let bytes = percent_decode(body.as_bytes());
+    let bytes = if is_base64 {
+        forgiving_base64_decode(&bytes).map_err(|e| format!("invalid base64 in data: URL: {e}"))?
+    } else {
+        bytes
     };
     Ok((content_type, bytes))
+}
+
+/// ASCII whitespace as defined by the WHATWG Infra standard.
+fn is_ascii_ws(c: char) -> bool {
+    matches!(c, '\t' | '\n' | '\x0c' | '\r' | ' ')
+}
+
+/// WHATWG "forgiving-base64 decode": padding is optional and ASCII whitespace is ignored.
+fn forgiving_base64_decode(input: &[u8]) -> Result<Vec<u8>, String> {
+    const ENGINE: general_purpose::GeneralPurpose = general_purpose::GeneralPurpose::new(
+        &alphabet::STANDARD,
+        general_purpose::NO_PAD.with_decode_allow_trailing_bits(true),
+    );
+    let mut data: Vec<u8> = input
+        .iter()
+        .copied()
+        .filter(|b| !matches!(b, b'\t' | b'\n' | b'\x0c' | b'\r' | b' '))
+        .collect();
+    if data.len() % 4 == 0 {
+        if data.ends_with(b"==") {
+            data.truncate(data.len() - 2);
+        } else if data.ends_with(b"=") {
+            data.truncate(data.len() - 1);
+        }
+    }
+    if data.len() % 4 == 1 {
+        return Err("invalid length".into());
+    }
+    if data
+        .iter()
+        .any(|b| !(b.is_ascii_alphanumeric() || *b == b'+' || *b == b'/'))
+    {
+        return Err("invalid character".into());
+    }
+    ENGINE.decode(data).map_err(|e| e.to_string())
+}
+
+/// HTTP token code point (RFC 9110 `tchar`).
+fn is_token(s: &str) -> bool {
+    !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || "!#$%&'*+-.^_`|~".contains(c))
+}
+
+/// WHATWG MIME Sniffing "parse a MIME type", returning the serialized form.
+/// Malformed parameters are skipped; a malformed type or subtype is `None`.
+fn parse_mime(input: &str) -> Option<String> {
+    let input = input.trim_matches(is_ascii_ws);
+    let (ty, rest) = input.split_once('/')?;
+    let (sub, params) = match rest.split_once(';') {
+        Some((s, p)) => (s.trim_end_matches(is_ascii_ws), p),
+        None => (rest.trim_end_matches(is_ascii_ws), ""),
+    };
+    if !is_token(ty) || !is_token(sub) {
+        return None;
+    }
+    let mut out = format!("{}/{}", ty.to_ascii_lowercase(), sub.to_ascii_lowercase());
+
+    let chars: Vec<char> = params.chars().collect();
+    let len = chars.len();
+    let mut seen: Vec<String> = Vec::new();
+    let mut pos = 0;
+    while pos < len {
+        while pos < len && chars[pos].is_ascii_whitespace() {
+            pos += 1;
+        }
+        let start = pos;
+        while pos < len && chars[pos] != ';' && chars[pos] != '=' {
+            pos += 1;
+        }
+        let name: String = chars[start..pos]
+            .iter()
+            .collect::<String>()
+            .to_ascii_lowercase();
+        if pos >= len {
+            break;
+        }
+        if chars[pos] == ';' {
+            pos += 1;
+            continue;
+        }
+        pos += 1; // skip '='
+        if pos >= len {
+            break;
+        }
+        let value: String = if chars[pos] == '"' {
+            // Quoted-string: backslash escapes the next character.
+            pos += 1;
+            let mut v = String::new();
+            while pos < len {
+                match chars[pos] {
+                    '\\' if pos + 1 < len => {
+                        v.push(chars[pos + 1]);
+                        pos += 2;
+                    }
+                    '"' => {
+                        pos += 1;
+                        break;
+                    }
+                    c => {
+                        v.push(c);
+                        pos += 1;
+                    }
+                }
+            }
+            while pos < len && chars[pos] != ';' {
+                pos += 1;
+            }
+            v
+        } else {
+            let start = pos;
+            while pos < len && chars[pos] != ';' {
+                pos += 1;
+            }
+            let v: String = chars[start..pos].iter().collect();
+            let v = v.trim_end_matches(is_ascii_ws).to_string();
+            if v.is_empty() {
+                continue;
+            }
+            v
+        };
+        let value_ok = value
+            .chars()
+            .all(|c| c == '\t' || (' '..='~').contains(&c) || ('\u{80}'..='\u{ff}').contains(&c));
+        if is_token(&name) && value_ok && !seen.contains(&name) {
+            out.push(';');
+            out.push_str(&name);
+            out.push('=');
+            if is_token(&value) {
+                out.push_str(&value);
+            } else {
+                out.push('"');
+                for c in value.chars() {
+                    if c == '"' || c == '\\' {
+                        out.push('\\');
+                    }
+                    out.push(c);
+                }
+                out.push('"');
+            }
+            seen.push(name);
+        }
+    }
+    Some(out)
 }
 
 /// Fetch spec: multiple identical `Content-Length` response headers combine into
@@ -312,7 +459,7 @@ async fn follow_redirects<F, Fut>(
     send: F,
 ) -> Result<(reqwest::Response, bool), TransportError>
 where
-    F: Fn(String, String, String, bool, bool) -> Fut,
+    F: Fn(String, String, String, bool, bool, bool) -> Fut,
     Fut: std::future::Future<Output = Result<reqwest::Response, reqwest::Error>>,
 {
     let mut url = start_url.to_string();
@@ -373,13 +520,22 @@ where
             method.clone(),
             url.clone(),
             referrer.clone(),
+            tainted,
             origin_opaque,
             cross_origin_hop,
         )
         .await
-        .map_err(|e| TransportError {
-            code: classify(&e),
-            message: format!("request failed: {e}"),
+        .map_err(|e| {
+            let mut msg = format!("request failed: {e}");
+            let mut src = e.source();
+            while let Some(s) = src {
+                msg.push_str(&format!("; caused by: {s}"));
+                src = s.source();
+            }
+            TransportError {
+                code: classify(&e),
+                message: msg,
+            }
         })?;
 
         // A redirect without a usable `Location` is delivered as-is; WPT serves
@@ -571,6 +727,7 @@ pub(crate) async fn perform_request(
     let send_once = |method: String,
                      url: String,
                      referrer: String,
+                     tainted: bool,
                      origin_opaque: bool,
                      cross_origin_hop: bool| {
         let method = reqwest::Method::from_bytes(method.as_bytes()).unwrap_or(reqwest::Method::GET);
@@ -598,20 +755,19 @@ pub(crate) async fn perform_request(
             }
         }
         // For `cors`-mode requests, recompute the `Origin` header for this hop.
-        // Per the WHATWG fetch "append a request `Origin` header" algorithm the
-        // value is set whenever the method is not GET/HEAD, or when the request is
-        // CORS-tainted (a cross-origin `cors`-mode hop) — regardless of whether the
-        // *current* URL is cross-origin. So a same-origin `cors`-mode POST still
-        // emits `Origin` (= client origin), and a cross-origin GET does too. An
-        // opaque origin (turned opaque by a cross-origin redirect) serializes to the
-        // literal `null`. `Origin` is a forbidden request header, so any
-        // caller-provided value is replaced. Non-cors requests keep whatever
-        // `Origin` the caller set.
+        // Fetch spec "append a request Origin header": a request whose response
+        // tainting is "cors" ALWAYS carries `Origin` (so every hop of a
+        // cross-origin cors request keeps it, including hops that stay on the
+        // same origin as the previous one). Otherwise a non-GET/HEAD request
+        // carries it, and a `no-cors` one serializes to `null`. An origin made
+        // opaque by a cross-origin redirect serializes to the literal `null`.
+        // `Origin` is a forbidden request header, so any caller-provided value
+        // is replaced. Non-cors requests keep whatever `Origin` the caller set.
         if req.cors_mode {
             headers.retain(|(k, _)| !k.eq_ignore_ascii_case("origin"));
             let origin_value: Option<String> = if origin_opaque {
                 Some("null".to_string())
-            } else if !method_is_safe(method.as_str()) || cross_origin_hop {
+            } else if tainted || !method_is_safe(method.as_str()) {
                 Some(req.cors_client_origin.clone())
             } else {
                 None
@@ -677,12 +833,14 @@ pub(crate) async fn perform_request(
     let send_with_retry = move |method: String,
                                 url: String,
                                 referrer: String,
+                                tainted: bool,
                                 origin_opaque: bool,
                                 cross_origin_hop: bool| {
         let first = send_once(
             method.clone(),
             url.clone(),
             referrer.clone(),
+            tainted,
             origin_opaque,
             cross_origin_hop,
         );
@@ -690,7 +848,15 @@ pub(crate) async fn perform_request(
             match first.await {
                 Ok(r) if replayable && r.status() == reqwest::StatusCode::MISDIRECTED_REQUEST => {
                     log::debug!("421 on {url}; retrying once on a fresh connection");
-                    send_once(method, url, referrer, origin_opaque, cross_origin_hop).await
+                    send_once(
+                        method,
+                        url,
+                        referrer,
+                        tainted,
+                        origin_opaque,
+                        cross_origin_hop,
+                    )
+                    .await
                 }
                 other => other,
             }
@@ -737,6 +903,7 @@ pub(crate) async fn perform_request(
                 req.method.clone(),
                 req.url.clone(),
                 req.referrer.clone(),
+                cors_tainted,
                 false,
                 false,
             )

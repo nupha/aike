@@ -6,10 +6,10 @@
 //! In a browser the client origin is the document's origin; here it is read
 //! from the `self.location` shim that WPT runners inject, with a fallback to
 //! plain `__wptClientUrl`/`__wptClientOrigin` globals for runners that cannot
-//! decorate the engine's native `self`. Gated by `fetch_cors`: server
+//! decorate the engine's native `self`. Gated by `fetch_browser`: server
 //! builds have no location/origin concept at all.
 
-#[cfg(feature = "fetch_cors")]
+#[cfg(feature = "fetch_browser")]
 use zuqe::JSValue;
 use zuqe::ScopedContext;
 
@@ -17,7 +17,7 @@ use zuqe::ScopedContext;
 /// for same-origin checks, the default referrer, and CORS taint decisions.
 /// A failed property read is expected and must not leak a pending exception,
 /// so each probe takes/discards its error.
-#[cfg(feature = "fetch_cors")]
+#[cfg(feature = "fetch_browser")]
 pub(crate) fn resolve_client_origin(ctx: &mut ScopedContext) -> (Option<String>, Option<String>) {
     let loc = ctx
         .global_obj()
@@ -51,14 +51,14 @@ pub(crate) fn resolve_client_origin(ctx: &mut ScopedContext) -> (Option<String>,
 
 /// Server build: no location/origin concept — every fetch runs origin-less
 /// (null origin).
-#[cfg(not(feature = "fetch_cors"))]
+#[cfg(not(feature = "fetch_browser"))]
 pub(crate) fn resolve_client_origin(_ctx: &mut ScopedContext) -> (Option<String>, Option<String>) {
     (None, None)
 }
 
 /// Read a non-nullish value as an owned UTF-8 string; `None` on undefined/null
 /// or a failed conversion.
-#[cfg(feature = "fetch_cors")]
+#[cfg(feature = "fetch_browser")]
 fn js_string_of(ctx: &mut ScopedContext, v: &JSValue) -> Option<String> {
     if v.is_undefined_or_null() {
         None
@@ -71,7 +71,7 @@ fn js_string_of(ctx: &mut ScopedContext, v: &JSValue) -> Option<String> {
 
 /// Read a global property as an owned UTF-8 string; `None` when absent/nullish
 /// or empty.
-#[cfg(feature = "fetch_cors")]
+#[cfg(feature = "fetch_browser")]
 fn global_string(ctx: &mut ScopedContext, key: &str) -> Option<String> {
     ctx.global_obj()
         .get_property_str(ctx, key)

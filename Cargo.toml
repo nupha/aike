@@ -13,14 +13,19 @@ typescript = [
 ]
 enable_eval_log = [] # 启用 DeepEval 评估日志采集
 # Browser-security layer of the Fetch API (WHATWG CORS protocol, request
-# modes/tainting, client-origin resolution, referrer policy inputs).
+# modes/tainting, client-origin resolution, referrer policy inputs, and the
+# shared cookie jar backing `cookieStore`).
 #
 # Off by default: every fetch() is a plain HTTP request, with no preflight, no
 # response-header filtering, and no CORS check on the response. Enable it for
-# browser-shaped fetches (`cargo build -F fetch_cors`), e.g. a browser-side
+# browser-shaped fetches (`cargo build -F fetch_browser`), e.g. a browser-side
 # test harness driven by WPT, where a cross-origin response without
 # `Access-Control-Allow-Origin` must fail.
-fetch_cors = []
+#
+# This only controls whether the machinery is *compiled in*. Which behaviour a
+# running script gets is selected per-runtime through the `fetch.cors`,
+# `fetch.cookie` and `fetch.allowInsecureTLS` accessors (all default off).
+fetch_browser = []
 mimalloc = ["dep:mimalloc"]
 
 default = ["typescript", "mimalloc"]
@@ -155,6 +160,7 @@ tokio-tungstenite = { version = "0.30", default-features = false, features = [
     "connect",
 ] }
 url = "2"
+cookie_store = "0.22"
 base64 = "0.22"
 flate2 = "1"
 sha2 = "0.11"

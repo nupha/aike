@@ -37,14 +37,10 @@ impl GcTrace for HttpClientPayload {
 }
 
 impl HttpClientPayload {
-    /// Return a client for the given target URL, choosing the insecure bucket
-    /// only when the URL's host is allow-listed via `AIKE_TLS_INSECURE_HOSTS`.
-    fn client_for(&self, url_str: &str) -> reqwest::Client {
-        let insecure = url::Url::parse(url_str)
-            .ok()
-            .and_then(|u| u.host_str().map(|h| (h.to_string(), u.port())))
-            .map(|(h, p)| crate::http::client::config::tls_insecure_for_host(&h, p))
-            .unwrap_or(false);
+    /// Return a client for this instance, using the insecure bucket only when
+    /// the instance was created with `rejectUnauthorized: true`.
+    fn client_for(&self) -> reqwest::Client {
+        let insecure = self.cfg.danger_accept_invalid_certs;
 
         if let Some(c) = self.clients.read().unwrap().get(&insecure) {
             return c.clone();
@@ -295,8 +291,8 @@ fn js_do_request(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         use_shared_cookies: false,
     };
 
-    // Choose the client bucket by target host (AIKE_TLS_INSECURE_HOSTS).
-    let client = payload.client_for(&req.url);
+    // Pick the client bucket (insecure only when `rejectUnauthorized`).
+    let client = payload.client_for();
 
     let result_slot = PromiseResultSlot::<Result<TransportResponse, RequestError>>::new();
     let promise =

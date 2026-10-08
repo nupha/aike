@@ -8,9 +8,12 @@
 
 use std::{
     net::SocketAddr,
-    sync::{Arc, OnceLock},
+    sync::{Arc, OnceLock, RwLock},
     time::Duration,
 };
+
+use reqwest::header::HeaderValue;
+use url::Url;
 
 /// Protocol version preference.
 #[derive(Clone, Debug, Default)]
@@ -88,9 +91,9 @@ impl HttpClientConfig {
 
     /// Build a `reqwest::Client`, optionally skipping cert validation.
     ///
-    /// `insecure` overrides `self.danger_accept_invalid_certs`: when true the
-    /// client accepts *any* certificate (test/dev escape hatch for self-signed
-    /// hosts). Validation stays on for every other host.
+    /// When `insecure` is true the client accepts *any* certificate (the
+    /// `fetch.allowInsecureTLS` / per-instance `rejectUnauthorized` escape
+    /// hatch). Otherwise normal validation applies.
     pub fn build_http_client_ex(&self, insecure: bool) -> Result<reqwest::Client, String> {
         let redirect = if self.follow_redirects {
             reqwest::redirect::Policy::limited(10)
@@ -128,7 +131,7 @@ impl HttpClientConfig {
         }
         // reqwest also reads http_proxy / https_proxy env vars by default.
 
-        // --- TLS: skip validation (AIKE_TLS_INSECURE_HOSTS) ---
+        // --- TLS: skip validation (fetch.allowInsecureTLS / rejectUnauthorized) ---
         if insecure {
             builder = builder.danger_accept_invalid_certs(true);
         }
@@ -172,13 +175,71 @@ impl HttpClientConfig {
     }
 }
 
+/// Shared cookie jar backing both `fetch()` and the `cookieStore` API.
+///
+/// Mirrors `reqwest::cookie::Jar` — which wraps the very same
+/// `cookie_store::CookieStore` — but additionally exposes the store so the
+/// Cookie Store API can enumerate and remove cookies. `fetch` stores/reads
+/// through the same `add_cookie_str`/`cookies` surface, so the HTTP layer and
+/// the script API operate on a single store, as the spec requires.
+pub(crate) struct SharedCookieJar {
+    store: RwLock<cookie_store::CookieStore>,
+}
+
+impl Default for SharedCookieJar {
+    fn default() -> Self {
+        Self {
+            store: RwLock::new(cookie_store::CookieStore::new()),
+        }
+    }
+}
+
+impl SharedCookieJar {
+    /// Parse a `Set-Cookie` value and store it as received from `url`.
+    /// Mirrors `reqwest::cookie::Jar::add_cookie_str`, including its use of the
+    /// `cookie` crate for parsing (re-exported by `cookie_store`).
+    pub(crate) fn add_cookie_str(&self, cookie: &str, url: &Url) {
+        let cookies = cookie_store::RawCookie::parse(cookie)
+            .ok()
+            .map(|c| c.into_owned())
+            .into_iter();
+        self.store
+            .write()
+            .unwrap()
+            .store_response_cookies(cookies, url);
+    }
+
+    /// Build the `Cookie` request header for `url`. Mirrors `reqwest`'s
+    /// `Jar`: names/values joined with `"; "` in retrieval order.
+    pub(crate) fn cookies(&self, url: &Url) -> Option<HeaderValue> {
+        let s = self
+            .store
+            .read()
+            .unwrap()
+            .get_request_values(url)
+            .map(|(name, value)| format!("{name}={value}"))
+            .collect::<Vec<_>>()
+            .join("; ");
+        if s.is_empty() {
+            return None;
+        }
+        HeaderValue::from_str(&s).ok()
+    }
+
+    /// Run `f` with read access to the underlying store (Cookie Store API).
+    #[cfg(feature = "fetch_browser")]
+    pub(crate) fn with_store<R>(&self, f: impl FnOnce(&cookie_store::CookieStore) -> R) -> R {
+        f(&self.store.read().unwrap())
+    }
+}
+
 /// The global cookie jar shared by WHATWG `fetch()` clients. Cookies persist
 /// across separate `fetch()` calls, matching the browser's per-origin cookie
 /// store. The fetch path reads/writes it manually according to the request's
 /// `credentials` mode.
-pub(crate) fn global_cookie_jar() -> Arc<reqwest::cookie::Jar> {
-    static JAR: OnceLock<Arc<reqwest::cookie::Jar>> = OnceLock::new();
-    JAR.get_or_init(|| Arc::new(reqwest::cookie::Jar::default()))
+pub(crate) fn global_cookie_jar() -> Arc<SharedCookieJar> {
+    static JAR: OnceLock<Arc<SharedCookieJar>> = OnceLock::new();
+    JAR.get_or_init(|| Arc::new(SharedCookieJar::default()))
         .clone()
 }
 
@@ -233,126 +294,4 @@ pub(crate) fn reorder_cookie_header(value: &str) -> String {
         .map(|(_, pair)| pair)
         .collect::<Vec<_>>()
         .join("; ")
-}
-
-/// Host patterns (either `host` or `host:port`) for which TLS certificate
-/// validation is skipped. Populated once from the `AIKE_TLS_INSECURE_HOSTS`
-/// env var, as a comma-separated list.
-///
-/// Each entry may contain `*` wildcards, matching any run of characters
-/// (including dots), so `*.web-platform.test` covers every WPT subdomain and
-/// `*.web-platform.test:8443` pins it to one port. Entries without a port
-/// match any port.
-///
-/// This is a test/dev escape hatch for self-signed servers (e.g. WPT's
-/// `web-platform.test:8443`). It is matched per-request against the target
-/// URL's host/port, so validation stays on for every other host.
-fn insecure_hosts() -> &'static Vec<String> {
-    use std::sync::OnceLock;
-    static PATTERNS: OnceLock<Vec<String>> = OnceLock::new();
-    PATTERNS.get_or_init(|| {
-        std::env::var("AIKE_TLS_INSECURE_HOSTS")
-            .unwrap_or_default()
-            .split(',')
-            .map(|s| s.trim().to_ascii_lowercase())
-            .filter(|s| !s.is_empty())
-            .collect()
-    })
-}
-
-/// Glob match supporting `*` (any run of characters, including dots).
-///
-/// Greedy scan with backtracking to the last `*`: linear in practice and
-/// allocation-free, which keeps this cheap enough to run per request.
-fn glob_match(pattern: &str, text: &str) -> bool {
-    let (p, t): (Vec<char>, Vec<char>) = (pattern.chars().collect(), text.chars().collect());
-    let (mut pi, mut ti) = (0usize, 0usize);
-    // Position just after the most recent `*`, and where it last matched up to.
-    let (mut star, mut backtrack) = (None, 0usize);
-
-    while ti < t.len() {
-        if pi < p.len() && (p[pi] == t[ti]) {
-            pi += 1;
-            ti += 1;
-        } else if pi < p.len() && p[pi] == '*' {
-            star = Some(pi);
-            backtrack = ti;
-            pi += 1; // tentatively match zero characters
-        } else if let Some(s) = star {
-            // Mismatch: let the last `*` absorb one more character and retry.
-            pi = s + 1;
-            backtrack += 1;
-            ti = backtrack;
-        } else {
-            return false;
-        }
-    }
-    // Trailing `*`s may still match the empty remainder.
-    p[pi..].iter().all(|&c| c == '*')
-}
-
-/// Returns true if the given host (with optional port) is allow-listed to skip
-/// TLS certificate validation via `AIKE_TLS_INSECURE_HOSTS`.
-///
-/// A pattern containing `:` is matched against `host:port`; otherwise it is
-/// matched against the bare host, so it applies to every port.
-pub fn tls_insecure_for_host(host: &str, port: Option<u16>) -> bool {
-    let host = host.to_ascii_lowercase();
-    let with_port = port.map(|p| format!("{host}:{p}"));
-
-    insecure_hosts().iter().any(|pat| {
-        // Only treat the pattern as host:port when it pins an explicit port,
-        // so a bare `*` still means "any host, any port".
-        match (pat.rsplit_once(':'), &with_port) {
-            (Some((_, port_pat)), Some(hp)) if !port_pat.contains('*') => glob_match(pat, hp),
-            _ => glob_match(pat, &host),
-        }
-    })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::glob_match;
-
-    #[test]
-    fn glob_matches_wildcards() {
-        // Exact and full wildcard.
-        assert!(glob_match("web-platform.test", "web-platform.test"));
-        assert!(glob_match("*", "anything.example"));
-        assert!(!glob_match("web-platform.test", "not-web-platform.test"));
-
-        // `*` spans dots, so it covers nested WPT subdomains.
-        assert!(glob_match("*.web-platform.test", "www1.web-platform.test"));
-        assert!(glob_match(
-            "*.web-platform.test",
-            "www1.www2.web-platform.test"
-        ));
-        assert!(glob_match(
-            "*.web-platform.test",
-            "xn--lve-6lad.web-platform.test"
-        ));
-        // A bare `*.` prefix requires at least one leading label.
-        assert!(!glob_match("*.web-platform.test", "web-platform.test"));
-
-        // Suffix patterns must not match a longer, different domain.
-        assert!(!glob_match(
-            "*.web-platform.test",
-            "web-platform.test.evil.com"
-        ));
-
-        // host:port forms.
-        assert!(glob_match(
-            "*.web-platform.test:8443",
-            "www.web-platform.test:8443"
-        ));
-        assert!(!glob_match(
-            "*.web-platform.test:8443",
-            "www.web-platform.test:9999"
-        ));
-
-        // Backtracking: repeated literals after a wildcard.
-        assert!(glob_match("*test", "web-platform.test"));
-        assert!(glob_match("a*b*c", "axxbyyc"));
-        assert!(!glob_match("a*b*c", "axxbyy"));
-    }
 }

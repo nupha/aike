@@ -1,9 +1,9 @@
 // CORS probe for the WHATWG fetch() implementation.
 //
 // Runs a battery of fetches against a deliberately CORS-hostile server and
-// prints one `PROBE <name>: <outcome>` line per probe. The same script is run
-// against builds with and without the `fetch_cors` feature: the outcome lines
-// must differ exactly where CORS enforcement applies.
+// prints one `PROBE <name>: <outcome>` line per probe. Requires the
+// `fetch_browser` feature (the machinery must be compiled in) and turns CORS
+// enforcement on for this runtime via `fetch.cors = true`.
 //
 // The server is aike's own `HttpServer` started with `listen({ cors: false })`,
 // so it attaches no permissive CORS layer and every `Access-Control-*` header
@@ -24,6 +24,9 @@ const CLIENT_ORIGIN = "http://client.test:8080";
 globalThis.self = {
   location: { origin: CLIENT_ORIGIN, href: `${CLIENT_ORIGIN}/doc.html` },
 };
+
+// Enable CORS enforcement for this runtime (default is off).
+fetch.cors = true;
 
 const svr = new HttpServer();
 

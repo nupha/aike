@@ -106,6 +106,10 @@ pub(crate) struct ReadableControllerPayload {
     pub(crate) pull_algorithm: JSValue,
     pub(crate) cancel_algorithm: JSValue,
     pub(crate) size_algorithm: JSValue,
+    /// Chunks dequeued but not yet handed to a reader. They are out of `queue`
+    /// while `pull` runs (and `pull` may force a GC), so they are traced here.
+    /// Use `with_in_flight`, not this field directly.
+    in_flight: RefCell<Vec<JSValue>>,
     pub(crate) kind: ReadableControllerKind,
 }
 
@@ -125,6 +129,7 @@ impl ReadableControllerPayload {
             pull_algorithm: JSValue::UNDEFINED,
             cancel_algorithm: JSValue::UNDEFINED,
             size_algorithm: JSValue::UNDEFINED,
+            in_flight: RefCell::new(Vec::new()),
             kind: ReadableControllerKind::Default {
                 controller: None,
                 started: Cell::new(false),
@@ -153,6 +158,7 @@ impl ReadableControllerPayload {
             pull_algorithm: JSValue::UNDEFINED,
             cancel_algorithm: JSValue::UNDEFINED,
             size_algorithm: JSValue::UNDEFINED,
+            in_flight: RefCell::new(Vec::new()),
             kind: ReadableControllerKind::Byte {
                 byob_request: Rc::new(RefCell::new(None)),
                 pending_pull_intos: Rc::new(RefCell::new(Vec::new())),
@@ -168,6 +174,9 @@ impl ReadableControllerPayload {
 
     pub(crate) fn gc_trace(&self, gcx: &mut GcTraceCtx) {
         self.underlying_source.trace(gcx);
+        for v in self.in_flight.borrow().iter() {
+            v.trace(gcx);
+        }
         self.pull_algorithm.trace(gcx);
         self.cancel_algorithm.trace(gcx);
         self.size_algorithm.trace(gcx);
@@ -513,6 +522,16 @@ impl ReadableControllerPayload {
         &self.queue
     }
 
+    /// Run `f` with a traced slot for values that must survive JS re-entry.
+    /// Entries pushed by `f` are truncated when it returns, so the hold ends
+    /// with the closure, including on error.
+    pub(crate) fn with_in_flight<R>(&self, f: impl FnOnce(&RefCell<Vec<JSValue>>) -> R) -> R {
+        let base = self.in_flight.borrow().len();
+        let r = f(&self.in_flight);
+        self.in_flight.borrow_mut().truncate(base);
+        r
+    }
+
     pub(crate) fn queue_total_size(&self) -> f64 {
         self.queue_total_size.get()
     }
@@ -569,7 +588,6 @@ impl ReadableControllerPayload {
         ctx: &mut ScopedContext,
         pending: &Rc<RefCell<Vec<PullIntoDescriptor>>>,
         chunk: &JSValue,
-        queue: &mut Vec<QueueEntry>,
     ) -> Result<(), i32> {
         let chunk_bytes: Vec<u8> =
             match chunk.as_object().and_then(|o| TypedArray::try_from(o).ok()) {
@@ -582,32 +600,35 @@ impl ReadableControllerPayload {
         // triggers the patched Object.prototype.then getter.
         let mut resolved: Vec<(JSValue, JSValue)> = Vec::new();
 
-        loop {
-            let desc_bytes_needed = {
-                let mut descs = pending.borrow_mut();
-                // Remove detached descriptors at the front (user detached the buffer).
-                while let Some(d) = descs.first() {
-                    if d.view.is_detached() {
-                        descs.remove(0);
-                    } else {
-                        break;
+        // Every value in `resolved` is also held in the traced slot: once a
+        // descriptor leaves `pending`, nothing else traces it, and `subarray` /
+        // `resolve_fn` may run JS that GCs.
+        self.with_in_flight(|held| -> Result<(), i32> {
+            loop {
+                let desc_bytes_needed = {
+                    let mut descs = pending.borrow_mut();
+                    // Remove detached descriptors at the front (user detached the buffer).
+                    while let Some(d) = descs.first() {
+                        if d.view.is_detached() {
+                            descs.remove(0);
+                        } else {
+                            break;
+                        }
                     }
+                    match descs.first() {
+                        Some(d) => d.element_size - d.bytes_filled,
+                        None => break,
+                    }
+                };
+
+                let available = chunk_bytes.len() as u32 - src_offset;
+                let copy_len = desc_bytes_needed.min(available);
+
+                if copy_len == 0 {
+                    break;
                 }
-                match descs.first() {
-                    Some(d) => d.element_size - d.bytes_filled,
-                    None => break,
-                }
-            };
 
-            let available = chunk_bytes.len() as u32 - src_offset;
-            let copy_len = desc_bytes_needed.min(available);
-
-            if copy_len == 0 {
-                break;
-            }
-
-            // Copy bytes into the descriptor's view.
-            {
+                // Copy bytes into the descriptor's view.
                 let mut descs = pending.borrow_mut();
                 let desc = &mut descs[0];
                 desc.view.with_bytes_mut(|dest| {
@@ -622,35 +643,40 @@ impl ReadableControllerPayload {
                 if desc.bytes_filled == desc.element_size {
                     let n = desc.element_size;
                     let resolve_fn = desc.resolve_fn;
+                    held.borrow_mut().push(resolve_fn);
                     let filled = desc.view.invoke_str(
                         ctx,
                         "subarray",
                         &[JSValue::ZERO, JSValue::from(n)],
                     )?;
+                    held.borrow_mut().push(filled);
                     descs.remove(0);
                     resolved.push((resolve_fn, filled));
                 }
             }
-        }
 
-        // Resolve fully-filled descriptors now that all pending_pull_intos
-        // updates are complete — byobRequest will see null for consumers.
-        for (resolve_fn, filled) in resolved {
-            let result = make_iterator_result(ctx, filled, false)?;
-            resolve_fn.call(ctx, JSValue::UNDEFINED, &[result])?;
-        }
+            // Resolve fully-filled descriptors now that all pending_pull_intos
+            // updates are complete — byobRequest will see null for consumers.
+            for (resolve_fn, filled) in resolved {
+                let result = make_iterator_result(ctx, filled, false)?;
+                resolve_fn.call(ctx, JSValue::UNDEFINED, &[result])?;
+            }
+            Ok(())
+        })?;
 
-        // Push leftover bytes back to queue.
+        // Push leftover bytes back to queue. The queue is borrowed only here,
+        // never across the JS resolves above (a GC during them traces the queue).
         if src_offset < chunk_bytes.len() as u32 {
             let rest =
                 TypedArray::create_from_vec_u8(ctx, chunk_bytes[src_offset as usize..].to_vec())?;
-            queue.insert(
+            self.queue.borrow_mut().insert(
                 0,
                 QueueEntry {
                     chunk: JSValue::from(rest),
                     size: 1.0,
                 },
             );
+            self.queue_total_size.set(self.queue_total_size.get() + 1.0);
         }
 
         Ok(())
@@ -998,10 +1024,7 @@ impl ReadableControllerPayload {
 
                     // For "byob" readerType: copy chunk bytes into all
                     // pending descriptor views (fill + commit each when full).
-                    {
-                        let mut q = self.queue.borrow_mut();
-                        self.fill_pending_pull_intos(ctx, pending_pull_intos, &chunk, &mut q)?;
-                    }
+                    self.fill_pending_pull_intos(ctx, pending_pull_intos, &chunk)?;
                     return Ok(JSValue::UNDEFINED);
                 }
 

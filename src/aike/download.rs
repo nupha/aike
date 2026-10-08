@@ -4,7 +4,7 @@
 //! `Aike.download(url, destPath?, options?)` — download a URL to a file or bytes.
 //!
 //! Thin sugar over reqwest + the fs atomic-write machinery (memo §5.4). The HTTP
-//! client is built the same way as `fetch` (honors `AIKE_TLS_INSECURE_HOSTS`,
+//! client is built the same way as `fetch` (honors `fetch.allowInsecureTLS`,
 //! env proxy, connect timeout, redirects). With `destPath` the body is streamed
 //! to a temp file and atomically renamed; without it the bytes are returned. An
 //! `AbortSignal` (`options.signal`) cancels an in-flight download — the partial
@@ -25,7 +25,7 @@ use zuqe::{
 
 use crate::{
     fs::TempFileGuard,
-    http::client::config::{HttpClientConfig, tls_insecure_for_host},
+    http::client::config::HttpClientConfig,
     whatwg::{
         abort::{JSAbortSignal, signal_is_aborted, signal_notify, signal_reason},
         dom::make_dom_exception,
@@ -77,20 +77,15 @@ pub(super) fn js_download(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
         }
     }
 
-    // Validate the URL and pick the per-host TLS escape hatch (same as fetch).
-    let insecure = match Url::parse(&url) {
-        Ok(u) => u
-            .host_str()
-            .map(|h| tls_insecure_for_host(h, u.port_or_known_default()))
-            .unwrap_or(false),
-        Err(_) => {
-            let reason = ctx
-                .create_error_object(ErrorKind::Type, "`url` must be a valid URL", false)
-                .map(JSValue::from)
-                .unwrap_or(JSValue::UNDEFINED);
-            return Promise::from_reject_value(ctx, reason).map(JSValue::from);
-        }
-    };
+    // Validate the URL, then honor the runtime TLS escape (same as fetch).
+    if Url::parse(&url).is_err() {
+        let reason = ctx
+            .create_error_object(ErrorKind::Type, "`url` must be a valid URL", false)
+            .map(JSValue::from)
+            .unwrap_or(JSValue::UNDEFINED);
+        return Promise::from_reject_value(ctx, reason).map(JSValue::from);
+    }
+    let insecure = crate::aike::AikeRuntimeState::of(ctx).fetch_allow_insecure_tls;
 
     let cfg = HttpClientConfig::default();
     let client = match cfg.build_http_client_ex(insecure) {

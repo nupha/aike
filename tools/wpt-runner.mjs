@@ -130,6 +130,19 @@ function registerHarnessCallbacks() {
 G.self = G;
 // WPT tests also reference `window` (the global object in window scope).
 G.window = G;
+
+// WPT is a browser-oriented suite: put `fetch` in WHATWG mode for this run —
+// enforce CORS and let fetch auto-manage the cookie jar (`fetch.cors` /
+// `fetch.cookie`, only present in a `fetch_browser` build) — and allow the
+// self-signed WPT TLS server (`fetch.allowInsecureTLS`). Harmless when the
+// machinery is not compiled in.
+try {
+  fetch.cors = true;
+  fetch.cookie = true;
+  fetch.allowInsecureTLS = true;
+} catch {
+  // lean build without the fetch switches: nothing to configure
+}
 // `.any.js` files run in the "window"-like variant here; GLOBAL lets tests
 // branch on the scope they were loaded into (e.g. isWindow() guards).
 G.GLOBAL = {

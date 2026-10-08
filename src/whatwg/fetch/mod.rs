@@ -7,7 +7,7 @@
 //! policy (`headers`), the referrer algorithm (`referrer`) and Subresource
 //! Integrity (`integrity`). `cors` holds the browser-security layer (the
 //! WHATWG CORS protocol + mode/tainting decisions) and `origin` the client
-//! ("document") origin resolution; both are gated by the `fetch_cors`
+//! ("document") origin resolution; both are gated by the `fetch_browser`
 //! feature — server builds compile them down to constant pass-through stubs.
 
 mod cors;

@@ -139,11 +139,22 @@ fn split_on_commas(value: &str) -> Vec<String> {
 /// Drop all forbidden request headers set by the caller. Called after default
 /// headers are injected (Accept / Accept-Language are not forbidden, so they
 /// survive). The transport layer adds its own Content-Length / Host later.
-pub(super) fn strip_forbidden_request_headers(h: &mut HeaderList) {
+///
+/// `strip_cookies` controls the cookie headers: when fetch owns the cookie jar
+/// (`cookie` switch on) `Cookie`/`Cookie2` are forbidden and dropped; otherwise
+/// the caller may set them directly.
+pub(super) fn strip_forbidden_request_headers(h: &mut HeaderList, strip_cookies: bool) {
     let drop: Vec<String> = h
         .to_vec()
         .into_iter()
-        .filter(|(k, v)| is_forbidden_request_header(k, v))
+        .filter(|(k, v)| {
+            if !strip_cookies
+                && (k.eq_ignore_ascii_case("cookie") || k.eq_ignore_ascii_case("cookie2"))
+            {
+                return false;
+            }
+            is_forbidden_request_header(k, v)
+        })
         .map(|(k, _)| k)
         .collect();
     for k in drop {

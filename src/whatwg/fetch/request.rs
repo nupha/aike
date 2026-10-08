@@ -140,18 +140,6 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         }
     }
 
-    // Fetch spec: a request URL containing a NUL byte is a network error
-    // (TypeError), not a transport "request failed" error.
-    if url_str.contains('\0') {
-        return throw_transport_error(
-            ctx,
-            TransportError {
-                code: "other",
-                message: "URL contains a null byte".into(),
-            },
-        );
-    }
-
     // Fetch spec: the request URL is serialized "with the exclude fragment
     // flag set" — the fragment is never sent and never appears in
     // `response.url`. Parsing also normalizes the URL (e.g. an empty path
@@ -308,13 +296,16 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         }
     }
 
-    // Server builds (`fetch_cors` off) have no client-origin concept, so
-    // `same-origin` cookie scoping cannot be evaluated; treat it like
-    // `include` so cookies still flow.
-    #[cfg(not(feature = "fetch_cors"))]
-    if credentials == "same-origin" {
-        credentials = String::from("include");
-    }
+    // Per-runtime fetch switches (`fetch.cors` / `fetch.cookie`). A lean build
+    // (no `fetch_browser`) compiles the CORS/cookie code paths out, so both
+    // switches are forced off.
+    #[cfg(feature = "fetch_browser")]
+    let (fetch_cors, fetch_cookie) = {
+        let st = crate::aike::AikeRuntimeState::of(ctx);
+        (st.fetch_cors, st.fetch_cookie)
+    };
+    #[cfg(not(feature = "fetch_browser"))]
+    let (fetch_cors, fetch_cookie) = (false, false);
 
     let notify = signal_val.as_ref().and_then(signal_notify);
     let already_aborted = signal_val.as_ref().is_some_and(signal_is_aborted);
@@ -332,15 +323,28 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     // Client origin/URL for same-origin checks (used by the cache
     // short-circuit and the response handler below). In a browser this is the
     // document's origin; resolved from the `self.location` shim / WPT runner
-    // globals. Server builds (`fetch_cors` off) have no location concept
+    // globals. Server builds (`fetch_browser` off) have no location concept
     // and get a null origin.
-    let (client_origin, client_url) = resolve_client_origin(ctx);
+    let (mut client_origin, mut client_url) = resolve_client_origin(ctx);
+
+    // With both switches off there is no client-origin concept: fetch behaves
+    // like a plain HTTP client (no CORS taint, no same-origin referrer).
+    if !(fetch_cors || fetch_cookie) {
+        client_origin = None;
+        client_url = None;
+    }
+    // No client origin → `same-origin` cookie scoping cannot be evaluated;
+    // treat it like `include` so cookies still flow.
+    if client_origin.is_none() && credentials == "same-origin" {
+        credentials = String::from("include");
+    }
 
     // CORS tainting: a cross-origin request in `cors` mode. These require
     // origin/ACAO handling and (for non-safelisted requests) a preflight.
     // Computed up front so the response callback (created below) can reference
     // it and the async side can run the preflight.
-    let cors_tainted = mode == "cors" && is_cross_origin(client_origin.as_deref(), &url_str);
+    let cors_tainted =
+        fetch_cors && mode == "cors" && is_cross_origin(client_origin.as_deref(), &url_str);
     // Whether `Access-Control-Allow-Credentials` must be present (fetch
     // `credentials: "include"`).
     let credentials_include = credentials == "include";
@@ -456,17 +460,40 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
         match crate::whatwg::url::blob_store_get(&url_str) {
             Some(blob) => {
-                let bytes = blob.bytes().to_vec();
+                let all = blob.bytes().to_vec();
                 let mime = blob.type_().to_string();
+                // A `Range` header selects a 206 slice of the blob (WPT `range/blob`).
+                let (status, status_text, mut headers, bytes) = match header_list.get("range") {
+                    None => (200, "OK", Vec::new(), all),
+                    Some(range) => {
+                        let size = all.len() as u64;
+                        let Some((start, end)) = parse_blob_range(&range, size) else {
+                            return throw_transport_error(
+                                ctx,
+                                TransportError {
+                                    code: "other",
+                                    message: "Failed to fetch: invalid blob Range".into(),
+                                },
+                            );
+                        };
+                        let slice = all[start as usize..=end as usize].to_vec();
+                        let content_range = format!("bytes {start}-{end}/{size}");
+                        (
+                            206,
+                            "Partial Content",
+                            vec![("Content-Range".to_string(), content_range)],
+                            slice,
+                        )
+                    }
+                };
+                headers.push(("Content-Type".to_string(), mime.clone()));
+                headers.push(("Content-Length".to_string(), bytes.len().to_string()));
                 let response = build_response_from_transport(
                     ctx,
                     TransportResponse {
-                        status: 200,
-                        status_text: "OK".to_string(),
-                        headers: vec![
-                            ("Content-Type".to_string(), mime.clone()),
-                            ("Content-Length".to_string(), bytes.len().to_string()),
-                        ],
+                        status,
+                        status_text: status_text.to_string(),
+                        headers,
                         content_type: mime,
                         content_length: Some(bytes.len() as u64),
                         http_version: "1.1",
@@ -590,14 +617,9 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         return Promise::from_reject_value(ctx, abort_reason).map(JSValue::from);
     }
 
-    // Per-host TLS escape hatch: skip cert validation only for hosts listed in
-    // AIKE_TLS_INSECURE_HOSTS (self-signed dev/WPT servers). All other hosts
-    // keep strict validation.
-    let insecure = url::Url::parse(&url_str)
-        .ok()
-        .and_then(|u| u.host_str().map(|h| (h.to_string(), u.port())))
-        .map(|(h, p)| crate::http::client::config::tls_insecure_for_host(&h, p))
-        .unwrap_or(false);
+    // Runtime TLS escape hatch: `fetch.allowInsecureTLS` skips cert validation
+    // for this request's client.
+    let insecure = AikeRuntimeState::of(ctx).fetch_allow_insecure_tls;
 
     // Fetch spec "HTTP defaults": a request carries default `Accept` and
     // `Accept-Language` headers unless the caller overrides them. reqwest's
@@ -605,7 +627,9 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     // explicitly), so we must supply them here.
     ensure_default_request_headers(&mut header_list);
     // WHATWG: silently drop forbidden request headers the caller tried to set.
-    strip_forbidden_request_headers(&mut header_list);
+    // The cookie headers are only forbidden when fetch owns the cookie jar; with
+    // the `cookie` switch off the caller may set `Cookie`/`Cookie2` directly.
+    strip_forbidden_request_headers(&mut header_list, fetch_cookie);
     // Validate header names/values per the Fetch spec. Must run on the JS
     // thread so a violation rejects the returned promise with a `TypeError`
     // (WPT header-values expects `promise_rejects_js(t, TypeError, ...)`).
@@ -664,8 +688,8 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     // disabled in every case — the redirect handling is fully owned here.
     let manual_redirect = redirect == "follow";
 
-    // Per-host TLS escape hatch: `insecure` skips cert validation for this
-    // request's host (AIKE_TLS_INSECURE_HOSTS).
+    // Runtime TLS escape: `insecure` (from `fetch.allowInsecureTLS`) skips cert
+    // validation for this request's client.
     let mut cfg = crate::http::client::config::HttpClientConfig::default();
     cfg.protocol = crate::http::client::config::ProtocolMode::Http1Only;
     // WHATWG `fetch` manages cookies itself via the shared global jar (driven
@@ -795,7 +819,8 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 // only allows `follow`), so it must reject (WPT redirect-mode.any.js).
                 // A `cors`-mode cross-origin 3xx without a valid
                 // `Access-Control-Allow-Origin` is also a CORS failure and rejects.
-                let cross_origin = is_cross_origin(client_origin.as_deref(), &url_clone);
+                let cross_origin =
+                    fetch_cors && is_cross_origin(client_origin.as_deref(), &url_clone);
                 if mode_clone == "no-cors" && cross_origin {
                     return Err(cx.throw_type_error(
                         "Failed to fetch: no-cors request cannot follow a cross-origin redirect with manual/error mode",
@@ -827,7 +852,8 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             // error. Redirects are followed manually, so the *final* response URL
             // is checked here (the redirect target would otherwise hide the
             // violation).
-            if mode_clone == "same-origin"
+            if fetch_cors
+                && mode_clone == "same-origin"
                 && let Some(msg) = same_origin_violation(client_origin.as_deref(), &tr.final_url)
             {
                 return throw_transport_error(
@@ -877,8 +903,9 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             // A `no-cors` request for a cross-origin (or unknown-origin) URL
             // yields an opaque response per Fetch spec (status 0, type opaque,
             // null body, CORS-filtered headers). Same-origin stays basic.
-            let is_opaque =
-                mode_clone == "no-cors" && is_cross_origin(client_origin.as_deref(), &url_clone);
+            let is_opaque = fetch_cors
+                && mode_clone == "no-cors"
+                && is_cross_origin(client_origin.as_deref(), &url_clone);
             let resp_type = if is_opaque {
                 RespType::Opaque
             } else {
@@ -969,7 +996,7 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     // each CORS-tainted hop target before sending the actual request there
     // (Fetch spec). A failed preflight rejects the fetch with a TypeError.
     let requested_headers = preflight_request_headers(&req_headers);
-    let preflight = preflight_possible.then(|| PreflightCtx {
+    let preflight = (fetch_cors && preflight_possible).then(|| PreflightCtx {
         possible: true,
         method: method.clone(),
         request_headers: join_request_headers(&requested_headers),
@@ -988,13 +1015,13 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         referrer_ctx,
         replayable: stream_body.is_none(),
         before_hop: make_before_hop_hook(preflight),
-        // Server builds have no origin concept: the transport's cors-mode
-        // rules (per-hop Origin recomputation, opaque-origin rule) never apply.
-        cors_mode: cfg!(feature = "fetch_cors") && mode == "cors",
+        // Per-runtime CORS switch: with it off the transport's cors-mode rules
+        // (per-hop Origin recomputation, opaque-origin rule) never apply.
+        cors_mode: fetch_cors && mode == "cors",
         cors_tainted,
         cors_client_origin: client_origin_str,
         credentials_mode: credentials.clone(),
-        use_shared_cookies: true,
+        use_shared_cookies: fetch_cookie,
     };
 
     // Issue the request on the tokio side. Taken as a closure because a stream
@@ -1173,6 +1200,75 @@ fn set_content_length(headers: &mut Vec<(String, String)>, len: usize) {
 /// Install the `fetch` global and register all WHATWG classes.
 pub(crate) fn install_fetch(ctx: &mut ScopedContext, mut global: Object) -> Result<(), i32> {
     let func = ctx.create_native_function(Callback::Func(js_fetch), "fetch", 1, 0)?;
+
+    // Runtime-level switches as accessor properties on the `fetch` function
+    // object (not per-request). The getters/setters read/write
+    // `AikeRuntimeState`.
+    {
+        let mut func = func;
+
+        // `fetch.allowInsecureTLS` — always available (a general TLS escape).
+        let insecure_atom = zuqe::Atom::intern_static(ctx, "allowInsecureTLS")?;
+        let insecure_get = ctx.create_native_function(
+            Callback::Func(js_fetch_allow_insecure_get),
+            "get allowInsecureTLS",
+            0,
+            0,
+        )?;
+        let insecure_set = ctx.create_native_function(
+            Callback::Func(js_fetch_allow_insecure_set),
+            "set allowInsecureTLS",
+            1,
+            0,
+        )?;
+        func.define_property_getset(
+            ctx,
+            insecure_atom,
+            insecure_get.into(),
+            insecure_set.into(),
+            zuqe::JS_PROP_C_W_E,
+        )?;
+
+        // `fetch.cors` / `fetch.cookie` — only when the browser machinery was
+        // compiled in.
+        #[cfg(feature = "fetch_browser")]
+        {
+            let cors_atom = zuqe::Atom::intern_static(ctx, "cors")?;
+            let cors_get =
+                ctx.create_native_function(Callback::Func(js_fetch_cors_get), "get cors", 0, 0)?;
+            let cors_set =
+                ctx.create_native_function(Callback::Func(js_fetch_cors_set), "set cors", 1, 0)?;
+            func.define_property_getset(
+                ctx,
+                cors_atom,
+                cors_get.into(),
+                cors_set.into(),
+                zuqe::JS_PROP_C_W_E,
+            )?;
+
+            let cookie_atom = zuqe::Atom::intern_static(ctx, "cookie")?;
+            let cookie_get = ctx.create_native_function(
+                Callback::Func(js_fetch_cookie_get),
+                "get cookie",
+                0,
+                0,
+            )?;
+            let cookie_set = ctx.create_native_function(
+                Callback::Func(js_fetch_cookie_set),
+                "set cookie",
+                1,
+                0,
+            )?;
+            func.define_property_getset(
+                ctx,
+                cookie_atom,
+                cookie_get.into(),
+                cookie_set.into(),
+                zuqe::JS_PROP_C_W_E,
+            )?;
+        }
+    }
+
     global.define_property_value_str(ctx, "fetch", func.into(), zuqe::JS_PROP_C_W_E)?;
 
     // Cache Storage API
@@ -1187,4 +1283,98 @@ pub(crate) fn install_fetch(ctx: &mut ScopedContext, mut global: Object) -> Resu
     global.define_property_value_str(ctx, "caches", caches, zuqe::JS_PROP_C_W_E)?;
 
     Ok(())
+}
+
+/// `fetch.cors` getter — whether this runtime enforces CORS.
+#[cfg(feature = "fetch_browser")]
+fn js_fetch_cors_get(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
+    Ok(JSValue::from(AikeRuntimeState::of(ctx).fetch_cors))
+}
+
+/// `fetch.cors` setter — strict boolean.
+#[cfg(feature = "fetch_browser")]
+fn js_fetch_cors_set(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let b = match cc.arg(0).as_bool() {
+        Some(b) => b,
+        None => return Err(ctx.throw_type_error("`fetch.cors` must be a boolean")),
+    };
+    AikeRuntimeState::of(ctx).fetch_cors = b;
+    Ok(JSValue::UNDEFINED)
+}
+
+/// `fetch.cookie` getter — whether this runtime's `fetch` auto-uses the jar.
+#[cfg(feature = "fetch_browser")]
+fn js_fetch_cookie_get(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
+    Ok(JSValue::from(AikeRuntimeState::of(ctx).fetch_cookie))
+}
+
+/// `fetch.cookie` setter — strict boolean.
+#[cfg(feature = "fetch_browser")]
+fn js_fetch_cookie_set(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let b = match cc.arg(0).as_bool() {
+        Some(b) => b,
+        None => return Err(ctx.throw_type_error("`fetch.cookie` must be a boolean")),
+    };
+    AikeRuntimeState::of(ctx).fetch_cookie = b;
+    Ok(JSValue::UNDEFINED)
+}
+
+/// `fetch.allowInsecureTLS` getter — whether TLS validation is skipped.
+fn js_fetch_allow_insecure_get(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
+    Ok(JSValue::from(
+        AikeRuntimeState::of(ctx).fetch_allow_insecure_tls,
+    ))
+}
+
+/// `fetch.allowInsecureTLS` setter — strict boolean.
+fn js_fetch_allow_insecure_set(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let b = match cc.arg(0).as_bool() {
+        Some(b) => b,
+        None => {
+            return Err(ctx.throw_type_error("`fetch.allowInsecureTLS` must be a boolean"));
+        }
+    };
+    AikeRuntimeState::of(ctx).fetch_allow_insecure_tls = b;
+    Ok(JSValue::UNDEFINED)
+}
+
+/// Parse a single `bytes` range (the `Range` header of a `blob:` fetch) against
+/// a body of `size` bytes. Returns inclusive `(start, end)` offsets, or `None`
+/// when the range is malformed or unsatisfiable. Whitespace is allowed around
+/// the unit, `=` and `-`; multiple ranges are not supported.
+fn parse_blob_range(value: &str, size: u64) -> Option<(u64, u64)> {
+    let ws = |c: char| matches!(c, ' ' | '\t');
+    let unit = value.get(..5)?;
+    if !unit.eq_ignore_ascii_case("bytes") {
+        return None;
+    }
+    let rest = value[5..].trim_start_matches(ws).strip_prefix('=')?;
+    let (first, rest) = split_digits(rest.trim_start_matches(ws));
+    let rest = rest.trim_start_matches(ws).strip_prefix('-')?;
+    let (last, rest) = split_digits(rest.trim_start_matches(ws));
+    if !rest.trim_matches(ws).is_empty() || (first.is_empty() && last.is_empty()) || size == 0 {
+        return None;
+    }
+    // Overflowing numbers saturate; they are then clamped or unsatisfiable.
+    let num = |s: &str| s.parse::<u64>().unwrap_or(u64::MAX);
+    match (first.is_empty(), last.is_empty()) {
+        (false, true) => {
+            let start = num(first);
+            (start < size).then_some((start, size - 1))
+        }
+        (false, false) => {
+            let (start, end) = (num(first), num(last));
+            (start <= end && start < size).then(|| (start, end.min(size - 1)))
+        }
+        (true, _) => {
+            let suffix = num(last);
+            (suffix > 0).then(|| (size.saturating_sub(suffix), size - 1))
+        }
+    }
+}
+
+/// Split the leading ASCII digits off `s`.
+fn split_digits(s: &str) -> (&str, &str) {
+    let n = s.bytes().take_while(u8::is_ascii_digit).count();
+    s.split_at(n)
 }

@@ -231,6 +231,18 @@ fn is_cors_safelisted_method(method: &str) -> bool {
     )
 }
 
+/// Whether a referrer value parses as a URL, absolutely or relative to any base
+/// (the spec resolves it against the entry settings object's base URL).
+/// Whether a referrer value parses as a URL, absolutely or relative to a base
+/// (the spec resolves it against the entry settings object's base URL). The base
+/// here is only a resolvability probe, so any hierarchical URL will do — an
+/// opaque-path base like `about:blank` cannot resolve relative references.
+fn is_parseable_referrer(referrer: &str) -> bool {
+    url::Url::parse(referrer)
+        .or_else(|_| url::Url::parse("https://example.invalid/").and_then(|b| b.join(referrer)))
+        .is_ok()
+}
+
 /// Validate the request options that the Fetch spec rejects with a `TypeError`
 /// (`method`, `mode`, `cache`, `credentials`, `redirect`, `referrerPolicy`,
 /// `referrer`, `only-if-cached`/`same-origin`, `no-cors` method, `navigate` mode).
@@ -269,10 +281,13 @@ pub(crate) fn validate_request_init_options(
         referrer_policy,
         VALID_REFERRER_POLICY,
     )?;
-    // Validate the referrer: must be `""`, `about:client`, `about:blank`, or a
-    // valid absolute URL (WPT request-error "RequestInit's referrer is invalid").
-    if !matches!(referrer, "" | "about:client" | "about:blank")
-        && url::Url::parse(referrer).is_err()
+    // Validate the referrer: must be `""`, `about:client`, `about:blank`, or
+    // something parseable as a URL (WPT request-error "RequestInit's referrer is
+    // invalid"). The spec parses the referrer *with* the entry settings object's
+    // base URL, so a relative value like `myreferrer` is valid and resolves
+    // against the document base — only a value that parses neither absolutely
+    // nor relatively is a TypeError.
+    if !matches!(referrer, "" | "about:client" | "about:blank") && !is_parseable_referrer(referrer)
     {
         return Err(ctx.throw_type_error("RequestInit.referrer is not a valid URL"));
     }

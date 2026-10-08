@@ -507,6 +507,27 @@ declare function fetch(
   init?: RequestInit,
 ): Promise<Response>;
 
+/**
+ * Runtime-level switches on `fetch` itself (aike extension, not per-request).
+ * Only present when the browser machinery was compiled in (`fetch_browser`).
+ * Both default to `false` (plain HTTP client).
+ */
+declare namespace fetch {
+  /** Whether this runtime's `fetch()` enforces CORS. */
+  let cors: boolean;
+  /**
+   * Whether this runtime's `fetch()` automatically uses the shared cookie jar
+   * (and strips caller `Cookie` headers). `cookieStore` stays available either
+   * way; this only controls the automatic fetch integration.
+   */
+  let cookie: boolean;
+  /**
+   * Whether this runtime's `fetch()` (and `Aike.download`) skip TLS certificate
+   * validation. A test/dev escape hatch for self-signed servers; default off.
+   */
+  let allowInsecureTLS: boolean;
+}
+
 // ---------------------------------------------------------------------------
 // ReadableStream
 // ---------------------------------------------------------------------------
@@ -777,3 +798,70 @@ declare class Blob {
   /** Return a `ReadableStream` over the blob's bytes. */
   stream(): ReadableStream<Uint8Array>;
 }
+
+// ---------------------------------------------------------------------------
+// Cookie Store API — https://cookiestore.spec.whatwg.org/
+// ---------------------------------------------------------------------------
+
+/** Options for `CookieStore.get()` / `getAll()`. */
+interface CookieStoreGetOptions {
+  name?: string;
+  url?: string;
+}
+
+/** `CookieInit.sameSite` enum. */
+type CookieSameSite = "strict" | "lax" | "none";
+
+/** Options for `CookieStore.set()`. */
+interface CookieInit {
+  name: string;
+  value: string;
+  /** Expiry as a DOMHighResTimeStamp (ms since epoch); `null` = session. */
+  expires?: number | null;
+  domain?: string | null;
+  path?: string;
+  sameSite?: CookieSameSite;
+  partitioned?: boolean;
+  /** Lifetime in seconds; mutually exclusive with `expires`. */
+  maxAge?: number | null;
+}
+
+/** Options for `CookieStore.delete()`. */
+interface CookieStoreDeleteOptions {
+  name: string;
+  domain?: string | null;
+  path?: string;
+  partitioned?: boolean;
+}
+
+/** A cookie as returned by `get()` / `getAll()`. */
+interface CookieListItem {
+  name: string;
+  value: string;
+}
+
+type CookieList = CookieListItem[];
+
+/**
+ * WHATWG `CookieStore`: asynchronous cookie access. Operates on the same
+ * cookie store as `fetch()`.
+ *
+ * aike has no `Document`; the "current URL" is the running script/module URL
+ * (`import.meta.url`). A `file://` script has an opaque origin, so the methods
+ * reject with a `SecurityError` — run under an `http(s)` base URL (e.g. via
+ * `Aike.evalModule(code, baseUrl)`) to use it.
+ */
+declare class CookieStore {
+  get(name: string): Promise<CookieListItem | null>;
+  get(options: CookieStoreGetOptions): Promise<CookieListItem | null>;
+  getAll(name: string): Promise<CookieList>;
+  getAll(options?: CookieStoreGetOptions): Promise<CookieList>;
+  set(name: string, value: string): Promise<void>;
+  set(options: CookieInit): Promise<void>;
+  delete(name: string): Promise<void>;
+  delete(options: CookieStoreDeleteOptions): Promise<void>;
+}
+
+/** The global `CookieStore` instance. */
+declare const cookieStore: CookieStore;
+

@@ -190,12 +190,16 @@ impl ReaderPayload {
                 }
 
                 // Spec PullSteps step 2.3: after dequeue, if stream is not
-                // closed, call CallPullIfNeeded to refill the queue.
-                if cp.should_call_pull(ctx)? {
-                    cp.call_pull(ctx)?;
-                }
-
-                return iterator_result_promise(ctx, chunk, false);
+                // closed, call CallPullIfNeeded to refill the queue. `pull` runs
+                // JS (may GC), so the chunk stays traced until it is bound into
+                // the result object.
+                return cp.with_in_flight(|held| -> Result<Promise, i32> {
+                    held.borrow_mut().push(chunk);
+                    if cp.should_call_pull(ctx)? {
+                        cp.call_pull(ctx)?;
+                    }
+                    iterator_result_promise(ctx, chunk, false)
+                });
             }
 
             if cp.close_requested() {

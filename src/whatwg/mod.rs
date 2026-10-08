@@ -7,6 +7,8 @@ pub mod abort;
 pub mod base64;
 pub mod blob;
 pub mod console;
+#[cfg(feature = "fetch_browser")]
+pub mod cookie_store;
 pub mod crypto;
 pub mod dom;
 pub mod fetch;
@@ -50,6 +52,8 @@ pub(crate) fn install_whatwg(ctx: &mut ScopedContext, mut global: Object) -> Res
         crypto::subtle::JSCryptoSubtle::class_id(),
         crypto::JSCryptoKey::class_id(),
     ])?;
+    #[cfg(feature = "fetch_browser")]
+    ctx.use_classes(&[cookie_store::JSCookieStore::class_id()])?;
 
     console::install_console(ctx, &mut global)?;
     timeout::install_timeout(ctx, global)?;
@@ -61,6 +65,8 @@ pub(crate) fn install_whatwg(ctx: &mut ScopedContext, mut global: Object) -> Res
     base64::install_encoding(ctx, global)?;
     structured_clone::install_structured_clone(ctx, global)?;
     crypto::install_crypto(ctx, global)?;
+    #[cfg(feature = "fetch_browser")]
+    cookie_store::install_cookie_store(ctx, global)?;
 
     Ok(())
 }

@@ -499,6 +499,8 @@ function testFetch() {
   console.log("\n=== fetch() ===");
 
   check("fetch is global function", typeof fetch === "function");
+  check("fetch.allowInsecureTLS is a boolean", typeof fetch.allowInsecureTLS === "boolean");
+  check("fetch.allowInsecureTLS defaults false", fetch.allowInsecureTLS === false);
   check(
     "fetch returns promise",
     fetch("https://example.com") instanceof Promise,
