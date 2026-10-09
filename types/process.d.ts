@@ -281,9 +281,7 @@ declare namespace Aike {
     /**
      * Send a signal to the child process. Default: SIGTERM.
      *
-     * In sandbox mode, the default signal is SIGKILL (not SIGTERM).
-     * On macOS, sandbox-exec does not forward signals to the exec'd
-     * command — only SIGKILL reliably terminates the tree.
+     * In sandbox mode the signal goes to the whole sandboxed tree.
      */
     kill(signal?: string | number): boolean;
     /** Check if the child process is still running. */
@@ -295,10 +293,6 @@ declare namespace Aike {
      * waits `killTimeoutMs`. Resolves with the stage at which the child
      * exited, or "timed_out" if it survived SIGKILL's grace period.
      * Idempotent — a second call resolves with "already_closed".
-     *
-     * On macOS with sandbox mode, the "term" stage is effectively
-     * unreachable (sandbox-exec absorbs SIGTERM), so the ladder always
-     * escalates to "kill". The "eof" stage still works.
      */
     shutdown(options?: ShutdownOptions): Promise<ShutdownResult>;
   }
@@ -355,91 +349,85 @@ declare namespace Aike {
     options?: SpawnOptions,
   ): Subprocess;
 
+  /**
+   * Runs the command inside an OS-enforced sandbox. The working directory is
+   * the only writable place; every other path is refused unless a `grants`
+   * entry says otherwise, and network is off unless asked for.
+   *
+   * Three backends enforce this, each with the primitive that works on its
+   * platform: Seatbelt on macOS, AppContainer on Windows, bubblewrap on Linux.
+   * Ask `Aike.sandboxSupport()` before offering the option — on a machine
+   * whose backend is missing or unusable this throws rather than running the
+   * command without a sandbox.
+   *
+   * @example
+   * Aike.sh("npm test", {
+   *   sandbox: {
+   *     cwd: "/path/to/project",
+   *     grants: [{ path: "/opt/toolchain", access: "rx" }],
+   *     denied: ["/path/to/project/.env"],
+   *   },
+   * });
+   */
   interface SandboxOptions {
     /**
-     * Directory the sandbox starts in. Required — canonicalized by the
-     * runtime before spawning; missing or non-existent dirs throw.
+     * Directory the command starts in, and the one place it may write.
+     * Required, must exist, and must be absolute. Resolved through symlinks
+     * before it is matched, so `..` and links cannot walk out of a rule.
      */
     cwd: string;
-    /** Map of host source path → mount options (insertion order preserved). */
-    mounts?: Record<
-      string,
-      {
-        /**
-         * In-sandbox path. Omitted = mount at the same path as the source.
-         * Linux only: nanosandbox has no mount namespace to relocate into on
-         * macOS, where a different target is refused rather than ignored.
-         */
-        target?: string;
-        /** Default false (read-only). */
-        writable?: boolean;
-      }
-    >;
-    /** Linux only: nanosandbox has no tmpfs mount elsewhere. */
-    tmpfs?: { path: string; size: number }[];
-    /** Linux only. */
-    rootfs?: string;
-    /**
-     * Memory limit in bytes.
-     * NOTE: Not enforced on macOS (sandbox uses per-process memlimit only).
-     */
-    memoryLimit?: number;
-    /**
-     * CPU limit, 0 < n <= core count; fractions allowed.
-     * NOTE: Not enforced on macOS.
-     */
-    cpuLimit?: number;
-    /** Wall-clock time limit in milliseconds (also enforced independently). */
-    wallTimeLimitMs?: number;
-    /** CPU time limit in milliseconds. */
-    cpuTimeLimitMs?: number;
-    /**
-     * Max concurrent processes (PIDs) in the sandbox.
-     * NOTE: Not enforced on macOS.
-     */
-    maxPids?: number;
-    /** Max file size in bytes for files created inside the sandbox. */
-    maxFileSize?: number;
-    /**
-     * Max open file descriptors per process.
-     * NOTE: Not enforced on macOS.
-     */
-    maxOpenFiles?: number;
-    /** "none" (default) | full host network | domain allowlist (proxied). */
-    network?: "none" | "host" | { allow: string[] };
-    /**
-     * Seccomp syscall filter (Linux only). NOTE: Ignored off Linux.
-     *
-     * nanosandbox has a single filter, so only "disabled" turns it off:
-     * "strict", "standard", "permissive" and a syscall list all mean "on",
-     * and a list no longer narrows which syscalls are allowed.
-     */
-    seccompProfile?:
-      | "disabled"
-      | "strict"
-      | "standard"
-      | "permissive"
-      | string[];
 
     /**
-     * Run as this UID inside the sandbox.
-     * NOTE: Not enforced on macOS.
+     * Extra paths the command may reach, in addition to `cwd`.
+     *
+     * `access` is `"r"`, `"rw"`, `"rx"` or `"rwx"`. Write and execute both
+     * imply read — opening a file to write it is itself a read, and no
+     * platform can express otherwise, so a mode without `r` is rejected.
+     *
+     * A path granted `rw` without `x` is **not** runnable: that is what stops
+     * a command from dropping a payload somewhere writable and executing it.
+     * On Linux this is the one guarantee that does not hold, because
+     * `bwrap --bind` cannot separate the execute bit.
      */
-    uid?: number;
+    grants?: { path: string; access: "r" | "rw" | "rx" | "rwx" }[];
+
     /**
-     * Run as this GID inside the sandbox.
-     * NOTE: Not enforced on macOS.
+     * Paths the command may not reach at all, whatever `grants` says. Must
+     * exist and be absolute. A `denied` path that contains a granted one, or
+     * that covers `cwd`, is rejected at build time instead of silently
+     * winning.
+     *
+     * The entry itself stays visible — its name still appears when its parent
+     * is listed, and `stat` on it still succeeds. Only its contents are
+     * hidden, except on macOS where listing the denied directory's own
+     * entries is refused as well, since `readdir` needs read access to the
+     * directory itself.
      */
-    gid?: number;
+    denied?: string[];
+
     /**
-     * Set hostname inside the sandbox.
-     * NOTE: Not enforced on macOS.
+     * `"none"` (default) refuses every outbound connection; `"host"` gives
+     * the command the machine's full network access.
+     *
+     * A domain allowlist (`{allow: [...]}`) is not implemented yet — no proxy
+     * runs to enforce it — so it is refused rather than quietly downgraded to
+     * a total block.
      */
-    hostname?: string;
-    // `cwd` intentionally NOT here: spawn's top-level `cwd` doubles as the
-    // sandbox working directory when sandboxing is enabled.
+    network?: "none" | "host";
+
+    // `cwd` intentionally NOT here: spawn's top-level `cwd` is not the
+    // sandbox working directory, unlike before. Pass it as `sandbox.cwd`.
     // `env` is intentionally NOT here: spawn's top-level `env` is the single
-    // env knob and is forwarded into the sandbox builder when sandboxing.
+    // env knob and is forwarded into the sandbox.
+  }
+
+  /** What this machine can sandbox, and why not if it cannot. */
+  interface SandboxSupport {
+    available: boolean;
+    /** "seatbelt" | "appcontainer" | "bubblewrap", or null when unavailable. */
+    backend: "seatbelt" | "appcontainer" | "bubblewrap" | null;
+    /** Why it is unavailable, phrased for the user. Null when it is. */
+    reason: string | null;
   }
 
   interface SpawnOptions {
@@ -559,6 +547,12 @@ declare namespace Aike {
     stderr: string;
     /** Exit code, or null if the command was terminated by a signal. */
     exitCode: number | null;
+    /** True when the command ran inside a sandbox. */
+    sandboxed?: boolean;
+    /** True when the command was killed for exceeding `ShOptions.timeout`. */
+    killedByTimeout?: boolean;
+    /** True when the command exited zero. */
+    success?: boolean;
   }
 
   /** Options for `Aike.sh`. */
@@ -573,6 +567,13 @@ declare namespace Aike {
     input?: string | ArrayBufferView | ArrayBuffer;
     /** Throw an Error if the command exits non-zero or is killed by a signal. */
     check?: boolean;
+    /**
+     * Run the command inside an OS-enforced sandbox. See
+     * {@link SandboxOptions}. Note that `cwd` here is the *shell's* cwd and
+     * is ignored when sandboxing — the command starts in `sandbox.cwd`, which
+     * is also the only place it may write.
+     */
+    sandbox?: SandboxOptions;
   }
 
   /**
@@ -580,6 +581,13 @@ declare namespace Aike {
    * `%COMSPEC%` i.e. cmd.exe on Windows) and capture its output.
    */
   function sh(command: string, options?: ShOptions): ShResult;
+
+  /**
+   * Whether this machine can run a sandbox. Check before offering the
+   * `sandbox` option: where the backend is missing or unusable, passing
+   * `sandbox` throws instead of running the command unsandboxed.
+   */
+  function sandboxSupport(): SandboxSupport;
 
   // --- download (aike 增强，非 WHATWG；memo §5.4) ---
 

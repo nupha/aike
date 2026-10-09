@@ -175,6 +175,7 @@ pub(crate) fn install_aike_namespace(ctx: &mut ScopedContext) -> Result<(), i32>
         FieldDef::FUNC("gzip", 1, crate::gzip::js_gzip, 0),
         FieldDef::FUNC("gunzip", 1, crate::gzip::js_gunzip, 0),
         FieldDef::FUNC("sh", 1, spawn::js_sh, 0),
+        FieldDef::FUNC("sandboxSupport", 0, sandbox::js_sandbox_support, 0),
         FieldDef::FUNC("download", 2, download::js_download, 0),
         // --- timer ---
         FieldDef::FUNC("sleep", 0, crate::whatwg::timeout::js_sleep, 0),

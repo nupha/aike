@@ -176,7 +176,6 @@ hmac = "0.13"
 aes-gcm = "0.11"
 rand = "0.9"
 subtle = "2"
-nanosandbox = { path = "../nanosandbox-for-aike/build" }
 mimalloc = { version = "0.1", optional = true }
 
 # TypeScript transpilation — only compiled when typescript feature is enabled

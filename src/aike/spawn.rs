@@ -126,7 +126,7 @@ pub(super) fn js_spawn(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut env_opt: Option<HashMap<String, String>> = None;
     let mut input_data: Option<Vec<u8>> = None;
     let mut abort_on_parent_exit = false;
-    let mut sandbox_opt: Option<nanosandbox::Sandbox> = None;
+    let mut sandbox_opt: Option<super::sandbox::Policy> = None;
 
     // arg 2 (optional): options object
     if cc.length() > 2 {
@@ -165,10 +165,10 @@ pub(super) fn js_spawn(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             input_data = extract_input(ctx, &opts)?;
         }
 
-        // sandbox — optional; when present the command runs inside a
-        // nanosandbox child (see super::sandbox) instead of a plain spawn.
-        // Validated here; dispatched after timeout parsing below.
-        sandbox_opt = super::sandbox::get_sandbox_opt(ctx, &opts, env_opt.clone())?;
+        // sandbox — optional; when present the command runs inside a sandbox
+        // (see super::sandbox) instead of a plain spawn. Validated here;
+        // dispatched after timeout parsing below.
+        sandbox_opt = super::sandbox::get_sandbox_opt(ctx, &opts)?;
 
         // stdio modes
         (stdin_mode, stdin_inherit) = parse_stdio_mode_strict(ctx, &opts, "stdin", true)?;
@@ -199,21 +199,30 @@ pub(super) fn js_spawn(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         None => None,
     };
 
-    // Sandbox dispatch: sandboxed children always use piped stdio and
-    // `sandbox.cwd` as the working dir. `env` (SpawnOptions.env) is forwarded
-    // into the sandbox builder by get_sandbox_opt, so it is NOT ignored.
-    if let Some(sb) = sandbox_opt {
+    // Sandbox dispatch: sandboxed children always use piped stdio, and the
+    // policy's working directory as the cwd. `env` (SpawnOptions.env) is
+    // forwarded into the sandbox, so it is NOT ignored.
+    if let Some(policy) = sandbox_opt {
         return if is_async {
             super::sandbox::spawn_async_sandboxed(
                 ctx,
-                sb,
+                &policy,
                 cmd_str,
                 args,
+                env_opt,
                 timeout_limit,
                 abort_on_parent_exit,
             )
         } else {
-            super::sandbox::spawn_sync_sandboxed(ctx, sb, cmd_str, args, input_data, timeout_limit)
+            super::sandbox::spawn_sync_sandboxed(
+                ctx,
+                &policy,
+                cmd_str,
+                args,
+                env_opt,
+                input_data,
+                timeout_limit,
+            )
         };
     }
 
@@ -334,6 +343,7 @@ pub(super) fn js_sh(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut input = None;
     let mut timeout_ms = None;
     let mut check = false;
+    let mut sandbox_opt: Option<super::sandbox::Policy> = None;
 
     // options (optional object): strict parsing, same schema as spawnSync
     if cc.length() > 1 {
@@ -350,6 +360,7 @@ pub(super) fn js_sh(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         }
         input = extract_input(ctx, &opts)?;
         timeout_ms = get_timeout_prop(ctx, &opts)?;
+        sandbox_opt = super::sandbox::get_sandbox_opt(ctx, &opts)?;
 
         let check_val = opts.get_property_str(ctx, "check")?;
         if !check_val.is_undefined() {
@@ -371,6 +382,28 @@ pub(super) fn js_sh(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     } else {
         ("/bin/sh".to_string(), &["-c"])
     };
+
+    // A sandboxed `sh` runs through the same backend as `spawnSync`, so the
+    // two cannot drift: it used to build its own `Command` here and had no
+    // sandbox path at all, which left the option silently ignored on the one
+    // entry point an agent reaches for first.
+    if let Some(policy) = sandbox_opt {
+        let mut argv: Vec<&str> = shell_flags.to_vec();
+        argv.push(&command);
+        let (exit_code, stdout, stderr, killed) =
+            super::sandbox::run_sandboxed_sync(&policy, &shell, &argv, env_opt, input, timeout_ms);
+        if check && exit_code != 0 {
+            let msg = format!("`command` exited with code {exit_code}");
+            return match ctx.create_error_object(ErrorKind::Internal, &msg, false) {
+                Some(err) => {
+                    ctx.throw(Exception::Error(err.into()));
+                    Err(-1)
+                }
+                None => Err(ctx.throw_internal_error(&msg)),
+            };
+        }
+        return Ok(build_sh_result(ctx, exit_code, stdout, stderr, killed, true)?.into());
+    }
 
     let mut cmd = Command::new(&shell);
     cmd.args(shell_flags).arg(&command);
@@ -402,7 +435,7 @@ pub(super) fn js_sh(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         .map_err(|e| ctx.throw_internal_error(&format!("spawn failed: {e}")))?;
     let pid = child.id() as i32;
 
-    let (stdout_buf, stderr_buf, exit_status, _killed) =
+    let (stdout_buf, stderr_buf, exit_status, killed) =
         match collect_with_timeout(child, pid, input, timeout_ms) {
             Ok(t) => t,
             Err(e) => return Err(ctx.throw_internal_error(&e)),
@@ -424,23 +457,52 @@ pub(super) fn js_sh(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         };
     }
 
+    build_sh_result(
+        ctx,
+        exit_status.code().unwrap_or(-1),
+        stdout_buf,
+        stderr_buf,
+        killed,
+        false,
+    )
+}
+
+/// The result object `Aike.sh` returns: output as strings, unlike
+/// `spawnSync`'s byte arrays. Shared by the plain and sandboxed paths.
+fn build_sh_result(
+    ctx: &mut ScopedContext,
+    exit_code: i32,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    killed_by_timeout: bool,
+    sandboxed: bool,
+) -> JSResult {
     let stdout_js = JSValue::make_string(
-        ctx.create_string_from_utf8(String::from_utf8_lossy(&stdout_buf).as_bytes().to_vec())?,
+        ctx.create_string_from_utf8(String::from_utf8_lossy(&stdout).as_bytes().to_vec())?,
     );
     let stderr_js = JSValue::make_string(
-        ctx.create_string_from_utf8(String::from_utf8_lossy(&stderr_buf).as_bytes().to_vec())?,
+        ctx.create_string_from_utf8(String::from_utf8_lossy(&stderr).as_bytes().to_vec())?,
     );
 
     let mut result = ctx.create_base_object()?;
+    if sandboxed {
+        result.define_property_value_str(ctx, "sandboxed", JSValue::TRUE, JS_PROP_ENUMERABLE)?;
+    }
     result.define_property_value_str(ctx, "stdout", stdout_js, JS_PROP_C_W_E)?;
     result.define_property_value_str(ctx, "stderr", stderr_js, JS_PROP_C_W_E)?;
+    result.define_property_value_str(ctx, "exitCode", JSValue::from(exit_code), JS_PROP_C_W_E)?;
     result.define_property_value_str(
         ctx,
-        "exitCode",
-        exit_status.code().map_or(JSValue::NULL, JSValue::from),
+        "success",
+        JSValue::from(exit_code == 0),
         JS_PROP_C_W_E,
     )?;
-
+    result.define_property_value_str(
+        ctx,
+        "killedByTimeout",
+        JSValue::from(killed_by_timeout),
+        JS_PROP_C_W_E,
+    )?;
     Ok(result.into())
 }
 
