@@ -2,7 +2,7 @@
  * sandbox_limits_test.mjs — Test nanosandbox features and limits.
  *
  * Covers:
- *   - Mounts: cwd/ro/rw, target aliasing, descendant inheritance, validation
+ *   - Mounts: cwd/ro/rw, target relocation (Linux only), inheritance, validation
  *   - Limits: memoryLimit, cpuLimit, maxPids, maxFileSize, maxOpenFiles
  *   - Features: tmpfs, network allowlist, seccompProfile, uid/gid, hostname
  *   - Baseline: no-sandbox comparison
@@ -126,8 +126,8 @@ async function testMounts() {
 
   const mounts = {
     [ws]: { writable: true },
-    [ro]: { target: "/mnt-data" },
-    [rw]: { target: "/mnt-rw", writable: true },
+    [ro]: {},
+    [rw]: { writable: true },
   };
   const sb = { cwd: ws, mounts, network: "host" };
 
@@ -156,6 +156,33 @@ async function testMounts() {
 }
 
 // ===================================================================
+// 1b. Mount target — relocating a mount is Linux-only in nanosandbox 0.2
+// ===================================================================
+async function testMountTarget() {
+  console.log("\n=== mount target ===");
+
+  if (isWin) {
+    skip("mount target", "filesystem isolation not implemented on Windows");
+    return;
+  }
+
+  const mounts = { [ws]: { writable: true }, [ro]: { target: "/mnt-data" } };
+  const sb = { cwd: ws, mounts, network: "host" };
+  const sh = isWin ? "cmd.exe" : "sh";
+  const shArg = isWin ? "/c" : "-c";
+
+  if (process.platform === "linux") {
+    check("reads at the relocated target", readOut(`${cat} /mnt-data/secret.txt`, sb) === "SECRET");
+  } else {
+    // macOS has no mount namespace to relocate into; the option is refused
+    // rather than silently mounting at the source instead.
+    let e = null;
+    try { Aike.spawnSync(sh, [shArg, "true"], { sandbox: sb }); } catch (err) { e = err; }
+    check("refused where it cannot be honored", e !== null, e?.message);
+  }
+}
+
+// ===================================================================
 // 2. Non-existent mount source — throws at sandbox creation
 // ===================================================================
 async function testNonexistentMount() {
@@ -165,7 +192,7 @@ async function testNonexistentMount() {
   const sb = {
     cwd: ws,
     mounts: {
-      [ghost]: { target: "/ghost" },
+      [ghost]: {},
     },
     network: "host",
   };
@@ -192,8 +219,8 @@ async function testDescendantInheritance() {
 
   const mounts = {
     [ws]: { writable: true },
-    [ro]: { target: "/mnt-data" },
-    [rw]: { target: "/mnt-rw", writable: true },
+    [ro]: {},
+    [rw]: { writable: true },
   };
   const sb = { cwd: ws, mounts, network: "host" };
 
@@ -483,6 +510,10 @@ async function testTmpfs() {
     skip("write and read back", "tmpfs not implemented on Windows");
     return;
   }
+  if (isMacos) {
+    skip("write and read back", "tmpfs is Linux-only in nanosandbox 0.2 (use private_tmp)");
+    return;
+  }
 
   const tmpfsDir = `${ws}/ramdisk`;
   if (isWin) {
@@ -661,6 +692,7 @@ async function testWallTimeLimitMs() {
 await setup();
 try {
   await testMounts();
+  await testMountTarget();
   await testNonexistentMount();
   await testDescendantInheritance();
   await testNoSandboxBaseline();

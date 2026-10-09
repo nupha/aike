@@ -365,13 +365,19 @@ declare namespace Aike {
     mounts?: Record<
       string,
       {
-        /** In-sandbox path. Omitted = mount at the same path as the source. */
+        /**
+         * In-sandbox path. Omitted = mount at the same path as the source.
+         * Linux only: nanosandbox has no mount namespace to relocate into on
+         * macOS, where a different target is refused rather than ignored.
+         */
         target?: string;
         /** Default false (read-only). */
         writable?: boolean;
       }
     >;
+    /** Linux only: nanosandbox has no tmpfs mount elsewhere. */
     tmpfs?: { path: string; size: number }[];
+    /** Linux only. */
     rootfs?: string;
     /**
      * Memory limit in bytes.
@@ -402,8 +408,11 @@ declare namespace Aike {
     /** "none" (default) | full host network | domain allowlist (proxied). */
     network?: "none" | "host" | { allow: string[] };
     /**
-     * Seccomp syscall filter profile (Linux only).
-     * NOTE: Ignored on macOS (no seccomp support).
+     * Seccomp syscall filter (Linux only). NOTE: Ignored off Linux.
+     *
+     * nanosandbox has a single filter, so only "disabled" turns it off:
+     * "strict", "standard", "permissive" and a syscall list all mean "on",
+     * and a list no longer narrows which syscalls are allowed.
      */
     seccompProfile?:
       | "disabled"

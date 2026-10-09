@@ -119,6 +119,47 @@ fn parse_string_array(
 // sandbox construction from JS options
 // ---------------------------------------------------------------------------
 
+/// Message for every rejected `sandbox.seccompProfile` value.
+const SECCOMP_PROFILE_ERR: &str = "`sandbox.seccompProfile` must be \
+    \"disabled\"|\"strict\"|\"standard\"|\"permissive\" or a syscall list";
+
+/// `sandbox.seccompProfile`, collapsed to "filter on" or "off".
+///
+/// nanosandbox 0.2 has a single syscall filter, not the named profiles or
+/// per-syscall lists aike used to select between: only `"disabled"` turns it
+/// off, and a list is no longer honored precisely. The accepted value set is
+/// unchanged, so a caller gets an error instead of a silent change of meaning.
+fn parse_seccomp_profile(ctx: &mut ScopedContext, opts: &Object) -> Result<Option<bool>, i32> {
+    let v = opts.get_property_str(ctx, "seccompProfile")?;
+    if v.is_undefined() {
+        return Ok(None);
+    }
+    if let Some(s) = v.as_string(false) {
+        return match s.content().encode_utf8(false).as_ref() {
+            "disabled" => Ok(Some(false)),
+            "strict" | "standard" | "permissive" => Ok(Some(true)),
+            _ => Err(ctx.throw_range_error(SECCOMP_PROFILE_ERR)),
+        };
+    }
+    if v.as_object().is_some() {
+        // The list used to pick syscalls; 0.2's filter is fixed, so this only
+        // turns it on. Parsed anyway, so a malformed list still throws.
+        parse_string_array(ctx, &v, "sandbox.seccompProfile")?;
+        return Ok(Some(true));
+    }
+    Err(ctx.throw_range_error(SECCOMP_PROFILE_ERR))
+}
+
+/// `get_pos_int_prop` narrowed to `u32`, with aike's range error.
+fn get_u32_prop(ctx: &mut ScopedContext, opts: &Object, name: &str) -> Result<Option<u32>, i32> {
+    match get_pos_int_prop(ctx, opts, name)? {
+        Some(v) => u32::try_from(v)
+            .map(Some)
+            .map_err(|_| ctx.throw_range_error(&format!("`sandbox.{name}` exceeds u32 range"))),
+        None => Ok(None),
+    }
+}
+
 /// Read `options.sandbox`. Returns `Ok(None)` when absent so plain spawns are
 /// untouched; rejects arrays and non-objects explicitly.
 pub(crate) fn get_sandbox_opt(
@@ -193,47 +234,87 @@ pub(crate) fn get_sandbox_opt(
                 )));
             };
 
-            let target = get_str_prop(ctx, &m, "target")?.unwrap_or_else(|| source.clone());
-            b = b.mount(
-                PathBuf::from(source),
-                PathBuf::from(target),
-                if writable {
-                    nanosandbox::Permission::ReadWrite
+            let target = get_str_prop(ctx, &m, "target")?;
+            let source_path = PathBuf::from(&source);
+            // nanosandbox 0.2 expresses a same-path mount with read_only/
+            // writable (every isolating platform), and a different target
+            // with bind() (Linux only).
+            let same_path = target
+                .as_deref()
+                .map_or(true, |t| PathBuf::from(t) == source_path);
+            if same_path {
+                b = if writable {
+                    b.writable(source_path)
                 } else {
-                    nanosandbox::Permission::ReadOnly
-                },
-            );
+                    b.read_only(source_path)
+                };
+            } else {
+                let target_path = PathBuf::from(target.expect("checked above"));
+                #[cfg(target_os = "linux")]
+                {
+                    b = b.bind(
+                        source_path,
+                        target_path,
+                        if writable {
+                            nanosandbox::Permission::ReadWrite
+                        } else {
+                            nanosandbox::Permission::ReadOnly
+                        },
+                    );
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    return Err(ctx.throw_type_error(&format!(
+                        "`sandbox.mounts[{source}].target` ({}) needs Linux: nanosandbox can only \
+                         bind a different target there",
+                        target_path.display()
+                    )));
+                }
+            }
         }
     }
 
-    // tmpfs: [{path, size}]
+    // tmpfs: [{path, size}], rootfs: path. Both are Linux-only in
+    // nanosandbox 0.2: elsewhere it has no mount to put them on.
     let tmpfs_v = opts.get_property_str(ctx, "tmpfs")?;
-    if !tmpfs_v.is_undefined() {
-        let arr = Array::try_from(tmpfs_v)
-            .map_err(|_| ctx.throw_type_error("`sandbox.tmpfs` must be an array"))?;
-        let len = arr.get_length_prop(ctx)? as usize;
-        for i in 0..len {
-            let item = arr.get_property_u32(ctx, i as u32)?;
-            let Some(m) = item.as_object() else {
-                return Err(ctx.throw_type_error("`sandbox.tmpfs[i]` must be an object"));
-            };
-            let path = get_str_prop(ctx, &m, "path")?
-                .ok_or_else(|| ctx.throw_type_error("`sandbox.tmpfs[i].path` must be a string"))?;
-            let size = get_pos_int_prop(ctx, &m, "size")?.ok_or_else(|| {
-                ctx.throw_range_error("`sandbox.tmpfs[i].size` must be a positive integer")
-            })?;
-            b = b.tmpfs(PathBuf::from(path), size);
+    let rootfs_v = get_str_prop(ctx, &opts, "rootfs")?;
+    #[cfg(target_os = "linux")]
+    {
+        if !tmpfs_v.is_undefined() {
+            let arr = Array::try_from(tmpfs_v)
+                .map_err(|_| ctx.throw_type_error("`sandbox.tmpfs` must be an array"))?;
+            let len = arr.get_length_prop(ctx)? as usize;
+            for i in 0..len {
+                let item = arr.get_property_u32(ctx, i as u32)?;
+                let Some(m) = item.as_object() else {
+                    return Err(ctx.throw_type_error("`sandbox.tmpfs[i]` must be an object"));
+                };
+                let path = get_str_prop(ctx, &m, "path")?.ok_or_else(|| {
+                    ctx.throw_type_error("`sandbox.tmpfs[i].path` must be a string")
+                })?;
+                let size = get_pos_int_prop(ctx, &m, "size")?.ok_or_else(|| {
+                    ctx.throw_range_error("`sandbox.tmpfs[i].size` must be a positive integer")
+                })?;
+                b = b.tmpfs(PathBuf::from(path), size);
+            }
+        }
+        if let Some(v) = rootfs_v {
+            b = b.rootfs(PathBuf::from(v));
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        for (key, set) in [("tmpfs", !tmpfs_v.is_undefined()), ("rootfs", rootfs_v.is_some())] {
+            if set {
+                return Err(ctx.throw_type_error(&format!(
+                    "`sandbox.{key}` needs Linux: nanosandbox has no equivalent on this platform"
+                )));
+            }
         }
     }
 
-    if let Some(v) = get_str_prop(ctx, &opts, "rootfs")? {
-        b = b.rootfs(PathBuf::from(v));
-    }
     if let Some(v) = get_pos_int_prop(ctx, &opts, "memoryLimit")? {
         b = b.memory_limit(v);
-    }
-    if let Some(v) = get_pos_float_prop(ctx, &opts, "cpuLimit")? {
-        b = b.cpu_limit(v);
     }
     if let Some(ms) = get_pos_int_prop(ctx, &opts, "wallTimeLimitMs")? {
         b = b.wall_time_limit(Duration::from_millis(ms));
@@ -241,20 +322,49 @@ pub(crate) fn get_sandbox_opt(
     if let Some(ms) = get_pos_int_prop(ctx, &opts, "cpuTimeLimitMs")? {
         b = b.cpu_time_limit(Duration::from_millis(ms));
     }
-    if let Some(n) = get_pos_int_prop(ctx, &opts, "maxPids")? {
-        b = b.max_pids(
-            u32::try_from(n)
-                .map_err(|_| ctx.throw_range_error("`sandbox.maxPids` exceeds u32 range"))?,
-        );
-    }
     if let Some(v) = get_pos_int_prop(ctx, &opts, "maxFileSize")? {
         b = b.max_file_size(v);
     }
-    if let Some(n) = get_pos_int_prop(ctx, &opts, "maxOpenFiles")? {
-        b = b.max_open_files(
-            u32::try_from(n)
-                .map_err(|_| ctx.throw_range_error("`sandbox.maxOpenFiles` exceeds u32 range"))?,
-        );
+    if let Some(n) = get_u32_prop(ctx, &opts, "maxOpenFiles")? {
+        b = b.max_open_files(n);
+    }
+
+    // Linux-only settings. aike documents all of these as accepted but not
+    // enforced off Linux, while nanosandbox 0.2 either has no builder method
+    // for them (seccomp, uid, gid) or refuses the configuration outright
+    // (cpuLimit/maxPids on macOS). Parsed and validated on every platform,
+    // applied on the one that enforces them.
+    let cpu_limit = get_pos_float_prop(ctx, &opts, "cpuLimit")?;
+    let max_pids = get_u32_prop(ctx, &opts, "maxPids")?;
+    let seccomp = parse_seccomp_profile(ctx, &opts)?;
+    let uid = get_u32_prop(ctx, &opts, "uid")?;
+    let gid = get_u32_prop(ctx, &opts, "gid")?;
+    let hostname = get_str_prop(ctx, &opts, "hostname")?;
+    #[cfg(target_os = "linux")]
+    {
+        if let Some(cpus) = cpu_limit {
+            b = b.cpu_limit(cpus);
+        }
+        if let Some(n) = max_pids {
+            b = b.max_pids(n);
+        }
+        if let Some(on) = seccomp {
+            b = b.seccomp(on);
+        }
+        if let Some(v) = uid {
+            b = b.uid(v);
+        }
+        if let Some(v) = gid {
+            b = b.gid(v);
+        }
+        if let Some(v) = hostname {
+            b = b.hostname(v);
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        // Parsed above only to validate them; there is nothing to apply.
+        let _ = (cpu_limit, max_pids, seccomp, uid, gid, hostname);
     }
 
     // network: "none" | "host" | {allow: string[]}
@@ -282,52 +392,10 @@ pub(crate) fn get_sandbox_opt(
         }
     }
 
-    // seccompProfile: named profile | custom syscall list
-    let seccomp_v = opts.get_property_str(ctx, "seccompProfile")?;
-    if !seccomp_v.is_undefined() {
-        if let Some(s) = seccomp_v.as_string(false) {
-            match s.content().encode_utf8(false).as_ref() {
-                "disabled" => b = b.seccomp_profile(nanosandbox::SeccompProfile::Disabled),
-                "strict" => b = b.seccomp_profile(nanosandbox::SeccompProfile::Strict),
-                "standard" => b = b.seccomp_profile(nanosandbox::SeccompProfile::Standard),
-                "permissive" => b = b.seccomp_profile(nanosandbox::SeccompProfile::Permissive),
-                _ => {
-                    return Err(ctx.throw_range_error(
-                        "`sandbox.seccompProfile` must be \"disabled\"|\"strict\"|\"standard\"|\"permissive\" or a syscall list",
-                    ));
-                }
-            }
-        } else if seccomp_v.as_object().is_some() {
-            let syscalls = parse_string_array(ctx, &seccomp_v, "sandbox.seccompProfile")?;
-            b = b.seccomp_profile(nanosandbox::SeccompProfile::Custom(syscalls));
-        } else {
-            return Err(ctx.throw_range_error(
-                "`sandbox.seccompProfile` must be \"disabled\"|\"strict\"|\"standard\"|\"permissive\" or a syscall list",
-            ));
-        }
-    }
-
-    if let Some(v) = get_pos_int_prop(ctx, &opts, "uid")? {
-        b = b.uid(
-            u32::try_from(v)
-                .map_err(|_| ctx.throw_range_error("`sandbox.uid` exceeds u32 range"))?,
-        );
-    }
-    if let Some(v) = get_pos_int_prop(ctx, &opts, "gid")? {
-        b = b.gid(
-            u32::try_from(v)
-                .map_err(|_| ctx.throw_range_error("`sandbox.gid` exceeds u32 range"))?,
-        );
-    }
-
     // env: the single env knob (SpawnOptions.env), forwarded from the caller.
     // Replaces the entire sandbox env, matching plain-spawn semantics.
     if let Some(env_map) = env {
         b = b.envs(env_map);
-    }
-
-    if let Some(v) = get_str_prop(ctx, &opts, "hostname")? {
-        b = b.hostname(v);
     }
 
     let sb = b
