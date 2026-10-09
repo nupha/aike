@@ -970,33 +970,61 @@ fn js_response_close(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
 fn js_response_clone(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut this = cc.this();
-    let (cloned, taken_resp) = {
+    // A body cannot be copied, so the spec tees it: this response keeps one
+    // branch and the clone gets the other. The source stream is materialized
+    // here (constructor stream, network channel, or synthetic buffer) because
+    // only one of the two responses may own it.
+    let branches: Option<[JSReadableStream; 2]> = {
         let p = get_response_payload_mut(ctx, &mut this)?;
         if p.body_consumed {
-            (None, None)
-        } else if p.resp.is_some() {
-            let resp = p.resp.take();
-            (Some(p), resp)
+            return Err(
+                ctx.throw_type_error("Cannot clone a Response whose body has already been used")
+            );
+        }
+        let source: Option<JSReadableStream> = if let Some(cs) = p.ctor_stream.clone() {
+            Some(cs)
+        } else if p.resp.is_some() || p.synthetic_body.is_some() {
+            match p.ensure_cached_body(ctx) {
+                Some(BodySource::Channel(rx)) => {
+                    Some(JSReadableStream::from_channel(ctx, rx, None)?)
+                }
+                Some(BodySource::Synthetic(bytes)) => {
+                    Some(JSReadableStream::from_bytes(ctx, bytes)?)
+                }
+                Some(BodySource::Stream(s)) => Some(s),
+                None => {
+                    return Err(ctx.throw_type_error("Cannot clone a Response with no body source"));
+                }
+            }
         } else {
-            (Some(p), None)
+            // A null-body response clones to a null body.
+            None
+        };
+
+        if let Some(mut stream) = source {
+            let mut reader = stream.acquire_reader(ctx, false)?;
+            let b = reader.tee(ctx)?;
+            // The tee owns the source now, so this response must not also build
+            // a body from the underlying response/buffer.
+            p.ctor_stream = Some(b[0]);
+            p.resp = None;
+            p.synthetic_body = None;
+            p.body_rx = None;
+            p.cached_body = None;
+            Some(b)
+        } else {
+            None
         }
     };
 
-    let Some(src) = cloned else {
-        return Err(
-            ctx.throw_type_error("Cannot clone a Response whose body has already been used")
-        );
-    };
-
-    let synthetic = src.synthetic_body.clone();
+    let src = get_response_payload_mut(ctx, &mut this)?;
     let payload = ResponsePayload {
-        resp: taken_resp,
+        resp: None,
         body_rx: None,
         body_consumed: false,
         cached_body: None,
-        synthetic_body: synthetic,
-        // A stream body cannot be duplicated without teeing; leave it out.
-        ctor_stream: None,
+        synthetic_body: None,
+        ctor_stream: branches.map(|b| b[1]),
         resp_type: src.resp_type,
         url: src.url.clone(),
         redirected: src.redirected,

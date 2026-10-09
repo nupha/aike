@@ -12,7 +12,7 @@ use std::{
 
 use zuqe::{
     Array, CallContext, Callback, JSResult, JSValue, NativeObject, ScopedContext,
-    builtins::promise::Promise,
+    builtins::{promise::Promise, typed_array::TypedArray},
     gc_lite::{GcTrace, GcTraceCtx},
 };
 
@@ -414,12 +414,17 @@ fn tee_pull_fulfilled(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     }
 
     let value = result.get_property_str(ctx, "value")?;
-    for c in [shared.c1, shared.c2] {
+    for (i, c) in [shared.c1, shared.c2].into_iter().enumerate() {
         if !tee_branch_is_final(ctx, c) {
-            // WHATWG: clone the chunk for byte streams so each branch gets
-            // its own buffer copy — each enqueue transfers/detaches.
+            // WHATWG: branch1 receives the original chunk and branch2 a
+            // structured clone of it. For byte streams the copy is a fresh
+            // buffer because each `enqueue` transfers (detaches) the chunk it
+            // is given, so handing the same view to both branches would leave
+            // the second one empty.
             let v = if shared.is_byte_stream {
                 clone_byte_chunk(ctx, value)?
+            } else if i == 1 {
+                structured_clone(ctx, value)?
             } else {
                 value
             };
@@ -585,42 +590,25 @@ fn get_controller_payload_from_val(c: &JSValue) -> Option<&ReadableControllerPay
     JSReadableByteStreamController::payload_of(c)
 }
 
-/// Clone a byte chunk (TypedArray or ArrayBuffer) by slicing its underlying
-/// buffer. Used by tee to avoid buffer-transfer side effects when enqueuing
-/// the same chunk to both branch controllers.
+/// Clone a byte chunk so each tee branch gets its own buffer copy — a byte
+/// controller's `enqueue` transfers (detaches) the chunk it is given, so
+/// handing the same value to both branches would break the second one.
+///
+/// A byte controller only ever holds `Uint8Array` chunks (it validates and
+/// converts on enqueue), so copying the bytes into a fresh view is enough and
+/// avoids routing through JS constructors.
 fn clone_byte_chunk(ctx: &mut ScopedContext, chunk: JSValue) -> Result<JSValue, i32> {
-    // ArrayBuffer: just slice it.
-    if let Some(ab) = chunk.as_object_ArrayBuffer() {
-        let slice_fn = ab.get_property_str(ctx, "slice")?;
-        return slice_fn.call(ctx, chunk, &[JSValue::from(0i32)]);
+    let ta = TypedArray::try_from(chunk)
+        .map_err(|_| ctx.throw_type_error("tee: byte stream chunk is not a TypedArray"))?;
+    let bytes = ta.with_bytes(|b| b.to_vec());
+    Ok(JSValue::from(TypedArray::create_from_vec_u8(ctx, bytes)?))
+}
+
+/// `StructuredClone(value)` for the tee's second branch.
+fn structured_clone(ctx: &mut ScopedContext, value: JSValue) -> Result<JSValue, i32> {
+    let f = ctx.global_obj().get_property_str(ctx, "structuredClone")?;
+    if !f.is_callable() {
+        return Err(ctx.throw_type_error("structuredClone is not callable"));
     }
-
-    // TypedArray: clone the underlying buffer, reconstruct with same ctor.
-    let buffer = chunk.get_property_str(ctx, "buffer")?;
-    let byte_offset = chunk
-        .get_property_str(ctx, "byteOffset")?
-        .to_number(ctx)?
-        .to_i32();
-    let byte_length = chunk
-        .get_property_str(ctx, "byteLength")?
-        .to_number(ctx)?
-        .to_i32();
-    let slice_fn = buffer.get_property_str(ctx, "slice")?;
-    let new_buffer = slice_fn.call(ctx, buffer, &[JSValue::from(0i32)])?;
-
-    let ctor = {
-        let o = chunk
-            .as_object()
-            .ok_or_else(|| ctx.throw_internal_error("not an object"))?;
-        ctx.global_obj().get_property_str(ctx, o.class_name_str())?
-    };
-    ctor.call(
-        ctx,
-        ctor,
-        &[
-            new_buffer,
-            JSValue::from(byte_offset),
-            JSValue::from(byte_length),
-        ],
-    )
+    f.call(ctx, JSValue::UNDEFINED, &[value])
 }
