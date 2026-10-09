@@ -168,7 +168,7 @@ pub(super) fn js_spawn(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         // sandbox — optional; when present the command runs inside a sandbox
         // (see super::sandbox) instead of a plain spawn. Validated here;
         // dispatched after timeout parsing below.
-        sandbox_opt = super::sandbox::get_sandbox_opt(ctx, &opts)?;
+        sandbox_opt = super::sandbox::get_sandbox_opt(ctx, &opts, cwd.as_deref())?;
 
         // stdio modes
         (stdin_mode, stdin_inherit) = parse_stdio_mode_strict(ctx, &opts, "stdin", true)?;
@@ -360,7 +360,7 @@ pub(super) fn js_sh(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         }
         input = extract_input(ctx, &opts)?;
         timeout_ms = get_timeout_prop(ctx, &opts)?;
-        sandbox_opt = super::sandbox::get_sandbox_opt(ctx, &opts)?;
+        sandbox_opt = super::sandbox::get_sandbox_opt(ctx, &opts, cwd.as_deref())?;
 
         let check_val = opts.get_property_str(ctx, "check")?;
         if !check_val.is_undefined() {

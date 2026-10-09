@@ -362,8 +362,8 @@ declare namespace Aike {
    *
    * @example
    * Aike.sh("npm test", {
+   *   cwd: "/path/to/project", // the one directory it may write
    *   sandbox: {
-   *     cwd: "/path/to/project",
    *     grants: [{ path: "/opt/toolchain", access: "rx" }],
    *     denied: ["/path/to/project/.env"],
    *   },
@@ -371,14 +371,8 @@ declare namespace Aike {
    */
   interface SandboxOptions {
     /**
-     * Directory the command starts in, and the one place it may write.
-     * Required, must exist, and must be absolute. Resolved through symlinks
-     * before it is matched, so `..` and links cannot walk out of a rule.
-     */
-    cwd: string;
-
-    /**
-     * Extra paths the command may reach, in addition to `cwd`.
+     * Extra paths the command may reach, in addition to the working
+     * directory (`cwd`, or the current directory when it is unset).
      *
      * `access` is `"r"`, `"rw"`, `"rx"` or `"rwx"`. Write and execute both
      * imply read — opening a file to write it is itself a read, and no
@@ -415,10 +409,10 @@ declare namespace Aike {
      */
     network?: "none" | "host";
 
-    // `cwd` intentionally NOT here: spawn's top-level `cwd` is not the
-    // sandbox working directory, unlike before. Pass it as `sandbox.cwd`.
-    // `env` is intentionally NOT here: spawn's top-level `env` is the single
-    // env knob and is forwarded into the sandbox.
+    // `cwd`, `env` and `timeout` are intentionally NOT here: they live on the
+    // spawn options and reach the sandbox unchanged. "Where the command
+    // starts" is one concept, and a second name for it is what once produced a
+    // top-level `cwd` that was silently ignored.
   }
 
   /** What this machine can sandbox, and why not if it cannot. */
@@ -431,7 +425,13 @@ declare namespace Aike {
   }
 
   interface SpawnOptions {
-    /** Working directory for the child process. */
+    /**
+     * Working directory for the child process.
+     *
+     * With `sandbox`, this is also the one directory the command may write,
+     * and is where the sandbox rules are anchored. Omitted means the current
+     * directory, for a sandboxed and a plain spawn alike.
+     */
     cwd?: string;
     /** Environment variables (replaces entire env when provided). */
     env?: Record<string, string>;
@@ -557,7 +557,12 @@ declare namespace Aike {
 
   /** Options for `Aike.sh`. */
   interface ShOptions {
-    /** Working directory for the shell. */
+    /**
+     * Working directory for the shell.
+     *
+     * With `sandbox`, this is also the one directory the command may write.
+     * Omitted means the current directory.
+     */
     cwd?: string;
     /** Environment; replaces the entire environment when provided. */
     env?: Record<string, string>;
@@ -569,9 +574,8 @@ declare namespace Aike {
     check?: boolean;
     /**
      * Run the command inside an OS-enforced sandbox. See
-     * {@link SandboxOptions}. Note that `cwd` here is the *shell's* cwd and
-     * is ignored when sandboxing — the command starts in `sandbox.cwd`, which
-     * is also the only place it may write.
+     * {@link SandboxOptions}. The command starts in `cwd` (the current
+     * directory when unset), which is also the only place it may write.
      */
     sandbox?: SandboxOptions;
   }

@@ -68,6 +68,12 @@ fn get_str_prop(ctx: &mut ScopedContext, obj: &Object, key: &str) -> Result<Opti
 
 /// Build the policy from `sandbox`, or `None` when the option is absent.
 ///
+/// `cwd` is the caller's top-level working directory, which is also where the
+/// sandbox runs and the one place it may write. It is not a separate field on
+/// `sandbox`: "where the command starts" is one concept, and giving it two
+/// names is what produced a top-level `cwd` that was silently ignored. When it
+/// is absent the current directory is used, matching what a plain spawn does.
+///
 /// Every rejection names the offending field and says what is wrong with it.
 /// Nothing here degrades: an option the platform cannot enforce is refused
 /// rather than dropped, so a caller never gets a sandbox weaker than the one
@@ -75,6 +81,7 @@ fn get_str_prop(ctx: &mut ScopedContext, obj: &Object, key: &str) -> Result<Opti
 pub(crate) fn get_sandbox_opt(
     ctx: &mut ScopedContext,
     opts: &Object,
+    cwd: Option<&str>,
 ) -> Result<Option<Policy>, i32> {
     let v = opts.get_property_str(ctx, "sandbox")?;
     if v.is_undefined() {
@@ -83,7 +90,7 @@ pub(crate) fn get_sandbox_opt(
     // Arrays are objects in JS — reject them with a clear message.
     if v.is_array(ctx)? {
         return Err(ctx.throw_type_error(
-            "`sandbox` must be an object ({cwd, grants, denied, network}), not an array",
+            "`sandbox` must be an object ({grants, denied, network}), not an array",
         ));
     }
     let Some(sandbox) = v.as_object() else {
@@ -96,14 +103,28 @@ pub(crate) fn get_sandbox_opt(
         return Err(ctx.throw_type_error(reason));
     }
 
-    let cwd = get_str_prop(ctx, &sandbox, "cwd")?
-        .ok_or_else(|| ctx.throw_type_error("`sandbox.cwd` is required"))?;
+    // No `cwd` means the current directory, so the sandbox writes where the
+    // command would have run anyway.
+    let working_dir = match cwd {
+        Some(dir) => dir.to_owned(),
+        None => std::env::current_dir()
+            .map_err(|e| {
+                ctx.throw_internal_error(&format!(
+                    "`cwd` is unset and the current directory cannot be read: {e}"
+                ))
+            })?
+            .to_str()
+            .ok_or_else(|| {
+                ctx.throw_type_error("`cwd` is unset and the current directory is not valid UTF-8")
+            })?
+            .to_owned(),
+    };
 
     let grants = parse_grants(ctx, &sandbox)?;
     let denied = parse_denied(ctx, &sandbox)?;
     let network = parse_network(ctx, &sandbox)?;
 
-    Policy::new(&cwd, grants, denied, network)
+    Policy::new(&working_dir, grants, denied, network)
         .map(Some)
         .map_err(|e| ctx.throw_type_error(&format!("invalid sandbox configuration: {e}")))
 }

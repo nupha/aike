@@ -24,8 +24,12 @@ function check(label, cond, detail = "") {
 const ROOT = "/tmp/sbx-test";
 const WD = `${ROOT}/work`;
 
+// The sandbox takes its working directory from the spawn options, so `cwd`
+// rides alongside `sandbox` rather than inside it.
 function sh(cmd, sandbox) {
-  return Aike.sh(cmd, sandbox ? { sandbox } : undefined);
+  if (!sandbox) return Aike.sh(cmd);
+  const { cwd = WD, ...rest } = sandbox;
+  return Aike.sh(cmd, { cwd, sandbox: rest });
 }
 const out = (r) => strip(dec.decode(r.stdout));
 const err = (r) => strip(dec.decode(r.stderr));
@@ -173,12 +177,49 @@ check(
 }
 
 // --- the sandboxed cwd is where the command starts ------------------------
+// `pwd` alone only proves what the shell reports; a relative write proves the
+// process's actual working directory, which is the thing that matters.
 {
+  Aike.sh(`rm -f ${WD}/relative-proof.txt`);
+  const w = sh("echo proof > relative-proof.txt", { cwd: WD });
+  const landed = Aike.sh(`test -f ${WD}/relative-proof.txt && echo YES || echo NO`);
+  check("a relative write lands in cwd", w.exitCode === 0 && strip(dec.decode(landed.stdout)) === "YES", err(w));
+
   const r = sh("pwd", { cwd: WD });
-  // /tmp is a symlink to /private/tmp, and the policy is compared against the
-  // resolved path, so accept either spelling.
-  const ok = [WD, "/private" + WD].includes(out(r));
-  check("command starts in cwd", ok, out(r));
+  check("pwd reports cwd", out(r).endsWith(`${ROOT}/work`), out(r));
+}
+
+// cwd is a starting point, not the boundary: cd'ing out and writing there is
+// still refused, because the grants are what constrain the process.
+{
+  await makeDir(`${ROOT}/elsewhere`, { recursive: true });
+  const r = sh(`cd ${ROOT}/elsewhere && touch escaped.txt`, { cwd: WD });
+  check("cd out of cwd does not widen write access", r.exitCode !== 0, `exit=${r.exitCode}`);
+  const leaked = Aike.sh(`test -f ${ROOT}/elsewhere/escaped.txt && echo LEAKED || echo CLEAN`);
+  check("nothing landed after cd'ing out", strip(dec.decode(leaked.stdout)) === "CLEAN");
+
+  const dotdot = sh(`echo x > ../outside/via_dotdot.txt`, { cwd: WD });
+  check("a relative .. write out of cwd is refused", dotdot.exitCode !== 0, `exit=${dotdot.exitCode}`);
+}
+
+// With no `cwd`, the sandbox runs in the current directory — the same place a
+// plain spawn would, and the one place it may write.
+//
+// `pwd -P` because the sandbox does not inherit `$PWD`, so the shell's logical
+// path is unavailable and only the physical one is meaningful here. Compare
+// against the host's own physical cwd, which is what `current_dir()` resolves.
+{
+  const here = strip(dec.decode(Aike.sh("/bin/pwd -P").stdout));
+  const inSandbox = strip(dec.decode(Aike.sh("/bin/pwd -P", { sandbox: {} }).stdout));
+  check("a sandbox with no cwd starts in the current directory", inSandbox === here, `host=${here} sandbox=${inSandbox}`);
+
+  // A relative write proves it is really the process's directory, not just
+  // what `pwd` reports.
+  Aike.sh("rm -f aike-cwd-default.txt");
+  const w = Aike.sh("echo probe > aike-cwd-default.txt", { sandbox: {} });
+  const landed = Aike.sh("test -f aike-cwd-default.txt && echo YES || echo NO");
+  check("and a relative write lands there", w.exitCode === 0 && strip(dec.decode(landed.stdout)) === "YES", err(w));
+  Aike.sh("rm -f aike-cwd-default.txt");
 }
 
 // --- network is denied by default -----------------------------------------
@@ -209,7 +250,8 @@ check(
 
 {
   const p = Aike.spawn("/bin/sh", ["-c", "trap 'exit 42' TERM; sleep 10"], {
-    sandbox: { cwd: WD },
+    cwd: WD,
+    sandbox: {},
     stdout: "pipe",
     stderr: "pipe",
   });
@@ -222,7 +264,8 @@ check(
 
 {
   const p = Aike.spawn("/bin/sh", ["-c", "sleep 30"], {
-    sandbox: { cwd: WD },
+    cwd: WD,
+    sandbox: {},
     stdout: "pipe",
     stderr: "pipe",
   });
@@ -239,54 +282,68 @@ check(
 }
 
 // --- rejections: every one names its field --------------------------------
+// Each entry is the whole spawn options object: `cwd` lives at the top level
+// now, so a rejection table keyed on it has to say both.
 const rejects = [
-  ["missing cwd", { network: "none" }, /cwd/],
-  ["nonexistent cwd", { cwd: `${ROOT}/nope` }, /cwd/],
+  ["missing cwd (a relative one)", { cwd: "relative/path", sandbox: {} }, /cwd/],
+  ["nonexistent cwd", { cwd: `${ROOT}/nope`, sandbox: {} }, /cwd/],
+  [
+    "cwd that is a file",
+    { cwd: `${ROOT}/grants/plain.txt`, sandbox: {} },
+    /cwd/,
+  ],
   [
     "nonexistent grant",
-    { cwd: WD, grants: [{ path: `${ROOT}/ghost`, access: "r" }] },
+    { cwd: WD, sandbox: { grants: [{ path: `${ROOT}/ghost`, access: "r" }] } },
     /grants/,
   ],
   [
     "bad access mode",
-    { cwd: WD, grants: [{ path: `${ROOT}/tools`, access: "zz" }] },
+    { cwd: WD, sandbox: { grants: [{ path: `${ROOT}/tools`, access: "zz" }] } },
     /access/,
   ],
   [
     "access without read",
-    { cwd: WD, grants: [{ path: `${ROOT}/tools`, access: "w" }] },
+    { cwd: WD, sandbox: { grants: [{ path: `${ROOT}/tools`, access: "w" }] } },
     /read/,
   ],
-  ["deny over cwd", { cwd: WD, denied: [WD] }, /cwd/],
-  ["bad network value", { cwd: WD, network: "maybe" }, /network/],
-  ["relative cwd", { cwd: "relative/path" }, /cwd/],
-  ["nonexistent denied", { cwd: WD, denied: [`${ROOT}/ghost`] }, /denied/],
+  ["deny over cwd", { cwd: WD, sandbox: { denied: [WD] } }, /cwd/],
+  ["bad network value", { cwd: WD, sandbox: { network: "maybe" } }, /network/],
+  [
+    "nonexistent denied",
+    { cwd: WD, sandbox: { denied: [`${ROOT}/ghost`] } },
+    /denied/,
+  ],
   [
     "denied over a grant",
     {
       cwd: WD,
-      grants: [{ path: `${ROOT}/tools`, access: "rx" }],
-      denied: [`${ROOT}/tools`],
+      sandbox: {
+        grants: [{ path: `${ROOT}/tools`, access: "rx" }],
+        denied: [`${ROOT}/tools`],
+      },
     },
     /denied/,
   ],
   [
     "rw without x on a file",
-    { cwd: WD, grants: [{ path: `${ROOT}/grants/plain.txt`, access: "rw" }] },
+    {
+      cwd: WD,
+      sandbox: { grants: [{ path: `${ROOT}/grants/plain.txt`, access: "rw" }] },
+    },
     /rwx/,
   ],
   [
     "the {allow} form",
-    { cwd: WD, network: { allow: ["a.com"] } },
+    { cwd: WD, sandbox: { network: { allow: ["a.com"] } } },
     /not implemented/,
   ],
-  ["sandbox not an object", null, /must be an object/],
+  ["sandbox not an object", { cwd: WD, sandbox: [] }, /must be an object/],
 ];
-for (const [label, sandbox, want] of rejects) {
+for (const [label, opts, want] of rejects) {
   let msg = "";
   try {
-    // `null` means "not an object at all", which has to bypass the helper.
-    Aike.sh("true", sandbox === null ? { sandbox: [] } : { sandbox });
+    Aike.sh("true", opts);
   } catch (e) {
     msg = String(e && e.message ? e.message : e);
   }
@@ -296,7 +353,8 @@ for (const [label, sandbox, want] of rejects) {
 // --- spawnSync path --------------------------------------------------------
 {
   const r = Aike.spawnSync("/bin/echo", ["sync-works"], {
-    sandbox: { cwd: WD },
+    cwd: WD,
+    sandbox: {},
   });
   check(
     "spawnSync honours the sandbox",
@@ -394,7 +452,8 @@ for (const [label, sandbox, want] of rejects) {
 // --- env and stdin --------------------------------------------------------
 {
   const r = Aike.sh(`echo "[$AIKE_PROBE]"`, {
-    sandbox: { cwd: WD },
+    cwd: WD,
+    sandbox: {},
     env: { AIKE_PROBE: "forwarded" },
   });
   check(
@@ -405,7 +464,7 @@ for (const [label, sandbox, want] of rejects) {
 }
 
 {
-  const r = Aike.sh("cat", { sandbox: { cwd: WD }, input: "piped-in" });
+  const r = Aike.sh("cat", { cwd: WD, sandbox: {}, input: "piped-in" });
   check("stdin reaches the sandboxed command", out(r) === "piped-in", out(r));
 }
 
@@ -435,7 +494,8 @@ for (const [label, sandbox, want] of rejects) {
     "/bin/sh",
     ["-c", "echo streaming; sleep 0.2; echo more"],
     {
-      sandbox: { cwd: WD },
+      cwd: WD,
+    sandbox: {},
       stdout: "pipe",
       stderr: "pipe",
     },
@@ -456,7 +516,8 @@ for (const [label, sandbox, want] of rejects) {
 
 {
   const p = Aike.spawn("/bin/sh", ["-c", "trap 'exit 0' TERM; cat"], {
-    sandbox: { cwd: WD },
+    cwd: WD,
+    sandbox: {},
     stdout: "pipe",
     stderr: "pipe",
   });
@@ -473,7 +534,8 @@ for (const [label, sandbox, want] of rejects) {
 // running on the host with the sandbox gone.
 {
   const p = Aike.spawn("/bin/sh", ["-c", "sleep 313 & echo up; wait"], {
-    sandbox: { cwd: WD },
+    cwd: WD,
+    sandbox: {},
     stdout: "pipe",
     stderr: "pipe",
   });
