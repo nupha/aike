@@ -671,13 +671,27 @@ fn redirect_target(resp: &reqwest::Response, current: &str) -> Option<String> {
         return None;
     }
 
-    let loc = resp
-        .headers()
-        .get(reqwest::header::LOCATION)?
-        .to_str()
-        .ok()?;
+    let raw = resp.headers().get(reqwest::header::LOCATION)?;
+    // A `Location` value is a byte sequence: WPT `redirect-location-escape`
+    // sends raw UTF-8 bytes (e.g. a snowman) which are not valid `HeaderValue`
+    // text, so `to_str()` fails on them. Percent-encode the non-ASCII bytes
+    // rather than dropping the redirect.
+    let loc = match raw.to_str() {
+        Ok(s) => s.to_string(),
+        Err(_) => raw
+            .as_bytes()
+            .iter()
+            .map(|&b| {
+                if b.is_ascii_graphic() || b == b' ' {
+                    (b as char).to_string()
+                } else {
+                    format!("%{b:02X}")
+                }
+            })
+            .collect(),
+    };
     let base = url::Url::parse(current).ok()?;
-    let joined = base.join(loc).ok()?;
+    let joined = base.join(&loc).ok()?;
     let joined = joined.to_string();
     Some(joined)
 }

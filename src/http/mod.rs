@@ -100,7 +100,9 @@ pub fn init_mod_http(ctx: &mut ScopedContext) -> Result<(), i32> {
         JSHttpResponseSse::class_id(),
         JSWebSocketStream::class_id(),
         crate::http::client::headers::HeaderListIterator::class_id(),
+        #[cfg(feature = "fetch_cache")]
         crate::http::client::cache_storage::JSCacheStorage::class_id(),
+        #[cfg(feature = "fetch_cache")]
         crate::http::client::cache_storage::JSCache::class_id(),
     ])?;
 

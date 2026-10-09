@@ -1029,10 +1029,19 @@ impl ReadableControllerPayload {
                 }
 
                 // WHATWG step 9: no pending pull-intos — enqueue to queue.
-                self.queue
-                    .borrow_mut()
-                    .push(QueueEntry { chunk, size: 1.0 });
-                self.queue_total_size.set(self.queue_total_size.get() + 1.0);
+                //
+                // A byte stream has no "pending read requests" in the spec (it uses
+                // pull-into descriptors), but aike models a default reader's wait
+                // as one. Such a reader is waiting for exactly this chunk, so hand
+                // it over directly instead of leaving the promise unresolved —
+                // otherwise any byte stream read before data is available hangs
+                // (reachable via `Response.clone()`, which tees the byte stream).
+                if !self.resolve_pending_read(ctx, chunk, false) {
+                    self.queue
+                        .borrow_mut()
+                        .push(QueueEntry { chunk, size: 1.0 });
+                    self.queue_total_size.set(self.queue_total_size.get() + 1.0);
+                }
                 Ok(JSValue::UNDEFINED)
             }
         }

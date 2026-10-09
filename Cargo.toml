@@ -26,6 +26,12 @@ enable_eval_log = [] # 启用 DeepEval 评估日志采集
 # running script gets is selected per-runtime through the `fetch.cors`,
 # `fetch.cookie` and `fetch.allowInsecureTLS` accessors (all default off).
 fetch_browser = []
+# The HTTP cache (Fetch spec "HTTP cache"), plus the `caches` / `CacheStorage`
+# globals. Off by default: without it every `fetch()` goes to the network and
+# the `cache` request option has no effect (a cache-mode-only failure such as
+# `only-if-cached` on a miss is still reported). Enable for browser-shaped
+# caching (`cargo build -F fetch_cache`).
+fetch_cache = []
 mimalloc = ["dep:mimalloc"]
 
 default = ["typescript", "mimalloc"]
@@ -88,6 +94,7 @@ reqwest = { version = "0.13", default-features = false, features = [
     "gzip",
     "brotli",
     "deflate",
+    "zstd",
     "http2",
     "rustls",
     "cookies",

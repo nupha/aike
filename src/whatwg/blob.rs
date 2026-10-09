@@ -67,8 +67,8 @@ pub(crate) fn blob_type_of(val: &JSValue) -> Option<String> {
     JSBlob::payload_of(val).map(|p| p.type_.clone())
 }
 
-/// Normalize a type string per File API. The result is a valid media type in
-/// lower case, or the empty string when the input is not a valid media type.
+/// Normalize a type string per File API. The result is a parseable media type
+/// in lower case, or the empty string when the input is not parseable.
 ///
 /// File API: `new Blob(parts, {type})` ignores `type` (treating it as empty)
 /// unless it is a *valid media type* — i.e. it parses as `type"/"subtype` with
@@ -108,10 +108,38 @@ fn normalize_type(raw: &str) -> String {
             })
     }
 
-    if let Some((ty, sub)) = cleaned.split_once('/') {
-        if is_token(ty) && is_token(sub) {
-            return cleaned.to_ascii_lowercase();
+    // File API: the type is kept when it "can be parsed as a MIME type", i.e.
+    // the MIME parsing algorithm succeeds — parameters are allowed, so the
+    // type/subtype part before the first ';' must be `token/token` and the rest
+    // must be a valid `;`-separated parameter list (WPT
+    // `response-init-contenttype`: `Blob([], {type:"a/b; c=d"})` keeps its type).
+    fn valid_params(s: &str) -> bool {
+        fn trim(s: &str) -> &str {
+            s.trim_matches(|c: char| c == ' ' || c == '\t')
         }
+        let s = trim(s);
+        if s.is_empty() {
+            return true;
+        }
+        if !s.starts_with(';') {
+            return false;
+        }
+        s.split(';').skip(1).all(|p| {
+            let p = trim(p);
+            match p.split_once('=') {
+                Some((name, value)) => is_token(trim(name)) && is_token(trim(value)),
+                None => false,
+            }
+        })
+    }
+
+    let head = cleaned.split(';').next().unwrap_or_default();
+    if let Some((ty, sub)) = head.split_once('/')
+        && is_token(ty.trim())
+        && is_token(sub.trim())
+        && valid_params(&cleaned[head.len()..])
+    {
+        return cleaned.to_ascii_lowercase();
     }
 
     String::new()

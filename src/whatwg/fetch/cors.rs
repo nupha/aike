@@ -88,6 +88,60 @@ pub(crate) fn should_append_origin(_method: &str, _cors_tainted: bool) -> bool {
     false
 }
 
+/// Fetch spec "append fetch metadata headers": add `Sec-Fetch-Dest`,
+/// `Sec-Fetch-Mode` and `Sec-Fetch-Site`. `Sec-Fetch-User` is omitted — it is
+/// only sent for navigations caused by a user activation, and `fetch()` is
+/// never a navigation.
+///
+/// `Sec-Fetch-Site` compares the request URL with the client origin:
+/// `same-origin`, then `same-site` (same host, ignoring scheme/port — aike has
+/// no public-suffix list), then `cross-site`.
+#[cfg(feature = "fetch_browser")]
+pub(crate) fn append_fetch_metadata_headers(
+    headers: &mut HeaderList,
+    mode: &str,
+    client_origin: Option<&str>,
+    url: &str,
+) {
+    headers.set("Sec-Fetch-Dest", "empty");
+    headers.set("Sec-Fetch-Mode", mode);
+    headers.set(
+        "Sec-Fetch-Site",
+        match fetch_site(client_origin, url) {
+            Some(s) => s,
+            None => return,
+        },
+    );
+}
+
+/// `Sec-Fetch-Site` value, or `None` when no client origin is known (the header
+/// is then left off, since the site relation is undefined).
+#[cfg(feature = "fetch_browser")]
+fn fetch_site(client_origin: Option<&str>, url: &str) -> Option<&'static str> {
+    let client = client_origin?;
+    let req = url::Url::parse(url).ok()?;
+    if client == req.origin().ascii_serialization() {
+        return Some("same-origin");
+    }
+    // `host_str` excludes the port, so a scheme/port change on the same host is
+    // "same-site" rather than "cross-site".
+    match (url::Url::parse(client).ok(), req.host_str()) {
+        (Some(c), Some(h)) if c.host_str() == Some(h) => Some("same-site"),
+        (Some(_), Some(_)) => Some("cross-site"),
+        _ => None,
+    }
+}
+
+/// Server build: no Fetch Metadata headers are appended.
+#[cfg(not(feature = "fetch_browser"))]
+pub(crate) fn append_fetch_metadata_headers(
+    _headers: &mut HeaderList,
+    _mode: &str,
+    _client_origin: Option<&str>,
+    _url: &str,
+) {
+}
+
 /// CORS-safelisted method (Fetch spec): GET, HEAD, or POST (case-insensitive).
 #[cfg(feature = "fetch_browser")]
 pub(crate) fn cors_safelisted_method(method: &str) -> bool {
@@ -222,6 +276,55 @@ pub(crate) fn same_origin_violation(
              request, but URL is cross-origin: {final_url}"
         ))
     }
+}
+
+/// Fetch spec: enforce `Cross-Origin-Resource-Policy` on a `no-cors` response.
+/// `same-origin` requires the client origin to be same-origin with the response
+/// URL; `same-site` requires them to be same-site (here: the same host, since
+/// aike carries no public-suffix list). Returns the error message on violation,
+/// `None` when the response is allowed through.
+#[cfg(feature = "fetch_browser")]
+pub(crate) fn corp_violation(
+    headers: &HeaderList,
+    client_origin: Option<&str>,
+    final_url: &str,
+) -> Option<String> {
+    let value = headers.get("Cross-Origin-Resource-Policy")?;
+    // Structured-field tokens are case-sensitive: only the exact `same-origin`
+    // / `same-site` members enforce anything (WPT `syntax.any.js` asserts that
+    // `SAME-ORIGIN` is not honoured).
+    let value = value.trim();
+    let req = url::Url::parse(final_url).ok()?;
+    let client = client_origin?;
+    if client == req.origin().ascii_serialization() {
+        // Same-origin satisfies both policy values.
+        return None;
+    }
+    let same_site = url::Url::parse(client)
+        .ok()
+        .zip(req.host_str())
+        .is_some_and(|(c, h)| c.host_str() == Some(h));
+    match value {
+        "same-origin" => Some(format!(
+            "request failed: 'no-cors' response is cross-origin and blocked by \
+             Cross-Origin-Resource-Policy: same-origin ({final_url})"
+        )),
+        "same-site" if !same_site => Some(format!(
+            "request failed: 'no-cors' response is not same-site and blocked by \
+             Cross-Origin-Resource-Policy: same-site ({final_url})"
+        )),
+        _ => None,
+    }
+}
+
+/// Server build: no Cross-Origin-Resource-Policy enforcement.
+#[cfg(not(feature = "fetch_browser"))]
+pub(crate) fn corp_violation(
+    _headers: &HeaderList,
+    _client_origin: Option<&str>,
+    _final_url: &str,
+) -> Option<String> {
+    None
 }
 
 /// Server build: no same-origin mode semantics; the check never fires.

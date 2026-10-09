@@ -45,6 +45,11 @@ struct CacheEntry {
     stored_at: u64,
     /// Final response URL after redirects (same as key URL when not redirected).
     final_url: String,
+    /// The `Vary` field names (lowercased) the stored response declared.
+    vary: Vec<String>,
+    /// The request headers this entry was stored for, used to decide whether a
+    /// later request matches the `Vary` fields.
+    req_headers: Vec<(String, String)>,
 }
 
 /// Upper bound on a body we are willing to hold in the in-memory cache.
@@ -151,8 +156,57 @@ fn is_fresh(entry: &CacheEntry) -> bool {
         return now_epoch() < expires_epoch;
     }
 
+    // RFC 7234 §4.2.2 heuristic freshness: with no explicit expiry, allow a small
+    // fraction (10%) of the apparent age (time since `Last-Modified`). The
+    // response must be shared, i.e. carry `Cache-Control: public` (WPT
+    // `http-cache/heuristic`: an unknown response with `public` is reused, the
+    // same response without it is not).
+    // RFC 7234 §4.2.2 heuristic freshness: with no explicit expiry, allow a small
+    // fraction (10%) of the apparent age (time since `Last-Modified`).
+    if let Some(lm) = header_value(&entry.headers, "last-modified")
+        && let Some(modified) = parse_http_date(&lm)
+    {
+        let apparent_age = now_epoch().saturating_sub(modified);
+        let current_age = now_epoch().saturating_sub(entry.stored_at);
+        // Fresh while the entry is younger than 10% of the apparent age.
+        return (current_age as f64) < (apparent_age as f64) * 0.1;
+    }
+
     // No freshness info: conservatively treat as stale (requires revalidation).
     false
+}
+
+/// Whether a request may reuse an entry given its `Vary` fields: every listed
+/// field must be present in both the stored and the current request with the
+/// same value (RFC 9111 §4.1). `Vary: *` never matches.
+fn vary_matches(entry: &CacheEntry, req_headers: &[(String, String)]) -> bool {
+    for field in &entry.vary {
+        if field == "*" {
+            return false;
+        }
+        fn pick<'a>(h: &'a [(String, String)], field: &str) -> Option<&'a str> {
+            h.iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case(field))
+                .map(|(_, v)| v.as_str())
+        }
+        // A field missing from either side cannot be shown to match.
+        match (pick(&entry.req_headers, field), pick(req_headers, field)) {
+            (Some(a), Some(b)) if a == b => {}
+            _ => return false,
+        }
+    }
+    true
+}
+
+/// RFC 9111 §3: the status codes a response may be cached from without an
+/// explicit freshness directive. Anything else (e.g. an unknown 299) is only
+/// cacheable when it carries `Cache-Control` / `Expires`
+/// (WPT `http-cache/heuristic`).
+fn is_heuristically_cacheable_status(status: u16) -> bool {
+    matches!(
+        status,
+        200 | 203 | 204 | 300 | 301 | 308 | 404 | 405 | 410 | 414 | 501
+    )
 }
 
 /// True when the caller supplied any conditional request header
@@ -176,28 +230,40 @@ pub(crate) fn caller_supplied_validator(headers: &[(String, String)]) -> bool {
 pub(crate) fn lookup_validators(
     method: &str,
     url: &str,
+    req_headers: &[(String, String)],
 ) -> Option<(Option<String>, Option<String>)> {
     if !method.eq_ignore_ascii_case("GET") {
         return None;
     }
     let cache = CACHE.lock().unwrap();
-    cache
-        .get(&(method.to_ascii_uppercase(), url.to_string()))
-        .map(|e| (e.etag.clone(), e.last_modified.clone()))
+    let entry = cache.get(&(method.to_ascii_uppercase(), url.to_string()))?;
+    // A response that varies on fields this request does not match is not
+    // revalidateable either (WPT `http-cache/vary`).
+    if !vary_matches(entry, req_headers) {
+        return None;
+    }
+    Some((entry.etag.clone(), entry.last_modified.clone()))
 }
 
 /// Return the full cached entry for a GET request, if present. Used by the
 /// cache modes that can serve straight from cache (`default` fresh,
 /// `force-cache`, `only-if-cached`).
-pub(crate) fn lookup_full(method: &str, url: &str) -> Option<CacheHit> {
+pub(crate) fn lookup_full(
+    method: &str,
+    url: &str,
+    req_headers: &[(String, String)],
+) -> Option<CacheHit> {
     if !method.eq_ignore_ascii_case("GET") {
         return None;
     }
     let cache = CACHE.lock().unwrap();
     let entry = cache.get(&(method.to_ascii_uppercase(), url.to_string()))?;
-    // A stored response carrying `Vary: *` can never be reused (it always
-    // varies), so it is not a usable cache hit (WPT request-cache-force-cache).
-    if header_value(&entry.headers, "vary").is_some_and(|v| v.trim() == "*") {
+    // `Vary: *` can never be reused (it always varies), and a response whose
+    // Vary fields do not match this request must not be served either
+    // (WPT request-cache-force-cache, http-cache/vary).
+    if header_value(&entry.headers, "vary").is_some_and(|v| v.trim() == "*")
+        || !vary_matches(entry, req_headers)
+    {
         return None;
     }
     Some(CacheHit {
@@ -243,6 +309,7 @@ pub(crate) fn store(
     headers: &[(String, String)],
     body: Vec<u8>,
     final_url: &str,
+    req_headers: &[(String, String)],
 ) {
     if !method.eq_ignore_ascii_case("GET") {
         return;
@@ -261,6 +328,19 @@ pub(crate) fn store(
         return;
     }
 
+    // A status outside the heuristically-cacheable set needs an explicit
+    // freshness directive to be cached at all (RFC 9111 §3).
+    let cc = header_value(headers, "cache-control")
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let explicit_freshness = cc.contains("max-age")
+        || cc.contains("s-maxage")
+        || cc.contains("public")
+        || has_header(headers, "expires");
+    if !is_heuristically_cacheable_status(status) && !explicit_freshness {
+        return;
+    }
+
     // Never cache `no-store` / `private` responses.
     if let Some(cc) = header_value(headers, "cache-control") {
         let cc = cc.to_ascii_lowercase();
@@ -268,6 +348,15 @@ pub(crate) fn store(
             return;
         }
     }
+    let vary: Vec<String> = header_value(headers, "vary")
+        .map(|v| {
+            v.split(',')
+                .map(|f| f.trim().to_ascii_lowercase())
+                .filter(|f| !f.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+
     let mut cache = CACHE.lock().unwrap();
     cache.insert(
         (method.to_ascii_uppercase(), url.to_string()),
@@ -279,8 +368,24 @@ pub(crate) fn store(
             last_modified,
             stored_at: now_epoch(),
             final_url: final_url.to_string(),
+            vary,
+            req_headers: req_headers
+                .iter()
+                .map(|(k, v)| (k.to_ascii_lowercase(), v.clone()))
+                .collect(),
         },
     );
+}
+
+/// Drop the entry for `url`, if any. A successful unsafe request (POST/PUT/
+/// DELETE/PATCH) invalidates the stored response for its target URL
+/// (RFC 9111 §4.4), as do the URLs it redirects to or names in
+/// `Location`/`Content-Location` (WPT `http-cache/invalidate`).
+pub(crate) fn invalidate(url: &str) {
+    CACHE
+        .lock()
+        .unwrap()
+        .remove(&("GET".to_string(), url.to_string()));
 }
 
 /// Merge `update` headers onto a stored entry and rebuild it. Used when the

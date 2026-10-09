@@ -18,7 +18,7 @@
 //
 // `components` are directories or individual .any.js files, resolved against
 // the root (e.g. `console`, `url`). If none is specified, nothing is tested.
-// idlharness.any.js files are skipped (need WebIDL).
+// idlharness.*.any.js files are skipped (need WebIDL).
 //
 // Differences from aike-wpt.mjs:
 //   - The test environment (test/promise_test/assert_*) is provided by the
@@ -193,11 +193,33 @@ function fileHttpUrl(absFile) {
   return wptBase + "/" + rel;
 }
 
+// The URL a browser would load the test file from. Same as `fileHttpUrl` except
+// that `.https.`/`.h2.` tests are served over TLS on a different port, so their
+// `location` (and therefore the client origin used for same-origin checks and
+// `Sec-Fetch-Site`) must use https. Only the shimmed location uses this — the
+// runner still *reads* the script over plain HTTP.
+function testOriginUrl(absFile) {
+  const url = fileHttpUrl(absFile);
+  if (!url) return url;
+  // Match `.https.` / `.h2.` anywhere before `.any.js`, so `.https.sub.any.js`
+  // variants are covered too.
+  if (/\.h2\.[^/]*\.any\.js$/.test(url)) {
+    return url.replace(/^http:/, "https:").replace(/:\d+/, ":9000");
+  }
+  if (/\.https\.[^/]*\.any\.js$/.test(url)) {
+    return url.replace(/^http:/, "https:").replace(/:\d+/, ":8443");
+  }
+  return url;
+}
+
 // evalScript options carrying the wpt-server base URL as `baseUrl`, which the
 // engine uses both as the reported script filename and as the base for relative
 // `fs`/`fetch` resolution. Returns undefined when interception is disabled
 // (relative URLs then fall back to the engine cwd, matching legacy behavior).
 function evalOpts(absFile) {
+  // Plain HTTP base even for `.https.` tests: the runner's own script/resource
+  // fetches go through this path and must stay same-origin. The client *origin*
+  // shim (setLocation) is what follows the test's scheme.
   const url = fileHttpUrl(absFile);
   return url ? { baseUrl: url } : undefined;
 }
@@ -241,6 +263,20 @@ function substituteTemplates(code) {
     );
 }
 
+// Fetch a URL from the runner itself (reading test sources and their
+// dependencies). These are not script-initiated requests: they always go to the
+// plain-HTTP wpt server even while the shimmed client origin follows an
+// `.https.` test's TLS port, so they must not be CORS-checked.
+async function serverFetch(url) {
+  const wasCors = fetch.cors;
+  fetch.cors = false;
+  try {
+    return await fetch(url);
+  } finally {
+    fetch.cors = wasCors;
+  }
+}
+
 // Fetch a test script's source. With a wpt server, request the script URL from
 // it (so `.sub.` substitution happens server-side); without one, read the local
 // file and expand `.sub.` placeholders locally.
@@ -249,7 +285,7 @@ async function fetchText(absFile) {
     const url = fileHttpUrl(absFile);
     let res;
     try {
-      res = await fetch(url);
+      res = await serverFetch(url);
     } catch (e) {
       console.error(`# fetchText failed for ${url}: ${e}`);
       throw e;
@@ -418,8 +454,16 @@ function setLocation(url) {
     // them as the default referrer / client origin. `__wptClientUrl` is the full
     // document URL (with port), `__wptClientOrigin` the origin (with port) used
     // for CORS same-origin checks against the server's ACAO header.
-    G.__wptClientUrl = u.href;
-    G.__wptClientOrigin = u.origin;
+    // An `.https.` test is served over TLS on a different port, so the client
+    // origin must follow the test URL's scheme/port — otherwise same-origin
+    // checks and `Sec-Fetch-Site` compare against the plain-HTTP origin
+    // (WPT fetch/metadata `*.https.sub.any.js`).
+    const isHttps = u.protocol === "https:";
+    const httpsOrigin = isHttps
+      ? `${u.protocol}//${u.hostname}${u.port ? `:${u.port}` : ""}`
+      : null;
+    G.__wptClientUrl = httpsOrigin ? `${httpsOrigin}/` : u.href;
+    G.__wptClientOrigin = httpsOrigin || u.origin;
     // WPT tests reference `get-host-info.sub.js` globals (e.g. HTTP_ORIGIN,
     // HTTP_NOTSAMESITE_ORIGIN) that are normally injected by that fixture. Since
     // the runner does not load dependency <script>s, define them here from the
@@ -536,7 +580,7 @@ async function runOneFile(file) {
 
   // Point location at this test file's URL, as a browser would, so tests that
   // derive fixture paths from location.pathname resolve to the right directory.
-  setLocation(fileHttpUrl(file));
+  setLocation(testOriginUrl(file));
 
   // Fresh harness realm: re-evaluate testharness.js so the global Tests
   // instance (and its callback lists) reset, then register our collectors.
@@ -548,7 +592,7 @@ async function runOneFile(file) {
   // testharness.js may redefine `self`/`location` globals, clobbering the shim
   // we injected above. Re-apply it now (after testharness) so the fetch engine
   // still sees a valid client URL/origin for referrer + CORS checks.
-  setLocation(fileHttpUrl(file));
+  setLocation(testOriginUrl(file));
 
   // Fetch the test file from the wpt server so `.sub.` placeholders are
   // expanded server-side (single source of truth). With no server, falls back
@@ -670,7 +714,11 @@ async function resolveTestFiles(comp) {
         await walk(p);
         continue;
       }
-      if (e.name.endsWith(".any.js") && e.name !== "idlharness.any.js") {
+      // Skip idlharness in every variant (idlharness.any.js,
+      // idlharness.https.any.js, ...): they need WebIDL, which the shell
+      // testharness.js does not provide, so every interface assertion misfires.
+      const isIdlHarness = /^idlharness\..*\.any\.js$/.test(e.name);
+      if (e.name.endsWith(".any.js") && !isIdlHarness) {
         if (globalFilter || globalExclude) {
           const scopes = await parseGlobalMeta(p);
           if (globalFilter && !hasIntersection(scopes, globalFilter)) continue;

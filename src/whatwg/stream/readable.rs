@@ -952,7 +952,7 @@ fn js_readable_stream_async_iterator_getter(ctx: &mut ScopedContext, cc: CallCon
 /// refreshed on every chunk, so a slow but live producer is never cut off; only
 /// a stalled stream times out.
 pub(crate) struct ChannelStream {
-    pub(crate) controller: JSReadableStreamDefaultController,
+    pub(crate) controller: JSReadableByteStreamController,
     pub(crate) rx: zuqe::WakeReceiver<Result<Vec<u8>, String>>,
     pub(crate) idle_deadline: Instant,
 }
@@ -1324,13 +1324,20 @@ impl JSReadableStream {
 
         let mut stream =
             JSReadableStream::new_instance(ctx, JSValue::UNDEFINED, ReadableStreamPayload::new())?;
+        // A fetch response body is a byte stream (Fetch spec: an HTTP fetch runs
+        // "extract a byte stream"), so `body.getReader({mode:"byob"})` must work.
+        stream.payload_mut().unwrap().is_byte_stream = true;
 
-        let controller = JSReadableStreamDefaultController::new_instance(
+        let controller = JSReadableByteStreamController::new_instance(
             ctx,
             JSValue::UNDEFINED,
-            ReadableControllerPayload::new_default(JSValue::from(source), Some(stream), 1.0),
+            ReadableControllerPayload::new_byte(JSValue::from(source), Some(stream), 0.0, 0),
         )?;
-        stream.payload_mut().unwrap().controller = Some(controller.into());
+        let controller_val: JSValue = controller.into();
+        stream.payload_mut().unwrap().controller = Some(controller_val.clone());
+        if let Some(cp) = JSReadableByteStreamController::payload_of(&controller_val) {
+            cp.set_byte_self_handle(controller_val.clone());
+        }
 
         // Keep the abort signal alive on the stream payload (GC-traced), not just in
         // the channel registry, so it cannot be reclaimed while the body is live.
@@ -1369,20 +1376,28 @@ impl JSReadableStream {
 
         let mut stream =
             JSReadableStream::new_instance(ctx, JSValue::UNDEFINED, ReadableStreamPayload::new())?;
+        // Synthetic HTTP bodies (data:/blob:) are byte streams too, same as
+        // from_channel.
+        stream.payload_mut().unwrap().is_byte_stream = true;
 
-        let controller = JSReadableStreamDefaultController::new_instance(
+        let controller = JSReadableByteStreamController::new_instance(
             ctx,
             JSValue::UNDEFINED,
-            ReadableControllerPayload::new_default(JSValue::from(source), Some(stream), 1.0),
+            ReadableControllerPayload::new_byte(JSValue::from(source), Some(stream), 0.0, 0),
         )?;
-        let controller_val = JSValue::from(controller);
+        let controller_val: JSValue = controller.into();
+        stream.payload_mut().unwrap().controller = Some(controller_val.clone());
+        if let Some(cp) = JSReadableByteStreamController::payload_of(&controller_val) {
+            cp.set_byte_self_handle(controller_val.clone());
+        }
 
-        stream.payload_mut().unwrap().controller = Some(controller.into());
-
-        // Enqueue the single chunk as a TypedArray.
-        let ta = TypedArray::create_from_vec_u8(ctx, bytes)?;
-        let enqueue_fn = controller_val.get_property_str(ctx, "enqueue")?;
-        enqueue_fn.call(ctx, controller_val, &[JSValue::from(ta)])?;
+        // Enqueue the single chunk as a TypedArray. A byte stream rejects a
+        // zero-length view, so an empty body just closes.
+        if !bytes.is_empty() {
+            let ta = TypedArray::create_from_vec_u8(ctx, bytes)?;
+            let enqueue_fn = controller_val.get_property_str(ctx, "enqueue")?;
+            enqueue_fn.call(ctx, controller_val, &[JSValue::from(ta)])?;
+        }
 
         // Close the stream — data is the full body.
         let close_fn = controller_val.get_property_str(ctx, "close")?;
@@ -1536,7 +1551,7 @@ fn start_channel_stream_poller(ctx: &mut ScopedContext) {
                     .map(|s| s.controller)
                     .and_then(|ctrl| {
                         let maybe_signal =
-                            JSReadableStreamDefaultController::payload_of(&JSValue::from(ctrl))
+                            JSReadableByteStreamController::payload_of(&JSValue::from(ctrl))
                                 .and_then(|cp| cp.stream())
                                 .and_then(|stream| {
                                     JSReadableStream::payload_of(&JSValue::from(stream))

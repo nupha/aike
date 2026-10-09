@@ -335,7 +335,9 @@ async fn main() -> ExitCode {
                 // aike-browser zapi extension during testing.
                 // JSPage::class_id(),
                 crate::http::client::headers::HeaderListIterator::class_id(),
+                #[cfg(feature = "fetch_cache")]
                 crate::http::client::cache_storage::JSCacheStorage::class_id(),
+                #[cfg(feature = "fetch_cache")]
                 crate::http::client::cache_storage::JSCache::class_id(),
                 JSLlmClient::class_id(),
                 JSSystem1Client::class_id(),

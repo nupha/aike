@@ -155,46 +155,49 @@ impl ReaderPayload {
             let cp = super::readable_controller::get_readable_controller(ctx, &controller_val)?;
 
             if !cp.queue().borrow().is_empty() {
-                let chunk;
-                {
-                    let mut q = cp.queue().borrow_mut();
-                    let entry = q.remove(0);
-                    let total = cp.queue_total_size();
-                    // Spec `DequeueValue`: clamp to 0 if floating-point drift makes
-                    // the running total slightly negative.
-                    let new_total = total - entry.size;
-                    cp.set_queue_total_size(if new_total < 0.0 { 0.0 } else { new_total });
-
-                    // BYOB: copy as much of the chunk as fits into the caller's view
-                    // and push the remainder back so the next read continues where
-                    // this one stopped. Done before the close transition so a
-                    // partially consumed chunk keeps the stream readable.
-                    chunk = if let Some(view) = byob_view {
-                        let filled = byob_fill_view(ctx, view, entry.chunk, &mut q)?;
-                        if !q.is_empty() {
-                            cp.set_queue_total_size(cp.queue_total_size() + 1.0);
-                        }
-                        filled
-                    } else {
-                        entry.chunk
-                    };
-
-                    // Per spec: after draining last item, if close_requested,
-                    // transition stream to closed state.
-                    if q.is_empty()
-                        && cp.close_requested()
-                        && let Some(sp) = stream.payload_mut()
-                    {
-                        sp.state = RsState::Closed;
-                    }
-                }
-
-                // Spec PullSteps step 2.3: after dequeue, if stream is not
-                // closed, call CallPullIfNeeded to refill the queue. `pull` runs
-                // JS (may GC), so the chunk stays traced until it is bound into
-                // the result object.
+                // The whole dequeue → fill → pull → result sequence runs inside
+                // one traced hold: the dequeued chunk leaves the queue, and the
+                // BYOB view is only a Rust local, yet `call_pull`/`subarray`
+                // run JS that can force a GC.
                 return cp.with_in_flight(|held| -> Result<Promise, i32> {
-                    held.borrow_mut().push(chunk);
+                    let chunk;
+                    {
+                        let mut q = cp.queue().borrow_mut();
+                        let entry = q.remove(0);
+                        held.borrow_mut().push(entry.chunk);
+                        let total = cp.queue_total_size();
+                        // Spec `DequeueValue`: clamp to 0 if floating-point drift makes
+                        // the running total slightly negative.
+                        let new_total = total - entry.size;
+                        cp.set_queue_total_size(if new_total < 0.0 { 0.0 } else { new_total });
+
+                        // BYOB: copy as much of the chunk as fits into the caller's view
+                        // and push the remainder back so the next read continues where
+                        // this one stopped. Done before the close transition so a
+                        // partially consumed chunk keeps the stream readable.
+                        chunk = if let Some(view) = byob_view {
+                            let filled = byob_fill_view(ctx, view, entry.chunk, &mut q, held)?;
+                            if !q.is_empty() {
+                                cp.set_queue_total_size(cp.queue_total_size() + 1.0);
+                            }
+                            filled
+                        } else {
+                            entry.chunk
+                        };
+                        held.borrow_mut().push(chunk);
+
+                        // Per spec: after draining last item, if close_requested,
+                        // transition stream to closed state.
+                        if q.is_empty()
+                            && cp.close_requested()
+                            && let Some(sp) = stream.payload_mut()
+                        {
+                            sp.state = RsState::Closed;
+                        }
+                    }
+
+                    // Spec PullSteps step 2.3: after dequeue, if stream is not
+                    // closed, call CallPullIfNeeded to refill the queue.
                     if cp.should_call_pull(ctx)? {
                         cp.call_pull(ctx)?;
                     }
@@ -342,13 +345,21 @@ pub(crate) fn transfer_view_buffer(
 /// back to the caller. Bytes that do not fit are pushed to the front of `queue`
 /// so the following read resumes from there.
 ///
-/// The returned view spans exactly the written bytes, sharing the caller's
-/// buffer, which is what makes `value.buffer` usable for the next read.
+/// The returned view spans exactly the bytes written, over the caller's own
+/// buffer at the caller's offset — so `value.byteLength` is the filled length
+/// and `value.buffer` is still the caller's allocation (which matters for a
+/// BYOB read into a view that starts at a byte offset).
+///
+/// `view` is pushed into `held` for the whole function: `subarray` runs JS, and
+/// the view is otherwise only a Rust local here (see the Rule 4 notes in
+/// docs/gc.md). `subarray` is deliberately the last JS call, so the view it
+/// returns needs no root of its own.
 fn byob_fill_view(
     ctx: &mut ScopedContext,
     mut view: TypedArray,
     chunk: JSValue,
     queue: &mut Vec<QueueEntry>,
+    held: &RefCell<Vec<JSValue>>,
 ) -> Result<JSValue, i32> {
     let src: Vec<u8> = match chunk.as_object().and_then(|o| TypedArray::try_from(o).ok()) {
         Some(ta) => ta.with_bytes(|b| b.to_vec()),
@@ -356,6 +367,7 @@ fn byob_fill_view(
         None => return Ok(chunk),
     };
 
+    held.borrow_mut().push(JSValue::from(view.clone()));
     let n = view.with_bytes_mut(|dest| {
         let n = src.len().min(dest.len());
         dest[..n].copy_from_slice(&src[..n]);
@@ -373,13 +385,10 @@ fn byob_fill_view(
         );
     }
 
-    // WHATWG: transfer (detach) the caller's original buffer and return a
-    // fresh view over a new buffer containing the filled bytes. This matches
-    // the spec's ReadableByteStreamControllerCommitPullIntoDescriptor
-    // which transfers the pull-into descriptor's buffer.
-    view.array_buffer().detatch(ctx);
-    let filled = TypedArray::create_from_vec_u8(ctx, src[..n].to_vec())?;
-    Ok(JSValue::from(filled))
+    // `subarray` of the filled length: same buffer, same offset, exact length.
+    let n = JSValue::from(n as i32);
+    let filled = view.invoke_str(ctx, "subarray", &[JSValue::ZERO, n])?;
+    Ok(filled)
 }
 
 /// Get the `&ReaderPayload` attached to a `ReadableStreamDefaultReader` value.

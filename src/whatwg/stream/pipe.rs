@@ -139,6 +139,11 @@ fn run_pipe_driver(
     // has been fully read (so the destination is closed once writes drain).
     state.set_property_str(ctx, "pendingWrites", 0.into())?;
     state.set_property_str(ctx, "readDone", false.into())?;
+    // The spec's first `reader.read()` is issued unconditionally during setup,
+    // before any backpressure check — so the source is disturbed synchronously
+    // even when the destination's desiredSize is not positive (WPT
+    // `response-stream-disturbed-by-pipe` reads with `highWaterMark: 0`).
+    state.set_property_str(ctx, "issuedFirstRead", false.into())?;
 
     // Uniform data layout threaded through every async pipe callback:
     //   [0] state, [1] resolve, [2] reject, [3] reader, [4] writer,
@@ -248,14 +253,20 @@ fn pipe_to_read(ctx: &mut ScopedContext, data: &[JSValue]) -> JSResult {
     if pipe_is_shutting_down(ctx, &data[0])? {
         return Ok(JSValue::UNDEFINED);
     }
-    let state_obj = data[0].as_object().unwrap();
+    let mut state_obj = data[0].as_object().unwrap();
     if state_obj.get_property_str(ctx, "readDone")?.to_bool()? {
         return Ok(JSValue::UNDEFINED);
     }
-    // Backpressure: do not read while the destination does not desire chunks.
+    // The first read is unconditional (see `issuedFirstRead`); afterwards apply
+    // backpressure — do not read while the destination does not desire chunks.
     // The destination's queue may hold writes from this pipe, so desiredSize
     // is writable hwm minus the writes this pipe still has in flight.
-    if !pipe_wants_read(ctx, data)? {
+    let first_read = !state_obj
+        .get_property_str(ctx, "issuedFirstRead")?
+        .to_bool()?;
+    if first_read {
+        state_obj.set_property_str(ctx, "issuedFirstRead", true.into())?;
+    } else if !pipe_wants_read(ctx, data)? {
         return Ok(JSValue::UNDEFINED);
     }
     let reader = data[3];

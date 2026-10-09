@@ -11,9 +11,12 @@ use zuqe::{
 
 use crate::aike::AikeRuntimeState;
 
+// The HTTP cache module is always compiled (it owns the `CacheHit` type used
+// below); every *call* into it is gated on the `fetch_cache` feature.
+use crate::http::client::cache as http_cache;
+
 use crate::http::client::{
     body::{BODY_TIMEOUT, body_content_type, body_to_bytes},
-    cache as http_cache,
     headers::{HeaderList, header_list_from_js, validate_header_list_for_fetch},
     request::{
         JSRequest, get_request_payload_mut, normalize_method, validate_request_init_options,
@@ -33,9 +36,10 @@ use crate::whatwg::{
 
 use super::{
     cors::{
-        PreflightCtx, check_allow_origin, cors_check, cors_filter_response_headers,
-        is_cross_origin, join_request_headers, make_before_hop_hook, needs_preflight,
-        preflight_request_headers, same_origin_violation, serialized_origin, should_append_origin,
+        PreflightCtx, append_fetch_metadata_headers, check_allow_origin, corp_violation,
+        cors_check, cors_filter_response_headers, is_cross_origin, join_request_headers,
+        make_before_hop_hook, needs_preflight, preflight_request_headers, same_origin_violation,
+        serialized_origin, should_append_origin,
     },
     headers::{ensure_default_request_headers, strip_forbidden_request_headers},
     integrity::check_integrity,
@@ -360,7 +364,13 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     // The short-circuit below runs before the network request is issued, so a
     // fresh hit (or `force-cache`) never touches the transport.
 
-    // Is this request cacheable at all (GET, no body)?
+    // Is this request cacheable at all (GET, no body)? Without the
+    // `fetch_cache` feature there is no cache, so every request goes to the
+    // network and the `cache` option has no effect.
+    let cache_enabled = cfg!(feature = "fetch_cache");
+    // Is this request cacheable at all (GET, no body)? Every cache read below is
+    // compiled in only with the `fetch_cache` feature; without it each request
+    // goes to the network and the `cache` option has no effect.
     let cacheable =
         method.eq_ignore_ascii_case("GET") && body_bytes.is_none() && stream_body.is_none();
 
@@ -368,18 +378,29 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     // `If-Modified-Since`, `If-Unmodified-Since`, `If-Match`, `If-Range`) is
     // treated as `no-store`: it bypasses the cache (WPT
     // request-cache-default-conditional).
+    #[cfg(feature = "fetch_cache")]
     let has_conditional = cacheable && http_cache::caller_supplied_validator(&header_list.to_vec());
+    // Without the feature there is no cache, so no caller header can be a
+    // "conditional" one as far as this layer is concerned.
+    #[cfg(not(feature = "fetch_cache"))]
+    let has_conditional = false;
 
     // Serve-from-cache hit for the modes that can return without a network call.
+    #[cfg(feature = "fetch_cache")]
     let cache_hit = if cacheable && !has_conditional {
         match cache_mode.as_str() {
-            "default" => http_cache::lookup_full(&method, &url_str).filter(|h| h.fresh),
-            "force-cache" | "only-if-cached" => http_cache::lookup_full(&method, &url_str),
+            "default" => http_cache::lookup_full(&method, &url_str, &header_list.to_vec())
+                .filter(|h| h.fresh),
+            "force-cache" | "only-if-cached" => {
+                http_cache::lookup_full(&method, &url_str, &header_list.to_vec())
+            }
             _ => None,
         }
     } else {
         None
     };
+    #[cfg(not(feature = "fetch_cache"))]
+    let cache_hit: Option<http_cache::CacheHit> = None;
 
     // `only-if-cached` with no cached entry is a network error (TypeError).
     if cache_mode == "only-if-cached" && cache_hit.is_none() {
@@ -531,16 +552,18 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let revalidate = !matches!(cache_mode.as_str(), "no-store" | "reload");
     // A conditional-header request is treated as no-store: no revalidation
     // validators are added on top of the caller's own conditional headers.
+    #[cfg(feature = "fetch_cache")]
     let cached_validators = if cacheable && revalidate && !has_conditional {
-        http_cache::lookup_validators(&method, &url_str)
+        http_cache::lookup_validators(&method, &url_str, &header_list.to_vec())
     } else {
         None
     };
+    #[cfg(not(feature = "fetch_cache"))]
+    let cached_validators: Option<(Option<String>, Option<String>)> = None;
     // Only treat a `304` as cache-driven (to be turned into the cached
     // response) when *we* added the validators — if the caller supplied them
     // the `304` is theirs and must be passed through unchanged.
-    let cache_driven = cached_validators.is_some()
-        && !http_cache::caller_supplied_validator(&header_list.to_vec());
+    let cache_driven = cached_validators.is_some() && !has_conditional;
     let url_clone = url_str.clone();
     let redirect_clone = redirect.clone();
     let method_clone = method.clone();
@@ -661,6 +684,7 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     // Apply conditional-revalidation validators (from the HTTP cache) to the
     // finalized request headers; this must run after the forbidden-header
     // strip above so it cannot revive a dropped header.
+    #[cfg(feature = "fetch_cache")]
     if let Some(validators) = &cached_validators {
         http_cache::add_conditional_headers(&mut req_headers, validators.clone());
     }
@@ -671,6 +695,20 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     // preflight decision must be made per hop in the transport layer (see
     // `TransportRequest::before_hop`).
     let preflight_possible = needs_preflight(&method, &req_headers, true);
+
+    // Fetch Metadata Request Headers (Fetch spec "append fetch metadata
+    // headers"). Appended *after* the preflight decision: these are UA-supplied
+    // headers, not author ones, so they must not themselves force a preflight
+    // (a `fetch()` with no custom header must not preflight). `fetch()` is never
+    // a navigation, so the destination is always "empty", and `Sec-Fetch-User`
+    // is only sent for navigations from a user activation, so it is omitted
+    // (WPT `fetch/metadata`).
+    append_fetch_metadata_headers(&mut header_list, &mode, req_origin.as_deref(), &url_str);
+    req_headers = header_list.to_vec();
+    #[cfg(feature = "fetch_cache")]
+    if let Some(validators) = &cached_validators {
+        http_cache::add_conditional_headers(&mut req_headers, validators.clone());
+    }
 
     // Always follow redirects manually when `redirect == "follow"`. Every hop
     // must recompute the outgoing `Referer` (per the hop's referrer policy) and,
@@ -852,6 +890,29 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             // error. Redirects are followed manually, so the *final* response URL
             // is checked here (the redirect target would otherwise hide the
             // violation).
+            // Fetch spec, `no-cors` responses: when the response carries
+            // `Cross-Origin-Resource-Policy`, a `no-cors` request that is not
+            // same-origin (`same-origin` value) or not same-site (`same-site`
+            // value) with the response URL is a network error. Applies only to
+            // `no-cors`; a `cors` request already passed the CORS check
+            // (WPT `fetch/cross-origin-resource-policy`).
+            if fetch_cors
+                && mode_clone == "no-cors"
+                && let Some(msg) = corp_violation(
+                    &HeaderList::from_vec(tr.headers.clone()),
+                    client_origin.as_deref(),
+                    &tr.final_url,
+                )
+            {
+                return throw_transport_error(
+                    cx,
+                    TransportError {
+                        code: "corp",
+                        message: msg,
+                    },
+                );
+            }
+
             if fetch_cors
                 && mode_clone == "same-origin"
                 && let Some(msg) = same_origin_violation(client_origin.as_deref(), &tr.final_url)
@@ -867,6 +928,7 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
             // HTTP cache: a `304` we drove via conditional headers becomes the
             // cached response (status 200) with the 304 headers merged on top.
+            #[cfg(feature = "fetch_cache")]
             if let Some((cached_status, cached_headers, cached_body)) =
                 http_cache::take_not_modified(
                     &method_clone,
@@ -1049,6 +1111,9 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             let has_conditional = has_conditional_for_spawn;
             let cache_method = req.method.clone();
             let cache_url = req.url.clone();
+            // Snapshot of the outgoing request headers, used to match `Vary`
+            // fields when the stored response is reused.
+            let cache_req_headers = req.headers.clone();
             let client = client.clone();
             tokio::spawn(async move {
                 let mut tr = match perform_request(&client, req).await {
@@ -1088,6 +1153,7 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 }
                 // HTTP cache: buffer the body of a cacheable GET response so it
                 // can be stored and later served/revalidated from cache.
+                #[cfg(feature = "fetch_cache")]
                 if cache_mode != "no-store"
                     && !has_conditional
                     && cache_method.eq_ignore_ascii_case("GET")
@@ -1123,8 +1189,39 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                             &tr.headers,
                             bytes.clone(),
                             &final_url,
+                            &cache_req_headers,
                         );
                         tr.synthetic_body = Some(bytes);
+                    }
+                }
+
+                // RFC 9111 §4.4: a successful unsafe request invalidates the
+                // stored responses for its target URL and for the URLs it names
+                // in `Location` / `Content-Location` (WPT `http-cache/invalidate`).
+                #[cfg(feature = "fetch_cache")]
+                {
+                    let method = cache_method.to_ascii_uppercase();
+                    let is_get = method == "GET" || method == "HEAD";
+                    let successful = tr.status >= 200 && tr.status < 400;
+                    if !is_get && successful {
+                        http_cache::invalidate(&cache_url);
+                        http_cache::invalidate(&tr.final_url);
+                        for name in ["location", "content-location"] {
+                            if let Some(v) = tr
+                                .headers
+                                .iter()
+                                .find(|(k, _)| k.eq_ignore_ascii_case(name))
+                                .map(|(_, v)| v.clone())
+                            {
+                                // Resolve against the request URL, then drop
+                                // any stored entry for it.
+                                if let Ok(abs) =
+                                    url::Url::parse(&cache_url).and_then(|b| b.join(&v))
+                                {
+                                    http_cache::invalidate(abs.as_str());
+                                }
+                            }
+                        }
                     }
                 }
 
@@ -1271,16 +1368,19 @@ pub(crate) fn install_fetch(ctx: &mut ScopedContext, mut global: Object) -> Resu
 
     global.define_property_value_str(ctx, "fetch", func.into(), zuqe::JS_PROP_C_W_E)?;
 
-    // Cache Storage API
-    let caches = crate::http::client::cache_storage::JSCacheStorage::new_instance(
-        ctx,
-        JSValue::UNDEFINED,
-        crate::http::client::cache_storage::CacheStoragePayload {
-            stores: std::rc::Rc::new(std::cell::RefCell::new(std::collections::HashMap::new())),
-        },
-    )
-    .map(JSValue::from)?;
-    global.define_property_value_str(ctx, "caches", caches, zuqe::JS_PROP_C_W_E)?;
+    // Cache Storage API (only with the `fetch_cache` feature).
+    #[cfg(feature = "fetch_cache")]
+    {
+        let caches = crate::http::client::cache_storage::JSCacheStorage::new_instance(
+            ctx,
+            JSValue::UNDEFINED,
+            crate::http::client::cache_storage::CacheStoragePayload {
+                stores: std::rc::Rc::new(std::cell::RefCell::new(std::collections::HashMap::new())),
+            },
+        )
+        .map(JSValue::from)?;
+        global.define_property_value_str(ctx, "caches", caches, zuqe::JS_PROP_C_W_E)?;
+    }
 
     Ok(())
 }

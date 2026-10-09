@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 John Ray <996351336@qq.com>
 
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     rc::Rc,
     sync::{
         Arc, Mutex,
@@ -153,6 +153,13 @@ pub(crate) fn drain_body(
     // error can be rethrown as the original object rather than a copied string.
     let raw_err: Rc<RefCell<Option<JSValue>>> = Rc::new(RefCell::new(None));
     let convert_err = raw_err.clone();
+    // Set when the failure came from the transport (a reset connection, a
+    // content-decoding error, ...). Those are Fetch network errors and must
+    // reject with a TypeError; only aike's own read timeout is an internal
+    // error. A flag rather than a message match, so the two cannot be confused.
+    let network_err = Rc::new(Cell::new(false));
+    let network_err_slot = network_err.clone();
+    let network_err_job = network_err.clone();
     let promise =
         Promise::create_with_result_slot(ctx, result_slot.clone(), move |cx, data| -> JSResult {
             let buf = data.map_err(|e| match convert_err.borrow_mut().take() {
@@ -160,6 +167,7 @@ pub(crate) fn drain_body(
                     cx.throw(Exception::Error(v));
                     -1
                 }
+                None if network_err_slot.get() => cx.throw_type_error(&e),
                 None => cx.throw_internal_error(&e),
             })?;
             match mode {
@@ -230,6 +238,7 @@ pub(crate) fn drain_body(
             // tick even though the data was committed.
             let committed = Arc::new(AtomicBool::new(false));
             let start = Instant::now();
+            let network_err = network_err_job;
             ctx.queue_job(
                 move |cx| {
                     if committed.load(Ordering::SeqCst) {
@@ -267,6 +276,7 @@ pub(crate) fn drain_body(
                             // A network error mid-body: reject the buffered read.
                             Ok(Err(msg)) => {
                                 finish(&mut guard);
+                                network_err.set(true);
                                 let _ = result_slot.commit(Err(msg));
                                 return Ok(JobState::Block);
                             }
