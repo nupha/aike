@@ -14,6 +14,7 @@ use axum::{
     Router,
     body::Body,
     extract::{FromRequestParts as _, RawPathParams, Request, ws::WebSocketUpgrade},
+    http::{HeaderMap, HeaderName, HeaderValue},
     response::{
         IntoResponse, Response as AxumResponse,
         sse::{Event, KeepAlive, Sse},
@@ -336,6 +337,30 @@ fn validate_axum_path(path: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Copy JS-supplied response headers into an `http` `HeaderMap`.
+///
+/// The names/values are already validated by the JS-side setters, so every
+/// header lands on the wire.
+///
+/// List-based fields (RFC 9110 §5.3) accumulate: `Set-Cookie` in particular
+/// cannot be comma-folded (RFC 6265 §3 — `Expires=Wed, 21 Oct 2035 ...`
+/// already contains a comma), so each `setHeader` call emits its own field
+/// line. Every other field is single-valued, so a later `setHeader` replaces an
+/// earlier one — the same rule Node's `ServerResponse` applies.
+fn apply_response_headers(map: &mut HeaderMap, headers: &[(HeaderName, HeaderValue)]) {
+    for (name, value) in headers {
+        match name.as_str() {
+            "set-cookie" | "link" | "vary" | "www-authenticate" | "proxy-authenticate"
+            | "accept-ch" => {
+                map.append(name.clone(), value.clone());
+            }
+            _ => {
+                map.insert(name.clone(), value.clone());
+            }
+        }
+    }
+}
+
 /// Create a (path, MethodRouter) pair that delegates to a JS handler via channel.
 ///
 /// The closure captures only `handler_index: usize` and `Sender` — both Send + Sync.
@@ -425,14 +450,7 @@ fn delegate_js_route(
                             .unwrap_or(axum::http::StatusCode::OK);
                         let mut response = AxumResponse::new(Body::from(body.unwrap_or_default()));
                         *response.status_mut() = status;
-                        for (k, v) in &headers {
-                            if let (Ok(name), Ok(val)) = (
-                                axum::http::HeaderName::from_bytes(k.as_bytes()),
-                                axum::http::HeaderValue::from_str(v),
-                            ) {
-                                response.headers_mut().insert(name, val);
-                            }
-                        }
+                        apply_response_headers(response.headers_mut(), &headers);
                         response
                     }
                     HttpResponseMessage::Streaming {
@@ -450,14 +468,7 @@ fn delegate_js_route(
                         if let Ok(s) = axum::http::StatusCode::from_u16(status) {
                             *response.status_mut() = s;
                         }
-                        for (k, v) in &headers {
-                            if let (Ok(name), Ok(val)) = (
-                                axum::http::HeaderName::from_bytes(k.as_bytes()),
-                                axum::http::HeaderValue::from_str(v),
-                            ) {
-                                response.headers_mut().insert(name, val);
-                            }
-                        }
+                        apply_response_headers(response.headers_mut(), &headers);
                         response
                     }
                 },

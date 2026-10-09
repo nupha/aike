@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2026 John Ray <996351336@qq.com>
 
+use axum::http::{HeaderName, HeaderValue, header};
 use tokio::sync::{mpsc, oneshot};
 use zuqe::{
     CallContext, FieldDef, IntOrFloat, JSResult, JSValue, ScopedContext,
@@ -12,17 +13,21 @@ use zuqe::{
 use super::outbound_buffer::{OUTBOUND_CAP, OutboundBuffer, js_stream_write};
 
 /// Response data sent back from JS to the axum handler.
+///
+/// Headers are already-validated `http` types: JS-facing setters reject
+/// anything the wire format cannot carry, so the axum side never has to
+/// silently drop a header.
 pub(crate) enum HttpResponseMessage {
     /// Normal one-shot response (status + headers + optional body).
     Normal {
         status: u16,
-        headers: Vec<(String, String)>,
+        headers: Vec<(HeaderName, HeaderValue)>,
         body: Option<String>,
     },
     /// SSE streaming response: headers + a receiver the axum `Sse` reads from.
     Streaming {
         status: u16,
-        headers: Vec<(String, String)>,
+        headers: Vec<(HeaderName, HeaderValue)>,
         receiver: mpsc::Receiver<String>,
     },
 }
@@ -30,7 +35,7 @@ pub(crate) enum HttpResponseMessage {
 /// Internal payload for HttpResponse classes.
 pub(crate) struct HttpResponsePayload {
     pub(crate) status: u16,
-    pub(crate) headers: Vec<(String, String)>,
+    pub(crate) headers: Vec<(HeaderName, HeaderValue)>,
     pub(crate) body: Option<String>,
     pub(crate) ended: bool,
     /// Set once `sse()` is called — every other method then throws, because
@@ -88,6 +93,33 @@ fn js_res_status(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     Ok(this)
 }
 
+/// Validate one user-supplied header pair and convert it to the wire types,
+/// throwing `TypeError` when the HTTP layer refuses to encode it (an invalid
+/// name, or a value carrying CR/LF — forbidden by RFC 9110 §5.5).
+///
+/// Validating here, where a `ScopedContext` exists, is what keeps the axum
+/// response builder infallible: a rejected header can never vanish from the
+/// response without the handler author learning about it.
+fn to_header(
+    ctx: &mut ScopedContext,
+    method: &str,
+    key: &str,
+    val: &str,
+) -> Result<(HeaderName, HeaderValue), i32> {
+    let name = HeaderName::from_bytes(key.as_bytes()).map_err(|_| {
+        ctx.throw_type_error(&format!(
+            "`{method}` name must be a valid HTTP header name, got '{key}'"
+        ))
+    })?;
+    let value = HeaderValue::from_str(val).map_err(|_| {
+        ctx.throw_type_error(&format!(
+            "`{method}` value for '{key}' must be a valid HTTP header value \
+             (no control characters, such as CR or LF)"
+        ))
+    })?;
+    Ok((name, value))
+}
+
 fn js_res_setHeader(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut this = cc.this();
     let (key, val) = if cc.length() >= 2 {
@@ -100,8 +132,9 @@ fn js_res_setHeader(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     } else {
         return Ok(this);
     };
+    let header = to_header(ctx, "setHeader", &key, &val)?;
     let data = get_res_payload_mut(ctx, &mut this)?;
-    data.headers.push((key, val));
+    data.headers.push(header);
     Ok(this)
 }
 
@@ -124,7 +157,8 @@ fn js_res_setHeaders(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                         if let Ok(val) = obj.get_property(ctx, pk.atom)
                             && let Ok(val_r) = val.to_string(ctx)
                         {
-                            entries.push((key_str, val_r.content().encode_utf8(false).to_string()));
+                            let val_str = val_r.content().encode_utf8(false).to_string();
+                            entries.push(to_header(ctx, "setHeaders", &key_str, &val_str)?);
                         }
                     }
                 }
@@ -154,7 +188,7 @@ fn js_res_finish(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
     let body_str;
     let status_code;
-    let redirect_url;
+    let location;
     match magic {
         FINISH_END => {
             body_str = if cc.length() > 0 && !cc.arg(0).is_undefined() {
@@ -166,7 +200,7 @@ fn js_res_finish(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 None
             };
             status_code = None;
-            redirect_url = None;
+            location = None;
         }
         FINISH_JSON => {
             // Use the engine's JSON.stringify so spec behavior is inherited: it
@@ -183,7 +217,7 @@ fn js_res_finish(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 None
             };
             status_code = None;
-            redirect_url = None;
+            location = None;
         }
         FINISH_SEND_STATUS => {
             body_str = None;
@@ -195,7 +229,7 @@ fn js_res_finish(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             } else {
                 None
             };
-            redirect_url = None;
+            location = None;
         }
         FINISH_REDIRECT => {
             let c = if cc.length() > 0 {
@@ -221,7 +255,14 @@ fn js_res_finish(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             };
             body_str = None;
             status_code = Some(c);
-            redirect_url = Some(u);
+            // The target travels as the `Location` header value, so it must be
+            // encodable — otherwise the redirect would go out without one.
+            location = Some(HeaderValue::from_str(&u).map_err(|_| {
+                ctx.throw_type_error(
+                    "`redirect` url must be a valid HTTP header value \
+                     (no control characters, such as CR or LF)",
+                )
+            })?);
         }
         _ => unreachable!(),
     }
@@ -232,17 +273,16 @@ fn js_res_finish(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     }
 
     if magic == FINISH_JSON {
-        let has_ct = data
-            .headers
-            .iter()
-            .any(|(k, _)| k.eq_ignore_ascii_case("content-type"));
+        let has_ct = data.headers.iter().any(|(k, _)| k == header::CONTENT_TYPE);
         if !has_ct {
-            data.headers
-                .push(("content-type".into(), "application/json".into()));
+            data.headers.push((
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("application/json"),
+            ));
         }
     }
-    if let Some(url) = redirect_url {
-        data.headers.push(("Location".into(), url));
+    if let Some(v) = location {
+        data.headers.push((header::LOCATION, v));
     }
 
     if let Some(b) = body_str {
@@ -332,24 +372,17 @@ pub(crate) fn get_sse_payload<'a>(
 }
 
 /// Append SSE-default headers if not already set by the user.
-fn ensure_sse_headers(headers: &mut Vec<(String, String)>) {
-    let has_ct = headers
-        .iter()
-        .any(|(k, _)| k.eq_ignore_ascii_case("content-type"));
-    if !has_ct {
-        headers.push(("content-type".into(), "text/event-stream".into()));
-    }
-    let has_cc = headers
-        .iter()
-        .any(|(k, _)| k.eq_ignore_ascii_case("cache-control"));
-    if !has_cc {
-        headers.push(("cache-control".into(), "no-cache".into()));
-    }
-    let has_accel = headers
-        .iter()
-        .any(|(k, _)| k.eq_ignore_ascii_case("x-accel-buffering"));
-    if !has_accel {
-        headers.push(("x-accel-buffering".into(), "no".into()));
+fn ensure_sse_headers(headers: &mut Vec<(HeaderName, HeaderValue)>) {
+    // `x-accel-buffering` has no constant in the `http` crate.
+    let defaults: [(HeaderName, &str); 3] = [
+        (header::CONTENT_TYPE, "text/event-stream"),
+        (header::CACHE_CONTROL, "no-cache"),
+        (HeaderName::from_static("x-accel-buffering"), "no"),
+    ];
+    for (name, value) in defaults {
+        if !headers.iter().any(|(k, _)| *k == name) {
+            headers.push((name, HeaderValue::from_static(value)));
+        }
     }
 }
 

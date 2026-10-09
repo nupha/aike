@@ -411,6 +411,14 @@ declare class Headers {
   values(): string[];
   /** Returns an array of [name, value] pairs. */
   entries(): Array<[string, string]>;
+  /**
+   * Returns every `Set-Cookie` value as a separate array element.
+   *
+   * `get("set-cookie")` cannot express several cookies — each value may itself
+   * contain a comma (`Expires=Wed, 21 Oct 2035 07:28:00 GMT`), so the
+   * comma-joined result is not splittable.
+   */
+  getSetCookie(): string[];
   /** Default iterator yields [name, value] pairs. */
   [Symbol.iterator](): IterableIterator<[string, string]>;
 }
@@ -864,4 +872,3 @@ declare class CookieStore {
 
 /** The global `CookieStore` instance. */
 declare const cookieStore: CookieStore;
-

@@ -35,9 +35,23 @@ declare module "http" {
   export class HttpServerResponse {
     /** Set the HTTP status code. Returns this for chaining. */
     status(code: number): this;
-    /** Set a single response header. Returns this for chaining. */
+    /**
+     * Set a response header. Returns this for chaining.
+     *
+     * List-based fields (`set-cookie`, `link`, `vary`, `www-authenticate`,
+     * `proxy-authenticate`, `accept-ch`) accumulate: each call emits its own
+     * header line, so repeated `setHeader("set-cookie", …)` sends several
+     * cookies. Every other field is single-valued and a later call replaces an
+     * earlier one.
+     *
+     * @throws TypeError if `key` is not a valid HTTP header name, or `value`
+     *   contains characters the wire format forbids (CR/LF).
+     */
     setHeader(key: string, value: string): this;
-    /** Set multiple response headers at once. Returns this for chaining. */
+    /**
+     * Set multiple response headers at once. Returns this for chaining.
+     * Same accumulation and validation rules as {@link setHeader}.
+     */
     setHeaders(headers: Record<string, string>): this;
     /** End the response with an optional body string. */
     end(body?: string): void;
@@ -49,6 +63,8 @@ declare module "http" {
      * Send a redirect response. Sets `Location` header and ends the response.
      * @param code HTTP status code (default: 302). Must be an integer.
      * @param url Redirect target URL. If omitted, only the status is set.
+     * @throws TypeError if `url` contains characters forbidden in a header
+     *   value (CR/LF).
      */
     redirect(code?: number, url?: string): void;
     /**
