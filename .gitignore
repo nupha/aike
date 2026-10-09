@@ -2,7 +2,10 @@
 
 !src/
 !src/**
+!src/**/*.rs
 !types/
 !types/**
+!types/**/*.d.ts
 !tests/
-!tests/**
+!tests/**/*.js
+!tests/**/*.mjs
