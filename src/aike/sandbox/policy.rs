@@ -134,6 +134,11 @@ pub(crate) struct Policy {
     /// Additional paths, beyond the working directory.
     pub(crate) grants: Vec<Grant>,
     /// Paths the process may not reach at all, whatever else says otherwise.
+    ///
+    /// macOS and Linux consume this; on Windows an ungranted path is denied by
+    /// default, so the list is only validated, not applied (a `denied` path
+    /// inside an allowed subtree is rejected in [`Policy::new`]).
+    #[cfg_attr(windows, allow(dead_code))]
     pub(crate) denied: Vec<PathBuf>,
     pub(crate) network: NetworkPolicy,
 }
@@ -211,6 +216,38 @@ impl Policy {
                         d.display(),
                         g.path.display()
                     ));
+                }
+            }
+        }
+
+        // Windows expresses a policy purely as ACL grants, and an AppContainer
+        // ACL can only add access to a path, never take it away from one that
+        // is already allowed. A `denied` path inside the working directory (or
+        // inside a grant) therefore has no representation there, and ignoring
+        // it would leave the file exposed while the caller believed it hidden.
+        // macOS and Linux both shadow it, so this is a Windows-only limitation.
+        #[cfg(windows)]
+        {
+            for d in &normalized_denied {
+                if path::is_within(d, &cwd) {
+                    return Err(format!(
+                        "`denied` entry `{}` is inside the sandbox cwd `{}`, which Windows \
+                         cannot express: an AppContainer ACL grants access but cannot take \
+                         it back from an already-allowed subtree",
+                        d.display(),
+                        cwd.display()
+                    ));
+                }
+                for g in &normalized_grants {
+                    if path::is_within(d, &g.path) {
+                        return Err(format!(
+                            "`denied` entry `{}` is inside granted path `{}`, which Windows \
+                             cannot express: an AppContainer ACL grants access but cannot take \
+                             it back from an already-allowed subtree",
+                            d.display(),
+                            g.path.display()
+                        ));
+                    }
                 }
             }
         }
@@ -354,15 +391,22 @@ mod tests {
         assert!(err.contains("denied"), "{err}");
 
         // Siblings do not conflict: a denied path beside a granted one is the
-        // normal way to hide one directory inside a workspace.
+        // normal way to hide one directory inside a workspace. Windows is the
+        // exception — it cannot subtract access from the working directory,
+        // which is this `secret` directory's parent, so the same policy is
+        // rejected there rather than left silently unenforced.
+        let siblings = Policy::new(
+            &s(dir.path()),
+            vec![(s(&tools), "rx".to_owned())],
+            vec![s(&secret)],
+            NetworkPolicy::DenyAll,
+        );
+        #[cfg(not(windows))]
+        assert!(siblings.is_ok(), "{siblings:?}");
+        #[cfg(windows)]
         assert!(
-            Policy::new(
-                &s(dir.path()),
-                vec![(s(&tools), "rx".to_owned())],
-                vec![s(&secret)],
-                NetworkPolicy::DenyAll,
-            )
-            .is_ok()
+            siblings.is_err(),
+            "Windows must reject a denied path under cwd"
         );
     }
 

@@ -27,23 +27,24 @@ pub(crate) fn normalize(path: &str, component: &str) -> Result<PathBuf, String> 
             "`{component}` path `{path}` must be absolute, not relative"
         ));
     }
-    p.canonicalize()
-        .map_err(|e| format!("`{component}` path `{path}` cannot be resolved: {e}"))
+    p.canonicalize().map_err(|e| {
+        // A missing path is the common case and gets the clearer phrasing;
+        // matching on the error kind keeps it working under a localized OS.
+        if e.kind() == std::io::ErrorKind::NotFound {
+            format!("`{component}` path `{path}` does not exist")
+        } else {
+            format!("`{component}` path `{path}` cannot be resolved: {e}")
+        }
+    })
 }
 
 /// [`normalize`], phrased for a path the caller expected to exist.
 ///
 /// `canonicalize` already fails when nothing is there, so there is no second
-/// existence check to make — only the message to improve. A policy naming
-/// something missing has to be rejected: the rule would silently cover nothing.
+/// existence check to make — only the message to improve, which `normalize`
+/// now does for a missing path.
 pub(crate) fn existing(path: &str, component: &str) -> Result<PathBuf, String> {
-    normalize(path, component).map_err(|e| {
-        if e.contains("No such file") {
-            format!("`{component}` path `{path}` does not exist")
-        } else {
-            e
-        }
-    })
+    normalize(path, component)
 }
 
 /// [`existing`], plus a check that it is a directory. The sandbox working
@@ -123,12 +124,12 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)] // symlink creation needs privileges on Windows
     fn resolves_symlinks_before_comparing() {
         let dir = TempDir::new();
         let real = dir.path().join("real");
         std::fs::create_dir(&real).unwrap();
         let link = dir.path().join("link");
-        #[cfg(unix)]
         std::os::unix::fs::symlink(&real, &link).unwrap();
 
         let a = normalize(link.to_str().unwrap(), "grants").unwrap();

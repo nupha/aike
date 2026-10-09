@@ -17,15 +17,31 @@
 //! is decided once, in [`super::spawn`]; this module only moves bytes between
 //! the engine and pipes.
 
+#[cfg(unix)]
+use std::os::fd::AsRawFd;
 use std::{
     collections::HashMap,
-    os::fd::AsRawFd,
     sync::{
         Arc, LazyLock, Mutex,
         atomic::{AtomicBool, Ordering},
     },
     time::Duration,
 };
+
+/// The raw descriptor a pipe is exposed to the engine under. Windows has no
+/// `RawFd`; the handle value is not used there and `-1` matches what the plain
+/// spawn path passes.
+fn raw_fd(file: &std::fs::File) -> i32 {
+    #[cfg(unix)]
+    {
+        file.as_raw_fd()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = file;
+        -1
+    }
+}
 
 use zuqe::{
     Array, CallContext, Callback, JS_PROP_C_W_E, JS_PROP_ENUMERABLE, JSResult, JSValue, Object,
@@ -257,7 +273,7 @@ pub(crate) fn spawn_async_sandboxed(
     let pid = child.pid;
     let stdin_val = match child.stdin.take() {
         Some(si) => {
-            let fd = si.as_raw_fd();
+            let fd = raw_fd(&si);
             JSStdioHandle::new_instance_pipe_write(ctx, pipe_bridge::bridge_writer(si), fd)
                 .map(JSValue::from)
                 .unwrap_or(JSValue::NULL)
@@ -266,7 +282,7 @@ pub(crate) fn spawn_async_sandboxed(
     };
     let stdout_val = match child.stdout.take() {
         Some(so) => {
-            let fd = so.as_raw_fd();
+            let fd = raw_fd(&so);
             JSStdioHandle::new_instance_pipe_read(ctx, pipe_bridge::bridge_reader(so), fd)
                 .map(JSValue::from)
                 .unwrap_or(JSValue::NULL)
@@ -275,7 +291,7 @@ pub(crate) fn spawn_async_sandboxed(
     };
     let stderr_val = match child.stderr.take() {
         Some(se) => {
-            let fd = se.as_raw_fd();
+            let fd = raw_fd(&se);
             JSStdioHandle::new_instance_pipe_read(ctx, pipe_bridge::bridge_reader(se), fd)
                 .map(JSValue::from)
                 .unwrap_or(JSValue::NULL)

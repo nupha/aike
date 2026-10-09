@@ -380,8 +380,14 @@ declare namespace Aike {
      *
      * A path granted `rw` without `x` is **not** runnable: that is what stops
      * a command from dropping a payload somewhere writable and executing it.
-     * On Linux this is the one guarantee that does not hold, because
-     * `bwrap --bind` cannot separate the execute bit.
+     * Two platforms have gaps here, both documented rather than hidden:
+     *
+     * - Linux: `bwrap --bind` cannot separate the execute bit, so a writable
+     *   directory is also runnable.
+     * - Windows: the launching process maps the *entry* image, so the image's
+     *   own ACL never gates the first `exec`. `Aike.spawn`/`Aike.sh` refuse to
+     *   start a program the sandbox left without execute, and a program
+     *   started from outside the writable area cannot in turn launch one.
      */
     grants?: { path: string; access: "r" | "rw" | "rx" | "rwx" }[];
 
@@ -391,11 +397,17 @@ declare namespace Aike {
      * that covers `cwd`, is rejected at build time instead of silently
      * winning.
      *
-     * The entry itself stays visible — its name still appears when its parent
-     * is listed, and `stat` on it still succeeds. Only its contents are
-     * hidden, except on macOS where listing the denied directory's own
-     * entries is refused as well, since `readdir` needs read access to the
-     * directory itself.
+     * On macOS the entry itself stays visible — its name still appears when
+     * its parent is listed, and `stat` on it still succeeds. Only its contents
+     * are hidden (and listing the denied directory's own entries is refused
+     * too, since `readdir` needs read access to the directory itself). On
+     * Linux and Windows an ungranted path is not mounted/granted at all, so it
+     * disappears entirely.
+     *
+     * Windows additionally cannot express a `denied` path that lies *inside*
+     * `cwd` or a grant: an AppContainer ACL grants access but cannot take it
+     * back from an already-allowed subtree. Such a configuration is rejected
+     * at build time rather than left silently unenforced.
      */
     denied?: string[];
 

@@ -17,6 +17,9 @@ use std::sync::Arc;
 pub(crate) struct ChildControl {
     kill_tree: Arc<dyn Fn() -> bool + Send + Sync>,
     is_running: Arc<dyn Fn() -> bool + Send + Sync>,
+    // Only Unix delivers signals; the Windows job object has no equivalent, so
+    // its `kill` is the whole API there.
+    #[cfg_attr(not(unix), allow(dead_code))]
     send_signal: Arc<dyn Fn(i32) -> bool + Send + Sync>,
 }
 
@@ -47,6 +50,7 @@ impl ChildControl {
     /// On macOS only SIGKILL reliably terminates the run: `sandbox-exec` is a
     /// persistent daemon that does not forward signals to the command it
     /// exec'd, so any other signal may appear to be delivered and do nothing.
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) fn send_signal(&self, sig: i32) -> bool {
         (self.send_signal)(sig)
     }
