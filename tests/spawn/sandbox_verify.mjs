@@ -174,6 +174,21 @@ check(
   );
 }
 
+// --- /dev/null is writable -------------------------------------------------
+// The one writable path outside the policy: a sink, so writing to it returns
+// nothing and reaches nothing. Most command-line tools are invoked as
+// `cmd > /dev/null`, so refusing it breaks ordinary scripts rather than
+// containing them.
+if (WIN) {
+  skip(
+    "write to /dev/null succeeds",
+    "Windows has no /dev/null; the AppContainer backend grants write access only to the cwd and the grants",
+  );
+} else {
+  const r = sh("echo discarded > /dev/null", { cwd: WD });
+  check("write to /dev/null succeeds", r.exitCode === 0, `exit=${r.exitCode} ${err(r)}`);
+}
+
 // --- a denied path cannot be read -----------------------------------------
 {
   const r = cat(join(ROOT, "secret", "key.txt"), {
@@ -300,9 +315,23 @@ if (process.platform === "darwin") {
 }
 
 // --- the sandboxed cwd is where the command starts ------------------------
+// Compared against a plain spawn of the same directory, not against the
+// literal `WD`. Both backends resolve the working directory before starting
+// the command, so on a host where a component is a symlink — `/tmp` is
+// `/private/tmp` on macOS — the shell reports the resolved path, and the
+// sandboxed and unsandboxed answers agree while neither matches the spelling
+// the caller passed. What is under test is that the sandbox does not move the
+// command, not that it preserves the spelling.
 {
-  const r = sh(WIN ? "cd" : "pwd", { cwd: WD });
-  check("the shell reports cwd", out(r).toLowerCase() === WD.toLowerCase(), out(r));
+  const cmd = WIN ? "cd" : "/bin/pwd -P";
+  const inSandbox = out(sh(cmd, { cwd: WD }));
+  const plain = out(Aike.sh(cmd, { cwd: WD }));
+  check(
+    "the shell reports cwd",
+    inSandbox.toLowerCase() === plain.toLowerCase() &&
+      inSandbox.toLowerCase().endsWith(join(ROOT, "work").toLowerCase()),
+    `sandbox=${inSandbox} plain=${plain}`,
+  );
 }
 
 // cwd is a starting point, not the boundary: cd'ing out and writing there is
@@ -338,24 +367,45 @@ async function realCwd() {
 }
 
 // --- network is denied by default -----------------------------------------
+// The body goes to a file inside the working directory rather than to
+// /dev/null. Discarding it would leave "no output on stdout" true whether or
+// not the fetch worked, so the `||` in the check below could never fail and the
+// case proved nothing. The outcome is curl's exit status plus whether the file
+// appeared; the case after this one runs the identical command with the
+// network allowed, which is the control that makes a failure mean something.
 const CURL = WIN ? "C:\\Windows\\System32\\curl.exe" : "/usr/bin/curl";
+const URL = "https://example.com";
+const BODY = join(WD, "body.html");
+
+function fetchUrl(sandbox, timeoutSec) {
+  const args = ["-s", "-m", String(timeoutSec), "-o", BODY, URL];
+  return WIN
+    ? spawnExe(CURL, sandbox, args)
+    : sh(`/usr/bin/curl -s -m ${timeoutSec} -o ${q(BODY)} ${URL}`, sandbox);
+}
+
 {
-  const r = WIN
-    ? spawnExe(CURL, { cwd: WD }, ["-s", "-m", "5", "https://example.com"])
-    : sh("/usr/bin/curl -s -m 5 -o /dev/null https://example.com", { cwd: WD });
-  const blocked = r.exitCode !== 0 || out(r).length === 0;
-  check("network denied by default", blocked, `exit=${r.exitCode} ${err(r)}`);
+  const r = fetchUrl({ cwd: WD }, 5);
+  check(
+    "network denied by default",
+    r.exitCode !== 0 && !(await exists(BODY)),
+    `exit=${r.exitCode} body=${await exists(BODY)} ${err(r)}`,
+  );
 }
 
 // --- network is available when asked for ----------------------------------
 {
-  const r = WIN
-    ? spawnExe(CURL, { cwd: WD, network: "host" }, ["-s", "-m", "8", "https://example.com"])
-    : sh("/usr/bin/curl -s -m 8 -o /dev/null https://example.com", { cwd: WD, network: "host" });
+  const r = fetchUrl({ cwd: WD, network: "host" }, 8);
   if (r.exitCode === 0) {
     check('network allowed with network:"host"', true);
   } else {
-    skip('network allowed with network:"host"', `no host network here: exit=${r.exitCode}`);
+    // Only reachable on a machine with no route out at all: the same command
+    // succeeded in the sandboxed case above with the network denied, so a
+    // failure here is the host's, not the policy's.
+    skip(
+      'network allowed with network:"host"',
+      `no host network here: exit=${r.exitCode} ${err(r)}`,
+    );
   }
 }
 

@@ -274,6 +274,13 @@ fn build_profile(policy: &Policy) -> (String, Vec<(String, String)>) {
 /// The floor. Read is open across the machine — that is the documented
 /// default for this kind of sandbox — and the policy's `denied` list is what
 /// closes the credential files.
+///
+/// `/dev/null` is the one writable path outside the policy's control. It is a
+/// sink: what is written there is discarded, so the grant cannot return data
+/// to the process or widen what it reaches. Without it `cmd > /dev/null` fails
+/// with "Operation not permitted", which is how most command-line tools are
+/// invoked and which broke any script redirecting output away. The Linux
+/// backend has always had it, via `--dev /dev`.
 const BASE: &str = r#"(version 1)
 (deny default)
 (allow process-exec)
@@ -283,6 +290,7 @@ const BASE: &str = r#"(version 1)
 (allow mach-lookup)
 (allow file-read*)
 (allow file-ioctl)
+(allow file-write* (literal "/dev/null"))
 "#;
 
 fn add_param(params: &mut Vec<(String, String)>, key: &str, path: &Path) -> String {
@@ -351,6 +359,18 @@ mod tests {
         let (profile, _) = build_profile(&policy());
         assert!(
             profile.contains("(deny process-exec (subpath (param \"GRANT_0\")))"),
+            "{profile}"
+        );
+    }
+
+    #[test]
+    fn the_null_device_is_writable() {
+        // `cmd > /dev/null` is how most command-line tools are invoked, and it
+        // failed before this rule existed. The path is a literal, not a
+        // subpath: granting a directory would hand out every file in it.
+        let (profile, _) = build_profile(&policy());
+        assert!(
+            profile.contains(r#"(allow file-write* (literal "/dev/null"))"#),
             "{profile}"
         );
     }
