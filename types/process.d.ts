@@ -281,7 +281,23 @@ declare namespace Aike {
     /**
      * Send a signal to the child process. Default: SIGTERM.
      *
-     * In sandbox mode the signal goes to the whole sandboxed tree.
+     * Outside a sandbox the signal is delivered to the child directly on Unix,
+     * so the child's own handler runs and, if the signal kills it instead,
+     * `signalCode` reports it. Windows has no POSIX signals. Inside a sandbox
+     * the signal goes to the whole tree, and whether the handler runs differs
+     * by platform:
+     *
+     * | platform | sandbox | handler runs | signalCode |
+     * | --- | --- | --- | --- |
+     * | macOS | no | yes | the signal, if it died from one |
+     * | Linux | no | yes | the signal, if it died from one |
+     * | Windows | no | no (`TerminateProcess`) | always null |
+     * | macOS | yes | yes (`sandbox-exec` forwards) | the signal, if it died from one |
+     * | Linux | yes | no (`bwrap` SIGKILLs the namespace) | the signal `bwrap` died from |
+     * | Windows | yes | no (`TerminateJobObject`) | always null |
+     *
+     * So a `SIGTERM` handler is only worth relying on when not sandboxed (on
+     * Unix) or under macOS; elsewhere treat `kill` as "terminate the tree now".
      */
     kill(signal?: string | number): boolean;
     /** Check if the child process is still running. */
@@ -293,6 +309,11 @@ declare namespace Aike {
      * waits `killTimeoutMs`. Resolves with the stage at which the child
      * exited, or "timed_out" if it survived SIGKILL's grace period.
      * Idempotent — a second call resolves with "already_closed".
+     *
+     * The `"term"` stage is reached on every platform. Whether the command's
+     * own handler runs first depends on the platform and whether it is
+     * sandboxed — see {@link Subprocess.kill}: outside a sandbox Unix delivers
+     * the signal and the handler runs, while inside a sandbox only macOS does.
      */
     shutdown(options?: ShutdownOptions): Promise<ShutdownResult>;
   }
@@ -350,9 +371,11 @@ declare namespace Aike {
   ): Subprocess;
 
   /**
-   * Runs the command inside an OS-enforced sandbox. The working directory is
-   * the only writable place; every other path is refused unless a `grants`
-   * entry says otherwise, and network is off unless asked for.
+   * Runs the command inside an OS-enforced sandbox. Reads are open across the
+   * machine except for `denied` paths — the same default the macOS backend gets
+   * from Seatbelt and the one Claude Code and Codex use; the working directory
+   * is the only writable place, plus any `rw` grant; and network is off unless
+   * asked for.
    *
    * Three backends enforce this, each with the primitive that works on its
    * platform: Seatbelt on macOS, AppContainer on Windows, bubblewrap on Linux.
@@ -397,17 +420,16 @@ declare namespace Aike {
      * that covers `cwd`, is rejected at build time instead of silently
      * winning.
      *
-     * On macOS the entry itself stays visible — its name still appears when
-     * its parent is listed, and `stat` on it still succeeds. Only its contents
-     * are hidden (and listing the denied directory's own entries is refused
-     * too, since `readdir` needs read access to the directory itself). On
-     * Linux and Windows an ungranted path is not mounted/granted at all, so it
-     * disappears entirely.
+     * The path's *name* stays visible on macOS and Linux — its parent still
+     * lists it and `stat` on it still succeeds; only the contents are hidden.
+     * macOS refuses to list a denied directory's own entries (since `readdir`
+     * needs read access to the directory itself), while Linux mounts an empty
+     * directory over it; a denied file cannot be read on either.
      *
-     * Windows additionally cannot express a `denied` path that lies *inside*
-     * `cwd` or a grant: an AppContainer ACL grants access but cannot take it
-     * back from an already-allowed subtree. Such a configuration is rejected
-     * at build time rather than left silently unenforced.
+     * Windows cannot express a `denied` path that lies *inside* `cwd` or a
+     * grant: an AppContainer ACL grants access but cannot take it back from an
+     * already-allowed subtree. Such a configuration is rejected at build time
+     * rather than left silently unenforced.
      */
     denied?: string[];
 

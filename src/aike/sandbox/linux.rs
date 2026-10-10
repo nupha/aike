@@ -17,9 +17,18 @@
 //!    bit, so a granted `rw` directory is also `rx` here. The other two
 //!    backends separate them. This weakens the "write a payload, run it"
 //!    barrier on Linux specifically.
-//! 2. **Paths are mounted, not filtered.** A denied path is one that is simply
-//!    not bound, so it appears to vanish rather than existing-but-unreadable.
-//!    macOS keeps names listable and hides contents; here the names go too.
+//! 2. **Paths are mounted, not filtered.** Reads are open across the machine
+//!    (the root is bound read-only), and a denied path is closed by covering
+//!    it: a directory takes a private tmpfs and its contents go away, a file is
+//!    bound over with `/dev/null`. In both cases the *name* stays visible and
+//!    `stat` succeeds — the same shape macOS gives with `(deny file-read-data)`,
+//!    where only the contents are hidden.
+//!
+//! A third difference is in signal handling, and it is not `bwrap`'s to fix:
+//! `bwrap` does not forward signals to the command, so `kill(SIGTERM)` is a
+//! hard kill of the whole sandbox and the command's own handler never runs.
+//! macOS's `sandbox-exec` does forward. See `Subprocess.kill` in the type
+//! declarations.
 
 use std::{
     collections::HashMap,
@@ -31,13 +40,10 @@ use std::{
     process::{Command, Stdio},
 };
 
-use super::child::{ChildControl, SpawnedChild, WaitResult};
-use super::policy::{NetworkPolicy, Policy};
-
-/// System directories a command needs in order to start at all. `ro-bind-try`
-/// because the set differs between distributions and a read-only rootfs has
-/// none of them.
-const SYSTEM_DIRS: [&str; 6] = ["/usr", "/bin", "/sbin", "/lib", "/lib64", "/lib32"];
+use super::{
+    child::{ChildControl, SpawnedChild, WaitResult},
+    policy::{NetworkPolicy, Policy},
+};
 
 pub(crate) fn spawn(
     policy: &Policy,
@@ -138,31 +144,38 @@ fn build_args(policy: &Policy, program: &Path, args: &[&str]) -> Result<Vec<Stri
     let mut a: Vec<String> = vec![
         "--unshare-all".into(),
         "--die-with-parent".into(),
+        // The read floor: the whole machine, read-only. This is the same
+        // default the macOS backend gets from `(allow file-read*)` and the one
+        // Claude Code and Codex use — reads are open, and `denied` is what
+        // closes the credential files. Everything below overlays this base, so
+        // it must come first.
+        "--ro-bind".into(),
+        "/".into(),
+        "/".into(),
         // A fresh procfs, so the command sees only its own namespace's
         // processes instead of every process on the host.
         "--proc".into(),
         "/proc".into(),
         "--dev".into(),
         "/dev".into(),
+        // The host's /tmp is not what the command should see. This must come
+        // before the cwd and grant binds below: a mount over /tmp covers
+        // everything already mounted under it, so emitting it afterwards would
+        // hide any policy path that lives in /tmp.
+        "--tmpfs".into(),
+        "/tmp".into(),
     ];
 
-    // The working directory is the one writable place; everything else the
-    // command needs to start is bound read-only.
+    // The working directory is the one writable place.
     a.push("--bind".into());
     a.push(s(&policy.working_dir));
     a.push(s(&policy.working_dir));
 
-    for d in SYSTEM_DIRS {
-        if Path::new(d).exists() {
-            a.push("--ro-bind-try".into());
-            a.push(d.into());
-            a.push(d.into());
-        }
-    }
-
     for g in &policy.grants {
         // ⚠️ See the module docs: `--bind` and `--ro-bind` are the only two
-        // options here, so `rw` also grants exec on Linux.
+        // options here, so `rw` also grants exec on Linux. A read-only grant
+        // still needs its own mount: it may live under /tmp, which the tmpfs
+        // above has already emptied.
         let flag = if g.access.can_write() {
             "--bind"
         } else {
@@ -173,26 +186,31 @@ fn build_args(policy: &Policy, program: &Path, args: &[&str]) -> Result<Vec<Stri
         a.push(s(&g.path));
     }
 
-    // A denied path is simply absent: see the module docs for what that costs.
-    // It still has to be shadowed, or the directory it lives in — typically
-    // the working directory, which is bound writable — would expose it.
+    // `denied` beats the read-all floor, so it is shadowed wherever it lives —
+    // not only inside the writable cwd. A directory takes a private tmpfs and
+    // its contents go away (the name stays); a file cannot take a tmpfs, so it
+    // is bound over with /dev/null — name visible, reads fail. Both match what
+    // the macOS backend gives with `(deny file-read-data)`.
     for d in &policy.denied {
-        if d.starts_with(&policy.working_dir) {
+        if d.is_dir() {
             a.push("--tmpfs".into());
+            a.push(s(d));
+        } else {
+            a.push("--ro-bind".into());
+            a.push("/dev/null".into());
             a.push(s(d));
         }
     }
 
-    // The working directory itself is where programs put scratch files, and
-    // the host's /tmp is not reachable from inside the namespace.
-    a.push("--tmpfs".into());
-    a.push("/tmp".into());
-
     match &policy.network {
         // A network namespace with no interfaces: nothing can reach out, and
-        // nothing can be reached.
+        // nothing can be reached. Already implied by --unshare-all; named here
+        // so the intent is explicit and survives a change to the base flags.
         NetworkPolicy::DenyAll => a.push("--unshare-net".into()),
-        NetworkPolicy::AllowAll => {}
+        // --unshare-all unshared every namespace, network included, so keeping
+        // the host's network takes an explicit re-share. Without it `network:
+        // "host"` silently had no route at all.
+        NetworkPolicy::AllowAll => a.push("--share-net".into()),
     }
 
     a.push("--".into());
@@ -227,6 +245,7 @@ fn into_file(pipe: impl IntoRawFd) -> std::fs::File {
 
 #[cfg(test)]
 mod tests {
+    use super::super::path::testdir::TempDir;
     use super::super::policy::{Access, Grant};
     use super::*;
 
@@ -271,7 +290,9 @@ mod tests {
     }
 
     #[test]
-    fn host_network_emits_no_namespace_flag() {
+    fn host_network_re_shares_the_namespace_unshare_all_took_away() {
+        // --unshare-all includes the network namespace, so "host" needs an
+        // explicit --share-net; emitting nothing left the sandbox with only lo.
         let a = build_args(
             &Policy {
                 network: NetworkPolicy::AllowAll,
@@ -281,6 +302,7 @@ mod tests {
             &[],
         )
         .unwrap();
+        assert!(a.contains(&"--share-net".to_string()), "{a:?}");
         assert!(!a.contains(&"--unshare-net".to_string()), "{a:?}");
     }
 
@@ -304,12 +326,64 @@ mod tests {
         );
     }
 
+    /// Every value a `--tmpfs` was given, in order.
+    fn tmpfs_targets(a: &[String]) -> Vec<&str> {
+        a.iter()
+            .enumerate()
+            .filter(|(_, x)| x.as_str() == "--tmpfs")
+            .filter_map(|(i, _)| a.get(i + 1).map(String::as_str))
+            .collect()
+    }
+
     #[test]
-    fn a_denied_path_inside_the_working_directory_is_shadowed() {
-        // Binding the working directory read-write would otherwise expose a
-        // denied file that happens to live inside it.
+    fn a_denied_file_inside_the_working_directory_is_hidden_with_dev_null() {
+        // bwrap cannot put a tmpfs on a file, so a denied file is bound over
+        // with /dev/null: the name stays visible and reads fail — the shape the
+        // macOS backend gives with (deny file-read-data). `args()` denies a
+        // non-directory path, which is the file branch.
         let a = args();
-        assert_eq!(value_after(&a, "--tmpfs"), Some("/work/.env"), "{a:?}");
+        assert!(
+            a.windows(3)
+                .any(|w| w[0] == "--ro-bind" && w[1] == "/dev/null" && w[2] == "/work/.env"),
+            "{a:?}"
+        );
+        assert!(
+            !tmpfs_targets(&a).contains(&"/work/.env"),
+            "a file must not get a tmpfs: {a:?}"
+        );
+    }
+
+    #[test]
+    fn a_denied_directory_inside_the_working_directory_is_shadowed() {
+        // A directory can take a tmpfs, so it disappears entirely.
+        let dir = TempDir::new();
+        let cwd = dir.path().join("work");
+        let secret = cwd.join("secret");
+        std::fs::create_dir_all(&secret).unwrap();
+        let p = Policy {
+            working_dir: cwd,
+            grants: vec![],
+            denied: vec![secret.clone()],
+            network: NetworkPolicy::DenyAll,
+        };
+        let a = build_args(&p, Path::new("/bin/ls"), &[]).unwrap();
+        let target = secret.to_string_lossy();
+        assert!(
+            tmpfs_targets(&a).contains(&target.as_ref()),
+            "the denied directory must be shadowed: {a:?}"
+        );
+    }
+
+    #[test]
+    fn the_private_tmp_does_not_shadow_the_working_directory() {
+        // A mount over /tmp covers everything already mounted under it, so the
+        // private /tmp has to be emitted before the cwd (and grant) binds; the
+        // other order silently hides any policy path that lives in /tmp.
+        let a = args();
+        let tmp = a.iter().position(|x| x == "--tmpfs").unwrap();
+        let cwd = a.iter().position(|x| x == "--bind").unwrap();
+        assert_eq!(a[tmp + 1], "/tmp", "{a:?}");
+        assert!(tmp < cwd, "--tmpfs /tmp must precede the cwd bind: {a:?}");
     }
 
     #[test]
@@ -320,15 +394,13 @@ mod tests {
     }
 
     #[test]
-    fn system_directories_are_bound_read_only() {
+    fn the_whole_machine_is_readable_read_only() {
+        // The read floor: everything is readable, matching macOS's
+        // (allow file-read*) and the mainstream agents' default. Without this
+        // the sandbox could only read the directories it happened to bind.
         let a = args();
         let m = mounts(&a);
-        for d in ["/usr", "/bin"] {
-            assert!(
-                m.iter().any(|(f, t)| *f != "--bind" && *t == d),
-                "{d} must be bound read-only: {m:?}"
-            );
-        }
+        assert!(m.contains(&("--ro-bind", "/")), "{m:?}");
     }
 
     #[test]

@@ -228,10 +228,10 @@ if (process.platform === "darwin") {
     inside.exitCode !== 0,
     out(inside),
   );
-} else {
-  // Windows and Linux make an ungranted path disappear entirely; the parent
-  // is not reachable either, so there is nothing to list and no name to see.
-  const parent = sh(WIN ? `dir ${q(ROOT)}` : `ls ${q(ROOT)}`, {
+} else if (WIN) {
+  // Windows makes an ungranted path disappear entirely; the parent is not
+  // reachable either, so there is nothing to list and no name to see.
+  const parent = sh(`dir ${q(ROOT)}`, {
     cwd: WD,
     denied: [join(ROOT, "secret")],
   });
@@ -240,6 +240,24 @@ if (process.platform === "darwin") {
     parent.exitCode !== 0,
     out(parent),
   );
+} else {
+  // Linux now binds the root read-only and closes a denied path by covering
+  // it: a directory gets an empty tmpfs, so the name stays visible (like
+  // macOS) while the contents are gone.
+  const parent = sh(`ls ${q(ROOT)}`, {
+    cwd: WD,
+    denied: [join(ROOT, "secret")],
+  });
+  check(
+    "denied entry still named in the parent listing",
+    out(parent).includes("secret"),
+    out(parent),
+  );
+  const st = sh(`test -f ${q(join(ROOT, "secret", "key.txt"))} && echo EXISTS`, {
+    cwd: WD,
+    denied: [join(ROOT, "secret")],
+  });
+  check("denied path's contents are gone", out(st) !== "EXISTS", out(st));
 }
 
 // --- a granted rx path: read and execute yes, write no --------------------
@@ -439,7 +457,19 @@ if (process.platform !== "win32") {
   check("child is running", p.isRunning() === true);
   p.kill("SIGTERM");
   const code = await p.exitCode;
-  check("SIGTERM reaches the command (trap fired)", code === 42, String(code));
+  if (process.platform === "darwin") {
+    // sandbox-exec forwards the signal, so the command's trap runs.
+    check("SIGTERM reaches the command (trap fired)", code === 42, String(code));
+  } else {
+    // bwrap does not forward signals: it is the PID-namespace init, so a
+    // SIGTERM hard-kills the whole namespace and the trap never runs. See
+    // Subprocess.kill in the type declarations.
+    check(
+      "SIGTERM hard-kills the sandbox without running the trap (Linux)",
+      code !== 42,
+      String(code),
+    );
+  }
 } else {
   // The process tree lives in a job object; `kill` terminates the whole job.
   // `set /p x=` blocks on stdin, which the sandbox leaves open.
@@ -580,6 +610,34 @@ for (const [label, opts, want] of rejects) {
   check("denied file is unreadable", r.exitCode !== 0 || out(r) !== "PLAIN", out(r));
 }
 
+// A denied file *inside* the cwd. The cwd is bound writable, so this path is
+// reachable unless the backend explicitly shadows it. On macOS and Linux the
+// name stays visible and the content is refused; on Windows an AppContainer
+// ACL cannot take access back from the cwd subtree, so the policy is rejected
+// rather than left exposed (Policy::new, windows branch).
+{
+  const secret = join(WD, "secret.txt");
+  await writeText(secret, "INSIDE-SECRET");
+  if (WIN) {
+    let threw = false;
+    try {
+      sh("exit /b 0", { cwd: WD, denied: [secret] });
+    } catch {
+      threw = true;
+    }
+    check("denied inside cwd is rejected on Windows", threw);
+  } else {
+    const r = cat(secret, { cwd: WD, denied: [secret] });
+    check(
+      "denied file inside cwd is unreadable",
+      r.exitCode !== 0 || out(r) !== "INSIDE-SECRET",
+      out(r),
+    );
+    const ls = sh(`ls -a ${q(WD)}`, { cwd: WD, denied: [secret] });
+    check("denied file's name is still visible", out(ls).includes("secret.txt"), out(ls));
+  }
+}
+
 // --- symlinks must not route around a rule --------------------------------
 if (WIN) {
   skip("a symlink to a denied path is still denied", "symlink creation needs privileges on Windows");
@@ -602,10 +660,13 @@ if (WIN) {
     grants: [{ path: join(ROOT, "rwdir"), access: "rw" }],
     denied: [join(ROOT, "target")],
   });
+  // The write may succeed, but it lands in the empty tmpfs the denied
+  // directory is covered with — never on the host. That is the property that
+  // matters, not the exit code.
   check(
     "a symlink cannot be used to write into a denied path",
-    w.exitCode !== 0,
-    `exit=${w.exitCode}`,
+    !(await exists(join(ROOT, "target", "via_link"))),
+    `exit=${w.exitCode} hostFile=${await exists(join(ROOT, "target", "via_link"))}`,
   );
 }
 

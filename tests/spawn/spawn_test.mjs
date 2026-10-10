@@ -296,6 +296,38 @@ async function testAbortSignal() {
   check("child killed on SIGTERM", !alivePid(childPid), `pid=${childPid}`);
 }
 
+// ===================================================================
+// A signal sent to a non-sandboxed child reaches the child itself, so its own
+// handler runs and a signal death is reported through signalCode. In a sandbox
+// this is platform-specific — see tests/spawn/sandbox_verify.mjs.
+// ===================================================================
+async function testChildSignal() {
+  console.log("\n=== child signal handling (no sandbox) ===");
+
+  if (process.platform === "win32") {
+    console.log("  ⏭ skipped on windows (no POSIX signals; kill hard-terminates)");
+    return;
+  }
+
+  const handled = Aike.spawn("/bin/sh", ["-c", "trap 'exit 42' TERM; sleep 10"], {
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  await new Promise((res) => setTimeout(res, 300));
+  handled.kill("SIGTERM");
+  check("the child's own handler runs on SIGTERM", (await handled.exitCode) === 42);
+  check("a handled exit leaves signalCode null", (await handled.signalCode) === null);
+
+  const unhandled = Aike.spawn("/bin/sh", ["-c", "sleep 10"], {
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  await new Promise((res) => setTimeout(res, 300));
+  unhandled.kill("SIGTERM");
+  const sig = await unhandled.signalCode;
+  check("a signal death is reported through signalCode", sig === "SIGTERM", String(sig));
+}
+
 
 
 await testSyncBaseline();
@@ -308,6 +340,7 @@ await testAwaited();
 await testAbortNormalExit();
 await testAbortProcessExit();
 await testAbortSignal();
+await testChildSignal();
 
 console.log(`\n${"=".repeat(40)}`);
 console.log(`  Pass: ${pass}  Fail: ${fail}`);
