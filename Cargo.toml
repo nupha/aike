@@ -133,7 +133,7 @@ rmcp = { version = "3.1", default-features = false, features = [
     "transport-streamable-http-server-session",
     "transport-streamable-http-client-reqwest",
 ] }
-process-wrap = { version = "9", features = [
+process-wrap = { version = "10", features = [
     "tokio1",
     "process-group",
     "job-object",
