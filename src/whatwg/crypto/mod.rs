@@ -376,7 +376,7 @@ def_native_object!(
 // ===========================================================================
 
 /// Install the `crypto` global (a `Crypto` instance carrying its `subtle`).
-pub(crate) fn install_crypto(ctx: &mut ScopedContext, mut global: Object) -> Result<(), i32> {
+pub(crate) fn init_crypto(ctx: &mut ScopedContext, mut global: Object) -> Result<(), i32> {
     let subtle = subtle::JSCryptoSubtle::new_instance(ctx, JSValue::UNDEFINED)?;
     let crypto = JSCrypto::new_instance(
         ctx,

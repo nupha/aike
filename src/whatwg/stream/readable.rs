@@ -1685,7 +1685,7 @@ fn js_readable_stream_byob_reader_static(ctx: &mut ScopedContext, cc: CallContex
 }
 
 /// Register the static `ReadableStream.from()` method on the global constructor.
-pub(crate) fn install_readable_stream_statics(
+pub(crate) fn init_readable_stream_statics(
     ctx: &mut ScopedContext,
     global: &mut Object,
 ) -> Result<(), i32> {

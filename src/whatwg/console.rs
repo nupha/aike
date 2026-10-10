@@ -311,7 +311,7 @@ fn js_console_table(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 }
 
 /// Create and register the `console` object on globalThis.
-pub(crate) fn install_console(ctx: &mut ScopedContext, global: &mut Object) -> Result<(), i32> {
+pub(crate) fn init_console(ctx: &mut ScopedContext, global: &mut Object) -> Result<(), i32> {
     // `console` is a namespace object: its methods are own properties, and its
     // [[Prototype]] is an empty object whose own [[Prototype]] is %ObjectPrototype%.
     // WPT requires getPrototypeOf(console) to have no own properties.

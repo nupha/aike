@@ -1295,7 +1295,7 @@ fn set_content_length(headers: &mut Vec<(String, String)>, len: usize) {
 }
 
 /// Install the `fetch` global and register all WHATWG classes.
-pub(crate) fn install_fetch(ctx: &mut ScopedContext, mut global: Object) -> Result<(), i32> {
+pub(crate) fn init_fetch(ctx: &mut ScopedContext, mut global: Object) -> Result<(), i32> {
     let func = ctx.create_native_function(Callback::Func(js_fetch), "fetch", 1, 0)?;
 
     // Runtime-level switches as accessor properties on the `fetch` function

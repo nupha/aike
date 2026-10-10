@@ -408,7 +408,7 @@ fn clone_container(
 }
 
 /// Install the global `structuredClone`.
-pub(crate) fn install_structured_clone(
+pub(crate) fn init_structured_clone(
     ctx: &mut ScopedContext,
     mut global: Object,
 ) -> Result<(), i32> {

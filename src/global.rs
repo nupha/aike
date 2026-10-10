@@ -4,9 +4,10 @@
 use zuqe::ScopedContext;
 
 use crate::{
-    aike::{install_aike_namespace, save_process_info},
+    aike::{init_aike_namespace, save_process_info},
+    cjs::init_cjs,
     process::init_process,
-    whatwg::install_whatwg,
+    whatwg::init_whatwg,
 };
 
 pub fn setup_globals(
@@ -22,13 +23,16 @@ pub fn setup_globals(
     save_process_info(argv, exec_argv, exec_path);
 
     // Install all WHATWG-standard global APIs (console, timers, etc.)
-    install_whatwg(ctx, global)?;
+    init_whatwg(ctx, global)?;
 
     // process — Node.js-compatible namespace
     init_process(ctx, argv, exec_argv, exec_path)?;
 
     // Aike — Aike-specific namespace
-    install_aike_namespace(ctx)?;
+    init_aike_namespace(ctx)?;
+
+    // CommonJS — the global `require`
+    init_cjs(ctx)?;
 
     Ok(())
 }

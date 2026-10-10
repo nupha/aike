@@ -34,7 +34,7 @@ fetch_browser = []
 fetch_cache = []
 mimalloc = ["dep:mimalloc"]
 
-default = ["typescript", "mimalloc"]
+default = ["typescript", "fetch_browser", "mimalloc"]
 
 [profile.release]
 panic = "abort"

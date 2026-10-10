@@ -139,14 +139,14 @@ pub(crate) fn js_module_loader(
         }
         Some(a) => Err(ctx.throw_type_error(&format!("unsupported import attribute type '{a}'"))),
         None => {
-            let code = if transpile::needs_transpile(&resolved_name) {
-                if resolved_name.ends_with(".d.ts") {
-                    return ctx.compile_module(b"export {}", file_name, false);
-                }
+            if resolved_name.ends_with(".d.ts") {
+                return ctx.compile_module(b"export {}", file_name, false);
+            }
 
-                let source = String::from_utf8_lossy(&buf);
+            let source = String::from_utf8_lossy(&buf).into_owned();
+            let (code, is_module) = if transpile::needs_transpile(&resolved_name) {
                 match transpile::transpile(&source) {
-                    Ok(result) => result.code.into_bytes(),
+                    Ok(r) => (r.code, r.is_module),
                     Err(e) => {
                         return Err(ctx.throw_syntax_error(&format!(
                             "failed to transpile module '{resolved_name}': {e}"
@@ -154,7 +154,22 @@ pub(crate) fn js_module_loader(
                     }
                 }
             } else {
-                buf.to_vec()
+                // SWC is not involved for plain JS, so the engine's own
+                // detection decides; `.cjs` / `.cts` are CommonJS by
+                // definition and must never be parsed as a module.
+                let fmt = crate::cjs::format_of(&resolved_name, &source);
+                (source, matches!(fmt, crate::cjs::Format::Esm))
+            };
+
+            // A CommonJS file reached through `import` is served by generated
+            // ES source: `default` is `module.exports`, plus the names a
+            // static scan of the file can see (Node's cjs-module-lexer).
+            let code: Vec<u8> = if is_module {
+                code.into_bytes()
+            } else {
+                let file = zuqe::url_to_abspath(file_name)
+                    .unwrap_or_else(|| std::path::PathBuf::from(file_name.as_str()));
+                crate::cjs::esm_interop_source(&file.to_string_lossy(), &code).into_bytes()
             };
 
             // Note: should use original file URL (not resolved path) as module name
@@ -213,7 +228,9 @@ fn is_absolute_specifier(name: &str) -> bool {
 /// 3. the CWD;
 /// 4. `$AIKE_LIB_PATH` (single directory, skipped when unset or empty) — the
 ///    weakest, since a planted CWD can forge it via the auto-loaded `.env`.
-fn module_search_dirs(importer_dir: Option<&Path>) -> Vec<PathBuf> {
+///
+/// Also backs `require()` resolution and `module.paths`.
+pub(crate) fn module_search_dirs(importer_dir: Option<&Path>) -> Vec<PathBuf> {
     let mut dirs = Vec::with_capacity(4);
     if let Some(dir) = dist_modules_dir() {
         dirs.push(dir);

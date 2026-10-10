@@ -458,21 +458,21 @@ fn cap_classes(cap: &str) -> Vec<ClassID> {
 fn install_cap(cx: &mut ScopedContext, cap: &str) -> Result<(), i32> {
     let mut global = cx.global_obj();
     match cap {
-        "console" => console::install_console(cx, &mut global)?,
-        "timers" => timeout::install_timeout(cx, global)?,
-        "microtask" => microtask::install_microtask(cx, global)?,
-        "base64" => base64::install_encoding(cx, global)?,
-        "structuredClone" => structured_clone::install_structured_clone(cx, global)?,
-        "crypto" => crypto::install_crypto(cx, global)?,
-        "url" => url::register_url_statics(cx, &mut global)?,
-        "abort" => abort::install_abort_signal_statics(cx, &mut global)?,
-        "streams" => stream::install_readable_stream_statics(cx, &mut global)?,
-        "fetch" => fetch::install_fetch(cx, global)?,
+        "console" => console::init_console(cx, &mut global)?,
+        "timers" => timeout::init_timeout(cx, global)?,
+        "microtask" => microtask::init_microtask(cx, global)?,
+        "base64" => base64::init_encoding(cx, global)?,
+        "structuredClone" => structured_clone::init_structured_clone(cx, global)?,
+        "crypto" => crypto::init_crypto(cx, global)?,
+        "url" => url::init_url(cx, &mut global)?,
+        "abort" => abort::init_abort_signal_statics(cx, &mut global)?,
+        "streams" => stream::init_readable_stream_statics(cx, &mut global)?,
+        "fetch" => fetch::init_fetch(cx, global)?,
         "process" => {
             let (argv, exec_argv, exec_path) = PROCESS_INFO.with(|p| p.borrow().clone());
             crate::process::init_process(cx, &argv, &exec_argv, &exec_path)?;
         }
-        "Aike" => super::install_aike_namespace(cx)?,
+        "Aike" => super::init_aike_namespace(cx)?,
         "fs" => crate::fs::init_mod_fs(cx)?,
         "path" => crate::path::init_mod_path(cx)?,
         "os" => crate::os::init_mod_os(cx)?,

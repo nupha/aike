@@ -17,4 +17,4 @@ mod origin;
 mod referrer;
 mod request;
 
-pub(crate) use {referrer::compute_request_referrer, request::install_fetch};
+pub(crate) use {referrer::compute_request_referrer, request::init_fetch};

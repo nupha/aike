@@ -645,10 +645,7 @@ def_native_object!(
 /// Mount `URL.createObjectURL` / `URL.revokeObjectURL` as static methods on the
 /// global `URL` constructor. These back the WHATWG object-URL store used by
 /// `fetch('blob:...')`.
-pub(crate) fn register_url_statics(
-    ctx: &mut ScopedContext,
-    global: &mut Object,
-) -> Result<(), i32> {
+pub(crate) fn init_url(ctx: &mut ScopedContext, global: &mut Object) -> Result<(), i32> {
     let create_fn = ctx.create_native_function(
         zuqe::Callback::Func(js_url_create_object_url),
         "createObjectURL",

@@ -87,11 +87,16 @@ pub(crate) struct AikeRuntimeState {
     /// whether `fetch()` enforces CORS, and whether it automatically uses the
     /// shared cookie jar. Both default off (plain HTTP client). Only meaningful
     /// in builds that compiled the browser machinery in (`fetch_browser`).
+    #[cfg(feature = "fetch_browser")]
     pub(crate) fetch_cors: bool,
+    #[cfg(feature = "fetch_browser")]
     pub(crate) fetch_cookie: bool,
     /// Whether `fetch()` (and `Aike.download`) skip TLS certificate validation
     /// (`fetch.allowInsecureTLS`). Default off.
     pub(crate) fetch_allow_insecure_tls: bool,
+
+    /// CommonJS module registry (`require.cache` / `require.main`).
+    pub(crate) cjs: crate::cjs::CjsState,
 }
 
 impl GcTrace for AikeRuntimeState {
@@ -115,6 +120,7 @@ impl GcTrace for AikeRuntimeState {
         self.channel_streams.trace(gcx);
         self.tee_streams.trace(gcx);
         self.io.trace(gcx);
+        self.cjs.trace(gcx);
     }
 }
 
@@ -136,9 +142,12 @@ impl AikeRuntimeState {
             channel_streams: crate::whatwg::stream::ChannelStreamState::new(),
             tee_streams: crate::whatwg::stream::TeeStreamState::new(),
             io: Default::default(),
+            #[cfg(feature = "fetch_browser")]
             fetch_cors: false,
+            #[cfg(feature = "fetch_browser")]
             fetch_cookie: false,
             fetch_allow_insecure_tls: false,
+            cjs: Default::default(),
         }
     }
 
@@ -158,7 +167,7 @@ impl RuntimeUserState for AikeRuntimeState {}
 /// (`ctx.rt().is_root()`). A child runtime never gets them, so no runtime
 /// check is needed at call time. The parent tick handler that drives child
 /// runtimes is likewise registered only on the root runtime.
-pub(crate) fn install_aike_namespace(ctx: &mut ScopedContext) -> Result<(), i32> {
+pub(crate) fn init_aike_namespace(ctx: &mut ScopedContext) -> Result<(), i32> {
     let is_root_rt = ctx.rt().is_root();
     let mut ns = ctx.create_base_object()?;
 

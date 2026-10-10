@@ -25,8 +25,7 @@ mod writer;
 
 pub(crate) use {
     readable::{
-        ChannelStreamState, JSReadableStream, ReadableStreamPayload,
-        install_readable_stream_statics,
+        ChannelStreamState, JSReadableStream, ReadableStreamPayload, init_readable_stream_statics,
     },
     readable_byob_request::JSReadableStreamBYOBRequest,
     readable_controller::ReadableControllerPayload,

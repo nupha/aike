@@ -711,7 +711,7 @@ pub(crate) fn make_default_signal(ctx: &mut ScopedContext) -> JSResult {
     new_signal(ctx, inner)
 }
 
-pub(crate) fn install_abort_signal_statics(
+pub(crate) fn init_abort_signal_statics(
     ctx: &mut ScopedContext,
     global: &mut Object,
 ) -> Result<(), i32> {

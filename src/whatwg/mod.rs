@@ -24,7 +24,7 @@ pub mod url;
 use zuqe::{NativeObject, Object, ScopedContext};
 
 /// Install all WHATWG-standard global APIs.
-pub(crate) fn install_whatwg(ctx: &mut ScopedContext, mut global: Object) -> Result<(), i32> {
+pub(crate) fn init_whatwg(ctx: &mut ScopedContext, mut global: Object) -> Result<(), i32> {
     ctx.use_classes(&[
         abort::JSAbortController::class_id(),
         abort::JSAbortSignal::class_id(),
@@ -55,16 +55,16 @@ pub(crate) fn install_whatwg(ctx: &mut ScopedContext, mut global: Object) -> Res
     #[cfg(feature = "fetch_browser")]
     ctx.use_classes(&[cookie_store::JSCookieStore::class_id()])?;
 
-    console::install_console(ctx, &mut global)?;
-    timeout::install_timeout(ctx, global)?;
-    microtask::install_microtask(ctx, global)?;
-    abort::install_abort_signal_statics(ctx, &mut global)?;
-    stream::install_readable_stream_statics(ctx, &mut global)?;
-    url::register_url_statics(ctx, &mut global)?;
-    fetch::install_fetch(ctx, global)?;
-    base64::install_encoding(ctx, global)?;
-    structured_clone::install_structured_clone(ctx, global)?;
-    crypto::install_crypto(ctx, global)?;
+    console::init_console(ctx, &mut global)?;
+    timeout::init_timeout(ctx, global)?;
+    microtask::init_microtask(ctx, global)?;
+    abort::init_abort_signal_statics(ctx, &mut global)?;
+    stream::init_readable_stream_statics(ctx, &mut global)?;
+    url::init_url(ctx, &mut global)?;
+    fetch::init_fetch(ctx, global)?;
+    base64::init_encoding(ctx, global)?;
+    structured_clone::init_structured_clone(ctx, global)?;
+    crypto::init_crypto(ctx, global)?;
     #[cfg(feature = "fetch_browser")]
     cookie_store::install_cookie_store(ctx, global)?;
 

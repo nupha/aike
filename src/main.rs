@@ -6,6 +6,7 @@
 mod ai;
 mod aike;
 mod class_event_emitter;
+mod cjs;
 mod color;
 #[cfg(feature = "enable_eval_log")]
 mod eval_logger;
@@ -37,7 +38,7 @@ use std::{
 use clap::{CommandFactory, Parser};
 use color::{Color::*, colorize_println};
 use zuqe::{
-    EvalFlags, EvalType, Exception, ExitStatus, ModuleDef, NativeObject, Runtime, ScopedContext,
+    EvalFlags, EvalType, Exception, ExitStatus, NativeObject, Runtime, ScopedContext,
 };
 
 use crate::{
@@ -371,6 +372,8 @@ async fn main() -> ExitCode {
     let script: String;
     let eval_name: zuqe::EvalName;
     let is_module: bool;
+    // The CommonJS entry module's absolute path, when the entry runs as CJS.
+    let cjs_entry: Option<String>;
 
     if let Some(ref_filename) = filename {
         //
@@ -385,7 +388,10 @@ async fn main() -> ExitCode {
         };
         let script_str = String::from_utf8_lossy(&script_bytes).to_string();
 
-        let (transpiled, detected_module): (String, bool) =
+        // A TypeScript entry is classified by SWC, which sees `import type`
+        // / `export type` that a post-transpile scan would no longer see.
+        // Everything else is classified from the source text.
+        let (transpiled, is_ts_module): (String, bool) =
             if transpile::needs_transpile(&script_path) {
                 match transpile::transpile(&script_str) {
                     Ok(result) => (result.code, result.is_module),
@@ -398,21 +404,26 @@ async fn main() -> ExitCode {
                     }
                 }
             } else {
-                // Non-TS files: use zuqe's built-in module detection
-                let detected = ModuleDef::detect_module(script_str.as_bytes());
-                (script_str, detected)
+                (script_str, false)
             };
-
-        let is_module_value = detected_module
-            || args.module
-            || ref_filename.ends_with(".mjs")
-            || ref_filename.ends_with(".mts");
 
         // Convert the entry filename to a canonical `file://` URL for module resolution.
         // Module names (and `import.meta.url`) are URLs, and a `file://` base is also
         // required so that dynamic `import()` resolves relative specifiers correctly.
         let url =
             zuqe::path_to_url(&ref_filename).expect("entry path must convert to a file:// URL");
+
+        // `-m` forces a module; otherwise `.mjs` / `.mts` are always modules
+        // and every other file follows its own source, which makes a
+        // non-module file CommonJS (Node's rule).
+        let is_module_value =
+            args.module || is_ts_module || matches!(cjs::format_of(&script_path, &transpiled), cjs::Format::Esm);
+        cjs_entry = (!is_module_value).then(|| {
+            zuqe::url_to_abspath(&url)
+                .unwrap_or_else(|| std::path::PathBuf::from(&script_path))
+                .to_string_lossy()
+                .into_owned()
+        });
 
         script = transpiled;
         eval_name = zuqe::EvalName::BaseUrl(url);
@@ -421,6 +432,8 @@ async fn main() -> ExitCode {
         //
         // Eval mode: inline script
         //
+        // Without `-m`, `-e` code runs as CommonJS, matching Node.
+        cjs_entry = (!args.module).then(|| "[eval]".to_string());
         script = eval_code;
         eval_name = zuqe::EvalName::Name("eval".to_string());
         is_module = args.module;
@@ -438,23 +451,48 @@ async fn main() -> ExitCode {
     crate::aike::set_root_runtime(rt.clone());
     crate::aike::set_root_ctx(ctx);
 
-    let result = ctx
-        .eval_wait(
-            &mut rt,
-            script.as_bytes(),
-            &eval_name,
-            if is_module {
-                EvalType::Module
-            } else {
-                EvalType::Global
-            },
-            if args.no_await_result {
-                EvalFlags::NO_AWAIT_RESULT
-            } else {
-                EvalFlags::empty()
-            },
-        )
-        .await;
+    let flags = if args.no_await_result {
+        EvalFlags::NO_AWAIT_RESULT
+    } else {
+        EvalFlags::empty()
+    };
+
+    let result = match cjs_entry {
+        // CommonJS entry: the module body runs synchronously inside
+        // `cjs::run_entry`, then an empty script drives the event loop to
+        // completion — the job `eval_wait` would otherwise have done.
+        Some(entry) => {
+            let entered = ctx.with_root_scope(|mut cx| cjs::run_entry(&mut cx, &entry, &script));
+
+            match entered {
+                Ok(()) => {
+                    ctx.eval_wait(
+                        &mut rt,
+                        b"",
+                        &zuqe::EvalName::Name(String::new()),
+                        EvalType::Global,
+                        flags,
+                    )
+                    .await
+                }
+                Err(_) => ExitStatus::Exception(ctx.take_exception()),
+            }
+        }
+        None => {
+            ctx.eval_wait(
+                &mut rt,
+                script.as_bytes(),
+                &eval_name,
+                if is_module {
+                    EvalType::Module
+                } else {
+                    EvalType::Global
+                },
+                flags,
+            )
+            .await
+        }
+    };
 
     // Resolve the process exit code. We exit explicitly (not by returning an
     // `ExitCode` from main) because `#[tokio::main]` would otherwise block in

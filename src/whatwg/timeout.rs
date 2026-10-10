@@ -313,7 +313,7 @@ fn js_timeout(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     }
 }
 
-pub(crate) fn install_timeout(ctx: &mut ScopedContext, mut global: Object) -> Result<(), i32> {
+pub(crate) fn init_timeout(ctx: &mut ScopedContext, mut global: Object) -> Result<(), i32> {
     let f = ctx.create_native_function(
         Callback::Func(js_timeout),
         "setTimeout",
