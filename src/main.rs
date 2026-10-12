@@ -159,6 +159,12 @@ fn parse_byte_size(ss: &str) -> Option<usize> {
     }
 }
 
+/// Empirical floor for `--thread-stack <n>`, an aike-side policy (not an engine
+/// contract): below this the engine has too little native stack to initialize
+/// — the C-stack guard reserves `THREAD_STACK_LIMIT_MARGIN` head-room near the
+/// stack bottom, and native builtins re-entering JS are expensive.
+const MIN_THREAD_STACK: usize = 1 << 20;
+
 fn main() -> ExitCode {
     let args = Args::parse();
 
@@ -171,13 +177,12 @@ fn main() -> ExitCode {
         None => None,
         Some(ss) => match parse_byte_size(ss) {
             Some(0) => None,
-            Some(n) if n < zuqe::Runtime::MIN_THREAD_STACK_SIZE => {
+            Some(n) if n < MIN_THREAD_STACK => {
                 colorize_println(
                     format!(
                         "thread-stack must be at least {} bytes ({} is too small \
                          for the C-stack guard)",
-                        zuqe::Runtime::MIN_THREAD_STACK_SIZE,
-                        ss
+                        MIN_THREAD_STACK, ss
                     ),
                     RedFg,
                 );
@@ -192,13 +197,13 @@ fn main() -> ExitCode {
     };
 
     let Some(size) = stack_size else {
-        return block_on(run(args, None));
+        return block_on(run(args));
     };
 
     match std::thread::Builder::new()
         .name("aike".to_string())
         .stack_size(size)
-        .spawn(move || block_on(run(args, Some(size))))
+        .spawn(move || block_on(run(args)))
     {
         Ok(handle) => handle.join().unwrap_or(ExitCode::FAILURE),
         Err(e) => {
@@ -217,7 +222,7 @@ fn block_on<F: std::future::Future>(fut: F) -> F::Output {
         .block_on(fut)
 }
 
-async fn run(mut args: Args, stack_size: Option<usize>) -> ExitCode {
+async fn run(mut args: Args) -> ExitCode {
     if let Err(e) = dotenvy::dotenv() {
         #[cfg(debug_assertions)]
         eprintln!("[INFO] .env not loaded: {e}");
@@ -376,10 +381,6 @@ async fn run(mut args: Args, stack_size: Option<usize>) -> ExitCode {
             colorize_println(format!("invalid thread-stack-limit: {ss}"), RedFg);
             std::process::exit(-1);
         }
-    } else if let Some(size) = stack_size {
-        // Running on a `--thread-stack` thread: declare its size so the guard
-        // matches it on platforms that can't report the stack bottom.
-        rt.declare_thread_stack_size(size);
     } else if !zuqe::Runtime::CAN_AUTO_THREAD_STACK_LIMIT {
         // Platform can't report the stack bottom: auto mode would leave no
         // C-stack guard, so fall back to a strict 512 KiB limit.
