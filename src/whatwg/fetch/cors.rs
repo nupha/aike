@@ -116,6 +116,10 @@ pub(crate) fn append_fetch_metadata_headers(
 
 /// `Sec-Fetch-Site` value, or `None` when no client origin is known (the header
 /// is then left off, since the site relation is undefined).
+///
+/// Per Fetch Metadata's "set the `Sec-Fetch-Site` header": `same-origin`, else
+/// `same-site` (HTML's *schemeful* same site — same scheme and a shared
+/// registrable domain), else `cross-site`.
 #[cfg(feature = "fetch_browser")]
 fn fetch_site(client_origin: Option<&str>, url: &str) -> Option<&'static str> {
     let client = client_origin?;
@@ -123,13 +127,27 @@ fn fetch_site(client_origin: Option<&str>, url: &str) -> Option<&'static str> {
     if client == req.origin().ascii_serialization() {
         return Some("same-origin");
     }
-    // `host_str` excludes the port, so a scheme/port change on the same host is
-    // "same-site" rather than "cross-site".
-    match (url::Url::parse(client).ok(), req.host_str()) {
-        (Some(c), Some(h)) if c.host_str() == Some(h) => Some("same-site"),
-        (Some(_), Some(_)) => Some("cross-site"),
-        _ => None,
+    let c = url::Url::parse(client).ok()?;
+    if c.scheme() == req.scheme() && same_site_host(c.host_str()?, req.host_str()?) {
+        Some("same-site")
+    } else {
+        Some("cross-site")
     }
+}
+
+/// Whether two host names share a registrable domain (HTML "schemelessly same
+/// site"). aike carries no Public Suffix List, so the registrable domain is
+/// approximated as the host's final two labels — exact for the `web-platform.test`
+/// family the suites use and for `not-web-platform.test` (its final two labels
+/// differ); multi-label public suffixes (`co.uk`) are the known imprecision.
+#[cfg(feature = "fetch_browser")]
+fn same_site_host(a: &str, b: &str) -> bool {
+    fn registrable(host: &str) -> &str {
+        host.rmatch_indices('.')
+            .nth(1)
+            .map_or(host, |(i, _)| &host[i + 1..])
+    }
+    registrable(a).eq_ignore_ascii_case(registrable(b))
 }
 
 /// Server build: no Fetch Metadata headers are appended.
@@ -732,7 +750,14 @@ mod preflight {
             .header(reqwest::header::ACCEPT, "*/*")
             .header("Origin", &preflight.origin)
             .header("Access-Control-Request-Method", &preflight.request_method)
+            // Fetch Metadata headers are appended to the preflight too; WPT's
+            // `echo-as-json.py` rejects an OPTIONS without `Sec-Fetch-Mode: cors`.
+            .header("Sec-Fetch-Dest", "empty")
+            .header("Sec-Fetch-Mode", "cors")
             .header("User-Agent", &preflight.user_agent);
+        if let Some(site) = super::fetch_site(Some(&preflight.origin), &preflight.url) {
+            rb = rb.header("Sec-Fetch-Site", site);
+        }
 
         if !preflight.request_headers.is_empty() {
             rb = rb.header("Access-Control-Request-Headers", &preflight.request_headers);

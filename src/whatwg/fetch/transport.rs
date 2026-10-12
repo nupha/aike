@@ -286,39 +286,6 @@ fn parse_mime(input: &str) -> Option<String> {
     Some(out)
 }
 
-/// Fetch spec: multiple identical `Content-Length` response headers combine into
-/// a single header; conflicting values are all dropped (treated as absent).
-fn combine_content_length_headers(raw: Vec<(String, String)>) -> Vec<(String, String)> {
-    let values: Vec<&str> = raw
-        .iter()
-        .filter(|(k, _)| k.eq_ignore_ascii_case("content-length"))
-        .map(|(_, v)| v.as_str())
-        .collect();
-    if values.len() <= 1 {
-        return raw;
-    }
-    if values.iter().all(|v| *v == values[0]) {
-        let mut out = Vec::with_capacity(raw.len());
-        let mut merged = false;
-        for (k, v) in raw {
-            if k.eq_ignore_ascii_case("content-length") {
-                if merged {
-                    continue;
-                }
-                out.push((k, v));
-                merged = true;
-            } else {
-                out.push((k, v));
-            }
-        }
-        out
-    } else {
-        raw.into_iter()
-            .filter(|(k, _)| !k.eq_ignore_ascii_case("content-length"))
-            .collect()
-    }
-}
-
 /// Canonical HTTP reason phrase for a status code (IANA registry). The Fetch
 /// spec exposes the response's status message via `Response.statusText`; for a
 /// real HTTP response this is the status-line reason phrase (200 → "OK",
@@ -457,9 +424,7 @@ pub(crate) fn throw_transport_error(cx: &mut ScopedContext, te: TransportError) 
 /// A response's headers as a `HeaderList`, latin-1 decoded so bytes 0x80-0xFF
 /// survive (a header value is a byte string and obs-text is legal, RFC 7230 —
 /// `to_str()` would drop the whole header).
-fn response_header_list(
-    resp: &reqwest::Response,
-) -> crate::whatwg::fetch::headers::HeaderList {
+fn response_header_list(resp: &reqwest::Response) -> crate::whatwg::fetch::headers::HeaderList {
     crate::whatwg::fetch::headers::HeaderList::from_vec(
         resp.headers()
             .iter()
@@ -918,7 +883,9 @@ pub(crate) async fn perform_request(
             }
         }
         if req.cache_mode == "no-store"
-            && !headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("pragma"))
+            && !headers
+                .iter()
+                .any(|(k, _)| k.eq_ignore_ascii_case("pragma"))
         {
             rb = rb.header(reqwest::header::PRAGMA, "no-cache");
         }
@@ -1091,9 +1058,11 @@ pub(crate) async fn perform_request(
             (k.to_string(), vs)
         })
         .collect();
-    // Fetch spec: multiple identical `Content-Length` headers combine into one;
-    // conflicting `Content-Length` values are dropped (treated as absent).
-    let headers = combine_content_length_headers(raw_headers);
+    // The header list is exposed as received: duplicate `Content-Length`
+    // headers are kept, so `Headers.get` joins them (WPT
+    // `content-length/api-and-duplicate-headers` expects "6, 6"). Body framing
+    // is hyper's own single-`Content-Length` decision, independent of this list.
+    let headers = raw_headers;
     // `Response.statusText` is the response's status message: the HTTP reason
     // phrase for a real response (200 → "OK", 304 → "Not Modified", ...).
     // HTTP/2 has no reason phrase, so the spec mandates an empty `statusText`
@@ -1102,7 +1071,14 @@ pub(crate) async fn perform_request(
     let status_text = if http_ver.starts_with("HTTP/2") {
         String::new()
     } else {
-        canonical_status_text(status.as_u16())
+        // hyper preserves a *non-canonical* reason phrase in the response
+        // extensions (`hyper::ext::ReasonPhrase`); when it is absent the
+        // canonical phrase for the status is implied. reqwest does not
+        // re-export the type, hence the direct hyper dependency.
+        match resp.extensions().get::<hyper::ext::ReasonPhrase>() {
+            Some(reason) => reason.as_bytes().iter().map(|&b| b as char).collect(),
+            None => canonical_status_text(status.as_u16()),
+        }
     };
     // Read Content-Length from the header: resp.content_length() reports the
     // body size hint, which is erased by the auto-decompression wrapper.

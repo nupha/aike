@@ -394,8 +394,9 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     #[cfg(feature = "fetch_cache")]
     let cache_hit = if cacheable && !has_conditional {
         match cache_mode.as_str() {
-            "default" => http_cache::lookup_full(&method, &url_str, &cache_req_headers)
-                .filter(|h| h.fresh),
+            "default" => {
+                http_cache::lookup_full(&method, &url_str, &cache_req_headers).filter(|h| h.fresh)
+            }
             "force-cache" | "only-if-cached" => {
                 http_cache::lookup_full(&method, &url_str, &cache_req_headers)
             }
@@ -405,6 +406,16 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         None
     };
 
+    // RFC 5861: with `default` caching, a stale entry carrying
+    // `stale-while-revalidate` may be served as-is; the network request below
+    // doubles as its revalidation (the transport stores the fresh response).
+    #[cfg(feature = "fetch_cache")]
+    let swr_hit = if cacheable && !has_conditional && cache_hit.is_none() && cache_mode == "default"
+    {
+        http_cache::lookup_full(&method, &url_str, &cache_req_headers).filter(|h| h.swr)
+    } else {
+        None
+    };
     // `only-if-cached` with no cached entry is a network error (TypeError).
     #[cfg(feature = "fetch_cache")]
     let no_cache_entry = cache_mode == "only-if-cached" && cache_hit.is_none();
@@ -468,6 +479,21 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
         // `fetch()` returns a promise; resolve it with the cached Response.
         return Promise::from_resolve_value(ctx, response).map(JSValue::from);
+    }
+
+    // RFC 9111 §3.3: a stored *incomplete* (`206`) response cannot be served
+    // for a request for the complete resource, but the fetch is completed by
+    // forwarding a request for the missing remainder (a `Range` for everything
+    // after the stored prefix). The caller's own `Range` takes precedence.
+    #[cfg(feature = "fetch_cache")]
+    if cacheable
+        && !has_conditional
+        && !header_list.has("range")
+        && matches!(cache_mode.as_str(), "default" | "force-cache")
+        && let Some(range) =
+            http_cache::partial_remainder_range(&method, &url_str, &cache_req_headers)
+    {
+        header_list.set("Range", &range);
     }
 
     // RFC 9111 §5.2.1.7: a request carrying `Cache-Control: only-if-cached`
@@ -891,6 +917,34 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
             let status = tr.status;
 
+            // RFC 5861: the request above already revalidated the stored entry
+            // (the transport stored the fresh response); hand the caller the
+            // stale copy we matched, so `stale-while-revalidate` serves stale
+            // first and refreshes in the background.
+            #[cfg(feature = "fetch_cache")]
+            if let Some(hit) = swr_hit {
+                let final_url = hit.final_url.clone();
+                return build_response_from_transport(
+                    cx,
+                    TransportResponse {
+                        status: hit.status,
+                        status_text: "OK".to_string(),
+                        headers: hit.headers,
+                        content_type: String::new(),
+                        content_length: Some(hit.body.len() as u64),
+                        http_version: "1.1",
+                        resp: None,
+                        final_url: hit.final_url,
+                        synthetic_body: Some(hit.body),
+                        origin_opaque: false,
+                    },
+                    RespType::Basic,
+                    &final_url,
+                    false,
+                    signal_val,
+                );
+            }
+
             // Fetch spec (HTTP-network fetch, authentication entries): a 401 or
             // 407 response with credentials mode other than "omit" is an auth
             // challenge that normally triggers a credentialed re-issue of the
@@ -997,6 +1051,7 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 http_cache::take_not_modified(
                     &method_clone,
                     &url_clone,
+                    &cache_req_headers,
                     status,
                     &tr.headers,
                     cache_driven,

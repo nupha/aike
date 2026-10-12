@@ -151,6 +151,24 @@ impl ReaderPayload {
             RsState::Readable => {}
         }
 
+        // WHATWG `ReadableByteStreamControllerPullInto` step 11: a BYOB read
+        // transfers the caller's buffer up front, so the result below always
+        // hands back a view over a fresh ArrayBuffer of the same byte length
+        // (and the caller's buffer is detached). That is what lets a caller
+        // read a body in chunks into one allocation: `value.buffer` stays the
+        // full-size buffer while `value.byteOffset` tracks the write position.
+        let byob_view = match byob_view {
+            Some(view) => {
+                let full = view.byte_length() as u32;
+                Some(
+                    TypedArray::try_from(transfer_view(ctx, view, full)?).map_err(|_| {
+                        ctx.throw_type_error("failed to transfer the BYOB view buffer")
+                    })?,
+                )
+            }
+            None => None,
+        };
+
         if let Some(controller_val) = stream_p.controller {
             let cp = super::readable_controller::get_readable_controller(ctx, &controller_val)?;
 
@@ -328,32 +346,68 @@ impl GcTrace for ReaderPayload {
     }
 }
 
-/// Transfer a BYOB view's underlying ArrayBuffer: detach the original, then
-/// return a new empty Uint8Array backed by a fresh buffer. This matches
-/// WHATWG ReadableByteStreamControllerBYOBRead when reading from a closed
-/// or empty stream.
+/// WHATWG `TransferArrayBuffer` + `Construct`: detach `view`'s ArrayBuffer and
+/// return a view of the same type over the fresh buffer, covering `bytes` bytes
+/// from `view`'s byte offset.
+///
+/// This is the transfer at the heart of BYOB reads
+/// (`ReadableByteStreamControllerPullInto` step 11, then
+/// `ReadableByteStreamControllerConvertPullIntoDescriptor`): the caller's
+/// buffer is detached and every result hands back a new ArrayBuffer of the same
+/// byte length. `bytes` must be a multiple of the view's element size.
+pub(crate) fn transfer_view(
+    ctx: &mut ScopedContext,
+    view: TypedArray,
+    bytes: u32,
+) -> Result<JSValue, i32> {
+    let view_jv = JSValue::from(view);
+    let byte_offset = view_jv
+        .get_property_str(ctx, "byteOffset")?
+        .to_number(ctx)?
+        .to_f64() as i32;
+    // elementSize = byteLength / length; 1 for Uint8Array and DataView.
+    let byte_length = view.byte_length() as u32;
+    let elements = view.length() as u32;
+    let element_size = if elements > 0 {
+        (byte_length / elements).max(1)
+    } else {
+        1
+    };
+    let count = bytes / element_size;
+    // `ArrayBuffer.prototype.transfer()` detaches the source and yields a fresh
+    // ArrayBuffer carrying the same bytes (a move, so this stays O(1)).
+    let new_buffer = view_jv
+        .get_property_str(ctx, "buffer")?
+        .invoke_str(ctx, "transfer", &[])?;
+    view_jv.get_property_str(ctx, "constructor")?.call_ctor(
+        ctx,
+        &[
+            new_buffer,
+            JSValue::from(byte_offset),
+            JSValue::from(count as i32),
+        ],
+    )
+}
+
+/// Empty view over a transferred buffer, for a BYOB read from a closed stream
+/// (`ReadableByteStreamControllerPullInto` step 12): the caller's buffer is
+/// still transferred, only the returned view is zero length.
 pub(crate) fn transfer_view_buffer(
     ctx: &mut ScopedContext,
     view: TypedArray,
 ) -> Result<JSValue, i32> {
-    view.array_buffer().detatch(ctx);
-    let new_ta = TypedArray::create_from_vec_u8(ctx, Vec::new())?;
-    Ok(JSValue::from(new_ta))
+    transfer_view(ctx, view, 0)
 }
 
-/// Copy `chunk` into the BYOB destination `view`, returning the view to hand
-/// back to the caller. Bytes that do not fit are pushed to the front of `queue`
-/// so the following read resumes from there.
+/// Copy `chunk` into the BYOB destination `view`, then transfer the buffer and
+/// hand back the resulting view (`ReadableByteStreamControllerConvertPullIntoDescriptor`).
+/// Bytes that do not fit are pushed to the front of `queue` so the following
+/// read resumes from there. The returned view spans exactly the bytes written,
+/// over a freshly transferred ArrayBuffer of the view's byte length.
 ///
-/// The returned view spans exactly the bytes written, over the caller's own
-/// buffer at the caller's offset — so `value.byteLength` is the filled length
-/// and `value.buffer` is still the caller's allocation (which matters for a
-/// BYOB read into a view that starts at a byte offset).
-///
-/// `view` is pushed into `held` for the whole function: `subarray` runs JS, and
-/// the view is otherwise only a Rust local here (see the Rule 4 notes in
-/// docs/gc.md). `subarray` is deliberately the last JS call, so the view it
-/// returns needs no root of its own.
+/// `view` is pushed into `held` for the whole function: `transfer_view` runs JS,
+/// and the view is otherwise only a Rust local here (see the Rule 4 notes in
+/// docs/gc.md).
 fn byob_fill_view(
     ctx: &mut ScopedContext,
     mut view: TypedArray,
@@ -385,10 +439,7 @@ fn byob_fill_view(
         );
     }
 
-    // `subarray` of the filled length: same buffer, same offset, exact length.
-    let n = JSValue::from(n as i32);
-    let filled = view.invoke_str(ctx, "subarray", &[JSValue::ZERO, n])?;
-    Ok(filled)
+    transfer_view(ctx, view, n as u32)
 }
 
 /// Get the `&ReaderPayload` attached to a `ReadableStreamDefaultReader` value.

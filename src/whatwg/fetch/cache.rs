@@ -25,6 +25,10 @@ pub(crate) struct CacheHit {
     pub body: Vec<u8>,
     /// Whether the entry is fresh per its `max-age`/`Expires` headers.
     pub fresh: bool,
+    /// RFC 5861: whether the entry is stale but still inside its
+    /// `stale-while-revalidate` window, so it may be served while a
+    /// revalidation runs.
+    pub swr: bool,
     /// The response's final URL after redirects (the requested URL when no
     /// redirect was followed), used for same-origin checks.
     pub final_url: String,
@@ -54,15 +58,21 @@ struct CacheEntry {
 
 /// Upper bound on a body we are willing to hold in the in-memory cache.
 ///
-/// The cache is a plain `HashMap<(method,url), Vec<u8>>`; buffering an
-/// unbounded body (e.g. the 8GiB file in WPT `huge-fetch`) would OOM the
-/// process or yield an empty chunk. Responses larger than this are not cached
-/// (the spec does not require caching every response), and the caller is
-/// expected to stream such bodies to the consumer instead of buffering them.
+/// The cache is an in-memory map; buffering an unbounded body (e.g. the 8GiB
+/// file in WPT `huge-fetch`) would OOM the process or yield an empty chunk.
+/// Responses larger than this are not cached (the spec does not require caching
+/// every response), and the caller is expected to stream such bodies to the
+/// consumer instead of buffering them.
 pub(crate) const MAX_CACHE_BODY_BYTES: u64 = 64 * 1024 * 1024;
 
-/// Global, process-wide cache. Keyed by (method, url).
-static CACHE: LazyLock<Mutex<HashMap<(String, String), CacheEntry>>> =
+/// Upper bound on the stored variants for one URL. RFC 9111 §4.1 lets a URL
+/// hold a separate response per `Vary` combination; cap the fan-out so a
+/// pathological URL cannot grow the in-memory cache without bound.
+const MAX_VARIANTS_PER_URL: usize = 16;
+
+/// Global, process-wide cache. Keyed by (method, url); each value holds one
+/// entry per `Vary` variant (RFC 9111 §4.1).
+static CACHE: LazyLock<Mutex<HashMap<(String, String), Vec<CacheEntry>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// Canonical URL used for cache keying.
@@ -97,6 +107,24 @@ fn header_value(headers: &[(String, String)], name: &str) -> Option<String> {
 
 fn has_header(headers: &[(String, String)], name: &str) -> bool {
     header_value(headers, name).is_some()
+}
+
+/// The value of header `name` (case-insensitive), or `None`.
+fn pick_header<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
+    headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case(name))
+        .map(|(_, v)| v.as_str())
+}
+
+/// The stored variant whose `Vary` fields match this request (RFC 9111 §4.1).
+/// `None` when no stored variant matches, including a `Vary: *` entry (which
+/// never matches).
+fn select_variant<'a>(
+    entries: &'a [CacheEntry],
+    req_headers: &[(String, String)],
+) -> Option<&'a CacheEntry> {
+    entries.iter().find(|e| vary_matches(e, req_headers))
 }
 
 /// Parse an IMF-fixdate HTTP-date (`Expires`/`Date`) into epoch seconds, or
@@ -206,6 +234,25 @@ fn is_fresh(entry: &CacheEntry) -> bool {
     false
 }
 
+/// RFC 5861 `stale-while-revalidate`: the entry is stale, but its staleness is
+/// within the window the response allowed for serving stale content while a
+/// revalidation runs in the background.
+fn stale_while_revalidate(entry: &CacheEntry) -> bool {
+    let Some(cc) = header_value(&entry.headers, "cache-control") else {
+        return false;
+    };
+    let cc = cc.to_ascii_lowercase();
+    let Some(window) = directive_value(&cc, "stale-while-revalidate") else {
+        return false;
+    };
+    // Needs an explicit lifetime to measure the staleness against.
+    let Some(lifetime) = explicit_lifetime(entry) else {
+        return false;
+    };
+    let age = current_age(entry);
+    age >= lifetime && age - lifetime <= window
+}
+
 /// The response's `Age` header in seconds (0 when absent). An upstream cache
 /// reports here how long it already held the response, so the client's view of
 /// the current age must include it (RFC 9111 §4.2.3).
@@ -280,25 +327,36 @@ fn usable_for_request(entry: &CacheEntry, req_headers: &[(String, String)]) -> b
 }
 
 /// Whether a request may reuse an entry given its `Vary` fields: every listed
-/// field must be present in both the stored and the current request with the
-/// same value (RFC 9111 §4.1). `Vary: *` never matches.
+/// field must have the same value in the stored and the current request, where
+/// a field absent from *both* counts as equal (RFC 9111 §4.1). `Vary: *` never
+/// matches.
 fn vary_matches(entry: &CacheEntry, req_headers: &[(String, String)]) -> bool {
     for field in &entry.vary {
         if field == "*" {
             return false;
         }
-        fn pick<'a>(h: &'a [(String, String)], field: &str) -> Option<&'a str> {
-            h.iter()
-                .find(|(k, _)| k.eq_ignore_ascii_case(field))
-                .map(|(_, v)| v.as_str())
-        }
-        // A field missing from either side cannot be shown to match.
-        match (pick(&entry.req_headers, field), pick(req_headers, field)) {
+        match (
+            pick_header(&entry.req_headers, field),
+            pick_header(req_headers, field),
+        ) {
+            // Present on both sides with the same value, or absent from both.
             (Some(a), Some(b)) if a == b => {}
+            (None, None) => {}
             _ => return false,
         }
     }
     true
+}
+
+/// True when `entry` describes the same `Vary` variant as a response that varies
+/// on `vary` and was requested with `req_headers`: the field list is identical
+/// and every field has the same value on both requests. Used by `store` to
+/// replace an existing variant instead of accumulating duplicates.
+fn same_variant(entry: &CacheEntry, vary: &[String], req_headers: &[(String, String)]) -> bool {
+    entry.vary == vary
+        && vary
+            .iter()
+            .all(|f| pick_header(&entry.req_headers, f) == pick_header(req_headers, f))
 }
 
 /// RFC 9111 §3: the status codes a response may be cached from without an
@@ -339,12 +397,10 @@ pub(crate) fn lookup_validators(
         return None;
     }
     let cache = CACHE.lock().unwrap();
-    let entry = cache.get(&(method.to_ascii_uppercase(), cache_key_url(url)))?;
+    let entries = cache.get(&(method.to_ascii_uppercase(), cache_key_url(url)))?;
     // A response that varies on fields this request does not match is not
     // revalidateable either (WPT `http-cache/vary`).
-    if !vary_matches(entry, req_headers) {
-        return None;
-    }
+    let entry = select_variant(entries, req_headers)?;
     Some((entry.etag.clone(), entry.last_modified.clone()))
 }
 
@@ -360,15 +416,10 @@ pub(crate) fn lookup_full(
         return None;
     }
     let cache = CACHE.lock().unwrap();
-    let entry = cache.get(&(method.to_ascii_uppercase(), cache_key_url(url)))?;
-    // `Vary: *` can never be reused (it always varies), and a response whose
-    // Vary fields do not match this request must not be served either
-    // (WPT request-cache-force-cache, http-cache/vary).
-    if header_value(&entry.headers, "vary").is_some_and(|v| v.trim() == "*")
-        || !vary_matches(entry, req_headers)
-    {
-        return None;
-    }
+    let entries = cache.get(&(method.to_ascii_uppercase(), cache_key_url(url)))?;
+    // Reuse only a stored variant matching this request; `select_variant`
+    // already rejects `Vary: *` (WPT request-cache-force-cache, http-cache/vary).
+    let entry = select_variant(entries, req_headers)?;
 
     // Request `Cache-Control` directives constrain whether this entry may be
     // reused at all (RFC 9111 §5.2.1).
@@ -397,6 +448,7 @@ pub(crate) fn lookup_full(
             headers: entry.headers.clone(),
             body: entry.body.clone(),
             fresh,
+            swr: stale_while_revalidate(entry),
             final_url: entry.final_url.clone(),
         });
     };
@@ -434,6 +486,7 @@ pub(crate) fn lookup_full(
             headers,
             body,
             fresh,
+            swr: stale_while_revalidate(entry),
             final_url: entry.final_url.clone(),
         });
     } else {
@@ -454,8 +507,37 @@ pub(crate) fn lookup_full(
         headers,
         body,
         fresh,
+        swr: stale_while_revalidate(entry),
         final_url: entry.final_url.clone(),
     })
+}
+
+/// RFC 9111 §3.3: a request for the complete resource that matches a stored
+/// *incomplete* (`206`) response cannot be served from cache, but the fetch can
+/// be completed by forwarding a request for the missing remainder. Returns the
+/// `Range` value to send (`bytes=<last stored byte + 1>-`), or `None` when there
+/// is no stored prefix to complete.
+pub(crate) fn partial_remainder_range(
+    method: &str,
+    url: &str,
+    req_headers: &[(String, String)],
+) -> Option<String> {
+    if !method.eq_ignore_ascii_case("GET") {
+        return None;
+    }
+    let cache = CACHE.lock().unwrap();
+    let entries = cache.get(&(method.to_ascii_uppercase(), cache_key_url(url)))?;
+    let entry = select_variant(entries, req_headers)?;
+    if entry.status != 206 {
+        return None;
+    }
+    let (start, end, total) = parse_content_range(&entry.headers)?;
+    // Only a stored prefix (start 0) can be extended by a single open-ended
+    // range, and only while the resource is still incomplete.
+    if start != 0 || end + 1 >= total {
+        return None;
+    }
+    Some(format!("bytes={}-", end + 1))
 }
 
 /// Parse a request `Range` header (`bytes=a-b`, `bytes=a-`, `bytes=-n`) against
@@ -614,23 +696,38 @@ pub(crate) fn store(
         .unwrap_or_default();
 
     let mut cache = CACHE.lock().unwrap();
-    cache.insert(
-        (method.to_ascii_uppercase(), cache_key_url(url)),
-        CacheEntry {
-            status,
-            headers: headers.to_vec(),
-            body,
-            etag,
-            last_modified,
-            stored_at: now_epoch(),
-            final_url: final_url.to_string(),
-            vary,
-            req_headers: req_headers
-                .iter()
-                .map(|(k, v)| (k.to_ascii_lowercase(), v.clone()))
-                .collect(),
-        },
-    );
+    let key = (method.to_ascii_uppercase(), cache_key_url(url));
+    let entry = CacheEntry {
+        status,
+        headers: headers.to_vec(),
+        body,
+        etag,
+        last_modified,
+        stored_at: now_epoch(),
+        final_url: final_url.to_string(),
+        vary,
+        req_headers: req_headers
+            .iter()
+            .map(|(k, v)| (k.to_ascii_lowercase(), v.clone()))
+            .collect(),
+    };
+
+    // RFC 9111 §4.1: keep one entry per `Vary` variant, so a response for one
+    // request header combination does not evict the one stored for another
+    // (WPT `http-cache/vary` "doesn't invalidate existing Vary response").
+    let entries = cache.entry(key).or_default();
+    match entries
+        .iter_mut()
+        .find(|e| same_variant(e, &entry.vary, &entry.req_headers))
+    {
+        Some(slot) => *slot = entry,
+        None => {
+            if entries.len() >= MAX_VARIANTS_PER_URL {
+                entries.remove(0);
+            }
+            entries.push(entry);
+        }
+    }
 }
 
 /// Drop the entry for `url`, if any. A successful unsafe request (POST/PUT/
@@ -646,20 +743,31 @@ pub(crate) fn invalidate(url: &str) {
 
 /// Merge `update` headers onto a stored entry and rebuild it. Used when the
 /// server answers a revalidation with `304`: per Fetch, the 304 response's
-/// headers update the stored response but the body stays the same.
-fn merge_and_update(method: &str, url: &str, update: &[(String, String)]) {
+/// headers update the stored response but the body stays the same. The variant
+/// is the one matching the revalidating request.
+fn merge_and_update(
+    method: &str,
+    url: &str,
+    req_headers: &[(String, String)],
+    update: &[(String, String)],
+) {
     let mut cache = CACHE.lock().unwrap();
-    if let Some(entry) = cache.get_mut(&(method.to_ascii_uppercase(), cache_key_url(url))) {
-        for (k, v) in update {
-            if let Some(slot) = entry
-                .headers
-                .iter_mut()
-                .find(|(ek, _)| ek.eq_ignore_ascii_case(k))
-            {
-                slot.1 = v.clone();
-            } else {
-                entry.headers.push((k.clone(), v.clone()));
-            }
+    let key = (method.to_ascii_uppercase(), cache_key_url(url));
+    let Some(entries) = cache.get_mut(&key) else {
+        return;
+    };
+    let Some(entry) = entries.iter_mut().find(|e| vary_matches(e, req_headers)) else {
+        return;
+    };
+    for (k, v) in update {
+        if let Some(slot) = entry
+            .headers
+            .iter_mut()
+            .find(|(ek, _)| ek.eq_ignore_ascii_case(k))
+        {
+            slot.1 = v.clone();
+        } else {
+            entry.headers.push((k.clone(), v.clone()));
         }
     }
 }
@@ -671,6 +779,7 @@ fn merge_and_update(method: &str, url: &str, update: &[(String, String)]) {
 pub(crate) fn take_not_modified(
     method: &str,
     url: &str,
+    req_headers: &[(String, String)],
     status: u16,
     not_modified_headers: &[(String, String)],
     cache_driven: bool,
@@ -681,12 +790,13 @@ pub(crate) fn take_not_modified(
     let key = (method.to_ascii_uppercase(), cache_key_url(url));
     let cached_status = {
         let cache = CACHE.lock().unwrap();
-        let entry = cache.get(&key)?;
-        entry.status
+        let entries = cache.get(&key)?;
+        select_variant(entries, req_headers)?.status
     };
     // Merge 304 headers onto the stored headers.
-    merge_and_update(method, url, not_modified_headers);
+    merge_and_update(method, url, req_headers, not_modified_headers);
     let cache = CACHE.lock().unwrap();
-    let entry = cache.get(&key)?;
+    let entries = cache.get(&key)?;
+    let entry = select_variant(entries, req_headers)?;
     Some((cached_status, entry.headers.clone(), entry.body.clone()))
 }

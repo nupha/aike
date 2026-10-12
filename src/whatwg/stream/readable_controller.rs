@@ -365,11 +365,10 @@ impl ReadableControllerPayload {
         let desc = pending_pull_intos.borrow_mut().remove(0);
         self.clear_byob_request();
 
-        let committed = desc.view.invoke_str(
-            ctx,
-            "subarray",
-            &[JSValue::ZERO, JSValue::from(desc.bytes_filled)],
-        )?;
+        // WHATWG `ReadableByteStreamControllerConvertPullIntoDescriptor`: the
+        // committed view is a fresh view over the descriptor's *transferred*
+        // buffer, covering exactly the filled bytes.
+        let committed = super::reader::transfer_view(ctx, desc.view, desc.bytes_filled)?;
 
         // Try to fulfill a pending non-BYOB read request first.
         if self.resolve_pending_read(ctx, committed, false) {
@@ -644,11 +643,8 @@ impl ReadableControllerPayload {
                     let n = desc.element_size;
                     let resolve_fn = desc.resolve_fn;
                     held.borrow_mut().push(resolve_fn);
-                    let filled = desc.view.invoke_str(
-                        ctx,
-                        "subarray",
-                        &[JSValue::ZERO, JSValue::from(n)],
-                    )?;
+                    // Commit: hand back a view over the transferred buffer.
+                    let filled = super::reader::transfer_view(ctx, desc.view, n)?;
                     held.borrow_mut().push(filled);
                     descs.remove(0);
                     resolved.push((resolve_fn, filled));
@@ -987,15 +983,11 @@ impl ReadableControllerPayload {
                     // Step 8c: invalidate BYOBRequest.
                     self.clear_byob_request();
 
-                    // Step 8d: transfer the first descriptor's buffer.
-                    {
-                        let mut descs = pending_pull_intos.borrow_mut();
-                        let first = &mut descs[0];
-                        let bytes = first.view.with_bytes(|b| b.to_vec());
-                        first.view = TypedArray::create_from_vec_u8(ctx, bytes)?;
-                        first.byte_offset = 0;
-                        first.buffer_byte_length = first.element_size;
-                    }
+                    // Step 8d's TransferArrayBuffer is already covered: the
+                    // descriptor's buffer was transferred when the BYOB read
+                    // created it (see `transfer_view`), so it is a fresh
+                    // full-size buffer here and must not be replaced by a
+                    // view-sized one.
 
                     // Step 8e: if reader type is "none", enqueue detached
                     // descriptor's bytes to the queue and return.
