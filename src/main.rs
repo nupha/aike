@@ -73,24 +73,24 @@ struct Args {
     #[arg(
         long,
         value_name = "n",
-        help = "set virtual stack arena size to n (default: 256k)"
+        help = "set VM stack arena size to n (default: 256k)"
     )]
-    stack_arena: Option<String>,
+    vm_stack_arena: Option<String>,
 
     #[arg(
         long,
         value_name = "n",
-        help = "set virtual stack byte limit to n (default: 512k)"
+        help = "set VM stack byte limit to n (default: 512k)"
     )]
-    stack_limit: Option<String>,
+    vm_stack_limit: Option<String>,
 
     #[arg(
         long,
         value_name = "n",
-        help = "set C-stack recursion budget (max native stack below the eval SP); \
+        help = "set C-stack recursion limit (max native stack below the eval SP); \
                 omit/0 for auto mode derived from the thread stack bottom"
     )]
-    stack_overflow: Option<String>,
+    thread_stack_limit: Option<String>,
 
     #[arg(
         long,
@@ -280,14 +280,14 @@ async fn run(mut args: Args, stack_size: Option<usize>) -> ExitCode {
         if let Some(ref ml) = args.memory_limit {
             v.push(format!("--memory-limit={}", ml));
         }
-        if let Some(ref sa) = args.stack_arena {
-            v.push(format!("--stack-arena={}", sa));
+        if let Some(ref sa) = args.vm_stack_arena {
+            v.push(format!("--vm-stack-arena={}", sa));
         }
-        if let Some(ref sl) = args.stack_limit {
-            v.push(format!("--stack-limit={}", sl));
+        if let Some(ref sl) = args.vm_stack_limit {
+            v.push(format!("--vm-stack-limit={}", sl));
         }
-        if let Some(ref so) = args.stack_overflow {
-            v.push(format!("--stack-overflow={}", so));
+        if let Some(ref so) = args.thread_stack_limit {
+            v.push(format!("--thread-stack-limit={}", so));
         }
         if let Some(ref ts) = args.thread_stack {
             v.push(format!("--thread-stack={}", ts));
@@ -342,45 +342,48 @@ async fn run(mut args: Args, stack_size: Option<usize>) -> ExitCode {
         }
     }
 
-    // stack-arena (default: 256k)
-    if let Some(ref ss) = args.stack_arena {
+    // vm-stack-arena (default: 256k)
+    if let Some(ref ss) = args.vm_stack_arena {
         if let Some(size) = parse_byte_size(ss) {
-            if rt.set_stack_arena(size).is_err() {
-                colorize_println(format!("cannot allocate stack-arena of size {ss}"), RedFg);
+            if rt.set_vm_stack_arena(size).is_err() {
+                colorize_println(
+                    format!("cannot allocate vm-stack-arena of size {ss}"),
+                    RedFg,
+                );
                 std::process::exit(-1);
             }
         } else {
-            colorize_println(format!("invalid stack-arena: {ss}"), RedFg);
+            colorize_println(format!("invalid vm-stack-arena: {ss}"), RedFg);
             std::process::exit(-1);
         }
     }
 
-    // stack-limit (default: 512k)
-    if let Some(ref ss) = args.stack_limit {
+    // vm-stack-limit (default: 512k)
+    if let Some(ref ss) = args.vm_stack_limit {
         if let Some(size) = parse_byte_size(ss) {
-            rt.set_stack_limit(size);
+            rt.set_vm_stack_limit(size);
         } else {
-            colorize_println(format!("invalid stack-limit: {ss}"), RedFg);
+            colorize_println(format!("invalid vm-stack-limit: {ss}"), RedFg);
             std::process::exit(-1);
         }
     }
 
-    // stack-overflow: omit/0 = auto mode (from thread stack bottom)
-    if let Some(ref ss) = args.stack_overflow {
+    // thread-stack-limit: omit/0 = auto mode (from thread stack bottom)
+    if let Some(ref ss) = args.thread_stack_limit {
         if let Some(size) = parse_byte_size(ss) {
-            rt.set_stack_budget(size);
+            rt.set_thread_stack_limit(size);
         } else {
-            colorize_println(format!("invalid stack-overflow: {ss}"), RedFg);
+            colorize_println(format!("invalid thread-stack-limit: {ss}"), RedFg);
             std::process::exit(-1);
         }
     } else if let Some(size) = stack_size {
         // Running on a `--thread-stack` thread: declare its size so the guard
         // matches it on platforms that can't report the stack bottom.
-        rt.set_thread_stack_size(size);
-    } else if !zuqe::Runtime::CAN_AUTO_STACK_BUDGET {
+        rt.declare_thread_stack_size(size);
+    } else if !zuqe::Runtime::CAN_AUTO_THREAD_STACK_LIMIT {
         // Platform can't report the stack bottom: auto mode would leave no
-        // C-stack guard, so fall back to a strict 512 KiB budget.
-        rt.set_stack_budget(512 << 10);
+        // C-stack guard, so fall back to a strict 512 KiB limit.
+        rt.set_thread_stack_limit(512 << 10);
     }
 
     rt.set_module_normalizer(module_loader::js_module_normalizer);
