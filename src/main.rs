@@ -5,8 +5,8 @@
 
 mod ai;
 mod aike;
-mod class_event_emitter;
 mod cjs;
+mod class_event_emitter;
 mod color;
 #[cfg(feature = "enable_eval_log")]
 mod eval_logger;
@@ -37,9 +37,7 @@ use std::{
 
 use clap::{CommandFactory, Parser};
 use color::{Color::*, colorize_println};
-use zuqe::{
-    EvalFlags, EvalType, Exception, ExitStatus, NativeObject, Runtime, ScopedContext,
-};
+use zuqe::{EvalFlags, EvalType, Exception, ExitStatus, NativeObject, Runtime, ScopedContext};
 
 use crate::{
     ai::{JSLlmClient, JSSystem1Client, init_mod_ai},
@@ -93,6 +91,15 @@ struct Args {
                 omit/0 for auto mode derived from the thread stack bottom"
     )]
     stack_overflow: Option<String>,
+
+    #[arg(
+        long,
+        value_name = "n",
+        help = "run the engine on a thread with an n-byte native stack \
+                (default: the main thread's platform default); raise it when deep \
+                native recursion trips 'stack overflow'; 0 = default"
+    )]
+    thread_stack: Option<String>,
 
     #[arg(short, long, default_value_t = false, help = "eval as esm module")]
     module: bool,
@@ -152,8 +159,65 @@ fn parse_byte_size(ss: &str) -> Option<usize> {
     }
 }
 
-#[tokio::main]
-async fn main() -> ExitCode {
+fn main() -> ExitCode {
+    let args = Args::parse();
+
+    // `--thread-stack <n>`: run the whole engine on a thread whose native stack
+    // is `n` bytes. The C-stack guard is sized from the *running* thread's
+    // stack, so this is the only way to lift the ceiling that reports
+    // `stack overflow` on deep native recursion. `0`/omitted keeps the main
+    // thread's platform-default stack.
+    let stack_size = match args.thread_stack.as_deref() {
+        None => None,
+        Some(ss) => match parse_byte_size(ss) {
+            Some(0) => None,
+            Some(n) if n < zuqe::Runtime::MIN_THREAD_STACK_SIZE => {
+                colorize_println(
+                    format!(
+                        "thread-stack must be at least {} bytes ({} is too small \
+                         for the C-stack guard)",
+                        zuqe::Runtime::MIN_THREAD_STACK_SIZE,
+                        ss
+                    ),
+                    RedFg,
+                );
+                std::process::exit(-1);
+            }
+            Some(n) => Some(n),
+            None => {
+                colorize_println(format!("invalid thread-stack: {ss}"), RedFg);
+                std::process::exit(-1);
+            }
+        },
+    };
+
+    let Some(size) = stack_size else {
+        return block_on(run(args, None));
+    };
+
+    match std::thread::Builder::new()
+        .name("aike".to_string())
+        .stack_size(size)
+        .spawn(move || block_on(run(args, Some(size))))
+    {
+        Ok(handle) => handle.join().unwrap_or(ExitCode::FAILURE),
+        Err(e) => {
+            colorize_println(format!("cannot spawn runtime thread: {e}"), RedFg);
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Drive `fut` on the tokio runtime `#[tokio::main]` used to generate.
+fn block_on<F: std::future::Future>(fut: F) -> F::Output {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("cannot build tokio runtime")
+        .block_on(fut)
+}
+
+async fn run(mut args: Args, stack_size: Option<usize>) -> ExitCode {
     if let Err(e) = dotenvy::dotenv() {
         #[cfg(debug_assertions)]
         eprintln!("[INFO] .env not loaded: {e}");
@@ -176,8 +240,6 @@ async fn main() -> ExitCode {
             .target(env_logger::Target::Pipe(Box::new(log_file)))
             .init();
     }
-
-    let mut args = Args::parse();
 
     // --help without filename/eval: show aike help and exit
     // --help with filename/eval: pass through to script
@@ -226,6 +288,9 @@ async fn main() -> ExitCode {
         }
         if let Some(ref so) = args.stack_overflow {
             v.push(format!("--stack-overflow={}", so));
+        }
+        if let Some(ref ts) = args.thread_stack {
+            v.push(format!("--thread-stack={}", ts));
         }
         v
     };
@@ -308,6 +373,10 @@ async fn main() -> ExitCode {
             colorize_println(format!("invalid stack-overflow: {ss}"), RedFg);
             std::process::exit(-1);
         }
+    } else if let Some(size) = stack_size {
+        // Running on a `--thread-stack` thread: declare its size so the guard
+        // matches it on platforms that can't report the stack bottom.
+        rt.set_thread_stack_size(size);
     } else if !zuqe::Runtime::CAN_AUTO_STACK_BUDGET {
         // Platform can't report the stack bottom: auto mode would leave no
         // C-stack guard, so fall back to a strict 512 KiB budget.
@@ -332,14 +401,6 @@ async fn main() -> ExitCode {
                 JSCronJob::class_id(),
                 HtmlDocument::class_id(),
                 HtmlElement::class_id(),
-                // [temporarily disabled] JSPage is provided by the external
-                // aike-browser zapi extension during testing.
-                // JSPage::class_id(),
-                crate::http::client::headers::HeaderListIterator::class_id(),
-                #[cfg(feature = "fetch_cache")]
-                crate::http::client::cache_storage::JSCacheStorage::class_id(),
-                #[cfg(feature = "fetch_cache")]
-                crate::http::client::cache_storage::JSCache::class_id(),
                 JSLlmClient::class_id(),
                 JSSystem1Client::class_id(),
             ])?;
@@ -391,21 +452,21 @@ async fn main() -> ExitCode {
         // A TypeScript entry is classified by SWC, which sees `import type`
         // / `export type` that a post-transpile scan would no longer see.
         // Everything else is classified from the source text.
-        let (transpiled, is_ts_module): (String, bool) =
-            if transpile::needs_transpile(&script_path) {
-                match transpile::transpile(&script_str) {
-                    Ok(result) => (result.code, result.is_module),
-                    Err(e) => {
-                        colorize_println(
-                            format!("error: failed to transpile '{script_path}': {e}"),
-                            RedFg,
-                        );
-                        std::process::exit(1);
-                    }
+        let (transpiled, is_ts_module): (String, bool) = if transpile::needs_transpile(&script_path)
+        {
+            match transpile::transpile(&script_str) {
+                Ok(result) => (result.code, result.is_module),
+                Err(e) => {
+                    colorize_println(
+                        format!("error: failed to transpile '{script_path}': {e}"),
+                        RedFg,
+                    );
+                    std::process::exit(1);
                 }
-            } else {
-                (script_str, false)
-            };
+            }
+        } else {
+            (script_str, false)
+        };
 
         // Convert the entry filename to a canonical `file://` URL for module resolution.
         // Module names (and `import.meta.url`) are URLs, and a `file://` base is also
@@ -416,8 +477,9 @@ async fn main() -> ExitCode {
         // `-m` forces a module; otherwise `.mjs` / `.mts` are always modules
         // and every other file follows its own source, which makes a
         // non-module file CommonJS (Node's rule).
-        let is_module_value =
-            args.module || is_ts_module || matches!(cjs::format_of(&script_path, &transpiled), cjs::Format::Esm);
+        let is_module_value = args.module
+            || is_ts_module
+            || matches!(cjs::format_of(&script_path, &transpiled), cjs::Format::Esm);
         cjs_entry = (!is_module_value).then(|| {
             zuqe::url_to_abspath(&url)
                 .unwrap_or_else(|| std::path::PathBuf::from(&script_path))

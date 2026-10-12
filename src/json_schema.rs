@@ -318,7 +318,7 @@ fn js_json_schema_fromSimpleSchema(ctx: &mut ScopedContext, cc: CallContext) -> 
         ));
     }
 
-    let schema_json = match simple_schema_from_args(ctx, obj.clone())? {
+    let schema_json = match simple_schema_from_args(ctx, obj)? {
         Some(s) => s,
         None => serde_json::json!({"type": "object"}),
     };

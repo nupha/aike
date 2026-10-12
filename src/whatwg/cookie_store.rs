@@ -22,9 +22,9 @@ use zuqe::{
     Object, ScopedContext, builtins::promise::Promise, def_native_object,
 };
 
-use crate::{
-    http::client::config::{cookie_order_record, global_cookie_jar, global_cookie_order},
-    whatwg::dom::make_dom_exception,
+use crate::whatwg::{
+    dom::make_dom_exception,
+    fetch::config::{cookie_order_record, global_cookie_jar, global_cookie_order},
 };
 
 /// Spec maximum name/value pair size (bytes).
@@ -691,10 +691,16 @@ fn js_cookie_store_constructor(ctx: &mut ScopedContext, _cc: CallContext) -> JSR
 }
 
 const COOKIE_STORE_PROTO: &[FieldDef] = &[
-    FieldDef::FUNC("get", 1, js_cookie_store_get, 0),
-    FieldDef::FUNC("getAll", 1, js_cookie_store_get_all, 0),
-    FieldDef::FUNC("set", 2, js_cookie_store_set, 0),
-    FieldDef::FUNC("delete", 2, js_cookie_store_delete, 0),
+    FieldDef::FUNC_ENUM("get", 1, js_cookie_store_get, 0),
+    FieldDef::FUNC_ENUM("getAll", 1, js_cookie_store_get_all, 0),
+    FieldDef::FUNC_ENUM("set", 2, js_cookie_store_set, 0),
+    FieldDef::FUNC_ENUM("delete", 2, js_cookie_store_delete, 0),
+    // WebIDL class string (`Object.prototype.toString` -> "[object CookieStore]").
+    FieldDef::STR(
+        "[Symbol.toStringTag]",
+        "CookieStore",
+        zuqe::JS_PROP_CONFIGURABLE,
+    ),
 ];
 
 def_native_object!(

@@ -298,13 +298,11 @@ pub(crate) fn json_schema_check(
                     }
                 }
             }
-            "null" => {
-                if !value.is_null() {
-                    out.push(Violation {
-                        path: path.to_string(),
-                        kind: ViolationKind::Type("null".into()),
-                    });
-                }
+            "null" if !value.is_null() => {
+                out.push(Violation {
+                    path: path.to_string(),
+                    kind: ViolationKind::Type("null".into()),
+                });
             }
             _ => {} // unknown type keyword → accept
         }

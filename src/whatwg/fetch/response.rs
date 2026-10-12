@@ -1,40 +1,34 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2026 John Ray <996351336@qq.com>
 
-//! HTTP response classes.
+//! HTTP response class.
 //!
 //! `Response` is the strict WHATWG class returned by `fetch()`. It exposes
 //! the `Response` constructor, `error()` / `redirect()` / `json()` statics,
-//! and the `Body` mixin.
-//!
-//! `HttpClientResponse` (Rust type `JSHttpClientResponse`) extends `Response` and is
-//! returned by `HttpClient`. It adds aike enhancements: `contentType`,
-//! `contentLength`, `httpVersion`, `close()`. Both classes share
-//! `ResponsePayload` and the same native callbacks; only the ClassID and
-//! prototype differ.
+//! and the `Body` mixin. No aike extensions.
 
 use std::{cell::RefCell, rc::Rc};
 
 use zuqe::{
-    CallContext, ClassCtorDef, FieldDef, JSResult, JSValue, NativeObject, ScopedContext,
+    CallContext, ClassCtorDef, FieldDef, JSResult, JSValue, ScopedContext,
     builtins::{json::JSON, promise::Promise},
     def_native_object,
     gc_lite::{GcTrace, GcTraceCtx},
 };
 
-use crate::{
-    html::HtmlConvertMode,
-    http::client::{
+use crate::whatwg::{
+    abort::signal_reason,
+    fetch::{
         body::{
             BODY_AS_ARRAY_BUFFER, BODY_AS_BLOB, BODY_AS_BYTES, BODY_AS_FORM_DATA, BODY_AS_JSON,
-            BODY_AS_TEXT, BODY_AS_TEXT_CONVERT, BodySource, blob_type_from_header,
-            body_content_type, body_to_bytes, drain_body,
+            BODY_AS_TEXT, BodySource, blob_type_from_header, body_content_type, body_to_bytes,
+            drain_body,
         },
         headers::{Guard, HeaderList, HeadersPayload, JSHeaders, header_list_from_js},
         request::reject_type_error_as_promise,
         transport::TransportResponse,
     },
-    whatwg::{abort::signal_reason, stream::JSReadableStream},
+    stream::JSReadableStream,
 };
 
 /// WHATWG `Response.type` (closed set of values this runtime produces).
@@ -199,9 +193,27 @@ impl ResponsePayload {
                             }
                         }
                         Err(e) => {
+                            // An https body delimited by connection close: rustls
+                            // rejects the missing `close_notify` with
+                            // `UnexpectedEof`, which is this body's end, not a
+                            // failure (see `is_tls_eof`).
+                            if crate::whatwg::fetch::body::is_tls_eof(&e) {
+                                break;
+                            }
                             // Signal the consumer that the body stream failed:
                             // the reader's read() promise must reject (TypeError).
-                            let _ = tx.send(Err(format!("{e}")));
+                            // Carry the cause chain: the top-level reqwest
+                            // message ("error decoding response body") hides the
+                            // underlying hyper/io/TLS reason, which is exactly
+                            // what is needed to tell a truncated body from a
+                            // missing TLS `close_notify`.
+                            let mut msg = format!("{e}");
+                            let mut src = std::error::Error::source(&e);
+                            while let Some(s) = src {
+                                msg.push_str(&format!("; caused by: {s}"));
+                                src = s.source();
+                            }
+                            let _ = tx.send(Err(msg));
                             break;
                         }
                     }
@@ -226,22 +238,15 @@ fn get_response_payload_mut<'a>(
     ctx: &mut ScopedContext,
     val: &'a mut JSValue,
 ) -> Result<&'a mut ResponsePayload, i32> {
-    // HttpClientResponse is a subclass with its own ClassID; probe both classes.
-    let p = if JSResponse::payload_of(val).is_some() {
-        JSResponse::payload_mut_of(val)
-    } else {
-        JSHttpClientResponse::payload_mut_of(val)
-    };
-    p.ok_or_else(|| ctx.throw_type_error("not an http response object"))
+    JSResponse::payload_mut_of(val)
+        .ok_or_else(|| ctx.throw_type_error("not an http response object"))
 }
 
 fn get_response_payload<'a>(
     ctx: &mut ScopedContext,
     val: &'a JSValue,
 ) -> Result<&'a ResponsePayload, i32> {
-    JSResponse::payload_of(val)
-        .or_else(|| JSHttpClientResponse::payload_of(val))
-        .ok_or_else(|| ctx.throw_type_error("not an http response object"))
+    JSResponse::payload_of(val).ok_or_else(|| ctx.throw_type_error("not an http response object"))
 }
 
 /// Build an opaque-redirect `Response` (used for `redirect: "manual"`).
@@ -343,19 +348,6 @@ pub(crate) fn build_response_from_transport(
     }
     let payload = transport_payload(tr, resp_type, url, redirected, signal);
     JSResponse::new_instance(ctx, JSValue::UNDEFINED, payload).map(JSValue::from)
-}
-
-/// Build an enhanced `HttpClientResponse` from a [`TransportResponse`] (HttpClient path).
-pub(crate) fn build_http_response_from_transport(
-    ctx: &mut ScopedContext,
-    tr: TransportResponse,
-    resp_type: RespType,
-    url: &str,
-    redirected: bool,
-    signal: Option<JSValue>,
-) -> JSResult {
-    let payload = transport_payload(tr, resp_type, url, redirected, signal);
-    JSHttpClientResponse::new_instance(ctx, JSValue::UNDEFINED, payload).map(JSValue::from)
 }
 
 // ---------------------------------------------------------------------------
@@ -619,11 +611,8 @@ const RESPONSE_GET_REDIRECTED: i16 = 2;
 const RESPONSE_GET_STATUS: i16 = 3;
 const RESPONSE_GET_OK: i16 = 4;
 const RESPONSE_GET_STATUS_TEXT: i16 = 5;
-const RESPONSE_GET_CONTENT_TYPE: i16 = 6;
-const RESPONSE_GET_CONTENT_LENGTH: i16 = 7;
 const RESPONSE_GET_HEADERS: i16 = 8;
 const RESPONSE_GET_BODY_USED: i16 = 9;
-const RESPONSE_GET_HTTP_VERSION: i16 = 10;
 
 fn js_response_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let kind = cc.magic() as i16;
@@ -643,13 +632,6 @@ fn js_response_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         RESPONSE_GET_STATUS_TEXT => ctx
             .create_string_from_utf8(p.status_text.as_bytes().to_vec())
             .map(JSValue::make_string),
-        RESPONSE_GET_CONTENT_TYPE => ctx
-            .create_string_from_utf8(p.content_type.as_bytes().to_vec())
-            .map(JSValue::make_string),
-        RESPONSE_GET_CONTENT_LENGTH => Ok(p
-            .content_length
-            .map(|v| JSValue::from(v as f64))
-            .unwrap_or(JSValue::NULL)),
         RESPONSE_GET_HEADERS => {
             // [SameObject]: return the same Headers instance on every access.
             let mut this = cc.this();
@@ -674,15 +656,6 @@ fn js_response_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             // ReadableStream, reading the *original* stream directly (via its
             // own reader) must also mark bodyUsed.
             Ok(JSValue::from(p.body_consumed || p.body_disturbed()))
-        }
-        RESPONSE_GET_HTTP_VERSION => {
-            // null for synthetic responses (no network transport involved).
-            if p.http_version.is_empty() {
-                Ok(JSValue::NULL)
-            } else {
-                ctx.create_string_from_utf8(p.http_version.as_bytes().to_vec())
-                    .map(JSValue::make_string)
-            }
         }
         _ => Err(ctx.throw_type_error("unknown Response getter")),
     }
@@ -763,24 +736,8 @@ fn js_response_body_as(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let magic = cc.magic();
     let mut this = cc.this();
 
-    let (source, html_convert) = {
+    let source = {
         let p = get_response_payload_mut(ctx, &mut this)?;
-        let is_html = p.content_type.starts_with("text/html");
-
-        // Extended experimenal: the convert arg is only honored via BODY_AS_TEXT_CONVERT, which is
-        // wired on HttpClientResponse.text(); base Response.text() ignores args.
-        let convert = if magic == BODY_AS_TEXT_CONVERT && is_html && cc.length() > 0 {
-            let arg0 = cc.arg(0);
-            arg0.to_string(ctx)
-                .ok()
-                .and_then(|s| match s.content().encode_utf8(false).as_ref() {
-                    "strip" => Some(HtmlConvertMode::Strip),
-                    "markdown" => Some(HtmlConvertMode::Markdown),
-                    _ => None,
-                })
-        } else {
-            None
-        };
 
         // Spec (Fetch): consuming a body whose signal is already aborted must
         // reject with the signal's reason (e.g. an "AbortError"), not resolve.
@@ -806,9 +763,9 @@ fn js_response_body_as(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
         if null_body_type {
             p.body_consumed = true;
-            (Some(BodySource::Synthetic(Vec::new())), convert)
+            Some(BodySource::Synthetic(Vec::new()))
         } else if unusable {
-            (None, convert)
+            None
         } else if p.resp.is_none()
             && p.synthetic_body.is_none()
             && p.ctor_stream.is_none()
@@ -825,7 +782,7 @@ fn js_response_body_as(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             // the cached stream. Without it a network response whose `.body`
             // was merely touched would be misread as null-body and consumers
             // would resolve to "" instead of the real bytes.
-            (Some(BodySource::Synthetic(Vec::new())), convert)
+            Some(BodySource::Synthetic(Vec::new()))
         } else {
             let src = if p.cached_body.is_some() && !p.body_consumed {
                 // The `.body` getter already built the unique ReadableStream.
@@ -861,7 +818,7 @@ fn js_response_body_as(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 }
             }
 
-            (src, convert)
+            src
         }
     };
 
@@ -872,7 +829,7 @@ fn js_response_body_as(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     // correct multipart type (error case)". An `application/x-www-form-urlencoded`
     // null body still parses (to an empty FormData) and is allowed through.
     let is_null_body = {
-        let p = JSHttpClientResponse::payload_of(&this).or_else(|| JSResponse::payload_of(&this));
+        let p = JSResponse::payload_of(&this);
         matches!(p, Some(p) if p.resp.is_none()
             && p.synthetic_body.is_none()
             && p.ctor_stream.is_none()
@@ -880,7 +837,7 @@ fn js_response_body_as(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             && !matches!(p.resp_type, RespType::Error | RespType::OpaqueRedirect | RespType::Opaque))
     };
     if magic == BODY_AS_FORM_DATA && is_null_body {
-        let p = JSHttpClientResponse::payload_of(&this).or_else(|| JSResponse::payload_of(&this));
+        let p = JSResponse::payload_of(&this);
         let ct = p
             .map(|p| p.headers.borrow().get("content-type").unwrap_or_default())
             .unwrap_or_default();
@@ -894,7 +851,7 @@ fn js_response_body_as(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     // with any parameters (e.g. charset) stripped. Resolve it once before
     // borrowing `source`, since the payload borrow below lives in a nested scope.
     let blob_type = {
-        let p = JSHttpClientResponse::payload_of(&this).or_else(|| JSResponse::payload_of(&this));
+        let p = JSResponse::payload_of(&this);
         match p {
             // formData() needs the *raw* Content-Type: the multipart boundary
             // lives in the parameters that blob_type_from_header strips.
@@ -906,16 +863,12 @@ fn js_response_body_as(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         }
     };
 
+    // The owning request's `AbortSignal`, so a mid-read abort rejects with the
+    // signal's reason rather than the cancellation's transport error.
+    let signal = JSResponse::payload_of(&this).and_then(|p| p.signal);
+
     match source {
-        Some(source) => {
-            // Normalize the convert variant back to plain text mode for draining.
-            let mode = if magic == BODY_AS_TEXT_CONVERT {
-                BODY_AS_TEXT
-            } else {
-                magic
-            };
-            drain_body(ctx, source, mode, html_convert, blob_type)
-        }
+        Some(source) => drain_body(ctx, source, magic, blob_type, signal),
         // Spec: these methods always return a promise; a disturbed/locked or
         // already-consumed body rejects it rather than throwing synchronously.
         None => reject_type_error_as_promise(ctx, "body already consumed or unavailable"),
@@ -957,17 +910,6 @@ fn js_response_text_stream(ctx: &mut ScopedContext, _cc: CallContext) -> JSResul
     }
 }
 
-fn js_response_close(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let mut this = cc.this();
-    let payload = get_response_payload_mut(ctx, &mut this)?;
-
-    let _ = payload.body_rx.take();
-    let _ = payload.resp.take();
-    let _ = payload.synthetic_body.take();
-
-    Ok(JSValue::UNDEFINED)
-}
-
 fn js_response_clone(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut this = cc.this();
     // A body cannot be copied, so the spec tees it: this response keeps one
@@ -981,7 +923,7 @@ fn js_response_clone(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 ctx.throw_type_error("Cannot clone a Response whose body has already been used")
             );
         }
-        let source: Option<JSReadableStream> = if let Some(cs) = p.ctor_stream.clone() {
+        let source: Option<JSReadableStream> = if let Some(cs) = p.ctor_stream {
             Some(cs)
         } else if p.resp.is_some() || p.synthetic_body.is_some() {
             match p.ensure_cached_body(ctx) {
@@ -1039,70 +981,70 @@ fn js_response_clone(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         http_version: src.http_version,
         signal: src.signal,
     };
-    // Preserve the concrete class: an HttpClientResponse clone stays HttpClientResponse.
-    let this_ref = cc.this();
-    if JSHttpClientResponse::payload_of(&this_ref).is_some() {
-        JSHttpClientResponse::new_instance(ctx, JSValue::UNDEFINED, payload).map(JSValue::from)
-    } else {
-        JSResponse::new_instance(ctx, cc.this(), payload).map(JSValue::from)
-    }
+    JSResponse::new_instance(ctx, cc.this(), payload).map(JSValue::from)
 }
 
-// Strict WHATWG prototype — no aike extensions here (see HTTP_RESPONSE_PROTO).
+// Strict WHATWG prototype — no aike extensions.
 const RESPONSE_PROTO: &[FieldDef] = &[
-    FieldDef::GETSET("type", Some(js_response_getter), None, RESPONSE_GET_TYPE),
-    FieldDef::GETSET("url", Some(js_response_getter), None, RESPONSE_GET_URL),
-    FieldDef::GETSET(
+    FieldDef::GETSET_ENUM("type", Some(js_response_getter), None, RESPONSE_GET_TYPE),
+    FieldDef::GETSET_ENUM("url", Some(js_response_getter), None, RESPONSE_GET_URL),
+    FieldDef::GETSET_ENUM(
         "redirected",
         Some(js_response_getter),
         None,
         RESPONSE_GET_REDIRECTED,
     ),
-    FieldDef::GETSET(
+    FieldDef::GETSET_ENUM(
         "status",
         Some(js_response_getter),
         None,
         RESPONSE_GET_STATUS,
     ),
-    FieldDef::GETSET("ok", Some(js_response_getter), None, RESPONSE_GET_OK),
-    FieldDef::GETSET(
+    FieldDef::GETSET_ENUM("ok", Some(js_response_getter), None, RESPONSE_GET_OK),
+    FieldDef::GETSET_ENUM(
         "statusText",
         Some(js_response_getter),
         None,
         RESPONSE_GET_STATUS_TEXT,
     ),
-    FieldDef::GETSET(
+    FieldDef::GETSET_ENUM(
         "headers",
         Some(js_response_getter),
         None,
         RESPONSE_GET_HEADERS,
     ),
-    FieldDef::GETSET(
+    FieldDef::GETSET_ENUM(
         "bodyUsed",
         Some(js_response_getter),
         None,
         RESPONSE_GET_BODY_USED,
     ),
-    FieldDef::GETSET("body", Some(js_response_body), None, 0),
-    FieldDef::FUNC("bytes", 0, js_response_body_as, BODY_AS_BYTES as i16),
-    FieldDef::FUNC("text", 0, js_response_body_as, BODY_AS_TEXT as i16),
-    FieldDef::FUNC("json", 0, js_response_body_as, BODY_AS_JSON as i16),
-    FieldDef::FUNC(
+    FieldDef::GETSET_ENUM("body", Some(js_response_body), None, 0),
+    FieldDef::FUNC_ENUM("bytes", 0, js_response_body_as, BODY_AS_BYTES as i16),
+    FieldDef::FUNC_ENUM("text", 0, js_response_body_as, BODY_AS_TEXT as i16),
+    FieldDef::FUNC_ENUM("json", 0, js_response_body_as, BODY_AS_JSON as i16),
+    FieldDef::FUNC_ENUM(
         "arrayBuffer",
         0,
         js_response_body_as,
         BODY_AS_ARRAY_BUFFER as i16,
     ),
-    FieldDef::FUNC("blob", 0, js_response_body_as, BODY_AS_BLOB as i16),
-    FieldDef::FUNC("formData", 0, js_response_body_as, BODY_AS_FORM_DATA as i16),
-    FieldDef::FUNC("textStream", 0, js_response_text_stream, 0),
-    FieldDef::FUNC("clone", 0, js_response_clone, 0),
+    FieldDef::FUNC_ENUM("blob", 0, js_response_body_as, BODY_AS_BLOB as i16),
+    FieldDef::FUNC_ENUM("formData", 0, js_response_body_as, BODY_AS_FORM_DATA as i16),
+    FieldDef::FUNC_ENUM("textStream", 0, js_response_text_stream, 0),
+    FieldDef::FUNC_ENUM("clone", 0, js_response_clone, 0),
+    // WebIDL class string (`Object.prototype.toString` → "[object Response]").
+    FieldDef::STR(
+        "[Symbol.toStringTag]",
+        "Response",
+        zuqe::JS_PROP_CONFIGURABLE,
+    ),
 ];
 
 const RESPONSE_STATIC_ENTRIES: &[FieldDef] = &[
-    FieldDef::FUNC("error", 0, js_response_static_error, 0),
-    FieldDef::FUNC("redirect", 2, js_response_static_redirect, 0),
-    FieldDef::FUNC("json", 2, js_response_static_json, 0),
+    FieldDef::FUNC_ENUM("error", 0, js_response_static_error, 0),
+    FieldDef::FUNC_ENUM("redirect", 2, js_response_static_redirect, 0),
+    FieldDef::FUNC_ENUM("json", 2, js_response_static_json, 0),
 ];
 
 def_native_object!(
@@ -1111,51 +1053,10 @@ def_native_object!(
     ResponsePayload,
     RESPONSE_PROTO,
     Some(
-        ClassCtorDef::new(js_response_constructor, 1, true)
+        // WebIDL: `constructor(optional BodyInit? body = null, optional
+        // ResponseInit init = {})` — no required argument, so `.length` is 0.
+        ClassCtorDef::new(js_response_constructor, 0, true)
             .entries(RESPONSE_STATIC_ENTRIES)
             .expose_to_global()
     )
-);
-
-// ---------------------------------------------------------------------------
-// HttpClientResponse — HttpClient-enhanced subclass of Response
-// ---------------------------------------------------------------------------
-
-fn js_http_response_constructor(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
-    // Instances are only produced by HttpClient requests.
-    Err(ctx.throw_type_error("HttpClientResponse is not constructable; use HttpClient"))
-}
-
-// Aike enhancements only; everything else is inherited from Response.
-const HTTP_RESPONSE_PROTO: &[FieldDef] = &[
-    // Shadows the base text(): accepts the optional html-convert arg.
-    FieldDef::FUNC("text", 0, js_response_body_as, BODY_AS_TEXT_CONVERT as i16),
-    FieldDef::GETSET(
-        "contentType",
-        Some(js_response_getter),
-        None,
-        RESPONSE_GET_CONTENT_TYPE,
-    ),
-    FieldDef::GETSET(
-        "contentLength",
-        Some(js_response_getter),
-        None,
-        RESPONSE_GET_CONTENT_LENGTH,
-    ),
-    FieldDef::GETSET(
-        "httpVersion",
-        Some(js_response_getter),
-        None,
-        RESPONSE_GET_HTTP_VERSION,
-    ),
-    FieldDef::FUNC("close", 0, js_response_close, 0),
-];
-
-def_native_object!(
-    "HttpClientResponse",
-    JSHttpClientResponse,
-    ResponsePayload,
-    HTTP_RESPONSE_PROTO,
-    Some(ClassCtorDef::new(js_http_response_constructor, 0, false)),
-    extends: JSResponse::class_id
 );

@@ -74,9 +74,14 @@ fn js_encoding_getter(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
 }
 
 const CLASS_TEXT_ENCODER_PROTO: &[FieldDef] = &[
-    FieldDef::GETSET("encoding", Some(js_encoding_getter), None, 0),
-    FieldDef::FUNC("encode", 1, js_encode, 0),
-    FieldDef::FUNC("encodeInto", 2, js_encode_into, 0),
+    FieldDef::GETSET_ENUM("encoding", Some(js_encoding_getter), None, 0),
+    FieldDef::FUNC_ENUM("encode", 1, js_encode, 0),
+    FieldDef::FUNC_ENUM("encodeInto", 2, js_encode_into, 0),
+    FieldDef::STR(
+        "[Symbol.toStringTag]",
+        "TextEncoder",
+        zuqe::JS_PROP_CONFIGURABLE,
+    ),
 ];
 
 def_native_object!(

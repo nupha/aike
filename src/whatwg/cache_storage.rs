@@ -19,7 +19,7 @@ use zuqe::{
     gc_lite::{GcTrace, GcTraceCtx},
 };
 
-use crate::http::client::{request::JSRequest, response::JSResponse};
+use crate::whatwg::fetch::{request::JSRequest, response::JSResponse};
 
 /// A stored request/response pair keyed by `method + " " + url`.
 struct CacheEntry {
@@ -78,6 +78,21 @@ fn snapshot_request(ctx: &mut ScopedContext, val: &JSValue) -> Result<RequestSna
         method: p.method.to_string(),
         url: p.url.to_string(),
     })
+}
+
+/// Resolve a `RequestInfo` — a `Request` or a `USVString` URL, per the Cache
+/// Storage spec — into a snapshot. A bare string means a `GET` for that URL.
+fn snapshot_request_info(
+    ctx: &mut ScopedContext,
+    val: &JSValue,
+) -> Result<RequestSnapshot, i32> {
+    if let Some(s) = val.as_string(false) {
+        return Ok(RequestSnapshot {
+            method: "GET".to_string(),
+            url: s.content().encode_utf8(false).to_string(),
+        });
+    }
+    snapshot_request(ctx, val)
 }
 
 fn snapshot_response(ctx: &mut ScopedContext, val: &JSValue) -> Result<ResponseSnapshot, i32> {
@@ -224,7 +239,7 @@ fn js_cache_put(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let name = get_cache_name(ctx, &cc)?;
     let req = cc.arg(0);
     let res = cc.arg(1);
-    let req_snap = match snapshot_request(ctx, &req) {
+    let req_snap = match snapshot_request_info(ctx, &req) {
         Ok(s) => s,
         Err(_) => return Err(-1),
     };
@@ -252,7 +267,7 @@ fn js_cache_match(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let stores = get_cache_stores(ctx, &cc)?;
     let name = get_cache_name(ctx, &cc)?;
     let req = cc.arg(0);
-    let req_snap = match snapshot_request(ctx, &req) {
+    let req_snap = match snapshot_request_info(ctx, &req) {
         Ok(s) => s,
         Err(_) => return Err(-1),
     };
@@ -279,7 +294,7 @@ fn js_cache_match_all(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let wanted_key = if req_val.is_undefined() {
         None
     } else {
-        snapshot_request(ctx, &req_val)
+        snapshot_request_info(ctx, &req_val)
             .ok()
             .map(|s| cache_key(&s.method, &s.url))
     };
@@ -310,7 +325,7 @@ fn js_cache_delete(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let stores = get_cache_stores(ctx, &cc)?;
     let name = get_cache_name(ctx, &cc)?;
     let req = cc.arg(0);
-    let req_snap = match snapshot_request(ctx, &req) {
+    let req_snap = match snapshot_request_info(ctx, &req) {
         Ok(s) => s,
         Err(_) => return Err(-1),
     };
@@ -331,7 +346,7 @@ fn js_cache_keys(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let wanted_key = if req_val.is_undefined() {
         None
     } else {
-        snapshot_request(ctx, &req_val)
+        snapshot_request_info(ctx, &req_val)
             .ok()
             .map(|s| cache_key(&s.method, &s.url))
     };
@@ -359,18 +374,31 @@ fn js_cache_keys(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 }
 
 const CACHE_STORAGE_PROTO: &[FieldDef] = &[
-    FieldDef::FUNC("open", 1, js_cache_storage_open, 0),
-    FieldDef::FUNC("has", 1, js_cache_storage_has, 0),
-    FieldDef::FUNC("delete", 1, js_cache_storage_delete, 0),
-    FieldDef::FUNC("keys", 0, js_cache_storage_keys, 0),
+    FieldDef::FUNC_ENUM("open", 1, js_cache_storage_open, 0),
+    FieldDef::FUNC_ENUM("has", 1, js_cache_storage_has, 0),
+    FieldDef::FUNC_ENUM("delete", 1, js_cache_storage_delete, 0),
+    FieldDef::FUNC_ENUM("keys", 0, js_cache_storage_keys, 0),
+    // WebIDL class string (`Object.prototype.toString` -> "[object CacheStorage]").
+    FieldDef::STR(
+        "[Symbol.toStringTag]",
+        "CacheStorage",
+        zuqe::JS_PROP_CONFIGURABLE,
+    ),
+
 ];
 
 const CACHE_PROTO: &[FieldDef] = &[
-    FieldDef::FUNC("put", 2, js_cache_put, 0),
-    FieldDef::FUNC("match", 1, js_cache_match, 0),
-    FieldDef::FUNC("matchAll", 1, js_cache_match_all, 0),
-    FieldDef::FUNC("delete", 1, js_cache_delete, 0),
-    FieldDef::FUNC("keys", 1, js_cache_keys, 0),
+    FieldDef::FUNC_ENUM("put", 2, js_cache_put, 0),
+    FieldDef::FUNC_ENUM("match", 1, js_cache_match, 0),
+    FieldDef::FUNC_ENUM("matchAll", 1, js_cache_match_all, 0),
+    FieldDef::FUNC_ENUM("delete", 1, js_cache_delete, 0),
+    FieldDef::FUNC_ENUM("keys", 1, js_cache_keys, 0),
+    // WebIDL class string (`Object.prototype.toString` -> "[object Cache]").
+    FieldDef::STR(
+        "[Symbol.toStringTag]",
+        "Cache",
+        zuqe::JS_PROP_CONFIGURABLE,
+    ),
 ];
 
 def_native_object!(

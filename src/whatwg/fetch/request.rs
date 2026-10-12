@@ -1,132 +1,364 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2026 John Ray <996351336@qq.com>
 
-use std::{cell::RefCell, rc::Rc, time::Duration};
+use std::{cell::RefCell, rc::Rc};
 
 use zuqe::{
-    CallContext, Callback, Exception, JSResult, JSValue, JobState, NativeObject, Object,
+    CallContext, ClassCtorDef, Exception, FieldDef, JSResult, JSValue, NativeObject, Object,
     ScopedContext,
-    builtins::promise::{Promise, PromiseResultSlot},
-};
-
-use crate::aike::AikeRuntimeState;
-
-// The HTTP cache module is always compiled (it owns the `CacheHit` type used
-// below); every *call* into it is gated on the `fetch_cache` feature.
-use crate::http::client::cache as http_cache;
-
-use crate::http::client::{
-    body::{BODY_TIMEOUT, body_content_type, body_to_bytes},
-    headers::{HeaderList, header_list_from_js, validate_header_list_for_fetch},
-    request::{
-        JSRequest, get_request_payload_mut, normalize_method, validate_request_init_options,
-    },
-    response::{RespType, build_opaque_redirect_response, build_response_from_transport},
-    transport::{
-        ReferrerCtx, TransportError, TransportRequest, TransportResponse, perform_request,
-        throw_transport_error,
-    },
+    builtins::promise::Promise,
+    def_native_object,
+    gc_lite::{GcTrace, GcTraceCtx},
 };
 
 use crate::whatwg::{
-    abort::{JSAbortSignal, signal_is_aborted, signal_notify, signal_reason},
-    dom::make_dom_exception,
+    abort::{JSAbortSignal, make_default_signal, signal_attach_follower},
+    fetch::{
+        body::{
+            BODY_AS_ARRAY_BUFFER, BODY_AS_BLOB, BODY_AS_BYTES, BODY_AS_FORM_DATA, BODY_AS_JSON,
+            BODY_AS_TEXT, BodySource, blob_type_from_header, body_content_type, body_to_bytes,
+            drain_body,
+        },
+        headers::{
+            Guard, HeaderList, HeadersPayload, JSHeaders, header_list_from_js,
+            validate_header_list_for_fetch,
+        },
+    },
     stream::JSReadableStream,
 };
 
-use super::{
-    cors::{
-        PreflightCtx, append_fetch_metadata_headers, check_allow_origin, corp_violation,
-        cors_check, cors_filter_response_headers, is_cross_origin, join_request_headers,
-        make_before_hop_hook, needs_preflight, preflight_request_headers, same_origin_violation,
-        serialized_origin, should_append_origin,
-    },
-    headers::{ensure_default_request_headers, strip_forbidden_request_headers},
-    integrity::check_integrity,
-    origin::resolve_client_origin,
-    referrer::compute_request_referrer,
-};
-
-/// Error type carried through the fetch result slot.
-enum FetchError {
-    /// Aborted via `AbortSignal` (or pre-aborted signal).
-    Abort,
-    /// Any other failure (network, redirect, timeout, ...).
-    Other(TransportError),
+pub(crate) struct RequestPayload {
+    pub(crate) method: String,
+    pub(crate) url: String,
+    pub(crate) headers: Rc<RefCell<HeaderList>>,
+    pub(crate) destination: String,
+    pub(crate) referrer: String,
+    pub(crate) referrer_policy: String,
+    pub(crate) mode: String,
+    pub(crate) credentials: String,
+    pub(crate) cache: String,
+    pub(crate) redirect: String,
+    pub(crate) integrity: String,
+    pub(crate) keepalive: bool,
+    /// Request `duplex` mode. Defaults to `"half"`; `new Request(stream)` without
+    /// `duplex: "half"` is rejected at construction.
+    pub(crate) duplex: String,
+    pub(crate) is_reload_navigation: bool,
+    pub(crate) is_history_navigation: bool,
+    pub(crate) signal: Option<JSValue>,
+    /// Cached `Headers` object returned by the `headers` getter ([SameObject]).
+    pub(crate) headers_obj: Option<JSValue>,
+    pub(crate) synthetic_body: Option<Vec<u8>>,
+    /// A `ReadableStream` body, kept unread until the request is sent.
+    pub(crate) stream_body: Option<JSValue>,
+    /// Cached body `ReadableStream` returned by the `body` getter; stays the
+    /// same object across accesses and after consumption (disturbed).
+    pub(crate) cached_body: Option<JSReadableStream>,
+    pub(crate) body_consumed: bool,
 }
 
-/// `fetch(input, init)` → `Promise<Response>`
-///
-/// Per the Fetch spec `fetch()` never throws synchronously: request-construction
-/// failures (bad URL, invalid header, ...) must surface as a rejected promise.
-/// `fetch_impl` does the real work and may throw; here we catch a pending
-/// exception and convert it into a rejection.
-pub(crate) fn js_fetch(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    match fetch_impl(ctx, cc) {
-        Ok(v) => Ok(v),
-        Err(e) => {
-            // Turn the in-flight exception into a rejected promise.
-            let Exception::Error(reason) = ctx.take_exception() else {
-                // Nothing retrievable (e.g. stack overflow): propagate as-is.
-                return Err(e);
-            };
-            let (mut promise, _funcs) = Promise::create(ctx)?;
-            promise.reject(ctx, reason);
-            Ok(promise.into())
+impl RequestPayload {
+    /// Keep JS-visible handles alive across GC while the request is held.
+    fn gc_trace(&self, gcx: &mut GcTraceCtx) {
+        if let Some(ref s) = self.signal {
+            s.trace(gcx);
+        }
+        if let Some(ref h) = self.headers_obj {
+            h.trace(gcx);
+        }
+        if let Some(ref s) = self.stream_body {
+            s.trace(gcx);
+        }
+        if let Some(ref s) = self.cached_body {
+            s.trace(gcx);
         }
     }
 }
 
-fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let input = cc.arg(0);
-    let init = if cc.length() > 1 {
-        cc.arg(1)
-    } else {
-        JSValue::UNDEFINED
+impl GcTrace for RequestPayload {
+    fn trace(&self, gcx: &mut GcTraceCtx) {
+        self.gc_trace(gcx);
+    }
+}
+
+pub(crate) fn get_request_payload_mut<'a>(
+    ctx: &mut ScopedContext,
+    val: &'a mut JSValue,
+) -> Result<&'a mut RequestPayload, i32> {
+    JSRequest::payload_mut_of(val).ok_or_else(|| ctx.throw_type_error("not a Request instance"))
+}
+
+fn get_request_payload<'a>(
+    ctx: &mut ScopedContext,
+    val: &'a JSValue,
+) -> Result<&'a RequestPayload, i32> {
+    JSRequest::payload_of(val).ok_or_else(|| ctx.throw_type_error("not a Request instance"))
+}
+
+/// HTTP token byte, per RFC 7230 tchar: `!#$%&'*+-.^_`|~` plus alphanumerics.
+fn is_http_token(c: char) -> bool {
+    matches!(c,
+        '!' | '#' | '$' | '%' | '&' | '\'' | '*' | '+' | '-' | '.' | '^' | '_' | '`' | '|' | '~'
+        | '0'..='9' | 'A'..='Z' | 'a'..='z')
+}
+
+/// WHATWG forbidden methods: CONNECT, TRACE, TRACK (byte-case-insensitive).
+fn is_forbidden_method(method: &str) -> bool {
+    matches!(
+        method.to_ascii_lowercase().as_str(),
+        "connect" | "trace" | "track"
+    )
+}
+
+/// Throw a TypeError and return it as a rejected promise: body-use methods
+/// must reject rather than throw synchronously (Fetch spec). Shared by the
+/// Request/Response body consumers.
+pub(super) fn reject_type_error_as_promise(ctx: &mut ScopedContext, msg: &str) -> JSResult {
+    let _ = ctx.throw_type_error(msg);
+    let reason = match ctx.take_exception() {
+        Exception::Error(v) => v,
+        // Non-Error exceptions (OOM, interrupt) must stay fatal.
+        other => {
+            ctx.throw(other);
+            return Err(-1);
+        }
     };
+    Promise::from_reject_value(ctx, reason).map(JSValue::from)
+}
+
+/// Fetch spec "ensure method": the method must be a valid HTTP token, and not a
+/// forbidden method. Returns `Err` (TypeError) on violation.
+pub(crate) fn check_request_method(ctx: &mut ScopedContext, method: &str) -> Result<(), i32> {
+    if is_forbidden_method(method) {
+        return Err(ctx.throw_type_error(&format!("method {method} is forbidden")));
+    }
+    if !method.chars().all(is_http_token) {
+        return Err(ctx.throw_type_error(&format!("invalid method {method}")));
+    }
+    Ok(())
+}
+
+/// Fetch spec "method normalize": uppercase the method if it is a
+/// byte-case-insensitive match for one of DELETE, GET, HEAD, OPTIONS, POST, PUT.
+/// Any other method (e.g. `patch`, custom verbs) is left as-is.
+pub(crate) fn normalize_method(method: &str) -> String {
+    match method.to_ascii_uppercase().as_str() {
+        "DELETE" | "GET" | "HEAD" | "OPTIONS" | "POST" | "PUT" => method.to_ascii_uppercase(),
+        _ => method.to_string(),
+    }
+}
+
+/// Fetch spec "validate request URL": the URL must resolve to a valid `URL`
+/// (absolute, or relative against the current document base), must not contain
+/// credentials, and must not be `about:blank` or `about:srcdoc`. Returns `Err`
+/// (TypeError) on violation.
+fn check_request_url(ctx: &mut ScopedContext, url: &str) -> Result<(), i32> {
+    if url == "about:blank" || url == "about:srcdoc" {
+        return Ok(());
+    }
+    // Resolve relative URLs against the current module/document base, mirroring
+    // how `fetch()` resolves relative specifiers. An absolute URL parses
+    // directly; a relative one needs the base.
+    let parsed = match url::Url::parse(url) {
+        Ok(u) => Some(u),
+        Err(_) => ctx
+            .current_module_name()
+            .and_then(|base| url::Url::parse(&base).ok())
+            .and_then(|base| base.join(url).ok()),
+    };
+    let parsed = parsed.ok_or_else(|| ctx.throw_type_error(&format!("invalid URL: {url}")))?;
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(ctx.throw_type_error("URL contains credentials"));
+    }
+    Ok(())
+}
+
+/// Fetch spec allowed request credentials.
+const VALID_CREDENTIALS: &[&str] = &["omit", "same-origin", "include"];
+/// Fetch spec allowed request cache modes.
+const VALID_CACHE: &[&str] = &[
+    "default",
+    "no-store",
+    "reload",
+    "no-cache",
+    "force-cache",
+    "only-if-cached",
+];
+/// Fetch spec allowed request redirect modes.
+const VALID_REDIRECT: &[&str] = &["follow", "error", "manual"];
+/// Fetch spec allowed request referrer policies.
+const VALID_REFERRER_POLICY: &[&str] = &[
+    "",
+    "no-referrer",
+    "no-referrer-when-downgrade",
+    "same-origin",
+    "origin",
+    "strict-origin",
+    "origin-when-cross-origin",
+    "strict-origin-when-cross-origin",
+    "unsafe-url",
+];
+/// Fetch spec allowed request modes.
+const VALID_MODE: &[&str] = &["same-origin", "no-cors", "cors", "navigate", "websocket"];
+/// Fetch spec allowed request priorities (RequestInit.priority).
+const VALID_PRIORITY: &[&str] = &["high", "low", "auto"];
+
+/// Validate a `RequestInit` option string against its allowed set (per the Fetch
+/// spec, invalid values throw `TypeError`). `request-error.js` WPT exercises the
+/// `referrerPolicy`/`mode`/`credentials`/`cache`/`redirect` bad-value cases.
+fn check_enum_option(
+    ctx: &mut ScopedContext,
+    name: &str,
+    value: &str,
+    allowed: &[&str],
+) -> Result<(), i32> {
+    if !allowed.contains(&value) {
+        return Err(
+            ctx.throw_type_error(&format!("invalid value '{value}' for RequestInit.{name}"))
+        );
+    }
+    Ok(())
+}
+
+/// Fetch spec "request method + no-cors" rule: a `no-cors` request may only use
+/// a CORS-safelisted method (`GET`, `HEAD`, `POST`); anything else throws.
+fn is_cors_safelisted_method(method: &str) -> bool {
+    matches!(
+        method.to_ascii_lowercase().as_str(),
+        "get" | "head" | "post"
+    )
+}
+
+/// Whether a referrer value parses as a URL, absolutely or relative to any base
+/// (the spec resolves it against the entry settings object's base URL).
+/// Whether a referrer value parses as a URL, absolutely or relative to a base
+/// (the spec resolves it against the entry settings object's base URL). The base
+/// here is only a resolvability probe, so any hierarchical URL will do — an
+/// opaque-path base like `about:blank` cannot resolve relative references.
+fn is_parseable_referrer(referrer: &str) -> bool {
+    url::Url::parse(referrer)
+        .or_else(|_| url::Url::parse("https://example.invalid/").and_then(|b| b.join(referrer)))
+        .is_ok()
+}
+
+/// Validate the request options that the Fetch spec rejects with a `TypeError`
+/// (`method`, `mode`, `cache`, `credentials`, `redirect`, `referrerPolicy`,
+/// `referrer`, `only-if-cached`/`same-origin`, `no-cors` method, `navigate` mode).
+///
+/// Shared by `new Request` and `fetch`: a string-`input` `fetch` call does not
+/// build a `Request` object, so it must run this validation itself — WPT
+/// `abort/general.any.js` "TypeError from request constructor takes priority"
+/// requires a bad init to reject with `TypeError` *before* an already-aborted
+/// signal surfaces an `AbortError`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn validate_request_init_options(
+    ctx: &mut ScopedContext,
+    url_str: &str,
+    method: &str,
+    mode: &str,
+    cache: &str,
+    credentials: &str,
+    redirect: &str,
+    referrer: &str,
+    referrer_policy: &str,
+) -> Result<(), i32> {
+    // Validate the request URL (WPT request-error: invalid URL, credentials).
+    if !url_str.is_empty() {
+        check_request_url(ctx, url_str)?;
+    }
+    // Validate the request method (WPT forbidden-method / request-error).
+    check_request_method(ctx, method)?;
+    // Validate the enum options (WPT request-error bad-option values).
+    check_enum_option(ctx, "mode", mode, VALID_MODE)?;
+    check_enum_option(ctx, "credentials", credentials, VALID_CREDENTIALS)?;
+    check_enum_option(ctx, "cache", cache, VALID_CACHE)?;
+    check_enum_option(ctx, "redirect", redirect, VALID_REDIRECT)?;
+    check_enum_option(
+        ctx,
+        "referrerPolicy",
+        referrer_policy,
+        VALID_REFERRER_POLICY,
+    )?;
+    // Validate the referrer: must be `""`, `about:client`, `about:blank`, or
+    // something parseable as a URL (WPT request-error "RequestInit's referrer is
+    // invalid"). The spec parses the referrer *with* the entry settings object's
+    // base URL, so a relative value like `myreferrer` is valid and resolves
+    // against the document base — only a value that parses neither absolutely
+    // nor relatively is a TypeError.
+    if !matches!(referrer, "" | "about:client" | "about:blank") && !is_parseable_referrer(referrer)
+    {
+        return Err(ctx.throw_type_error("RequestInit.referrer is not a valid URL"));
+    }
+    // `only-if-cached` requires `mode: "same-origin"` (WPT request-error).
+    if cache == "only-if-cached" && mode != "same-origin" {
+        return Err(ctx.throw_type_error("cache mode 'only-if-cached' requires mode 'same-origin'"));
+    }
+    // `no-cors` mode forbids non-safelisted methods (WPT request-error).
+    if mode == "no-cors" && !is_cors_safelisted_method(method) {
+        return Err(ctx.throw_type_error("mode 'no-cors' may only use CORS-safelisted methods"));
+    }
+    // A `navigate` mode is never constructible (WPT request-error).
+    if mode == "navigate" {
+        return Err(ctx.throw_type_error("mode 'navigate' is not constructible"));
+    }
+    Ok(())
+}
+
+fn js_request_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let new_target = cc.this();
+    let input = cc.arg(0);
 
     let mut url_str = String::new();
     let mut method = String::from("GET");
     let mut header_list = HeaderList::new();
-    let mut body_bytes: Option<Vec<u8>> = None;
-    // A `ReadableStream` body, held until it can be pumped to bytes below.
+    let mut synthetic_body: Option<Vec<u8>> = None;
     let mut stream_body: Option<JSValue> = None;
     let mut redirect = String::from("follow");
-    let mut timeout = Duration::from_secs(30);
-
-    // RequestInit fields used for client config.
+    let mut signal: Option<JSValue> = None;
+    let mut integrity = String::new();
+    // Track the effective `mode`/`cache`/`credentials`/`referrer`/`referrerPolicy`
+    // and `duplex`/navigation flags so validation and defaults can be applied
+    // after the input-Request and RequestInit layers are merged.
+    let mut mode = String::from("cors");
+    let mut cache = String::from("default");
     let mut credentials = String::from("same-origin");
     let mut referrer = String::from("about:client");
-    let mut referrer_policy = String::from("");
-    let mut integrity = String::new();
-    // Fetch spec default request mode is "cors"; "no-cors" produces an opaque
-    // response for cross-origin fetches.
-    let mut mode = String::from("cors");
-    let mut signal_val: Option<JSValue> = None;
-    // Fetch spec request `cache` mode: default | no-store | reload | no-cache |
-    // force-cache | only-if-cached. Drives HTTP cache reuse/revalidation.
-    let mut cache_mode = String::from("default");
+    let mut referrer_policy = String::new();
+    let mut duplex: Option<String> = None;
+    let mut keepalive = false;
+    let mut is_reload_navigation = false;
+    let mut is_history_navigation = false;
+    // Whether RequestInit supplied a non-null `body` (overrides the input's).
+    let mut init_body_provided = false;
+
+    // Track an input `Request` so its body can be disturbed (marked used) after
+    // all constructor validation has passed — a *failed* construction must not
+    // disturb the input (WPT request-disturbed "construction failure should not
+    // set bodyUsed").
+    let mut input_is_request = false;
+    let mut input_has_body = false;
+    let mut input_body_consumed = false;
 
     // Inherit from a Request input.
     if let Some(p) = JSRequest::payload_of(&input) {
+        input_is_request = true;
+        input_has_body = p.synthetic_body.is_some() || p.stream_body.is_some();
+        input_body_consumed = p.body_consumed;
         url_str = p.url.clone();
         method = p.method.clone();
         header_list = p.headers.borrow().clone();
         redirect = p.redirect.clone();
-        signal_val = p.signal;
-        body_bytes = p.synthetic_body.clone();
-        // Consuming an input Request's body marks it used (Fetch spec):
-        // subsequent body methods on it must reject with TypeError. A null-body
-        // request stays unconsumed (bodyUsed remains false), matching WPT's
-        // "aborted consumed empty request" cases.
-        let input_has_body = p.synthetic_body.is_some() || p.stream_body.is_some();
+        signal = p.signal;
+        synthetic_body = p.synthetic_body.clone();
+        stream_body = p.stream_body;
+        mode = p.mode.clone();
+        cache = p.cache.clone();
         credentials = p.credentials.clone();
         referrer = p.referrer.clone();
-        mode = p.mode.clone();
-        cache_mode = p.cache.clone();
-        if input_has_body && let Ok(p) = get_request_payload_mut(ctx, &mut input.clone()) {
-            p.body_consumed = true;
-        }
+        referrer_policy = p.referrer_policy.clone();
+        integrity = p.integrity.clone();
+        is_reload_navigation = p.is_reload_navigation;
+        is_history_navigation = p.is_history_navigation;
     } else if !input.is_undefined_or_null() {
         let href = input.get_property_str(ctx, "href")?;
         if !href.is_undefined() {
@@ -144,1337 +376,640 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         }
     }
 
-    // Fetch spec: the request URL is serialized "with the exclude fragment
-    // flag set" — the fragment is never sent and never appears in
-    // `response.url`. Parsing also normalizes the URL (e.g. an empty path
-    // becomes "/"). Leave unparsable URLs alone so the transport reports them.
-    if let Ok(mut u) = url::Url::parse(&url_str) {
-        u.set_fragment(None);
-        url_str = u.to_string();
-    } else if let Some(base) = ctx.current_module_name() {
-        // Relative specifier: resolve against the current module's base URL
-        // (the value behind `import.meta.url`, set by `aike.evalModule`),
-        // mirroring Node/Bun semantics. `None` when not inside a script/module
-        // frame, in which case the specifier stays as-is.
-        if let Ok(base_u) = url::Url::parse(&base)
-            && let Ok(joined) = base_u.join(&url_str)
-        {
-            let mut u = joined;
-            u.set_fragment(None);
-            url_str = u.to_string();
-        }
-    }
-
     // Apply RequestInit overrides.
-    if let Some(o) = init.as_object() {
-        // `window` may only be null (forbidden legacy option). Any other
-        // value throws a TypeError, and it must take priority over an
-        // already-aborted signal (WPT "TypeError from request constructor
-        // takes priority"). Mirrors `js_request_constructor`.
-        let w = o.get_property_str(ctx, "window")?;
-        if !w.is_undefined() && !w.is_null() {
-            return Err(ctx.throw_type_error("RequestInit.window must be null"));
-        }
-        let m = o.get_property_str(ctx, "method")?;
-        if !m.is_undefined() {
-            let raw = m.to_string(ctx)?.content().encode_utf8(false).to_string();
-            method = normalize_method(&raw);
-        }
-        let mut h = o.get_property_str(ctx, "headers")?;
-        if !h.is_undefined_or_null() {
-            header_list = header_list_from_js(ctx, &mut h)?;
-        }
-        // `duplex` must be read whenever a body is present: the spec reads
-        // it off the init dictionary, and a stream body requires it to be
-        // "half". Read it before `body` so a throwing getter still fires.
-        let duplex = o.get_property_str(ctx, "duplex")?;
-        let duplex = match duplex.is_undefined() {
-            true => None,
-            false => Some(
-                duplex
-                    .to_string(ctx)?
-                    .content()
-                    .encode_utf8(false)
-                    .to_string(),
-            ),
-        };
-
-        let b = o.get_property_str(ctx, "body")?;
-        if !b.is_undefined_or_null() {
-            // Fetch spec: a GET/HEAD request must not carry a body.
-            if method.eq_ignore_ascii_case("GET") || method.eq_ignore_ascii_case("HEAD") {
-                return Err(ctx.throw_type_error("Request with GET/HEAD method cannot have body"));
+    if cc.length() > 1 {
+        let init = cc.arg(1);
+        if let Some(o) = init.as_object() {
+            // `window` is only ever allowed to be null (it is a forbidden
+            // legacy option). Any other value throws (WPT request-error).
+            let w = o.get_property_str(ctx, "window")?;
+            if !w.is_undefined() && !w.is_null() {
+                return Err(ctx.throw_type_error("RequestInit.window must be null"));
             }
 
-            // The body source implies a default Content-Type unless the
-            // caller already supplied one.
-            if let Some(t) = body_content_type(&b)
-                && !header_list.has("content-type")
+            let m = o.get_property_str(ctx, "method")?;
+            if !m.is_undefined() {
+                let raw = m.to_string(ctx)?.content().encode_utf8(false).to_string();
+                method = normalize_method(&raw);
+            }
+            let mut h = o.get_property_str(ctx, "headers")?;
+            if !h.is_undefined_or_null() {
+                header_list = header_list_from_js(ctx, &mut h)?;
+            }
+            // `duplex` must be read off the init dictionary whenever a body is
+            // present, and read before `body` so a getter on it still fires.
+            let d = o.get_property_str(ctx, "duplex")?;
+            if !d.is_undefined() {
+                duplex = Some(d.to_string(ctx)?.content().encode_utf8(false).to_string());
+            }
+
+            // Any non-`"half"` `duplex` value rejects the request, whatever the
+            // body (or absence thereof) — WPT request-init-stream "duplex full"
+            // cases, including `body: null`.
+            if let Some(d) = duplex.as_deref()
+                && d != "half"
             {
-                header_list.set("Content-Type", &t);
+                return Err(ctx.throw_type_error("duplex must be 'half'"));
             }
 
-            match JSReadableStream::payload_of(&b).is_some() {
-                // A stream body is only allowed with `duplex: "half"`;
-                // omitting it is a TypeError so that code written against
-                // full-duplex semantics fails loudly instead of silently
-                // buffering.
-                true if duplex.as_deref() != Some("half") => {
-                    return Err(ctx.throw_type_error(
-                        "Request body is a ReadableStream but duplex is not 'half'",
-                    ));
+            let b = o.get_property_str(ctx, "body")?;
+            if !b.is_undefined_or_null() {
+                init_body_provided = true;
+                // The body source implies a default Content-Type unless the
+                // caller already supplied one.
+                if let Some(t) = body_content_type(&b)
+                    && !header_list.has("content-type")
+                {
+                    header_list.set("Content-Type", &t);
                 }
-                true => stream_body = Some(b),
-                false => body_bytes = Some(body_to_bytes(ctx, &b)?),
-            }
-        }
 
-        let r = o.get_property_str(ctx, "redirect")?;
-        if !r.is_undefined() {
-            redirect = r.to_string(ctx)?.content().encode_utf8(false).to_string();
-        }
-
-        // Per Fetch spec, an *explicit* `signal: null` in the init clears any
-        // signal inherited from the input Request; an absent `signal` key
-        // leaves the inherited signal in place.
-        let s = o.get_property_str(ctx, "signal")?;
-        if s.is_undefined() {
-            // Key absent: keep the inherited signal.
-        } else if s.is_null() {
-            signal_val = None;
-        } else if JSAbortSignal::from_value(s).is_some() {
-            signal_val = Some(s);
-        }
-
-        let t = o.get_property_str(ctx, "timeout")?;
-        if !t.is_undefined() {
-            let secs = t.to_number(ctx)?.to_f64();
-            if secs > 0.0 {
-                timeout = Duration::from_secs_f64(secs);
-            }
-        }
-
-        let mut read_str = |o: Object, key: &str| -> Option<String> {
-            let v = o.get_property_str(ctx, key).ok()?;
-            if v.is_undefined() {
-                None
-            } else {
-                Some(
-                    v.to_string(ctx)
-                        .ok()?
-                        .content()
-                        .encode_utf8(false)
-                        .to_string(),
-                )
-            }
-        };
-        if let Some(v) = read_str(o, "credentials") {
-            credentials = v;
-        }
-        if let Some(v) = read_str(o, "referrer") {
-            referrer = v;
-        }
-        if let Some(v) = read_str(o, "referrerPolicy") {
-            referrer_policy = v;
-        }
-        if let Some(v) = read_str(o, "integrity") {
-            integrity = v;
-        }
-        if let Some(v) = read_str(o, "mode") {
-            mode = v;
-        }
-        if let Some(v) = read_str(o, "cache") {
-            cache_mode = v;
-        }
-        // Validate `priority` eagerly: an invalid RequestInit member value
-        // must reject the fetch with a TypeError (WPT request-init-priority).
-        // The valid set is `high` | `low` | `auto`; `high`/`low` are accepted
-        // as hints and otherwise ignored, `auto` is the effective default.
-        if let Some(v) = read_str(o, "priority") {
-            const VALID: &[&str] = &["high", "low", "auto"];
-            if !VALID.contains(&v.as_str()) {
-                return Err(
-                    ctx.throw_type_error(&format!("invalid value '{v}' for RequestInit.priority"))
-                );
-            }
-        }
-    }
-
-    // Per-runtime fetch switches (`fetch.cors` / `fetch.cookie`). A lean build
-    // (no `fetch_browser`) compiles the CORS/cookie code paths out, so both
-    // switches are forced off.
-    #[cfg(feature = "fetch_browser")]
-    let (fetch_cors, fetch_cookie) = {
-        let st = crate::aike::AikeRuntimeState::of(ctx);
-        (st.fetch_cors, st.fetch_cookie)
-    };
-    #[cfg(not(feature = "fetch_browser"))]
-    let (fetch_cors, fetch_cookie) = (false, false);
-
-    let notify = signal_val.as_ref().and_then(signal_notify);
-    let already_aborted = signal_val.as_ref().is_some_and(signal_is_aborted);
-    // When the signal is (already) aborted the fetch must reject with the
-    // signal's `reason` (e.g. a DOMException "AbortError"), matching the Fetch
-    // spec and WPT's `promise_rejects_exactly`/`promise_rejects_dom`.
-    let abort_reason = signal_val
-        .as_ref()
-        .and_then(signal_reason)
-        .unwrap_or_else(|| {
-            make_dom_exception(ctx, "AbortError", "The operation was aborted.")
-                .unwrap_or(JSValue::UNDEFINED)
-        });
-
-    // Client origin/URL for same-origin checks (used by the cache
-    // short-circuit and the response handler below). In a browser this is the
-    // document's origin; resolved from the `self.location` shim / WPT runner
-    // globals. Server builds (`fetch_browser` off) have no location concept
-    // and get a null origin.
-    let (mut client_origin, mut client_url) = resolve_client_origin(ctx);
-
-    // With both switches off there is no client-origin concept: fetch behaves
-    // like a plain HTTP client (no CORS taint, no same-origin referrer).
-    if !(fetch_cors || fetch_cookie) {
-        client_origin = None;
-        client_url = None;
-    }
-    // No client origin → `same-origin` cookie scoping cannot be evaluated;
-    // treat it like `include` so cookies still flow.
-    if client_origin.is_none() && credentials == "same-origin" {
-        credentials = String::from("include");
-    }
-
-    // CORS tainting: a cross-origin request in `cors` mode. These require
-    // origin/ACAO handling and (for non-safelisted requests) a preflight.
-    // Computed up front so the response callback (created below) can reference
-    // it and the async side can run the preflight.
-    let cors_tainted =
-        fetch_cors && mode == "cors" && is_cross_origin(client_origin.as_deref(), &url_str);
-    // Whether `Access-Control-Allow-Credentials` must be present (fetch
-    // `credentials: "include"`).
-    let credentials_include = credentials == "include";
-
-    // HTTP cache (§ Fetch HTTP-cache). The request's `cache` mode decides
-    // whether we serve straight from cache, revalidate, or always hit network:
-    //   default      fresh hit → serve cache; stale hit → revalidate
-    //   no-store     always network, never read/write cache
-    //   reload       always network (force re-fetch), then re-store
-    //   no-cache     always revalidate via conditional headers
-    //   force-cache  serve cache hit regardless of freshness; else network
-    //   only-if-cached  serve cache hit; a miss is a network error
-    // The short-circuit below runs before the network request is issued, so a
-    // fresh hit (or `force-cache`) never touches the transport.
-
-    // Is this request cacheable at all (GET, no body)? Without the
-    // `fetch_cache` feature there is no cache, so every request goes to the
-    // network and the `cache` option has no effect.
-    let cache_enabled = cfg!(feature = "fetch_cache");
-    // Is this request cacheable at all (GET, no body)? Every cache read below is
-    // compiled in only with the `fetch_cache` feature; without it each request
-    // goes to the network and the `cache` option has no effect.
-    let cacheable =
-        method.eq_ignore_ascii_case("GET") && body_bytes.is_none() && stream_body.is_none();
-
-    // A request carrying any conditional header (`If-None-Match`,
-    // `If-Modified-Since`, `If-Unmodified-Since`, `If-Match`, `If-Range`) is
-    // treated as `no-store`: it bypasses the cache (WPT
-    // request-cache-default-conditional).
-    #[cfg(feature = "fetch_cache")]
-    let has_conditional = cacheable && http_cache::caller_supplied_validator(&header_list.to_vec());
-    // Without the feature there is no cache, so no caller header can be a
-    // "conditional" one as far as this layer is concerned.
-    #[cfg(not(feature = "fetch_cache"))]
-    let has_conditional = false;
-
-    // Serve-from-cache hit for the modes that can return without a network call.
-    #[cfg(feature = "fetch_cache")]
-    let cache_hit = if cacheable && !has_conditional {
-        match cache_mode.as_str() {
-            "default" => http_cache::lookup_full(&method, &url_str, &header_list.to_vec())
-                .filter(|h| h.fresh),
-            "force-cache" | "only-if-cached" => {
-                http_cache::lookup_full(&method, &url_str, &header_list.to_vec())
-            }
-            _ => None,
-        }
-    } else {
-        None
-    };
-    #[cfg(not(feature = "fetch_cache"))]
-    let cache_hit: Option<http_cache::CacheHit> = None;
-
-    // `only-if-cached` with no cached entry is a network error (TypeError).
-    if cache_mode == "only-if-cached" && cache_hit.is_none() {
-        return throw_transport_error(
-            ctx,
-            TransportError {
-                code: "other",
-                message: "only-if-cached: no cached response for the request URL".into(),
-            },
-        );
-    }
-
-    if let Some(hit) = cache_hit {
-        // `only-if-cached` requires `mode: "same-origin"`; if the cached
-        // response came from a cross-origin redirect, same-origin mode makes it
-        // a network error (WPT request-cache-only-if-cached cross-origin).
-        if cache_mode == "only-if-cached" && mode == "same-origin" {
-            let hit_origin = url::Url::parse(&hit.final_url)
-                .ok()
-                .map(|u| u.origin().ascii_serialization());
-            let same = match (&client_origin, &hit_origin) {
-                (Some(c), Some(h)) => c == h,
-                _ => false,
-            };
-            if !same {
-                return throw_transport_error(
-                    ctx,
-                    TransportError {
-                        code: "other",
-                        message: "only-if-cached: cached response is cross-origin".into(),
-                    },
-                );
-            }
-        }
-        let response = build_response_from_transport(
-            ctx,
-            TransportResponse {
-                status: hit.status,
-                status_text: "OK".to_string(),
-                headers: hit.headers,
-                content_type: String::new(),
-                content_length: Some(hit.body.len() as u64),
-                http_version: "1.1",
-                resp: None,
-                final_url: hit.final_url.clone(),
-                synthetic_body: Some(hit.body),
-                origin_opaque: false,
-            },
-            RespType::Basic,
-            &hit.final_url,
-            false,
-            signal_val,
-        )?;
-
-        // `fetch()` returns a promise; resolve it with the cached Response.
-        return Promise::from_resolve_value(ctx, response).map(JSValue::from);
-    }
-
-    // `blob:` scheme: resolve the object URL against the global blob store
-    // populated by `URL.createObjectURL`. A revoked or unknown blob URL is a
-    // network error; a valid one yields a basic 200 response carrying the
-    // blob's bytes and MIME type (WPT `scheme-blob.sub.any.js`).
-    //
-    // Fetch spec (blob scheme fetch) only performs the fetch for a GET request;
-    // any other method is a network error (TypeError). So reject non-GET
-    // methods before touching the store (WPT `scheme-blob.sub.any.js` expects
-    // POST/OPTIONS/HEAD/PUT/DELETE/INVALID on a blob: URL to reject).
-    if url_str.starts_with("blob:") {
-        if !method.eq_ignore_ascii_case("GET") {
-            return throw_transport_error(
-                ctx,
-                TransportError {
-                    code: "method",
-                    message: "Failed to fetch: blob: URLs only support GET".into(),
-                },
-            );
-        }
-
-        match crate::whatwg::url::blob_store_get(&url_str) {
-            Some(blob) => {
-                let all = blob.bytes().to_vec();
-                let mime = blob.type_().to_string();
-                // A `Range` header selects a 206 slice of the blob (WPT `range/blob`).
-                let (status, status_text, mut headers, bytes) = match header_list.get("range") {
-                    None => (200, "OK", Vec::new(), all),
-                    Some(range) => {
-                        let size = all.len() as u64;
-                        let Some((start, end)) = parse_blob_range(&range, size) else {
-                            return throw_transport_error(
-                                ctx,
-                                TransportError {
-                                    code: "other",
-                                    message: "Failed to fetch: invalid blob Range".into(),
-                                },
-                            );
-                        };
-                        let slice = all[start as usize..=end as usize].to_vec();
-                        let content_range = format!("bytes {start}-{end}/{size}");
-                        (
-                            206,
-                            "Partial Content",
-                            vec![("Content-Range".to_string(), content_range)],
-                            slice,
-                        )
+                let is_stream = JSReadableStream::payload_of(&b).is_some();
+                // A body on a GET/HEAD request is a TypeError.
+                if !is_stream && matches!(method.as_str(), "GET" | "HEAD") {
+                    return Err(ctx.throw_type_error("GET/HEAD requests may not have a body"));
+                }
+                // A stream body requires `duplex: "half"` and must not already be
+                // locked/disturbed (WPT request-init-stream).
+                if is_stream {
+                    let unusable = JSReadableStream::payload_of(&b)
+                        .is_some_and(|sp| sp.disturbed || sp.reader.is_some());
+                    if duplex.as_deref() != Some("half") {
+                        return Err(ctx.throw_type_error(
+                            "Request body is a ReadableStream but duplex is not 'half'",
+                        ));
                     }
-                };
-                headers.push(("Content-Type".to_string(), mime.clone()));
-                headers.push(("Content-Length".to_string(), bytes.len().to_string()));
-                let response = build_response_from_transport(
-                    ctx,
-                    TransportResponse {
-                        status,
-                        status_text: status_text.to_string(),
-                        headers,
-                        content_type: mime,
-                        content_length: Some(bytes.len() as u64),
-                        http_version: "1.1",
-                        resp: None,
-                        final_url: url_str.clone(),
-                        synthetic_body: Some(bytes),
-                        origin_opaque: false,
-                    },
-                    RespType::Basic,
-                    &url_str,
-                    false,
-                    signal_val,
-                )?;
-
-                return Promise::from_resolve_value(ctx, response).map(JSValue::from);
+                    if unusable {
+                        return Err(ctx.throw_type_error(
+                            "Request body ReadableStream is locked or already disturbed",
+                        ));
+                    }
+                    stream_body = Some(b);
+                } else {
+                    synthetic_body = Some(body_to_bytes(ctx, &b)?);
+                }
             }
-            None => {
-                return throw_transport_error(
-                    ctx,
-                    TransportError {
-                        code: "other",
-                        message: "Failed to fetch: unknown blob URL".into(),
-                    },
-                );
+
+            let r = o.get_property_str(ctx, "redirect")?;
+            if !r.is_undefined() {
+                redirect = r.to_string(ctx)?.content().encode_utf8(false).to_string();
+            }
+
+            let s = o.get_property_str(ctx, "signal")?;
+            if JSAbortSignal::from_value(s).is_some() {
+                signal = Some(s);
+            }
+
+            let mut read_str = |o: Object, key: &str| -> Result<Option<String>, i32> {
+                let v = o.get_property_str(ctx, key)?;
+                if v.is_undefined() {
+                    Ok(None)
+                } else {
+                    Ok(Some(
+                        v.to_string(ctx)?.content().encode_utf8(false).to_string(),
+                    ))
+                }
+            };
+            if let Some(v) = read_str(o, "mode")? {
+                mode = v;
+            }
+            if let Some(v) = read_str(o, "credentials")? {
+                credentials = v;
+            }
+            if let Some(v) = read_str(o, "cache")? {
+                cache = v;
+            }
+            if let Some(v) = read_str(o, "referrer")? {
+                referrer = v;
+            }
+            if let Some(v) = read_str(o, "referrerPolicy")? {
+                referrer_policy = v;
+            }
+            // SRI metadata string, echoed verbatim by `Request.integrity`.
+            if let Some(v) = read_str(o, "integrity")? {
+                integrity = v;
+            }
+            if let Some(v) = read_str(o, "priority")? {
+                // Validate eagerly: any invalid RequestInit member value must
+                // throw a TypeError (WPT request-init-priority).
+                check_enum_option(ctx, "priority", &v, VALID_PRIORITY)?;
+            }
+            let rn = o.get_property_str(ctx, "isReloadNavigation")?;
+            if !rn.is_undefined() {
+                is_reload_navigation = rn.to_bool()?;
+            }
+            let hn = o.get_property_str(ctx, "isHistoryNavigation")?;
+            if !hn.is_undefined() {
+                is_history_navigation = hn.to_bool()?;
+            }
+            let kl = o.get_property_str(ctx, "keepalive")?;
+            if !kl.is_undefined() {
+                keepalive = kl.to_bool()?;
             }
         }
     }
 
-    let result_slot = PromiseResultSlot::<Result<TransportResponse, FetchError>>::new();
-    // Look up cached validators before issuing the request so the conditional
-    // headers ride on the outgoing request and the `cache_driven` flag (copied
-    // into the response closure below) reflects *our* revalidation.
-    // `no-store`/`reload` never attach revalidation validators (they go to
-    // network unconditionally); `default` stale and `no-cache` revalidate.
-    let revalidate = !matches!(cache_mode.as_str(), "no-store" | "reload");
-    // A conditional-header request is treated as no-store: no revalidation
-    // validators are added on top of the caller's own conditional headers.
-    #[cfg(feature = "fetch_cache")]
-    let cached_validators = if cacheable && revalidate && !has_conditional {
-        http_cache::lookup_validators(&method, &url_str, &header_list.to_vec())
-    } else {
-        None
-    };
-    #[cfg(not(feature = "fetch_cache"))]
-    let cached_validators: Option<(Option<String>, Option<String>)> = None;
-    // Only treat a `304` as cache-driven (to be turned into the cached
-    // response) when *we* added the validators — if the caller supplied them
-    // the `304` is theirs and must be passed through unchanged.
-    let cache_driven = cached_validators.is_some() && !has_conditional;
-    let url_clone = url_str.clone();
-    let redirect_clone = redirect.clone();
-    let method_clone = method.clone();
-    // Whether the request body was a streaming (non-replayable) ReadableStream.
-    // Captured into the result closure for the 401/407 auth-entry rejection.
-    let had_stream_body = stream_body.is_some();
-    // Credentials mode, cloned *before* the `move` closure so the original
-    // `credentials` stays available for later use (e.g. validate_request_init).
-    let credentials_clone = credentials.clone();
-    let mode_clone = mode.clone();
+    // A `keepalive: true` request cannot use a ReadableStream body (WPT
+    // request-keepalive "keepalive flag with stream body").
+    if keepalive && stream_body.is_some() {
+        return Err(ctx.throw_type_error("keepalive requests cannot have a ReadableStream body"));
+    }
 
-    // Compute the outgoing Referer value per the Fetch `referrer`/`referrerPolicy`
-    // algorithm. Covers the policies exercised by WPT `referrer.any.js`:
-    // `origin-when-cross-origin` and the default (`client`-resolved) policy, plus
-    // explicit `referrer` values with their credentials/fragment stripped.
-    let effective_referrer = compute_request_referrer(
-        &referrer,
-        &referrer_policy,
-        client_origin.as_deref(),
-        client_url.as_deref(),
-        &url_str,
-    )
-    .unwrap_or_default();
-
-    // The probing above intentionally tolerates missing properties; clear any
-    // exception it may have left behind so the caller does not observe a stale
-    // pending error. (In practice the probe returns Ok/None and there is none.)
-    let exc = ctx.take_exception();
-    #[cfg(debug_assertions)]
-    crate::helpers::print_exc(ctx, exc);
-
-    // Clone the client origin for request-header injection; the original is
-    // moved into the response callback closure below.
-    let req_origin = client_origin.clone();
-
-    // Same reason: keep a copy of the referrer-policy inputs for the transport,
-    // which recomputes the header on each redirect hop.
-    let rc_origin = client_origin.clone();
-    let rc_url = client_url.clone();
-    let rc_referrer = referrer.clone();
-    let rc_policy = referrer_policy.clone();
-
-    // Argument validation (method/mode/cache/referrer etc.) must take priority
-    // over an already-aborted signal: WPT "TypeError from request constructor
-    // takes priority" expects the `TypeError` to surface before the `AbortError`.
-    // This must run before the result-slot promise/job below is created: a throw
-    // here (or in the aborted-signal early return) must not leave a polling job
-    // waiting forever on a slot that is never committed, which would keep the
-    // event loop alive after the script finished.
+    // Validate request URL + method + enum options (WPT request-error, and shared
+    // with `fetch` so a string-input fetch also rejects bad init with TypeError).
     validate_request_init_options(
         ctx,
         &url_str,
         &method,
         &mode,
-        &cache_mode,
+        &cache,
         &credentials,
         &redirect,
         &referrer,
         &referrer_policy,
     )?;
-
-    if already_aborted {
-        // An already-aborted signal must reject on a microtask, *before* any
-        // `Promise.resolve().then` callback (WPT "already aborted signal rejects
-        // immediately"). Skip the thread/event-loop hop and reject synchronously
-        // as a (microtask) job via the promise machinery.
-        // Consuming a Request whose signal is already aborted marks its body as
-        // used (Fetch spec): `request.bodyUsed` must become true.
-        if JSRequest::from_value(input).is_some()
-            && let Ok(p) = get_request_payload_mut(ctx, &mut input.clone())
-        {
-            p.body_consumed = true;
-        }
-        return Promise::from_reject_value(ctx, abort_reason).map(JSValue::from);
+    // A GET/HEAD request may not carry a body — whether inherited from the input
+    // Request or supplied via init (WPT request-disturbed "A get request may not
+    // have body").
+    if matches!(method.as_str(), "GET" | "HEAD")
+        && (synthetic_body.is_some() || stream_body.is_some())
+    {
+        return Err(ctx.throw_type_error("GET/HEAD requests may not have a body"));
     }
 
-    // Runtime TLS escape hatch: `fetch.allowInsecureTLS` skips cert validation
-    // for this request's client.
-    let insecure = AikeRuntimeState::of(ctx).fetch_allow_insecure_tls;
-
-    // Fetch spec "HTTP defaults": a request carries default `Accept` and
-    // `Accept-Language` headers unless the caller overrides them. reqwest's
-    // own defaults are wiped by `perform_request` (it sets each header
-    // explicitly), so we must supply them here.
-    ensure_default_request_headers(&mut header_list);
-    // WHATWG: silently drop forbidden request headers the caller tried to set.
-    // The cookie headers are only forbidden when fetch owns the cookie jar; with
-    // the `cookie` switch off the caller may set `Cookie`/`Cookie2` directly.
-    strip_forbidden_request_headers(&mut header_list, fetch_cookie);
     // Validate header names/values per the Fetch spec. Must run on the JS
-    // thread so a violation rejects the returned promise with a `TypeError`
-    // (WPT header-values expects `promise_rejects_js(t, TypeError, ...)`).
+    // thread so a violation throws a `TypeError` synchronously (WPT expects
+    // `promise_rejects_js(t, TypeError, ...)`).
     validate_header_list_for_fetch(ctx, &header_list)?;
 
-    // `Origin` is a forbidden request header (scripts cannot set it), so it is
-    // added here *after* the forbidden-header strip. Per the Fetch spec an
-    // `Origin` header is appended when the method is not GET/HEAD, OR when the
-    // request is CORS-tainted. The value is the client's origin, or the
-    // literal `null` when the client origin is opaque.
-    if should_append_origin(&method, cors_tainted) {
-        header_list.set("Origin", &serialized_origin(req_origin.as_deref()));
+    // Filter headers per the request's final mode: forbidden request headers
+    // are dropped for normal requests; only CORS-safelisted headers survive in
+    // `no-cors` mode (WPT request-headers).
+    header_list.filter_for_request_mode(mode == "no-cors");
+
+    // Disturb the input Request's body per the Fetch spec: constructing a new
+    // Request from an input with a body marks the input's body as used. A
+    // request with a *replaced* body (init.body) disturbs the input too; a
+    // request without a replacement body whose input is already disturbed
+    // throws a TypeError (WPT request-disturbed).
+    // The input Request's body is unusable if it was consumed OR its body
+    // stream was locked/disturbed (e.g. `request.body.getReader()` was called,
+    // WPT request-init-stream). In either case, without a replacement body the
+    // new construction throws.
+    let input_body_unusable = if input_is_request && !init_body_provided {
+        let p = get_request_payload(ctx, &input)?;
+        p.body_consumed
+            || p.cached_body.as_ref().is_some_and(|s| {
+                s.payload()
+                    .is_some_and(|sp| sp.disturbed || sp.reader.is_some())
+            })
+    } else {
+        false
+    };
+    if input_body_unusable {
+        return Err(ctx.throw_type_error(
+            "Cannot construct a Request from a request whose body has already been used",
+        ));
     }
 
-    // `Content-Length` is likewise forbidden for scripts, so it too is derived
-    // here from the actual payload. With no body only POST/PUT still report 0
-    // (they normally carry one); other methods send no length at all.
-    let implies_body = method.eq_ignore_ascii_case("POST") || method.eq_ignore_ascii_case("PUT");
-
-    if let Some(b) = &body_bytes {
-        header_list.set("Content-Length", &b.len().to_string());
-    } else if implies_body {
-        header_list.set("Content-Length", "0");
+    if input_is_request
+        && input_has_body
+        && !input_body_consumed
+        && let Ok(p) = get_request_payload_mut(ctx, &mut input.clone())
+    {
+        p.body_consumed = true;
     }
 
-    // Snapshot after the HTTP-default and forbidden-header passes so the
-    // conditional-revalidation headers added below ride on the final list.
-    let mut req_headers = header_list.to_vec();
-    // Apply conditional-revalidation validators (from the HTTP cache) to the
-    // finalized request headers; this must run after the forbidden-header
-    // strip above so it cannot revive a dropped header.
-    #[cfg(feature = "fetch_cache")]
-    if let Some(validators) = &cached_validators {
-        http_cache::add_conditional_headers(&mut req_headers, validators.clone());
-    }
-
-    // Whether a CORS preflight is *ever* needed for this request (non-safelisted
-    // method or header). This is independent of CORS tainting: even a same-origin
-    // request needs a preflight once a redirect makes it cross-origin, so the
-    // preflight decision must be made per hop in the transport layer (see
-    // `TransportRequest::before_hop`).
-    let preflight_possible = needs_preflight(&method, &req_headers, true);
-
-    // Fetch Metadata Request Headers (Fetch spec "append fetch metadata
-    // headers"). Appended *after* the preflight decision: these are UA-supplied
-    // headers, not author ones, so they must not themselves force a preflight
-    // (a `fetch()` with no custom header must not preflight). `fetch()` is never
-    // a navigation, so the destination is always "empty", and `Sec-Fetch-User`
-    // is only sent for navigations from a user activation, so it is omitted
-    // (WPT `fetch/metadata`).
-    append_fetch_metadata_headers(&mut header_list, &mode, req_origin.as_deref(), &url_str);
-    req_headers = header_list.to_vec();
-    #[cfg(feature = "fetch_cache")]
-    if let Some(validators) = &cached_validators {
-        http_cache::add_conditional_headers(&mut req_headers, validators.clone());
-    }
-
-    // Always follow redirects manually when `redirect == "follow"`. Every hop
-    // must recompute the outgoing `Referer` (per the hop's referrer policy) and,
-    // for cors-mode, the `Origin` header; a cross-origin redirect also makes the
-    // origin opaque. reqwest's auto-follow replays the *initial* headers verbatim
-    // and would (a) leak the full referrer on cross-origin hops (WPT
-    // `redirect-referrer`), (b) wrongly send a `Referer` under `no-referrer`
-    // after a redirect, and (c) never re-run a CORS preflight for the new URL
-    // (Fetch spec: a redirect re-enters HTTP-network-or-cache fetch). Manual
-    // following is the only path that honors the per-hop recomputation.
-    //
-    // For `manual`/`error` we also must *not* let reqwest auto-follow: the spec
-    // wants the first 3xx response surfaced as an `opaqueredirect` (status 0) or
-    // a TypeError, which the dispatch below handles. So reqwest's auto-follow is
-    // disabled in every case — the redirect handling is fully owned here.
-    let manual_redirect = redirect == "follow";
-
-    // Runtime TLS escape: `insecure` (from `fetch.allowInsecureTLS`) skips cert
-    // validation for this request's client.
-    let mut cfg = crate::http::client::config::HttpClientConfig::default();
-    cfg.protocol = crate::http::client::config::ProtocolMode::Http1Only;
-    // WHATWG `fetch` manages cookies itself via the shared global jar (driven
-    // by the `credentials` mode), so disable reqwest's automatic store which
-    // would otherwise send cookies unconditionally.
-    cfg.cookie_jar = false;
-    // Disable reqwest's auto-follow in all redirect modes: `follow` is handled
-    // manually here (per-hop referrer/origin recomputation); `manual`/`error`
-    // must surface the first 3xx response rather than following it.
-    cfg.follow_redirects = false;
-
-    // Build the client *before* the result-slot promise below: a client-build
-    // failure must reject (via the caller) without leaving the polling job
-    // behind. The `client` is only consumed by the spawned transport task.
-    let client = match cfg.build_http_client_ex(insecure) {
-        Ok(c) => c,
-        Err(e) => {
-            return Err(ctx.throw_internal_error(&format!("failed to build HTTP client: {e}")));
+    // WHATWG: `request.signal` is a fresh "follow" signal that follows the
+    // supplied signal (`request.signal !== signal`), and is never the same
+    // object. If no signal is supplied, create a default non-aborted signal so
+    // that `request.signal` is always present.
+    let signal = match signal {
+        Some(parent) => {
+            let child = make_default_signal(ctx)?;
+            signal_attach_follower(ctx, &parent, &child);
+            Some(child)
         }
+        None => Some(make_default_signal(ctx)?),
     };
 
-    // Captured into the result closure so an *in-flight* abort (one that fires
-    // while the request is on the network) rejects with the signal's live
-    // reason — including any custom reason passed to `abort()` — exactly like
-    // the already-aborted path below. A JSValue is not `Send`, so it must live
-    // in the engine job closure (not the `tokio::spawn` closure that does the
-    // network I/O), where it is read only after the abort has committed.
-    //
-    // The `convert` closure is NOT traced by `create_with_result_slot`, so we
-    // register the signal as a GC root for the fetch's lifetime (see
-    // `gc_trace_fetch`) and clear it once the closure has run, preventing the
-    // AbortSignal from being collected into a dangling pointer mid-flight.
-    // Register the signal as a GC root only when one is present (id 0 is the
-    // "no signal" sentinel, since ids start at 1). `signal_for_reason` indexes
-    // the entry that the convert closure's Drop guard removes on settle.
-    let signal_for_reason: usize = match &signal_val {
-        Some(s) => {
-            let st = AikeRuntimeState::of(ctx);
-            let id = st.fetch_signal_next_id;
-            st.fetch_signal_next_id = id.wrapping_add(1);
-            st.fetch_signals.insert(id, *s);
-            id
-        }
-        None => 0,
-    };
-
-    let promise = Promise::create_with_result_slot(
-        ctx,
-        result_slot.clone(),
-        move |cx, data| -> JSResult {
-            // Release the GC root now and keep the signal in a local for the
-            // abort-reason path below. The convert closure runs exactly once
-            // (on commit), so this mirrors the previous Drop guard while
-            // needing no context in a destructor.
-            let signal_root = if signal_for_reason != 0 {
-                AikeRuntimeState::of(cx)
-                    .fetch_signals
-                    .remove(&signal_for_reason)
-            } else {
-                None
-            };
-
-            let client_origin = client_origin.clone();
-            // Captured for the 401/407 authentication-entry check below: a
-            // streaming (non-replayable) request body cannot be re-sent when the
-            // server issues an auth challenge, so the fetch must reject.
-            let had_stream_body = had_stream_body;
-            let credentials_clone = credentials_clone;
-            let mut tr = match data {
-                Ok(tr) => tr,
-                Err(e) => {
-                    return match e {
-                        FetchError::Abort => {
-                            // Reject with the signal's live abort reason — a
-                            // custom reason passed to `abort()` must surface even
-                            // when the abort fires mid-flight (while the request
-                            // is on the network). Fall back to the default
-                            // "AbortError" DOMException if no signal is present.
-                            let reason = signal_root
-                                .as_ref()
-                                .and_then(signal_reason)
-                                .unwrap_or_else(|| {
-                                    make_dom_exception(
-                                        cx,
-                                        "AbortError",
-                                        "The operation was aborted.",
-                                    )
-                                    .unwrap_or(JSValue::UNDEFINED)
-                                });
-                            cx.throw(Exception::Error(reason));
-                            Err(-1)
-                        }
-                        FetchError::Other(te) => throw_transport_error(cx, te),
-                    };
-                }
-            };
-
-            let status = tr.status;
-
-            // Fetch spec (HTTP-network fetch, authentication entries): a 401 or
-            // 407 response with credentials mode other than "omit" is an auth
-            // challenge that normally triggers a credentialed re-issue of the
-            // request. A streaming (non-replayable) body cannot be re-sent, so
-            // the re-issue is impossible and the fetch becomes a network error
-            // (rejects with TypeError). Browsers reject such streaming uploads
-            // on a 401 (WPT `request-upload.h2.any.js`:
-            // "Streaming upload should fail on a 401 response").
-            if (status == 401 || status == 407) && credentials_clone != "omit" && had_stream_body {
-                return throw_transport_error(
-                    cx,
-                    TransportError {
-                        code: "unauthorized",
-                        message: "Failed to fetch: streaming upload cannot be retried on an authentication challenge".into(),
-                    },
-                );
-            }
-
-            if matches!(redirect_clone.as_str(), "error" | "manual") && (300..400).contains(&status)
-            {
-                if redirect_clone == "error" {
-                    return Err(
-                        cx.throw_type_error("Failed to fetch: redirect not allowed (mode 'error')")
-                    );
-                }
-                // `manual` mode surfaces the first 3xx response as an opaqueredirect,
-                // but a cross-origin 3xx is invalid for a `no-cors` request (no-cors
-                // only allows `follow`), so it must reject (WPT redirect-mode.any.js).
-                // A `cors`-mode cross-origin 3xx without a valid
-                // `Access-Control-Allow-Origin` is also a CORS failure and rejects.
-                let cross_origin =
-                    fetch_cors && is_cross_origin(client_origin.as_deref(), &url_clone);
-                if mode_clone == "no-cors" && cross_origin {
-                    return Err(cx.throw_type_error(
-                        "Failed to fetch: no-cors request cannot follow a cross-origin redirect with manual/error mode",
-                    ));
-                }
-                if mode_clone == "cors" && cors_tainted {
-                    let acao = tr
-                        .headers
-                        .iter()
-                        .find(|(k, _)| k.eq_ignore_ascii_case("access-control-allow-origin"))
-                        .map(|(_, v)| v.clone());
-                    let allowed = check_allow_origin(
-                        acao.as_deref(),
-                        client_origin.as_deref().unwrap_or(""),
-                        credentials_include,
-                    )
-                    .is_some();
-                    if !allowed {
-                        return Err(cx.throw_type_error(
-                            "Failed to fetch: redirect response is a cross-origin CORS failure",
-                        ));
-                    }
-                }
-                return build_opaque_redirect_response(cx, &url_clone);
-            }
-
-            // Fetch spec: `mode: "same-origin"` requires the request (and every
-            // redirect hop) to stay same-origin; a cross-origin URL is a network
-            // error. Redirects are followed manually, so the *final* response URL
-            // is checked here (the redirect target would otherwise hide the
-            // violation).
-            // Fetch spec, `no-cors` responses: when the response carries
-            // `Cross-Origin-Resource-Policy`, a `no-cors` request that is not
-            // same-origin (`same-origin` value) or not same-site (`same-site`
-            // value) with the response URL is a network error. Applies only to
-            // `no-cors`; a `cors` request already passed the CORS check
-            // (WPT `fetch/cross-origin-resource-policy`).
-            if fetch_cors
-                && mode_clone == "no-cors"
-                && let Some(msg) = corp_violation(
-                    &HeaderList::from_vec(tr.headers.clone()),
-                    client_origin.as_deref(),
-                    &tr.final_url,
-                )
-            {
-                return throw_transport_error(
-                    cx,
-                    TransportError {
-                        code: "corp",
-                        message: msg,
-                    },
-                );
-            }
-
-            if fetch_cors
-                && mode_clone == "same-origin"
-                && let Some(msg) = same_origin_violation(client_origin.as_deref(), &tr.final_url)
-            {
-                return throw_transport_error(
-                    cx,
-                    TransportError {
-                        code: "same-origin",
-                        message: msg,
-                    },
-                );
-            }
-
-            // HTTP cache: a `304` we drove via conditional headers becomes the
-            // cached response (status 200) with the 304 headers merged on top.
-            #[cfg(feature = "fetch_cache")]
-            if let Some((cached_status, cached_headers, cached_body)) =
-                http_cache::take_not_modified(
-                    &method_clone,
-                    &url_clone,
-                    status,
-                    &tr.headers,
-                    cache_driven,
-                )
-            {
-                return build_response_from_transport(
-                    cx,
-                    TransportResponse {
-                        status: cached_status,
-                        status_text: "OK".to_string(),
-                        headers: cached_headers,
-                        content_type: String::new(),
-                        content_length: Some(cached_body.len() as u64),
-                        http_version: "1.1",
-                        resp: None,
-                        final_url: url_clone.clone(),
-                        synthetic_body: Some(cached_body),
-                        origin_opaque: false,
-                    },
-                    RespType::Basic,
-                    &url_clone,
-                    false,
-                    signal_val,
-                );
-            }
-            // Caching a successful GET response (with its full body) is done in
-            // the transport closure above, where the body bytes are available.
-            // (Skipping `no-store` there too.) Nothing to do here.
-            //
-            // A `no-cors` request for a cross-origin (or unknown-origin) URL
-            // yields an opaque response per Fetch spec (status 0, type opaque,
-            // null body, CORS-filtered headers). Same-origin stays basic.
-            let is_opaque = fetch_cors
-                && mode_clone == "no-cors"
-                && is_cross_origin(client_origin.as_deref(), &url_clone);
-            let resp_type = if is_opaque {
-                RespType::Opaque
-            } else {
-                RespType::Basic
-            };
-            // The response URL is the *final* URL after any redirect (Fetch spec
-            // sets `response.url` to the last URL in the chain), and `redirected`
-            // is true once the chain followed at least one redirect.
-            let final_url = tr.final_url.clone();
-            let redirected = final_url != url_clone;
-            // Cross-origin `cors` mode: run the CORS check against the final
-            // response origin and, on success, return a `cors` filtered
-            // response (type `cors`, headers limited to the safelist +
-            // `Access-Control-Expose-Headers`). A failed check is a network
-            // error (rejects with TypeError).
-            if !is_opaque && cors_tainted && mode_clone == "cors" {
-                let final_cross = is_cross_origin(client_origin.as_deref(), &final_url);
-                // A `cors` request that went through a cross-origin redirect keeps the
-                // CORS-filtered (`cors`) response type even when the final URL ends up
-                // same-origin again (whatwg/fetch#737). The CORS check still applies
-                // when the *final* response is cross-origin; a same-origin final URL
-                // always passes.
-                if final_cross {
-                    let headers = HeaderList::from_vec(tr.headers.clone());
-                    // The request's origin may have become opaque ("null") after a
-                    // cross-origin redirect; the CORS check must then compare the
-                    // `Access-Control-Allow-Origin` header against "null" (the
-                    // serialized opaque origin), not the client origin.
-                    let check_origin = if tr.origin_opaque {
-                        "null".to_string()
-                    } else {
-                        serialized_origin(client_origin.as_deref())
-                    };
-                    if cors_check(&headers, &check_origin, credentials_include).is_none() {
-                        return throw_transport_error(
-                            cx,
-                            TransportError {
-                                code: "cors",
-                                message: "request failed: CORS check failed for the response"
-                                    .into(),
-                            },
-                        );
-                    }
-                }
-                // CORS-filter the exposed headers. `content-type` / `content-length`
-                // are safelisted, so the payload's derived fields stay valid.
-                let headers = HeaderList::from_vec(tr.headers.clone());
-                let expose = headers.get("Access-Control-Expose-Headers");
-                let filtered =
-                    cors_filter_response_headers(&headers, expose.as_deref(), credentials_include);
-                tr.headers = filtered;
-                return build_response_from_transport(
-                    cx,
-                    tr,
-                    RespType::Cors,
-                    &final_url,
-                    redirected,
-                    signal_val,
-                );
-            }
-            build_response_from_transport(cx, tr, resp_type, &final_url, redirected, signal_val)
-        },
-    )?;
-
-    let referrer_ctx = manual_redirect.then_some(ReferrerCtx {
-        referrer: rc_referrer,
-        policy: rc_policy,
-        client_origin: rc_origin,
-        client_url: rc_url,
-        max_redirects: 20,
-    });
-
-    // The actual request carries `User-Agent: Mozilla/5.0 (aike)` (injected by
-    // `ensure_default_request_headers`); a CORS preflight must send the same
-    // value so a server comparing the two (WPT `checkUserAgentHeaderInPreflight`)
-    // accepts the actual request.
-    let user_agent = req_headers
-        .iter()
-        .find(|(k, _)| k.eq_ignore_ascii_case("user-agent"))
-        .map(|(_, v)| v.clone())
-        .unwrap_or_else(|| "Mozilla/5.0 (aike)".to_string());
-
-    let client_origin_str = serialized_origin(req_origin.as_deref());
-
-    // Per-hop gate for the transport layer (browser builds: a CORS preflight
-    // runner). `possible` records whether this request *would* need a
-    // preflight once tainted; the gate runs a fresh OPTIONS preflight against
-    // each CORS-tainted hop target before sending the actual request there
-    // (Fetch spec). A failed preflight rejects the fetch with a TypeError.
-    let requested_headers = preflight_request_headers(&req_headers);
-    let preflight = (fetch_cors && preflight_possible).then(|| PreflightCtx {
-        possible: true,
-        method: method.clone(),
-        request_headers: join_request_headers(&requested_headers),
-        client_origin: client_origin_str.clone(),
-        credentials_include,
-        user_agent,
-    });
-
-    let req = TransportRequest {
+    let payload = RequestPayload {
         method,
-        url: url_str.clone(),
-        headers: req_headers,
-        body: body_bytes,
-        timeout,
-        referrer: effective_referrer,
-        referrer_ctx,
-        replayable: stream_body.is_none(),
-        before_hop: make_before_hop_hook(preflight),
-        // Per-runtime CORS switch: with it off the transport's cors-mode rules
-        // (per-hop Origin recomputation, opaque-origin rule) never apply.
-        cors_mode: fetch_cors && mode == "cors",
-        cors_tainted,
-        cors_client_origin: client_origin_str,
-        credentials_mode: credentials.clone(),
-        use_shared_cookies: fetch_cookie,
+        url: url_str,
+        headers: Rc::new(RefCell::new(header_list)),
+        destination: String::new(),
+        referrer,
+        referrer_policy,
+        mode,
+        credentials,
+        cache,
+        redirect,
+        integrity,
+        keepalive,
+        duplex: duplex.unwrap_or_else(|| "half".to_string()),
+        is_reload_navigation,
+        is_history_navigation,
+        signal,
+        headers_obj: None,
+        synthetic_body,
+        stream_body,
+        cached_body: None,
+        body_consumed: false,
     };
 
-    // Issue the request on the tokio side. Taken as a closure because a stream
-    // body must first be pumped on the JS thread, which defers this call to a
-    // later event-loop turn.
-    let rs = result_slot.clone();
-    let notify2 = notify;
-    let cache_mode_for_spawn = cache_mode.clone();
-    let has_conditional_for_spawn = has_conditional;
-    let spawn_request = move |req: TransportRequest| match notify2 {
-        Some(n) => {
-            let client = client.clone();
-            tokio::spawn(async move {
-                let fut = perform_request(&client, req);
-                tokio::select! {
-                    r = fut => {
-                        let _ = rs.commit(r.map_err(FetchError::Other));
-                    }
-                    _ = n.notified() => { let _ = rs.commit(Err(FetchError::Abort)); }
-                }
-            });
-        }
-        None => {
-            let cache_mode = cache_mode_for_spawn.clone();
-            let has_conditional = has_conditional_for_spawn;
-            let cache_method = req.method.clone();
-            let cache_url = req.url.clone();
-            // Snapshot of the outgoing request headers, used to match `Vary`
-            // fields when the stored response is reused.
-            let cache_req_headers = req.headers.clone();
-            let client = client.clone();
-            tokio::spawn(async move {
-                let mut tr = match perform_request(&client, req).await {
-                    Ok(tr) => tr,
-                    Err(e) => {
-                        let _ = rs.commit(Err(FetchError::Other(e)));
-                        return;
-                    }
-                };
-                // Subresource Integrity: for a non-empty `integrity`, the whole
-                // body must be read and its hash matched against the metadata,
-                // otherwise the response is rejected (fetch spec §6.4).
-                if !integrity.is_empty() {
-                    let bytes = match tr.resp.take() {
-                        Some(resp) => match resp.bytes().await {
-                            Ok(b) => b.to_vec(),
-                            Err(e) => {
-                                let _ = rs.commit(Err(FetchError::Other(TransportError {
-                                    code: "integrity",
-                                    message: format!(
-                                        "request failed: reading body for integrity check: {e}"
-                                    ),
-                                })));
-                                return;
-                            }
-                        },
-                        None => tr.synthetic_body.clone().unwrap_or_default(),
-                    };
-                    if let Err(msg) = check_integrity(&bytes, &integrity) {
-                        let _ = rs.commit(Err(FetchError::Other(TransportError {
-                            code: "integrity",
-                            message: format!("request failed: {msg}"),
-                        })));
-                        return;
-                    }
-                    tr.synthetic_body = Some(bytes);
-                }
-                // HTTP cache: buffer the body of a cacheable GET response so it
-                // can be stored and later served/revalidated from cache.
-                #[cfg(feature = "fetch_cache")]
-                if cache_mode != "no-store"
-                    && !has_conditional
-                    && cache_method.eq_ignore_ascii_case("GET")
-                    && (200..300).contains(&tr.status)
-                    // 204/205/304 (and HEAD) carry no body and are never cached.
-                    && !matches!(tr.status, 204 | 205 | 304)
-                {
-                    // The final URL (after any redirect) is stored so a later
-                    // `same-origin` cache hit can reject a cross-origin redirect.
-                    let final_url = tr.final_url.clone();
-                    // Never buffer an unbounded body just to cache it: WPT
-                    // `huge-fetch` is 8GiB and the in-memory cache (a plain
-                    // HashMap) would OOM the process, yielding an empty chunk
-                    // or a crash. Only cache when we know the body is small
-                    // enough; otherwise keep `tr.resp` intact so the body is
-                    // streamed lazily to the consumer, one chunk at a time.
-                    let small_enough = matches!(
-                        tr.content_length,
-                        Some(len) if len <= http_cache::MAX_CACHE_BODY_BYTES
-                    );
-                    if small_enough {
-                        let bytes = match tr.resp.take() {
-                            Some(resp) => match resp.bytes().await {
-                                Ok(b) => b.to_vec(),
-                                Err(_) => Vec::new(),
-                            },
-                            None => tr.synthetic_body.clone().unwrap_or_default(),
-                        };
-                        http_cache::store(
-                            &cache_method,
-                            &cache_url,
-                            tr.status,
-                            &tr.headers,
-                            bytes.clone(),
-                            &final_url,
-                            &cache_req_headers,
-                        );
-                        tr.synthetic_body = Some(bytes);
-                    }
-                }
+    JSRequest::new_instance(ctx, new_target, payload).map(JSValue::from)
+}
 
-                // RFC 9111 §4.4: a successful unsafe request invalidates the
-                // stored responses for its target URL and for the URLs it names
-                // in `Location` / `Content-Location` (WPT `http-cache/invalidate`).
-                #[cfg(feature = "fetch_cache")]
-                {
-                    let method = cache_method.to_ascii_uppercase();
-                    let is_get = method == "GET" || method == "HEAD";
-                    let successful = tr.status >= 200 && tr.status < 400;
-                    if !is_get && successful {
-                        http_cache::invalidate(&cache_url);
-                        http_cache::invalidate(&tr.final_url);
-                        for name in ["location", "content-location"] {
-                            if let Some(v) = tr
-                                .headers
-                                .iter()
-                                .find(|(k, _)| k.eq_ignore_ascii_case(name))
-                                .map(|(_, v)| v.clone())
-                            {
-                                // Resolve against the request URL, then drop
-                                // any stored entry for it.
-                                if let Ok(abs) =
-                                    url::Url::parse(&cache_url).and_then(|b| b.join(&v))
-                                {
-                                    http_cache::invalidate(abs.as_str());
-                                }
-                            }
-                        }
-                    }
-                }
+// --- getters ---
 
-                let _ = rs.commit(Ok(tr));
-            });
+macro_rules! req_str_getter {
+    ($name:ident, $field:ident) => {
+        fn $name(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+            let this = cc.this();
+            let p = get_request_payload(ctx, &this)?;
+            ctx.create_string_from_utf8(p.$field.as_bytes().to_vec())
+                .map(JSValue::make_string)
         }
     };
+}
 
-    // A buffered body can go out immediately; a stream body must be pumped to
-    // completion on the JS thread first, then the request is issued with the
-    // collected bytes (and the now-known Content-Length).
-    match stream_body {
-        None => spawn_request(req),
-        Some(sv) => {
-            let mut s = JSReadableStream::try_from(sv)
-                .map_err(|_| ctx.throw_type_error("body is not a ReadableStream"))?;
+req_str_getter!(js_req_method, method);
+req_str_getter!(js_req_url, url);
+req_str_getter!(js_req_destination, destination);
+req_str_getter!(js_req_referrer, referrer);
+req_str_getter!(js_req_referrer_policy, referrer_policy);
+req_str_getter!(js_req_mode, mode);
+req_str_getter!(js_req_credentials, credentials);
+req_str_getter!(js_req_cache, cache);
+req_str_getter!(js_req_redirect, redirect);
+req_str_getter!(js_req_integrity, integrity);
 
-            let drain_slot = PromiseResultSlot::<Result<Vec<u8>, String>>::new();
-            let raw_err = Rc::new(RefCell::new(None::<JSValue>));
-            let reader = s.acquire_reader(ctx, false)?;
-            reader.drain(ctx, drain_slot.clone(), raw_err.clone(), BODY_TIMEOUT)?;
+fn js_req_keepalive_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let this = cc.this();
+    let p = get_request_payload(ctx, &this)?;
+    Ok(JSValue::from(p.keepalive))
+}
 
-            // The job may run over several turns, so the request and the
-            // one-shot dispatcher are parked in cells and taken on the turn
-            // that actually dispatches.
-            let req = RefCell::new(Some(req));
-            let spawn_request = RefCell::new(Some(spawn_request));
-            let fail_slot = result_slot.clone();
+fn js_req_duplex_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let this = cc.this();
+    let p = get_request_payload(ctx, &this)?;
+    ctx.create_string_from_utf8(p.duplex.as_bytes().to_vec())
+        .map(JSValue::make_string)
+}
 
-            ctx.queue_job(
-                move |_cx| {
-                    let Some(bytes) = drain_slot.try_take() else {
-                        return Ok(JobState::Block);
-                    };
+fn js_req_is_reload_navigation_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let this = cc.this();
+    let p = get_request_payload(ctx, &this)?;
+    Ok(JSValue::from(p.is_reload_navigation))
+}
 
-                    match bytes {
-                        Ok(b) => {
-                            let mut req = req.take().expect("stream drain job ran twice");
-                            set_content_length(&mut req.headers, b.len());
-                            req.body = Some(b);
+fn js_req_is_history_navigation_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let this = cc.this();
+    let p = get_request_payload(ctx, &this)?;
+    Ok(JSValue::from(p.is_history_navigation))
+}
 
-                            let spawn = spawn_request.take().expect("dispatcher already used");
-                            spawn(req);
-                        }
-                        // The stream errored or produced a bad chunk; surface it
-                        // as a network error so the fetch promise rejects.
-                        Err(msg) => {
-                            let _ = fail_slot.commit(Err(FetchError::Other(TransportError {
-                                code: "body",
-                                message: format!("request failed: {msg}"),
-                            })));
-                        }
-                    }
+fn js_req_signal_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let this = cc.this();
+    let p = get_request_payload(ctx, &this)?;
+    Ok(p.signal.unwrap_or(JSValue::NULL))
+}
 
-                    Ok(JobState::Done)
-                },
-                (),
-            );
-        }
+fn js_req_headers_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    // [SameObject]: return the same Headers instance on every access.
+    let mut this = cc.this();
+    if let Some(h) = get_request_payload_mut(ctx, &mut this)?.headers_obj {
+        return Ok(h);
     }
-
-    Ok(promise.into())
+    let (shared, guard) = {
+        let p = get_request_payload(ctx, &this)?;
+        // A Request's exposed Headers object uses the `request` guard (or
+        // `request-no-cors` in no-cors mode), which silently drops forbidden
+        // request-header names / non-CORS-safelisted writes.
+        let guard = if p.mode == "no-cors" {
+            Guard::RequestNoCors
+        } else {
+            Guard::Request
+        };
+        (p.headers.clone(), guard)
+    };
+    let payload = HeadersPayload::from_shared(shared, guard);
+    let headers = JSHeaders::new_instance(ctx, JSValue::UNDEFINED, payload)?;
+    let hv = headers.into();
+    get_request_payload_mut(ctx, &mut this)?.headers_obj = Some(hv);
+    Ok(hv)
 }
 
-/// Whether an HTTP status is a redirect status (301/302/303/307/308).
-/// Overwrite `Content-Length` on an already-built header list. Used once a
-/// stream body has been pumped and its real length is known.
-fn set_content_length(headers: &mut Vec<(String, String)>, len: usize) {
-    headers.retain(|(k, _)| !k.eq_ignore_ascii_case("content-length"));
-    headers.push(("Content-Length".into(), len.to_string()));
+fn js_req_body_used_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let this = cc.this();
+    let p = get_request_payload(ctx, &this)?;
+    Ok(JSValue::from(p.body_consumed))
 }
 
-/// Install the `fetch` global and register all WHATWG classes.
-pub(crate) fn init_fetch(ctx: &mut ScopedContext, mut global: Object) -> Result<(), i32> {
-    let func = ctx.create_native_function(Callback::Func(js_fetch), "fetch", 1, 0)?;
+fn js_req_body(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let mut this = cc.this();
 
-    // Runtime-level switches as accessor properties on the `fetch` function
-    // object (not per-request). The getters/setters read/write
-    // `AikeRuntimeState`.
+    // A stream body is exposed as-is: it is the very stream the caller passed
+    // in, so `request.body` must hand back that same object.
     {
-        let mut func = func;
-
-        // `fetch.allowInsecureTLS` — always available (a general TLS escape).
-        let insecure_atom = zuqe::Atom::intern_static(ctx, "allowInsecureTLS")?;
-        let insecure_get = ctx.create_native_function(
-            Callback::Func(js_fetch_allow_insecure_get),
-            "get allowInsecureTLS",
-            0,
-            0,
-        )?;
-        let insecure_set = ctx.create_native_function(
-            Callback::Func(js_fetch_allow_insecure_set),
-            "set allowInsecureTLS",
-            1,
-            0,
-        )?;
-        func.define_property_getset(
-            ctx,
-            insecure_atom,
-            insecure_get.into(),
-            insecure_set.into(),
-            zuqe::JS_PROP_C_W_E,
-        )?;
-
-        // `fetch.cors` / `fetch.cookie` — only when the browser machinery was
-        // compiled in.
-        #[cfg(feature = "fetch_browser")]
+        let p = get_request_payload_mut(ctx, &mut this)?;
+        if !p.body_consumed
+            && let Some(s) = p.stream_body
         {
-            let cors_atom = zuqe::Atom::intern_static(ctx, "cors")?;
-            let cors_get =
-                ctx.create_native_function(Callback::Func(js_fetch_cors_get), "get cors", 0, 0)?;
-            let cors_set =
-                ctx.create_native_function(Callback::Func(js_fetch_cors_set), "set cors", 1, 0)?;
-            func.define_property_getset(
-                ctx,
-                cors_atom,
-                cors_get.into(),
-                cors_set.into(),
-                zuqe::JS_PROP_C_W_E,
-            )?;
-
-            let cookie_atom = zuqe::Atom::intern_static(ctx, "cookie")?;
-            let cookie_get = ctx.create_native_function(
-                Callback::Func(js_fetch_cookie_get),
-                "get cookie",
-                0,
-                0,
-            )?;
-            let cookie_set = ctx.create_native_function(
-                Callback::Func(js_fetch_cookie_set),
-                "set cookie",
-                1,
-                0,
-            )?;
-            func.define_property_getset(
-                ctx,
-                cookie_atom,
-                cookie_get.into(),
-                cookie_set.into(),
-                zuqe::JS_PROP_C_W_E,
-            )?;
+            return Ok(s);
         }
     }
-
-    global.define_property_value_str(ctx, "fetch", func.into(), zuqe::JS_PROP_C_W_E)?;
-
-    // Cache Storage API (only with the `fetch_cache` feature).
-    #[cfg(feature = "fetch_cache")]
+    // Return the same cached stream instance on every access ([SameObject]).
     {
-        let caches = crate::http::client::cache_storage::JSCacheStorage::new_instance(
+        let p = get_request_payload_mut(ctx, &mut this)?;
+        if let Some(s) = p.cached_body {
+            return Ok(JSValue::from(s));
+        }
+    }
+
+    // A *consumed* body still exposes a `body` that is a ReadableStream —
+    // disturbed, so any read rejects (Fetch spec). A request that never had a
+    // body exposes a null `body` (WPT request-disturbed "body's default value
+    // is null").
+    {
+        let p = get_request_payload_mut(ctx, &mut this)?;
+        if p.body_consumed {
+            let mut s = JSReadableStream::from_bytes(ctx, Vec::new())?;
+            // Lock the stream so a later getReader() throws (Fetch spec: a
+            // consumed request body still exposes a disturbed ReadableStream).
+            s.acquire_reader(ctx, false)?;
+            p.cached_body = Some(s);
+            return Ok(JSValue::from(p.cached_body.expect("just set")));
+        }
+        // A request constructed without any body has a null body.
+        if p.synthetic_body.is_none() && p.stream_body.is_none() {
+            return Ok(JSValue::NULL);
+        }
+    }
+
+    // First access of an unconsumed buffered body: build and cache the stream.
+    // The synthetic bytes are *cloned* (not taken): accessing `request.body`
+    // does not consume the body (bodyUsed stays false), so a later `blob()` /
+    // `text()` must still find the source bytes.
+    let stream = {
+        let p = get_request_payload_mut(ctx, &mut this)?;
+        if let Some(bytes) = p.synthetic_body.clone() {
+            JSReadableStream::from_bytes(ctx, bytes)?
+        } else {
+            JSReadableStream::from_bytes(ctx, Vec::new())?
+        }
+    };
+    get_request_payload_mut(ctx, &mut this)?.cached_body = Some(stream);
+    let p = get_request_payload_mut(ctx, &mut this)?;
+    Ok(JSValue::from(p.cached_body.expect("just set")))
+}
+
+/// Body read methods for Request (bytes, text, json, arrayBuffer).
+fn js_req_body_as(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let magic = cc.magic();
+    let mut this = cc.this();
+
+    // Spec (Fetch): an already-consumed body rejects with a `TypeError`
+    // *before* any abort-signal check — WPT "Calling arrayBuffer() on an
+    // aborted consumed nonempty request must reject with TypeError" expects
+    // the consumed state to take priority over a(`AbortError`) abort reason.
+    {
+        let p = get_request_payload(ctx, &this)?;
+        if p.body_consumed {
+            return reject_type_error_as_promise(ctx, "body already consumed or unavailable");
+        }
+    }
+
+    // A null-body request (e.g. `new Request(url)` with no init body) has no
+    // synthetic/stream body and is never disturbed. `formData()` must reject on
+    // a null body per the Fetch spec (e.g. WPT "Consume request's body as
+    // formData with correct multipart type (error case)"), even when a multipart
+    // `Content-Type` header is set without an actual body. We record this before
+    // the source block turns it into an empty synthetic body.
+    let is_null_body = {
+        let p = get_request_payload(ctx, &this)?;
+        !p.body_consumed && p.synthetic_body.is_none() && p.stream_body.is_none()
+    };
+
+    // A null-body request consumed as `formData()` must reject per the Fetch
+    // spec when the `Content-Type` is multipart/form-data (which needs a closing
+    // delimiter that an empty body lacks) — WPT "Consume request's body as
+    // formData with correct multipart type (error case)". A null body with an
+    // `application/x-www-form-urlencoded` type still parses (to an empty
+    // FormData), so it is allowed through.
+    if magic == BODY_AS_FORM_DATA && is_null_body {
+        let p = get_request_payload(ctx, &this)?;
+        let ct = p.headers.borrow().get("content-type").unwrap_or_default();
+        if ct.to_ascii_lowercase().starts_with("multipart/form-data") {
+            return reject_type_error_as_promise(ctx, "cannot parse null body as FormData");
+        }
+    }
+
+    // NOTE: Unlike Response (whose body consumption is aborted by its signal),
+    // a Request's body methods consume the *request* body and are NOT affected
+    // by signal abort. An aborted-but-unconsumed request resolves normally; a
+    // consumed request rejects with TypeError (handled above). See WPT
+    // fetch/api/abort/request.any.js.
+
+    let source = {
+        let p = get_request_payload_mut(ctx, &mut this)?;
+        if p.body_consumed {
+            None
+        } else if let Some(bytes) = p.synthetic_body.take() {
+            p.body_consumed = true;
+            Some(BodySource::Synthetic(bytes))
+        } else if let Some(s) = p.stream_body.take() {
+            // A stream body is drained on demand, like a buffered one.
+            p.body_consumed = true;
+            Some(BodySource::Stream(JSReadableStream::try_from(s)?))
+        } else {
+            // Null-body request (e.g. `new Request(url)` with no init body):
+            // consumers resolve to the empty value, and the body stays unused
+            // (bodyUsed remains false — a null body is never disturbed).
+            Some(BodySource::Synthetic(Vec::new()))
+        }
+    };
+
+    // Request.blob() sets the Blob's type to the request's *current*
+    // Content-Type header (mutable via `headers.set`), with parameters
+    // stripped. Computed before consuming the source below.
+    let blob_type = match magic {
+        BODY_AS_BLOB => {
+            let p = get_request_payload(ctx, &this)?;
+            blob_type_from_header(&p.headers.borrow())
+        }
+        // formData() needs the raw Content-Type: the multipart boundary lives
+        // in the parameters that blob_type_from_header strips.
+        BODY_AS_FORM_DATA => {
+            let p = get_request_payload(ctx, &this)?;
+            let ct = p.headers.borrow().get("content-type");
+            ct.unwrap_or_default()
+        }
+        _ => String::new(),
+    };
+
+    // The request's `AbortSignal`, so a mid-read abort rejects with the signal's
+    // reason rather than the cancellation's transport error.
+    let signal = get_request_payload(ctx, &this).ok().and_then(|p| p.signal);
+
+    match source {
+        Some(source) => drain_body(ctx, source, magic, blob_type, signal),
+        // Spec: these methods always return a promise; an already-consumed body
+        // rejects it rather than throwing synchronously.
+        None => reject_type_error_as_promise(ctx, "body already consumed or unavailable"),
+    }
+}
+
+/// `textStream()` — returns a `ReadableStream` of UTF-8-decoded string chunks.
+/// Consumes the body (sets `bodyUsed`); a null-body request yields an empty
+/// stream without marking the body used, and an already-consumed or locked
+/// body throws (WPT fetch/api/body/textstream.any.js expects a TypeError when
+/// `request.body` is locked via `getReader()`).
+fn js_req_text_stream(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
+    let mut this = _cc.this();
+    let source = {
+        let p = get_request_payload_mut(ctx, &mut this)?;
+        if p.body_consumed {
+            return Err(ctx.throw_type_error("body already consumed or locked"));
+        }
+        // A body exposed as a ReadableStream that is locked (or disturbed)
+        // cannot be consumed again — `textStream()` must reject, just like
+        // `blob()`/`text()` do (the shared `request_body_unusable` helper).
+        if p.cached_body.as_ref().is_some_and(|s| {
+            s.payload()
+                .is_some_and(|sp| sp.disturbed || sp.reader.is_some())
+        }) {
+            return Err(ctx.throw_type_error("body is locked"));
+        }
+
+        // Null-body request: empty stream, bodyUsed stays false, reusable.
+        if p.synthetic_body.is_none() && p.stream_body.is_none() {
+            None
+        } else if let Some(bytes) = p.synthetic_body.take() {
+            p.body_consumed = true;
+            Some(BodySource::Synthetic(bytes))
+        } else {
+            p.body_consumed = true;
+            let s = p.stream_body.take().expect("stream_body checked above");
+            Some(BodySource::Stream(JSReadableStream::try_from(s)?))
+        }
+    };
+
+    match source {
+        Some(src) => Ok(JSValue::from(JSReadableStream::from_text_source(ctx, src)?)),
+        None => Ok(JSValue::from(JSReadableStream::from_text_source(
             ctx,
-            JSValue::UNDEFINED,
-            crate::http::client::cache_storage::CacheStoragePayload {
-                stores: std::rc::Rc::new(std::cell::RefCell::new(std::collections::HashMap::new())),
-            },
-        )
-        .map(JSValue::from)?;
-        global.define_property_value_str(ctx, "caches", caches, zuqe::JS_PROP_C_W_E)?;
+            BodySource::Synthetic(Vec::new()),
+        )?)),
+    }
+}
+
+fn js_req_clone(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    let this = cc.this();
+
+    let src = get_request_payload(ctx, &this)?;
+    if src.body_consumed {
+        return Err(ctx.throw_type_error("Cannot clone a Request whose body has already been used"));
     }
 
-    Ok(())
-}
-
-/// `fetch.cors` getter — whether this runtime enforces CORS.
-#[cfg(feature = "fetch_browser")]
-fn js_fetch_cors_get(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
-    Ok(JSValue::from(AikeRuntimeState::of(ctx).fetch_cors))
-}
-
-/// `fetch.cors` setter — strict boolean.
-#[cfg(feature = "fetch_browser")]
-fn js_fetch_cors_set(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let b = match cc.arg(0).as_bool() {
-        Some(b) => b,
-        None => return Err(ctx.throw_type_error("`fetch.cors` must be a boolean")),
+    // WHATWG: a cloned Request gets its own "follow" signal that tracks the
+    // original. `clone.signal` must be a distinct object from `request.signal`,
+    // and aborting the original controller must abort the clone's signal too.
+    let signal = match src.signal {
+        Some(parent) => {
+            let child = make_default_signal(ctx)?;
+            signal_attach_follower(ctx, &parent, &child);
+            Some(child)
+        }
+        None => None,
     };
-    AikeRuntimeState::of(ctx).fetch_cors = b;
-    Ok(JSValue::UNDEFINED)
-}
 
-/// `fetch.cookie` getter — whether this runtime's `fetch` auto-uses the jar.
-#[cfg(feature = "fetch_browser")]
-fn js_fetch_cookie_get(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
-    Ok(JSValue::from(AikeRuntimeState::of(ctx).fetch_cookie))
-}
-
-/// `fetch.cookie` setter — strict boolean.
-#[cfg(feature = "fetch_browser")]
-fn js_fetch_cookie_set(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let b = match cc.arg(0).as_bool() {
-        Some(b) => b,
-        None => return Err(ctx.throw_type_error("`fetch.cookie` must be a boolean")),
+    let payload = RequestPayload {
+        method: src.method.clone(),
+        url: src.url.clone(),
+        // A cloned request owns an independent header set, not the shared one.
+        headers: Rc::new(RefCell::new(src.headers.borrow().clone())),
+        destination: src.destination.clone(),
+        referrer: src.referrer.clone(),
+        referrer_policy: src.referrer_policy.clone(),
+        mode: src.mode.clone(),
+        credentials: src.credentials.clone(),
+        cache: src.cache.clone(),
+        redirect: src.redirect.clone(),
+        integrity: src.integrity.clone(),
+        keepalive: src.keepalive,
+        duplex: src.duplex.clone(),
+        is_reload_navigation: src.is_reload_navigation,
+        is_history_navigation: src.is_history_navigation,
+        signal,
+        headers_obj: None,
+        synthetic_body: src.synthetic_body.clone(),
+        stream_body: src.stream_body,
+        cached_body: None,
+        body_consumed: false,
     };
-    AikeRuntimeState::of(ctx).fetch_cookie = b;
-    Ok(JSValue::UNDEFINED)
+    JSRequest::new_instance(ctx, this, payload).map(JSValue::from)
 }
 
-/// `fetch.allowInsecureTLS` getter — whether TLS validation is skipped.
-fn js_fetch_allow_insecure_get(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
-    Ok(JSValue::from(
-        AikeRuntimeState::of(ctx).fetch_allow_insecure_tls,
-    ))
-}
+// ---------------------------------------------------------------------------
+// Registration
+// ---------------------------------------------------------------------------
 
-/// `fetch.allowInsecureTLS` setter — strict boolean.
-fn js_fetch_allow_insecure_set(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let b = match cc.arg(0).as_bool() {
-        Some(b) => b,
-        None => {
-            return Err(ctx.throw_type_error("`fetch.allowInsecureTLS` must be a boolean"));
-        }
-    };
-    AikeRuntimeState::of(ctx).fetch_allow_insecure_tls = b;
-    Ok(JSValue::UNDEFINED)
-}
+const REQUEST_PROTO: &[FieldDef] = &[
+    FieldDef::GETSET_ENUM("method", Some(js_req_method), None, 0),
+    FieldDef::GETSET_ENUM("url", Some(js_req_url), None, 0),
+    FieldDef::GETSET_ENUM("destination", Some(js_req_destination), None, 0),
+    FieldDef::GETSET_ENUM("referrer", Some(js_req_referrer), None, 0),
+    FieldDef::GETSET_ENUM("referrerPolicy", Some(js_req_referrer_policy), None, 0),
+    FieldDef::GETSET_ENUM("mode", Some(js_req_mode), None, 0),
+    FieldDef::GETSET_ENUM("credentials", Some(js_req_credentials), None, 0),
+    FieldDef::GETSET_ENUM("cache", Some(js_req_cache), None, 0),
+    FieldDef::GETSET_ENUM("redirect", Some(js_req_redirect), None, 0),
+    FieldDef::GETSET_ENUM("integrity", Some(js_req_integrity), None, 0),
+    FieldDef::GETSET_ENUM("keepalive", Some(js_req_keepalive_getter), None, 0),
+    FieldDef::GETSET_ENUM("signal", Some(js_req_signal_getter), None, 0),
+    FieldDef::GETSET_ENUM("headers", Some(js_req_headers_getter), None, 0),
+    FieldDef::GETSET_ENUM("bodyUsed", Some(js_req_body_used_getter), None, 0),
+    FieldDef::GETSET_ENUM("duplex", Some(js_req_duplex_getter), None, 0),
+    FieldDef::GETSET_ENUM(
+        "isReloadNavigation",
+        Some(js_req_is_reload_navigation_getter),
+        None,
+        0,
+    ),
+    FieldDef::GETSET_ENUM(
+        "isHistoryNavigation",
+        Some(js_req_is_history_navigation_getter),
+        None,
+        0,
+    ),
+    FieldDef::GETSET_ENUM("body", Some(js_req_body), None, 0),
+    FieldDef::FUNC_ENUM("bytes", 0, js_req_body_as, BODY_AS_BYTES as i16),
+    FieldDef::FUNC_ENUM(
+        "arrayBuffer",
+        0,
+        js_req_body_as,
+        BODY_AS_ARRAY_BUFFER as i16,
+    ),
+    FieldDef::FUNC_ENUM("text", 0, js_req_body_as, BODY_AS_TEXT as i16),
+    FieldDef::FUNC_ENUM("json", 0, js_req_body_as, BODY_AS_JSON as i16),
+    FieldDef::FUNC_ENUM("blob", 0, js_req_body_as, BODY_AS_BLOB as i16),
+    FieldDef::FUNC_ENUM("formData", 0, js_req_body_as, BODY_AS_FORM_DATA as i16),
+    FieldDef::FUNC_ENUM("textStream", 0, js_req_text_stream, 0),
+    FieldDef::FUNC_ENUM("clone", 0, js_req_clone, 0),
+    // WebIDL class string (`Object.prototype.toString` → "[object Request]").
+    FieldDef::STR(
+        "[Symbol.toStringTag]",
+        "Request",
+        zuqe::JS_PROP_CONFIGURABLE,
+    ),
+];
 
-/// Parse a single `bytes` range (the `Range` header of a `blob:` fetch) against
-/// a body of `size` bytes. Returns inclusive `(start, end)` offsets, or `None`
-/// when the range is malformed or unsatisfiable. Whitespace is allowed around
-/// the unit, `=` and `-`; multiple ranges are not supported.
-fn parse_blob_range(value: &str, size: u64) -> Option<(u64, u64)> {
-    let ws = |c: char| matches!(c, ' ' | '\t');
-    let unit = value.get(..5)?;
-    if !unit.eq_ignore_ascii_case("bytes") {
-        return None;
-    }
-    let rest = value[5..].trim_start_matches(ws).strip_prefix('=')?;
-    let (first, rest) = split_digits(rest.trim_start_matches(ws));
-    let rest = rest.trim_start_matches(ws).strip_prefix('-')?;
-    let (last, rest) = split_digits(rest.trim_start_matches(ws));
-    if !rest.trim_matches(ws).is_empty() || (first.is_empty() && last.is_empty()) || size == 0 {
-        return None;
-    }
-    // Overflowing numbers saturate; they are then clamped or unsatisfiable.
-    let num = |s: &str| s.parse::<u64>().unwrap_or(u64::MAX);
-    match (first.is_empty(), last.is_empty()) {
-        (false, true) => {
-            let start = num(first);
-            (start < size).then_some((start, size - 1))
-        }
-        (false, false) => {
-            let (start, end) = (num(first), num(last));
-            (start <= end && start < size).then(|| (start, end.min(size - 1)))
-        }
-        (true, _) => {
-            let suffix = num(last);
-            (suffix > 0).then(|| (size.saturating_sub(suffix), size - 1))
-        }
-    }
-}
-
-/// Split the leading ASCII digits off `s`.
-fn split_digits(s: &str) -> (&str, &str) {
-    let n = s.bytes().take_while(u8::is_ascii_digit).count();
-    s.split_at(n)
-}
+def_native_object!(
+    "Request",
+    JSRequest,
+    RequestPayload,
+    REQUEST_PROTO,
+    // `call_as_func: false`: Request must be constructed with `new` (WPT
+    // request-error "without new must throw").
+    Some(ClassCtorDef::new(js_request_constructor, 1, false).expose_to_global())
+);

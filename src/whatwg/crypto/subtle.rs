@@ -337,13 +337,14 @@ fn gcm_crypt(
     tag_len: usize,
     decrypt: bool,
 ) -> Option<Vec<u8>> {
-    // aead 0.6 moved to hybrid-array: typenum consts live under
-    // `aead::array::typenum::consts`; cipher 0.5 splits BlockEncrypt into
-    // BlockCipherEncrypt/BlockModeEncrypt.
-    use aes_gcm::AesGcm;
-    use aes_gcm::aead::array::typenum::consts::{U12, U13, U14, U15, U16};
-    use aes_gcm::aead::{Aead, AeadCore, KeyInit, Payload};
-    use aes_gcm::aes::cipher::{BlockCipherEncrypt, BlockSizeUser};
+    use aes_gcm::{
+        AesGcm,
+        aead::{
+            Aead, AeadCore, KeyInit, Payload,
+            array::typenum::consts::{U12, U13, U14, U15, U16},
+        },
+        aes::cipher::{BlockCipherEncrypt, BlockSizeUser},
+    };
 
     fn gcm_do<K, T>(
         key: &[u8],
@@ -832,13 +833,18 @@ fn js_subtle_constructor(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult 
 }
 
 const CLASS_SUBTLE_PROTO: &[FieldDef] = &[
-    FieldDef::FUNC("digest", 2, js_subtle_digest, 0),
-    FieldDef::FUNC("sign", 3, js_subtle_sign, 0),
-    FieldDef::FUNC("verify", 4, js_subtle_verify, 0),
-    FieldDef::FUNC("encrypt", 3, js_subtle_encrypt, 0),
-    FieldDef::FUNC("decrypt", 3, js_subtle_decrypt, 0),
-    FieldDef::FUNC("importKey", 5, js_subtle_import_key, 0),
-    FieldDef::FUNC("exportKey", 2, js_subtle_export_key, 0),
+    FieldDef::FUNC_ENUM("digest", 2, js_subtle_digest, 0),
+    FieldDef::FUNC_ENUM("sign", 3, js_subtle_sign, 0),
+    FieldDef::FUNC_ENUM("verify", 4, js_subtle_verify, 0),
+    FieldDef::FUNC_ENUM("encrypt", 3, js_subtle_encrypt, 0),
+    FieldDef::FUNC_ENUM("decrypt", 3, js_subtle_decrypt, 0),
+    FieldDef::FUNC_ENUM("importKey", 5, js_subtle_import_key, 0),
+    FieldDef::FUNC_ENUM("exportKey", 2, js_subtle_export_key, 0),
+    FieldDef::STR(
+        "[Symbol.toStringTag]",
+        "SubtleCrypto",
+        zuqe::JS_PROP_CONFIGURABLE,
+    ),
 ];
 
 def_native_object!(

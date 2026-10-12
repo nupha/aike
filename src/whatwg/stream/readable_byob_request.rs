@@ -108,9 +108,9 @@ fn js_byob_request_respond_with_new_view(ctx: &mut ScopedContext, cc: CallContex
 // ---------------------------------------------------------------------------
 
 const BYOB_REQUEST_PROTO: &[FieldDef] = &[
-    FieldDef::GETSET("view", Some(js_byob_request_view), None, 0),
-    FieldDef::FUNC("respond", 1, js_byob_request_respond, 0),
-    FieldDef::FUNC(
+    FieldDef::GETSET_ENUM("view", Some(js_byob_request_view), None, 0),
+    FieldDef::FUNC_ENUM("respond", 1, js_byob_request_respond, 0),
+    FieldDef::FUNC_ENUM(
         "respondWithNewView",
         1,
         js_byob_request_respond_with_new_view,

@@ -49,7 +49,7 @@ function findTestharness(roots) {
       const p = join(base, "resources/testharness.js");
       try {
         if (await fs.exists(p)) return p;
-      } catch {}
+      } catch { }
     }
     return null;
   })();
@@ -188,7 +188,13 @@ function fileHttpUrl(absFile) {
   if (repoRoot && absFile.startsWith(repoRoot)) {
     rel = absFile.slice(repoRoot.replace(/\/+$/, "").length);
   }
-  rel = rel.replace(/^\/+/, "");
+  // Paths from the filesystem use the OS separator; on Windows that is `\`,
+  // which the URL parser also treats as `/` for special schemes — leaving the
+  // injected document URL with a doubled slash (`.../\fetch\x.any.js` ->
+  // `...//fetch/x.any.js`). Tests derive fixture URLs from `location.pathname`,
+  // so that artifact then leaks into every request URL they build (and breaks
+  // cache-key/invalidation matching, WPT `http-cache/invalidate`). Normalize.
+  rel = rel.replace(/\\/g, "/").replace(/^\/+/, "");
 
   return wptBase + "/" + rel;
 }
@@ -196,17 +202,24 @@ function fileHttpUrl(absFile) {
 // The URL a browser would load the test file from. Same as `fileHttpUrl` except
 // that `.https.`/`.h2.` tests are served over TLS on a different port, so their
 // `location` (and therefore the client origin used for same-origin checks and
-// `Sec-Fetch-Site`) must use https. Only the shimmed location uses this — the
-// runner still *reads* the script over plain HTTP.
+// `Sec-Fetch-Site`) must use https. Only the shimmed location and the eval base
+// URL use this — the runner still *reads* the script over plain HTTP, and the
+// two must agree: a relative `fetch()` resolves against the eval base URL and is
+// then compared with the client origin.
 function testOriginUrl(absFile) {
   const url = fileHttpUrl(absFile);
   if (!url) return url;
-  // Match `.https.` / `.h2.` anywhere before `.any.js`, so `.https.sub.any.js`
-  // variants are covered too.
-  if (/\.h2\.[^/]*\.any\.js$/.test(url)) {
+  // Match `.https.` / `.h2.` anywhere in the name, so both the direct form
+  // (`<name>.https.any.js`) and the substituted one
+  // (`<name>.https.sub.any.js`) are covered. A `[^/]*` segment before `.any.js`
+  // silently missed the direct form, which left every
+  // `fetch/cross-origin-resource-policy/*.https.any.js` (and
+  // `fetch/content-encoding/*.https.any.js`) running against the plain-HTTP
+  // client origin.
+  if (/\.h2\./.test(url)) {
     return url.replace(/^http:/, "https:").replace(/:\d+/, ":9000");
   }
-  if (/\.https\.[^/]*\.any\.js$/.test(url)) {
+  if (/\.https\./.test(url)) {
     return url.replace(/^http:/, "https:").replace(/:\d+/, ":8443");
   }
   return url;
@@ -372,6 +385,59 @@ Options:
 components: directories or .any.js files, resolved against the root
             (none = nothing is tested). Example: console url console/foo.any.js`;
 
+// ---------------------------------------------------------------------------
+// Not-applicable files
+//
+// WPT targets a browser; a JS shell can never pass these, and their noise
+// buries the signal in the totals. Matched against the file's absolute path.
+// `--no-skip` runs everything (for auditing the list).
+// ---------------------------------------------------------------------------
+const NA_PATTERNS = [
+  // HTTP/2 variants: aike speaks HTTP/1.1 only (`ProtocolMode::Http1Only`).
+  [/\.h2\./, "h2"],
+  // Tentative tests describe unshipped / at-risk features.
+  [/\.tentative\./, "tentative"],
+  // Opaque Response Blocking (`fetch/orb`): not implemented.
+  [/[/\\]fetch[/\\]orb[/\\]/, "orb"],
+  // Page-lifecycle tests (keepalive on load / unload / pagehide) need
+  // `document`, `window.open` and `Worker`; a shell has none of them.
+  [/keepalive[^/\\]*\.any\.js$/, "no-window"],
+];
+const skippedNa = [];
+let skipNa = true;
+
+// ---------------------------------------------------------------------------
+// Not-applicable *failures*
+//
+// Some files mix browser-only tests with portable ones (e.g.
+// `header-values-normalize.any.js` pairs `fetch` cases with `XMLHttpRequest`
+// ones), so the whole file cannot be skipped. Classify those individual
+// failures as not-applicable instead: a shell simply has no `document`,
+// `window`, `Worker` or `XMLHttpRequest`. Reported separately from real
+// failures so the real number stays readable.
+// ---------------------------------------------------------------------------
+const NA_MESSAGE_RES = [
+  /'XMLHttpRequest' is not defined/,
+  /'document' is not defined/,
+  /'window' is not defined/,
+  /'Worker' is not defined/,
+  /'navigator' is not defined/,
+  /'onload' is not defined/,
+  /'HTMLAnchorElement' is not defined/,
+];
+/// Classify a failure message into the buckets the summary reports apart from
+/// real conformance failures:
+///   "na"     — the shell has no such browser global (nothing to fix here)
+///   "engine" — a known engine/harness defect, tracked separately; it is
+///              stack-depth sensitive and swings the totals run to run
+///   "real"   — an actual behaviour difference
+function classifyFailure(message) {
+  const m = message ?? "";
+  if (NA_MESSAGE_RES.some((re) => re.test(m))) return "na";
+  if (/stack overflow/.test(m)) return "engine";
+  return "real";
+}
+
 const args = G.process.argv.slice(2);
 root = G.process.env.AIKE_WPT_ROOT || G.process.cwd();
 let failFile = null;
@@ -394,6 +460,7 @@ for (let i = 0; i < args.length; i++) {
   else if (a.startsWith("--wpt-server="))
     wptServer = a.slice("--wpt-server=".length);
   else if (a === "--no-wpt-server") wptServerEnabled = false;
+  else if (a === "--no-skip") skipNa = false;
   else if (a === "--global") globalFilter = new Set(args[++i].split(","));
   else if (a.startsWith("--global="))
     globalFilter = new Set(a.slice("--global=".length).split(","));
@@ -574,6 +641,23 @@ const PROMISE_SETTLE_TIMEOUT_MS = 30000;
 // Single-file execution
 // ---------------------------------------------------------------------------
 
+/// Path relative to the WPT root, e.g. `fetch/api/response/x.any.js`.
+///
+/// Reports use it instead of the basename because the same basename recurs
+/// across directories (`fetch.any.js` exists in `fetch/api/basic`,
+/// `fetch/cross-origin-resource-policy`, …), which makes a basename-keyed
+/// failure list ambiguous.
+function relFile(absFile) {
+  if (!absFile) return null;
+  const r = repoRoot.replace(/[\\/]+$/, "");
+  if (!absFile.startsWith(r)) return absFile;
+  return absFile
+    .slice(r.length)
+    .replace(/^[\\/]+/, "")
+    .split("\\")
+    .join("/");
+}
+
 async function runOneFile(file) {
   currentAbsFile = file;
   currentFile = basename(file);
@@ -633,7 +717,12 @@ async function runOneFile(file) {
   // close over its top-level declarations.
   await Aike.evalScript(`(async () => {\n${code}\n})()`, {
     topLevelAwait: true,
-    baseUrl: fileHttpUrl(file),
+    // The *test's* origin URL, matching `setLocation` above: a relative
+    // `fetch()` in the file must resolve to the same origin the document is
+    // served from, exactly as in a browser. Keeping this on plain HTTP while
+    // `location` followed the test's scheme made relative fetches cross-origin
+    // against their own client origin.
+    baseUrl: testOriginUrl(file),
   });
 
   // All test()/promise_test() calls in the file have now run synchronously.
@@ -718,14 +807,20 @@ async function resolveTestFiles(comp) {
       // idlharness.https.any.js, ...): they need WebIDL, which the shell
       // testharness.js does not provide, so every interface assertion misfires.
       const isIdlHarness = /^idlharness\..*\.any\.js$/.test(e.name);
-      if (e.name.endsWith(".any.js") && !isIdlHarness) {
-        if (globalFilter || globalExclude) {
-          const scopes = await parseGlobalMeta(p);
-          if (globalFilter && !hasIntersection(scopes, globalFilter)) continue;
-          if (globalExclude && hasIntersection(scopes, globalExclude)) continue;
+      if (!e.name.endsWith(".any.js") || isIdlHarness) continue;
+      if (skipNa) {
+        const hit = NA_PATTERNS.find(([re]) => re.test(p));
+        if (hit) {
+          skippedNa.push([p, hit[1]]);
+          continue;
         }
-        out.push(p);
       }
+      if (globalFilter || globalExclude) {
+        const scopes = await parseGlobalMeta(p);
+        if (globalFilter && !hasIntersection(scopes, globalFilter)) continue;
+        if (globalExclude && hasIntersection(scopes, globalExclude)) continue;
+      }
+      out.push(p);
     }
   };
   await walk(compPath);
@@ -781,11 +876,28 @@ async function runComponent(comp) {
 
   let passed = 0;
   let failed = 0;
+  let na = 0;
+  let engine = 0;
   const failures = [];
+  const naFailures = [];
+  const engineFailures = [];
   for (const r of results.slice(before)) {
     if (r.status === "PASS") {
       passed++;
       continue;
+    }
+    if (r.status === "FAIL") {
+      const kind = classifyFailure(r.message);
+      if (kind === "na") {
+        na++;
+        naFailures.push(r);
+        continue;
+      }
+      if (kind === "engine") {
+        engine++;
+        engineFailures.push(r);
+        continue;
+      }
     }
     failed++;
     failures.push(r);
@@ -793,22 +905,39 @@ async function runComponent(comp) {
   const status = failed > 0 ? "FAIL" : "PASS";
   console.log(`=== ${comp} ===`);
   for (const r of failures) {
-    console.log(`FAIL  [${r.file}] ${r.name}`);
+    console.log(`FAIL  [${relFile(r.abs) ?? r.file}] ${r.name}`);
     if (r.message) console.log(`      ${r.message}`);
   }
+  const side = [];
+  if (naFailures.length) side.push(`not applicable: ${naFailures.length}`);
+  if (engineFailures.length) side.push(`engine: ${engineFailures.length}`);
+  if (side.length) console.log(`(excluded — ${side.join(", ")})`);
+  const naTag = na + engine > 0 ? `  (na ${na}, engine ${engine})` : "";
   console.log(
-    `Files: ${files.length}  Tests: ${failed + passed}  Passed: ${passed}  Failed: ${failed}  [${status === "FAIL" ? "FAIL" : "PASS"}]`,
+    `Files: ${files.length}  Tests: ${failed + passed + na + engine}  Passed: ${passed}  Failed: ${failed}${naTag}  [${status === "FAIL" ? "FAIL" : "PASS"}]`,
   );
-  return { comp, files: files.length, tests: failed + passed, passed, failed };
+  return {
+    comp,
+    files: files.length,
+    tests: failed + passed + na + engine,
+    passed,
+    failed,
+    na,
+    engine,
+  };
 }
 
 const summaries = [];
 let totalFailed = 0;
+let totalNa = 0;
+let totalEngine = 0;
 for (const comp of components) {
   const s = await runComponent(comp);
   if (s) {
     summaries.push(s);
     totalFailed += s.failed;
+    totalNa += s.na ?? 0;
+    totalEngine += s.engine ?? 0;
   }
 }
 
@@ -828,7 +957,7 @@ if (failFile) {
     if (compResults.length === 0) continue;
     lines.push(`=== ${comp} ===`);
     for (const r of compResults) {
-      lines.push(`FAIL  [${r.file}] ${r.name}`);
+      lines.push(`FAIL  [${relFile(r.abs) ?? r.file}] ${r.name}`);
       if (r.message) lines.push(`      ${r.message}`);
     }
     lines.push("");
@@ -850,8 +979,18 @@ for (const s of summaries) {
   );
 }
 console.log(
-  `Total: ${summaries.reduce((n, s) => n + s.tests, 0)} tests, ${summaries.reduce((n, s) => n + s.passed, 0)} passed, ${totalFailed} failed`,
+  `Total: ${summaries.reduce((n, s) => n + s.tests, 0)} tests, ${summaries.reduce((n, s) => n + s.passed, 0)} passed, ${totalFailed} failed${totalNa + totalEngine > 0 ? `  (excluded: ${totalNa} not-applicable, ${totalEngine} engine)` : ""}`,
 );
+if (skippedNa.length > 0) {
+  const byReason = {};
+  for (const [, why] of skippedNa) byReason[why] = (byReason[why] ?? 0) + 1;
+  const detail = Object.entries(byReason)
+    .map(([why, n]) => `${why}=${n}`)
+    .join(" ");
+  console.log(
+    `Skipped (not applicable to a JS shell): ${skippedNa.length} files  [${detail}]  (--no-skip to include)`,
+  );
+}
 
 // wptreport JSON (format consumed by wpt.fyi), one entry per test file.
 if (logWptreport) {

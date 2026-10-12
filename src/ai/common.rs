@@ -136,7 +136,6 @@ pub(crate) fn js_common_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSRe
 /// references imported at each call site to save four lines. The magic
 /// constants and `js_common_getter` are what must not drift; the property
 /// names are written out.
-
 /// Read a required string argument of a header accessor.
 fn name_arg(ctx: &mut ScopedContext, v: JSValue, label: &str) -> Result<String, i32> {
     v.as_string(true)

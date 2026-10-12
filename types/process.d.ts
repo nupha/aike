@@ -627,27 +627,6 @@ declare namespace Aike {
    */
   function sandboxSupport(): SandboxSupport;
 
-  // --- download (aike 增强，非 WHATWG；memo §5.4) ---
-
-  /** Options for `Aike.download`. */
-  interface DownloadOptions {
-    /** AbortSignal to cancel an in-flight download. */
-    signal?: AbortSignal;
-  }
-
-  /**
-   * Download a URL. With `destPath` the body is streamed to the file (written
-   * to a temp file then atomically renamed) and the promise resolves with the
-   * path; without it, the promise resolves with the body as a `Uint8Array`.
-   * When `options.signal` aborts, the download is cancelled, any partial temp
-   * file is removed, and the promise rejects with the signal's reason.
-   */
-  function download(
-    url: string,
-    destPath?: string,
-    options?: DownloadOptions,
-  ): Promise<string | Uint8Array>;
-
   // --- signal ---
 
   // The signal name → number table lives at `os.constants.signals`.

@@ -78,8 +78,8 @@ impl GcTrace for WritableControllerPayload {
 }
 
 const WRITABLE_CONTROLLER_PROTO: &[FieldDef] = &[
-    FieldDef::FUNC("error", 1, js_writable_controller_error, 0),
-    FieldDef::GETSET("signal", Some(js_writable_controller_signal), None, 0),
+    FieldDef::FUNC_ENUM("error", 1, js_writable_controller_error, 0),
+    FieldDef::GETSET_ENUM("signal", Some(js_writable_controller_signal), None, 0),
     FieldDef::STR(
         "[Symbol.toStringTag]",
         "WritableStreamDefaultController",

@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2026 John Ray <996351336@qq.com>
 
-use std::path::PathBuf;
-
 use crossbeam::channel::TryRecvError;
 use serde_json::Value as JsonValue;
 use zuqe::{Exception, JobState, ScopedContext};
@@ -20,22 +18,13 @@ pub(crate) fn print_exc(ctx: &mut ScopedContext, exc: Exception) {
     }
 }
 
-/// Return `$AIKE_HOME` if set, otherwise the current working directory.
-pub(crate) fn aike_home() -> PathBuf {
-    std::env::var("AIKE_HOME")
-        .ok()
-        .filter(|v| !v.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
-}
-
 /// Canonicalize a path, stripping the Windows `\\?\` prefix that `canonicalize()` adds.
 ///
 /// On Windows, `std::fs::canonicalize()` returns paths with `\\?\` prefix (extended-length
 /// path format, e.g. `\\?\C:\Users\...`). This breaks user-facing display and `starts_with`
 /// comparisons. This wrapper strips that prefix for cross-platform consistency.
 ///
-/// Also handles `\\?\UNC\server\share\...` 鈫?`\\server\share\...` conversion correctly.
+/// Also handles `\\?\UNC\server\share\...` \\?`\\server\share\...` conversion correctly.
 pub(crate) fn canonicalize_path<P: AsRef<std::path::Path>>(
     path: P,
 ) -> std::io::Result<std::path::PathBuf> {
@@ -45,14 +34,14 @@ pub(crate) fn canonicalize_path<P: AsRef<std::path::Path>>(
     {
         let s = p.to_string_lossy();
         if let Some(rest) = s.strip_prefix(r"\\?\") {
-            // UNC paths: `\\?\UNC\server\share\...` 鈫?`\\server\share\...`
+            // UNC paths: `\\?\UNC\server\share\...` \\?`\\server\share\...`
             if let Some(unc) = rest
                 .strip_prefix("UNC\\")
                 .or_else(|| rest.strip_prefix("UNC/"))
             {
                 return Ok(std::path::PathBuf::from(format!("\\{}", unc)));
             }
-            // Regular paths: `\\?\C:\...` 鈫?`C:\...`
+            // Regular paths: `\\?\C:\...` \\?`C:\...`
             return Ok(std::path::PathBuf::from(rest));
         }
     }
@@ -153,8 +142,7 @@ pub(crate) fn start_channel_poller<T, F>(
                 Ok(msg) => {
                     let cont = handler(msg, cx);
 
-                    // ES 搂9.5: handler returns bool, not Result 鈥?clear any
-                    // exception it may have set via cx.throw_*().
+                    // handler returns bool, must not leak a thrown exception
                     if let exc @ Exception::Error(_) = cx.take_exception() {
                         log::warn!("[channel poller:{label}] handler left exception: {exc:?}");
                     }

@@ -4,8 +4,8 @@
 //! Browser-security layer of the Fetch API: the WHATWG CORS protocol
 //! (preflight, `Access-Control-Allow-*` validation, response-header
 //! filtering), request-mode/tainting decisions, and the per-hop preflight
-//! gate driven through the transport's neutral [`BeforeHopHook`](crate::
-//! http::client::transport::BeforeHopHook).
+//! gate driven through the transport's neutral [`BeforeHopHook`](super::transport::
+//! BeforeHopHook).
 //!
 //! Gated by the `fetch_browser` feature. With the feature disabled the
 //! decision functions below compile to constant stubs (`false` / always-pass),
@@ -13,7 +13,7 @@
 //! the engine then behaves like a plain HTTP client. The preflight execution
 //! machinery ([`self::preflight`]) exists only in browser builds.
 
-use crate::http::client::headers::{HeaderList, is_cors_safelisted};
+use crate::whatwg::fetch::headers::{HeaderList, is_cors_safelisted};
 
 /// CORS-safelisted response-header names (Fetch spec §5.1.1). These are the
 /// only headers exposed on a `cors` filtered response unless the server lists
@@ -280,9 +280,9 @@ pub(crate) fn same_origin_violation(
 
 /// Fetch spec: enforce `Cross-Origin-Resource-Policy` on a `no-cors` response.
 /// `same-origin` requires the client origin to be same-origin with the response
-/// URL; `same-site` requires them to be same-site (here: the same host, since
-/// aike carries no public-suffix list). Returns the error message on violation,
-/// `None` when the response is allowed through.
+/// URL; `same-site` requires them to be same-site — same scheme and same host
+/// (port ignored), since aike carries no public-suffix list. Returns the error
+/// message on violation, `None` when the response is allowed through.
 #[cfg(feature = "fetch_browser")]
 pub(crate) fn corp_violation(
     headers: &HeaderList,
@@ -300,10 +300,16 @@ pub(crate) fn corp_violation(
         // Same-origin satisfies both policy values.
         return None;
     }
+    // HTML "same site" is schemeful: `http://a.test:1234` and
+    // `https://a.test:8443` are *schemelessly* same site but not same site, and
+    // the port is ignored either way. (WPT `cross-origin-resource-policy`: the
+    // cross-scheme HTTP→HTTPS case must be blocked, the same-scheme
+    // different-port case must not.) There is no public-suffix list here, so
+    // the host is compared as-is.
     let same_site = url::Url::parse(client)
         .ok()
         .zip(req.host_str())
-        .is_some_and(|(c, h)| c.host_str() == Some(h));
+        .is_some_and(|(c, h)| c.host_str() == Some(h) && c.scheme() == req.scheme());
     match value {
         "same-origin" => Some(format!(
             "request failed: 'no-cors' response is cross-origin and blocked by \
@@ -448,11 +454,12 @@ mod preflight {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use super::{PreflightCtx, cors_check, cors_safelisted_method, split_header_list};
-    use crate::http::client::{
+    use crate::whatwg::fetch::{
         headers::HeaderList,
         transport::{BeforeHopFuture, BeforeHopHook},
     };
+
+    use super::{PreflightCtx, cors_check, cors_safelisted_method, split_header_list};
 
     /// Build the per-hop gate installed on a fetch `TransportRequest`. The
     /// transport invokes the hook before every CORS-tainted hop (initial URL
@@ -830,6 +837,6 @@ pub(crate) use preflight::make_before_hop_hook;
 #[cfg(not(feature = "fetch_browser"))]
 pub(crate) fn make_before_hop_hook(
     _pf: Option<PreflightCtx>,
-) -> Option<crate::http::client::transport::BeforeHopHook> {
+) -> Option<crate::whatwg::fetch::transport::BeforeHopHook> {
     None
 }

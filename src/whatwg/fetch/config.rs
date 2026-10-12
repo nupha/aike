@@ -23,14 +23,11 @@ pub(crate) enum ProtocolMode {
     Auto,
     /// Force HTTP/1.x only.
     Http1Only,
-    /// Assume the server speaks HTTP/2 from the start (no upgrade).
-    Http2PriorKnowledge,
 }
 
-/// Client-level configuration for `HttpClient`.
-///
-/// Set once in the constructor; all subsequent requests on the same
-/// `HttpClient` instance share the same settings and connection pool.
+/// Connection-level configuration shared by every request that goes through
+/// [`build_http_client_ex`](self::HttpClientConfig::build_http_client_ex).
+/// The fetch pipeline builds one from `default()` and narrows it per request.
 #[derive(Clone, Debug)]
 pub(crate) struct HttpClientConfig {
     /// HTTP/HTTPS proxy URL.
@@ -159,14 +156,8 @@ impl HttpClientConfig {
         }
 
         // --- Protocol ---
-        match self.protocol {
-            ProtocolMode::Http1Only => {
-                builder = builder.http1_only();
-            }
-            ProtocolMode::Http2PriorKnowledge => {
-                builder = builder.http2_prior_knowledge();
-            }
-            ProtocolMode::Auto => {}
+        if matches!(self.protocol, ProtocolMode::Http1Only) {
+            builder = builder.http1_only();
         }
 
         builder
@@ -265,9 +256,14 @@ pub(crate) fn cookie_order_record(set_cookie: &str) {
         return;
     }
     let mut order = global_cookie_order().write().unwrap();
-    if !order.iter().any(|n| n == &name) {
-        order.push(name);
-    }
+    // Re-register on every `Set-Cookie`: move the name to the end rather than
+    // keeping its first-ever position. The table is process-global and never
+    // pruned, so a stale entry left by an earlier test or file would otherwise
+    // pin a name ahead of cookies set later, and a deleted cookie's name would
+    // keep its old slot (WPT `credentials/cookies` "Include mode: 2 cookies"
+    // expects the creation order of *this* response: `b=2; c=3`).
+    order.retain(|n| n != &name);
+    order.push(name);
 }
 
 /// Reorder a `Cookie` header value's `name=value` pairs into first-seen order.

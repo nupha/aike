@@ -6,7 +6,6 @@
 //! Exposes:
 //! - `parseHTML(html): Document`          — module-level function
 //! - `html2markdown(html): string`        — module-level function
-//! - `convert_html(html, mode)`           — shared utility for `HttpResponse.text()`
 //! - `Document` / `Element`               — internal classes (used via module API)
 
 use ego_tree::NodeId;
@@ -40,136 +39,6 @@ fn get_element_ref<'a>(html: &'a Html, id: NodeId) -> Option<ElementRef<'a>> {
 fn arg_str(ctx: &mut ScopedContext, cc: &CallContext, idx: usize) -> Result<String, i32> {
     let s = cc.arg(idx).to_string(ctx)?;
     Ok(s.content().encode_utf8(false).to_string())
-}
-
-// ---------------------------------------------------------------------------
-// HTML ↔ text conversion  (shared with `request.rs`)
-// ---------------------------------------------------------------------------
-
-/// Strip HTML tags, decode common entities, and remove script/style content.
-/// Handles multi-byte UTF-8 correctly — iterates by char, matches by byte offset.
-fn strip_html_tags(input: &str) -> String {
-    let lower = input.to_ascii_lowercase();
-    let lower_bytes = lower.as_bytes();
-    let mut result = String::with_capacity(input.len() / 2);
-    let mut in_tag = false;
-    let mut in_skip = false; // inside <script> or <style>
-
-    // Collect (byte_offset, char) for UTF-8-safe iteration
-    let char_pos: Vec<(usize, char)> = input.char_indices().collect();
-    let mut ci = 0;
-
-    while ci < char_pos.len() {
-        let (pos, ch) = char_pos[ci];
-
-        if !in_tag && ch == '<' {
-            // Detect <script or <style opening (all ASCII, safe to slice lower)
-            if !in_skip {
-                let rest = &lower[pos..];
-                if rest.starts_with("<script")
-                    && rest.len() > 7
-                    && (lower_bytes[pos + 7] == b'>' || lower_bytes[pos + 7].is_ascii_whitespace())
-                {
-                    in_skip = true;
-                } else if rest.starts_with("<style")
-                    && rest.len() > 6
-                    && (lower_bytes[pos + 6] == b'>' || lower_bytes[pos + 6].is_ascii_whitespace())
-                {
-                    in_skip = true;
-                }
-            }
-            in_tag = true;
-            ci += 1;
-            continue;
-        }
-        if in_tag && ch == '>' {
-            in_tag = false;
-            // Detect </script> or </style> closing
-            if in_skip && pos >= 8 {
-                let from = pos.saturating_sub(10);
-                // from may not be a char boundary (multi-byte UTF-8),
-                // walk forward to the nearest safe boundary
-                let start = (from..=pos)
-                    .find(|&i| lower.is_char_boundary(i))
-                    .unwrap_or(pos);
-                let slice = &lower[start..=pos];
-                if slice.contains("</script>") || slice.contains("</style>") {
-                    in_skip = false;
-                }
-            }
-            result.push(' ');
-            ci += 1;
-            continue;
-        }
-        if !in_tag && !in_skip {
-            if ch == '&' {
-                // Decode common HTML entities (all ASCII)
-                let rest = &lower[pos..];
-                let (decoded, skip) = if rest.starts_with("&amp;") {
-                    ('&', 5)
-                } else if rest.starts_with("&lt;") {
-                    ('<', 4)
-                } else if rest.starts_with("&gt;") {
-                    ('>', 4)
-                } else if rest.starts_with("&quot;") {
-                    ('"', 6)
-                } else if rest.starts_with("&#39;") {
-                    ('\'', 5)
-                } else if rest.starts_with("&apos;") {
-                    ('\'', 6)
-                } else if rest.starts_with("&nbsp;") {
-                    (' ', 6)
-                } else {
-                    ('&', 1)
-                };
-                result.push(decoded);
-                // Advance past multi-byte entity by byte offset
-                let target = pos + skip;
-                while ci < char_pos.len() && char_pos[ci].0 < target {
-                    ci += 1;
-                }
-            } else {
-                // Push the full UTF-8 char (safe for CJK, emoji, etc.)
-                result.push(ch);
-                ci += 1;
-            }
-        } else {
-            ci += 1;
-        }
-    }
-
-    // Collapse whitespace
-    let mut collapsed = String::with_capacity(result.len());
-    let mut last_was_space = false;
-    for ch in result.chars() {
-        if ch.is_whitespace() {
-            if !last_was_space {
-                collapsed.push(' ');
-                last_was_space = true;
-            }
-        } else {
-            collapsed.push(ch);
-            last_was_space = false;
-        }
-    }
-    collapsed.trim().to_string()
-}
-
-/// HTML conversion mode for `convert_html()`.
-#[derive(Clone, Copy)]
-pub(crate) enum HtmlConvertMode {
-    /// Strip all HTML tags, decode entities, return plain text.
-    Strip,
-    /// Convert HTML to Markdown via `mdka`.
-    Markdown,
-}
-
-/// Shared HTML conversion — used both by `html2markdown()` and `HttpResponse.text()`.
-pub(crate) fn convert_html(html: &str, mode: HtmlConvertMode) -> String {
-    match mode {
-        HtmlConvertMode::Markdown => html_to_markdown(html),
-        HtmlConvertMode::Strip => strip_html_tags(html),
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -347,18 +216,18 @@ fn js_element_query_selector(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
     let el_ref = get_element_ref(&el.html, el.node_id)
         .ok_or_else(|| ctx.throw_internal_error("element not found in tree"))?;
 
-    if let Some(child_ref) = el_ref.select(&selector).next() {
-        if let Some(child_id) = find_node_id(&el.html, &child_ref) {
-            return HtmlElement::new_instance(
-                ctx,
-                JSValue::UNDEFINED,
-                ElementPayload {
-                    html: el.html.clone(),
-                    node_id: child_id,
-                },
-            )
-            .map(|e| e.into());
-        }
+    if let Some(child_ref) = el_ref.select(&selector).next()
+        && let Some(child_id) = find_node_id(&el.html, &child_ref)
+    {
+        return HtmlElement::new_instance(
+            ctx,
+            JSValue::UNDEFINED,
+            ElementPayload {
+                html: el.html.clone(),
+                node_id: child_id,
+            },
+        )
+        .map(|e| e.into());
     }
 
     Ok(JSValue::NULL)

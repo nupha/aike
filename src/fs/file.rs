@@ -209,49 +209,6 @@ fn temp_path_for(path: &Path) -> PathBuf {
     })
 }
 
-/// A guard around a temp-file write: content goes into `<name>.tmp`, and
-/// `commit()` atomically renames it over the final path. Dropping the guard
-/// without committing removes the partial temp file, so an aborted write
-/// (e.g. `Aike.download`) leaves nothing behind.
-pub(crate) struct TempFileGuard {
-    tmp: PathBuf,
-    final_path: PathBuf,
-    committed: bool,
-}
-
-impl TempFileGuard {
-    /// Create a guard for `final_path`; the temp file is a sibling
-    /// (`<final_name>.tmp`).
-    pub(crate) fn new(final_path: PathBuf) -> Self {
-        let tmp = temp_path_for(&final_path);
-        Self {
-            tmp,
-            final_path,
-            committed: false,
-        }
-    }
-
-    /// The temp file path to write the content into.
-    pub(crate) fn temp_path(&self) -> &Path {
-        &self.tmp
-    }
-
-    /// Atomically rename the temp file over the final path.
-    pub(crate) async fn commit(&mut self) -> std::io::Result<()> {
-        atomic_replace(&self.tmp, &self.final_path).await?;
-        self.committed = true;
-        Ok(())
-    }
-}
-
-impl Drop for TempFileGuard {
-    fn drop(&mut self) {
-        if !self.committed {
-            let _ = std::fs::remove_file(&self.tmp);
-        }
-    }
-}
-
 // Atomically replace `dst` with `src` (both on the same filesystem).
 #[cfg(not(windows))]
 async fn atomic_replace(tmp: &Path, dst: &Path) -> std::io::Result<()> {
@@ -297,8 +254,8 @@ async fn atomic_replace(tmp: &Path, dst: &Path) -> std::io::Result<()> {
         }
     })
     .await
-    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?
-    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("rename: {e}")))
+    .map_err(|e| std::io::Error::other(e.to_string()))?
+    .map_err(|e| std::io::Error::other(format!("rename: {e}")))
 }
 
 // ---------------------------------------------------------------------------

@@ -402,7 +402,7 @@ pub(super) fn js_sh(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
                 None => Err(ctx.throw_internal_error(&msg)),
             };
         }
-        return Ok(build_sh_result(ctx, exit_code, stdout, stderr, killed, true)?.into());
+        return build_sh_result(ctx, exit_code, stdout, stderr, killed, true);
     }
 
     let mut cmd = Command::new(&shell);

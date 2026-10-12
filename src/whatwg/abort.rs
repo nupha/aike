@@ -104,7 +104,7 @@ fn js_signal_throw_if_aborted(ctx: &mut ScopedContext, cc: CallContext) -> JSRes
         // "AbortError" or whatever reason was passed to abort()).
         let reason = inner.reason;
         ctx.throw(Exception::Error(reason));
-        return Err(-1);
+        Err(-1)
     } else {
         Ok(JSValue::UNDEFINED)
     }
@@ -514,19 +514,25 @@ fn do_signal_abort(ctx: &mut ScopedContext, inner: &Rc<RefCell<SignalInner>>, re
 // ===========================================================================
 
 const CLASS_SIGNAL_PROTO: &[FieldDef] = &[
-    FieldDef::GETSET("aborted", Some(js_signal_aborted_getter), None, 0),
-    FieldDef::GETSET("reason", Some(js_signal_reason_getter), None, 0),
-    FieldDef::GETSET(
+    FieldDef::GETSET_ENUM("aborted", Some(js_signal_aborted_getter), None, 0),
+    FieldDef::GETSET_ENUM("reason", Some(js_signal_reason_getter), None, 0),
+    FieldDef::GETSET_ENUM(
         "onabort",
         Some(js_signal_onabort_getter),
         Some(js_signal_onabort_setter),
         0,
     ),
-    FieldDef::FUNC("throwIfAborted", 0, js_signal_throw_if_aborted, 0),
+    FieldDef::FUNC_ENUM("throwIfAborted", 0, js_signal_throw_if_aborted, 0),
     // EventTarget subset (AbortSignal is an EventTarget per WHATWG).
-    FieldDef::FUNC("addEventListener", 0, js_signal_add_event_listener, 0),
-    FieldDef::FUNC("removeEventListener", 0, js_signal_remove_event_listener, 0),
-    FieldDef::FUNC("dispatchEvent", 0, js_signal_dispatch_event, 0),
+    FieldDef::FUNC_ENUM("addEventListener", 0, js_signal_add_event_listener, 0),
+    FieldDef::FUNC_ENUM("removeEventListener", 0, js_signal_remove_event_listener, 0),
+    FieldDef::FUNC_ENUM("dispatchEvent", 0, js_signal_dispatch_event, 0),
+    // WebIDL class string (`Object.prototype.toString` -> "[object AbortSignal]").
+    FieldDef::STR(
+        "[Symbol.toStringTag]",
+        "AbortSignal",
+        zuqe::JS_PROP_CONFIGURABLE,
+    ),
 ];
 
 def_native_object!(
@@ -542,8 +548,14 @@ def_native_object!(
 // ===========================================================================
 
 const CLASS_CONTROLLER_PROTO: &[FieldDef] = &[
-    FieldDef::GETSET("signal", Some(js_controller_signal_getter), None, 0),
-    FieldDef::FUNC("abort", 1, js_controller_abort, 0),
+    FieldDef::GETSET_ENUM("signal", Some(js_controller_signal_getter), None, 0),
+    FieldDef::FUNC_ENUM("abort", 1, js_controller_abort, 0),
+    // WebIDL class string (`Object.prototype.toString` -> "[object AbortController]").
+    FieldDef::STR(
+        "[Symbol.toStringTag]",
+        "AbortController",
+        zuqe::JS_PROP_CONFIGURABLE,
+    ),
 ];
 
 def_native_object!(

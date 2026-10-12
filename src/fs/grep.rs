@@ -168,10 +168,10 @@ pub(super) fn js_fs_grep(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         dot = read_bool(ctx, &cc, "dot", false)?;
         respect_ignore = read_bool(ctx, &cc, "respectIgnore", true)?;
         absolute = read_bool(ctx, &cc, "absolute", false)?;
-        if let Some(n) = opt_str(ctx, &cc, "maxResults")? {
-            if let Ok(n) = n.parse::<usize>() {
-                max_results = n.max(1);
-            }
+        if let Some(n) = opt_str(ctx, &cc, "maxResults")?
+            && let Ok(n) = n.parse::<usize>()
+        {
+            max_results = n.max(1);
         }
         // mode: "content" (default) | "files" (-l) | "count" (-c).
         mode = opt_str(ctx, &cc, "mode")?
@@ -437,8 +437,8 @@ fn path_matches(path: &Path, pattern: &str, dot: bool, cwd: &Path) -> bool {
         // Absolute path glob (e.g. "/abs/**/*.rs") — only when the pattern
         // itself is absolute, to avoid matching a literal absolute path as a
         // self-glob (which would make every file match).
-        if Path::new(pattern).is_absolute() {
-            if glob::glob_with(pattern, opts)
+        if Path::new(pattern).is_absolute()
+            && glob::glob_with(pattern, opts)
                 .map(|mut it| {
                     it.any(|p| match p {
                         Ok(p) => p == path,
@@ -446,9 +446,8 @@ fn path_matches(path: &Path, pattern: &str, dot: bool, cwd: &Path) -> bool {
                     })
                 })
                 .unwrap_or(false)
-            {
-                return true;
-            }
+        {
+            return true;
         }
     }
     // 2) Basename match.

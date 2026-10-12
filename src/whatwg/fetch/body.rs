@@ -22,15 +22,13 @@ use zuqe::{
     },
 };
 
-use crate::{
-    html::{HtmlConvertMode, convert_html},
-    http::client::headers::HeaderList,
-    whatwg::{
-        blob::{blob_bytes_of, blob_from_bytes, blob_type_of},
-        form_data::{form_data_content_type, form_data_parse, form_data_to_bytes},
-        stream::JSReadableStream,
-        url::JSURLSearchParams,
-    },
+use crate::whatwg::{
+    abort::signal_reason,
+    blob::{blob_bytes_of, blob_from_bytes, blob_type_of},
+    fetch::headers::HeaderList,
+    form_data::{form_data_content_type, form_data_parse, form_data_to_bytes},
+    stream::JSReadableStream,
+    url::JSURLSearchParams,
 };
 
 /// Source of response body data.
@@ -105,6 +103,29 @@ pub(crate) fn body_content_type(val: &JSValue) -> Option<String> {
     (!is_buffer_source).then(|| "text/plain;charset=UTF-8".into())
 }
 
+/// Whether a body-stream error is rustls's "peer closed connection without
+/// sending TLS `close_notify`" (surfaced as `io::ErrorKind::UnexpectedEof`).
+///
+/// Rustls treats a missing `close_notify` as a hard EOF error and reqwest has no
+/// knob to relax it, so *every* https response whose body is delimited by
+/// connection close (no `Content-Length`, no chunking) fails to read. Treating
+/// it as a clean end-of-body is safe rather than a truncation hole: a
+/// length-framed body never needs EOF, so hyper reports a truncated one with a
+/// different error ("connection closed before message completed") and this can
+/// only fire for a body whose extent was "until close" to begin with.
+pub(crate) fn is_tls_eof(err: &(dyn std::error::Error + 'static)) -> bool {
+    let mut src: Option<&(dyn std::error::Error + 'static)> = Some(err);
+    while let Some(e) = src {
+        if let Some(io) = e.downcast_ref::<std::io::Error>()
+            && io.kind() == std::io::ErrorKind::UnexpectedEof
+        {
+            return true;
+        }
+        src = e.source();
+    }
+    false
+}
+
 /// Blob MIME type derived from a header list's current `Content-Type`: the
 /// media type "essence" (type/subtype before any `;` parameter), trimmed and
 /// lowercased. Absent `Content-Type` yields an empty string, per the Fetch
@@ -124,9 +145,6 @@ pub(crate) fn blob_type_from_header(list: &HeaderList) -> String {
 pub(crate) const BODY_AS_BYTES: i32 = 0;
 pub(crate) const BODY_AS_TEXT: i32 = 1;
 pub(crate) const BODY_AS_JSON: i32 = 2;
-/// Text mode with the optional html-convert arg ("strip" | "markdown").
-/// Only wired on `HttpClientResponse.text()`; base `Response.text()` stays strict.
-pub(crate) const BODY_AS_TEXT_CONVERT: i32 = 3;
 /// Returns a `Blob` instance (type taken from `blob_type`).
 pub(crate) const BODY_AS_BLOB: i32 = 4;
 /// Returns a real `ArrayBuffer` (used by `Response.arrayBuffer()`; distinct
@@ -140,13 +158,15 @@ pub(crate) const BODY_AS_FORM_DATA: i32 = 6;
 pub(crate) const BODY_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Drain a body source into a `Promise` resolving to text/json/bytes.
-/// `html_convert` applies only in text mode for `text/html` responses.
+/// `signal` is the owning request's `AbortSignal`: when it aborts mid-read the
+/// promise rejects with the signal's reason (a `DOMException` `AbortError` by
+/// default) rather than the raw transport error a cancellation produces.
 pub(crate) fn drain_body(
     ctx: &mut ScopedContext,
     source: BodySource,
     mode: i32,
-    html_convert: Option<HtmlConvertMode>,
     blob_type: String,
+    signal: Option<JSValue>,
 ) -> JSResult {
     let result_slot = PromiseResultSlot::<Result<Vec<u8>, String>>::new();
     // Carries a JS rejection value alongside the (Send-only) slot, so a stream
@@ -162,13 +182,24 @@ pub(crate) fn drain_body(
     let network_err_job = network_err.clone();
     let promise =
         Promise::create_with_result_slot(ctx, result_slot.clone(), move |cx, data| -> JSResult {
-            let buf = data.map_err(|e| match convert_err.borrow_mut().take() {
-                Some(v) => {
-                    cx.throw(Exception::Error(v));
-                    -1
+            let buf = data.map_err(|e| {
+                // An abort cancels the transfer, which surfaces as a transport
+                // error; the promise must reject with the signal's reason
+                // instead (Fetch spec: "if aborted, reject with abort reason").
+                if let Some(sig) = signal.as_ref()
+                    && let Some(reason) = signal_reason(sig)
+                {
+                    cx.throw(Exception::Error(reason));
+                    return -1;
                 }
-                None if network_err_slot.get() => cx.throw_type_error(&e),
-                None => cx.throw_internal_error(&e),
+                match convert_err.borrow_mut().take() {
+                    Some(v) => {
+                        cx.throw(Exception::Error(v));
+                        -1
+                    }
+                    None if network_err_slot.get() => cx.throw_type_error(&e),
+                    None => cx.throw_internal_error(&e),
+                }
             })?;
             match mode {
                 BODY_AS_BYTES => TypedArray::create_from_vec_u8(cx, buf).map(JSValue::from),
@@ -185,11 +216,7 @@ pub(crate) fn drain_body(
                     // match that, otherwise consumers see a stray BOM char.
                     let bytes = buf.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(&buf);
                     let s = String::from_utf8_lossy(bytes);
-                    let out = match html_convert {
-                        Some(m) => convert_html(&s, m),
-                        None => s.into_owned(),
-                    };
-                    cx.create_string_from_utf8(out.into_bytes())
+                    cx.create_string_from_utf8(s.into_owned().into_bytes())
                         .map(JSValue::make_string)
                 }
                 BODY_AS_JSON => {

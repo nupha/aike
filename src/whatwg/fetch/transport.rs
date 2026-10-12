@@ -6,7 +6,7 @@ use std::{error::Error, future::Future, pin::Pin, sync::Arc, time::Duration};
 use base64::{Engine, alphabet, engine::general_purpose};
 use zuqe::{ErrorKind, Exception, JSResult, JSValue, ScopedContext};
 
-use super::headers::normalize_header_value;
+use crate::whatwg::fetch::{cors::corp_violation, headers::normalize_header_value};
 
 /// Async gate invoked by the redirect loop before each hop that the request
 /// owner flagged as needing one. This is a neutral extension point: the
@@ -22,7 +22,7 @@ pub(crate) type BeforeHopHook =
 ///
 /// Contains only request-level fields.  Client-level settings (proxy, TLS,
 /// cookie jar, redirect policy, …) belong in
-/// [`HttpClientConfig`](super::config::HttpClientConfig) and are baked into
+/// [`HttpClientConfig`](crate::whatwg::fetch::config::HttpClientConfig) and are baked into
 /// the `reqwest::Client` at construction time.
 pub(crate) struct TransportRequest {
     pub method: String,
@@ -58,6 +58,14 @@ pub(crate) struct TransportRequest {
     /// (the WHATWG `fetch` path). The low-level HTTP client API keeps reqwest's
     /// own per-client cookie store and does not touch the global jar.
     pub use_shared_cookies: bool,
+    /// The request's `cache` mode ("default" | "no-store" | "reload" |
+    /// "no-cache" | "force-cache" | "only-if-cached"). The transport derives the
+    /// UA-owned `Cache-Control` / `Pragma` request headers from it (both are
+    /// forbidden header names, so JS cannot set them).
+    pub cache_mode: String,
+    /// Whether `Cross-Origin-Resource-Policy` must be enforced on each response:
+    /// true for a `no-cors` request in a browser build.
+    pub corp_check: bool,
 }
 
 /// Policy inputs carried across redirects so each hop can recompute its own
@@ -150,7 +158,7 @@ fn forgiving_base64_decode(input: &[u8]) -> Result<Vec<u8>, String> {
         .copied()
         .filter(|b| !matches!(b, b'\t' | b'\n' | b'\x0c' | b'\r' | b' '))
         .collect();
-    if data.len() % 4 == 0 {
+    if data.len().is_multiple_of(4) {
         if data.ends_with(b"==") {
             data.truncate(data.len() - 2);
         } else if data.ends_with(b"=") {
@@ -446,6 +454,23 @@ pub(crate) fn throw_transport_error(cx: &mut ScopedContext, te: TransportError) 
 /// fetch, which re-runs CORS-preflight for the new URL). A failed preflight
 /// aborts the whole fetch with a "cors" network error.
 #[allow(clippy::too_many_arguments)]
+/// A response's headers as a `HeaderList`, latin-1 decoded so bytes 0x80-0xFF
+/// survive (a header value is a byte string and obs-text is legal, RFC 7230 —
+/// `to_str()` would drop the whole header).
+fn response_header_list(
+    resp: &reqwest::Response,
+) -> crate::whatwg::fetch::headers::HeaderList {
+    crate::whatwg::fetch::headers::HeaderList::from_vec(
+        resp.headers()
+            .iter()
+            .map(|(k, v)| {
+                let vs = v.as_bytes().iter().map(|&b| b as char).collect::<String>();
+                (k.to_string(), vs)
+            })
+            .collect(),
+    )
+}
+
 async fn follow_redirects<F, Fut>(
     rc: &ReferrerCtx,
     start_url: &str,
@@ -454,12 +479,13 @@ async fn follow_redirects<F, Fut>(
     cors_mode: bool,
     cors_tainted: bool,
     cors_client_origin: &str,
+    corp_check: bool,
     client: &reqwest::Client,
     before_hop: Option<&BeforeHopHook>,
     send: F,
 ) -> Result<(reqwest::Response, bool), TransportError>
 where
-    F: Fn(String, String, String, bool, bool, bool) -> Fut,
+    F: Fn(String, String, String, bool, bool, bool, bool) -> Fut,
     Fut: std::future::Future<Output = Result<reqwest::Response, reqwest::Error>>,
 {
     let mut url = start_url.to_string();
@@ -483,6 +509,9 @@ where
     // Proxy-Authorization) must be stripped so they don't leak cross-origin
     // (Fetch spec HTTP-redirect fetch).
     let mut prev_url = start_url.to_string();
+    // Whether the hop about to be sent is a *subsequent* one (reached through a
+    // redirect). A non-GET/HEAD `Origin` is only sent for the initial request.
+    let mut subsequent = false;
     // Set once a hop is reached via a cross-origin redirect: the credentials
     // headers (Authorization, Cookie, Proxy-Authorization) were stripped, so a
     // preflight whose only unsafe headers were those credentials is no longer
@@ -523,6 +552,7 @@ where
             tainted,
             origin_opaque,
             cross_origin_hop,
+            subsequent,
         )
         .await
         .map_err(|e| {
@@ -537,6 +567,21 @@ where
                 message: msg,
             }
         })?;
+
+        // Fetch spec: `Cross-Origin-Resource-Policy` is enforced on *every*
+        // response in the chain, a redirect's included — a cross-origin 302
+        // carrying `CORP: same-origin` is a network error even when the target
+        // itself is same-origin (WPT `cross-origin-resource-policy`, the
+        // "... redirect response header" cases).
+        if corp_check
+            && let Some(msg) =
+                corp_violation(&response_header_list(&resp), Some(cors_client_origin), &url)
+        {
+            return Err(TransportError {
+                code: "corp",
+                message: msg,
+            });
+        }
 
         // A redirect without a usable `Location` is delivered as-is; WPT serves
         // `.any.js` via a 302 with an empty `Location` (self-redirect) so the
@@ -629,6 +674,7 @@ where
         };
         prev_url = url;
         url = next;
+        subsequent = true;
     }
 
     Err(TransportError {
@@ -743,11 +789,32 @@ pub(crate) async fn perform_request(
                      referrer: String,
                      tainted: bool,
                      origin_opaque: bool,
-                     cross_origin_hop: bool| {
+                     cross_origin_hop: bool,
+                     subsequent: bool| {
         let method = reqwest::Method::from_bytes(method.as_bytes()).unwrap_or(reqwest::Method::GET);
         let mut rb = client.request(method.clone(), &url).timeout(req.timeout);
 
         let mut headers = req.headers.clone();
+        // A redirect may rewrite the method to GET (see `follow_redirects`).
+        // Such a hop must not carry the original body's headers: Fetch spec
+        // "HTTP-redirect fetch" removes `Content-Encoding`, `Content-Language`,
+        // `Content-Location` and `Content-Type`, and a stale `Content-Length`
+        // would make the server block waiting for a body that is never sent
+        // (WPT `redirect-method`: 301/302/303 + POST timed out).
+        if !method.as_str().eq_ignore_ascii_case(&req.method) {
+            headers.retain(|(k, _)| {
+                let k = k.to_ascii_lowercase();
+                !matches!(
+                    k.as_str(),
+                    "content-encoding"
+                        | "content-language"
+                        | "content-location"
+                        | "content-type"
+                        | "content-length"
+                        | "transfer-encoding"
+                )
+            });
+        }
         // A cross-origin redirect must not leak the request's credentials
         // (Fetch spec HTTP-redirect fetch): strip `Authorization`,
         // `Proxy-Authorization`, and `Cookie` so they don't reach the new
@@ -781,7 +848,14 @@ pub(crate) async fn perform_request(
             headers.retain(|(k, _)| !k.eq_ignore_ascii_case("origin"));
             let origin_value: Option<String> = if origin_opaque {
                 Some("null".to_string())
-            } else if tainted || !method_is_safe(method.as_str()) {
+            } else if tainted || (!method_is_safe(method.as_str()) && !subsequent) {
+                // A hop reached through a redirect drops `Origin` when the
+                // request is not CORS-tainted: a POST's `Origin` is only ever
+                // sent for the initial request, since redirects are treated as
+                // potentially leaking it (WPT `redirect-origin.any.js`: "[POST]
+                // Redirect 307 Same origin to same origin" expects no Origin on
+                // the target). A 301/302/303 already rewrote the method to GET,
+                // so those hops carry none either.
                 Some(req.cors_client_origin.clone())
             } else {
                 None
@@ -796,12 +870,12 @@ pub(crate) async fn perform_request(
         if req.use_shared_cookies
             && cookies_allowed(&req.credentials_mode, &req.cors_client_origin, &url)
             && let Ok(u) = url::Url::parse(&url)
-            && let Some(cv) = crate::http::client::config::global_cookie_jar().cookies(&u)
+            && let Some(cv) = crate::whatwg::fetch::config::global_cookie_jar().cookies(&u)
         {
             headers.retain(|(k, _)| !k.eq_ignore_ascii_case("cookie"));
             if let Ok(s) = cv.to_str() {
                 // Present cookies in creation order (WPT `cookies.any.js`).
-                let s = crate::http::client::config::reorder_cookie_header(s);
+                let s = crate::whatwg::fetch::config::reorder_cookie_header(s);
                 headers.push(("Cookie".to_string(), s));
             }
         }
@@ -828,6 +902,36 @@ pub(crate) async fn perform_request(
             rb = rb.header(k, hv);
         }
 
+        // Fetch spec "HTTP fetch" (cache mode): `Cache-Control` and `Pragma` are
+        // forbidden request header names, so the UA owns them. A caller-supplied
+        // value (possible only through a header the spec allows, e.g. a
+        // cache-mode-independent one) is left untouched.
+        // WPT `http-cache/cache-mode`.
+        if !headers
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case("cache-control"))
+        {
+            if req.cache_mode == "no-cache" {
+                rb = rb.header(reqwest::header::CACHE_CONTROL, "max-age=0");
+            } else if req.cache_mode == "no-store" {
+                rb = rb.header(reqwest::header::CACHE_CONTROL, "no-cache");
+            }
+        }
+        if req.cache_mode == "no-store"
+            && !headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("pragma"))
+        {
+            rb = rb.header(reqwest::header::PRAGMA, "no-cache");
+        }
+
+        // Fetch spec "add a range header": a request carrying `Range` must be
+        // sent with `Accept-Encoding: identity`, so a compressed body cannot
+        // break the byte range. reqwest otherwise advertises its default
+        // encodings, and the Fetch layer cannot set this itself because
+        // `Accept-Encoding` is a forbidden request header.
+        if headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("range")) {
+            rb = rb.header(reqwest::header::ACCEPT_ENCODING, "identity");
+        }
+
         // A redirect rewrites the method to GET (see `follow_redirects`); a GET
         // request must not carry the original request body, so only attach it for
         // non-GET/HEAD methods.
@@ -849,7 +953,8 @@ pub(crate) async fn perform_request(
                                 referrer: String,
                                 tainted: bool,
                                 origin_opaque: bool,
-                                cross_origin_hop: bool| {
+                                cross_origin_hop: bool,
+                                subsequent: bool| {
         let first = send_once(
             method.clone(),
             url.clone(),
@@ -857,6 +962,7 @@ pub(crate) async fn perform_request(
             tainted,
             origin_opaque,
             cross_origin_hop,
+            subsequent,
         );
         async move {
             match first.await {
@@ -869,6 +975,7 @@ pub(crate) async fn perform_request(
                         tainted,
                         origin_opaque,
                         cross_origin_hop,
+                        subsequent,
                     )
                     .await
                 }
@@ -895,6 +1002,7 @@ pub(crate) async fn perform_request(
                 cors_mode,
                 cors_tainted,
                 &cors_client_origin,
+                req.corp_check,
                 client,
                 before_hop,
                 send_with_retry,
@@ -918,6 +1026,7 @@ pub(crate) async fn perform_request(
                 req.url.clone(),
                 req.referrer.clone(),
                 cors_tainted,
+                false,
                 false,
                 false,
             )
@@ -948,14 +1057,18 @@ pub(crate) async fn perform_request(
         )
     {
         let url_for_cookie = resp.url().clone();
-        let jar = crate::http::client::config::global_cookie_jar();
-        for (k, v) in resp.headers() {
-            if k == reqwest::header::SET_COOKIE
-                && let Ok(s) = v.to_str()
-            {
+        let jar = crate::whatwg::fetch::config::global_cookie_jar();
+        // `get_all` walks the same-name entries in append (wire) order; the
+        // generic `headers()` iterator leaves the order of duplicate names
+        // unspecified, which reversed the recorded creation order and made the
+        // outgoing `Cookie` header come out backwards (WPT `credentials/cookies`
+        // "Include mode: 2 cookies": `b=2` is set before `c=3`, so the request
+        // must carry `b=2; c=3`).
+        for v in resp.headers().get_all(reqwest::header::SET_COOKIE) {
+            if let Ok(s) = v.to_str() {
                 jar.add_cookie_str(s, &url_for_cookie);
                 // Track the first-seen order for the `Cookie` header (WPT).
-                crate::http::client::config::cookie_order_record(s);
+                crate::whatwg::fetch::config::cookie_order_record(s);
             }
         }
     }

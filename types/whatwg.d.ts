@@ -67,7 +67,6 @@ declare function structuredClone<T>(
 
 /**
  * WHATWG Fetch `Response` class (strict spec subset, no aike extensions).
- * `HttpClient` returns the enhanced subclass `HttpClientResponse` (module "http").
  */
 declare class Response {
   constructor(
@@ -530,7 +529,7 @@ declare namespace fetch {
    */
   let cookie: boolean;
   /**
-   * Whether this runtime's `fetch()` (and `Aike.download`) skip TLS certificate
+   * Whether this runtime's `fetch()` skips TLS certificate
    * validation. A test/dev escape hatch for self-signed servers; default off.
    */
   let allowInsecureTLS: boolean;

@@ -584,50 +584,52 @@ fn js_sp_values(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
 // ===========================================================================
 
 const CLASS_URL_PROTO: &[FieldDef] = &[
-    FieldDef::GETSET("href", Some(js_url_getter), Some(js_url_setter), URL_HREF),
-    FieldDef::GETSET("origin", Some(js_url_getter), None, URL_ORIGIN),
-    FieldDef::GETSET(
+    FieldDef::GETSET_ENUM("href", Some(js_url_getter), Some(js_url_setter), URL_HREF),
+    FieldDef::GETSET_ENUM("origin", Some(js_url_getter), None, URL_ORIGIN),
+    FieldDef::GETSET_ENUM(
         "protocol",
         Some(js_url_getter),
         Some(js_url_setter),
         URL_PROTOCOL,
     ),
-    FieldDef::GETSET(
+    FieldDef::GETSET_ENUM(
         "username",
         Some(js_url_getter),
         Some(js_url_setter),
         URL_USERNAME,
     ),
-    FieldDef::GETSET(
+    FieldDef::GETSET_ENUM(
         "password",
         Some(js_url_getter),
         Some(js_url_setter),
         URL_PASSWORD,
     ),
-    FieldDef::GETSET("host", Some(js_url_getter), Some(js_url_setter), URL_HOST),
-    FieldDef::GETSET(
+    FieldDef::GETSET_ENUM("host", Some(js_url_getter), Some(js_url_setter), URL_HOST),
+    FieldDef::GETSET_ENUM(
         "hostname",
         Some(js_url_getter),
         Some(js_url_setter),
         URL_HOSTNAME,
     ),
-    FieldDef::GETSET("port", Some(js_url_getter), Some(js_url_setter), URL_PORT),
-    FieldDef::GETSET(
+    FieldDef::GETSET_ENUM("port", Some(js_url_getter), Some(js_url_setter), URL_PORT),
+    FieldDef::GETSET_ENUM(
         "pathname",
         Some(js_url_getter),
         Some(js_url_setter),
         URL_PATHNAME,
     ),
-    FieldDef::GETSET(
+    FieldDef::GETSET_ENUM(
         "search",
         Some(js_url_getter),
         Some(js_url_setter),
         URL_SEARCH,
     ),
-    FieldDef::GETSET("hash", Some(js_url_getter), Some(js_url_setter), URL_HASH),
-    FieldDef::GETSET("searchParams", Some(js_url_search_params_getter), None, 0),
-    FieldDef::FUNC("toString", 0, js_url_to_string, 0),
-    FieldDef::FUNC("toJSON", 0, js_url_to_string, 0),
+    FieldDef::GETSET_ENUM("hash", Some(js_url_getter), Some(js_url_setter), URL_HASH),
+    FieldDef::GETSET_ENUM("searchParams", Some(js_url_search_params_getter), None, 0),
+    FieldDef::FUNC_ENUM("toString", 0, js_url_to_string, 0),
+    FieldDef::FUNC_ENUM("toJSON", 0, js_url_to_string, 0),
+    // WebIDL class string (`Object.prototype.toString` -> "[object URL]").
+    FieldDef::STR("[Symbol.toStringTag]", "URL", zuqe::JS_PROP_CONFIGURABLE),
 ];
 
 def_native_object!(
@@ -680,18 +682,23 @@ pub(crate) fn init_url(ctx: &mut ScopedContext, global: &mut Object) -> Result<(
 // ===========================================================================
 
 const CLASS_SP_PROTO: &[FieldDef] = &[
-    FieldDef::FUNC("append", 2, js_sp_append, 0),
-    FieldDef::FUNC("delete", 1, js_sp_delete, 0),
-    FieldDef::FUNC("get", 1, js_sp_get, 0),
-    FieldDef::FUNC("getAll", 1, js_sp_get_all, 0),
-    FieldDef::FUNC("has", 1, js_sp_has, 0),
-    FieldDef::FUNC("set", 2, js_sp_set, 0),
-    FieldDef::FUNC("sort", 0, js_sp_sort, 0),
-    FieldDef::FUNC("toString", 0, js_sp_to_string, 0),
-    FieldDef::FUNC("forEach", 1, js_sp_for_each, 0),
-    FieldDef::FUNC("entries", 0, js_sp_entries, 0),
-    FieldDef::FUNC("keys", 0, js_sp_keys, 0),
-    FieldDef::FUNC("values", 0, js_sp_values, 0),
+    FieldDef::FUNC_ENUM("append", 2, js_sp_append, 0),
+    FieldDef::FUNC_ENUM("delete", 1, js_sp_delete, 0),
+    FieldDef::FUNC_ENUM("get", 1, js_sp_get, 0),
+    FieldDef::FUNC_ENUM("getAll", 1, js_sp_get_all, 0),
+    FieldDef::FUNC_ENUM("has", 1, js_sp_has, 0),
+    FieldDef::FUNC_ENUM("set", 2, js_sp_set, 0),
+    FieldDef::FUNC_ENUM("sort", 0, js_sp_sort, 0),
+    FieldDef::FUNC_ENUM("toString", 0, js_sp_to_string, 0),
+    FieldDef::FUNC_ENUM("forEach", 1, js_sp_for_each, 0),
+    FieldDef::FUNC_ENUM("entries", 0, js_sp_entries, 0),
+    FieldDef::FUNC_ENUM("keys", 0, js_sp_keys, 0),
+    FieldDef::FUNC_ENUM("values", 0, js_sp_values, 0),
+    FieldDef::STR(
+        "[Symbol.toStringTag]",
+        "URLSearchParams",
+        zuqe::JS_PROP_CONFIGURABLE,
+    ),
 ];
 
 def_native_object!(

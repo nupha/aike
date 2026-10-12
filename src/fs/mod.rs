@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2026 John Ray <996351336@qq.com>
 
-use zuqe::{CallContext, ScopedContext};
-
 mod dir;
 mod entries;
 mod file;
@@ -10,7 +8,9 @@ mod glob;
 mod grep;
 
 pub use entries::init_mod_fs;
-pub(crate) use file::{TempFileGuard, write_file_atomic};
+pub(crate) use file::write_file_atomic;
+
+use zuqe::{CallContext, ScopedContext};
 
 // ---- shared options-object readers (fs.glob / fs.grep opts arg) ----
 

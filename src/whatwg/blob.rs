@@ -153,7 +153,7 @@ fn part_to_bytes(ctx: &mut ScopedContext, part: &JSValue) -> Result<Vec<u8>, i32
         return Ok(bytes.to_vec());
     }
     // TypedArray / ArrayBuffer view.
-    if let Ok(mut ta) = TypedArray::try_from(part.clone()) {
+    if let Ok(mut ta) = TypedArray::try_from(*part) {
         return Ok(ta.with_bytes_mut(|b| b.to_vec()));
     }
     // String part: UTF-8 encode (spec uses UTF-8 for Blob strings).
@@ -357,13 +357,14 @@ fn js_blob_stream(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 }
 
 const BLOB_PROTO: &[FieldDef] = &[
-    FieldDef::GETSET("size", Some(js_blob_get_size), None, 0),
-    FieldDef::GETSET("type", Some(js_blob_get_type), None, 0),
-    FieldDef::FUNC("slice", 3, js_blob_slice, 0),
-    FieldDef::FUNC("arrayBuffer", 0, js_blob_array_buffer, 0),
-    FieldDef::FUNC("text", 0, js_blob_text, 0),
-    FieldDef::FUNC("bytes", 0, js_blob_bytes, 0),
-    FieldDef::FUNC("stream", 0, js_blob_stream, 0),
+    FieldDef::GETSET_ENUM("size", Some(js_blob_get_size), None, 0),
+    FieldDef::GETSET_ENUM("type", Some(js_blob_get_type), None, 0),
+    FieldDef::FUNC_ENUM("slice", 3, js_blob_slice, 0),
+    FieldDef::FUNC_ENUM("arrayBuffer", 0, js_blob_array_buffer, 0),
+    FieldDef::FUNC_ENUM("text", 0, js_blob_text, 0),
+    FieldDef::FUNC_ENUM("bytes", 0, js_blob_bytes, 0),
+    FieldDef::FUNC_ENUM("stream", 0, js_blob_stream, 0),
+    FieldDef::STR("[Symbol.toStringTag]", "Blob", zuqe::JS_PROP_CONFIGURABLE),
 ];
 
 def_native_object!(

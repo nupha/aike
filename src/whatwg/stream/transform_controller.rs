@@ -89,10 +89,10 @@ impl GcTrace for TransformControllerPayload {
 }
 
 const TRANSFORM_CONTROLLER_PROTO: &[FieldDef] = &[
-    FieldDef::FUNC("enqueue", 1, js_transform_controller_enqueue, 0),
-    FieldDef::FUNC("error", 1, js_transform_controller_error, 0),
-    FieldDef::FUNC("terminate", 0, js_transform_controller_terminate, 0),
-    FieldDef::GETSET(
+    FieldDef::FUNC_ENUM("enqueue", 1, js_transform_controller_enqueue, 0),
+    FieldDef::FUNC_ENUM("error", 1, js_transform_controller_error, 0),
+    FieldDef::FUNC_ENUM("terminate", 0, js_transform_controller_terminate, 0),
+    FieldDef::GETSET_ENUM(
         "desiredSize",
         Some(js_transform_controller_desired_size),
         None,

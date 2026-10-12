@@ -112,9 +112,14 @@ fn js_dom_exception_code_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSR
 }
 
 const CLASS_PROTO: &[FieldDef] = &[
-    FieldDef::GETSET("name", Some(js_dom_exception_name_getter), None, 0),
-    FieldDef::GETSET("message", Some(js_dom_exception_message_getter), None, 0),
-    FieldDef::GETSET("code", Some(js_dom_exception_code_getter), None, 0),
+    FieldDef::GETSET_ENUM("name", Some(js_dom_exception_name_getter), None, 0),
+    FieldDef::GETSET_ENUM("message", Some(js_dom_exception_message_getter), None, 0),
+    FieldDef::GETSET_ENUM("code", Some(js_dom_exception_code_getter), None, 0),
+    FieldDef::STR(
+        "[Symbol.toStringTag]",
+        "DOMException",
+        zuqe::JS_PROP_CONFIGURABLE,
+    ),
 ];
 
 def_native_object!(

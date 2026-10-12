@@ -69,7 +69,7 @@ pub(crate) struct QueueEntry {
 // ============================================================================
 
 const BYTE_LENGTH_QUEUING_STRATEGY_PROTO: &[FieldDef] = &[
-    FieldDef::FUNC("size", 1, js_byte_length_size, 0),
+    FieldDef::FUNC_ENUM("size", 1, js_byte_length_size, 0),
     FieldDef::STR(
         "[Symbol.toStringTag]",
         "ByteLengthQueuingStrategy",
@@ -184,7 +184,7 @@ pub(crate) fn extract_size_algorithm(
 // ============================================================================
 
 const COUNT_QUEUING_STRATEGY_PROTO: &[FieldDef] = &[
-    FieldDef::FUNC("size", 0, js_count_size, 0),
+    FieldDef::FUNC_ENUM("size", 0, js_count_size, 0),
     FieldDef::STR(
         "[Symbol.toStringTag]",
         "CountQueuingStrategy",

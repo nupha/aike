@@ -340,6 +340,11 @@ const FORM_DATA_ITER_PROTO: &[FieldDef] = &[
     // `next` must be enumerable for WPT's `checkIteratorProperties`.
     FieldDef::FUNC_ENUM("next", 0, js_fd_iterator_next, 0),
     FieldDef::FUNC("[Symbol.iterator]", 0, js_fd_iterator_self, 0),
+    FieldDef::STR(
+        "[Symbol.toStringTag]",
+        "FormData Iterator",
+        zuqe::JS_PROP_CONFIGURABLE,
+    ),
 ];
 
 def_native_object!(
@@ -690,17 +695,26 @@ fn split_on<'a>(hay: &'a [u8], sep: &[u8]) -> Vec<&'a [u8]> {
 // ---------------------------------------------------------------------------
 
 const FORM_DATA_PROTO: &[FieldDef] = &[
-    FieldDef::FUNC("append", 2, js_fd_append, 0),
-    FieldDef::FUNC("delete", 1, js_fd_delete, 0),
-    FieldDef::FUNC("get", 1, js_fd_get, 0),
-    FieldDef::FUNC("getAll", 1, js_fd_get_all, 0),
-    FieldDef::FUNC("has", 1, js_fd_has, 0),
-    FieldDef::FUNC("set", 2, js_fd_set, 0),
-    FieldDef::FUNC("forEach", 1, js_fd_for_each, 0),
-    FieldDef::FUNC("keys", 0, js_fd_keys, 0),
-    FieldDef::FUNC("values", 0, js_fd_values, 0),
-    FieldDef::FUNC("entries", 0, js_fd_entries, 0),
-    FieldDef::FUNC("[Symbol.iterator]", 0, js_fd_entries, 0),
+    FieldDef::FUNC_ENUM("append", 2, js_fd_append, 0),
+    FieldDef::FUNC_ENUM("delete", 1, js_fd_delete, 0),
+    FieldDef::FUNC_ENUM("get", 1, js_fd_get, 0),
+    FieldDef::FUNC_ENUM("getAll", 1, js_fd_get_all, 0),
+    FieldDef::FUNC_ENUM("has", 1, js_fd_has, 0),
+    FieldDef::FUNC_ENUM("set", 2, js_fd_set, 0),
+    FieldDef::FUNC_ENUM("forEach", 1, js_fd_for_each, 0),
+    FieldDef::FUNC_ENUM("keys", 0, js_fd_keys, 0),
+    FieldDef::FUNC_ENUM("values", 0, js_fd_values, 0),
+    FieldDef::FUNC_ENUM("entries", 0, js_fd_entries, 0),
+    // WebIDL §3.7.9: `%Symbol.iterator%` is the *same function object* as
+    // `entries`, but is created with `DefineMethodProperty(..., false)` so it
+    // stays non-enumerable (unlike `entries`).
+    FieldDef::ALIAS("[Symbol.iterator]", "entries"),
+    // WebIDL class string (`Object.prototype.toString` -> "[object FormData]").
+    FieldDef::STR(
+        "[Symbol.toStringTag]",
+        "FormData",
+        zuqe::JS_PROP_CONFIGURABLE,
+    ),
 ];
 
 def_native_object!(

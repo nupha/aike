@@ -404,7 +404,7 @@ impl GcTrace for McpServicePayload {
 fn js_base_constructor(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
     Err(ctx.throw_type_error(
         "BaseMcp is abstract and cannot be constructed directly; use StdioMcp.define / HttpMcp.define",
-    ) )
+    ))
 }
 
 const BASE_MCP_PROTO: &[FieldDef] = &[
@@ -615,7 +615,7 @@ pub(crate) fn parse_mcp_tools_object(
             None
         };
 
-        let mut tool = Tool::new(name.clone(), description, Arc::new(input_schema_obj.into()));
+        let mut tool = Tool::new(name.clone(), description, Arc::new(input_schema_obj));
         if let Some(ann) = annotations {
             tool = tool.with_annotations(ann);
         }

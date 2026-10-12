@@ -367,7 +367,7 @@ fn byob_fill_view(
         None => return Ok(chunk),
     };
 
-    held.borrow_mut().push(JSValue::from(view.clone()));
+    held.borrow_mut().push(JSValue::from(view));
     let n = view.with_bytes_mut(|dest| {
         let n = src.len().min(dest.len());
         dest[..n].copy_from_slice(&src[..n]);
@@ -410,10 +410,10 @@ pub(crate) fn get_read_payload_mut<'a>(
 }
 
 const READER_PROTO: &[FieldDef] = &[
-    FieldDef::FUNC("read", 0, js_reader_read, 0),
-    FieldDef::FUNC("cancel", 1, js_reader_cancel, 0),
-    FieldDef::FUNC("releaseLock", 0, js_reader_release_lock, 0),
-    FieldDef::GETSET("closed", Some(js_reader_closed), None, 0),
+    FieldDef::FUNC_ENUM("read", 0, js_reader_read, 0),
+    FieldDef::FUNC_ENUM("cancel", 1, js_reader_cancel, 0),
+    FieldDef::FUNC_ENUM("releaseLock", 0, js_reader_release_lock, 0),
+    FieldDef::GETSET_ENUM("closed", Some(js_reader_closed), None, 0),
     FieldDef::STR(
         "[Symbol.toStringTag]",
         "ReadableStreamDefaultReader",
@@ -643,14 +643,9 @@ impl JSReadableStreamDefaultReader {
                         .ok_or_else(|| cx.throw_type_error("reader released"))?;
 
                     match p.read(cx, None, 1) {
-                        Ok(pv) => match Promise::try_from(pv) {
-                            Ok(p) => *pending.borrow_mut() = Some(p),
-                            Err(_) => {
-                                committed_ref.set(true);
-                                let _ = slot.commit(Err("read() did not return a promise".into()));
-                                return Ok(JobState::Block);
-                            }
-                        },
+                        Ok(pv) => {
+                            *pending.borrow_mut() = Some(pv);
+                        }
                         Err(_) => {
                             // read() threw synchronously — carry the thrown value
                             // over so identity is preserved.

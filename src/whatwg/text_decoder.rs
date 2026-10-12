@@ -423,15 +423,20 @@ fn js_text_decoder_ignore_bom_getter(ctx: &mut ScopedContext, cc: CallContext) -
 // ---------------------------------------------------------------------------
 
 const CLASS_TEXT_DECODER_PROTO: &[FieldDef] = &[
-    FieldDef::GETSET("encoding", Some(js_text_decoder_encoding_getter), None, 0),
-    FieldDef::GETSET("fatal", Some(js_text_decoder_fatal_getter), None, 0),
-    FieldDef::GETSET(
+    FieldDef::GETSET_ENUM("encoding", Some(js_text_decoder_encoding_getter), None, 0),
+    FieldDef::GETSET_ENUM("fatal", Some(js_text_decoder_fatal_getter), None, 0),
+    FieldDef::GETSET_ENUM(
         "ignoreBOM",
         Some(js_text_decoder_ignore_bom_getter),
         None,
         0,
     ),
-    FieldDef::FUNC("decode", 2, js_text_decoder_decode, 0),
+    FieldDef::FUNC_ENUM("decode", 2, js_text_decoder_decode, 0),
+    FieldDef::STR(
+        "[Symbol.toStringTag]",
+        "TextDecoder",
+        zuqe::JS_PROP_CONFIGURABLE,
+    ),
 ];
 
 def_native_object!(

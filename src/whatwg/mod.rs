@@ -6,6 +6,8 @@
 pub mod abort;
 pub mod base64;
 pub mod blob;
+#[cfg(feature = "fetch_cache")]
+pub(crate) mod cache_storage;
 pub mod console;
 #[cfg(feature = "fetch_browser")]
 pub mod cookie_store;

@@ -65,6 +65,21 @@ pub(crate) const MAX_CACHE_BODY_BYTES: u64 = 64 * 1024 * 1024;
 static CACHE: LazyLock<Mutex<HashMap<(String, String), CacheEntry>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
+/// Canonical URL used for cache keying.
+///
+/// The raw request string is not canonical: e.g. a doubled slash
+/// (`http://h//p`) is a different string from its parsed form
+/// (`http://h/p`), and the WHATWG URL parser collapses it. Storing under the
+/// raw string while invalidation resolves a `Location` through the parser
+/// makes the two disagree, leaving stale entries behind (WPT
+/// `http-cache/invalidate`). Keying on the parsed serialization keeps store,
+/// lookup and invalidate consistent; an unparseable URL falls back to itself.
+fn cache_key_url(url: &str) -> String {
+    url::Url::parse(url)
+        .map(|u| u.to_string())
+        .unwrap_or_else(|_| url.to_string())
+}
+
 fn now_epoch() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -135,34 +150,49 @@ fn days_from_civil(year: i64, month: u32, day: u32) -> Option<i64> {
     Some(era * 146097 + doe - 719468)
 }
 
-/// True when the stored entry is fresh: `max-age` in `Cache-Control` (or the
-/// `Expires` date) is still in the future relative to storage time.
-fn is_fresh(entry: &CacheEntry) -> bool {
+/// Explicit freshness lifetime in seconds: `Cache-Control: max-age`, else the
+/// `Expires` date measured from when the response was stored. `None` when the
+/// response carries no explicit lifetime (only heuristic freshness applies).
+fn explicit_lifetime(entry: &CacheEntry) -> Option<u64> {
     if let Some(cc) = header_value(&entry.headers, "cache-control") {
         let cc = cc.to_ascii_lowercase();
         if let Some(pos) = cc.find("max-age=") {
-            let rest = &cc[pos + "max-age=".len()..];
-            let max_age: u64 = rest
+            return cc[pos + "max-age=".len()..]
                 .split(|c: char| !c.is_ascii_digit())
                 .next()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(0);
-            return now_epoch().saturating_sub(entry.stored_at) < max_age;
+                .and_then(|s| s.parse().ok());
         }
     }
-    if let Some(expires) = header_value(&entry.headers, "expires")
-        && let Some(expires_epoch) = parse_http_date(&expires)
+    if let Some(expires) = header_value(&entry.headers, "expires") {
+        // RFC 9111 §4.2.1: an invalid date — especially the value "0" — must be
+        // interpreted as *already expired*, not as "no explicit lifetime", so
+        // this must not fall through to heuristic freshness (WPT
+        // `http-cache/freshness`: an invalid `Expires` alongside a past
+        // `Last-Modified` must not be reused).
+        return Some(parse_http_date(&expires).map_or(0, |e| e.saturating_sub(entry.stored_at)));
+    }
+    None
+}
+
+/// True when the stored entry is fresh: its explicit lifetime (`max-age` or
+/// `Expires`) outlasts its current age — which includes the `Age` header
+/// (RFC 9111 §4.2.3).
+fn is_fresh(entry: &CacheEntry) -> bool {
+    // A response `no-cache` directive forbids *reuse without revalidation*, no
+    // matter how fresh `max-age`/`Expires` makes the entry (WPT
+    // `http-cache/freshness`: "stores a response with Cache-Control: no-cache,
+    // but revalidates upon use, even with max-age and Expires").
+    if let Some(cc) = header_value(&entry.headers, "cache-control")
+        && cc.to_ascii_lowercase().contains("no-cache")
     {
-        return now_epoch() < expires_epoch;
+        return false;
+    }
+    if let Some(lifetime) = explicit_lifetime(entry) {
+        return current_age(entry) < lifetime;
     }
 
-    // RFC 7234 §4.2.2 heuristic freshness: with no explicit expiry, allow a small
-    // fraction (10%) of the apparent age (time since `Last-Modified`). The
-    // response must be shared, i.e. carry `Cache-Control: public` (WPT
-    // `http-cache/heuristic`: an unknown response with `public` is reused, the
-    // same response without it is not).
-    // RFC 7234 §4.2.2 heuristic freshness: with no explicit expiry, allow a small
-    // fraction (10%) of the apparent age (time since `Last-Modified`).
+    // RFC 9111 §4.2.2 heuristic freshness: with no explicit expiry, allow a
+    // small fraction (10%) of the apparent age (time since `Last-Modified`).
     if let Some(lm) = header_value(&entry.headers, "last-modified")
         && let Some(modified) = parse_http_date(&lm)
     {
@@ -174,6 +204,79 @@ fn is_fresh(entry: &CacheEntry) -> bool {
 
     // No freshness info: conservatively treat as stale (requires revalidation).
     false
+}
+
+/// The response's `Age` header in seconds (0 when absent). An upstream cache
+/// reports here how long it already held the response, so the client's view of
+/// the current age must include it (RFC 9111 §4.2.3).
+fn age_header(entry: &CacheEntry) -> u64 {
+    header_value(&entry.headers, "age")
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(0)
+}
+
+/// Current age of a stored response: resident time plus the `Age` header.
+fn current_age(entry: &CacheEntry) -> u64 {
+    now_epoch()
+        .saturating_sub(entry.stored_at)
+        .saturating_add(age_header(entry))
+}
+
+/// Read a numeric `Cache-Control` directive (`name=123`) from a lowercased
+/// directive string.
+fn directive_value(cc: &str, name: &str) -> Option<u64> {
+    let pat = format!("{name}=");
+    let pos = cc.find(&pat)?;
+    let rest = &cc[pos + pat.len()..];
+    let end = rest
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(rest.len());
+    rest[..end].parse().ok()
+}
+
+/// Whether a stored entry may be reused given the request's own
+/// `Cache-Control` directives (RFC 9111 §5.2.1). `None` means "not usable".
+///
+/// - `no-cache` / `no-store`: never reuse without going to the network.
+/// - `max-age=N`: only if the entry's current age is at most `N`.
+/// - `min-fresh=N`: only if it stays fresh for at least `N` more seconds.
+/// - `max-stale[=N]`: accept a stale entry, optionally bounded to `N` seconds
+///   of staleness (a bare `max-stale` accepts any amount).
+fn usable_for_request(entry: &CacheEntry, req_headers: &[(String, String)]) -> bool {
+    let Some(cc) = header_value(req_headers, "cache-control") else {
+        return true; // no request directive: no constraint from this side
+    };
+    let cc = cc.to_ascii_lowercase();
+    if cc.contains("no-cache") || cc.contains("no-store") {
+        return false;
+    }
+    let age = current_age(entry);
+    if let Some(n) = directive_value(&cc, "max-age")
+        && age > n
+    {
+        return false;
+    }
+    if let Some(n) = directive_value(&cc, "min-fresh") {
+        // Remaining freshness is the lifetime minus the current age, and that
+        // age already includes the response's `Age` header.
+        let remaining = explicit_lifetime(entry).map_or(0, |l| l.saturating_sub(age));
+        if remaining < n {
+            return false;
+        }
+    }
+    // `max-stale` only matters for an entry that is already stale.
+    if !is_fresh(entry) {
+        let stale_for = explicit_lifetime(entry).map_or(u64::MAX, |l| age.saturating_sub(l));
+        let accepted = match directive_value(&cc, "max-stale") {
+            Some(n) => stale_for <= n,
+            // A bare `max-stale` (no value) accepts any amount of staleness.
+            None => cc.contains("max-stale"),
+        };
+        if !accepted {
+            return false;
+        }
+    }
+    true
 }
 
 /// Whether a request may reuse an entry given its `Vary` fields: every listed
@@ -236,7 +339,7 @@ pub(crate) fn lookup_validators(
         return None;
     }
     let cache = CACHE.lock().unwrap();
-    let entry = cache.get(&(method.to_ascii_uppercase(), url.to_string()))?;
+    let entry = cache.get(&(method.to_ascii_uppercase(), cache_key_url(url)))?;
     // A response that varies on fields this request does not match is not
     // revalidateable either (WPT `http-cache/vary`).
     if !vary_matches(entry, req_headers) {
@@ -257,7 +360,7 @@ pub(crate) fn lookup_full(
         return None;
     }
     let cache = CACHE.lock().unwrap();
-    let entry = cache.get(&(method.to_ascii_uppercase(), url.to_string()))?;
+    let entry = cache.get(&(method.to_ascii_uppercase(), cache_key_url(url)))?;
     // `Vary: *` can never be reused (it always varies), and a response whose
     // Vary fields do not match this request must not be served either
     // (WPT request-cache-force-cache, http-cache/vary).
@@ -266,13 +369,157 @@ pub(crate) fn lookup_full(
     {
         return None;
     }
+
+    // Request `Cache-Control` directives constrain whether this entry may be
+    // reused at all (RFC 9111 §5.2.1).
+    if !usable_for_request(entry, req_headers) {
+        return None;
+    }
+
+    // `fresh` is the caller's freshness filter (`fetch.rs` keeps only fresh
+    // entries for the default cache mode). A request directive that explicitly
+    // accepted a stale entry (`max-stale`) makes it reusable here.
+    let fresh = is_fresh(entry) || header_value(req_headers, "cache-control").is_some();
+    let range = req_headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("range"))
+        .map(|(_, v)| v.clone());
+
+    // Without a `Range` request header the whole stored response is returned.
+    // A stored *partial* response cannot answer such a request — the caller
+    // wants the complete entity, so fall through to the network.
+    let Some(range_value) = range else {
+        if entry.status == 206 {
+            return None;
+        }
+        return Some(CacheHit {
+            status: entry.status,
+            headers: entry.headers.clone(),
+            body: entry.body.clone(),
+            fresh,
+            final_url: entry.final_url.clone(),
+        });
+    };
+
+    // RFC 9111 §3.3 / §4.3.2: a `Range` request may be satisfied from the cache
+    // as a `206 Partial Content`. A complete stored response is sliced; a stored
+    // `206` can only answer ranges that lie inside the span it covers.
+    let full_len = if entry.status == 206 {
+        // The stored body is the resource's `start..` slice, so its byte 0 is
+        // resource offset `start` and the last byte available is
+        // `start + len - 1`. That makes `start + len` the resource length the
+        // stored span implies — the `Content-Range` total is only used to
+        // re-serialize the response header, since fixtures commonly report a
+        // total wider than the body they actually send.
+        let (start, _end, _total) = parse_content_range(&entry.headers)?;
+        let stored_end = start + entry.body.len().saturating_sub(1) as u64;
+        let eff_len = stored_end + 1;
+        let (rs, re) = parse_byte_range(&range_value, eff_len)?;
+        if rs < start || rs > stored_end {
+            return None;
+        }
+        let re = re.min(stored_end);
+        let offset = (rs - start) as usize;
+        let take = (re - rs + 1) as usize;
+        let body = entry.body.get(offset..offset + take)?.to_vec();
+        let mut headers = entry.headers.clone();
+        set_header(
+            &mut headers,
+            "Content-Range",
+            &format!("bytes {rs}-{re}/{eff_len}"),
+        );
+        set_header(&mut headers, "Content-Length", &body.len().to_string());
+        return Some(CacheHit {
+            status: 206,
+            headers,
+            body,
+            fresh,
+            final_url: entry.final_url.clone(),
+        });
+    } else {
+        entry.body.len() as u64
+    };
+    let (rs, re) = parse_byte_range(&range_value, full_len)?;
+    let body = entry.body.get(rs as usize..=re as usize)?.to_vec();
+    let mut headers = entry.headers.clone();
+    set_header(
+        &mut headers,
+        "Content-Range",
+        &format!("bytes {rs}-{re}/{full_len}"),
+    );
+    // The stored response carried the whole entity; the slice is partial.
+    set_header(&mut headers, "Content-Length", &body.len().to_string());
     Some(CacheHit {
-        status: entry.status,
-        headers: entry.headers.clone(),
-        body: entry.body.clone(),
-        fresh: is_fresh(entry),
+        status: 206,
+        headers,
+        body,
+        fresh,
         final_url: entry.final_url.clone(),
     })
+}
+
+/// Parse a request `Range` header (`bytes=a-b`, `bytes=a-`, `bytes=-n`) against
+/// a resource of `len` bytes, returning the inclusive `(start, end)` span. Only
+/// the first byte-range-spec is used; an unsatisfiable or malformed value
+/// returns `None` (the caller then falls back to the network).
+fn parse_byte_range(value: &str, len: u64) -> Option<(u64, u64)> {
+    let spec = value.trim();
+    let spec = spec
+        .strip_prefix("bytes=")
+        .or_else(|| spec.strip_prefix("bytes ="))
+        .or_else(|| spec.strip_prefix("BYTES="))?;
+    let first = spec.split(',').next()?.trim();
+    let (a, b) = first.split_once('-')?;
+    let (a, b) = (a.trim(), b.trim());
+    if len == 0 {
+        return None;
+    }
+    if a.is_empty() {
+        // suffix-byte-range-spec: the final `b` bytes.
+        let n: u64 = b.parse().ok()?;
+        if n == 0 {
+            return None;
+        }
+        let n = n.min(len);
+        return Some((len - n, len - 1));
+    }
+    let start: u64 = a.parse().ok()?;
+    if start >= len {
+        return None;
+    }
+    let end = if b.is_empty() {
+        len - 1
+    } else {
+        b.parse::<u64>().ok()?.min(len - 1)
+    };
+    (start <= end).then_some((start, end))
+}
+
+/// Parse a stored `Content-Range: bytes start-end/total` into its parts.
+fn parse_content_range(headers: &[(String, String)]) -> Option<(u64, u64, u64)> {
+    let v = header_value(headers, "content-range")?;
+    let v = v.trim();
+    let rest = v.strip_prefix("bytes").map(str::trim).unwrap_or(v);
+    let (span, total) = rest.split_once('/')?;
+    let (start, end) = span.trim().split_once('-')?;
+    Some((
+        start.trim().parse().ok()?,
+        end.trim().parse().ok()?,
+        total.trim().parse().ok()?,
+    ))
+}
+
+/// Replace (or append) a header, preserving the stored name casing of an
+/// existing entry.
+fn set_header(headers: &mut Vec<(String, String)>, name: &str, value: &str) {
+    if let Some(h) = headers
+        .iter_mut()
+        .find(|(k, _)| k.eq_ignore_ascii_case(name))
+    {
+        h.1 = value.to_string();
+    } else {
+        headers.push((name.to_string(), value.to_string()));
+    }
 }
 
 /// Append conditional revalidation headers to `headers` from a cached entry,
@@ -311,6 +558,10 @@ pub(crate) fn store(
     final_url: &str,
     req_headers: &[(String, String)],
 ) {
+    // Only a GET seeds the cache. POST/PATCH response caching (RFC 9111 §9.3.1,
+    // a MAY) is deliberately not implemented: browsers have dropped it, and
+    // serving a stored response in place of the one a fresh unsafe request
+    // produced is not something to guess at.
     if !method.eq_ignore_ascii_case("GET") {
         return;
     }
@@ -320,13 +571,8 @@ pub(crate) fn store(
         return;
     }
 
-    // Only cache responses that carry a validator; everything else is not
-    // revalidateable and caching it would only add risk of stale data.
     let etag = header_value(headers, "etag");
     let last_modified = header_value(headers, "last-modified");
-    if etag.is_none() && last_modified.is_none() {
-        return;
-    }
 
     // A status outside the heuristically-cacheable set needs an explicit
     // freshness directive to be cached at all (RFC 9111 §3).
@@ -341,12 +587,22 @@ pub(crate) fn store(
         return;
     }
 
-    // Never cache `no-store` / `private` responses.
-    if let Some(cc) = header_value(headers, "cache-control") {
-        let cc = cc.to_ascii_lowercase();
-        if cc.contains("no-store") || cc.contains("private") {
-            return;
-        }
+    // A stored response must be reusable: one with an explicit freshness
+    // lifetime (`max-age`/`s-maxage`/`public`/`Expires`) is served straight from
+    // cache while fresh and needs no validator at all; otherwise it can only be
+    // *revalidated*, which requires an `ETag`/`Last-Modified`. Needing neither
+    // means nothing could ever be judged about reuse, so do not store it.
+    if !explicit_freshness && etag.is_none() && last_modified.is_none() {
+        return;
+    }
+
+    // Never cache a `no-store` response. `private` is allowed: this cache is a
+    // single-user (browser-style) cache, and RFC 9111 §5.2.2.7 only forbids
+    // *shared* caches from storing `private`.
+    if let Some(cc) = header_value(headers, "cache-control")
+        && cc.to_ascii_lowercase().contains("no-store")
+    {
+        return;
     }
     let vary: Vec<String> = header_value(headers, "vary")
         .map(|v| {
@@ -359,7 +615,7 @@ pub(crate) fn store(
 
     let mut cache = CACHE.lock().unwrap();
     cache.insert(
-        (method.to_ascii_uppercase(), url.to_string()),
+        (method.to_ascii_uppercase(), cache_key_url(url)),
         CacheEntry {
             status,
             headers: headers.to_vec(),
@@ -385,7 +641,7 @@ pub(crate) fn invalidate(url: &str) {
     CACHE
         .lock()
         .unwrap()
-        .remove(&("GET".to_string(), url.to_string()));
+        .remove(&("GET".to_string(), cache_key_url(url)));
 }
 
 /// Merge `update` headers onto a stored entry and rebuild it. Used when the
@@ -393,7 +649,7 @@ pub(crate) fn invalidate(url: &str) {
 /// headers update the stored response but the body stays the same.
 fn merge_and_update(method: &str, url: &str, update: &[(String, String)]) {
     let mut cache = CACHE.lock().unwrap();
-    if let Some(entry) = cache.get_mut(&(method.to_ascii_uppercase(), url.to_string())) {
+    if let Some(entry) = cache.get_mut(&(method.to_ascii_uppercase(), cache_key_url(url))) {
         for (k, v) in update {
             if let Some(slot) = entry
                 .headers
@@ -422,7 +678,7 @@ pub(crate) fn take_not_modified(
     if status != 304 || !cache_driven {
         return None;
     }
-    let key = (method.to_ascii_uppercase(), url.to_string());
+    let key = (method.to_ascii_uppercase(), cache_key_url(url));
     let cached_status = {
         let cache = CACHE.lock().unwrap();
         let entry = cache.get(&key)?;

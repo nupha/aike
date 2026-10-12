@@ -1,24 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2026 John Ray <996351336@qq.com>
 
-pub(crate) mod client;
-pub(crate) mod server;
+mod server;
 
-pub(crate) use {
-    client::JSHttpClient,
-    server::{
-        IncomingRequest, JSHttpRequest, JSHttpResponse, JSHttpResponseSse, JSHttpServer,
-        JSWebSocketStream,
-    },
+pub(crate) use server::{
+    IncomingRequest, JSHttpRequest, JSHttpResponse, JSHttpResponseSse, JSHttpServer,
+    JSWebSocketStream,
 };
 
 use zuqe::{FieldDef, NativeObject, ScopedContext};
-
-use crate::http::client::{
-    headers::JSHeaders,
-    request::JSRequest,
-    response::{JSHttpClientResponse, JSResponse},
-};
 
 /// HTTP method enum — shared across submodules.
 #[allow(clippy::upper_case_acronyms)]
@@ -68,42 +58,19 @@ impl Method {
     }
 }
 
-const MOD_HTTP_ENTRIES: &[FieldDef] = &[
-    FieldDef::CLASS(
-        JSHttpClient::CLASS_NAME,
-        JSHttpClient::class_id,
-        zuqe::JS_PROP_ENUMERABLE,
-    ),
-    // Client response subclass ("HttpClientResponse"); exported for instanceof checks.
-    FieldDef::CLASS(
-        JSHttpClientResponse::CLASS_NAME,
-        JSHttpClientResponse::class_id,
-        zuqe::JS_PROP_ENUMERABLE,
-    ),
-    FieldDef::CLASS(
-        JSHttpServer::CLASS_NAME,
-        JSHttpServer::class_id,
-        zuqe::JS_PROP_ENUMERABLE,
-    ),
-];
+const MOD_HTTP_ENTRIES: &[FieldDef] = &[FieldDef::CLASS(
+    JSHttpServer::CLASS_NAME,
+    JSHttpServer::class_id,
+    zuqe::JS_PROP_ENUMERABLE,
+)];
 
 pub fn init_mod_http(ctx: &mut ScopedContext) -> Result<(), i32> {
     ctx.use_classes(&[
-        JSHttpClient::class_id(),
-        JSResponse::class_id(),
-        JSHttpClientResponse::class_id(),
-        JSHeaders::class_id(),
-        JSRequest::class_id(),
         JSHttpServer::class_id(),
         JSHttpRequest::class_id(),
         JSHttpResponse::class_id(),
         JSHttpResponseSse::class_id(),
         JSWebSocketStream::class_id(),
-        crate::http::client::headers::HeaderListIterator::class_id(),
-        #[cfg(feature = "fetch_cache")]
-        crate::http::client::cache_storage::JSCacheStorage::class_id(),
-        #[cfg(feature = "fetch_cache")]
-        crate::http::client::cache_storage::JSCache::class_id(),
     ])?;
 
     ctx.create_module("http", MOD_HTTP_ENTRIES)?;

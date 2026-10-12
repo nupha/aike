@@ -362,9 +362,6 @@ mod search_tests {
         fn mkdir(&self, rel: &str) {
             std::fs::create_dir_all(self.0.join(rel)).unwrap();
         }
-        fn path(&self) -> &Path {
-            &self.0
-        }
     }
     impl Drop for TempDir {
         fn drop(&mut self) {

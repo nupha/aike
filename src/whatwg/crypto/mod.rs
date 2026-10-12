@@ -231,10 +231,15 @@ fn js_key_usages_getter(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 }
 
 const CLASS_KEY_PROTO: &[FieldDef] = &[
-    FieldDef::GETSET("type", Some(js_key_type_getter), None, 0),
-    FieldDef::GETSET("extractable", Some(js_key_extractable_getter), None, 0),
-    FieldDef::GETSET("algorithm", Some(js_key_algorithm_getter), None, 0),
-    FieldDef::GETSET("usages", Some(js_key_usages_getter), None, 0),
+    FieldDef::GETSET_ENUM("type", Some(js_key_type_getter), None, 0),
+    FieldDef::GETSET_ENUM("extractable", Some(js_key_extractable_getter), None, 0),
+    FieldDef::GETSET_ENUM("algorithm", Some(js_key_algorithm_getter), None, 0),
+    FieldDef::GETSET_ENUM("usages", Some(js_key_usages_getter), None, 0),
+    FieldDef::STR(
+        "[Symbol.toStringTag]",
+        "CryptoKey",
+        zuqe::JS_PROP_CONFIGURABLE,
+    ),
 ];
 
 def_native_object!(
@@ -357,10 +362,11 @@ fn js_crypto_sha256_hex(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 }
 
 const CLASS_CRYPTO_PROTO: &[FieldDef] = &[
-    FieldDef::GETSET("subtle", Some(js_crypto_subtle_getter), None, 0),
-    FieldDef::FUNC("getRandomValues", 1, js_crypto_get_random_values, 0),
-    FieldDef::FUNC("randomUUID", 0, js_crypto_random_uuid, 0),
-    FieldDef::FUNC("sha256Hex", 1, js_crypto_sha256_hex, 0),
+    FieldDef::GETSET_ENUM("subtle", Some(js_crypto_subtle_getter), None, 0),
+    FieldDef::FUNC_ENUM("getRandomValues", 1, js_crypto_get_random_values, 0),
+    FieldDef::FUNC_ENUM("randomUUID", 0, js_crypto_random_uuid, 0),
+    FieldDef::FUNC_ENUM("sha256Hex", 1, js_crypto_sha256_hex, 0),
+    FieldDef::STR("[Symbol.toStringTag]", "Crypto", zuqe::JS_PROP_CONFIGURABLE),
 ];
 
 def_native_object!(

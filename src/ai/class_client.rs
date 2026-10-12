@@ -828,8 +828,7 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
                         // tool-call fragment is intentionally dropped (stalled
                         // partial output is worthless).
                         let mut stall_aborted = false;
-                        let stall_limit =
-                            stall_timeout_secs.map(|s| std::time::Duration::from_secs(s));
+                        let stall_limit = stall_timeout_secs.map(std::time::Duration::from_secs);
                         let notify = abort_notify.clone();
 
                         // Accumulated coalesced content chunk and a line stashed
@@ -1061,7 +1060,7 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
                                                 nd.get("tool_calls").is_some_and(|t| {
                                                     !t.is_null()
                                                         && t.as_array()
-                                                            .map_or(true, |a| !a.is_empty())
+                                                            .is_none_or(|a| !a.is_empty())
                                                 });
                                             let npure = !has_tool_calls
                                                 && j[OUTMSG_FIELD_CHOICES][0]["finish_reason"]
@@ -1177,7 +1176,7 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
             // Abort races the whole request; dropping `result_fut` closes the
             // upstream connection, so generation stops server-side too.
             let result_fut = async {
-                let result = match req_builder.send().await {
+                match req_builder.send().await {
                     Ok(response) => {
                         let status = response.status();
                         let body = response.text().await.unwrap_or_default();
@@ -1222,9 +1221,9 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
                         }
                     }
                     Err(e) => Err(e.to_string()),
-                };
-                result
+                }
             };
+
             let result = match abort_notify {
                 Some(n) => tokio::select! {
                     biased;
@@ -1233,6 +1232,7 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
                 },
                 None => result_fut.await,
             };
+
             let _ = result_slot.commit(result);
         });
 

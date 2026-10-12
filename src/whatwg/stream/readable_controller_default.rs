@@ -8,10 +8,10 @@ use zuqe::{
 use super::{ReadableControllerPayload, readable_controller::get_readable_controller};
 
 const CONTROLLER_PROTO: &[FieldDef] = &[
-    FieldDef::FUNC("enqueue", 1, js_controller_enqueue, 0),
-    FieldDef::FUNC("close", 0, js_controller_close, 0),
-    FieldDef::FUNC("error", 1, js_controller_error, 0),
-    FieldDef::GETSET("desiredSize", Some(js_controller_desired_size), None, 0),
+    FieldDef::FUNC_ENUM("enqueue", 1, js_controller_enqueue, 0),
+    FieldDef::FUNC_ENUM("close", 0, js_controller_close, 0),
+    FieldDef::FUNC_ENUM("error", 1, js_controller_error, 0),
+    FieldDef::GETSET_ENUM("desiredSize", Some(js_controller_desired_size), None, 0),
     FieldDef::STR(
         "[Symbol.toStringTag]",
         "ReadableStreamDefaultController",

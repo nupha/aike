@@ -32,24 +32,6 @@ pub(crate) struct WriterPayload {
 }
 
 impl WriterPayload {
-    fn gc_trace(&self, gcx: &mut GcTraceCtx) {
-        if let Some(ref s) = self.stream {
-            s.trace(gcx);
-        }
-        if let Some(ref cp) = self.closed_promise {
-            cp.trace(gcx);
-        }
-        if let Some(ref rp) = self.ready_promise {
-            rp.trace(gcx);
-        }
-        if let Some(ref wp) = self.write_promise {
-            wp.trace(gcx);
-        }
-        if let Some(ref ap) = self.abort_promise {
-            ap.trace(gcx);
-        }
-    }
-
     /// Abort the stream this writer is locked to, forwarding `reason`.
     ///
     /// Returns the underlying stream's abort result. If the writer is not
@@ -130,10 +112,10 @@ impl WriterPayload {
     /// released-writer TypeError). `desiredSize` throws on access once `stream`
     /// is `None`.
     pub(crate) fn release_lock(&mut self, ctx: &mut ScopedContext) {
-        if let Some(mut stream_val) = self.stream.take() {
-            if let Some(sp) = stream_val.payload_mut() {
-                sp.writer = None;
-            }
+        if let Some(mut stream_val) = self.stream.take()
+            && let Some(sp) = stream_val.payload_mut()
+        {
+            sp.writer = None;
         }
         // Per spec `WritableStreamDefaultWriterRelease`, a released writer's
         // `ready`/`closed` are rejected with a released-writer TypeError: in
@@ -146,18 +128,32 @@ impl WriterPayload {
 
 impl GcTrace for WriterPayload {
     fn trace(&self, gcx: &mut GcTraceCtx) {
-        self.gc_trace(gcx);
+        if let Some(ref s) = self.stream {
+            s.trace(gcx);
+        }
+        if let Some(ref cp) = self.closed_promise {
+            cp.trace(gcx);
+        }
+        if let Some(ref rp) = self.ready_promise {
+            rp.trace(gcx);
+        }
+        if let Some(ref wp) = self.write_promise {
+            wp.trace(gcx);
+        }
+        if let Some(ref ap) = self.abort_promise {
+            ap.trace(gcx);
+        }
     }
 }
 
 const WRITER_PROTO: &[FieldDef] = &[
-    FieldDef::FUNC("write", 1, js_writer_write, 0),
-    FieldDef::FUNC("close", 0, js_writer_close, 0),
-    FieldDef::FUNC("abort", 1, js_writer_abort, 0),
-    FieldDef::FUNC("releaseLock", 0, js_writer_release_lock, 0),
-    FieldDef::GETSET("closed", Some(js_writer_closed), None, 0),
-    FieldDef::GETSET("ready", Some(js_writer_ready), None, 0),
-    FieldDef::GETSET("desiredSize", Some(js_writer_desired_size), None, 0),
+    FieldDef::FUNC_ENUM("write", 1, js_writer_write, 0),
+    FieldDef::FUNC_ENUM("close", 0, js_writer_close, 0),
+    FieldDef::FUNC_ENUM("abort", 1, js_writer_abort, 0),
+    FieldDef::FUNC_ENUM("releaseLock", 0, js_writer_release_lock, 0),
+    FieldDef::GETSET_ENUM("closed", Some(js_writer_closed), None, 0),
+    FieldDef::GETSET_ENUM("ready", Some(js_writer_ready), None, 0),
+    FieldDef::GETSET_ENUM("desiredSize", Some(js_writer_desired_size), None, 0),
     FieldDef::STR(
         "[Symbol.toStringTag]",
         "WritableStreamDefaultWriter",
@@ -217,11 +213,11 @@ fn js_writer_desired_size(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
             RsState::Closed => return Ok(JSValue::ZERO),
             RsState::Readable => {}
         }
-        if let Some(ctrl) = sp.controller {
-            if let Some(cp) = ctrl.payload() {
-                // Spec: desiredSize = highWaterMark − total queued chunk size.
-                return Ok(JSValue::from(cp.high_water_mark - sp.queue_total_size));
-            }
+        if let Some(ctrl) = sp.controller
+            && let Some(cp) = ctrl.payload()
+        {
+            // Spec: desiredSize = highWaterMark − total queued chunk size.
+            return Ok(JSValue::from(cp.high_water_mark - sp.queue_total_size));
         }
     }
     Ok(JSValue::from(1))
@@ -233,12 +229,6 @@ fn js_writer_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut stream = JSWritableStream::from_value(cc.arg(0)).ok_or_else(|| {
         ctx.throw_type_error("WritableStreamDefaultWriter requires a WritableStream")
     })?;
-    // let mut stream = cc
-    //     .arg(0)
-    //     .as_native_object::<JSWritableStream>()
-    //     .ok_or_else(|| {
-    //         ctx.throw_type_error("WritableStreamDefaultWriter requires a WritableStream")
-    //     })?;
     let handle = stream;
 
     // Per spec `SetUpWritableStreamDefaultWriter`: the stream must not be

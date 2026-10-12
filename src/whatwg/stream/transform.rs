@@ -60,8 +60,8 @@ impl GcTrace for TransformStreamPayload {
 }
 
 const TRANSFORM_STREAM_PROTO: &[FieldDef] = &[
-    FieldDef::GETSET("readable", Some(js_transform_stream_readable), None, 0),
-    FieldDef::GETSET("writable", Some(js_transform_stream_writable), None, 0),
+    FieldDef::GETSET_ENUM("readable", Some(js_transform_stream_readable), None, 0),
+    FieldDef::GETSET_ENUM("writable", Some(js_transform_stream_writable), None, 0),
     FieldDef::STR(
         "[Symbol.toStringTag]",
         "TransformStream",

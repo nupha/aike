@@ -3,7 +3,7 @@
 
 mod class_io_handle;
 mod cron;
-mod download;
+
 mod persistent;
 pub(crate) mod pipe_bridge;
 mod runtime;
@@ -21,7 +21,7 @@ pub(crate) use {
     },
     signal::{install_default_signal_handlers, register_signal_handler, signal_number},
     spawn::{kill_all_children, terminate_process},
-    sys::{get_time_ns, which_executable},
+    sys::get_time_ns,
 };
 
 use std::{collections::HashMap, time::Instant};
@@ -91,7 +91,7 @@ pub(crate) struct AikeRuntimeState {
     pub(crate) fetch_cors: bool,
     #[cfg(feature = "fetch_browser")]
     pub(crate) fetch_cookie: bool,
-    /// Whether `fetch()` (and `Aike.download`) skip TLS certificate validation
+    /// Whether `fetch()` skips TLS certificate validation
     /// (`fetch.allowInsecureTLS`). Default off.
     pub(crate) fetch_allow_insecure_tls: bool,
 
@@ -185,7 +185,6 @@ pub(crate) fn init_aike_namespace(ctx: &mut ScopedContext) -> Result<(), i32> {
         FieldDef::FUNC("gunzip", 1, crate::gzip::js_gunzip, 0),
         FieldDef::FUNC("sh", 1, spawn::js_sh, 0),
         FieldDef::FUNC("sandboxSupport", 0, sandbox::js_sandbox_support, 0),
-        FieldDef::FUNC("download", 2, download::js_download, 0),
         // --- timer ---
         FieldDef::FUNC("sleep", 0, crate::whatwg::timeout::js_sleep, 0),
         // --- persistent ---

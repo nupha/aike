@@ -3,7 +3,7 @@
 
 mod parse;
 
-pub(crate) use parse::{HtmlConvertMode, HtmlDocument, HtmlElement, convert_html};
+pub(crate) use parse::{HtmlDocument, HtmlElement};
 
 use zuqe::{FieldDef, ScopedContext};
 

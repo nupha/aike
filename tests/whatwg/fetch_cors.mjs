@@ -7,12 +7,11 @@
 //
 // The server is aike's own `HttpServer` started with `listen({ cors: false })`,
 // so it attaches no permissive CORS layer and every `Access-Control-*` header
-// below is one the test set deliberately. Readiness polling and the hit
-// counters are read back over HttpClient, which never applies CORS.
+// below is one the test set deliberately.
 //
 // Run: aike -m tests/whatwg/fetch_cors.mjs
 
-import { HttpClient, HttpServer } from "http";
+import { HttpServer } from "http";
 
 const PORT = 18131;
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -112,12 +111,13 @@ svr.put("/preflight-denied", (_req, res) => {
 
 svr.listen({ host: "127.0.0.1", port: PORT, cors: false });
 
-const client = new HttpClient();
-
 async function waitForServer() {
   for (let i = 0; i < 100; i++) {
     try {
-      const r = await client.get(`${BASE}/no-acao`, { timeout: 2 });
+      // `/acao-star` replies with `Access-Control-Allow-Origin: *`, so this
+      // readiness probe passes the CORS check the rest of the file exercises;
+      // a server that is not listening yet rejects with a network error.
+      const r = await fetch(`${BASE}/acao-star`);
       if (r.status === 200) return;
     } catch {
       // not up yet

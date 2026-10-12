@@ -49,6 +49,7 @@ use crate::{
 ///
 /// All three live in [`AikeRuntimeState`] rather than in thread-locals so two
 /// runtimes on one thread never share a registry.
+#[derive(Default)]
 pub(crate) struct CjsState {
     /// `require.cache` — resolved filename -> module record.
     cache: Option<JSValue>,
@@ -62,18 +63,6 @@ pub(crate) struct CjsState {
     esm: HashMap<String, JSValue>,
     /// Scratch slot filled by the generated `require(esm)` wrapper module.
     captured: Option<JSValue>,
-}
-
-impl Default for CjsState {
-    fn default() -> Self {
-        Self {
-            cache: None,
-            extensions: None,
-            main: None,
-            esm: HashMap::new(),
-            captured: None,
-        }
-    }
 }
 
 /// Every field here is a GC node reachable only from Rust, so the whole
@@ -387,7 +376,7 @@ pub(crate) fn run_entry(ctx: &mut ScopedContext, filename: &str, source: &str) -
         // `require.main` was still unset while `create_record` built this
         // module's own `require`, so patch it here — `require.main === module`
         // must hold inside the entry body.
-        for holder in [
+        for mut req in [
             ctx.global_obj()
                 .get_property_str(ctx, "require")?
                 .as_object(),
@@ -395,10 +384,11 @@ pub(crate) fn run_entry(ctx: &mut ScopedContext, filename: &str, source: &str) -
                 .as_object()
                 .and_then(|r| r.get_property_str(ctx, "require").ok())
                 .and_then(|r| r.as_object()),
-        ] {
-            if let Some(mut req) = holder {
-                req.set_property_str(ctx, "main", record)?;
-            }
+        ]
+        .into_iter()
+        .flatten()
+        {
+            req.set_property_str(ctx, "main", record)?;
         }
     }
 

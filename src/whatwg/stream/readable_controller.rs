@@ -1521,10 +1521,10 @@ pub(super) fn get_readable_controller<'a>(
     this: &'a JSValue,
 ) -> Result<&'a ReadableControllerPayload, i32> {
     if let Some(p) = JSReadableStreamDefaultController::payload_of(this) {
-        return Ok(p);
+        Ok(p)
+    } else if let Some(p) = JSReadableByteStreamController::payload_of(this) {
+        Ok(p)
+    } else {
+        Err(ctx.throw_type_error("not a ReadableStream controller"))
     }
-    if let Some(p) = JSReadableByteStreamController::payload_of(this) {
-        return Ok(p);
-    }
-    Err(ctx.throw_type_error("not a ReadableStream controller"))
 }

@@ -393,7 +393,7 @@ impl WritableStreamPayload {
                 // during the close) discard the error and resolve a pending abort
                 // request, then close the stream.
                 if let Some(mut cp) = sp.close_promise.take() {
-                    let _ = cp.resolve(ctx, JSValue::UNDEFINED);
+                    cp.resolve(ctx, JSValue::UNDEFINED);
                 }
                 if sp.state == RsState::Erroring {
                     sp.stored_error = JSValue::UNDEFINED;
@@ -419,7 +419,7 @@ impl WritableStreamPayload {
                 // then `DealWithRejection` (writable -> start erroring, erroring ->
                 // finish erroring with the existing stored error).
                 if let Some(mut cp) = sp.close_promise.take() {
-                    let _ = cp.reject(ctx, value);
+                    cp.reject(ctx, value);
                 }
                 if let Some(req) = sp.pending_abort.take() {
                     let mut p = req.promise;
@@ -567,31 +567,31 @@ impl WritableStreamPayload {
 
         // Spec step 3: if [[finishPromise]] already exists (e.g. a concurrent
         // readable.cancel()), return it — do not call flush().
-        if let Some(tcp) = tc.payload() {
-            if let Some(fp) = tcp.finish_promise {
-                let stream_val = self.stream_value();
-                let ok = ctx
-                    .create_native_function_with_data(
-                        Callback::Func(flush_close_ok),
-                        "flushCloseOk",
-                        0,
-                        0,
-                        [stream_val].into(),
-                    )?
-                    .into();
-                let err = ctx
-                    .create_native_function_with_data(
-                        Callback::Func(flush_close_err),
-                        "flushCloseErr",
-                        1,
-                        0,
-                        [stream_val].into(),
-                    )?
-                    .into();
-                let mut fp = fp;
-                fp.perform_then(ctx, ok, err)?;
-                return Ok(());
-            }
+        if let Some(tcp) = tc.payload()
+            && let Some(fp) = tcp.finish_promise
+        {
+            let stream_val = self.stream_value();
+            let ok = ctx
+                .create_native_function_with_data(
+                    Callback::Func(flush_close_ok),
+                    "flushCloseOk",
+                    0,
+                    0,
+                    [stream_val].into(),
+                )?
+                .into();
+            let err = ctx
+                .create_native_function_with_data(
+                    Callback::Func(flush_close_err),
+                    "flushCloseErr",
+                    1,
+                    0,
+                    [stream_val].into(),
+                )?
+                .into();
+            let mut fp = fp;
+            fp.perform_then(ctx, ok, err)?;
+            return Ok(());
         }
 
         // Spec step 4: create [[finishPromise]] before calling flush.
@@ -1074,10 +1074,10 @@ fn flush_close_err(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 }
 
 const WRITABLE_STREAM_PROTO: &[FieldDef] = &[
-    FieldDef::GETSET("locked", Some(js_writable_stream_locked), None, 0),
-    FieldDef::FUNC("getWriter", 0, js_writable_stream_get_writer, 0),
-    FieldDef::FUNC("abort", 1, js_writable_stream_abort, 0),
-    FieldDef::FUNC("close", 0, js_writable_stream_close, 0),
+    FieldDef::GETSET_ENUM("locked", Some(js_writable_stream_locked), None, 0),
+    FieldDef::FUNC_ENUM("getWriter", 0, js_writable_stream_get_writer, 0),
+    FieldDef::FUNC_ENUM("abort", 1, js_writable_stream_abort, 0),
+    FieldDef::FUNC_ENUM("close", 0, js_writable_stream_close, 0),
     FieldDef::STR(
         "[Symbol.toStringTag]",
         "WritableStream",
@@ -1272,7 +1272,7 @@ fn js_writable_stream_constructor(ctx: &mut ScopedContext, cc: CallContext) -> J
         resolved.perform_then(ctx, start_fn.into(), JSValue::UNDEFINED)?;
     }
 
-    stream.payload_mut().unwrap().controller = Some(controller.into());
+    stream.payload_mut().unwrap().controller = Some(controller);
 
     Ok(stream.into())
 }

@@ -71,7 +71,7 @@ fn format_next_run(schedule: &Schedule) -> Option<String> {
 /// Normalize a 5-field standard cron expression to the 7-field format
 /// expected by the `cron` crate: `sec min hour dom month dow year`.
 fn normalize_cron_expr(expr: &str) -> String {
-    let fields: Vec<&str> = expr.trim().split_whitespace().collect();
+    let fields: Vec<&str> = expr.split_whitespace().collect();
     match fields.len() {
         5 => format!("0 {} *", expr.trim()), // prepend seconds, append year
         6 => format!("{} *", expr.trim()),   // has seconds, append year
@@ -323,8 +323,7 @@ pub(super) fn js_schedule(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
     // Set data properties on the instance
     let mut job_obj = job_val
         .as_object()
-        .ok_or_else(|| ctx.throw_internal_error("failed to create CronJob object"))?
-        .clone();
+        .ok_or_else(|| ctx.throw_internal_error("failed to create CronJob object"))?;
     job_obj.define_property_value_str(ctx, "id", JSValue::from(id as i32), JS_PROP_C_W_E)?;
     job_obj.define_property_value_str(ctx, "name", name_val, JS_PROP_C_W_E)?;
     job_obj.define_property_value_str(ctx, "pattern", pattern_val, JS_PROP_C_W_E)?;
@@ -338,7 +337,7 @@ pub(super) fn js_schedule(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
             CronEntry {
                 schedule: schedule.clone(),
                 callback,
-                job_obj: job_obj.clone(),
+                job_obj,
                 active: true,
             },
         );

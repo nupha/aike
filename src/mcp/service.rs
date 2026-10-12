@@ -174,7 +174,7 @@ impl ServerHandler for McpService {
         let tool_name = request.name.to_string();
         let mut arguments: serde_json::Value = request
             .arguments
-            .map(|m| serde_json::Value::Object(m))
+            .map(serde_json::Value::Object)
             .unwrap_or(serde_json::Value::Null);
 
         async move {
@@ -419,7 +419,7 @@ fn result_as_mcp_envelope(ctx: &mut ScopedContext, result: &JSValue) -> Option<s
         return None;
     };
     let obj = val.as_object()?;
-    if !obj.get("content").map_or(false, |c| c.is_array()) {
+    if !obj.get("content").is_some_and(|c| c.is_array()) {
         return None;
     }
     Some(val)
