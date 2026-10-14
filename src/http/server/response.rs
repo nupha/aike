@@ -412,8 +412,7 @@ fn js_res_sse(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     // Queue a job that polls the disconnect signal and fires close_cbs.
     {
         let close_cbs = data.close_cbs.clone();
-        let disconnect_rx =
-            sink.arm_disconnect_watcher(ctx, sink.tx.clone().expect("sink tx must be present"));
+        let disconnect_rx = sink.arm_disconnect_watcher(ctx);
 
         ctx.queue_job(
             move |cx| match disconnect_rx.try_recv() {

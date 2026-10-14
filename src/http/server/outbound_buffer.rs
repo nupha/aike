@@ -86,24 +86,26 @@ impl OutboundBuffer {
         self.close_cbs = Some(cbs);
     }
 
-    /// Arm a disconnect watcher. Takes a clone of the mpsc sender so the tokio
-    /// task can await its closure. Returns a `std::sync::mpsc::Receiver<()>`
-    /// that receives a signal when the client disconnects — poll it via
-    /// `queue_job` on the JS thread to fire `close_cbs`.
-    pub(crate) fn arm_disconnect_watcher(
-        &mut self,
-        ctx: &ScopedContext,
-        mpsc_tx: tokio::sync::mpsc::Sender<String>,
-    ) -> zuqe::WakeReceiver<()> {
+    /// Arm a disconnect watcher. The tokio task holds only a *weak* sender, so it
+    /// does not keep the channel alive: `shutdown()` (SSE close / WS close) drops
+    /// the last strong sender, the receiver ends and the stream really ends.
+    /// Returns a `WakeReceiver<()>` that receives a signal when the client
+    /// disconnects — poll it via `queue_job` on the JS thread to fire `close_cbs`.
+    pub(crate) fn arm_disconnect_watcher(&mut self, ctx: &ScopedContext) -> zuqe::WakeReceiver<()> {
         let (wake_tx, wake_rx) = ctx.make_channel::<()>(1);
+        let weak = self.tx.as_ref().expect("sender armed").downgrade();
 
-        // Spawn a tokio task that watches for receiver drop.
+        // Spawn a tokio task that watches for receiver drop. A weak sender has no
+        // `closed()`, so it polls `upgrade()`: one wakeup a quarter second per
+        // open stream, and it fires when shutdown() dropped the last sender.
         tokio::spawn(async move {
-            // Wait until the receiver side is dropped (client disconnect or
-            // stream ends). `sender.closed()` resolves when all receivers are gone.
-            mpsc_tx.closed().await;
-            // Signal the JS thread.
-            let _ = wake_tx.send(());
+            loop {
+                if weak.upgrade().is_none() {
+                    let _ = wake_tx.send(());
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            }
         });
 
         wake_rx
