@@ -3,7 +3,10 @@
 
 use std::{sync::LazyLock, time::Instant};
 
-use zuqe::{CallContext, JS_PROP_ENUMERABLE, JSResult, JSValue, ScopedContext};
+use zuqe::{
+    CallContext, JS_PROP_ENUMERABLE, JSResult, JSValue, ScopedContext,
+    zapi::{ZQ_ABI_MIN, ZQ_ABI_VERSION, ZQ_API_MIN, ZQ_API_VERSION},
+};
 
 /// Process start time — used by `process.uptime()`.
 static START_TIME: LazyLock<Instant> = LazyLock::new(Instant::now);
@@ -48,12 +51,10 @@ pub(crate) const VERSION_STR: &str = concat!("v", env!("CARGO_PKG_VERSION"));
 /// Leaked to `'static` because clap wants a `&'static str`; there is exactly
 /// one, so the leak is bounded.
 pub(crate) fn version_banner() -> &'static str {
-    use zuqe::zapi::{ZQ_ABI_BASE, ZQ_ABI_VERSION, ZQ_API_BASE, ZQ_API_VERSION};
-
     Box::leak(
         format!(
             "{ver}, with zapi abi {ZQ_ABI_VERSION}, api {ZQ_API_VERSION} \
-             (min abi {ZQ_ABI_BASE}, min api {ZQ_API_BASE})",
+             (min abi {ZQ_ABI_MIN}, min api {ZQ_API_MIN})",
             ver = env!("CARGO_PKG_VERSION"),
         )
         .into_boxed_str(),
