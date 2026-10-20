@@ -2,24 +2,27 @@ import { System1Client, choice, score, noul } from "ai";
 
 // system1_live_test.mjs — smoke test against a REAL System One endpoint.
 //
-//   OPENCODE_API_KEY=... ./target/debug/aike tests/llm/system1_live_test.mjs
-//   TYPESAFE_API_KEY=...  ./target/debug/aike tests/llm/system1_live_test.mjs
+//   ./target/debug/aike tests/llm/system1_live_test.mjs
 //
-// The api key comes from TYPESAFE_API_KEY first, then OPENCODE_API_KEY (the
-// OpenCode Zen gateway speaks the same protocol). baseUrl/model can be
-// overridden with AIKE_S1_BASE_URL / AIKE_S1_MODEL.
+// Endpoint: https://api.bamboonode.dev/v1/systemone (the client appends
+// `/v1/systemone` to `baseUrl`, so the base carries no `/v1` suffix).
+// Model:    startlux-decision-27b-autothink.
+// Override with AIKE_S1_BASE_URL / AIKE_S1_MODELS (comma separated).
 //
-// This asserts nothing about answer *values* — Jev is a probabilistic model,
-// so only the protocol shape is checked.
+// This asserts nothing about answer *values* — the decision model is
+// probabilistic, so only the protocol shape is checked.
 
-const KEY = process.env.TYPESAFE_API_KEY || process.env.OPENCODE_API_KEY;
+// Key: BAMBOONODE_API_KEY, loaded from this repo's `.env` by `dotenvy::dotenv()`
+// at startup — aike searches the CWD and its parents, so running from `aike/`
+// picks up the workspace root's `.env`.
+const KEY = process.env.BAMBOONODE_API_KEY;
 if (!KEY) {
-  console.error("set TYPESAFE_API_KEY or OPENCODE_API_KEY first");
+  console.error("BAMBOONODE_API_KEY is not set (expected in the workspace .env)");
   throw new Error("no api key");
 }
 
-const BASE = process.env.AIKE_S1_BASE_URL || "https://opencode.ai/zen";
-const MODELS = (process.env.AIKE_S1_MODELS || "jev-1.13-free,jev-1.13").split(",");
+const BASE = process.env.AIKE_S1_BASE_URL || "https://api.bamboonode.dev";
+const MODELS = (process.env.AIKE_S1_MODELS || "startlux-decision-27b-autothink").split(",");
 
 let pass = 0;
 let fail = 0;
@@ -105,12 +108,22 @@ for (const model of MODELS) {
   }
 
   // choice → {type, choice, confidence, probabilities}, choice ∈ criteria keys
+  // or `null`: this deployment has `allow_none` on, so a null choice is a legal
+  // answer meaning "none of the listed options" and is signalled by
+  // `none_probability`, not by a low listed-option probability.
   for (const name of keys.filter((k) => QUESTIONS[k].type === "choice")) {
     const v = a[name];
     const labels = Object.keys(QUESTIONS[name].criteria);
     check(`${model}: ${name}.type`, v.type === "choice", v.type);
-    check(`${model}: ${name}.choice is a declared label`,
-      labels.includes(v.choice), `${v.choice} not in ${labels.join(",")}`);
+    if (v.choice === null) {
+      console.log(`  (${name}: choice null, none_probability=${v.none_probability})`);
+      check(`${model}: ${name}.null choice reports none_probability`,
+        typeof v.none_probability === "number" && v.none_probability >= 0 && v.none_probability <= 1,
+        JSON.stringify(v.none_probability));
+    } else {
+      check(`${model}: ${name}.choice is a declared label`,
+        labels.includes(v.choice), `${v.choice} not in ${labels.join(",")}`);
+    }
     check(`${model}: ${name}.confidence in [0,1]`,
       typeof v.confidence === "number" && v.confidence >= 0 && v.confidence <= 1,
       JSON.stringify(v.confidence));
@@ -140,6 +153,32 @@ for (const model of MODELS) {
       JSON.stringify(v.probabilities));
   }
 
+  // ---- none-of-the-above: `allow_none` lets `choice` come back null, and the
+  // answer stays well-formed either way. Accept both outcomes; assert the shape.
+  try {
+    const r = await client.systemOne({
+      state: "The customer writes: 'nothing needed, just saying hi.'",
+      questions: {
+        department: choice("Which team should handle this request?", {
+          billing: "Charges, invoices, or payment problems",
+          technical: "Bugs or integration problems",
+        }),
+      },
+    });
+    const v = r.answers.department;
+    const labels = ["billing", "technical"];
+    check(`${model}: none-matching state answers with type choice`, v.type === "choice", v.type);
+    check(`${model}: none-matching state choice is null or a declared label`,
+      v.choice === null || labels.includes(v.choice), `${v.choice} not in null,${labels.join(",")}`);
+    if (v.choice === null) {
+      check(`${model}: none-matching null choice reports none_probability`,
+        typeof v.none_probability === "number",
+        JSON.stringify(v.none_probability));
+    }
+  } catch (e) {
+    check(`${model}: none-matching state answered`, false, e.message);
+  }
+
   // ---- state carried as an object, not flattened ----
   check(`${model}: object state accepted`, true);
 
@@ -156,7 +195,7 @@ for (const model of MODELS) {
   }
 
   // ---- array state is a legal EntryType; `state: null` is legal per the SDK
-  // type but the Zen gateway rejects it upstream. Either way the client must
+  // type but the gateway may reject it upstream. Either way the client must
   // behave predictably: answer, or surface the server's message verbatim.
   try {
     const r = await client.systemOne({ state: ["Hi there", "Charged twice."], questions: { q: noul("Is this a request") } });

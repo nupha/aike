@@ -4,8 +4,12 @@ import { HttpServer } from "http";
 // system1_client_test.mjs — System1Client ("ai".System1Client) protocol tests
 // against a built-in mock System One server. Self-contained:
 //   ./target/debug/aike tests/llm/system1_client_test.mjs
-// To run against the real API instead of the mock:
-//   TYPESAFE_API_KEY=sk-... ./target/debug/aike tests/llm/system1_client_test.mjs
+// To run against the real decision model instead of the mock:
+//   AIKE_S1_LIVE=1 ./target/debug/aike tests/llm/system1_client_test.mjs
+//
+// Live endpoint: https://api.bamboonode.dev/v1/systemone, model
+// startlux-decision-27b-autothink. The client appends `/v1/systemone` to
+// `baseUrl`, so baseUrl carries no `/v1` suffix.
 
 let pass = 0;
 let fail = 0;
@@ -19,9 +23,18 @@ function check(label, cond) {
   }
 }
 
-const USE_ENV = !!process.env.TYPESAFE_API_KEY;
+// Key: BAMBOONODE_API_KEY, loaded from this repo's `.env` by `dotenvy::dotenv()`
+// at startup — aike searches the CWD and its parents, so running from `aike/`
+// picks up the workspace root's `.env`.
+const KEY = process.env.BAMBOONODE_API_KEY;
+// The mock is the default: this file asserts mock-observable wire details, so
+// live mode has to be asked for explicitly.
+const USE_ENV = process.env.AIKE_S1_LIVE === "1";
 const MOCK = "http://127.0.0.1:18151";
-const BASE = USE_ENV ? "https://api.typesafe.ai" : MOCK;
+const LIVE_BASE = "https://api.bamboonode.dev";
+const BASE = USE_ENV ? LIVE_BASE : MOCK;
+const MODEL = process.env.AIKE_S1_MODEL || "startlux-decision-27b-autothink";
+const API_KEY = USE_ENV ? KEY : "sk-test";
 
 // ---- mock System One server ----
 
@@ -151,7 +164,7 @@ server.post("/v1/systemone", async (req, res) => {
     answers[name] = mkAnswer(question);
   }
   send(200, {
-    model: "jev-1.13.0",
+    model: body.model,
     answers,
     usage: { input_tokens: 120, output_tokens: 0 },
   });
@@ -180,9 +193,9 @@ function throwsRange(fn, label) {
 }
 
 const client = new System1Client({
-  apiKey: "sk-test",
+  apiKey: API_KEY,
   baseUrl: BASE,
-  model: "jev-1.13.0",
+  model: MODEL,
 });
 
 // ---- question builders ----
@@ -208,7 +221,7 @@ throwsType(() => noul("bad", "nope"), "noul() criteria must be object");
 
 // ---- client properties ----
 
-check("model getter", client.model === "jev-1.13.0");
+check("model getter", client.model === MODEL);
 check("baseUrl getter", client.baseUrl === BASE);
 check("timeout getter", client.timeout === 60);
 check("headers getter is object", typeof client.headers === "object");
@@ -231,14 +244,14 @@ const resp = await client.systemOne({
 check("request path", lastRequest.path === "/v1/systemone");
 check("request method", lastRequest.method === "POST");
 check("json content-type", /application\/json/.test(lastContentType || ""));
-check("bearer auth header", lastAuth === "Bearer sk-test");
-check("request model", lastRequest.body.model === "jev-1.13.0");
+check("bearer auth header", lastAuth === "Bearer " + API_KEY);
+check("request model", lastRequest.body.model === MODEL);
 check("request state forwarded", lastRequest.body.state === "I was charged twice. Please fix this ASAP.");
 check("request question count", Object.keys(lastRequest.body.questions).length === 3);
 check("wire question type", lastRequest.body.questions.category.type === "choice");
 check("wire score criteria is array", Array.isArray(lastRequest.body.questions.frustration.criteria));
 
-check("response model", resp.model === "jev-1.13.0");
+check("response model", resp.model === MODEL);
 check("response usage.input_tokens", resp.usage.input_tokens === 120);
 check("response choice", resp.answers.category.choice === "billing");
 check("response choice confidence", resp.answers.category.confidence === 0.6);
@@ -319,7 +332,7 @@ check("plain question answers", plain.answers.a.noul === 0.82);
 const hdrClient = new System1Client({
   apiKey: "k",
   baseUrl: BASE,
-  model: "jev-1.13.0",
+  model: MODEL,
   headers: { "x-app": "test" },
 });
 await hdrClient.systemOne({ state: "s", questions: { q: noul("i") } });
@@ -389,12 +402,12 @@ check("apiKey is optional", keyless instanceof System1Client);
 check("keyless client has no default model/baseUrl",
   keyless.baseUrl === BASE && keyless.model === "m");
 
-// No environment variable is consulted: TYPESAFE_API_KEY must not leak in.
-check("client ignores TYPESAFE_API_KEY", (() => {
-  const saved = process.env.TYPESAFE_API_KEY;
+// No environment variable is consulted: BAMBOONODE_API_KEY must not leak in.
+check("client ignores BAMBOONODE_API_KEY", (() => {
+  const saved = process.env.BAMBOONODE_API_KEY;
   const made = new System1Client({ baseUrl: BASE, model: "m" });
-  if (saved === undefined) delete process.env.TYPESAFE_API_KEY;
-  else process.env.TYPESAFE_API_KEY = saved;
+  if (saved === undefined) delete process.env.BAMBOONODE_API_KEY;
+  else process.env.BAMBOONODE_API_KEY = saved;
   return made.baseUrl === BASE && made.model === "m";
 })());
 
