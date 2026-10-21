@@ -11,7 +11,9 @@ use windows_sys::Win32::System::SystemInformation::{
     GetTickCount64, GetVersionExW, OSVERSIONINFOW,
 };
 
-use zuqe::{CallContext, FieldDef, JS_PROP_ENUMERABLE, JSResult, JSValue, ScopedContext};
+use zuqe::{
+    CallContext, FieldDef, JS_PROP_ENUMERABLE, JSResult, JSValue, ModuleDef, ScopedContext,
+};
 
 use crate::{
     aike::signal::js_signals,
@@ -415,7 +417,6 @@ const MOD_OS_ENTRIES: &[FieldDef] = &[
     FieldDef::FUNC("videoDir", 0, js_dir, DIR_VIDEO as _),
 ];
 
-pub fn init_mod_os(ctx: &mut ScopedContext) -> Result<(), i32> {
-    ctx.create_module("os", MOD_OS_ENTRIES)?;
-    Ok(())
+pub fn install_mod_os(ctx: &mut ScopedContext) -> Result<ModuleDef, i32> {
+    ctx.create_module("os", MOD_OS_ENTRIES)
 }

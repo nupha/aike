@@ -15,7 +15,7 @@ pub(crate) use {
     service::{McpToolCallRequest, build_axum_mcp_route, handle_mcp_tool_call},
 };
 
-use zuqe::{FieldDef, JS_PROP_ENUMERABLE, NativeObject, Object, ScopedContext};
+use zuqe::{FieldDef, JS_PROP_ENUMERABLE, ModuleDef, NativeObject, Object, ScopedContext};
 
 #[derive(Clone)]
 pub(super) enum EnvVal {
@@ -30,7 +30,7 @@ pub(super) enum CommandArgs {
     Func(Object),
 }
 
-pub(crate) fn init_mod_mcp(ctx: &mut ScopedContext) -> Result<(), i32> {
+pub(crate) fn install_mod_mcp(ctx: &mut ScopedContext) -> Result<ModuleDef, i32> {
     const MOD_MCP_ENTRIES: &[FieldDef] = &[
         FieldDef::CLASS(
             JSStdioMcp::CLASS_NAME,
@@ -62,7 +62,5 @@ pub(crate) fn init_mod_mcp(ctx: &mut ScopedContext) -> Result<(), i32> {
         JSHttpMcpClient::class_id(),
     ])?;
 
-    ctx.create_module("mcp", MOD_MCP_ENTRIES)?;
-
-    Ok(())
+    ctx.create_module("mcp", MOD_MCP_ENTRIES)
 }

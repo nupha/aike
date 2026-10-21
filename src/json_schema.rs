@@ -9,7 +9,7 @@
 //!   - `jsonSchema.schemaExample(s)`    — synthesize an example value from a schema
 //!   - `jsonSchema.matchesType(v, t)`   — JSON-Schema type keyword matcher
 
-use zuqe::{Array, CallContext, FieldDef, JSResult, JSValue, ScopedContext};
+use zuqe::{Array, CallContext, FieldDef, JSResult, JSValue, ModuleDef, ScopedContext};
 
 use crate::helpers::{
     json_schema_coerce_or_check, json_schema_example, json_schema_matches_type_field,
@@ -341,7 +341,6 @@ const MOD_JSON_SCHEMA_ENTRIES: &[FieldDef] = &[FieldDef::OBJECT(
     zuqe::JS_PROP_ENUMERABLE,
 )];
 
-pub fn init_mod_json_schema(ctx: &mut ScopedContext) -> Result<(), i32> {
-    ctx.create_module("json-schema", MOD_JSON_SCHEMA_ENTRIES)?;
-    Ok(())
+pub fn install_mod_json_schema(ctx: &mut ScopedContext) -> Result<ModuleDef, i32> {
+    ctx.create_module("json-schema", MOD_JSON_SCHEMA_ENTRIES)
 }

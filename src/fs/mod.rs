@@ -7,7 +7,7 @@ mod file;
 mod glob;
 mod grep;
 
-pub use entries::init_mod_fs;
+pub use entries::install_mod_fs;
 pub(crate) use file::write_file_atomic;
 
 use zuqe::{CallContext, ScopedContext};

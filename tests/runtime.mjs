@@ -376,6 +376,271 @@ async function testRunOnce() {
   check("runOnce returns value", (await runOnce("5 * 5")) === 25);
 }
 
+// The import policy is the only gate on module access: the capability list
+// governs globals only.
+async function testImportPolicy() {
+  console.log("\n=== import policy ===");
+
+  // A dynamic import inside a child run: the run's completion value must be
+  // serializable, so the module namespace is never returned.
+  const IMP = (spec) =>
+    `(async () => { await import(${JSON.stringify(spec)}); return "imported"; })()`;
+
+  // --- no policy: every import is denied ---
+  const bare = Aike.createRuntime();
+  for (const name of ["ai", "fs"]) {
+    let err = null;
+    try {
+      await bare.run(IMP(name));
+    } catch (e) {
+      err = e;
+    }
+    check(
+      `no importPolicy denies import("${name}")`,
+      err !== null &&
+        err.name === "ReferenceError" &&
+        err.message.includes(
+          `import of '${name}' is not allowed (no importPolicy)`,
+        ),
+      err && err.message,
+    );
+  }
+  bare.close();
+
+  // --- a policy that allows everything ---
+  const allow = Aike.createRuntime({ importPolicy: () => true });
+  const ai = await allow.run(
+    `(async () => { const m = await import("ai"); return typeof m.LlmClient + "," + typeof m.DecisionClient + "," + typeof m.EmbeddingClient; })()`,
+  );
+  check(
+    'allowed import("ai") exposes the module\'s classes',
+    ai === "function,function,function",
+    String(ai),
+  );
+  // The built-in module is installed once: the second import must resolve to
+  // the same module record, not a second one.
+  const sameModule = await allow.run(
+    `(async () => { const a = await import("ai"); const b = await import("ai"); return a === b; })()`,
+  );
+  check(
+    "importing a built-in twice yields one module",
+    sameModule === true,
+    String(sameModule),
+  );
+  allow.close();
+
+  // --- the policy sees the module name ---
+  const seen = [];
+  const spy = Aike.createRuntime({
+    importPolicy: (name) => {
+      seen.push(name);
+      return true;
+    },
+  });
+  await spy.run(IMP("ai"));
+  check("policy sees the module name", seen[0] === "ai", JSON.stringify(seen));
+  spy.close();
+
+  // --- the policy sees a file's absolute path ---
+  const fixture = new URL("fixtures/import_ok.mjs", import.meta.url).pathname;
+  const seenPaths = [];
+  const fileSpy = Aike.createRuntime({
+    importPolicy: (name) => {
+      seenPaths.push(name);
+      return true;
+    },
+  });
+  const fixtureValue = await fileSpy.run(
+    `(async () => { const m = await import(${JSON.stringify(fixture)}); return m.value; })()`,
+  );
+  check(
+    "a file import reaches the module",
+    fixtureValue === "fixture-ok",
+    String(fixtureValue),
+  );
+  check(
+    "policy sees a file's absolute path",
+    seenPaths.length === 1 && seenPaths[0] === fixture,
+    JSON.stringify(seenPaths),
+  );
+  fileSpy.close();
+
+  // --- a static import is policy-checked too ---
+  const staticFixture = new URL("fixtures/static_import.mjs", import.meta.url)
+    .pathname;
+  const staticSeen = [];
+  const staticSpy = Aike.createRuntime({
+    importPolicy: (name) => {
+      staticSeen.push(name);
+      // Allow the outer module only: its *static* import must be refused.
+      return name.endsWith("static_import.mjs");
+    },
+  });
+  let staticErr = null;
+  try {
+    await staticSpy.run(
+      `(async () => { const m = await import(${JSON.stringify(staticFixture)}); return m.staticValue; })()`,
+    );
+  } catch (e) {
+    staticErr = e;
+  }
+  check(
+    "a static import is policy-checked as well",
+    staticErr !== null &&
+      staticErr.name === "ReferenceError" &&
+      staticErr.message.includes("is denied by the runtime's importPolicy"),
+    staticErr && staticErr.message,
+  );
+  check(
+    "the nested static import is reported by path",
+    staticSeen.some((n) => n.endsWith("import_ok.mjs")),
+    JSON.stringify(staticSeen),
+  );
+  staticSpy.close();
+
+  // --- the policy denies ---
+  const deny = Aike.createRuntime({ importPolicy: () => false });
+  let denied = null;
+  try {
+    await deny.run(IMP("ai"));
+  } catch (e) {
+    denied = e;
+  }
+  check(
+    "policy returning false denies the import",
+    denied !== null &&
+      denied.name === "ReferenceError" &&
+      denied.message.includes(
+        "import of 'ai' is denied by the runtime's importPolicy",
+      ),
+    denied && denied.message,
+  );
+  deny.close();
+
+  // --- the policy throws ---
+  const thrower = Aike.createRuntime({
+    importPolicy: () => {
+      throw new Error("policy exploded");
+    },
+  });
+  let thrown = null;
+  try {
+    await thrower.run(IMP("ai"));
+  } catch (e) {
+    thrown = e;
+  }
+  check(
+    "a throwing policy is reported, not swallowed",
+    thrown !== null &&
+      thrown.name === "ReferenceError" &&
+      thrown.message.includes("importPolicy threw") &&
+      thrown.message.includes("policy exploded"),
+    thrown && thrown.message,
+  );
+  thrower.close();
+
+  // --- the policy returns a non-boolean ---
+  const bad = Aike.createRuntime({ importPolicy: () => 42 });
+  let nonBool = null;
+  try {
+    await bad.run(IMP("ai"));
+  } catch (e) {
+    nonBool = e;
+  }
+  check(
+    "a non-boolean policy result is reported",
+    nonBool !== null &&
+      nonBool.name === "ReferenceError" &&
+      nonBool.message.includes("importPolicy must return a boolean"),
+    nonBool && nonBool.message,
+  );
+  bad.close();
+
+  // --- a policy must not re-enter the runtime tree ---
+  const reentrant = Aike.createRuntime({
+    importPolicy: () => {
+      Aike.createRuntime();
+      return true;
+    },
+  });
+  let reentered = null;
+  try {
+    await reentrant.run(IMP("ai"));
+  } catch (e) {
+    reentered = e;
+  }
+  check(
+    "a policy creating a runtime is refused",
+    reentered !== null &&
+      reentered.name === "TypeError" &&
+      reentered.message.includes(
+        "importPolicy must not create or close runtimes",
+      ),
+    reentered && reentered.message,
+  );
+  reentrant.close();
+
+  // --- closing a runtime from inside the policy is refused too ---
+  const victim = Aike.createRuntime();
+  const closer = Aike.createRuntime({
+    importPolicy: () => {
+      victim.close();
+      return true;
+    },
+  });
+  let closed = null;
+  try {
+    await closer.run(IMP("ai"));
+  } catch (e) {
+    closed = e;
+  }
+  check(
+    "a policy closing a runtime is refused",
+    closed !== null &&
+      closed.name === "TypeError" &&
+      closed.message.includes("importPolicy must not create or close runtimes"),
+    closed && closed.message,
+  );
+  closer.close();
+  victim.close();
+
+  // --- the capability list governs globals only ---
+  let moduleCap = null;
+  try {
+    Aike.createRuntime({ global: ["fs"] });
+  } catch (e) {
+    moduleCap = e;
+  }
+  check(
+    "a module name is not a capability",
+    moduleCap !== null &&
+      moduleCap.name === "TypeError" &&
+      moduleCap.message.includes("unknown host capability"),
+    moduleCap && moduleCap.message,
+  );
+
+  const consoleOnly = Aike.createRuntime({ global: ["console"] });
+  check(
+    'global: ["console"] installs console',
+    (await consoleOnly.run("typeof console")) === "object",
+  );
+  let consoleImport = null;
+  try {
+    await consoleOnly.run(IMP("console"));
+  } catch (e) {
+    consoleImport = e;
+  }
+  check(
+    'import("console") fails — console is a global, not a module',
+    consoleImport !== null,
+  );
+  consoleOnly.close();
+
+  // --- the root runtime is unaffected ---
+  const { LlmClient } = await import("ai");
+  check('root import("ai") still works', typeof LlmClient === "function");
+}
+
 async function testRootOnly() {
   console.log("\n=== root-only gating ===");
   // Root runtime: these features are available.
@@ -444,6 +709,7 @@ async function main() {
   await testMemoryLimit();
   await testRootOnly();
   await testRunOnce();
+  await testImportPolicy();
   console.log(`\n${"=".repeat(40)}`);
   console.log(`  Pass: ${pass}  Fail: ${fail}`);
   if (fail > 0) {

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2026 John Ray <996351336@qq.com>
 
-use zuqe::{CallContext, FieldDef, JSResult, JSValue, ScopedContext};
+use zuqe::{CallContext, FieldDef, JSResult, JSValue, ModuleDef, ScopedContext};
 
 /// YAML.parse(text) — parse YAML string into a JS value
 fn js_yaml_parse(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
@@ -47,7 +47,6 @@ const MOD_YAML_ENTRIES: &[FieldDef] = &[FieldDef::OBJECT(
     zuqe::JS_PROP_ENUMERABLE,
 )];
 
-pub fn init_mod_yaml(ctx: &mut ScopedContext) -> Result<(), i32> {
-    ctx.create_module("yaml", MOD_YAML_ENTRIES)?;
-    Ok(())
+pub fn install_mod_yaml(ctx: &mut ScopedContext) -> Result<ModuleDef, i32> {
+    ctx.create_module("yaml", MOD_YAML_ENTRIES)
 }

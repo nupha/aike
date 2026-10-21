@@ -699,20 +699,35 @@ declare namespace Aike {
     /** Per-`run` wall-clock timeout in ms; 0/omitted = unlimited. */
     timeout?: number;
     /**
-     * Host capabilities to install in the child runtime:
+     * Host **globals** to install in the child runtime:
      * - `string[]` — whitelist (equivalent to `{ whiteList: [...] }`)
      * - `{ whiteList }` — install only these
      * - `{ whiteList, blackList }` — whiteList wins, blackList ignored
-     * - `{ blackList }` — install all host capabilities except these
+     * - `{ blackList }` — install all host globals except these
      * - omitted — install none (pure ECMA, `eval` stripped): minimum privilege
      *
-     * Capability names include `"console"`, `"crypto"`, `"fetch"`, `"fs"`,
-     * `"process"`, `"Aike"`, etc. Process/thread-global APIs (e.g.
-     * `process.exit`, `Aike.onSignal`) are simply not installed in a child
-     * runtime; `Aike.spawn({abortOnParentExit})` is rejected with a
+     * Global names are `"console"`, `"crypto"`, `"fetch"`, `"url"`, `"timers"`,
+     * `"microtask"`, `"abort"`, `"streams"`, `"blob"`, `"formData"`,
+     * `"textEncoder"`, `"textDecoder"`, `"dom"`, `"base64"`,
+     * `"structuredClone"`, `"process"` and `"Aike"`. Process/thread-global
+     * APIs (e.g. `process.exit`, `Aike.onSignal`) are simply not installed in
+     * a child runtime; `Aike.spawn({abortOnParentExit})` is rejected with a
      * `TypeError`.
+     *
+     * Modules are **not** capabilities: whether the child may import a
+     * module is decided by {@link RuntimeOptions.importPolicy}.
      */
     global?: string[] | { whiteList?: string[]; blackList?: string[] };
+    /**
+     * Decides which modules the child runtime may import. Called with the
+     * module's name (`"ai"`, `"sqlite"`) or, for a script file, its absolute
+     * path; it must return a boolean synchronously.
+     *
+     * Omitted (or `undefined`) denies **every** import. The policy runs in
+     * the creating runtime's context and must return synchronously; it must
+     * not create or close runtimes (rejected with a `TypeError`).
+     */
+    importPolicy?: (name: string) => boolean;
     /** Optional debug name. */
     name?: string;
   }

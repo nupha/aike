@@ -14,7 +14,18 @@ use std::path::{Path, PathBuf};
 
 use zuqe::{JSValue, ModuleDef, ScopedContext};
 
-use crate::transpile;
+use crate::{
+    builtin_modules::{builtin_module, is_builtin_module},
+    transpile,
+};
+
+/// URL scheme of a built-in module: `aike-builtin:<name>`.
+///
+/// A built-in module has no file behind it, so the normalizer gives it a
+/// synthetic URL and the loader recognizes the scheme. That keeps the module's
+/// identity (`<name>`) available at load time — which is what the import
+/// policy of a child runtime is asked about.
+pub(crate) const BUILTIN_SCHEME: &str = "aike-builtin:";
 
 /// Read file with JS → TS fallback.
 /// If `foo.js` not found, tries `foo.ts`. Same for `.mjs` → `.mts`, `.cjs` → `.cts`.
@@ -54,6 +65,13 @@ pub(crate) fn js_module_normalizer(
     name: &str,
 ) -> Result<url::Url, i32> {
     if is_bare_specifier(name) {
+        // A built-in module is named, not filed: give it the synthetic URL the
+        // loader recognizes. (The root runtime already has every built-in
+        // registered natively, so this branch is what a child runtime uses.)
+        if is_builtin_module(name) {
+            return url::Url::parse(&format!("{BUILTIN_SCHEME}{name}")).map_err(|_| -1);
+        }
+
         let importer_dir = zuqe::url_to_abspath(base_name)
             .and_then(|p| p.parent().map(|parent| parent.to_path_buf()));
         let dirs = module_search_dirs(importer_dir.as_deref());
@@ -75,6 +93,19 @@ pub(crate) fn js_module_loader(
     file_name: &url::Url,
     attrs: JSValue,
 ) -> Result<ModuleDef, i32> {
+    // A built-in module: install it on demand.
+    if let Some(name) = builtin_name_of(file_name) {
+        // The import policy of a child runtime decides whether the module may
+        // be loaded at all — ask before installing anything.
+        crate::aike::runtime::ensure_import_allowed(ctx, name)?;
+        let Some(module) = builtin_module(name) else {
+            return Err(ctx.throw_reference_error(&format!(
+                "could not load module '{name}': unknown built-in module"
+            )));
+        };
+        return crate::builtin_modules::install_builtin(ctx, module);
+    }
+
     // Convert URL back to absolute path for filesystem access.
     let Some(file_path) = zuqe::url_to_abspath(file_name) else {
         return Err(ctx.throw_reference_error(&format!(
@@ -86,6 +117,16 @@ pub(crate) fn js_module_loader(
         .extension()
         .and_then(|e| e.to_str())
         .is_some_and(|e| e == "aike");
+
+    // The import policy of a child runtime decides whether this file may be
+    // loaded. A native extension is a *module* (it is named, not filed), so
+    // the policy sees its module name; a script file is reported by path.
+    let policy_name = if is_native_lib {
+        native_module_name(&file_path)
+    } else {
+        file_path.to_string_lossy().to_string()
+    };
+    crate::aike::runtime::ensure_import_allowed(ctx, &policy_name)?;
 
     if is_native_lib {
         return ctx.load_zapi_extension(&file_path);
@@ -178,7 +219,7 @@ pub(crate) fn js_module_loader(
     }
 }
 
-/// Extract the `type` value from import attributes, returning `None` if
+/// Extract the import attribute `type` value, returning `None` if
 /// the attrs object is absent or has no `type` property.
 fn get_attr_type(ctx: &mut ScopedContext, attrs: JSValue) -> Option<String> {
     if !attrs.is_object() {
@@ -188,6 +229,33 @@ fn get_attr_type(ctx: &mut ScopedContext, attrs: JSValue) -> Option<String> {
         v.as_string(true)
             .map(|s| s.content().encode_utf8(false).to_string())
     })
+}
+
+/// The built-in module name carried by a synthetic `aike-builtin:<name>` URL.
+fn builtin_name_of(url: &url::Url) -> Option<&str> {
+    let s = url.as_str();
+    s.strip_prefix(BUILTIN_SCHEME)
+        .filter(|name| !name.is_empty())
+}
+
+/// The module name of a native extension (`.aike`).
+///
+/// Extensions ship as `<dir>/<name>/index.aike` or `<dir>/<name>.aike`; the
+/// name is the directory in the first case and the file stem in the second.
+fn native_module_name(path: &Path) -> String {
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or_default()
+        .to_string();
+    if stem != "index" {
+        return stem;
+    }
+    path.parent()
+        .and_then(|p| p.file_name())
+        .and_then(|n| n.to_str())
+        .unwrap_or_default()
+        .to_string()
 }
 
 /// A bare specifier: not empty, not relative (`./x`, `../x`), not absolute,

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2026 John Ray <996351336@qq.com>
 
-//! Client for TypeSafe's System One Models (the Jev family).
+//! Client for decision models (the Jev family, served by TypeSafe).
 //!
 //! Wire protocol: `POST {baseUrl}/v1/systemone` with a body of
 //! `{model, state, questions}` and a bearer token in `Authorization`. The
@@ -37,22 +37,22 @@ use super::{
 
 /// The protocol defines exactly one inference endpoint.
 const SYSTEMONE_PATH: &str = "/v1/systemone";
-/// The three question kinds a System One model answers.
+/// The three question kinds a decision model answers.
 const QUESTION_TYPES: &[&str] = &["choice", "score", "noul"];
 
 #[derive(Debug)]
-pub(crate) struct System1Payload {
+pub(crate) struct DecisionPayload {
     /// Connection config shared with `LlmClient` (see `common.rs`).
     pub(crate) common: ClientCommon,
 }
 
-impl GcTrace for System1Payload {
+impl GcTrace for DecisionPayload {
     fn trace(&self, _gcx: &mut GcTraceCtx) {}
 }
 
-fn get_client<'a>(ctx: &mut ScopedContext, val: &'a JSValue) -> Result<&'a System1Payload, i32> {
-    JSSystem1Client::payload_of(val)
-        .ok_or_else(|| ctx.throw_type_error("not a System1Client instance"))
+fn get_client<'a>(ctx: &mut ScopedContext, val: &'a JSValue) -> Result<&'a DecisionPayload, i32> {
+    JSDecisionClient::payload_of(val)
+        .ok_or_else(|| ctx.throw_type_error("not a DecisionClient instance"))
 }
 
 /// Read a required non-empty string option. `undefined`, `null`, a non-string
@@ -67,7 +67,7 @@ fn req_str_prop(ctx: &mut ScopedContext, obj: &Object, key: &str) -> Result<Stri
     }
 }
 
-/// Constructor: new System1Client({baseUrl, model, apiKey?, timeout?, headers?})
+/// Constructor: new DecisionClient({baseUrl, model, apiKey?, timeout?, headers?})
 ///
 /// No environment variable is read and no endpoint or model is assumed.
 /// `baseUrl` and `model` are required, so the caller is explicit about which
@@ -93,7 +93,7 @@ fn js_client_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         base_url.pop();
     }
 
-    let payload = System1Payload {
+    let payload = DecisionPayload {
         common: ClientCommon {
             base_url,
             api_key,
@@ -104,7 +104,7 @@ fn js_client_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         },
     };
 
-    JSSystem1Client::new_instance(ctx, new_target, payload).map(JSValue::from)
+    JSDecisionClient::new_instance(ctx, new_target, payload).map(JSValue::from)
 }
 
 /// Validate one question object against the protocol's per-type rules.
@@ -235,8 +235,8 @@ fn extract_error_msg(body: &serde_json::Value) -> Option<String> {
         .or_else(|| as_text(&body["detail"]))
 }
 
-/// `client.systemOne({state, questions, model?}, opts?)` → Promise
-fn js_client_system_one(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+/// `client.decide({state, questions, model?}, opts?)` → Promise
+fn js_client_decide(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let client = get_client(ctx, &this)?;
 
@@ -244,7 +244,7 @@ fn js_client_system_one(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let req_obj = cc
         .arg(0)
         .as_object()
-        .ok_or_else(|| ctx.throw_type_error("systemOne() requires a request object"))?;
+        .ok_or_else(|| ctx.throw_type_error("decide() requires a request object"))?;
 
     let state_val = req_obj.get_property_str(ctx, "state")?;
     if state_val.is_undefined() {
@@ -381,7 +381,7 @@ fn js_client_system_one(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
 
 fn js_client_dispose(_: &mut ScopedContext, cc: CallContext) -> JSResult {
     let mut this = cc.this();
-    let _ = JSSystem1Client::take_payload_of(&mut this);
+    let _ = JSDecisionClient::take_payload_of(&mut this);
 
     Ok(JSValue::UNDEFINED)
 }
@@ -448,8 +448,8 @@ fn build_question(ctx: &mut ScopedContext, cc: &CallContext, kind: &str) -> JSRe
     Ok(obj.into())
 }
 
-const CLASS_SYSTEM1_PROTO: &[FieldDef] = &[
-    FieldDef::FUNC("systemOne", 2, js_client_system_one, 0),
+const CLASS_DECISION_PROTO: &[FieldDef] = &[
+    FieldDef::FUNC("decide", 2, js_client_decide, 0),
     FieldDef::FUNC("dispose", 0, js_client_dispose, 0),
     FieldDef::FUNC("setHeader", 2, js_client_set_header, 0),
     FieldDef::FUNC("getHeader", 1, js_client_get_header, 0),
@@ -462,9 +462,9 @@ const CLASS_SYSTEM1_PROTO: &[FieldDef] = &[
 ];
 
 def_native_object!(
-    "System1Client",
-    JSSystem1Client,
-    System1Payload,
-    CLASS_SYSTEM1_PROTO,
+    "DecisionClient",
+    JSDecisionClient,
+    DecisionPayload,
+    CLASS_DECISION_PROTO,
     Some(ClassCtorDef::new(js_client_constructor, 1, false))
 );

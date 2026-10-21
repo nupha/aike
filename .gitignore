@@ -8,6 +8,8 @@
 !types/**/*.d.ts
 !tests/
 !tests/commonjs/
+!tests/llm/
+!tests/fixtures/
 !tests/**/*.js
 !tests/**/*.mjs
 !tests/commonjs/**

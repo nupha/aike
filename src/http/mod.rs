@@ -8,7 +8,7 @@ pub(crate) use server::{
     JSWebSocketStream,
 };
 
-use zuqe::{FieldDef, NativeObject, ScopedContext};
+use zuqe::{FieldDef, ModuleDef, NativeObject, ScopedContext};
 
 /// HTTP method enum — shared across submodules.
 #[allow(clippy::upper_case_acronyms)]
@@ -64,7 +64,7 @@ const MOD_HTTP_ENTRIES: &[FieldDef] = &[FieldDef::CLASS(
     zuqe::JS_PROP_ENUMERABLE,
 )];
 
-pub fn init_mod_http(ctx: &mut ScopedContext) -> Result<(), i32> {
+pub fn install_mod_http(ctx: &mut ScopedContext) -> Result<ModuleDef, i32> {
     ctx.use_classes(&[
         JSHttpServer::class_id(),
         JSHttpRequest::class_id(),
@@ -73,7 +73,5 @@ pub fn init_mod_http(ctx: &mut ScopedContext) -> Result<(), i32> {
         JSWebSocketStream::class_id(),
     ])?;
 
-    ctx.create_module("http", MOD_HTTP_ENTRIES)?;
-
-    Ok(())
+    ctx.create_module("http", MOD_HTTP_ENTRIES)
 }

@@ -139,25 +139,25 @@ declare module "ai" {
   }
 
   // ---------------------------------------------------------------------------
-  // System1Client — TypeSafe System One Models (Jev): typed, probabilistic
-  // decisions instead of generated text. Mirrors `@typesafe-ai/sdk`.
+  // DecisionClient — decision models (Jev): typed, probabilistic decisions
+  // instead of generated text. Mirrors `@typesafe-ai/sdk`.
   // ---------------------------------------------------------------------------
 
   /** Text, a JSON object, an array, or `null`. */
-  export type System1Entry = string | object | unknown[] | null;
+  export type DecisionEntry = string | object | unknown[] | null;
 
   /** Yes/no question with optional descriptions of either outcome. */
   export interface NoulQuestion {
     type: "noul";
-    instructions?: System1Entry;
-    criteria?: { true?: System1Entry; false?: System1Entry } | null;
+    instructions?: DecisionEntry;
+    criteria?: { true?: DecisionEntry; false?: DecisionEntry } | null;
   }
 
   /** One-of-N question; `criteria` maps a label to its description. */
   export interface ChoiceQuestion {
     type: "choice";
-    instructions?: System1Entry;
-    criteria: Record<string, System1Entry>;
+    instructions?: DecisionEntry;
+    criteria: Record<string, DecisionEntry>;
   }
 
   /**
@@ -167,22 +167,22 @@ declare module "ai" {
    */
   export interface ScoreQuestion {
     type: "score";
-    instructions?: System1Entry;
-    criteria: System1Entry[];
+    instructions?: DecisionEntry;
+    criteria: DecisionEntry[];
   }
 
-  export type System1Question = NoulQuestion | ChoiceQuestion | ScoreQuestion;
+  export type DecisionQuestion = NoulQuestion | ChoiceQuestion | ScoreQuestion;
 
   /** `state` plus the questions answered in one parallel pass. */
-  export interface SystemOneRequest {
-    state: System1Entry;
-    questions: Record<string, System1Question>;
+  export interface DecisionRequest {
+    state: DecisionEntry;
+    questions: Record<string, DecisionQuestion>;
     /** Overrides the client's model for this call. */
     model?: string;
     [key: string]: any;
   }
 
-  export interface System1Usage {
+  export interface DecisionUsage {
     /** Number of input tokens used. */
     readonly input_tokens: number;
     /** Number of output tokens used. Reported even on the free tier. */
@@ -210,32 +210,32 @@ declare module "ai" {
     readonly score: number;
     readonly confidence: number;
     /** Rubric descriptions keyed by level index (`"0"`, `"1"`, …). */
-    readonly legend: Record<string, System1Entry>;
+    readonly legend: Record<string, DecisionEntry>;
     /** Probabilities keyed by level index; sums to ~1. */
     readonly probabilities: Record<string, number>;
   }
 
-  export type System1Answer = NoulResponse | ChoiceResponse | ScoreResponse;
+  export type DecisionAnswer = NoulResponse | ChoiceResponse | ScoreResponse;
 
-  export interface SystemOneResult {
+  export interface DecisionResult {
     /** The versioned model id that answered. */
     readonly model: string;
-    readonly answers: Record<string, System1Answer>;
-    readonly usage: System1Usage;
+    readonly answers: Record<string, DecisionAnswer>;
+    readonly usage: DecisionUsage;
   }
 
   /**
    * Per-call control options — never serialized into the request body. There is
    * no streaming, so the stream-only knobs of `ChatOpts` do not apply.
    */
-  export interface SystemOneOpts {
+  export interface DecisionOpts {
     /** AbortSignal cancelling the in-flight request. */
     signal?: AbortSignal;
     /** Per-request HTTP timeout in seconds. */
     timeout?: number;
   }
 
-  interface System1ClientOptions {
+  interface DecisionClientOptions {
     /** API root. `{baseUrl}/v1/systemone` is the request URL. Required. */
     baseUrl: string;
     /**
@@ -252,14 +252,14 @@ declare module "ai" {
   }
 
   /**
-   * Client for System One Models (Jev).
+   * Client for decision models (Jev).
    *
    * Answers typed questions about a `state` with probabilities instead of
    * generating text. Reads no environment variables: `baseUrl` and `model`
    * must be given explicitly.
    */
-  export class System1Client {
-    constructor(options: System1ClientOptions);
+  export class DecisionClient {
+    constructor(options: DecisionClientOptions);
 
     readonly model: string;
     readonly baseUrl: string;
@@ -272,26 +272,113 @@ declare module "ai" {
     getHeader(name: string): string | undefined;
 
     /** Answer every question about `state` in one pass. */
-    systemOne(req: SystemOneRequest, opts?: SystemOneOpts): Promise<SystemOneResult>;
+    decide(req: DecisionRequest, opts?: DecisionOpts): Promise<DecisionResult>;
 
     dispose(): void;
   }
 
   /** Build a one-of-N question. `criteria` maps a label to its description. */
   export function choice(
-    instructions: System1Entry,
-    criteria: Record<string, System1Entry>,
+    instructions: DecisionEntry,
+    criteria: Record<string, DecisionEntry>,
   ): ChoiceQuestion;
   /** Build an ordered-rubric question; `criteria` needs at least two levels. */
   export function score(
-    instructions: System1Entry,
-    criteria: System1Entry[],
+    instructions: DecisionEntry,
+    criteria: DecisionEntry[],
   ): ScoreQuestion;
   /** Build a yes/no question answered with a probability. */
   export function noul(
-    instructions?: System1Entry,
-    criteria?: { true?: System1Entry; false?: System1Entry } | null,
+    instructions?: DecisionEntry,
+    criteria?: { true?: DecisionEntry; false?: DecisionEntry } | null,
   ): NoulQuestion;
+
+  // ---------------------------------------------------------------------------
+  // EmbeddingClient — OpenAI-compatible embeddings
+  // ---------------------------------------------------------------------------
+
+  /**
+   * The text to embed: one string, several strings, one token-id list, or
+   * several token-id lists.
+   */
+  export type EmbeddingInput = string | string[] | number[] | number[][];
+
+  export interface EmbeddingRequest {
+    input: EmbeddingInput;
+    /** Overrides the client's model for this call. */
+    model?: string;
+    [key: string]: any;
+  }
+
+  export interface EmbeddingUsage {
+    readonly prompt_tokens: number;
+    readonly total_tokens: number;
+  }
+
+  export interface EmbeddingData {
+    readonly object: "embedding";
+    readonly index: number;
+    readonly embedding: number[];
+  }
+
+  export interface EmbeddingResult {
+    readonly object: "list";
+    readonly data: EmbeddingData[];
+    readonly model: string;
+    readonly usage: EmbeddingUsage;
+  }
+
+  /** Per-call control options — never serialized into the request body. */
+  export interface EmbeddingOpts {
+    /** AbortSignal cancelling the in-flight request. */
+    signal?: AbortSignal;
+    /** Per-request HTTP timeout in seconds. */
+    timeout?: number;
+  }
+
+  interface EmbeddingClientOptions {
+    /**
+     * API root. `{baseUrl}/embeddings` is the request URL — `baseUrl` carries
+     * the `/v1` prefix. Required.
+     */
+    baseUrl: string;
+    /** Embedding model id, e.g. `text-embedding-3-small`. Required. */
+    model: string;
+    /** Sent as `Authorization: Bearer <apiKey>`. Omit for a keyless gateway. */
+    apiKey?: string;
+    /** HTTP timeout in seconds. Default: 60. */
+    timeout?: number;
+    /** Custom HTTP headers sent with every request. */
+    headers?: Record<string, string>;
+  }
+
+  /**
+   * Client for OpenAI-compatible embedding endpoints.
+   *
+   * Reads no environment variables: `baseUrl` and `model` must be given
+   * explicitly. There is no streaming — one call embeds the whole input.
+   */
+  export class EmbeddingClient {
+    constructor(options: EmbeddingClientOptions);
+
+    readonly model: string;
+    readonly baseUrl: string;
+    readonly timeout: number;
+    readonly headers: Record<string, string>;
+
+    /** Insert or update a single HTTP header. `null` removes it, `undefined` is a no-op. */
+    setHeader(name: string, value: string | null | undefined): void;
+    /** Read a single header value, or `undefined` if not set. */
+    getHeader(name: string): string | undefined;
+
+    /** Embed the input in one call. */
+    embed(
+      req: EmbeddingRequest,
+      opts?: EmbeddingOpts,
+    ): Promise<EmbeddingResult>;
+
+    dispose(): void;
+  }
 
   // ---------------------------------------------------------------------------
   // LlmClient — remote LLM client (always available)

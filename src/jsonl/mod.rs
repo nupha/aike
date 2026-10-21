@@ -3,7 +3,7 @@
 
 pub(crate) mod funcs;
 
-use zuqe::{FieldDef, ScopedContext};
+use zuqe::{FieldDef, ModuleDef, ScopedContext};
 
 const JSONL_MOD_ENTRIES: &[FieldDef] = &[
     FieldDef::FUNC("parse", 1, funcs::js_parse, 0),
@@ -25,7 +25,6 @@ const JSONL_MOD_ENTRIES: &[FieldDef] = &[
     FieldDef::FUNC("parseStream", 1, funcs::js_parse_stream, 0),
 ];
 
-pub fn init_mod_jsonl(cx: &mut ScopedContext) -> Result<(), i32> {
-    cx.create_module("jsonl", JSONL_MOD_ENTRIES)?;
-    Ok(())
+pub fn install_mod_jsonl(cx: &mut ScopedContext) -> Result<ModuleDef, i32> {
+    cx.create_module("jsonl", JSONL_MOD_ENTRIES)
 }

@@ -141,7 +141,7 @@ use super::{
 
 #[derive(Debug)]
 pub(crate) struct ClientPayload {
-    /// Connection config shared with `System1Client` (see `common.rs`).
+    /// Connection config shared with `DecisionClient` (see `common.rs`).
     pub(crate) common: ClientCommon,
 
     //
@@ -1326,7 +1326,7 @@ const CLASS_CLIENT_PROTO: &[FieldDef] = &[
     FieldDef::FUNC("dispose", 0, js_client_dispose, 0),
     FieldDef::FUNC("setHeader", 2, js_client_set_header, 0),
     FieldDef::FUNC("getHeader", 1, js_client_get_header, 0),
-    // Shared properties: same magics and getter as `System1Client`.
+    // Shared properties: same magics and getter as `DecisionClient`.
     FieldDef::GETSET("model", Some(js_common_getter), None, MAGIC_MODEL as _),
     FieldDef::GETSET("baseUrl", Some(js_common_getter), None, MAGIC_BASE_URL as _),
     FieldDef::GETSET("timeout", Some(js_common_getter), None, MAGIC_TIMEOUT as _),

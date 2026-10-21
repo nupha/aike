@@ -115,6 +115,13 @@ type SharedSlot = Rc<RefCell<Option<PromiseResultSlot<RunOutcome>>>>;
 struct Child {
     rt: Runtime,
     ctx: Context<'static>,
+    /// The import policy of this runtime, as a **parent-heap** JSValue.
+    ///
+    /// The policy is the creator's function, so it lives in the creator's
+    /// heap; it is traced by the root's GC trace handler (see
+    /// `gc_trace_runtime_handles`). `None` means "no policy given" — which
+    /// denies every import.
+    import_policy: Option<JSValue>,
     /// Per-run wall-clock timeout (ms); `None`/0 = unlimited.
     default_timeout: Option<u64>,
     /// Parent-heap handle object — traced by `gc_trace_runtime_handles`.
@@ -145,6 +152,15 @@ thread_local! {
     static ROOT_CTX: RefCell<Option<Context<'static>>> = const { RefCell::new(None) };
     /// Per-run suffix for the child global rooting a pending completion promise.
     static RUN_SERIAL: Cell<u32> = const { Cell::new(1) };
+    /// Depth of the import-policy call in progress.
+    ///
+    /// A policy runs inside the runtime tree's tick, so creating or closing a
+    /// runtime from it would re-enter the tree — the policy must not.
+    static IMPORT_POLICY_DEPTH: Cell<u32> = const { Cell::new(0) };
+    /// Set when a create/close was refused because it happened inside an
+    /// import policy. The policy's own exception then has to be reported as
+    /// the re-entrancy error, not as a generic "the policy threw".
+    static IMPORT_POLICY_REENTRY: Cell<bool> = const { Cell::new(false) };
 }
 
 /// Remember the root runtime, park wake handle and context (called once, on the
@@ -164,19 +180,18 @@ fn root_runtime() -> Option<Runtime> {
     ROOT_RUNTIME.with(|r| r.borrow().clone())
 }
 
+/// The root context, as a copy: the context handle is `Copy`, so a caller can
+/// take one without borrowing the registry.
+fn root_context() -> Option<Context<'static>> {
+    ROOT_CTX.with(|c| *c.borrow())
+}
+
 fn wake_root() {
     ROOT_WAKE.with(|w| {
         if let Some(w) = w.borrow().as_ref() {
             w.wake();
         }
     });
-}
-
-/// Queue a one-shot job on the root context (used for child → parent delivery).
-fn queue_root_job(f: impl Fn(&mut ScopedContext) -> Result<(), i32> + 'static) {
-    if let Some(mut ctx) = ROOT_CTX.with(|c| *c.borrow()) {
-        ctx.queue_oneshot_job(f, ());
-    }
 }
 
 fn get_child(id: u32) -> Option<Rc<Child>> {
@@ -217,6 +232,11 @@ pub(crate) fn gc_trace_runtime_handles(gcx: &mut GcTraceCtx) {
     CHILDREN.with(|m| {
         for c in m.borrow().values() {
             c.handle.trace(gcx);
+            // The import policy is a parent-heap value: the root's heap must
+            // keep it alive for as long as the child exists.
+            if let Some(p) = &c.import_policy {
+                p.trace(gcx);
+            }
         }
     });
 }
@@ -256,7 +276,11 @@ fn read_string_array(ctx: &mut ScopedContext, v: JSValue, name: &str) -> Result<
     Ok(out)
 }
 
-/// Supported capability (host global / importable module) names.
+/// Supported host **global** names.
+///
+/// The capability list only governs globals. Modules are not capabilities:
+/// whether a runtime may import a module is decided by the import policy
+/// (`Aike.createRuntime({ importPolicy })`).
 const ALL_CAPS: &[&str] = &[
     "console",
     "crypto",
@@ -275,18 +299,6 @@ const ALL_CAPS: &[&str] = &[
     "structuredClone",
     "process",
     "Aike",
-    "fs",
-    "path",
-    "os",
-    "http",
-    "html",
-    "browser",
-    "yaml",
-    "jsonl",
-    "jsonSchema",
-    "jinja2",
-    "ai",
-    "mcp",
 ];
 
 /// Capabilities that may only be installed in the root runtime (they back onto
@@ -301,6 +313,9 @@ struct RuntimeOpts {
     white_list: Option<Vec<String>>,
     black_list: Vec<String>,
     name: Option<String>,
+    /// The import policy: a **parent-heap** function consulted before every
+    /// module load. `None` = no policy given, which denies every import.
+    import_policy: Option<JSValue>,
 }
 
 fn parse_opts(ctx: &mut ScopedContext, v: JSValue) -> Result<RuntimeOpts, i32> {
@@ -311,6 +326,7 @@ fn parse_opts(ctx: &mut ScopedContext, v: JSValue) -> Result<RuntimeOpts, i32> {
             white_list: Some(Vec::new()),
             black_list: Vec::new(),
             name: None,
+            import_policy: None,
         });
     }
     let Some(opts) = v.as_object() else {
@@ -330,6 +346,11 @@ fn parse_opts(ctx: &mut ScopedContext, v: JSValue) -> Result<RuntimeOpts, i32> {
     let name = match opts.get_property_str(ctx, "name")? {
         x if x.is_undefined() => None,
         x => Some(read_string(ctx, x, "name")?),
+    };
+    let import_policy = match opts.get_property_str(ctx, "importPolicy")? {
+        x if x.is_undefined() => None,
+        x if x.is_callable() => Some(x),
+        _ => return Err(ctx.throw_type_error("`importPolicy` must be a function")),
     };
 
     let g = opts.get_property_str(ctx, "global")?;
@@ -365,6 +386,7 @@ fn parse_opts(ctx: &mut ScopedContext, v: JSValue) -> Result<RuntimeOpts, i32> {
         white_list,
         black_list,
         name,
+        import_policy,
     })
 }
 
@@ -439,21 +461,11 @@ fn cap_classes(cap: &str) -> Vec<ClassID> {
             super::JSStdioHandle::class_id(),
             super::JSFileHandle::class_id(),
         ],
-        "fs" => vec![super::JSFileHandle::class_id()],
-        "path" | "os" | "yaml" | "jsonl" | "jsonSchema" | "jinja2" | "http" | "mcp" => Vec::new(),
-        "html" => vec![
-            crate::html::HtmlDocument::class_id(),
-            crate::html::HtmlElement::class_id(),
-        ],
-        "ai" => vec![
-            crate::ai::JSLlmClient::class_id(),
-            crate::ai::JSSystem1Client::class_id(),
-        ],
         _ => Vec::new(),
     }
 }
 
-/// Install one capability's globals/modules into a child context. Class
+/// Install one capability's globals into a child context. Class
 /// initialization is done separately (see `cap_classes`).
 fn install_cap(cx: &mut ScopedContext, cap: &str) -> Result<(), i32> {
     let mut global = cx.global_obj();
@@ -473,17 +485,6 @@ fn install_cap(cx: &mut ScopedContext, cap: &str) -> Result<(), i32> {
             crate::process::init_process(cx, &argv, &exec_argv, &exec_path)?;
         }
         "Aike" => super::init_aike_namespace(cx)?,
-        "fs" => crate::fs::init_mod_fs(cx)?,
-        "path" => crate::path::init_mod_path(cx)?,
-        "os" => crate::os::init_mod_os(cx)?,
-        "http" => crate::http::init_mod_http(cx)?,
-        "html" => crate::html::init_mod_html(cx)?,
-        "yaml" => crate::yaml::init_mod_yaml(cx)?,
-        "jsonl" => crate::jsonl::init_mod_jsonl(cx)?,
-        "jsonSchema" => crate::json_schema::init_mod_json_schema(cx)?,
-        "jinja2" => crate::jinja2::init_mod_jinja2(cx)?,
-        "ai" => crate::ai::init_mod_ai(cx)?,
-        "mcp" => crate::mcp::init_mod_mcp(cx)?,
         // Capabilities without an installer are pure class exposures
         // (`dom`, `blob`, `formData`, `textEncoder`, `textDecoder`); their
         // constructors were exposed by `use_classes`.
@@ -537,11 +538,148 @@ fn setup_child(cx: &mut ScopedContext, id: u32, caps: &[String]) -> Result<(), i
     Ok(())
 }
 
+/// Queue a one-shot job on `ctx`, holding `child` **weakly**.
+///
+/// The job lives in `ctx`'s runtime heap. A strong capture of the child would
+/// be a cycle — job → child → runtime → heap → job — and the runtime could
+/// never be freed, not even by `close()`.
+fn queue_oneshot_holding<F>(mut ctx: Context<'static>, child: &Rc<Child>, f: F)
+where
+    F: Fn(&mut ScopedContext, &Rc<Child>) -> Result<(), i32> + 'static,
+{
+    let weak = Rc::downgrade(child);
+    ctx.queue_oneshot_job(
+        move |cx| match weak.upgrade() {
+            Some(child) => f(cx, &child),
+            None => Ok(()),
+        },
+        (),
+    );
+}
+
+/// Queue a polling job on `ctx`, holding `child` **weakly**.
+///
+/// See [`queue_oneshot_holding`] for why the capture must be weak.
+fn queue_polling_holding<F>(mut ctx: Context<'static>, child: &Rc<Child>, f: F)
+where
+    F: Fn(&mut ScopedContext, &Rc<Child>) -> Result<JobState, i32> + 'static,
+{
+    let weak = Rc::downgrade(child);
+    ctx.queue_job(
+        move |cx| match weak.upgrade() {
+            Some(child) => f(cx, &child),
+            None => Ok(JobState::Done),
+        },
+        (),
+    );
+}
+
+/// Queue a one-shot job on the root context, holding `child` **weakly**.
+///
+/// The child holds its parent, so a strong capture here is a cycle through
+/// the *root's* heap: job → child → parent → root's heap → job.
+fn queue_root_job_holding<F>(child: &Rc<Child>, f: F)
+where
+    F: Fn(&mut ScopedContext, &Rc<Child>) -> Result<(), i32> + 'static,
+{
+    if let Some(mut ctx) = ROOT_CTX.with(|c| *c.borrow()) {
+        queue_oneshot_holding(ctx, child, f);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// import policy
+// ---------------------------------------------------------------------------
+
+/// Whether an import policy is currently being evaluated.
+///
+/// A policy runs inside the runtime tree's tick: creating or closing a
+/// runtime from it would re-enter the tree, so both are refused.
+fn in_import_policy() -> bool {
+    IMPORT_POLICY_DEPTH.with(|d| d.get() > 0)
+}
+
+/// Ask the runtime's import policy whether `name` may be loaded.
+///
+/// `name` is the module's name for a module (`"ai"`, `"sqlite"`) and the
+/// absolute path for a script file. The root runtime has no policy and
+/// allows everything.
+///
+/// Errors are reported in the importing runtime's context, so the import
+/// fails where it was attempted:
+/// - no policy given → every import is denied;
+/// - the policy returned `false` → denied;
+/// - the policy threw → its message is reported;
+/// - the policy returned a non-boolean → a protocol error.
+pub(crate) fn ensure_import_allowed(ctx: &mut ScopedContext, name: &str) -> Result<(), i32> {
+    // The root runtime is unrestricted.
+    let Some(id) = ctx.rt().user_state::<super::AikeRuntimeState>().child_id else {
+        return Ok(());
+    };
+    let Some(child) = get_child(id) else {
+        return Ok(());
+    };
+    let Some(policy) = child.import_policy else {
+        return Err(ctx.throw_reference_error(&format!(
+            "import of '{name}' is not allowed (no importPolicy)"
+        )));
+    };
+
+    // The policy is a parent-heap value: its argument must live in the same
+    // heap, and the call must run in the parent's context.
+    let Some(mut parent) = root_context() else {
+        return Err(ctx.throw_internal_error("no root context for the import policy"));
+    };
+    let arg = parent.with_root_scope(|mut cx| {
+        cx.create_string_from_utf8(name.as_bytes().to_vec())
+            .map(JSValue::make_string)
+    })?;
+
+    let result = {
+        IMPORT_POLICY_REENTRY.with(|f| f.set(false));
+        IMPORT_POLICY_DEPTH.with(|d| d.set(d.get() + 1));
+        let r = Context::call_in_ctx(&parent, policy, &[arg]);
+        IMPORT_POLICY_DEPTH.with(|d| d.set(d.get() - 1));
+        r
+    };
+
+    // A create/close from inside the policy is a re-entrancy error, not an
+    // ordinary policy failure: report it as such.
+    if IMPORT_POLICY_REENTRY.with(|f| f.get()) {
+        return Err(ctx.throw_type_error("importPolicy must not create or close runtimes"));
+    }
+
+    match result {
+        Ok(v) => {
+            if !v.is_bool() {
+                return Err(ctx.throw_reference_error("importPolicy must return a boolean"));
+            }
+            if v.as_bool() == Some(false) {
+                return Err(ctx.throw_reference_error(&format!(
+                    "import of '{name}' is denied by the runtime's importPolicy"
+                )));
+            }
+            Ok(())
+        }
+        Err(_) => {
+            // The policy threw: report its message, never swallow it.
+            let text = parent.take_exception_as_text();
+            Err(ctx.throw_reference_error(&format!("importPolicy threw: {}", text.message)))
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Aike.createRuntime
 // ---------------------------------------------------------------------------
 
 pub(crate) fn js_create_runtime(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    // A policy must not re-enter the runtime tree.
+    if in_import_policy() {
+        IMPORT_POLICY_REENTRY.with(|f| f.set(true));
+        return Err(ctx.throw_type_error("importPolicy must not create or close runtimes"));
+    }
+
     let opts = parse_opts(ctx, cc.arg(0))?;
 
     // Resolve the effective capability list, validating whitelist names.
@@ -595,6 +733,12 @@ pub(crate) fn js_create_runtime(ctx: &mut ScopedContext, cc: CallContext) -> JSR
         rt.gc_set_memory_limit(mem as usize);
     }
 
+    // The child resolves and loads modules like the root does — but the
+    // loader consults the import policy before it installs anything.
+    rt.set_module_normalizer(crate::module_loader::js_module_normalizer);
+    rt.set_module_loader(crate::module_loader::js_module_loader);
+    rt.user_state_mut::<super::AikeRuntimeState>().child_id = Some(id);
+
     // Interrupt handler: abort synchronous overruns at the run deadline. (The
     // child shares the root's park, so no per-child deadline waker is needed.)
     let deadline: Rc<Cell<Option<Instant>>> = Rc::new(Cell::new(None));
@@ -636,6 +780,7 @@ pub(crate) fn js_create_runtime(ctx: &mut ScopedContext, cc: CallContext) -> JSR
     let child = Rc::new(Child {
         rt,
         ctx: child_ctx,
+        import_policy: opts.import_policy,
         default_timeout: opts.timeout,
         handle: handle_val,
         deadline,
@@ -685,12 +830,9 @@ fn js_run(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             v
         })
     );
-    let mut child_ctx = child.ctx;
-    let job_child = child.clone();
-    child_ctx.queue_job(
-        move |cx| run_job(cx, &job_child, &started, &code, &name, &key, &shared),
-        (),
-    );
+    queue_polling_holding(child.ctx, &child, move |cx, child| {
+        run_job(cx, child, &started, &code, &name, &key, &shared)
+    });
     child.rt.wake_handle().wake();
 
     Ok(promise.into())
@@ -897,15 +1039,10 @@ fn js_parent_post_message(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
     child.in_msg.borrow_mut().push_back(blob.to_vec());
 
     // Deliver on the child's own runtime (its persistent driver runs the job).
-    let child_job = child.clone();
-    let mut child_ctx = child.ctx;
-    child_ctx.queue_oneshot_job(
-        move |cx| {
-            deliver_to_child(cx, &child_job);
-            Ok(())
-        },
-        (),
-    );
+    queue_oneshot_holding(child.ctx, &child, |cx, child| {
+        deliver_to_child(cx, child);
+        Ok(())
+    });
     child.rt.wake_handle().wake();
     Ok(JSValue::UNDEFINED)
 }
@@ -922,16 +1059,20 @@ fn js_child_post_message(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     child.out_msg.borrow_mut().push_back(blob.to_vec());
 
     // Deliver on the root runtime: queue a one-shot job there and wake it.
-    let child_job = child.clone();
-    queue_root_job(move |cx| {
-        deliver_to_parent(cx, &child_job);
+    queue_root_job_holding(&child, |cx, child| {
+        deliver_to_parent(cx, child);
         Ok(())
     });
     wake_root();
     Ok(JSValue::UNDEFINED)
 }
 
-fn js_close(_ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+fn js_close(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
+    // A policy must not re-enter the runtime tree.
+    if in_import_policy() {
+        IMPORT_POLICY_REENTRY.with(|f| f.set(true));
+        return Err(ctx.throw_type_error("importPolicy must not create or close runtimes"));
+    }
     let id = cc.magic() as u32;
     let Some(child) = remove_child(id) else {
         return Ok(JSValue::UNDEFINED);
@@ -947,7 +1088,8 @@ fn js_close(_ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
             });
         }
     }
-    // Detach from the engine tree (the parent holds the strong ref).
+    // Detach from the engine tree's tick list (the child dies with its
+    // handle; the parent only stops driving it).
     if let Some(root) = root_runtime() {
         root.remove_child(&child.rt);
     }
@@ -1136,4 +1278,68 @@ fn check_serializable(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A child runtime, built the way `js_create_runtime` builds one.
+    fn make_child(root: &Runtime) -> Result<Rc<Child>, i32> {
+        let mut rt = Runtime::create_child(root)?;
+        let ctx: Context<'static> = rt.create_context(ScopedContext::ECMA_CONTEXT_SETUP)?;
+        Ok(Rc::new(Child {
+            rt,
+            ctx,
+            import_policy: None,
+            default_timeout: None,
+            handle: JSValue::UNDEFINED,
+            deadline: Rc::new(Cell::new(None)),
+            in_msg: RefCell::new(VecDeque::new()),
+            out_msg: RefCell::new(VecDeque::new()),
+            run_slots: RefCell::new(Vec::new()),
+            closed: Cell::new(false),
+        }))
+    }
+
+    /// A job queued on a runtime's **own** context must hold the child
+    /// weakly: the job lives in the child's heap, so a strong capture is a
+    /// cycle — job → child → runtime → heap → job — and the runtime could
+    /// never be freed, not even by `close()`.
+    #[test]
+    fn a_queued_job_does_not_keep_its_runtime_alive() -> Result<(), i32> {
+        let root = Runtime::create()?;
+        let child = make_child(&root)?;
+
+        queue_polling_holding(child.ctx, &child, |_cx, _child| Ok(JobState::Done));
+
+        let weak = Rc::downgrade(&child);
+        drop(child);
+        assert!(
+            weak.upgrade().is_none(),
+            "a queued job must not keep its runtime alive"
+        );
+        Ok(())
+    }
+
+    /// The same holds for a job on the **parent's** context: the child holds
+    /// its parent, so a strong capture there is a cycle through the parent's
+    /// heap (job → child → parent → parent's heap → job).
+    #[test]
+    fn a_root_job_does_not_keep_the_child_alive() -> Result<(), i32> {
+        let mut root = Runtime::create()?;
+        let root_ctx: Context<'static> = root.create_context(ScopedContext::ECMA_CONTEXT_SETUP)?;
+        set_root_ctx(root_ctx);
+
+        let child = make_child(&root)?;
+        queue_root_job_holding(&child, |_cx, _child| Ok(()));
+
+        let weak = Rc::downgrade(&child);
+        drop(child);
+        assert!(
+            weak.upgrade().is_none(),
+            "a root job must not keep the child alive"
+        );
+        Ok(())
+    }
 }

@@ -82,10 +82,7 @@ fn snapshot_request(ctx: &mut ScopedContext, val: &JSValue) -> Result<RequestSna
 
 /// Resolve a `RequestInfo` — a `Request` or a `USVString` URL, per the Cache
 /// Storage spec — into a snapshot. A bare string means a `GET` for that URL.
-fn snapshot_request_info(
-    ctx: &mut ScopedContext,
-    val: &JSValue,
-) -> Result<RequestSnapshot, i32> {
+fn snapshot_request_info(ctx: &mut ScopedContext, val: &JSValue) -> Result<RequestSnapshot, i32> {
     if let Some(s) = val.as_string(false) {
         return Ok(RequestSnapshot {
             method: "GET".to_string(),
@@ -384,7 +381,6 @@ const CACHE_STORAGE_PROTO: &[FieldDef] = &[
         "CacheStorage",
         zuqe::JS_PROP_CONFIGURABLE,
     ),
-
 ];
 
 const CACHE_PROTO: &[FieldDef] = &[
@@ -394,11 +390,7 @@ const CACHE_PROTO: &[FieldDef] = &[
     FieldDef::FUNC_ENUM("delete", 1, js_cache_delete, 0),
     FieldDef::FUNC_ENUM("keys", 1, js_cache_keys, 0),
     // WebIDL class string (`Object.prototype.toString` -> "[object Cache]").
-    FieldDef::STR(
-        "[Symbol.toStringTag]",
-        "Cache",
-        zuqe::JS_PROP_CONFIGURABLE,
-    ),
+    FieldDef::STR("[Symbol.toStringTag]", "Cache", zuqe::JS_PROP_CONFIGURABLE),
 ];
 
 def_native_object!(

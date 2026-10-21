@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2026 John Ray <996351336@qq.com>
 
-use zuqe::{FieldDef, NativeObject, ScopedContext};
+use zuqe::{FieldDef, ModuleDef, NativeObject, ScopedContext};
 
 use crate::aike::JSFileHandle;
 
@@ -66,7 +66,8 @@ const MOD_FS_ENTRIES: &[FieldDef] = &[
     FieldDef::FUNC("removeDir", 2, js_fs_removeDir, 0),
 ];
 
-pub fn init_mod_fs(ctx: &mut ScopedContext) -> Result<(), i32> {
-    ctx.create_module("fs", MOD_FS_ENTRIES)?;
-    Ok(())
+pub fn install_mod_fs(ctx: &mut ScopedContext) -> Result<ModuleDef, i32> {
+    ctx.use_classes(&[JSFileHandle::class_id()])?;
+
+    ctx.create_module("fs", MOD_FS_ENTRIES)
 }

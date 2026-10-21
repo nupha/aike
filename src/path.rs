@@ -4,7 +4,9 @@
 use std::path::{Component, MAIN_SEPARATOR, Path, PathBuf};
 
 use url::Url;
-use zuqe::{CallContext, FieldDef, JS_PROP_ENUMERABLE, JSResult, JSValue, ScopedContext};
+use zuqe::{
+    CallContext, FieldDef, JS_PROP_ENUMERABLE, JSResult, JSValue, ModuleDef, ScopedContext,
+};
 
 use crate::whatwg::url::{new_url, url_arg_to_str};
 
@@ -672,7 +674,6 @@ const MOD_PATH_ENTRIES: &[FieldDef] = &[
     ),
 ];
 
-pub fn init_mod_path(ctx: &mut ScopedContext) -> Result<(), i32> {
-    ctx.create_module("path", MOD_PATH_ENTRIES)?;
-    Ok(())
+pub fn install_mod_path(ctx: &mut ScopedContext) -> Result<ModuleDef, i32> {
+    ctx.create_module("path", MOD_PATH_ENTRIES)
 }

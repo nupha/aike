@@ -12,7 +12,7 @@ use std::{cell::RefCell, collections::HashMap, path::PathBuf};
 use minijinja::{Environment, value::Rest};
 use minijinja_contrib::pycompat;
 use zuqe::{
-    CallContext, ClassCtorDef, FieldDef, JSResult, JSValue, NativeObject, ScopedContext,
+    CallContext, ClassCtorDef, FieldDef, JSResult, JSValue, ModuleDef, NativeObject, ScopedContext,
     def_native_object,
     gc_lite::{GcTrace, GcTraceCtx},
 };
@@ -498,8 +498,8 @@ const MOD_JINJA2_ENTRIES: &[FieldDef] = &[
     ),
 ];
 
-pub fn init_mod_jinja2(ctx: &mut ScopedContext) -> Result<(), i32> {
+pub fn install_mod_jinja2(ctx: &mut ScopedContext) -> Result<ModuleDef, i32> {
     ctx.use_classes(&[JSJinja2::class_id()])?;
-    ctx.create_module("jinja2", MOD_JINJA2_ENTRIES)?;
-    Ok(())
+
+    ctx.create_module("jinja2", MOD_JINJA2_ENTRIES)
 }

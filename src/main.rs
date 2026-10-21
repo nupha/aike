@@ -5,6 +5,7 @@
 
 mod ai;
 mod aike;
+mod builtin_modules;
 mod cjs;
 mod class_event_emitter;
 mod color;
@@ -40,17 +41,10 @@ use color::{Color::*, colorize_println};
 use zuqe::{EvalFlags, EvalType, Exception, ExitStatus, NativeObject, Runtime, ScopedContext};
 
 use crate::{
-    ai::{JSLlmClient, JSSystem1Client, init_mod_ai},
-    aike::{AikeRuntimeState, JSCronJob, JSFileHandle, JSStdioHandle},
+    aike::{AikeRuntimeState, JSCronJob, JSStdioHandle},
     class_event_emitter::JSEventEmitter,
-    fs::init_mod_fs,
     global::setup_globals,
     helpers::canonicalize_path,
-    html::{HtmlDocument, HtmlElement, init_mod_html},
-    http::init_mod_http,
-    mcp::init_mod_mcp,
-    path::init_mod_path,
-    yaml::init_mod_yaml,
 };
 
 #[cfg(feature = "mimalloc")]
@@ -401,26 +395,11 @@ async fn run(mut args: Args) -> ExitCode {
             cx.use_classes(&[
                 JSEventEmitter::class_id(),
                 JSStdioHandle::class_id(),
-                JSFileHandle::class_id(),
                 JSCronJob::class_id(),
-                HtmlDocument::class_id(),
-                HtmlElement::class_id(),
-                JSLlmClient::class_id(),
-                JSSystem1Client::class_id(),
             ])?;
 
             // initialize native modules
-            init_mod_fs(cx)?;
-            init_mod_http(cx)?;
-            init_mod_path(cx)?;
-            os::init_mod_os(cx)?;
-            init_mod_html(cx)?;
-            init_mod_yaml(cx)?;
-            jsonl::init_mod_jsonl(cx)?;
-            json_schema::init_mod_json_schema(cx)?;
-            jinja2::init_mod_jinja2(cx)?;
-            init_mod_ai(cx)?;
-            init_mod_mcp(cx)?;
+            crate::builtin_modules::install_all(cx)?;
 
             setup_globals(cx, &argv, &exec_argv, &exe_path)
         })
@@ -533,7 +512,6 @@ async fn run(mut args: Args) -> ExitCode {
             match entered {
                 Ok(()) => {
                     ctx.eval_wait(
-                        &mut rt,
                         b"",
                         &zuqe::EvalName::Name(String::new()),
                         EvalType::Global,
@@ -546,7 +524,6 @@ async fn run(mut args: Args) -> ExitCode {
         }
         None => {
             ctx.eval_wait(
-                &mut rt,
                 script.as_bytes(),
                 &eval_name,
                 if is_module {

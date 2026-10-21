@@ -6,7 +6,7 @@ mod cron;
 
 mod persistent;
 pub(crate) mod pipe_bridge;
-mod runtime;
+pub(crate) mod runtime;
 pub(crate) mod sandbox;
 pub(crate) mod signal;
 mod spawn;
@@ -42,6 +42,11 @@ use zuqe::{
 ///
 /// [`RuntimeImpl::user_state_mut`]: zuqe::RuntimeImpl::user_state_mut
 pub(crate) struct AikeRuntimeState {
+    /// The id of this runtime in the `createRuntime` registry, when it is a
+    /// child runtime. `None` for the root. The module loader uses it to find
+    /// the runtime's import policy.
+    pub(crate) child_id: Option<u32>,
+
     /// Signal number -> JS callback (last `onSignal` wins). Root-only in
     /// practice (the `onSignal` API is not installed on children).
     pub(crate) signals: HashMap<u32, JSValue>,
@@ -127,6 +132,7 @@ impl GcTrace for AikeRuntimeState {
 impl AikeRuntimeState {
     pub(crate) fn new() -> Self {
         Self {
+            child_id: None,
             signals: HashMap::new(),
             next_tick: Vec::new(),
             eval_script_depth: 0,

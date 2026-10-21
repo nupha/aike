@@ -3,10 +3,10 @@
 
 //! Configuration shared by every `ai` remote client.
 //!
-//! `LlmClient` and `System1Client` talk to different endpoints and return
-//! different shapes, but they are configured identically: a base URL, a
-//! bearer token, a header map, a timeout and one bound HTTP client. That much
-//! lives here once, and each class embeds it as `common`.
+//! `LlmClient`, `DecisionClient` and `EmbeddingClient` talk to different
+//! endpoints and return different shapes, but they are configured identically:
+//! a base URL, a bearer token, a header map, a timeout and one bound HTTP
+//! client. That much lives here once, and each class embeds it as `common`.
 //!
 //! The per-class extras (`maxTokens`/`extraBody` for LlmClient) stay on the
 //! class's own payload rather than in an enum variant: no code needs to handle
@@ -17,7 +17,7 @@ use std::{collections::HashMap, time::Duration};
 
 use zuqe::{CallContext, JSResult, JSValue, ScopedContext};
 
-use super::{JSLlmClient, JSSystem1Client};
+use super::{JSDecisionClient, JSEmbeddingClient, JSLlmClient};
 use zuqe::NativeObject;
 
 /// Getter magic values for the properties both clients expose.
@@ -56,7 +56,10 @@ fn get_common<'a>(ctx: &mut ScopedContext, val: &'a JSValue) -> Result<&'a Clien
     if let Some(p) = JSLlmClient::payload_of(val) {
         return Ok(&p.common);
     }
-    if let Some(p) = JSSystem1Client::payload_of(val) {
+    if let Some(p) = JSDecisionClient::payload_of(val) {
+        return Ok(&p.common);
+    }
+    if let Some(p) = JSEmbeddingClient::payload_of(val) {
         return Ok(&p.common);
     }
     Err(ctx.throw_type_error("not an ai client instance"))
@@ -76,7 +79,10 @@ fn get_common_mut<'a>(
         id if id == JSLlmClient::class_id() => JSLlmClient::payload_mut_of(val)
             .map(|p| &mut p.common)
             .ok_or_else(not_a_client),
-        id if id == JSSystem1Client::class_id() => JSSystem1Client::payload_mut_of(val)
+        id if id == JSDecisionClient::class_id() => JSDecisionClient::payload_mut_of(val)
+            .map(|p| &mut p.common)
+            .ok_or_else(not_a_client),
+        id if id == JSEmbeddingClient::class_id() => JSEmbeddingClient::payload_mut_of(val)
             .map(|p| &mut p.common)
             .ok_or_else(not_a_client),
         _ => Err(not_a_client()),
@@ -116,7 +122,7 @@ pub(crate) fn common_getter(
 }
 
 /// Getter for the shared properties. Serves every client class, so a class
-/// whose properties are all shared (`System1Client`) points straight at this;
+/// whose properties are all shared (`DecisionClient`) points straight at this;
 /// `LlmClient` points its shared properties here too and handles only its own
 /// extras in a separate getter. The two never overlap: extras start at
 /// `MAGIC_EXTRA_BASE`.
