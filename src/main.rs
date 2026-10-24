@@ -160,6 +160,25 @@ fn parse_byte_size(ss: &str) -> Option<usize> {
 const MIN_THREAD_STACK: usize = 1 << 20;
 
 fn main() -> ExitCode {
+    #[cfg(target_os = "windows")]
+    unsafe {
+        // Makes the process per-monitor DPI aware, so Windows stops scaling the window
+        // bitmap.
+        //
+        // A DPI-unaware process is served a 96 DPI lie: `GetDpiForWindow` answers 96,
+        // native windows render at their logical size, and the compositor then resamples
+        // that bitmap up to the monitor's scale. At 125% or 150% that resample is what
+        // makes text look soft.
+        //
+        // The usual home for this is the executable's manifest; this binary carries
+        // none, so it asks here instead. `main` runs before the first window exists,
+        // which is the only time the call is allowed. A manifest, if one ever appears,
+        // wins and makes the call fail — the state we want anyway.
+        windows_sys::Win32::UI::HiDpi::SetProcessDpiAwarenessContext(
+            windows_sys::Win32::UI::HiDpi::DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+        );
+    }
+
     let args = Args::parse();
 
     // `--thread-stack <n>`: run the whole engine on a thread whose native stack
