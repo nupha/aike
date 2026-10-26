@@ -594,7 +594,11 @@ async fn run(mut args: Args) -> ExitCode {
 
     // Drop the engine runtime BEFORE exiting so GC nodes are finalized, then
     // exit without waiting on orphaned tokio tasks. (`ctx` is a Copy handle, so
-    // only `rt` holds the heap that needs finalizing.)
+    // only `rt` holds the heap that needs finalizing.) The root runtime also
+    // lives in a thread local for child runtimes; clear those handles first so
+    // module finalizers and runtime-owned jobs run here, not in a TLS
+    // destructor after other TLS values are gone.
+    crate::aike::shutdown_root();
     drop(rt);
 
     // Kill `abortOnParentExit` children synchronously: every script exit

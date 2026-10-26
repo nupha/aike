@@ -176,6 +176,30 @@ pub(crate) fn set_root_ctx(ctx: Context<'static>) {
     ROOT_CTX.with(|c| *c.borrow_mut() = Some(ctx));
 }
 
+/// Release the thread-scoped handles that keep the root runtime alive.
+///
+/// Must be called on the runtime's thread before the host drops its own root
+/// handle. Otherwise the last strong reference lives in `ROOT_RUNTIME`, and the
+/// runtime is finalized from a `thread_local!` destructor at thread exit —
+/// after other TLS values (e.g. wgpu's) have already been destroyed. Children
+/// are strong owners of their runtime and of the parent, so they go first.
+pub(crate) fn shutdown_root() {
+    // Take everything out before dropping: a child or module finalizer may run
+    // native teardown that touches these TLS values again.
+    let children = CHILDREN.with(|m| std::mem::take(&mut *m.borrow_mut()));
+    let wake = ROOT_WAKE.with(|w| w.borrow_mut().take());
+    // `Context` is a Copy raw handle; clearing the slot is the whole job.
+    ROOT_CTX.with(|c| {
+        c.borrow_mut().take();
+    });
+    let root = ROOT_RUNTIME.with(|r| r.borrow_mut().take());
+
+    drop(children);
+    // The wake token references the runtime; release it before the last handle.
+    drop(wake);
+    drop(root);
+}
+
 fn root_runtime() -> Option<Runtime> {
     ROOT_RUNTIME.with(|r| r.borrow().clone())
 }

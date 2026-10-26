@@ -17,7 +17,7 @@ pub(crate) use {
     cron::JSCronJob,
     runtime::{
         ensure_root_runtime, register_runtime_traces, save_process_info, set_root_ctx,
-        set_root_runtime,
+        set_root_runtime, shutdown_root,
     },
     signal::{install_default_signal_handlers, register_signal_handler, signal_number},
     spawn::{kill_all_children, terminate_process},
