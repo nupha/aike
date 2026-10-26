@@ -45,17 +45,20 @@ pub(crate) fn platform_str() -> &'static str {
 /// Runtime version string, e.g. `"v0.1.0"`.
 pub(crate) const VERSION_STR: &str = concat!("v", env!("CARGO_PKG_VERSION"));
 
-/// The `-V` / `--version` banner: runtime version plus the zapi ABI/API
-/// contract this build speaks (and the lowest it still accepts).
+/// The `-V` / `--version` banner: runtime version, the git commit it was
+/// built from, plus the zapi ABI/API contract this build speaks (and the
+/// lowest it still accepts).
 ///
 /// Leaked to `'static` because clap wants a `&'static str`; there is exactly
 /// one, so the leak is bounded.
 pub(crate) fn version_banner() -> &'static str {
     Box::leak(
         format!(
-            "{ver}, with zapi abi {ZQ_ABI_VERSION}, api {ZQ_API_VERSION} \
+            "{ver} ({hash}, {time}), with zapi abi {ZQ_ABI_VERSION}, api {ZQ_API_VERSION} \
              (min abi {ZQ_ABI_MIN}, min api {ZQ_API_MIN})",
             ver = env!("CARGO_PKG_VERSION"),
+            hash = env!("AIKE_GIT_HASH"),
+            time = env!("AIKE_GIT_TIME"),
         )
         .into_boxed_str(),
     )
