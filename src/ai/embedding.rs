@@ -27,7 +27,7 @@ use crate::whatwg::{
 };
 
 use super::{
-    class_client::{
+    client_call::{
         ABORT_MSG, opt_secs_prop, opt_str_prop, parse_basic_call_opts, parse_headers_prop,
     },
     common::{

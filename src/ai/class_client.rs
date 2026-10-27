@@ -1,23 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2026 John Ray <996351336@qq.com>
 
-use std::{
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
-    time::Duration,
-};
+use std::{sync::Arc, time::Duration};
 
 use futures_util::StreamExt;
 use tokio::io::AsyncBufReadExt;
-use tokio::sync::Notify;
 use tokio_util::io::StreamReader;
 use zuqe::{
-    CallContext, ClassCtorDef, FieldDef, IntOrFloat, JS_PROP_WRITABLE, JSResult, JSValue, Object,
-    ScopedContext,
+    CallContext, ClassCtorDef, FieldDef, JS_PROP_WRITABLE, JSResult, JSValue, ScopedContext,
     builtins::{
-        iterator::{AsyncIterableIterator, AsyncIteratorFetcher, IterFetchStatus},
+        iterator::AsyncIterableIterator,
         promise::{Promise, PromiseResultSlot},
     },
     def_native_object,
@@ -27,115 +19,23 @@ use zuqe::{
 use crate::{
     helpers::json_keys_camel_to_snake,
     whatwg::{
-        abort::{JSAbortSignal, signal_is_aborted, signal_notify, signal_reason},
+        abort::{signal_is_aborted, signal_notify, signal_reason},
         dom::make_dom_exception,
     },
 };
 
-/// Error surfaced to JS when a request is cancelled via the `signal` call opt.
-pub(super) const ABORT_MSG: &str = "request aborted by AbortSignal";
-
-/// Cancellation shared by a streaming iterator's JS side and its reading task.
-///
-/// `cancel()` runs on the JS thread when the consumer abandons iteration early
-/// (`for await ... break`, iterator `.return()`); the reading task's outer
-/// `tokio::select!` then drops the request in flight, closing the upstream
-/// connection so generation stops server-side too.
-pub(super) struct StreamCancel {
-    cancelled: AtomicBool,
-    notify: Notify,
-}
-
-impl StreamCancel {
-    pub(super) fn new() -> Self {
-        Self {
-            cancelled: AtomicBool::new(false),
-            notify: Notify::new(),
-        }
-    }
-
-    pub(super) fn cancel(&self) {
-        self.cancelled.store(true, Ordering::Release);
-        self.notify.notify_one();
-    }
-
-    pub(super) fn notified(&self) -> impl std::future::Future<Output = ()> + '_ {
-        self.notify.notified()
-    }
-}
-
-impl Default for StreamCancel {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// Stream-consumer half of a `LlmClient.chat()`/`responses()` iterator.
-///
-/// Polls the result slot on the JS thread (`try_fetch`), applies the response
-/// normalizer to yielded chunks, and forwards early `return()`/`break` to
-/// [`StreamCancel`]. Not `Send`: it holds the `normalizer` JS value and lives
-/// behind the engine's `Rc`.
-pub(super) struct LlmStreamFetcher<D: Send> {
-    slot: PromiseResultSlot<D>,
-    cancel: Arc<StreamCancel>,
-    normalizer: JSValue,
-    convert: Box<dyn Fn(&mut ScopedContext, D) -> Result<Option<JSValue>, i32>>,
-}
-
-impl<D: Send + 'static> LlmStreamFetcher<D> {
-    pub(super) fn new(
-        slot: PromiseResultSlot<D>,
-        cancel: Arc<StreamCancel>,
-        normalizer: JSValue,
-        convert: impl Fn(&mut ScopedContext, D) -> Result<Option<JSValue>, i32> + 'static,
-    ) -> Self {
-        Self {
-            slot,
-            cancel,
-            normalizer,
-            convert: Box::new(convert),
-        }
-    }
-}
-
-impl<D: Send + 'static> GcTrace for LlmStreamFetcher<D> {
-    fn trace(&self, gcx: &mut GcTraceCtx) {
-        self.normalizer.trace(gcx);
-    }
-}
-
-impl<D: Send + 'static> AsyncIteratorFetcher for LlmStreamFetcher<D> {
-    fn try_fetch(&self, cx: &mut ScopedContext) -> Result<IterFetchStatus, i32> {
-        let Some(data) = self.slot.try_take() else {
-            return Ok(IterFetchStatus::Wait);
-        };
-        match (self.convert)(cx, data) {
-            Ok(Some(v)) => {
-                let v = if self.normalizer.is_callable() {
-                    self.normalizer.call(cx, JSValue::UNDEFINED, &[v])?
-                } else {
-                    v
-                };
-                Ok(IterFetchStatus::Value(v))
-            }
-            Ok(None) => Ok(IterFetchStatus::Done),
-            Err(e) => Err(e),
-        }
-    }
-
-    fn close(&self) {
-        self.cancel.cancel();
-    }
-}
-
 use super::{
     MAGIC_CHAT_ONCE, MAGIC_CHAT_STREAM, MAGIC_RESPONSES_ONCE, MAGIC_RESPONSES_STREAM,
-    OUTMSG_FIELD_CHOICES, OUTMSG_FIELD_REASONING,
+    OUTMSG_FIELD_CHOICES,
     class_client_response::js_client_responses,
+    client_call::{ABORT_MSG, StreamCancel, parse_call_opts, parse_headers_prop},
     common::{
         ClientCommon, MAGIC_BASE_URL, MAGIC_EXTRA_BASE, MAGIC_HEADERS, MAGIC_MODEL, MAGIC_TIMEOUT,
         js_client_get_header, js_client_set_header, js_common_getter,
+    },
+    stream_fetch::LlmStreamFetcher,
+    stream_frame::{
+        ChatReply, CoalescedChunk, ToolCallBuffer, normalize_message_shape, parse_sse_payload,
     },
 };
 
@@ -152,7 +52,8 @@ pub(crate) struct ClientPayload {
 }
 
 impl GcTrace for ClientPayload {
-    fn trace(&self, _gcx: &mut GcTraceCtx) {}
+    #[inline(always)]
+    fn trace(&self, _: &mut GcTraceCtx) {}
 }
 
 pub(super) fn get_client<'a>(
@@ -160,164 +61,6 @@ pub(super) fn get_client<'a>(
     val: &'a JSValue,
 ) -> Result<&'a ClientPayload, i32> {
     JSLlmClient::payload_of(val).ok_or_else(|| ctx.throw_type_error("not an LlmClient instance"))
-}
-
-/// Per-call control options 鈥?the second argument of
-/// `chat`/`chatOnce`/`responses`/`responsesOnce`. Never serialized into the
-/// request body; only steers cancellation and timeouts.
-pub(super) struct CallOpts {
-    pub(super) signal: JSValue,
-    pub(super) timeout: Option<u64>,
-    pub(super) stallTimeout: Option<u64>,
-    /// Merge consecutive pure-content chunks arriving within this window into
-    /// one chunk, amortizing the per-chunk commit/wake/JS-convert cost. Window
-    /// in milliseconds; 0 (or negative) disables coalescing. Changes the
-    /// yielded chunk granularity, so it defaults to off.
-    pub(super) coalesce_ms: u64,
-}
-
-/// Read an optional positive-integer seconds control option.
-/// TypeError for non-numbers, RangeError for non-positive or fractional values.
-pub(super) fn opt_secs_prop(
-    ctx: &mut ScopedContext,
-    obj: &Object,
-    key: &str,
-) -> Result<Option<u64>, i32> {
-    let v = obj.get_property_str(ctx, key)?;
-    if v.is_undefined() {
-        return Ok(None);
-    }
-    if !v.is_number() {
-        return Err(ctx.throw_type_error(&format!("`{key}` must be a number")));
-    }
-    let n = v.to_number(ctx)?;
-    let ok = matches!(n, IntOrFloat::Int64(i) if i > 0)
-        || matches!(n, IntOrFloat::Float64(d) if d > 0.0 && d.fract() == 0.0);
-    if !ok {
-        return Err(ctx.throw_range_error(&format!("`{key}` must be a positive integer")));
-    }
-    Ok(Some(match n {
-        IntOrFloat::Int64(i) => i as u64,
-        IntOrFloat::Float64(d) => d as u64,
-    }))
-}
-
-/// Resolve the control-opts second argument to an object; `None` when omitted.
-/// `undefined` 鈫?defaults; anything but an object (including `null`) 鈫?TypeError.
-fn opts_obj(ctx: &mut ScopedContext, cc: &CallContext) -> Result<Option<Object>, i32> {
-    let v = cc.arg(1);
-    if v.is_undefined() {
-        return Ok(None);
-    }
-    Ok(Some(v.as_object().ok_or_else(|| {
-        ctx.throw_type_error("opts must be an object")
-    })?))
-}
-
-/// Parse the control-only options every client call shares: cancellation and
-/// per-request timeout. Streaming knobs (`stallTimeout`, `coalesce`) are added
-/// on top by `parse_call_opts`.
-pub(super) fn parse_basic_call_opts(
-    ctx: &mut ScopedContext,
-    cc: &CallContext,
-) -> Result<CallOpts, i32> {
-    let Some(obj) = opts_obj(ctx, cc)? else {
-        return Ok(CallOpts {
-            signal: JSValue::UNDEFINED,
-            timeout: None,
-            stallTimeout: None,
-            coalesce_ms: 0,
-        });
-    };
-
-    let signal = obj.get_property_str(ctx, "signal")?;
-    if !signal.is_undefined_or_null() && JSAbortSignal::payload_of(&signal).is_none() {
-        return Err(ctx.throw_type_error("`signal` must be an AbortSignal"));
-    }
-
-    Ok(CallOpts {
-        signal,
-        timeout: opt_secs_prop(ctx, &obj, "timeout")?,
-        stallTimeout: None,
-        coalesce_ms: 0,
-    })
-}
-
-/// Parse the optional control-opts second argument. `undefined` 鈫?all defaults;
-/// anything but an object (including `null`) 鈫?TypeError.
-pub(super) fn parse_call_opts(ctx: &mut ScopedContext, cc: &CallContext) -> Result<CallOpts, i32> {
-    let mut opts = parse_basic_call_opts(ctx, cc)?;
-    let Some(obj) = opts_obj(ctx, cc)? else {
-        return Ok(opts);
-    };
-
-    // Coalesce window in ms: any integer; <= 0 disables coalescing.
-    let coalesce_val = obj.get_property_str(ctx, "coalesce")?;
-    opts.coalesce_ms = if coalesce_val.is_undefined() {
-        0
-    } else if !coalesce_val.is_number() {
-        return Err(ctx.throw_type_error("`coalesce` must be a number"));
-    } else {
-        let n = coalesce_val.to_number(ctx)?;
-        let ok = matches!(n, IntOrFloat::Int64(_))
-            || matches!(n, IntOrFloat::Float64(d) if d.is_finite() && d.fract() == 0.0);
-        if !ok {
-            return Err(ctx.throw_range_error("`coalesce` must be an integer"));
-        }
-        match n {
-            IntOrFloat::Int64(i) => i.max(0) as u64,
-            IntOrFloat::Float64(d) => d.max(0.0) as u64,
-        }
-    };
-
-    opts.stallTimeout = opt_secs_prop(ctx, &obj, "stallTimeout")?;
-    Ok(opts)
-}
-
-/// Read an optional string constructor option. `undefined` 鈫?keep the current
-/// value; any non-string (including `null`) 鈫?TypeError.
-pub(super) fn opt_str_prop(
-    ctx: &mut ScopedContext,
-    obj: &Object,
-    key: &str,
-) -> Result<Option<String>, i32> {
-    let v = obj.get_property_str(ctx, key)?;
-    if v.is_undefined() {
-        return Ok(None);
-    }
-    match v.as_string(true) {
-        Some(s) => Ok(Some(s.content().encode_utf8(false).to_string())),
-        None => Err(ctx.throw_type_error(&format!("`{key}` must be a string"))),
-    }
-}
-
-/// Read an optional `{headers}` constructor option into a string map. Non-string
-/// keys/values are skipped (a header value must be a string to be sendable).
-pub(super) fn parse_headers_prop(
-    ctx: &mut ScopedContext,
-    obj: &Object,
-) -> Result<std::collections::HashMap<String, String>, i32> {
-    let mut headers = std::collections::HashMap::new();
-    let headers_val = obj.get_property_str(ctx, "headers")?;
-    if let Some(mut o) = headers_val.as_object() {
-        for (pk, val) in o.get_own_property_kvs(
-            ctx,
-            zuqe::JS_GPN_STR_OR_INT_MASK,
-            zuqe::JSIteratorKindEnum::JS_ITERATOR_KIND_KEY_AND_VALUE,
-        )? {
-            if let Some(key) = pk.as_string(true)
-                && let Some(val_str) = val.as_string(true)
-            {
-                headers.insert(
-                    key.content().encode_utf8(false).to_string(),
-                    val_str.content().encode_utf8(false).to_string(),
-                );
-            }
-        }
-    } else if !headers_val.is_undefined_or_null() {
-        return Err(ctx.throw_type_error("headers must be an object"));
-    }
-    Ok(headers)
 }
 
 /// Constructor: new LlmClient({apiKey, baseUrl, model?, timeout?})
@@ -448,188 +191,6 @@ fn js_client_constructor(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     })
 }
 
-/// Normalize message format in `choices[]` to standard shape.
-/// For both streaming delta and non-streaming message.
-fn normalize_message_shape(obj: &mut serde_json::Value) {
-    if let Some(choices) = obj[OUTMSG_FIELD_CHOICES].as_array_mut() {
-        for choice in choices.iter_mut() {
-            // The target is either 鈥榙elta鈥?(streaming) or 鈥榤essage鈥?(non-streaming).
-            let target = match choice.as_object_mut() {
-                Some(m) => {
-                    if let Some(v) = m.get_mut("delta") {
-                        v.as_object_mut()
-                    } else if let Some(v) = m.get_mut("message") {
-                        v.as_object_mut()
-                    } else {
-                        None
-                    }
-                }
-                None => None,
-            };
-
-            if let Some(target) = target {
-                // 1. fix reasoning 鈫?reasoning_content
-                if let Some(val) = target.remove("reasoning")
-                    && !target.contains_key(OUTMSG_FIELD_REASONING)
-                {
-                    target.insert(OUTMSG_FIELD_REASONING.to_string(), val);
-                }
-            }
-        }
-    }
-}
-
-/// Accumulates tool_call deltas until complete, then emits a single chunk.
-struct ToolCallBuffer {
-    idx: usize,
-    id: Option<String>,
-    r#type: Option<String>,
-    name: Option<String>,
-    arguments: String,
-    // Original chunk metadata preserved for completeness
-    chunk_id: Option<String>,
-    chunk_object: Option<String>,
-    chunk_created: Option<i64>,
-    chunk_model: Option<String>,
-}
-
-impl ToolCallBuffer {
-    fn new(idx: usize) -> Self {
-        Self {
-            idx,
-            id: None,
-            r#type: None,
-            name: None,
-            arguments: String::new(),
-            chunk_id: None,
-            chunk_object: None,
-            chunk_created: None,
-            chunk_model: None,
-        }
-    }
-
-    fn apply_delta(&mut self, tc: &serde_json::Value, original: &serde_json::Value) {
-        if let Some(id) = tc["id"].as_str() {
-            self.id = Some(id.to_owned());
-        }
-        if let Some(t) = tc["type"].as_str() {
-            self.r#type = Some(t.to_owned());
-        }
-        if let Some(name) = tc["function"]["name"].as_str() {
-            self.name = Some(name.to_owned());
-        }
-        if let Some(args) = tc["function"]["arguments"].as_str() {
-            self.arguments.push_str(args);
-        }
-        // Capture chunk-level metadata from the first chunk that triggers tool_call accumulation
-        if self.chunk_id.is_none() {
-            self.chunk_id = original["id"].as_str().map(String::from);
-            self.chunk_object = original["object"].as_str().map(String::from);
-            self.chunk_created = original["created"].as_i64();
-            self.chunk_model = original["model"].as_str().map(String::from);
-        }
-    }
-
-    /// A tool_call is complete only once the stream has supplied its `id` and
-    /// `function.name`. Until then it is a partial fragment that must not be
-    /// surfaced or stored.
-    fn is_complete(&self) -> bool {
-        self.id.is_some() && self.name.is_some()
-    }
-
-    fn into_chunk(self) -> serde_json::Value {
-        serde_json::json!({
-            "id": self.chunk_id,
-            "object": self.chunk_object,
-            "created": self.chunk_created,
-            "model": self.chunk_model,
-            "choices": [{
-                "index": 0,
-                "delta": {
-                    "tool_calls": [{
-                        "index": self.idx,
-                        "id": self.id,
-                        "type": self.r#type,
-                        "function": {
-                            "name": self.name,
-                            "arguments": self.arguments,
-                        }
-                    }]
-                },
-                "finish_reason": null
-            }]
-        })
-    }
-}
-
-enum ChatReply {
-    Chunk(serde_json::Value), // Use raw JSON to preserve extension fields
-    Done,
-    Error(String),
-}
-
-/// Accumulates consecutive pure-content deltas into a single chunk. Active only
-/// with the `coalesce` call opt: a fast (char-per-chunk) stream then amortizes
-/// the per-chunk commit/wake/JS-convert cost over several deltas.
-struct CoalescedChunk {
-    id: Option<String>,
-    object: Option<String>,
-    created: Option<i64>,
-    model: Option<String>,
-    content: String,
-    reasoning: String,
-}
-
-impl CoalescedChunk {
-    fn new(json: &serde_json::Value) -> Self {
-        Self {
-            id: json["id"].as_str().map(String::from),
-            object: json["object"].as_str().map(String::from),
-            created: json["created"].as_i64(),
-            model: json["model"].as_str().map(String::from),
-            content: String::new(),
-            reasoning: String::new(),
-        }
-    }
-
-    fn apply_delta(&mut self, json: &serde_json::Value) {
-        let delta = &json[OUTMSG_FIELD_CHOICES][0]["delta"];
-        if let Some(c) = delta["content"].as_str() {
-            self.content.push_str(c);
-        }
-        // Some servers emit "reasoning", others "reasoning_content".
-        if let Some(r) = delta[OUTMSG_FIELD_REASONING].as_str() {
-            self.reasoning.push_str(r);
-        } else if let Some(r) = delta["reasoning"].as_str() {
-            self.reasoning.push_str(r);
-        }
-    }
-
-    fn into_chunk(self) -> serde_json::Value {
-        let mut delta = serde_json::Map::new();
-        if !self.content.is_empty() {
-            delta.insert("content".into(), serde_json::Value::String(self.content));
-        }
-        if !self.reasoning.is_empty() {
-            delta.insert(
-                OUTMSG_FIELD_REASONING.into(),
-                serde_json::Value::String(self.reasoning),
-            );
-        }
-        serde_json::json!({
-            "id": self.id,
-            "object": self.object,
-            "created": self.created,
-            "model": self.model,
-            "choices": [{
-                "index": 0,
-                "delta": delta,
-                "finish_reason": null
-            }]
-        })
-    }
-}
-
 fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     let this = cc.this();
     let client = get_client(ctx, &this)?;
@@ -659,7 +220,7 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
     // arrived for this long (the stream "stalled"). Also NOT sent to the API.
     let stall_timeout_secs = opts.stallTimeout;
 
-    // camelCase 鈫?snake_case for OpenAI API compatibility
+    // camelCase to snake_case for OpenAI API compatibility
     json_keys_camel_to_snake(&mut req_json);
 
     if let Some(req) = req_json.as_object_mut() {
@@ -837,8 +398,8 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
                         let mut stash: Option<String> = None;
 
                         'sse: loop {
-                            // Fast path: no abort signal and no stall guard 鈥?                            // read the next line directly, skipping the per-line
-                            // select!/timeout scaffolding.
+                            // Fast path: no abort signal and no stall guard
+                            // read the next line directly, skipping the per-line select!/timeout scaffolding.
                             let next_result: std::io::Result<Option<String>> = if let Some(
                                 stashed,
                             ) = stash.take()
@@ -901,8 +462,8 @@ fn js_client_chatCompletions(ctx: &mut ScopedContext, cc: CallContext) -> JSResu
                                 break;
                             }
 
-                            let Ok(mut json) = serde_json::from_str::<serde_json::Value>(data)
-                            else {
+                            let Some(mut json) = parse_sse_payload(data) else {
+                                // parse_sse_payload logs why; a frame must never vanish without a trace.
                                 continue;
                             };
                             if json.get("error").is_some() {

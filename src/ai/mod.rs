@@ -3,9 +3,12 @@
 
 mod class_client;
 mod class_client_response;
+mod client_call;
 mod common;
 mod decision;
 mod embedding;
+mod stream_fetch;
+mod stream_frame;
 
 pub(crate) use class_client::JSLlmClient;
 pub(crate) use decision::{

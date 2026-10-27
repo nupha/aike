@@ -22,7 +22,9 @@ use crate::whatwg::{
 
 use super::{
     MAGIC_RESPONSES_STREAM,
-    class_client::{ABORT_MSG, LlmStreamFetcher, StreamCancel, get_client, parse_call_opts},
+    class_client::get_client,
+    client_call::{ABORT_MSG, StreamCancel, parse_call_opts},
+    stream_fetch::LlmStreamFetcher,
 };
 
 enum ResponsesReply {
