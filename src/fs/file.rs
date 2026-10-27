@@ -5,6 +5,7 @@ use std::{
     future::Future,
     io::SeekFrom,
     path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
 };
 
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
@@ -191,22 +192,60 @@ pub(super) fn js_fs_write(ctx: &mut ScopedContext, cc: CallContext) -> JSResult 
 
 // Write `data` to `path` atomically: write to a sibling temp file then
 // atomically replace the target. A crash mid-write leaves the original file
-// intact (or a stale `.tmp` that the next write replaces), so readers never
-// see a torn file. The actual replace is platform-specific (see atomic_replace).
+// intact, so readers never see a torn file. The actual replace is
+// platform-specific (see atomic_replace).
 // Exposed as `pub(crate)` so other modules (e.g. jsonl) reuse the same atomic
 // write instead of rolling their own non-atomic truncate.
+//
+// The temp name is unique per write (pid + monotonic counter), aligned with
+// npm's write-file-atomic (`filename + "." + hash(pid, invocations)`): two
+// concurrent writers each draft into their own file, so neither rename can
+// eat the other's temp (the old fixed `x.txt.tmp` name made the loser fail
+// with ENOENT while the winner's rename had already published the loser's
+// content). A crash can leave one unique temp behind — same trade-off node
+// makes; it is never mistaken for a live draft.
 pub(crate) async fn write_file_atomic(path: &Path, data: &[u8]) -> std::io::Result<()> {
     let tmp = temp_path_for(path);
-    tokio::fs::write(&tmp, data).await?;
-    atomic_replace(&tmp, path).await
+    let result = match tokio::fs::write(&tmp, data).await {
+        Ok(()) => atomic_replace(&tmp, path).await,
+        Err(e) => Err(e),
+    };
+    if result.is_err() {
+        // Our own draft, our own cleanup: never leave a half-written temp.
+        let _ = tokio::fs::remove_file(&tmp).await;
+    }
+    result
 }
 
-/// Sibling temp file path used for atomic writes/replacements.
+/// Unique sibling temp file path for this write: `<path>.<pid>.<n>.tmp`.
 fn temp_path_for(path: &Path) -> PathBuf {
-    path.with_extension(match path.extension().and_then(|e| e.to_str()) {
-        Some(ext) => format!("{ext}.tmp"),
-        None => "tmp".to_string(),
-    })
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let mut tmp = path.as_os_str().to_os_string();
+    tmp.push(format!(".{}.{}.tmp", std::process::id(), n));
+    PathBuf::from(tmp)
+}
+
+/// Read-modify-write `path` in ONE helper: read the current content, let `f`
+/// produce the replacement (`None` = no change, nothing is written), then
+/// publish through [`write_file_atomic`] so readers never observe a torn
+/// file. Returns `f`'s tag on success, `None` when `f` declined to edit or
+/// any step failed (unreadable file, failed write) — callers that treat
+/// "0 replacements" and "write failed" alike just unwrap.
+///
+/// This is the generic atomic-edit seam: `replaceText` is the first caller;
+/// any future native transform (trim, normalize, config re-save) belongs
+/// here rather than open-coding read + write again.
+pub(crate) async fn edit_file_atomic<T>(
+    path: &Path,
+    f: impl FnOnce(&[u8]) -> Option<(Vec<u8>, T)>,
+) -> std::io::Result<Option<T>> {
+    let data = tokio::fs::read(path).await?;
+    let Some((out, tag)) = f(&data) else {
+        return Ok(None);
+    };
+    write_file_atomic(path, &out).await?;
+    Ok(Some(tag))
 }
 
 // Atomically replace `dst` with `src` (both on the same filesystem).
@@ -371,56 +410,53 @@ pub(super) fn js_fs_replaceText(ctx: &mut ScopedContext, cc: CallContext) -> JSR
                 return Ok(0);
             }
 
-            // ponytail: whole-file in memory (O(file)); stream if huge files matter
-            let Ok(data) = tokio::fs::read(&path).await else {
-                return Ok(0); // unreadable → no replacements, as before
-            };
-            let needle = old_text.as_bytes();
-            let replacement = replace_with.as_bytes();
+            // ponytail: whole-file in memory (O(file)); stream if huge files matter.
+            // edit_file_atomic owns read → transform → atomic publish.
+            let result = edit_file_atomic(&path, |data| {
+                let needle = old_text.as_bytes();
+                let replacement = replace_with.as_bytes();
 
-            // Unique mode: exactly one (overlapping-counted) occurrence; any
-            // second match means no-op. ReplaceAll: left-to-right non-overlapping.
-            let mut out = Vec::with_capacity(data.len());
-            let mut count: i32 = 0;
-            let mut last = 0usize;
-            let mut i = 0usize;
-            while i + needle.len() <= data.len() {
-                if &data[i..i + needle.len()] == needle {
-                    out.extend_from_slice(&data[last..i]);
-                    out.extend_from_slice(replacement);
-                    let start = i;
-                    i += needle.len();
-                    last = i;
-                    count += 1;
-                    if !replace_all {
-                        // any further occurrence — even one overlapping this
-                        // match — makes it non-unique (old semantics)
-                        let mut j = start + 1;
-                        while j + needle.len() <= data.len() {
-                            if &data[j..j + needle.len()] == needle {
-                                return Ok(0);
+                // Unique mode: exactly one (overlapping-counted) occurrence; any
+                // second match means no-op. ReplaceAll: left-to-right non-overlapping.
+                let mut out = Vec::with_capacity(data.len());
+                let mut count: i32 = 0;
+                let mut last = 0usize;
+                let mut i = 0usize;
+                while i + needle.len() <= data.len() {
+                    if &data[i..i + needle.len()] == needle {
+                        out.extend_from_slice(&data[last..i]);
+                        out.extend_from_slice(replacement);
+                        let start = i;
+                        i += needle.len();
+                        last = i;
+                        count += 1;
+                        if !replace_all {
+                            // any further occurrence — even one overlapping this
+                            // match — makes it non-unique (old semantics)
+                            let mut j = start + 1;
+                            while j + needle.len() <= data.len() {
+                                if &data[j..j + needle.len()] == needle {
+                                    return None;
+                                }
+                                j += 1;
                             }
-                            j += 1;
+                            break;
                         }
-                        break;
+                    } else {
+                        i += 1;
                     }
-                } else {
-                    i += 1;
                 }
-            }
 
-            if count == 0 {
-                return Ok(0);
-            }
-            out.extend_from_slice(&data[last..]);
-
-            match write_file_atomic(&path, &out).await {
-                Ok(()) => Ok(count),
-                Err(_) => {
-                    let _ = tokio::fs::remove_file(temp_path_for(&path)).await;
-                    Ok(0)
+                if count == 0 {
+                    return None;
                 }
-            }
+                out.extend_from_slice(&data[last..]);
+                Some((out, count))
+            })
+            .await;
+
+            // Unreadable file, declined edit, or failed write → 0, as before.
+            Ok(result.unwrap_or(None).unwrap_or(0))
         },
         |_cx, count| Ok(JSValue::from(count)),
     )
@@ -497,4 +533,91 @@ pub(super) fn js_fs_write_auto(ctx: &mut ScopedContext, cc: CallContext) -> JSRe
             .map_err(|e| e.to_string())
     })
     .map(JSValue::from)
+}
+
+#[cfg(test)]
+mod atomic_write_tests {
+    use super::*;
+
+    /// The whole point of the unique temp name: two writes to the same path
+    /// must never draft into the same file (the old fixed `x.txt.tmp` made the
+    /// loser's rename fail with ENOENT after the winner had already moved the
+    /// shared temp — reporting failure for a write that had landed).
+    #[test]
+    fn temp_path_is_unique_per_call() {
+        let target = Path::new("/some/dir/file.txt");
+        let a = temp_path_for(target);
+        let b = temp_path_for(target);
+        assert_ne!(a, b, "two writes must not share a temp: {a:?} vs {b:?}");
+
+        // Sibling of the target (same directory → same filesystem → the
+        // rename stays atomic), carrying the pid so a second process cannot
+        // collide either.
+        assert_eq!(a.parent(), target.parent());
+        let name = a.file_name().unwrap().to_string_lossy();
+        assert!(name.starts_with("file.txt."), "got {name}");
+        assert!(name.ends_with(".tmp"), "got {name}");
+        assert!(
+            name.contains(&format!(".{}.", std::process::id())),
+            "pid embedded: {name}"
+        );
+    }
+
+    /// A burst of writes yields all-distinct temps (pid fixed in-process, so
+    /// the counter alone must separate them).
+    #[test]
+    fn temp_paths_of_a_burst_are_all_distinct() {
+        let target = Path::new("x.txt");
+        let seen: std::collections::HashSet<_> = (0..64).map(|_| temp_path_for(target)).collect();
+        assert_eq!(seen.len(), 64, "counter must not repeat within a process");
+    }
+
+    /// Concurrent atomic writes to one path: every writer succeeds (no
+    /// ENOENT on a stolen temp) and the final content is exactly one
+    /// writer's complete payload — never a torn mix.
+    #[tokio::test]
+    async fn concurrent_writes_all_succeed_with_intact_content() {
+        let dir = std::env::temp_dir().join(format!(
+            "aike-atomic-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("t.txt");
+
+        let writers: Vec<_> = (0..8)
+            .map(|i| {
+                let target = target.clone();
+                let payload = format!("writer-{i}-{}", "x".repeat(1024 * 1024));
+                tokio::spawn(async move { write_file_atomic(&target, payload.as_bytes()).await })
+            })
+            .collect();
+        for w in writers {
+            w.await
+                .unwrap()
+                .expect("concurrent atomic write must not fail with ENOENT");
+        }
+
+        let content = std::fs::read_to_string(&target).unwrap();
+        let line = content.trim();
+        assert!(
+            line.starts_with("writer-")
+                && line.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'),
+            "one writer's complete content, no torn mix: {:?}",
+            &line[..line.len().min(40)]
+        );
+
+        // No temp left behind after success (each rename consumed its own).
+        let leftovers = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains(".tmp"))
+            .count();
+        assert_eq!(leftovers, 0, "successful writes leave no temp files");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
