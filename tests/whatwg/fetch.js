@@ -1,8 +1,5 @@
 // 🌐 WHATWG Fetch API 标准测试 — fetch / Request / Response / Headers
 //
-// 按 WHATWG 标准测试全局 fetch() API 及其相关接口，与底层 HttpClient
-// 实现解耦。所有实现细节在 src/http/client/ 中，本文件只验证标准行为。
-//
 // 本文件只测 fetch 自身的标准行为，不测 CORS —— 后者由 fetch_cors.mjs 专测。
 // 因此把客户端 origin 钉成 example.com：下面的请求是同源的，不会被 CORS
 // 检查拦下，无论 fetch_cors feature 开关如何都能走完网络。
@@ -185,7 +182,10 @@ function testRequest() {
     req.redirect === "follow",
     `got ${req.redirect}`,
   );
-  check("Request signal default AbortSignal", req.signal instanceof AbortSignal);
+  check(
+    "Request signal default AbortSignal",
+    req.signal instanceof AbortSignal,
+  );
   check("Request bodyUsed pre", req.bodyUsed === false);
 
   // RequestInit 字段透传
@@ -419,17 +419,16 @@ function testResponse() {
     )
     .then(() => {
       // formData() returns a promise; a non-form body rejects with TypeError.
-      return new Response("x")
-        .formData()
-        .then(
-          () => check("Response.formData rejects", false, "unexpectedly resolved"),
-          (e) =>
-            check(
-              "Response.formData rejects with TypeError",
-              e instanceof TypeError,
-              `got ${e}`,
-            ),
-        );
+      return new Response("x").formData().then(
+        () =>
+          check("Response.formData rejects", false, "unexpectedly resolved"),
+        (e) =>
+          check(
+            "Response.formData rejects with TypeError",
+            e instanceof TypeError,
+            `got ${e}`,
+          ),
+      );
     })
     .then(() => {
       const r = new Response("hello");
@@ -499,8 +498,14 @@ function testFetch() {
   console.log("\n=== fetch() ===");
 
   check("fetch is global function", typeof fetch === "function");
-  check("fetch.allowInsecureTLS is a boolean", typeof fetch.allowInsecureTLS === "boolean");
-  check("fetch.allowInsecureTLS defaults false", fetch.allowInsecureTLS === false);
+  check(
+    "fetch.allowInsecureTLS is a boolean",
+    typeof fetch.allowInsecureTLS === "boolean",
+  );
+  check(
+    "fetch.allowInsecureTLS defaults false",
+    fetch.allowInsecureTLS === false,
+  );
   check(
     "fetch returns promise",
     fetch("https://example.com") instanceof Promise,

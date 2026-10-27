@@ -1,30 +1,20 @@
-// Regression test for bugs/http-server.md — multi-cookie `Set-Cookie` responses.
-//
-// Two symptoms, both rooted in the response-building path:
-//   1. Repeated `setHeader("Set-Cookie", …)` lost every call but the last,
-//      because the builder used `HeaderMap::insert` (replace) instead of
-//      `append`.
-//   2. A header value the HTTP layer refuses to encode (CR/LF, forbidden by
-//      RFC 9110 §5.5) vanished with no exception at all, because the builder
-//      dropped `HeaderValue::from_str` failures on the floor.
-//
-// Also pins the replacement semantics for single-valued fields, so the fix does
-// not silently start emitting two `Content-Type` lines.
-//
-// Assertions go through HttpClient, which applies no CORS and exposes the raw
-// header list, so `getSetCookie()` sees what actually went out on the wire.
+// Multi-value Set-Cookie: repeated setHeader("Set-Cookie", …) appends instead
+// of replacing, CR/LF values throw, single-valued fields (Content-Type) still
+// replace. Regression for bugs/http-server.md.
 //
 // Run: aike -m tests/http/set_cookie.mjs
 
-import { HttpClient, HttpServer } from "http";
+import { HttpServer } from "http";
 
 const PORT = 18146;
 const BASE = `http://127.0.0.1:${PORT}`;
 
+// Same-origin fetch: the assertions read raw response headers.
+globalThis.self = { location: { origin: BASE, href: `${BASE}/` } };
+
 const A = "sid=AAA; Path=/";
 const B = "pref=dark; Path=/";
-// A cookie whose value carries a comma — the reason the comma-joined
-// workaround cannot be parsed back into separate cookies.
+// Value carries a comma — must stay one unsplit header value.
 const EXPIRES = "pref=dark; Expires=Wed, 21 Oct 2035 07:28:00 GMT; Path=/";
 
 let pass = 0;
@@ -40,17 +30,15 @@ function check(label, ok, detail) {
   }
 }
 
-const client = new HttpClient();
-
 const svr = new HttpServer();
 
-// Baseline: one cookie, unchanged.
+// One cookie: unchanged.
 svr.get("/single", (_req, res) => {
   res.setHeader("Set-Cookie", A);
   res.end("ok");
 });
 
-// Two setHeader calls → two field lines. This is the bug.
+// Two setHeader calls → two field lines.
 svr.get("/twice", (_req, res) => {
   res.setHeader("Set-Cookie", A);
   res.setHeader("Set-Cookie", B);
@@ -65,14 +53,14 @@ svr.get("/three", (_req, res) => {
   res.end("ok");
 });
 
-// setHeaders() must accumulate the same way.
+// setHeaders() accumulates the same way.
 svr.get("/setHeaders", (_req, res) => {
   res.setHeaders({ "Set-Cookie": A, "X-Trace": "t1" });
   res.setHeader("Set-Cookie", B);
   res.end("ok");
 });
 
-// A CR/LF in the value must throw, not vanish.
+// CR/LF in the value must throw.
 svr.get("/bad-value", (_req, res) => {
   try {
     res.setHeader("Set-Cookie", `${A}\n${B}`);
@@ -114,7 +102,7 @@ svr.listen({ host: "127.0.0.1", port: PORT, cors: false });
 async function main() {
   console.log("\n=== multi-value Set-Cookie ===");
 
-  let r = await client.get(`${BASE}/single`);
+  let r = await fetch(`${BASE}/single`);
   await r.text();
   check(
     "single cookie is unchanged",
@@ -122,7 +110,7 @@ async function main() {
     JSON.stringify(r.headers.getSetCookie()),
   );
 
-  r = await client.get(`${BASE}/twice`);
+  r = await fetch(`${BASE}/twice`);
   await r.text();
   check(
     "two setHeader calls emit two Set-Cookie headers",
@@ -130,16 +118,17 @@ async function main() {
     JSON.stringify(r.headers.getSetCookie()),
   );
 
-  r = await client.get(`${BASE}/three`);
+  r = await fetch(`${BASE}/three`);
   await r.text();
   check(
     "three cookies keep order and value",
-    JSON.stringify(r.headers.getSetCookie()) === JSON.stringify([A, EXPIRES, B]),
+    JSON.stringify(r.headers.getSetCookie()) ===
+      JSON.stringify([A, EXPIRES, B]),
     JSON.stringify(r.headers.getSetCookie()),
   );
 
   console.log("\n=== setHeaders accumulation ===");
-  r = await client.get(`${BASE}/setHeaders`);
+  r = await fetch(`${BASE}/setHeaders`);
   await r.text();
   check(
     "setHeaders + setHeader both land",
@@ -148,28 +137,40 @@ async function main() {
   );
 
   console.log("\n=== invalid header values throw ===");
-  r = await client.get(`${BASE}/bad-value`);
+  r = await fetch(`${BASE}/bad-value`);
   const badBody = await r.text();
-  check("CR/LF value throws instead of vanishing", badBody === "threw", badBody);
-  check("  ...with a TypeError", r.headers.get("x-threw") === "TypeError",
-    r.headers.get("x-threw"));
+  check(
+    "CR/LF value throws instead of vanishing",
+    badBody === "threw",
+    badBody,
+  );
+  check(
+    "  ...with a TypeError",
+    r.headers.get("x-threw") === "TypeError",
+    r.headers.get("x-threw"),
+  );
   check(
     "  ...naming the header in the message",
     (r.headers.get("x-message") ?? "").includes("Set-Cookie"),
     r.headers.get("x-message"),
   );
-  check("  ...and no Set-Cookie was sent",
+  check(
+    "  ...and no Set-Cookie was sent",
     r.headers.getSetCookie().length === 0,
-    JSON.stringify(r.headers.getSetCookie()));
+    JSON.stringify(r.headers.getSetCookie()),
+  );
 
-  r = await client.get(`${BASE}/bad-name`);
+  r = await fetch(`${BASE}/bad-name`);
   const nameBody = await r.text();
   check("invalid header name throws", nameBody === "threw", nameBody);
-  check("  ...with a TypeError",
-    r.headers.get("x-threw") === "TypeError", r.headers.get("x-threw"));
+  check(
+    "  ...with a TypeError",
+    r.headers.get("x-threw") === "TypeError",
+    r.headers.get("x-threw"),
+  );
 
   console.log("\n=== single-valued fields still replace ===");
-  r = await client.get(`${BASE}/dup-content-type`);
+  r = await fetch(`${BASE}/dup-content-type`);
   await r.text();
   check(
     "duplicate Content-Type keeps only the last value",
@@ -188,7 +189,7 @@ async function main() {
   );
 
   console.log("\n=== comma-bearing cookie stays intact ===");
-  r = await client.get(`${BASE}/expires`);
+  r = await fetch(`${BASE}/expires`);
   await r.text();
   check(
     "Expires cookie is one unsplit value",

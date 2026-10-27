@@ -1,15 +1,11 @@
-// Tests the `cors` option of HttpServer.listen().
-//
-// The permissive CORS layer is opt-out: with `cors: false` the server must send
-// no `Access-Control-*` headers at all, so a CORS-enforcing client sees the
-// failure it would see against any non-CORS origin.
-//
-// Assertions go through HttpClient, which does not apply CORS, so the header
-// values can be inspected directly.
+// The `cors` option of HttpServer.listen(): the permissive CORS layer is
+// opt-out — with `cors: false` the server sends no `Access-Control-*` headers.
+// The client origin is pinned per request so the fetch is same-origin and the
+// raw headers are readable.
 //
 // Run: aike -m tests/http/cors_option.mjs
 
-import { HttpClient, HttpServer } from "http";
+import { HttpServer } from "http";
 
 let pass = 0;
 let fail = 0;
@@ -24,14 +20,19 @@ function check(label, ok, detail) {
   }
 }
 
-const client = new HttpClient();
+// The origin is read on every fetch() call (origin.rs), so re-pinning per
+// request makes each probe same-origin regardless of which port it targets.
+globalThis.self = { location: { origin: "", href: "" } };
 
 /** Start a server on `port` returning ACAO (or null), then stop it. */
 async function allowOriginFor(port, listenOpts) {
   const svr = new HttpServer();
   svr.get("/", (_req, res) => res.end("ok"));
   svr.listen({ host: "127.0.0.1", port, ...listenOpts });
-  const r = await client.get(`http://127.0.0.1:${port}/`, { timeout: 10 });
+  const origin = `http://127.0.0.1:${port}`;
+  globalThis.self.location.origin = origin;
+  globalThis.self.location.href = `${origin}/`;
+  const r = await fetch(`${origin}/`, { timeout: 10 });
   const acao = r.headers.get("access-control-allow-origin");
   await svr.shutdown();
   return acao;
@@ -42,15 +43,27 @@ async function main() {
 
   // Default: the permissive layer is attached, so ACAO is present.
   const withCors = await allowOriginFor(18141, {});
-  check("default attaches permissive CORS", withCors === "*", `got ${withCors}`);
+  check(
+    "default attaches permissive CORS",
+    withCors === "*",
+    `got ${withCors}`,
+  );
 
   // Explicit true is the same as the default.
   const explicitOn = await allowOriginFor(18142, { cors: true });
-  check("cors: true attaches permissive CORS", explicitOn === "*", `got ${explicitOn}`);
+  check(
+    "cors: true attaches permissive CORS",
+    explicitOn === "*",
+    `got ${explicitOn}`,
+  );
 
   // Opt-out: no Access-Control-* headers at all.
   const withCorsOff = await allowOriginFor(18143, { cors: false });
-  check("cors: false sends no ACAO", withCorsOff === null, `got ${withCorsOff}`);
+  check(
+    "cors: false sends no ACAO",
+    withCorsOff === null,
+    `got ${withCorsOff}`,
+  );
 
   // Strict validation: `cors` is a boolean or absent, nothing else.
   const svr = new HttpServer();
