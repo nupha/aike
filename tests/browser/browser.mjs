@@ -11,7 +11,7 @@
 // Chrome is installed. It mirrors the layout of tests/browser/*.mjs.
 //
 // Run as a module (.mjs) so `import` is parsed in module mode:
-//   cargo run -- tests/browser/browser_api.mjs
+//   cargo run -- tests/browser/browser.mjs
 
 import { Browser } from "browser";
 
@@ -35,7 +35,8 @@ async function testBrowserDomain(browser) {
   const ver = await browser.getVersion();
   check(
     "getVersion() returns version info",
-    ver && typeof ver.protocolVersion === "string" &&
+    ver &&
+      typeof ver.protocolVersion === "string" &&
       typeof ver.product === "string" &&
       typeof ver.userAgent === "string" &&
       typeof ver.jsVersion === "string",
@@ -46,12 +47,14 @@ async function testBrowserDomain(browser) {
   // browser.setWindowBounds({ width, height }) — resize, then verify it applied.
   // NOTE: these need a real GUI window, so under headless Chrome they reject
   // with "No web contents in the target". Skip gracefully in that case (the
-  // bing demo in tests/browser.mjs runs headful and exercises them for real).
+  // bing demo in tests/browser/basic.mjs runs headful and exercises them for real).
   try {
     const wb = await browser.getWindowBounds();
     check(
       "getWindowBounds() returns bounds",
-      wb && wb.bounds && typeof wb.bounds.width === "number" &&
+      wb &&
+        wb.bounds &&
+        typeof wb.bounds.width === "number" &&
         typeof wb.bounds.height === "number" &&
         typeof wb.bounds.windowState === "string",
       "got: " + JSON.stringify(wb),
@@ -62,7 +65,9 @@ async function testBrowserDomain(browser) {
     const wb2 = await browser.getWindowBounds();
     check(
       "setWindowBounds() resizes the window",
-      wb2 && wb2.bounds && Math.abs(wb2.bounds.width - 800) <= 50 &&
+      wb2 &&
+        wb2.bounds &&
+        Math.abs(wb2.bounds.width - 800) <= 50 &&
         Math.abs(wb2.bounds.height - 600) <= 50,
       "beforeW=" + beforeW + " after=" + JSON.stringify(wb2 && wb2.bounds),
     );
@@ -91,19 +96,25 @@ async function testTargetDomain(browser) {
   const targets = await browser.getTargets();
   check(
     "getTargets() returns targetInfos array",
-    targets && Array.isArray(targets.targetInfos) && targets.targetInfos.length >= 1,
-    "len=" + (targets && targets.targetInfos ? targets.targetInfos.length : "n/a"),
+    targets &&
+      Array.isArray(targets.targetInfos) &&
+      targets.targetInfos.length >= 1,
+    "len=" +
+      (targets && targets.targetInfos ? targets.targetInfos.length : "n/a"),
   );
 
   // browser.listPages() -> [ { targetId, url, title, type }, ... ] (page type only)
   const pages = await browser.listPages();
   check(
     "listPages() returns page targets",
-    Array.isArray(pages) && pages.length >= 1 &&
+    Array.isArray(pages) &&
+      pages.length >= 1 &&
       pages.every((p) => p.type === "page"),
     "len=" + (pages ? pages.length : "n/a"),
   );
-  const hasNewPage = pages.some((p) => typeof p.targetId === "string" && p.targetId.length > 0);
+  const hasNewPage = pages.some(
+    (p) => typeof p.targetId === "string" && p.targetId.length > 0,
+  );
   check("listPages() includes the launched page", hasNewPage);
 
   // browser.newContext() -> string context id, then dispose it.
@@ -115,10 +126,15 @@ async function testTargetDomain(browser) {
   );
 
   // A page created inside the new context should appear among targets.
-  const ctxPage = await browser.newPage({ url: "about:blank", contextId: ctxId });
+  const ctxPage = await browser.newPage({
+    url: "about:blank",
+    contextId: ctxId,
+  });
   check(
     "newPage({ contextId }) creates a page in the context",
-    ctxPage && typeof ctxPage.targetId === "string" && ctxPage.targetId.length > 0,
+    ctxPage &&
+      typeof ctxPage.targetId === "string" &&
+      ctxPage.targetId.length > 0,
     "targetId=" + (ctxPage && ctxPage.targetId),
   );
   const inCtx = (await browser.getTargets()).targetInfos.some(
@@ -170,13 +186,13 @@ async function testSecurityDomain(browser) {
     check("handleCertificateError() returns undefined", ret === undefined);
   } catch (e) {
     registered = false;
-    console.log("  [FAIL] handleCertificateError threw: " + (e && (e.message || e)));
+    console.log(
+      "  [FAIL] handleCertificateError threw: " + (e && (e.message || e)),
+    );
   }
   check("handleCertificateError() registered without error", registered);
   // Note: `fired` depends on a live insecure-TLS navigation; left unasserted.
 }
-
-// --- Tab-level tests merged from tests/test_browser.js ---
 
 async function testNewTab(browser) {
   console.log("\n=== Browser.newPage() ===");
@@ -269,7 +285,11 @@ async function testSpawnProcess() {
 
   // pid is live: reads through the child handle, null after kill().
   await proc.kill();
-  check("pid getter is null after kill()", proc.pid === null, "got: " + proc.pid);
+  check(
+    "pid getter is null after kill()",
+    proc.pid === null,
+    "got: " + proc.pid,
+  );
   check("bin getter still readable after kill()", typeof proc.bin === "string");
 }
 
@@ -308,8 +328,12 @@ async function main() {
     }
   }
 
-  try { await page.close(); } catch (e) {}
-  try { await browser.close(); } catch (e) {}
+  try {
+    await page.close();
+  } catch (e) {}
+  try {
+    await browser.close();
+  } catch (e) {}
 
   console.log("\n" + "=".repeat(50));
   console.log("pass: " + pass + ", fail: " + fail);

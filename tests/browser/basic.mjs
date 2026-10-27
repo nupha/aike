@@ -105,11 +105,8 @@ async function main() {
   }
   console.log("=== End of Results ===\n");
 
-  // 7b. exercise new Page-domain APIs that are safe on any loaded page
-  //     (these don't mutate or reload the document, so the bing demo above
-  //     keeps working). See aike/memo/cdp-features.md:66-75. The destructive
-  //     APIs (setContent/reload + history back/forward) live in
-  //     tests/browser/document.mjs and tests/browser/navigation.mjs.
+  // 7b. Page-domain APIs that don't mutate or reload the document, so the
+  //     bing demo above keeps working.
   console.log("=== Exercise Page-domain APIs (on bing page) ===");
   const tmpDir = "/tmp/aike_downloads";
 
@@ -133,8 +130,10 @@ async function main() {
   const mhtml = await page.captureSnapshot();
   check(
     "captureSnapshot() returns MHTML",
-    typeof mhtml === "string" && mhtml.length > 0 &&
-      (mhtml.indexOf("MIME-Version") >= 0 || mhtml.indexOf("multipart/related") >= 0),
+    typeof mhtml === "string" &&
+      mhtml.length > 0 &&
+      (mhtml.indexOf("MIME-Version") >= 0 ||
+        mhtml.indexOf("multipart/related") >= 0),
   );
 
   // 8. scroll to bottom, then wait
@@ -153,7 +152,9 @@ async function main() {
   console.log("\nDone.");
 
   console.log("\n" + "=".repeat(50));
-  console.log("Page-API checks on bing page: pass " + apiPass + ", fail " + apiFail);
+  console.log(
+    "Page-API checks on bing page: pass " + apiPass + ", fail " + apiFail,
+  );
   process.exit(apiFail > 0 ? 1 : 0);
 }
 

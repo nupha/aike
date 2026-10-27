@@ -1,4 +1,4 @@
-// Test: Page-class Storage domain APIs (P2/P3 from memo/cdp-features.md)
+// Test: Page-class Storage domain APIs
 //
 // Covers (all flat on `Page`):
 //   Storage (P2): clearData

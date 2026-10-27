@@ -1,4 +1,4 @@
-// Test: Page-class Tracing domain APIs (P3 from memo/cdp-features.md)
+// Test: Page-class Tracing domain APIs
 //
 // Covers (all flat on `Page`):
 //   Tracing (P3): startTracing, stopTracing

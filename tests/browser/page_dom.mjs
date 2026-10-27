@@ -1,4 +1,4 @@
-// Test: Page-class DOM / Emulation / Log domain APIs (P0/P1 from memo/cdp-features.md)
+// Test: Page-class DOM / Emulation / Log domain APIs
 //
 // Covers (all flat on `Page`, exercised offline against a data: URL):
 //   DOM (P0): querySelector, querySelectorAll, getAttribute, focus, getBoxModel
@@ -226,8 +226,6 @@ async function testLog(page) {
     "len=" + (after ? after.length : "n/a"),
   );
 }
-
-// --- Merged from tests/test_browser.js ---
 
 async function testGetOuterHTML(page) {
   console.log("\n=== page.getOuterHTML() ===");

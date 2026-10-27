@@ -1,9 +1,6 @@
-// Test: Page-domain navigation APIs (see aike/memo/cdp-features.md:66-75)
+// Test: Page-domain navigation APIs
 //
 // Covers: page.getNavigationHistory(), page.back(), page.forward()
-//
-// These need a controlled 2-entry history built from data: URLs, so they
-// live in their own script rather than the bing demo in tests/browser.mjs.
 //
 // Run as a module (.mjs) so `import` is parsed in module mode:
 //   cargo run -- tests/browser/navigation.mjs
@@ -83,8 +80,6 @@ async function testNavigationHistory(page) {
     "before=" + h2.currentIndex + " after=" + h3.currentIndex,
   );
 }
-
-// --- Merged from tests/test_browser.js ---
 
 async function testNavigate(page) {
   console.log("\n=== page.navigate() ===");

@@ -1,4 +1,4 @@
-// Test: Page-class Overlay domain APIs (P2 from memo/cdp-features.md)
+// Test: Page-class Overlay domain APIs
 //
 // Covers (all flat on `Page`):
 //   Overlay (P2): highlight, hideHighlight

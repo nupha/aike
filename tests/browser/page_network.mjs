@@ -1,4 +1,4 @@
-// Test: Page-class Network domain APIs (P0/P1 from memo/cdp-features.md)
+// Test: Page-class Network domain APIs
 //
 // Covers (all flat on `Page`):
 //   Network (P0): setUserAgent, setExtraHTTPHeaders, setOfflineMode

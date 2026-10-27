@@ -1,4 +1,4 @@
-// Test: Page-class CSS domain APIs (P3 from memo/cdp-features.md)
+// Test: Page-class CSS domain APIs
 //
 // Covers (all flat on `Page`):
 //   CSS (P3): getComputedStyle, getMatchedStyles

@@ -1,5 +1,5 @@
 // Test: Page-class Input domain — mouseClick, mouseMove, keyPress, insertText,
-// uploadFile (merged from tests/test_browser.js).
+// uploadFile.
 //
 // Run as a module (.mjs) so `import` is parsed in module mode:
 //   cargo run -- tests/browser/page_input.mjs
@@ -98,7 +98,11 @@ async function testInsertText(page) {
     const v = await page.evaluate("document.getElementById('tv').textContent");
     return v === "Hello CDP" ? v : "";
   });
-  check("insertText typed text", val === "Hello CDP", "got: " + JSON.stringify(val));
+  check(
+    "insertText typed text",
+    val === "Hello CDP",
+    "got: " + JSON.stringify(val),
+  );
 
   // CJK characters go through Input.insertText untouched.
   await page.insertText("你好世界");
@@ -141,7 +145,13 @@ async function main() {
   check("Browser launched", browser.isRunning === true);
   const page = await browser.newPage();
 
-  const tests = [testMouseClick, testMouseMove, testKeyPress, testInsertText, testUploadFile];
+  const tests = [
+    testMouseClick,
+    testMouseMove,
+    testKeyPress,
+    testInsertText,
+    testUploadFile,
+  ];
   for (const fn of tests) {
     try {
       await fn(page);
@@ -151,8 +161,12 @@ async function main() {
     }
   }
 
-  try { await page.close(); } catch (e) {}
-  try { await browser.close(); } catch (e) {}
+  try {
+    await page.close();
+  } catch (e) {}
+  try {
+    await browser.close();
+  } catch (e) {}
 
   console.log("\n" + "=".repeat(50));
   console.log("pass: " + pass + ", fail: " + fail);

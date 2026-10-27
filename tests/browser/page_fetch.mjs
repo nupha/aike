@@ -1,4 +1,4 @@
-// Test: Page-class Fetch domain (request interception) — P0 from memo/cdp-features.md
+// Test: Page-class Fetch domain (request interception)
 //
 // Covers (all flat on `Page`):
 //   Fetch (P0): setRequestInterception, continueRequest, abortRequest,
@@ -116,8 +116,6 @@ async function testAbort(page) {
   );
   await page.setRequestInterception(false);
 }
-
-// --- Network capture tests merged from tests/test_browser.js ---
 
 async function testNetworkCapture(page) {
   console.log("\n=== Network: startNetworkCapture / getCapturedRequests ===");

@@ -1,9 +1,6 @@
-// Test: Page-domain document APIs (see aike/memo/cdp-features.md:66-75)
+// Test: Page-domain document APIs
 //
 // Covers: page.setContent(html), page.reload(opts?)
-//
-// These replace/reload the document, which is destructive to the bing demo
-// flow in tests/browser.mjs, so they live in their own offline script.
 //
 // Run as a module (.mjs) so `import` is parsed in module mode:
 //   cargo run -- tests/browser/document.mjs
@@ -37,7 +34,11 @@ async function testSetContent(page) {
   );
   await page.waitForSelector("#x", 5000);
   const title = await page.evaluate("document.title");
-  check("setContent replaced the document", title === "SetContent", "got: " + title);
+  check(
+    "setContent replaced the document",
+    title === "SetContent",
+    "got: " + title,
+  );
 }
 
 async function testReload(page) {
@@ -87,8 +88,12 @@ async function main() {
     }
   }
 
-  try { await page.close(); } catch (e) {}
-  try { await browser.close(); } catch (e) {}
+  try {
+    await page.close();
+  } catch (e) {}
+  try {
+    await browser.close();
+  } catch (e) {}
 
   console.log("\n" + "=".repeat(50));
   console.log("pass: " + pass + ", fail: " + fail);

@@ -1,4 +1,4 @@
-// Test: Page-class Runtime domain P0/P1 APIs (from memo/cdp-features.md:84-87)
+// Test: Page-class Runtime domain P0/P1 APIs
 //
 // Covers (all flat on `Page`, exercised offline against a data: URL):
 //   Runtime (P0): callFunctionOn, getProperties
@@ -150,8 +150,6 @@ async function testOnConsole(page) {
     "msg=" + JSON.stringify(msg),
   );
 }
-
-// --- Merged from tests/test_browser.js ---
 
 async function testEvaluate(page) {
   console.log("\n=== page.evaluate() value round-trips ===");

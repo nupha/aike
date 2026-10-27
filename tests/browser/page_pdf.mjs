@@ -1,4 +1,4 @@
-// Test: Page-class Page domain — printToPDF (P0 from memo/cdp-features.md)
+// Test: Page-class Page domain — printToPDF
 //
 //   Page.printToPDF({ printBackground }) -> Uint8Array (PDF bytes)
 //

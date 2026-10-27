@@ -1,4 +1,4 @@
-// Test: Page-class Network `getRequestPostData` (P2 from memo/cdp-features.md)
+// Test: Page-class Network `getRequestPostData`
 //
 // Covers (flat on `Page`):
 //   Network (P2): getRequestPostData
