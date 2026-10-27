@@ -51,6 +51,19 @@ pub(crate) struct OutboundBuffer {
     drain_notified: bool,
     /// Shared close-callback list — fired on first channel-close (client disconnect).
     close_cbs: Option<class_request::CloseCbs>,
+    /// Signals the disconnect watcher task when this buffer is shut down or
+    /// dropped. The task also awaits the strong sender's `closed()` (receiver
+    /// side), so between the two every way a stream ends is observed without
+    /// the task pinning the channel open — see [`Self::arm_disconnect_watcher`].
+    close_notify: Arc<tokio::sync::Notify>,
+}
+
+impl Drop for OutboundBuffer {
+    fn drop(&mut self) {
+        // GC dropped the last JS reference: release the watcher, which drops
+        // the strong sender it holds so the receiver can end.
+        self.close_notify.notify_one();
+    }
 }
 
 impl OutboundBuffer {
@@ -65,6 +78,7 @@ impl OutboundBuffer {
                 on_drain: None,
                 drain_notified: false,
                 close_cbs: None,
+                close_notify: Arc::new(tokio::sync::Notify::new()),
             },
             rx,
         )
@@ -78,6 +92,7 @@ impl OutboundBuffer {
             on_drain: None,
             drain_notified: false,
             close_cbs: None,
+            close_notify: Arc::new(tokio::sync::Notify::new()),
         }
     }
 
@@ -86,26 +101,34 @@ impl OutboundBuffer {
         self.close_cbs = Some(cbs);
     }
 
-    /// Arm a disconnect watcher. The tokio task holds only a *weak* sender, so it
-    /// does not keep the channel alive: `shutdown()` (SSE close / WS close) drops
-    /// the last strong sender, the receiver ends and the stream really ends.
-    /// Returns a `WakeReceiver<()>` that receives a signal when the client
-    /// disconnects — poll it via `queue_job` on the JS thread to fire `close_cbs`.
+    /// Arm a disconnect watcher. Returns a `WakeReceiver<()>` that receives a
+    /// signal when the stream ends either way — poll it via `queue_job` on the
+    /// JS thread to fire `close_cbs` (otherwise that job stays `Block` forever
+    /// and the event loop never idles: the process would not exit).
+    ///
+    /// Both ends must be watched, and the task therefore holds a STRONG sender
+    /// for `closed()`:
+    ///
+    /// - receiver dropped (client disconnected / axum dropped the body) →
+    ///   `closed()` resolves. Watching only the sender missed this — which is
+    ///   what the old `weak.upgrade()` poll did, leaving the job blocked and
+    ///   the process alive after an aborted SSE stream;
+    /// - JS side gone (`sse.close()` / GC of the buffer) → `close_notify`
+    ///   (fired by `shutdown()` and `Drop`), after which the task drops its own
+    ///   sender clone so the receiver can really end.
     pub(crate) fn arm_disconnect_watcher(&mut self, ctx: &ScopedContext) -> zuqe::WakeReceiver<()> {
         let (wake_tx, wake_rx) = ctx.make_channel::<()>(1);
-        let weak = self.tx.as_ref().expect("sender armed").downgrade();
+        let tx = self.tx.as_ref().expect("sender armed").clone();
+        let notify = self.close_notify.clone();
 
-        // Spawn a tokio task that watches for receiver drop. A weak sender has no
-        // `closed()`, so it polls `upgrade()`: one wakeup a quarter second per
-        // open stream, and it fires when shutdown() dropped the last sender.
         tokio::spawn(async move {
-            loop {
-                if weak.upgrade().is_none() {
-                    let _ = wake_tx.send(());
-                    return;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            tokio::select! {
+                biased;
+                _ = tx.closed() => {}                 // receiver gone
+                _ = notify.notified() => {}           // sender side gone
             }
+            let _ = wake_tx.send(());
+            drop(tx); // release the channel if only we still held it
         });
 
         wake_rx
@@ -114,6 +137,9 @@ impl OutboundBuffer {
     /// Drop the sender so the underlying stream ends (SSE close / WS close).
     pub(crate) fn shutdown(&mut self) {
         self.tx.take();
+        // Wake the watcher: our strong sender was the one keeping its
+        // `closed()` pending (it holds a clone).
+        self.close_notify.notify_one();
     }
 
     /// Push one frame; on channel-full, enqueue a parked Promise and arm the
