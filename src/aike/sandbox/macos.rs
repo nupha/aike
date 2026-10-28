@@ -23,6 +23,22 @@
 //!   reachable here;
 //! - `process-fork` has to be allowed explicitly — without it `/bin/sh -c
 //!   'a; b'` fails with "fork: Operation not permitted".
+//!
+//! Two boundaries the profile cannot express are held around it instead:
+//!
+//! - **A signal stops at the sandbox.** `(allow signal (target same-sandbox))`
+//!   reaches the command's own tree and nothing else: without the rule a shell
+//!   could not signal what it forked, and widened to every process a command
+//!   could kill anything else running as this user. Linux settles on the same
+//!   boundary from the other side — `--unshare-pid` means a host process is not
+//!   even visible — so the same `kill` reads "operation not permitted" here and
+//!   "no such process" there.
+//! - **The tree does not outlive the call.** Linux gets that from
+//!   `--die-with-parent` (the namespace init leaving kills its namespace) and
+//!   Windows from `kill_on_job_close`; here `SpawnedChild::wait`
+//!   (`sandbox/child.rs`) sweeps the group once the command exits, so a
+//!   `nohup … &` grandchild cannot linger in a sandbox no later command is
+//!   allowed to signal.
 
 use std::{
     collections::HashMap,

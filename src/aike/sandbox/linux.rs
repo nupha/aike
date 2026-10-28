@@ -29,6 +29,13 @@
 //! hard kill of the whole sandbox and the command's own handler never runs.
 //! macOS's `sandbox-exec` does forward. See `Subprocess.kill` in the type
 //! declarations.
+//!
+//! What a signal may *reach* is the same on both, only the wording differs:
+//! `--unshare-pid` hides every host process, so a command here can signal
+//! nothing but its own namespace — the boundary macOS draws explicitly with
+//! `(allow signal (target same-sandbox))`. The end state matches too: the tree
+//! ends with the call, via `--die-with-parent` here and via the sweep in
+//! `SpawnedChild::wait` on macOS.
 
 use std::{
     collections::HashMap,

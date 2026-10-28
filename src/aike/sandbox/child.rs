@@ -92,8 +92,19 @@ impl SpawnedChild {
 
     /// Block until the command exits. Consumes the child, since a process can
     /// only be waited on once.
+    ///
+    /// Whatever the command left behind dies with the call: the tree is swept
+    /// once `reap` reports the exit, so `nohup cmd &` cannot outlive it. Linux
+    /// reaches the same end state through `--die-with-parent` (the namespace
+    /// init leaving kills its namespace) and Windows through
+    /// `kill_on_job_close`; on macOS nothing does it for us, and the leftover
+    /// would be a process no later sandbox can reach — the policy only allows
+    /// signals inside its own sandbox.
     pub(crate) fn wait(self) -> Result<WaitResult, String> {
-        (self.reap)()
+        let control = self.control.clone();
+        let r = (self.reap)();
+        control.kill();
+        r
     }
 }
 

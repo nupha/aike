@@ -417,17 +417,36 @@ fn collect_sandbox_output(
     }
     drop(child.stdin.take()); // EOF
 
-    let mut stdout = Vec::new();
-    if let Some(mut r) = child.stdout.take() {
-        use std::io::Read;
-        let _ = r.read_to_end(&mut stdout);
-    }
-    let mut stderr = Vec::new();
-    if let Some(mut r) = child.stderr.take() {
-        use std::io::Read;
-        let _ = r.read_to_end(&mut stderr);
-    }
-    let result = child.wait()?;
+    // Drain concurrently with the wait, not before it. A background process the
+    // command left behind inherits these very pipes; draining first would block
+    // until *that* process exits, while the sweep that ends it (`wait`, see
+    // `SpawnedChild::wait`) runs only after the drain — the two would wait for
+    // each other forever.
+    let stdout_reader = child.stdout.take().map(|mut r| {
+        std::thread::spawn(move || {
+            use std::io::Read;
+            let mut buf = Vec::new();
+            let _ = r.read_to_end(&mut buf);
+            buf
+        })
+    });
+    let stderr_reader = child.stderr.take().map(|mut r| {
+        std::thread::spawn(move || {
+            use std::io::Read;
+            let mut buf = Vec::new();
+            let _ = r.read_to_end(&mut buf);
+            buf
+        })
+    });
+
+    let waited = child.wait();
+    let stdout = stdout_reader
+        .map(|h| h.join().unwrap_or_default())
+        .unwrap_or_default();
+    let stderr = stderr_reader
+        .map(|h| h.join().unwrap_or_default())
+        .unwrap_or_default();
+    let result = waited?;
     Ok(SandboxedOutput {
         stdout,
         stderr,
@@ -698,4 +717,112 @@ pub(crate) fn js_sandbox_support(ctx: &mut ScopedContext, _cc: CallContext) -> J
         }
     }
     Ok(obj.into())
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    //! The process-lifecycle contract, exercised without a sandbox.
+    //!
+    //! `sandbox-exec` cannot be nested (a Seatbelt profile is inherited, and a
+    //! second `apply` on an already-confined process fails), so a test cannot
+    //! launch one from inside its own sandbox. What is being tested here is not
+    //! the profile but the order of drain/wait and the sweep afterwards, so an
+    //! ordinary `/bin/sh` child carries the same shape.
+
+    use super::*;
+    use std::os::fd::{FromRawFd, IntoRawFd};
+    use std::os::unix::process::CommandExt;
+    use std::process::{Command, Stdio};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+    use std::time::{Duration, Instant};
+
+    use super::super::child::{ChildControl, SpawnedChild, WaitResult};
+
+    fn into_file(pipe: impl IntoRawFd) -> std::fs::File {
+        // SAFETY: the pipe came from a `Child` we own and have just taken.
+        unsafe { std::fs::File::from_raw_fd(pipe.into_raw_fd()) }
+    }
+
+    /// A `SpawnedChild` running `script`, whose `kill` records that it ran.
+    fn shell_child(script: &str, killed: Arc<AtomicBool>) -> SpawnedChild {
+        let mut cmd = Command::new("/bin/sh");
+        cmd.arg("-c")
+            .arg(script)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            // Its own group: the sweep signals `-pid`, which would otherwise
+            // reach the test runner itself.
+            .process_group(0);
+        let mut child = cmd.spawn().expect("spawn /bin/sh");
+        let pid = child.id() as i32;
+
+        let stdin = child.stdin.take().map(into_file);
+        let stdout = child.stdout.take().map(into_file);
+        let stderr = child.stderr.take().map(into_file);
+
+        let control = ChildControl::new(
+            {
+                let killed = Arc::clone(&killed);
+                move || {
+                    killed.store(true, Ordering::SeqCst);
+                    unsafe {
+                        libc::kill(-pid, libc::SIGKILL);
+                    }
+                    true
+                }
+            },
+            move || unsafe { libc::kill(pid, 0) == 0 },
+            move |sig| unsafe { libc::kill(-pid, sig) == 0 },
+        );
+
+        SpawnedChild::new(pid, stdin, stdout, stderr, control, move || {
+            let status = child.wait().map_err(|e| e.to_string())?;
+            Ok(WaitResult {
+                exit_code: status.code().unwrap_or(-1),
+                signal: None,
+                killed_by_timeout: false,
+            })
+        })
+    }
+
+    /// A background child inherits the pipes. Draining before waiting would
+    /// block until that child exits — and the sweep that ends it only runs
+    /// after the wait — so the collector would never return.
+    #[test]
+    fn a_background_child_does_not_block_the_collector() {
+        let killed = Arc::new(AtomicBool::new(false));
+        let child = shell_child("sleep 5 & echo hi", Arc::clone(&killed));
+
+        let started = Instant::now();
+        let out = collect_sandbox_output(child, None).expect("collect");
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed < Duration::from_secs(3),
+            "collector waited for the background child: {elapsed:?}"
+        );
+        assert_eq!(out.result.exit_code, 0);
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "hi");
+        assert!(
+            killed.load(Ordering::SeqCst),
+            "the tree was not swept after the command exited"
+        );
+    }
+
+    /// Whatever the command left behind dies with the call, on every backend.
+    #[test]
+    fn wait_sweeps_the_tree_after_the_command_exits() {
+        let killed = Arc::new(AtomicBool::new(false));
+        let child = shell_child("true", Arc::clone(&killed));
+        assert!(!killed.load(Ordering::SeqCst));
+
+        let result = child.wait().expect("wait");
+
+        assert_eq!(result.exit_code, 0);
+        assert!(killed.load(Ordering::SeqCst), "wait did not sweep the tree");
+    }
 }

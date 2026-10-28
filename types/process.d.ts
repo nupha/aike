@@ -383,6 +383,13 @@ declare namespace Aike {
    * whose backend is missing or unusable this throws rather than running the
    * command without a sandbox.
    *
+   * The command's background children do not outlive it: whatever it left
+   * behind is killed when it exits (Linux `--die-with-parent`, Windows
+   * `kill_on_job_close`, macOS a sweep of the command's process group). And a
+   * signal only reaches the sandbox that raised the process, so a later command
+   * cannot terminate what an earlier one started — `kill` reports "no such
+   * process" on Linux, "operation not permitted" on macOS.
+   *
    * @example
    * Aike.sh("npm test", {
    *   cwd: "/path/to/project", // the one directory it may write
