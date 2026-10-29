@@ -1,0 +1,724 @@
+aike
+Copyright 2026 John Ray <996351336@qq.com>
+
+This product is licensed under the Apache License, Version 2.0 (LICENSE.txt).
+
+This NOTICE file lists the third-party components included in this product,
+as pinned in Cargo.lock. It covers platform-specific dependencies too, so it
+is a superset of what any single build contains. License texts are not
+reproduced here; each component ships its license text in its source package,
+or it is available from the component repository. Regenerate this list when
+Cargo.lock changes.
+
+
+Major components
+----------------
+
+zuqe 0.11.2
+    JavaScript engine that powers aike
+    Copyright holders: John Ray <996351336@qq.com>
+    License: Apache-2.0
+    Repository: https://github.com/nupha/zuqe
+
+zuqe_zapi 0.4.0
+    Native extension interface (zapi) for aike modules
+    copyright not stated upstream; see component repository
+    License: Apache-2.0
+    Repository: https://github.com/nupha/zuqe-zapi
+
+rmcp 3.5.1
+    Model Context Protocol (MCP) implementation
+    copyright not stated upstream; see component repository
+    License: Apache-2.0
+    Repository: https://github.com/modelcontextprotocol/rust-sdk/
+
+swc_ecma_parser 45.0.1
+    TypeScript / JavaScript parser (typescript feature)
+    Copyright holders: 강동윤 <kdy1997.dev@gmail.com>
+    License: Apache-2.0
+    Repository: https://github.com/swc-project/swc.git
+
+tokio 1.52.3
+    Asynchronous runtime
+    Copyright holders: Tokio Contributors <team@tokio.rs>
+    License: MIT
+    Repository: https://github.com/tokio-rs/tokio
+
+hyper 1.10.1
+    HTTP implementation
+    Copyright (c) 2014-2026 Sean McArthur
+    License: MIT
+    Repository: https://github.com/hyperium/hyper
+
+reqwest 0.13.4
+    HTTP client
+    Copyright (c) 2016-2026 Sean McArthur
+    License: MIT OR Apache-2.0
+    Repository: https://github.com/seanmonstar/reqwest
+
+mimalloc 0.1.52
+    Memory allocator (mimalloc feature)
+    Copyright 2019 Octavian Oncescu
+    License: MIT
+    Repository: https://github.com/purpleprotocol/mimalloc_rust
+
+
+All third-party components by license
+-------------------------------------
+
+MIT OR Apache-2.0 (240 components):
+
+    aead 0.6.1 — Copyright (c) 2019-2026 The RustCrypto Project Developers
+    aes 0.9.2 — Copyright (c) 2018-2024 The RustCrypto Project Developers
+    ahash 0.8.12 — Copyright (c) 2018 Tom Kaitchuck
+    allocator-api2 0.2.21 — copyright holders: Zakarum <zaq.dev@icloud.com>
+    anstream 1.0.0 — copyright not stated upstream; see component repository
+    anstyle-parse 1.0.0 — copyright not stated upstream; see component repository
+    anstyle-query 1.1.5 — copyright not stated upstream; see component repository
+    anstyle-wincon 3.0.11 — copyright not stated upstream; see component repository
+    anstyle 1.0.14 — copyright not stated upstream; see component repository
+    anyhow 1.0.102 — copyright holders: David Tolnay <dtolnay@gmail.com>
+    arbitrary 1.5.0 — Copyright (c) 2019 Manish Goregaokar
+    async-compression 0.4.42 — Copyright (c) 2018 the rustasync developers
+    async-trait 0.1.89 — copyright holders: David Tolnay <dtolnay@gmail.com>
+    base64 0.22.1 — Copyright (c) 2015 Alice Maz
+    base64 0.23.1 — Copyright (c) 2025 Alice Maz, Marshall Pierce
+    bitflags 2.11.1 — Copyright (c) 2014 The Rust Project Developers
+    block-buffer 0.10.4 — Copyright (c) 2018-2019 The RustCrypto Project Developers
+    block-buffer 0.12.1 — Copyright (c) 2018-2025 The RustCrypto Project Developers
+    bstr 1.13.0 — Copyright (c) 2018-2019 Andrew Gallant
+    bumpalo 3.20.3 — Copyright (c) 2019 Nick Fitzgerald
+    cc 1.2.63 — Copyright (c) 2014 Alex Crichton
+    cfg-if 1.0.4 — Copyright (c) 2014 Alex Crichton
+    chacha20 0.10.0 — Copyright (c) 2019-2026 The RustCrypto Project Developers
+    chrono 0.4.45 — Copyright (c) 2014, Kang Seonghoon
+    cipher 0.5.2 — Copyright (c) 2016-2025 RustCrypto Developers
+    clap 4.6.1 — copyright not stated upstream; see component repository
+    clap_builder 4.6.0 — copyright not stated upstream; see component repository
+    clap_derive 4.6.1 — copyright not stated upstream; see component repository
+    clap_lex 1.1.0 — copyright not stated upstream; see component repository
+    cmake 0.1.58 — Copyright (c) 2014 Alex Crichton
+    colorchoice 1.0.5 — copyright not stated upstream; see component repository
+    compression-codecs 0.4.38 — Copyright (c) 2018 the rustasync developers
+    compression-core 0.4.32 — Copyright (c) 2018 the rustasync developers
+    cookie 0.18.1 — Copyright (c) 2017 Sergio Benitez
+    cookie_store 0.22.1 — Copyright (c) 2017
+    core-foundation-sys 0.8.7 — Copyright (c) 2012-2013 Mozilla Foundation
+    core-foundation 0.10.1 — Copyright (c) 2012-2013 Mozilla Foundation
+    cpubits 0.1.1 — Copyright (c) 2023-2026 The RustCrypto Project Developers
+    cpufeatures 0.2.17 — Copyright (c) 2020-2025 The RustCrypto Project Developers
+    cpufeatures 0.3.0 — Copyright (c) 2020-2025 The RustCrypto Project Developers
+    crc32fast 1.5.0 — Copyright (c) 2018 Sam Rijs, Alex Crichton and contributors
+    cron 0.16.0 — Copyright (c) 2015 Zack Slayton
+    crossbeam-channel 0.5.15 — Copyright (c) 2019 The Crossbeam Project Developers
+    crossbeam-deque 0.8.6 — Copyright (c) 2019 The Crossbeam Project Developers
+    crossbeam-epoch 0.9.18 — Copyright (c) 2019 The Crossbeam Project Developers
+    crossbeam-queue 0.3.12 — Copyright (c) 2019 The Crossbeam Project Developers
+    crossbeam-utils 0.8.21 — Copyright (c) 2019 The Crossbeam Project Developers
+    crossbeam 0.8.4 — Copyright (c) 2019 The Crossbeam Project Developers
+    crypto-common 0.1.7 — Copyright (c) 2021 RustCrypto Developers
+    crypto-common 0.2.2 — Copyright (c) 2021-2026 RustCrypto Developers
+    ctr 0.10.1 — Copyright (c) 2018-2022 RustCrypto Developers
+    deranged 0.5.8 — Copyright (c) 2024 Jacob Pratt et al
+    derive_builder 0.20.2 — Copyright (c) 2016 rust-derive-builder contributors
+    derive_builder_core 0.20.2 — Copyright (c) 2016 rust-derive-builder contributors
+    derive_builder_macro 0.20.2 — Copyright (c) 2016 rust-derive-builder contributors
+    digest 0.10.7 — Copyright (c) 2017 Artyom Pavlov
+    digest 0.11.3 — Copyright (c) 2017-2025 RustCrypto Developers
+    dirs-sys 0.5.0 — Copyright (c) 2018-2019 dirs-rs contributors
+    dirs 6.0.0 — Copyright (c) 2018-2019 dirs-rs contributors
+    displaydoc 0.2.6 — copyright holders: Jane Lusby <jlusby@yaah.dev>
+    document-features 0.2.12 — Copyright (c) 2020 Olivier Goffart <ogoffart@sixtyfps.io>
+    dtoa 1.0.11 — copyright holders: David Tolnay <dtolnay@gmail.com>
+    dyn-clone 1.0.20 — copyright holders: David Tolnay <dtolnay@gmail.com>
+    either 1.16.0 — Copyright (c) 2015
+    encoding_rs_io 0.1.8 — Copyright (c) 2015 Andrew Gallant
+    env_logger 0.10.2 — copyright not stated upstream; see component repository
+    errno 0.3.14 — Copyright (c) 2014 Chris Wong
+    eventsource-stream 0.2.3 — copyright holders: Julian Popescu <jpopesculian@gmail.com>
+    fallible_collections 0.5.1 — Copyright (c) 2010 The Rust Project Developers
+    find-msvc-tools 0.1.9 — Copyright (c) 2014 Alex Crichton
+    flate2 1.1.9 — Copyright (c) 2014-2026 Alex Crichton
+    form_urlencoded 1.2.2 — Copyright (c) 2013-2016 The rust-url developers
+    futures-channel 0.3.32 — Copyright (c) 2016 Alex Crichton
+    futures-core 0.3.32 — Copyright (c) 2016 Alex Crichton
+    futures-executor 0.3.32 — Copyright (c) 2016 Alex Crichton
+    futures-io 0.3.32 — Copyright (c) 2016 Alex Crichton
+    futures-macro 0.3.32 — Copyright (c) 2016 Alex Crichton
+    futures-sink 0.3.32 — Copyright (c) 2016 Alex Crichton
+    futures-task 0.3.32 — Copyright (c) 2016 Alex Crichton
+    futures-util 0.3.32 — Copyright (c) 2016 Alex Crichton
+    futures 0.3.32 — Copyright (c) 2016 Alex Crichton
+    getopts 0.2.24 — Copyright (c) 2014 The Rust Project Developers
+    getrandom 0.2.17 — Copyright (c) 2018-2024 The rust-random Project Developers
+    getrandom 0.3.4 — Copyright (c) 2018-2025 The rust-random Project Developers
+    getrandom 0.4.2 — Copyright (c) 2018-2026 The rust-random Project Developers
+    gimli 0.31.1 — Copyright (c) 2015 The Rust Project Developers
+    glob 0.3.3 — Copyright (c) 2014 The Rust Project Developers
+    hashbrown 0.14.5 — Copyright (c) 2016 Amanieu d'Antras
+    hashbrown 0.15.5 — Copyright (c) 2016 Amanieu d'Antras
+    hashbrown 0.17.1 — Copyright (c) 2016 Amanieu d'Antras
+    heck 0.5.0 — Copyright (c) 2015 The Rust Project Developers
+    hermit-abi 0.5.2 — copyright holders: Stefan Lankes
+    hmac 0.13.0 — Copyright (c) 2017 Artyom Pavlov
+    home 0.5.12 — copyright holders: Brian Anderson <andersrb@gmail.com>
+    html5ever 0.39.0 — Copyright (c) 2014 The html5ever Project Developers
+    http 1.4.1 — Copyright (c) 2017 http-rs authors
+    httparse 1.10.1 — Copyright (c) 2015-2025 Sean McArthur
+    httpdate 1.0.3 — Copyright (c) 2016 Pyfisch
+    humantime 2.3.0 — Copyright (c) 2016 The humantime Developers
+    hybrid-array 0.4.14 — Copyright (c) 2022-2026 The RustCrypto Project Developers
+    iana-time-zone-haiku 0.1.2 — Copyright (c) 2020 Andrew D. Straw
+    iana-time-zone 0.1.65 — Copyright (c) 2020 Andrew D. Straw
+    idna 1.1.0 — Copyright (c) 2013-2025 The rust-url developers
+    inout 0.2.2 — Copyright (c) 2022-2025 The RustCrypto Project Developers
+    ipnet 2.12.0 — Copyright 2017 Juniper Networks, Inc
+    is_terminal_polyfill 1.70.2 — copyright not stated upstream; see component repository
+    itertools 0.13.0 — Copyright (c) 2015
+    itoa 1.0.18 — copyright holders: David Tolnay <dtolnay@gmail.com>
+    jni-macros 0.22.4 — copyright not stated upstream; see component repository
+    jni-sys-macros 0.4.1 — copyright holders: Robert Bragg <robert@sixbynine.org>
+    jni-sys 0.4.1 — Copyright (c) 2015 The rust-jni-sys Developers
+    jni 0.22.4 — copyright holders: jni team
+    jobserver 0.1.34 — Copyright (c) 2014 Alex Crichton
+    libc 0.2.186 — copyright holders: The Rust Project Developers
+    linkme-impl 0.3.36 — copyright holders: David Tolnay <dtolnay@gmail.com>
+    linkme 0.3.36 — copyright holders: David Tolnay <dtolnay@gmail.com>
+    litrs 1.0.0 — Copyright (c) 2020 Project Developers
+    lock_api 0.4.14 — Copyright (c) 2016 The Rust Project Developers
+    log 0.4.30 — Copyright (c) 2014 The Rust Project Developers
+    markup5ever 0.39.0 — Copyright (c) 2014 The html5ever Project Developers
+    memmap2 0.9.11 — Copyright (c) 2020 Yevhenii Reizner
+    mime 0.3.17 — Copyright (c) 2014 Sean McArthur
+    num-bigint 0.4.6 — Copyright (c) 2014 The Rust Project Developers
+    num-conv 0.2.2 — copyright holders: Jacob Pratt <jacob@jhpratt.dev>
+    num-integer 0.1.46 — Copyright (c) 2014 The Rust Project Developers
+    num-rational 0.4.2 — Copyright (c) 2014 The Rust Project Developers
+    num-traits 0.2.19 — Copyright (c) 2014 The Rust Project Developers
+    num_cpus 1.17.0 — Copyright (c) 2015-2025 Sean McArthur
+    once_cell 1.21.4 — copyright holders: Aleksey Kladov <aleksey.kladov@gmail.com>
+    once_cell_polyfill 1.70.2 — copyright not stated upstream; see component repository
+    openssl-probe 0.2.1 — Copyright (c) 2014 Alex Crichton
+    parking_lot 0.12.5 — Copyright (c) 2016 The Rust Project Developers
+    parking_lot_core 0.9.12 — Copyright (c) 2016 The Rust Project Developers
+    paste 1.0.15 — copyright holders: David Tolnay <dtolnay@gmail.com>
+    pastey 0.2.3 — copyright holders: Aditya Kumar <git@adityais.dev>; David Tolnay <dtolnay@gmail.com>
+    percent-encoding 2.3.2 — Copyright (c) 2013-2025 The rust-url developers
+    pkg-config 0.3.34 — Copyright (c) 2014 Alex Crichton
+    powerfmt 0.2.0 — Copyright (c) 2023 Jacob Pratt et al
+    ppv-lite86 0.2.21 — Copyright (c) 2019 The CryptoCorrosion Contributors
+    prettyplease 0.2.37 — copyright holders: David Tolnay <dtolnay@gmail.com>
+    proc-macro2 1.0.106 — copyright holders: David Tolnay <dtolnay@gmail.com>; Alex Crichton <alex@alexcrichton.com>
+    quinn-proto 0.11.14 — Copyright (c) 2018 The quinn Developers
+    quinn-udp 0.5.14 — Copyright (c) 2018 The quinn Developers
+    quinn 0.11.9 — Copyright (c) 2018 The quinn Developers
+    quote 1.0.45 — copyright holders: David Tolnay <dtolnay@gmail.com>
+    rand 0.10.2 — Copyright 2018 Developers of the Rand project
+    rand 0.8.6 — Copyright 2018 Developers of the Rand project
+    rand 0.9.4 — Copyright 2018 Developers of the Rand project
+    rand_chacha 0.9.0 — Copyright 2018 Developers of the Rand project
+    rand_core 0.10.1 — Copyright (c) 2018-2026 The Rand Project Developers
+    rand_core 0.6.4 — Copyright 2018 Developers of the Rand project
+    rand_core 0.9.5 — Copyright 2018 Developers of the Rand project
+    rayon-core 1.13.0 — Copyright (c) 2010 The Rust Project Developers
+    rayon 1.12.0 — Copyright (c) 2010 The Rust Project Developers
+    ref-cast-impl 1.0.25 — copyright holders: David Tolnay <dtolnay@gmail.com>
+    ref-cast 1.0.25 — copyright holders: David Tolnay <dtolnay@gmail.com>
+    regex-automata 0.4.14 — Copyright (c) 2014 The Rust Project Developers
+    regex-syntax 0.8.10 — Copyright (c) 2014 The Rust Project Developers
+    regex 1.12.3 — Copyright (c) 2014 The Rust Project Developers
+    reqwest 0.13.4 — Copyright (c) 2016-2026 Sean McArthur
+    rustc_version 0.4.1 — Copyright (c) 2016 The Rust Project Developers
+    rustls-pki-types 1.14.1 — Copyright (c) 2023 Dirkjan Ochtman <dirkjan@ochtman.nl>
+    rustls-platform-verifier-android 0.1.1 — copyright not stated upstream; see component repository
+    rustls-platform-verifier 0.7.0 — Copyright (c) 2022 1Password
+    rustversion 1.0.22 — copyright holders: David Tolnay <dtolnay@gmail.com>
+    scopeguard 1.2.0 — Copyright (c) 2016-2019 Ulrik Sverdrup "bluss" and scopeguard developers
+    security-framework-sys 2.17.0 — Copyright (c) 2015 Steven Fackler
+    security-framework 3.7.0 — Copyright (c) 2015 Steven Fackler
+    semver 1.0.28 — copyright holders: David Tolnay <dtolnay@gmail.com>
+    seq-macro 0.3.6 — copyright holders: David Tolnay <dtolnay@gmail.com>
+    serde 1.0.228 — copyright holders: Erick Tryzelaar <erick.tryzelaar@gmail.com>; David Tolnay <dtolnay@gmail.com>
+    serde_core 1.0.228 — copyright holders: Erick Tryzelaar <erick.tryzelaar@gmail.com>; David Tolnay <dtolnay@gmail.com>
+    serde_derive 1.0.228 — copyright holders: Erick Tryzelaar <erick.tryzelaar@gmail.com>; David Tolnay <dtolnay@gmail.com>
+    serde_derive_internals 0.29.1 — copyright holders: Erick Tryzelaar <erick.tryzelaar@gmail.com>; David Tolnay <dtolnay@gmail.com>
+    serde_json 1.0.150 — copyright holders: Erick Tryzelaar <erick.tryzelaar@gmail.com>; David Tolnay <dtolnay@gmail.com>
+    serde_path_to_error 0.1.20 — copyright holders: David Tolnay <dtolnay@gmail.com>
+    serde_yaml 0.9.34+deprecated — copyright holders: David Tolnay <dtolnay@gmail.com>
+    servo_arc 0.4.3 — copyright holders: The Servo Project Developers
+    sha1 0.10.6 — Copyright (c) 2006-2009 Graydon Hoare
+    sha1 0.11.0 — Copyright (c) 2016-2026 The RustCrypto Project Developers
+    sha2 0.11.0 — Copyright (c) 2016-2026 The RustCrypto Project Developers
+    shlex 1.3.0 — Copyright 2015 Nicholas Allegra (comex)
+    shlex 2.0.1 — Copyright 2015 Nicholas Allegra (comex)
+    signal-hook-mio 0.2.5 — Copyright (c) 2017 tokio-jsonrpc developers
+    signal-hook-registry 1.4.8 — Copyright (c) 2017 tokio-jsonrpc developers
+    simdutf8 0.1.5 — copyright holders: Hans Kratz <hans@appfour.com>
+    smallvec 1.15.1 — Copyright (c) 2018 The Servo Project Developers
+    socket2 0.6.4 — Copyright (c) 2014 Alex Crichton
+    sse-stream 0.2.5 — Copyright (c) 2024 4t145
+    stable_deref_trait 1.2.1 — Copyright (c) 2017 Robert Grosse
+    static_assertions 1.1.0 — Copyright (c) 2017 Nikolai Vazquez
+    string_cache 0.9.0 — Copyright (c) 2012-2013 Mozilla Foundation
+    string_cache_codegen 0.6.1 — Copyright (c) 2012-2013 Mozilla Foundation
+    syn 2.0.117 — copyright holders: David Tolnay <dtolnay@gmail.com>
+    syn 3.0.3 — copyright holders: David Tolnay <dtolnay@gmail.com>
+    tendril 0.5.0 — Copyright (c) 2015 Keegan McAllister
+    thiserror-impl 1.0.69 — copyright holders: David Tolnay <dtolnay@gmail.com>
+    thiserror-impl 2.0.18 — copyright holders: David Tolnay <dtolnay@gmail.com>
+    thiserror 1.0.69 — copyright holders: David Tolnay <dtolnay@gmail.com>
+    thiserror 2.0.18 — copyright holders: David Tolnay <dtolnay@gmail.com>
+    time-core 0.1.8 — copyright holders: Jacob Pratt <open-source@jhpratt.dev>; Time contributors
+    time-macros 0.2.27 — copyright holders: Jacob Pratt <open-source@jhpratt.dev>; Time contributors
+    time 0.3.47 — copyright holders: Jacob Pratt <open-source@jhpratt.dev>; Time contributors
+    tokio-rustls 0.26.4 — Copyright (c) 2017 quininer kel
+    triomphe 0.1.15 — Copyright (c) 2019 Manish Goregaokar
+    tungstenite 0.29.0 — Copyright (c) 2017 Alexey Galakhov
+    tungstenite 0.30.0 — Copyright (c) 2017 Alexey Galakhov
+    typenum 1.20.1 — Copyright (c) 2014 Paho Lurie-Gregg
+    unicase 2.9.0 — Copyright (c) 2014-2026 Sean McArthur
+    unicode-normalization 0.1.25 — Copyright (c) 2015 The Rust Project Developers
+    unicode-segmentation 1.13.2 — Copyright (c) 2015 The Rust Project Developers
+    unicode-width 0.2.2 — Copyright (c) 2015 The Rust Project Developers
+    universal-hash 0.6.1 — Copyright (c) 2019-2025 RustCrypto Developers
+    url 2.5.8 — Copyright (c) 2013-2025 The rust-url developers
+    utf-8 0.7.6 — copyright holders: Simon Sapin <simon.sapin@exyr.org>
+    web-time 1.1.0 — Copyright (c) 2023 dAxpeDDa
+    web_atoms 0.2.4 — Copyright (c) 2014 The html5ever Project Developers
+    windows-collections 0.3.2 — copyright not stated upstream; see component repository
+    windows-core 0.62.2 — copyright not stated upstream; see component repository
+    windows-future 0.3.2 — copyright not stated upstream; see component repository
+    windows-implement 0.60.2 — copyright not stated upstream; see component repository
+    windows-interface 0.59.3 — copyright not stated upstream; see component repository
+    windows-link 0.2.1 — copyright not stated upstream; see component repository
+    windows-numerics 0.3.1 — copyright not stated upstream; see component repository
+    windows-result 0.4.1 — copyright not stated upstream; see component repository
+    windows-strings 0.5.1 — copyright not stated upstream; see component repository
+    windows-sys 0.52.0 — copyright holders: Microsoft
+    windows-sys 0.59.0 — copyright holders: Microsoft
+    windows-sys 0.61.2 — copyright not stated upstream; see component repository
+    windows-targets 0.52.6 — copyright holders: Microsoft
+    windows-threading 0.2.1 — copyright not stated upstream; see component repository
+    windows 0.62.2 — copyright not stated upstream; see component repository
+    windows_aarch64_gnullvm 0.52.6 — copyright holders: Microsoft
+    windows_aarch64_msvc 0.52.6 — copyright holders: Microsoft
+    windows_i686_gnu 0.52.6 — copyright holders: Microsoft
+    windows_i686_gnullvm 0.52.6 — copyright holders: Microsoft
+    windows_i686_msvc 0.52.6 — copyright holders: Microsoft
+    windows_x86_64_gnu 0.52.6 — copyright holders: Microsoft
+    windows_x86_64_gnullvm 0.52.6 — copyright holders: Microsoft
+    windows_x86_64_msvc 0.52.6 — copyright holders: Microsoft
+
+MIT (85 components):
+
+    async-openai-macros 0.2.0 — copyright holders: Himanshu Neema
+    async-openai 0.37.0 — copyright holders: Himanshu Neema
+    axum-core 0.5.6 — Copyright (c) 2019–2025 axum Contributors
+    axum 0.8.9 — Copyright (c) 2019 axum Contributors
+    bytes 1.11.1 — Copyright (c) 2018 Carl Lerche
+    castaway 0.2.4 — Copyright (c) 2021 Stephen M. Coakley
+    cfg_aliases 0.2.1 — Copyright (c) 2020 Katharos Technology
+    compact_str 0.7.1 — Copyright (c) 2021 Parker Timmerman
+    core_maths 0.1.1 — Copyright (c) 2024 Robert Bastian
+    crossterm 0.28.1 — Copyright (c) 2019 Timon
+    darling 0.20.11 — Copyright (c) 2017 Ted Driggs
+    darling 0.24.1 — Copyright (c) 2017 Ted Driggs
+    darling_core 0.20.11 — Copyright (c) 2017 Ted Driggs
+    darling_core 0.24.1 — Copyright (c) 2017 Ted Driggs
+    darling_macro 0.20.11 — Copyright (c) 2017 Ted Driggs
+    darling_macro 0.24.1 — Copyright (c) 2017 Ted Driggs
+    data-encoding 2.11.0 — Copyright (c) 2015-2020 Julien Cretin
+    derive_more-impl 2.1.1 — Copyright (c) 2016 Jelte Fennema
+    derive_more 2.1.1 — Copyright (c) 2016 Jelte Fennema
+    dotenvy 0.15.7 — Copyright (c) 2014 Santiago Lapresta and contributors
+    endian-type 0.2.0 — Copyright (c) 2015
+    fs_extra 1.3.0 — Copyright (c) 2017 Denis Kurilenko
+    generic-array 0.14.7 — Copyright (c) 2015 Bartłomiej Kamiński
+    h2 0.4.14 — Copyright (c) 2017 h2 authors
+    hash-link 0.1.0 — Copyright (c) 2025-2026 John Ray <996351336@qq.com>
+    http-body-util 0.1.3 — Copyright (c) 2019-2025 Sean McArthur & Hyper Contributors
+    http-body 1.0.1 — Copyright (c) 2019-2024 Sean McArthur & Hyper Contributors
+    http-range-header 0.4.2 — Copyright (c) 2021 MarcusGrass
+    hyper-util 0.1.20 — Copyright (c) 2023-2025 Sean McArthur
+    hyper 1.10.1 — Copyright (c) 2014-2026 Sean McArthur
+    is-terminal 0.4.17 — Copyright (c) 2015-2019 Doug Tangren
+    libm 0.2.16 — copyright holders: Alex Crichton <alex@alexcrichton.com>; Amanieu d'Antras <amanieu@gmail.com>; Jorge Aparicio <japaricious@gmail.com>; Trevor Gross <tg@trevorgross.com>
+    libmimalloc-sys 0.1.49 — Copyright 2019 Octavian Oncescu
+    lre 0.3.2 — Copyright (c) 2025 John Ray <996351336@qq.com>
+    mimalloc 0.1.52 — Copyright 2019 Octavian Oncescu
+    mime_guess 2.0.5 — Copyright (c) 2015 Austin Bonander
+    mio 1.2.1 — Copyright (c) 2014 Carl Lerche and other MIO contributors
+    new_debug_unreachable 1.0.6 — Copyright (c) 2015 Jonathan Reem
+    nibble_vec 0.1.0 — Copyright (c) 2015 Michael Sproul
+    nix 0.31.3 — Copyright (c) 2015 Carl Lerche + nix-rust Authors
+    nom 7.1.3 — Copyright (c) 2014-2019 Geoffroy Couprie
+    nu-ansi-term 0.50.3 — Copyright (c) 2014 Benjamin Sago
+    phf 0.11.3 — Copyright (c) 2014-2022 Steven Fackler, Yuki Okushi
+    phf 0.13.1 — Copyright (c) 2014-2022 Steven Fackler, Yuki Okushi
+    phf_codegen 0.13.1 — Copyright (c) 2014-2022 Steven Fackler, Yuki Okushi
+    phf_generator 0.11.3 — Copyright (c) 2014-2022 Steven Fackler, Yuki Okushi
+    phf_generator 0.13.1 — Copyright (c) 2014-2022 Steven Fackler, Yuki Okushi
+    phf_macros 0.11.3 — Copyright (c) 2014-2022 Steven Fackler, Yuki Okushi
+    phf_macros 0.13.1 — Copyright (c) 2014-2022 Steven Fackler, Yuki Okushi
+    phf_shared 0.11.3 — Copyright (c) 2014-2022 Steven Fackler, Yuki Okushi
+    phf_shared 0.13.1 — Copyright (c) 2014-2022 Steven Fackler, Yuki Okushi
+    precomputed-hash 0.1.1 — Copyright (c) 2017 Emilio Cobos Álvarez
+    radix_trie 0.3.0 — Copyright (c) 2015 Michael Sproul
+    rappct 0.13.3 — copyright not stated upstream; see component repository
+    redox_syscall 0.5.18 — Copyright (c) 2017 Redox OS Developers
+    redox_users 0.5.2 — Copyright (c) 2017 Jose Narvaez
+    rustyline-derive 0.12.0 — copyright holders: gwenn
+    rustyline 18.0.0 — Copyright (c) 2015 Katsu Kawakami & Rustyline authors
+    schannel 0.1.29 — Copyright (c) 2015 steffengy
+    schemars 1.2.1 — Copyright (c) 2019 Graham Esau
+    schemars_derive 1.2.1 — Copyright (c) 2019 Graham Esau
+    simd-adler32 0.3.9 — Copyright (c) [2021] [Marvin Countryman]
+    slab 0.4.12 — Copyright (c) 2019 Carl Lerche
+    strsim 0.11.1 — Copyright (c) 2015 Danny Guo
+    synstructure 0.13.2 — Copyright 2016 Nika Layzell
+    tokio-macros 2.7.0 — Copyright (c) 2019 Yoshua Wuyts
+    tokio-stream 0.1.18 — copyright holders: Tokio Contributors <team@tokio.rs>
+    tokio-tungstenite 0.29.0 — Copyright (c) 2017 Daniel Abramov
+    tokio-tungstenite 0.30.0 — Copyright (c) 2017 Daniel Abramov
+    tokio-util 0.7.18 — copyright holders: Tokio Contributors <team@tokio.rs>
+    tokio 1.52.3 — copyright holders: Tokio Contributors <team@tokio.rs>
+    tower-http 0.5.2 — Copyright (c) 2019-2021 Tower Contributors
+    tower-http 0.6.11 — Copyright (c) 2019-2021 Tower Contributors
+    tower-layer 0.3.3 — Copyright (c) 2019 Tower Contributors
+    tower-service 0.3.3 — Copyright (c) 2019 Tower Contributors
+    tower 0.5.3 — Copyright (c) 2019 Tower Contributors
+    tracing-attributes 0.1.31 — Copyright (c) 2019 Tokio Contributors
+    tracing-core 0.1.36 — Copyright (c) 2019 Tokio Contributors
+    tracing 0.1.44 — Copyright (c) 2019 Tokio Contributors
+    try-lock 0.2.5 — Copyright (c) 2018-2023 Sean McArthur
+    unsafe-libyaml 0.2.11 — copyright holders: David Tolnay <dtolnay@gmail.com>
+    want 0.3.1 — Copyright (c) 2018-2019 Sean McArthur
+    winnow 0.7.15 — copyright not stated upstream; see component repository
+    zmij 1.0.21 — copyright holders: David Tolnay <dtolnay@gmail.com>
+    zstd 0.13.3 — Copyright (c) 2016 Alexandre Bury
+
+Unicode-3.0 (46 components):
+
+    fixed_decimal 0.7.2 — Copyright © 2020-2024 Unicode, Inc
+    icu 2.3.0 — Copyright © 2020-2024 Unicode, Inc
+    icu_calendar 2.3.0 — Copyright © 2020-2024 Unicode, Inc
+    icu_calendar_data 2.3.0 — Copyright © 2020-2024 Unicode, Inc
+    icu_casemap 2.3.0 — Copyright © 2020-2024 Unicode, Inc
+    icu_casemap_data 2.3.0 — Copyright © 2020-2024 Unicode, Inc
+    icu_collator 2.3.0 — Copyright © 2020-2024 Unicode, Inc
+    icu_collator_data 2.3.0 — Copyright © 2020-2024 Unicode, Inc
+    icu_collections 2.3.0 — Copyright © 2020-2024 Unicode, Inc
+    icu_datetime 2.3.0 — Copyright © 2020-2024 Unicode, Inc
+    icu_datetime_data 2.3.0 — Copyright © 2020-2024 Unicode, Inc
+    icu_decimal 2.3.0 — Copyright © 2020-2024 Unicode, Inc
+    icu_decimal_data 2.3.0 — Copyright © 2020-2024 Unicode, Inc
+    icu_experimental 0.6.0 — Copyright © 2020-2024 Unicode, Inc
+    icu_experimental_data 0.6.0 — Copyright © 2020-2024 Unicode, Inc
+    icu_list 2.3.0 — Copyright © 2020-2024 Unicode, Inc
+    icu_list_data 2.3.0 — Copyright © 2020-2024 Unicode, Inc
+    icu_locale 2.3.0 — Copyright © 2020-2024 Unicode, Inc
+    icu_locale_core 2.3.0 — Copyright © 2020-2024 Unicode, Inc
+    icu_locale_data 2.3.0 — Copyright © 2020-2024 Unicode, Inc
+    icu_locale_fallback 2.3.0 — Copyright © 2020-2024 Unicode, Inc
+    icu_locale_fallback_data 2.3.0 — Copyright © 2020-2024 Unicode, Inc
+    icu_normalizer 2.3.0 — Copyright © 2020-2024 Unicode, Inc
+    icu_normalizer_data 2.3.0 — Copyright © 2020-2024 Unicode, Inc
+    icu_pattern 0.5.0 — Copyright © 2020-2024 Unicode, Inc
+    icu_plurals 2.3.0 — Copyright © 2020-2024 Unicode, Inc
+    icu_plurals_data 2.3.0 — Copyright © 2020-2024 Unicode, Inc
+    icu_properties 2.3.0 — Copyright © 2020-2024 Unicode, Inc
+    icu_properties_data 2.3.0 — Copyright © 2020-2024 Unicode, Inc
+    icu_provider 2.3.0 — Copyright © 2020-2024 Unicode, Inc
+    icu_segmenter 2.3.0 — Copyright © 2020-2024 Unicode, Inc
+    icu_segmenter_data 2.3.0 — Copyright © 2020-2024 Unicode, Inc
+    icu_time 2.3.0 — Copyright © 2020-2024 Unicode, Inc
+    icu_time_data 2.3.0 — Copyright © 2020-2024 Unicode, Inc
+    ixdtf 0.6.6 — Copyright © 2020-2024 Unicode, Inc
+    litemap 0.8.2 — Copyright © 2020-2024 Unicode, Inc
+    potential_utf 0.1.5 — Copyright © 2020-2024 Unicode, Inc
+    tinystr 0.8.4 — Copyright © 2020-2024 Unicode, Inc
+    writeable 0.6.4 — Copyright © 2020-2024 Unicode, Inc
+    yoke-derive 0.8.2 — Copyright © 2020-2024 Unicode, Inc
+    yoke 0.8.3 — Copyright © 2020-2024 Unicode, Inc
+    zerofrom-derive 0.1.7 — Copyright © 2020-2024 Unicode, Inc
+    zerofrom 0.1.8 — Copyright © 2020-2024 Unicode, Inc
+    zerotrie 0.2.5 — Copyright © 2020-2024 Unicode, Inc
+    zerovec-derive 0.11.4 — Copyright © 2020-2024 Unicode, Inc
+    zerovec 0.11.7 — Copyright © 2020-2024 Unicode, Inc
+
+Apache-2.0 (39 components):
+
+    ast_node 7.0.0 — copyright holders: 강동윤 <kdy1997.dev@gmail.com>
+    better_scoped_tls 1.0.1 — copyright holders: 강동윤 <kdy1997.dev@gmail.com>
+    bytes-str 0.2.8 — copyright holders: Donny <kdy1997.dev@gmail.com>
+    calendrical_calculations 0.2.4 — copyright holders: The ICU4X Project Developers
+    clang-sys 1.8.1 — copyright holders: Kyle Mayes <kyle@mayeses.com>
+    from_variant 3.0.0 — copyright holders: 강동윤 <kdy1997.dev@gmail.com>
+    gc-lite-macros 0.2.1 — copyright holders: John Ray <996351336@qq.com>
+    gc-lite 0.7.2 — copyright holders: John Ray <996351336@qq.com>
+    hstr 4.0.1 — copyright holders: 강동윤 <kdy1997.dev@gmail.com>
+    is-macro 0.3.7 — copyright holders: 강동윤 <kdy1997.dev@gmail.com>
+    mdka 2.1.6 — copyright holders: nabbisen
+    memo-map 0.3.3 — copyright holders: Armin Ronacher <armin.ronacher@active-4.com>
+    minijinja-contrib 2.20.0 — copyright holders: Armin Ronacher <armin.ronacher@active-4.com>
+    minijinja 2.20.0 — copyright holders: Armin Ronacher <armin.ronacher@active-4.com>
+    par-core 2.0.0 — copyright holders: 강동윤 <kdy1997.dev@gmail.com>
+    rmcp-macros 3.5.1 — copyright not stated upstream; see component repository
+    rmcp 3.5.1 — copyright not stated upstream; see component repository
+    string_enum 1.0.2 — copyright holders: 강동윤 <kdy1997.dev@gmail.com>
+    swc_allocator 5.0.0 — copyright holders: 강동윤 <kdy1997.dev@gmail.com>
+    swc_atoms 10.0.0 — copyright holders: 강동윤 <kdy1997.dev@gmail.com>
+    swc_common 26.0.0 — copyright holders: 강동윤 <kdy1997.dev@gmail.com>
+    swc_config 6.0.0 — copyright holders: 강동윤 <kdy1997.dev@gmail.com>
+    swc_config_macro 1.0.1 — copyright holders: 강동윤 <kdy1997.dev@gmail.com>
+    swc_ecma_ast 29.0.0 — copyright holders: 강동윤 <kdy1997.dev@gmail.com>
+    swc_ecma_codegen 32.0.0 — copyright holders: 강동윤 <kdy1997.dev@gmail.com>
+    swc_ecma_codegen_macros 2.0.2 — copyright holders: 강동윤 <kdy1997.dev@gmail.com>
+    swc_ecma_hooks 1.0.0 — copyright holders: 강동윤 <kdy1997.dev@gmail.com>
+    swc_ecma_parser 45.0.1 — copyright holders: 강동윤 <kdy1997.dev@gmail.com>
+    swc_ecma_transforms_base 49.0.1 — copyright holders: 강동윤 <kdy1997.dev@gmail.com>
+    swc_ecma_transforms_react 55.0.1 — copyright holders: 강동윤 <kdy1997.dev@gmail.com>
+    swc_ecma_transforms_typescript 55.0.0 — copyright holders: 강동윤 <kdy1997.dev@gmail.com>
+    swc_ecma_utils 35.0.0 — copyright holders: 강동윤 <kdy1997.dev@gmail.com>
+    swc_ecma_visit 29.0.0 — copyright holders: 강동윤 <kdy1997.dev@gmail.com>
+    swc_eq_ignore_macros 1.0.1 — copyright holders: 강동윤 <kdy1@dudy.kr>
+    swc_macros_common 1.0.1 — copyright holders: 강동윤 <kdy1997.dev@gmail.com>
+    swc_visit 2.0.1 — copyright holders: 강동윤 <kdy1997.dev@gmail.com>
+    sync_wrapper 1.0.2 — copyright holders: Actyx AG <developer@actyx.io>
+    zuqe 0.11.2 — copyright holders: John Ray <996351336@qq.com>
+    zuqe_zapi 0.4.0 — copyright not stated upstream; see component repository
+
+not stated in package metadata (30 components):
+
+    android_system_properties 0.1.5 — Copyright 2016 Nicolas Silva
+    clipboard-win 5.4.1 — copyright not stated upstream; see component repository
+    combine 4.6.7 — Copyright (c) 2015 Markus Westerlind
+    crossterm_winapi 0.9.1 — Copyright (c) 2019 Timon
+    error-code 3.3.2 — copyright not stated upstream; see component repository
+    id-arena 2.3.0 — Copyright (c) 2014 Alex Crichton
+    js-sys 0.3.99 — Copyright (c) 2014 Alex Crichton
+    leb128fmt 0.1.0 — copyright not stated upstream; see component repository
+    libredox 0.1.17 — Copyright (c) 2023 4lDO2
+    simd_cesu8 1.1.1 — copyright not stated upstream; see component repository
+    unicode-xid 0.2.6 — Copyright (c) 2015 The Rust Project Developers
+    wasip2 1.0.3+wasi-0.2.9 — copyright not stated upstream; see component repository
+    wasip3 0.4.0+wasi-0.3.0-rc-2026-01-06 — copyright not stated upstream; see component repository
+    wasm-bindgen-futures 0.4.72 — Copyright (c) 2014 Alex Crichton
+    wasm-bindgen-macro-support 0.2.122 — Copyright (c) 2014 Alex Crichton
+    wasm-bindgen-macro 0.2.122 — Copyright (c) 2014 Alex Crichton
+    wasm-bindgen-shared 0.2.122 — Copyright (c) 2014 Alex Crichton
+    wasm-bindgen 0.2.122 — Copyright (c) 2014 Alex Crichton
+    wasm-encoder 0.244.0 — copyright not stated upstream; see component repository
+    wasm-metadata 0.244.0 — copyright not stated upstream; see component repository
+    wasm-streams 0.5.0 — copyright not stated upstream; see component repository
+    wasmparser 0.244.0 — copyright not stated upstream; see component repository
+    web-sys 0.3.99 — Copyright (c) 2014 Alex Crichton
+    webpki-root-certs 1.0.7 — copyright not stated upstream; see component repository
+    wit-bindgen-core 0.51.0 — copyright not stated upstream; see component repository
+    wit-bindgen-rust-macro 0.51.0 — copyright not stated upstream; see component repository
+    wit-bindgen-rust 0.51.0 — copyright not stated upstream; see component repository
+    wit-bindgen 0.51.0 — copyright not stated upstream; see component repository
+    wit-component 0.244.0 — copyright not stated upstream; see component repository
+    wit-parser 0.244.0 — copyright not stated upstream; see component repository
+
+Apache-2.0 OR MIT (24 components):
+
+    aes-gcm 0.11.1 — Copyright (c) 2019-2026 The RustCrypto Project Developers
+    ascii 1.1.0 — Copyright (c) 2017 Thomas Bahn and contributors
+    atomic-waker 1.1.2 — Copyright (c) 2016 Alex Crichton
+    autocfg 1.5.1 — Copyright (c) 2018 Josh Stone
+    cmov 0.5.4 — Copyright (c) 2022-2026 The RustCrypto Project Developers
+    const-oid 0.10.2 — Copyright (c) 2020-2026 The RustCrypto Project Developers
+    ctutils 0.4.2 — Copyright (c) 2025-2026 The RustCrypto Project Developers
+    equivalent 1.0.2 — Copyright (c) 2016--2023
+    fastrand 2.4.1 — copyright holders: Stjepan Glavina <stjepang@gmail.com>
+    ghash 0.6.0 — Copyright (c) 2019-2026 The RustCrypto Project Developers
+    idna_adapter 1.2.2 — copyright holders: The rust-url developers
+    indexmap 2.14.0 — Copyright (c) 2016--2017
+    object 0.36.7 — Copyright (c) 2015 The Gimli Developers
+    pin-project-lite 0.2.17 — copyright not stated upstream; see component repository
+    polyval 0.7.3 — Copyright (c) 2019-2026 The RustCrypto Project Developers
+    process-wrap 10.0.1 — copyright holders: Félix Saparelli <felix@passcod.name>
+    rustc-hash 2.1.2 — copyright holders: The Rust Project Developers
+    secrecy 0.10.3 — Copyright (c) 2019-2024 iqlusion
+    utf16_iter 1.0.5 — copyright holders: Henri Sivonen <hsivonen@hsivonen.fi>
+    utf8_iter 1.0.4 — copyright holders: Henri Sivonen <hsivonen@hsivonen.fi>
+    utf8parse 0.2.2 — Copyright (c) 2016 Joe Wilm
+    uuid 1.23.2 — Copyright (c) 2014 The Rust Project Developers
+    write16 1.0.0 — copyright not stated upstream; see component repository
+    zeroize 1.8.2 — Copyright (c) 2018-2021 The RustCrypto Project Developers
+
+Apache-2.0 WITH LLVM-exception (14 components):
+
+    cranelift-bforest 0.116.1 — copyright holders: The Cranelift Project Developers
+    cranelift-bitset 0.116.1 — copyright holders: The Cranelift Project Developers
+    cranelift-codegen-meta 0.116.1 — copyright holders: The Cranelift Project Developers
+    cranelift-codegen-shared 0.116.1 — copyright holders: The Cranelift Project Developers
+    cranelift-codegen 0.116.1 — copyright holders: The Cranelift Project Developers
+    cranelift-control 0.116.1 — copyright holders: The Cranelift Project Developers
+    cranelift-entity 0.116.1 — copyright holders: The Cranelift Project Developers
+    cranelift-frontend 0.116.1 — copyright holders: The Cranelift Project Developers
+    cranelift-isle 0.116.1 — copyright holders: The Cranelift Project Developers
+    cranelift-module 0.116.1 — copyright holders: The Cranelift Project Developers
+    cranelift-native 0.116.1 — copyright holders: The Cranelift Project Developers
+    cranelift-object 0.116.1 — copyright holders: The Cranelift Project Developers
+    regalloc2 0.11.2 — copyright holders: Chris Fallin <chris@cfallin.org>; Mozilla SpiderMonkey Developers
+    target-lexicon 0.13.5 — copyright holders: Dan Gohman <sunfish@mozilla.com>
+
+MIT/Apache-2.0 (13 components):
+
+    fallible-iterator 0.3.0 — Copyright (c) 2015 The rust-openssl-verify Developers
+    ident_case 1.0.1 — copyright holders: Ted Driggs <ted.driggs@outlook.com>
+    minimal-lexical 0.2.1 — Copyright (c) 2009 The Go Authors. All rights reserved
+    psl-types 2.0.11 — Copyright (c) 2021 Rushmore Mushambi
+    publicsuffix 2.3.0 — Copyright (c) 2016 Rushmore Mushambi
+    scoped-tls 1.0.1 — Copyright (c) 2014 Alex Crichton
+    serde_urlencoded 0.7.1 — Copyright (c) 2016 Anthony Ramine
+    siphasher 0.3.11 — Copyright 2012-2016 The Rust Project Developers
+    siphasher 1.0.3 — Copyright 2012-2016 The Rust Project Developers
+    version_check 0.9.5 — Copyright (c) 2017-2018 Sergio Benitez
+    winapi-i686-pc-windows-gnu 0.4.0 — copyright holders: Peter Atashian <retep998@gmail.com>
+    winapi-x86_64-pc-windows-gnu 0.4.0 — copyright holders: Peter Atashian <retep998@gmail.com>
+    winapi 0.3.9 — Copyright (c) 2015-2018 The winapi-rs Developers
+
+Unlicense OR MIT (9 components):
+
+    aho-corasick 1.1.4 — Copyright (c) 2015 Andrew Gallant
+    globset 0.4.19 — Copyright (c) 2015 Andrew Gallant
+    grep-matcher 0.1.9 — Copyright (c) 2015 Andrew Gallant
+    grep-regex 0.1.14 — Copyright (c) 2015 Andrew Gallant
+    grep-searcher 0.1.17 — Copyright (c) 2015 Andrew Gallant
+    ignore 0.4.32 — Copyright (c) 2015 Andrew Gallant
+    memchr 2.8.1 — Copyright (c) 2015 Andrew Gallant
+    termcolor 1.4.1 — Copyright (c) 2015 Andrew Gallant
+    winapi-util 0.1.11 — Copyright (c) 2017 Andrew Gallant
+
+BSD-3-Clause (6 components):
+
+    alloc-no-stdlib 2.0.4 — Copyright (c) 2016 Dropbox, Inc
+    alloc-stdlib 0.2.2 — copyright holders: Daniel Reiter Horn <danielrh@dropbox.com>
+    bindgen 0.72.1 — Copyright (c) 2013, Jyun-Yan You
+    subtle 2.6.1 — Copyright (c) 2016-2017 Isis Agora Lovecruft, Henry de Valence. All rights reserved
+    zstd-safe 7.3.0 — Copyright (c) 2026, Alexandre Bury
+    zstd-sys 2.1.0+zstd.1.5.7 — Copyright (c) 2026, Alexandre Bury
+
+ISC (6 components):
+
+    ego-tree 0.11.0 — Copyright © 2016, June McEnroe <june@causal.agency>
+    libloading 0.8.9 — Copyright © 2015, Simonas Kazlauskas
+    libloading 0.9.0 — Copyright © 2015, Simonas Kazlauskas
+    rustls-webpki 0.103.13 — Copyright 2015 Brian Smith
+    scraper 0.27.0 — Copyright © 2016, June McEnroe <june@causal.agency>
+    untrusted 0.9.0 — copyright holders: Brian Smith <brian@briansmith.org>
+
+MPL-2.0 (5 components):
+
+    cssparser-macros 0.7.0 — copyright holders: Simon Sapin <simon.sapin@exyr.org>
+    cssparser 0.37.0 — copyright holders: Simon Sapin <simon.sapin@exyr.org>
+    dtoa-short 0.3.5 — copyright holders: Xidorn Quan <me@upsuper.org>
+    option-ext 0.2.0 — copyright holders: Simon Ochsenreither <simon@ochsenreither.de>
+    selectors 0.38.0 — copyright holders: The Servo Project Developers
+
+Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT (4 components):
+
+    linux-raw-sys 0.4.15 — copyright holders: Dan Gohman <dev@sunfishcode.online>
+    rustix 0.38.44 — copyright holders: Dan Gohman <dev@sunfishcode.online>; Jakub Konka <kubkon@jakubkonka.com>
+    wasi 0.11.1+wasi-snapshot-preview1 — copyright holders: The Cranelift Project Developers
+    wit-bindgen 0.57.1 — copyright holders: Alex Crichton <alex@alexcrichton.com>
+
+Apache-2.0 OR ISC OR MIT (3 components):
+
+    hyper-rustls 0.27.9 — Copyright (c) 2016, Joseph Birr-Pixton <jpixton@gmail.com>
+    rustls-native-certs 0.8.3 — Copyright (c) 2016, Joseph Birr-Pixton <jpixton@gmail.com>
+    rustls 0.23.40 — Copyright (c) 2016, Joseph Birr-Pixton <jpixton@gmail.com>
+
+(MIT OR Apache-2.0) AND Unicode-3.0 (2 components):
+
+    unicode-id-start 1.4.0 — Copyright © 1991-2023 Unicode, Inc
+    unicode-ident 1.0.24 — Copyright © 1991-2023 Unicode, Inc
+
+Apache-2.0/MIT (2 components):
+
+    cexpr 0.6.0 — (C) Copyright 2016 Jethro G. Beekman
+    signal-hook 0.3.18 — Copyright (c) 2017 tokio-jsonrpc developers
+
+BSD-2-Clause OR Apache-2.0 OR MIT (2 components):
+
+    zerocopy-derive 0.8.50 — Copyright 2019 The Fuchsia Authors
+    zerocopy 0.8.50 — Copyright 2019 The Fuchsia Authors
+
+MIT OR Apache-2.0 OR LGPL-2.1-or-later (2 components):
+
+    r-efi 5.3.0 — copyright not stated upstream; see component repository
+    r-efi 6.0.0 — copyright not stated upstream; see component repository
+
+MIT OR Apache-2.0 OR Zlib (2 components):
+
+    lru-slab 0.1.2 — Copyright (c) 2024 The lru-slab Developers
+    tinyvec_macros 0.1.1 — Copyright (c) 2020 Soveu
+
+Unlicense/MIT (2 components):
+
+    same-file 1.0.6 — Copyright (c) 2017 Andrew Gallant
+    walkdir 2.5.0 — Copyright (c) 2015 Andrew Gallant
+
+(Apache-2.0 OR MIT) AND BSD-3-Clause (1 component):
+
+    encoding_rs 0.8.35 — copyright holders: Henri Sivonen <hsivonen@hsivonen.fi>
+
+0BSD OR MIT OR Apache-2.0 (1 component):
+
+    adler2 2.0.1 — copyright holders: Jonas Schievink <jonasschievink@gmail.com>; oyvindln <oyvindln@users.noreply.github.com>
+
+Apache-2.0 / MIT (1 component):
+
+    fnv 1.0.7 — Copyright (c) 2017 Contributors
+
+Apache-2.0 AND ISC (1 component):
+
+    ring 0.17.14 — Copyright 2015-2025 Brian Smith
+
+Apache-2.0 OR BSL-1.0 (1 component):
+
+    ryu 1.0.23 — copyright holders: David Tolnay <dtolnay@gmail.com>
+
+Apache-2.0 WITH LLVM-exception OR BSL-1.0 (1 component):
+
+    dragonbox_ecma 0.1.12 — copyright holders: David Tolnay <dtolnay@gmail.com>; magic-akari <akari.ccino@gmail.com>
+
+BSD-3-Clause AND MIT (1 component):
+
+    brotli 8.0.3 — Copyright (c) 2016 Dropbox, Inc
+
+BSD-3-Clause/MIT (1 component):
+
+    brotli-decompressor 5.0.1 — Copyright (c) 2016 Dropbox, Inc
+
+CC0-1.0 OR MIT-0 OR Apache-2.0 (1 component):
+
+    dunce 1.0.5 — copyright holders: Kornel <kornel@geekhood.net>
+
+ISC AND (Apache-2.0 OR ISC) (1 component):
+
+    aws-lc-rs 1.17.0 — copyright holders: AWS-LibCrypto
+
+ISC AND (Apache-2.0 OR ISC) AND Apache-2.0 AND MIT AND BSD-3-Clause AND (Apache-2.0 OR ISC OR MIT) AND (Apache-2.0 OR ISC OR MIT-0) (1 component):
+
+    aws-lc-sys 0.41.0 — Copyright (c) 2014-2024 Google Inc
+
+MIT AND BSD-3-Clause (1 component):
+
+    matchit 0.8.4 — Copyright (c) 2022 Ibraheem Ahmed
+
+MIT OR Zlib OR Apache-2.0 (1 component):
+
+    miniz_oxide 0.8.9 — Copyright 2013-2014 RAD Game Tools and Valve Software
+
+Zlib (1 component):
+
+    foldhash 0.1.5 — Copyright (c) 2024 Orson Peters
+
+Zlib OR Apache-2.0 OR MIT (1 component):
+
+    tinyvec 1.11.0 — Copyright (c) 2019 Daniel "Lokathor" Gee
+
