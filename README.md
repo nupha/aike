@@ -1,59 +1,42 @@
 [中文](./README_zh.md)
 
-# aike - The JS/TS runtime for scripting AI apps
+# aike - The JS/TS runtime, born for writing AI applications
 
-**aike** is named after "Ai + ke" (壳, "shell"): AI infra parts packed into one shell, nicknamed "braincase". It is the JavaScript / TypeScript runtime for scripting AI apps. It runs on [zuqe](https://github.com/nupha/zuqe), a small-footprint engine.
+**aike** is named after "Ai + ke" (壳, "shell"): AI infra parts packed into one shell, nicknamed "braincase". It is the JavaScript / TypeScript runtime for writing AI applications. It runs on [zuqe](https://github.com/nupha/zuqe), a small-footprint engine.
 
 AI infra parts — model calls, local inference, databases, browser automation, embeddings, syntax parsing, sandboxing — are built into native modules and shipped in the aike distro.
 
 ## Use cases
 
-### Embed in an existing product
+Some places to use aike include:
 
-Desktop apps, IDE plugins, industrial devices, offline terminals. The host calls aike to run a script; the script exits when done. Ship aike inside the installer — no deployment, no ops.
+### 1. Building agents
 
-### Turn a pile of material into one reliable result
-
-Contracts → field tables. Work orders → category labels. Tens of GB of logs → one daily report. A whole directory → one searchable index.
-
-The common traits: batch, repeatable, verifiable.
-
-The `json-schema` module ties model output to your own data structures: `fromSimpleSchema` writes a schema, `extractJSON` pulls JSON out of free-form text, `validateSchema` / `matchesType` check it. All module functions — no per-project rewrites.
-
-### AI apps on local data
-
-Intranets, classified data, healthcare, education. `llama` runs local inference, `sqlite` / `redb` store locally, vector search stays local too. Everything that can stay local, stays local. No need to hand over a whole document set just to use AI once.
-
-Requests leave from the caller's process, which decides what to send, where, and how much.
-
-### Run model-generated code safely
-
-Elsewhere you usually need a container, or a second embedded engine. aike has one runtime; the difference is configuration.
-
-`Aike.createRuntime({ global: ["console", "crypto"] })` grants **global** capabilities by list. Omit `global` and the sub-runtime gets only the language: no files, no network, no outside contact. Open several in one process; heaps stay independent.
-
-Modules are not on that list. Whether a sub-runtime may `import` a module is decided separately by `importPolicy`:
-
-```js
-const rt = Aike.createRuntime({
-  global: ["console"],
-  importPolicy: (name) => name === "ai", // modules get module names; script files get absolute paths
-});
-```
-
-Without `importPolicy`, a sub-runtime **cannot import anything**. With one, every `import` asks the policy; only `true` passes.
-
-The policy runs **synchronously** in the creator's context: it returns a boolean and must not create or close runtimes — re-entry breaks the runtime tree and throws `TypeError`. If it throws, the import fails and the error passes through unchanged.
-
-### Building agents
-
-Streaming output, tool calls, MCP connections, argument schema checks, context assembly — all inside the runtime.
+Streaming output, tool calls, MCP connections, argument schema checks, context assembly — all inside aike.
 
 Your code only says what to call and when to stop. SSE stream parsing is built in.
 
-### Writing MCP servers
+### 2. Writing MCP servers
 
 **aike** writes MCP servers in both transports: `StdioMcp` over stdin/stdout, `HttpMcp` over Streamable HTTP mounted on an `HttpServer`.
+
+### 3. Run inference and embeddings locally
+
+Load a model from disk; generation and embedding both run on this machine. No API calls, no token bills — and it keeps working offline.
+
+### 4. Turn documents and logs into structured results
+
+Contracts, work orders, logs, whole directories — aike reads them in batches and writes out field tables, category labels, daily reports, searchable indexes. Batch, repeatable, verifiable — the `json-schema` module checks every result.
+
+### 5. Introduce AI capability where local comes first
+
+Intranets, classified data, healthcare, education — places where sending data out is not an option. What can stay local, stays local: no handing over a whole document set just to use AI once.
+
+Requests leave from the caller's process, which decides what to send, where, and how much.
+
+### 6. Run untrusted code
+
+Run the code the model just wrote — and anything else you don't trust — inside a sandbox. No container, no second engine: one runtime, two levels. Details and demos in the [Sandbox](#sandbox) chapter.
 
 ## Aike distro
 
@@ -99,6 +82,19 @@ console.log(await rt.run("typeof fetch")); // "undefined"
 console.log(await rt.run("1 + 1")); // 2
 rt.close();
 ```
+
+Modules are not on the `global` list; whether a sub-runtime may `import` one is decided separately by `importPolicy`:
+
+```js
+const rt = Aike.createRuntime({
+  global: ["console"],
+  importPolicy: (name) => name === "ai", // modules get module names; script files get absolute paths
+});
+```
+
+Without `importPolicy`, a sub-runtime **cannot import anything**. With one, every `import` asks the policy; only `true` passes.
+
+The policy runs **synchronously** in the creator's context: it returns a boolean and must not create or close runtimes — re-entry breaks the runtime tree and throws `TypeError`. If it throws, the import fails and the error passes through unchanged.
 
 ### Process sandbox - for a program
 
@@ -216,7 +212,6 @@ for await (const chunk of llm.chat({
 ### Local inference
 
 ```ts
-// local.ts
 import * as llama from "llama";
 
 const model = new llama.Model("./models/Qwen3.5-4B-Q4_K_M.gguf");
@@ -242,7 +237,6 @@ engine.dispose();
 ### Automate a browser
 
 ```ts
-// page.ts
 import { Browser } from "browser";
 
 const browser = await Browser.launch({ headless: true });
@@ -272,7 +266,7 @@ db.close();
 
 ### Writing MCP servers
 
-Write MCP servers with aike: describe a tool once — name, description, argument list, handler — and the `args` DSL compiles to JSON Schema. The file-system, browser and web-search servers in `aike-mcp` are built this way.
+Write MCP servers with aike: describe a tool once — name, description, argument list, handler — and the `args` DSL compiles to JSON Schema.
 
 #### Stdio transport
 
