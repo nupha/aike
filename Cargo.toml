@@ -2,6 +2,13 @@
 name = "aike"
 version = "0.1.0"
 edition = "2024"
+authors = ["John Ray <996351336@qq.com>"]
+description = "JavaScript/TypeScript runtime for writing AI applications, battery-included the infrastructure components they need."
+license = "Apache-2.0"
+readme = "README.md"
+keywords = ["javascript", "typescript", "runtime", "ai", "llm"]
+categories = ["command-line-utilities", "development-tools"]
+repository = "https://github.com/nupha/aike"
 
 [features]
 typescript = [
@@ -11,28 +18,16 @@ typescript = [
     "swc_ecma_codegen",
     "swc_ecma_transforms_typescript",
 ]
-enable_eval_log = [] # 启用 DeepEval 评估日志采集
-# Browser-security layer of the Fetch API (WHATWG CORS protocol, request
-# modes/tainting, client-origin resolution, referrer policy inputs, and the
-# shared cookie jar backing `cookieStore`).
-#
-# Off by default: every fetch() is a plain HTTP request, with no preflight, no
-# response-header filtering, and no CORS check on the response. Enable it for
-# browser-shaped fetches (`cargo build -F fetch_browser`), e.g. a browser-side
-# test harness driven by WPT, where a cross-origin response without
-# `Access-Control-Allow-Origin` must fail.
-#
-# This only controls whether the machinery is *compiled in*. Which behaviour a
-# running script gets is selected per-runtime through the `fetch.cors`,
-# `fetch.cookie` and `fetch.allowInsecureTLS` accessors (all default off).
-fetch_browser = []
-# The HTTP cache (Fetch spec "HTTP cache"), plus the `caches` / `CacheStorage`
-# globals. Off by default: without it every `fetch()` goes to the network and
-# the `cache` request option has no effect (a cache-mode-only failure such as
-# `only-if-cached` on a miss is still reported). Enable for browser-shaped
-# caching (`cargo build -F fetch_cache`).
-fetch_cache = []
 mimalloc = ["dep:mimalloc"]
+# for DeepEval
+enable_eval_log = []
+# WHATWG fetch: enables security semantics: cross-origin detection, CORS
+# response checks, OPTIONS preflight, Origin/Sec-Fetch-* headers, and the
+# per-runtime `fetch.cors`/`fetch.cookie` switches. Off (or switches off) =
+# fetch() is a plain HTTP client; the API itself is always present.
+fetch_browser = []
+# WHATWG fetch: HTTP cache + `caches` / `CacheStorage` globals
+fetch_cache = []
 
 default = ["typescript", "fetch_browser", "mimalloc"]
 
@@ -60,16 +55,14 @@ debug = true
 strip = "none"
 debug = true
 
-# The `http` crate's `HeaderValue::from_maybe_shared_unchecked` panics under
-# `debug_assertions` when given bytes it considers invalid (e.g. control chars
-# like 0x01 that the Fetch spec permits in header values). Build `http` without
-# debug-assertions so we can send those values verbatim (see transport.rs).
+# `http` panics under debug-assertions on header bytes the Fetch spec allows
+# (e.g. 0x01); build it without them so transport.rs can send them verbatim
 [profile.dev.package."http"]
 opt-level = 3
 debug-assertions = false
 
 [dependencies]
-zuqe = { path = "../../../devel/zhuque", features = [
+zuqe = { version = "0.11.0", features = [
     "crossbeam_channel",
     "serde_json_support",
     "zapi",
@@ -99,9 +92,7 @@ reqwest = { version = "0.13", default-features = false, features = [
     "rustls",
     "cookies",
 ] }
-# Direct dependency for `hyper::ext::ReasonPhrase`: reqwest does not re-export
-# it, and it is the only way to recover a non-canonical HTTP/1 status message
-# (reqwest stores it in the response extensions).
+# direct dep for `hyper::ext::ReasonPhrase` (reqwest doesn't re-export it)
 hyper = { version = "1", default-features = false, features = ["http1"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1"
@@ -126,9 +117,7 @@ axum = { version = "0.8", default-features = false, features = [
     "ws",
     "original-uri",
 ] }
-# rmcp switched its process-wrap dependency from ^9 to ^10 at 3.3.0; aike pins
-# process-wrap 10, so keep rmcp on the >=3.3 line or `TokioChildProcess::new`
-# gets two different `CommandWrap` types (see class_mcp_client.rs).
+# rmcp >=3.3 needs process-wrap 10; keep both in sync or TokioChildProcess::new gets mismatched CommandWrap types (class_mcp_client.rs)
 rmcp = { version = "3.3", default-features = false, features = [
     "client",
     "server",
@@ -185,7 +174,6 @@ rand = "0.9"
 subtle = "2"
 mimalloc = { version = "0.1", optional = true }
 
-# TypeScript transpilation — only compiled when typescript feature is enabled
 swc_common = { version = "26", optional = true }
 swc_ecma_ast = { version = "29", optional = true }
 swc_ecma_parser = { version = "45", optional = true, default-features = false, features = [

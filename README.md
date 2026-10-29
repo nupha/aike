@@ -1,25 +1,201 @@
-# aike
+[中文](./README_zh.md)
 
-> 自带 AI 零部件的 JS/TS 运行时。零部件是原生的，用 JavaScript / TypeScript来组装它们。
+# aike - The JS/TS runtime for scripting AI apps
 
-aike 取名自 “Ai + ke（壳）”：把 AI 应用要用的零部件装进一个壳里带走。所以也叫"脑壳"。
+**aike** is named after "Ai + ke" (壳, "shell"): AI infra parts packed into one shell, nicknamed "braincase". It is the JavaScript / TypeScript runtime for scripting AI apps. It runs on [zuqe](https://github.com/nupha/zuqe), a small-footprint engine.
 
-AI 应用的零部件 aike 自带，全部原生实现。零部件随发行包一起装好，不必 `npm install`，也不必编译构建。组装零部件的工作交给 JavasSript/TypeScript。文件写好，直接用 aike 运行。
+AI infra parts — model calls, local inference, databases, browser automation, embeddings, syntax parsing, sandboxing — are built into native modules and shipped in the aike distro.
 
-- **零部件持续收集**：收集写 AI 应用需要的零部件，编译成标准模块，随 aike 发行包发布。截止当前，已收集 19 个：`ai` `mcp` `sqlite` `llama` `redb` `browser` `tree_sitter` 等，覆盖模型调用、本地推理、存储、浏览器自动化、语法解析。后续发展，新零部件将加入，过期的将下线。
-- **同线程多子运行时**：一个进程开多个隔离子运行时。每个运行时拥有独立堆。不建进程，不建 worker。
-- **沙箱强度可配**：宿主与沙箱共用一份运行时。差异只有一组能力开关。
+## Use cases
 
-实测数据（macOS arm64，0.1.0）：二进制 26 MB。`aike -e '1+1'` 热启动约 10 ms。空载常驻内存 6.4 MB。
+### Embed in an existing product
 
-## 例子
+Desktop apps, IDE plugins, industrial devices, offline terminals. The host calls aike to run a script; the script exits when done. Ship aike inside the installer — no deployment, no ops.
 
-每段都能直接运行，命令形如 `aike -m hello.ts`。装好发行包即可，不需要 `npm install`，不需要构建。
+### Turn a pile of material into one reliable result
 
-**一、调云端模型，流式输出。** 一次对话边收边打印，不引入 SDK。
+Contracts → field tables. Work orders → category labels. Tens of GB of logs → one daily report. A whole directory → one searchable index.
+
+The common traits: batch, repeatable, verifiable.
+
+The `json-schema` module ties model output to your own data structures: `fromSimpleSchema` writes a schema, `extractJSON` pulls JSON out of free-form text, `validateSchema` / `matchesType` check it. All module functions — no per-project rewrites.
+
+### AI apps on local data
+
+Intranets, classified data, healthcare, education. `llama` runs local inference, `sqlite` / `redb` store locally, vector search stays local too. Everything that can stay local, stays local. No need to hand over a whole document set just to use AI once.
+
+Requests leave from the caller's process, which decides what to send, where, and how much.
+
+### Run model-generated code safely
+
+Elsewhere you usually need a container, or a second embedded engine. aike has one runtime; the difference is configuration.
+
+`Aike.createRuntime({ global: ["console", "crypto"] })` grants **global** capabilities by list. Omit `global` and the sub-runtime gets only the language: no files, no network, no outside contact. Open several in one process; heaps stay independent.
+
+Modules are not on that list. Whether a sub-runtime may `import` a module is decided separately by `importPolicy`:
+
+```js
+const rt = Aike.createRuntime({
+  global: ["console"],
+  importPolicy: (name) => name === "ai", // modules get module names; script files get absolute paths
+});
+```
+
+Without `importPolicy`, a sub-runtime **cannot import anything**. With one, every `import` asks the policy; only `true` passes.
+
+The policy runs **synchronously** in the creator's context: it returns a boolean and must not create or close runtimes — re-entry breaks the runtime tree and throws `TypeError`. If it throws, the import fails and the error passes through unchanged.
+
+### Building agents
+
+Streaming output, tool calls, MCP connections, argument schema checks, context assembly — all inside the runtime.
+
+Your code only says what to call and when to stop. SSE stream parsing is built in.
+
+### Writing MCP servers
+
+**aike** writes MCP servers in both transports: `StdioMcp` over stdin/stdout, `HttpMcp` over Streamable HTTP mounted on an `HttpServer`.
+
+## Aike distro
+
+[TBD: pre-build distro downloads]
+
+After installation, you get this layout:
+
+```
+<INSTALL_ROOT>/
+├── bin/aike             # the runtime binary
+└── lib/aike/modules/
+    ├── *.d.ts  …        # type declarations for all modules
+    ├── llama.aike       # an extension module: shared library
+    ├── browser.aike
+    ├── tree_sitter.aike
+    ├── sqlite.aike
+    ├── postgres.aike
+    ├── redb.aike
+    ├── audio.aike
+    ├── speech.aike
+    ├── gui.aike
+    └── ...
+```
+
+The binary `aike` is the runtime program; `lib/aike/modules/` holds the modules.
+
+Note
+
+1. Every standard module ships a `.d.ts` next to its `.aike` file. Type checking, editor completion, and hints all read these declarations. Coding agents read them too — no guessing APIs. Declarations follow module versions: change the API, change the declaration.
+1. This repo builds only the runtime. Extension module sources live outside this repo.
+
+## Sandbox
+
+Built-in safety for running untrusted code. Two kinds, picked by what you confine: a piece of JavaScript, or a whole program.
+
+### Light sandbox - for a piece of JavaScript
+
+`Aike.createRuntime` opens a sub-runtime on the _same thread_: cheap enough to open many, heaps isolated. `global` grants the globals and APIs, `importPolicy` grants the modules. Grant neither and only the language remains — no files, no network. For evaluating JS tool calls, model-generated expressions, and untrusted snippets.
 
 ```ts
-// hello.ts
+const rt = Aike.createRuntime({ timeout: 1000 }); // omit global = language only
+console.log(await rt.run("typeof fetch")); // "undefined"
+console.log(await rt.run("1 + 1")); // 2
+rt.close();
+```
+
+### Process sandbox - for a program
+
+`Aike.spawn` starts a child process inside an OS-enforced sandbox: Seatbelt on macOS, AppContainer on Windows, bubblewrap on Linux. The working directory is the only place it may write; `grants` opens more paths, `denied` closes paths completely, and the network stays off until you ask. For external commands and third-party tools.
+
+```ts
+const child = Aike.spawn("cat", ["data/report.txt"], {
+  cwd: "/path/to/app",
+  sandbox: {
+    grants: [
+      { path: "/path/to/app/data", access: "r" }, // may read this directory
+    ],
+    denied: ["/path/to/app/.env"], // never this file
+    network: "none", // no outbound connections
+  },
+});
+console.log(child.sandboxed); // true
+console.log(await child.stdout?.text()); // contents of report.txt
+```
+
+_Note: if the OS sandbox backend is unavailable, spawn throws — never runs unsandboxed. Check `Aike.sandboxSupport()` first._
+
+## Modules
+
+### Basics
+
+Everyday built-ins:
+
+- `fs` — read, write, glob, grep
+- `path` — join, resolve, parse
+- `os` — platform, arch, well-known directories
+- `http` — HTTP server with routing
+- `yaml`, `jsonl` — parse and write data formats
+- `json-schema` — validate model output against a JSON-Schema; coerce obvious mismatches
+- `jinja2` — templates
+- `html` — parse pages, convert HTML to markdown
+
+````ts
+import * as fs from "fs";
+import * as path from "path";
+import * as os from "os";
+import { YAML } from "yaml";
+import * as jsonl from "jsonl";
+import JSONSchema from "json-schema";
+import { Jinja2 } from "jinja2";
+import { html2markdown } from "html";
+import { HttpServer } from "http";
+
+// os
+console.log(os.platform(), os.arch()); // e.g. darwin x64
+
+// fs: write, read, glob
+await fs.writeText("notes.txt", "hello aike");
+console.log(await fs.readText("notes.txt")); // hello aike
+console.log(await fs.glob("*.txt")); // [ 'notes.txt', ... ]
+
+// path
+console.log(path.join("/data", "app", "db.sqlite")); // /data/app/db.sqlite
+
+// yaml / jsonl
+console.log(YAML.parse("name: aike")); // { name: 'aike' }
+console.log(jsonl.stringify([{ id: 1 }])); // {"id":1}
+
+// json-schema: extract JSON from model text, then check it against your schema
+const schema = {
+  type: "object",
+  properties: { id: { type: "integer" }, name: { type: "string" } },
+  required: ["id"],
+};
+const value = JSONSchema.extractJSON(
+  'Result: ```json\n{"id":1,"name":"aike"}\n```',
+);
+console.log(JSONSchema.validateSchema(value, schema));
+// { ok: true, value: { id: 1, name: 'aike' }, errors: [] }
+console.log(JSONSchema.validateSchema({ id: "x" }, schema));
+// { ok: false, value: { id: 'x' }, errors: [ 'root.id: expected integer' ] }
+console.log(JSONSchema.validateSchema({ id: "42" }, schema, "coerce"));
+// { ok: true, value: { id: 42 }, errors: [] } — coercion fixes obvious mismatches
+
+// jinja2
+console.log(new Jinja2().render("Hi {{ name }}", { name: "aike" })); // Hi aike
+
+// html
+console.log(html2markdown("<h1>Hello</h1>")); // # Hello
+
+// http: serve one request, then shut down
+const server = new HttpServer();
+server.get("/hi", (req, res) => res.end("hello"));
+const handle = server.listen({ port: 8787 });
+console.log(await (await fetch("http://127.0.0.1:8787/hi")).text()); // hello
+handle.shutdown();
+await handle.exit;
+````
+
+### Call an LLM
+
+```ts
 import { LlmClient } from "ai";
 
 const llm = new LlmClient({
@@ -29,13 +205,15 @@ const llm = new LlmClient({
 });
 
 for await (const chunk of llm.chat({
-  messages: [{ role: "user", content: "用一句话说明 aike 是什么" }],
+  messages: [
+    { role: "user", content: "What is a JavaScript runtime, in one sentence?" },
+  ],
 })) {
   process.stdout.write(chunk.choices[0]?.delta?.content ?? "");
 }
 ```
 
-**二、本机推理，请求不出网。** 模型从磁盘加载，推理在本机完成。
+### Local inference
 
 ```ts
 // local.ts
@@ -48,7 +226,12 @@ const engine = llama.Engine.createEngine(model, {
 });
 
 const reply = engine.chat(
-  [{ role: "user", content: "用一句话说明本地推理的意义" }],
+  [
+    {
+      role: "user",
+      content: "Explain why local inference matters, in one sentence",
+    },
+  ],
   { temperature: 0.7, thinking: false },
 );
 console.log(reply.text, reply.usage);
@@ -56,7 +239,7 @@ console.log(reply.text, reply.usage);
 engine.dispose();
 ```
 
-**三、操控浏览器，取回渲染后的页面。** 启动 Chrome，打开页面，读 DOM 文本。
+### Automate a browser
 
 ```ts
 // page.ts
@@ -73,10 +256,11 @@ console.log(await page.evaluate("document.body.innerText"));
 await browser.close();
 ```
 
-**四、写入本地数据库，读回记录。** 建表、写入、迭代查询，全程在本机。
+### Using databases
+
+Modules cover SQL databases, key-value stores, and vector databases.
 
 ```ts
-// db.ts
 import { Database } from "sqlite";
 
 const db = new Database(":memory:");
@@ -86,218 +270,128 @@ for await (const row of db.query("select * from t")) console.log(row); // { 'id'
 db.close();
 ```
 
-另有两个存储模块：`postgres`（服务端数据库）与 `redb`（嵌入式键值存储）。此处不再演示。
+### Writing MCP servers
 
-**五、运行不可信代码，权限按清单授予。** 子运行时只拿到语言本身，没有文件，没有网络。
+Write MCP servers with aike: describe a tool once — name, description, argument list, handler — and the `args` DSL compiles to JSON Schema. The file-system, browser and web-search servers in `aike-mcp` are built this way.
+
+#### Stdio transport
 
 ```ts
-// sandbox.ts
-const rt = Aike.createRuntime({ timeout: 1000 }); // 省略 global = 只给语言本身
-console.log(await rt.run("typeof fetch")); // "undefined"
-console.log(await rt.run("1 + 1")); // 2
-rt.close();
-```
+import { StdioMcp } from "mcp";
 
-以上涉及的 `llama`、`browser`、`sqlite` 即是标准模块，随 aike 发行包分发，见下节。
-
-## 运行时（Runtime）与发行包（Distro）
-
-**`bin/aike` 是运行时，`lib/aike/modules/` 是模块目录。** 用户拿到的目录结构如下：
-
-```
-dist/
-├── bin/aike                    # 运行时本体，26 MB
-└── lib/aike/modules/
-    ├── ai.d.ts  mcp.d.ts  fs.d.ts  http/  process.d.ts  …   # 所有模块的类型声明
-    ├── llama.aike       12.8 MB   # 扩展模块：原生共享库
-    ├── speech.aike      31.8 MB
-    ├── tree_sitter.aike 11.3 MB
-    ├── browser.aike      8.2 MB
-    ├── redb.aike         2.6 MB
-    ├── sqlite.aike       2.5 MB
-    ├── postgres.aike     2.4 MB
-    └── audio.aike        1.4 MB
-```
-
-发行包里的模块统称标准模块。清单逐版变动：新零部件加进来，过期的清出去。
-
-模块分两类。区别只有一处：编译进二进制，还是放进 `modules/` 按需加载。
-
-|        | 内置模块                                                                        | 扩展模块                                                                    |
-| ------ | ------------------------------------------------------------------------------- | --------------------------------------------------------------------------- |
-| 形态   | 编译进 `bin/aike`                                                               | 独立的 `.aike`（zapi 扩展，原生共享库）                                     |
-| 清单   | `ai` `mcp` `http` `fs` `path` `os` `html` `yaml` `jsonl` `json-schema` `jinja2` | `llama` `sqlite` `postgres` `redb` `browser` `tree_sitter` `speech` `audio` |
-| 体积   | 含在 26 MB 内                                                                   | 1.4 MB ~ 31.8 MB。可只带需要的几个                                          |
-| 来源   | 有二进制即有                                                                    | 发行包提供。也可单独拷贝或自行构建                                          |
-| 缺失时 | —                                                                               | `import "sqlite"` 抛 `could not load module '…/sqlite'`                     |
-
-全局 API 不在模块之列，直接使用，不必 `import`：`fetch`、`URL`、`Blob`、流、`crypto.subtle`、`console`、`process`，以及 CommonJS 的 `require`。
-
-**本仓库只构建运行时。** 扩展模块的源码在本仓库之外。
-
-结论：仓库内 `cargo build` 产出的 `aike` 没有 `llama`、`sqlite`。要使用扩展模块，把发行包的 `lib/aike/modules/` 放到二进制旁边，或指向任意目录：
-
-```sh
-AIKE_LIB_PATH=/path/to/modules aike app.ts
-```
-
-确认当前安装带了哪些模块：
-
-```sh
-ls "$(dirname "$(command -v aike)")/../lib/aike/modules"
-```
-
-**标准模块都带 `.d.ts` 声明，与 `.aike` 同目录。** 类型检查、编辑器补全、语法提示，都从这些声明里读模块的用法。写代码的 agent 同样读它们，不必猜 API。声明跟着模块版本走，改 API 即改声明。
-
-## 模块搜索路径
-
-只有裸名字（`sqlite`、`vendor/lib`）走搜索路径。相对路径（`./x`、`../x`）、绝对路径、URL 一律不参与搜索。
-
-搜索目录按优先级排列，前一级命中即止：
-
-1. **发行包模块目录** `<二进制真实路径>/../../lib/aike/modules`。运行时先算出自己的真实路径（跟随符号链接），再向上两级拼出这个目录。它代表当前二进制自带的模块集合，项目里的同名文件覆盖不了它。目录不存在则跳过。
-2. **引用者所在目录**：写 `import` 的那个文件所在的目录。
-3. **当前工作目录**（CWD）。
-4. **`$AIKE_LIB_PATH`**：只有一个目录；未设置或为空则跳过。
-
-每个目录内部按下面的顺序找文件：
-
-- 先看 `目录/名字` 是不是目录。是目录，就只在里面找 `index.js`、`index.ts`、`index.aike`，三者皆无则跳到下一级搜索目录。
-- 不是目录时，名字自带扩展名（如 `notes.aike`）只认这个文件；不带扩展名则依次试 `名字.js`、`名字.ts`、`名字.aike`。
-
-命中 `.aike` 走 zapi 扩展加载，其余按源码加载。`.js` 读不到时回退 `.ts`，`.mjs` 回退 `.mts`，`.cjs` 回退 `.cts`。`require()` 与 `module.paths` 用同一份目录列表。
-
-推荐的摆放方式：**标准模块留在标准路径，自己写的扩展统一放 `AIKE_LIB_PATH` 指定的目录。**
-
-```sh
-AIKE_LIB_PATH=$HOME/.aike/mods aike app.ts   # app.ts 里 import { x } from "myext"
-```
-
-这样两个来源互不混淆：升级发行包不影响自建扩展，自建扩展也不用改二进制旁边的目录。
-
-两点要留意。`AIKE_LIB_PATH` 只接受一个目录，不解析冒号分隔的列表。它的优先级最低，项目目录里的同名文件会先命中——想让自建扩展成为默认实现，就别在脚本旁边留同名文件。
-
-## 标准模块不够用时
-
-标准模块覆盖常见需求。如果还没采集到你需要的，不必等：用 zapi 把中意的库接成扩展模块，JS 侧照常 `import`。
-
-zapi 是 aike 的原生扩展接口。扩展产物是一个动态库。写普通 Rust，几个宏生成导出表。类、异步、多线程、GC 追踪都有现成写法。动态库改名成 `.aike`，放进工作目录，标准模块目录，或 `AIKE_LIB_PATH` 指向的目录，即可 `import`。
-
-详细写法，参考zapi仓库 https://github.com/nupha/zuqe-zapi 之 `skills/SKILL.md` 技能 —— 你让Agent去读也行。
-
-## 使用场景
-
-### 嵌入已有产品
-
-桌面软件、IDE 插件、工业设备、离线终端。宿主程序调用 aike 执行脚本，脚本执行完毕即退出。aike 直接放进安装包，无需部署，也无需运维。
-
-### 把一批材料转成一个确定结果
-
-合同 → 字段表；工单 → 分类标签；数十 GB 日志 → 一份日报；一整个目录 → 一个可检索索引。
-
-共同点：批量、可重复执行、结果可验收。
-
-`json-schema` 把模型输出接入自有数据结构。`fromSimpleSchema` 写 schema，`extractJSON` 从模型输出取出 JSON，`validateSchema` / `matchesType` 校验。抽取与校验都是模块函数，不必逐项目重写。
-
-### 本地数据的 AI 应用
-
-内网、涉密、医疗、教育。`llama` 做本机推理，`sqlite` / `redb` 做本地存储，向量检索同样在本机完成。能留在本机的部分全部留在本机。不必为"用一下 AI"交出整份材料。
-
-请求从调用方进程发出。调用方决定发出什么、发往何处、发出多少。
-
-### 安全运行模型生成的代码
-
-别处通常要一个容器，或者再嵌一个引擎。aike 只有一份运行时，差别在配置。
-
-`Aike.createRuntime({ global: ["console", "crypto"] })` 按清单授予**全局**能力。省略 `global` 只给语言本身：没有文件，没有网络，没有外部联系。同一进程可同时开多个，堆彼此独立。
-
-模块不在这份清单里。子运行时能否 `import` 一个模块，由 `importPolicy` 单独裁决：
-
-```js
-const rt = Aike.createRuntime({
-  global: ["console"],
-  importPolicy: (name) => name === "ai", // 模块给模块名，脚本文件给绝对路径
+const server = StdioMcp.define({
+  name: "demo",
+  version: "0.1.0",
+  tools: {
+    word_count: {
+      desc: "Count words in a text.",
+      handler: async ({ text }) => ({ words: text.trim().split(/\s+/).length }),
+      args: {
+        text: { desc: "Text to count.", type: "string", required: true },
+      },
+    },
+  },
 });
+
+await server.run();
 ```
 
-不传 `importPolicy`，子运行时**禁止一切 import**。传了，就每次 import 问一次，返回 `true` 才放行。
+Run it with `aike -m mcp-server.ts` and it speaks MCP over stdio: clients list the tools, the input schema comes from your `args`, and calls land in your handler.
 
-策略在创建者的上下文里**同步**执行：必须同步返回布尔值，不得创建或关闭运行时（重入会破坏运行时树，报 `TypeError`）；策略抛错则 import 失败，错误信息原样带出。
+#### HTTP transport
 
-### 构建 Agent
+`HttpMcp` doesn't run by itself; it mounts onto an `HttpServer`:
 
-流式输出、tool call、MCP 连接、参数 schema 校验、上下文拼接，都在运行时内。`StdioMcp` / `HttpMcp` 提供 MCP 服务端，`StdioMcpClient` / `HttpMcpClient` 提供客户端。
+```ts
+import { HttpMcp } from "mcp";
+import { HttpServer } from "http";
 
-代码里只写调什么、何时停。SSE 流解析，运行时已经做好。
+// http mcp
+const mcpServer = HttpMcp.define({
+  name: "demo",
+  version: "0.1.0",
+  tools: {
+    word_count: {
+      desc: "Count words in a text.",
+      handler: async ({ text }) => ({ words: text.trim().split(/\s+/).length }),
+      args: {
+        text: { desc: "Text to count.", type: "string", required: true },
+      },
+    },
+  },
+});
 
-## 两级沙箱
+const http = new HttpServer();
+http.mcp("/mcp", mcpServer);
+http.listen({ port: 8787 });
+```
 
-需要限制不可信代码时，aike 提供两级，按用途挑。
+Clients then talk Streamable HTTP at `http://localhost:8787/mcp`.
 
-**线程级**（`Aike.createRuntime`）：在同一进程里执行一段代码，决定这段代码能用哪些全局能力、用到哪些模块。清单为空，就只剩语言本身；模块由 `importPolicy` 裁决，缺省禁止一切 import。用来跑模型生成的表达式、处理不受信任的片段。
+### See more modules
 
-**进程级**（`Aike.spawn`）：执行一个子进程，资源边界交给操作系统——可写目录、可执行文件、出站连接。macOS、Windows、Linux 各有自己的后端。用来跑外部命令和第三方工具。
+[TBD: module index]
 
-两级可叠加：在受限的子运行时里再启一个受限进程。
+### When shipped modules are not enough
 
-启动前问一次 `Aike.sandboxSupport()`。后端不可用时它会拒绝，不会静默降级。
+Distro-packaged modules cover common needs. If yours is not collected yet, do not wait: use **zapi** to wrap your favorite library into an extension module, then `import` it from JS as usual.
 
-## Aike 与 Node、Bun、Deno 的区别
+#### Writing a native module with zapi
 
-**Node / Bun / Deno 是通用运行时。aike 是面向 AI 应用的专用运行时。**
+**zapi** is aike's native extension interface. An extension is a dynamic library. Write plain Rust; a few macros generate the export table. Classes, async, threads, and GC tracing all have ready patterns. Rename the dynamic library to `.aike`, drop it in the working directory, the standard module directory, or the `AIKE_LIB_PATH` directory — then `import` it.
 
-|                        | Node / Bun / Deno                                              | aike                                                                           |
-| ---------------------- | -------------------------------------------------------------- | ------------------------------------------------------------------------------ |
-| 定位                   | 通用 JS 运行时，任何代码均可运行                               | 只面向"编写 AI 应用"这一目标                                                   |
-| AI 应用的基础设施      | 自行安装依赖                                                   | 发行包内置                                                                     |
-| 规范取向               | 承担历史兼容负担                                               | 按 ECMA / WHATWG 设计 API，不做历史兼容                                        |
-| 引擎                   | 通用大引擎，面向大型服务                                       | 嵌入式轻量引擎 `zuqe`（一个 crate），面向嵌入与轻负载                          |
-| 外部模块               | npm / JSR 生态                                                 | 发行包模块 + 可引用外部模块。现成的 npm 包多数不能直接用，依赖 native 的更不能 |
-| 一个进程里的多个运行时 | 依赖 worker / 子进程 / isolate，各有额外开销                   | 同一线程开多个隔离子运行时，宿主事件循环驱动它们                               |
-| 运行模型生成的代码     | 依赖容器，或另选嵌入式引擎。Deno 以权限模型 + isolate 亦可实现 | 两级沙箱：子运行时按能力清单 + import 策略，子进程按 OS 策略                   |
+For details, see `skills/SKILL.md` in the zapi repo: https://github.com/nupha/zuqe-zapi — let your agent read it.
 
-三条底层差异：
+#### Module search path
 
-**轻量多运行时。** 同一线程可开多个隔离子运行时。每个运行时拥有独立堆。宿主的事件循环驱动它们。隔离执行几段任务无需创建进程。跨边界值必须可序列化；函数、promise、symbol 抛 `TypeError`。
+Only bare names (`sqlite`, `vendor/lib`) go through the search path. Relative paths (`./x`, `../x`), absolute paths, and URLs never do.
 
-**沙箱强度可配。** 同一份运行时，全局能力按清单给，模块由 import 策略裁决。两样都不给，就只剩语言本身，与外界全无接触。
+Directories are checked in order; first hit wins:
 
-**同一份代码，两种身份。** 宿主与沙箱共用一个二进制、一套语言能力。安全执行生成的 JS 无需第二个嵌入式运行时。
+1. **Distro module directory** `<real binary path>/../../lib/aike/modules`. The runtime resolves its own real path (following symlinks), then goes up two levels. This is what the current binary ships; same-named files in your project cannot override it. Skipped if the directory does not exist.
+2. **The importer's directory**: where the file with the `import` lives.
+3. **Current working directory (CWD)**.
+4. **`$AIKE_LIB_PATH`**: a single directory; skipped when unset or empty.
 
-## 开始
+Inside each directory, files are looked up in this order:
 
-目前只有源码构建。预编译安装包尚未发布。
+- If `<dir>/<name>` is a directory: look only for `index.js`, `index.ts`, `index.aike` inside. If none exist, move to the next directory.
+- If it is not a directory: a name with an extension (like `notes.aike`) matches only that file; without one, try `name.js`, `name.ts`, `name.aike` in order.
+
+A hit on `.aike` loads as a zapi extension; everything else loads as source. `.js` falls back to `.ts`, `.mjs` to `.mts`, `.cjs` to `.cts`. `require()` and `module.paths` use the same list.
+
+Recommended layout: **standard modules stay on the standard path; your own extensions go in one directory pointed to by `AIKE_LIB_PATH`.**
 
 ```sh
-# 需要 Rust 工具链，以及轻量嵌入式引擎 zuqe 的 crate 源码
-# Cargo.toml 中：zuqe = { path = "../../../devel/zhuque" }，暂未公开
-cargo build --release
-./target/release/aike -e 'console.log("hello aike")'
+AIKE_LIB_PATH=$HOME/.aike/mods aike app.ts   # app.ts does: import { x } from "myext"
 ```
 
-发行包内的 `bin/aike` 可直接使用，内含运行时与全部内置模块。
+The two sources stay apart: upgrading the distro never touches your extensions, and your extensions never touch the directory next to the binary.
 
-日常用法：
+Two things to note. `AIKE_LIB_PATH` takes one directory only — no colon-separated list. It has the lowest priority; same-named files in project directories win first. To make your extension the default, do not leave a same-named file next to your script.
 
-```sh
-aike app.ts                 # 直接运行 TypeScript
-aike -m app.mjs             # 强制按 ES module 运行
-aike -e '1 + 1'             # 运行一段表达式
-aike                        # REPL
-aike app.ts --help extra    # 文件名之后的参数原样进 process.argv
-aike -h                     # 运行时自身的帮助（含 --memory-limit 等）
-```
+## How aike differs from Node, Bun, and Deno
 
-## 状态
+**Node / Bun / Deno are general-purpose runtimes. aike is a dedicated runtime for AI applications.**
 
-0.1.0，活跃开发中。API 仍在变动。
+|                         | Node / Bun / Deno                                                                          | aike                                                                                                                                                |
+| ----------------------- | ------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Positioning             | General-purpose JS runtimes; run any code                                                  | Built for one goal: writing AI applications                                                                                                         |
+| AI app infrastructure   | Install dependencies yourself                                                              | Shipped in the distro                                                                                                                               |
+| Standards               | Carry a burden of backward compatibility                                                   | APIs designed to ECMA / WHATWG; no legacy compatibility                                                                                             |
+| Engine                  | Large general engines, aimed at big services                                               | Small embedded engine `zuqe` (one crate), built for embedding and light loads                                                                       |
+| External modules        | npm / JSR ecosystems                                                                       | Distro modules plus references to external modules. Most npm packages do not work as-is; ones with native dependencies are even less likely to work |
+| Runtimes in one process | workers / sub-processes / isolates, each with extra overhead                               | Several isolated sub-runtimes on one thread, driven by the host event loop                                                                          |
+| Running generated code  | Containers, or a separate embedded engine. Deno can also do it with permissions + isolates | Two sandbox levels: capability list + import policy for sub-runtimes; OS policy for child processes                                                 |
 
-- 适用范围：编写 AI 应用。不提供聊天客户端，不复刻 npm 生态。
-- 标准模块随版本增删，清单以发行包为准。本文件的模块数量按当前版本标注。
-- API 声明位于 `types/`，模块与全局 API 各有一份 `.d.ts`，可直接当文档阅读。
-- Web 设施按 WHATWG 规范实现，用 WPT 校对。仓库内抽样（`streams/writable-streams`，16 个文件 / 192 个子测试）通过 185 个，即 96.4%。明细见 `wpt-report.json`。
-- 已知缺口：预编译二进制与安装脚本尚未发布；运行时与扩展模块分开分发，扩展模块源码不在本仓库；`LlmClient` 不做请求重试，重试需在调用方实现。
+**aike** opens several isolated sub-runtimes on a single thread. Each has its own heap, driven by the host's event loop. Isolate tasks cheaply without spawning processes. Values crossing the boundary must be serializable; functions, promises, and symbols throw `TypeError`.
 
-## 许可
+Host and sandbox share one binary and one set of language capabilities. Running generated JS safely needs no second embedded runtime.
 
-Apache-2.0。
+## Status
+
+Under active development. APIs still change.
+
+## License
+
+Apache-2.0.
