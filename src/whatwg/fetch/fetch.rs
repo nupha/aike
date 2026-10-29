@@ -303,15 +303,13 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         }
     }
 
-    // Per-runtime fetch switches (`fetch.cors` / `fetch.cookie`). A lean build
-    // (no `fetch_browser`) compiles the CORS/cookie code paths out, so both
-    // switches are forced off.
-    #[cfg(feature = "fetch_browser")]
-    let (fetch_cors, fetch_cookie) = {
-        let st = crate::aike::AikeRuntimeState::of(ctx);
-        (st.fetch_cors, st.fetch_cookie)
-    };
-    #[cfg(not(feature = "fetch_browser"))]
+    // Browser-security semantics are a compile-time decision: with the
+    // `fetch_cors_cookie` feature both are always enforced (WPT builds);
+    // without it both compile out and fetch is a plain HTTP client. There is
+    // no runtime switch.
+    #[cfg(feature = "fetch_cors_cookie")]
+    let (fetch_cors, fetch_cookie) = (true, true);
+    #[cfg(not(feature = "fetch_cors_cookie"))]
     let (fetch_cors, fetch_cookie) = (false, false);
 
     let notify = signal_val.as_ref().and_then(signal_notify);
@@ -330,11 +328,11 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     // Client origin/URL for same-origin checks (used by the cache
     // short-circuit and the response handler below). In a browser this is the
     // document's origin; resolved from the `self.location` shim / WPT runner
-    // globals. Server builds (`fetch_browser` off) have no location concept
+    // globals. Server builds (`fetch_cors_cookie` off) have no location concept
     // and get a null origin.
     let (mut client_origin, mut client_url) = resolve_client_origin(ctx);
 
-    // With both switches off there is no client-origin concept: fetch behaves
+    // Without the feature there is no client-origin concept: fetch behaves
     // like a plain HTTP client (no CORS taint, no same-origin referrer).
     if !(fetch_cors || fetch_cookie) {
         client_origin = None;
@@ -718,8 +716,9 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
     // explicitly), so we must supply them here.
     ensure_default_request_headers(&mut header_list);
     // WHATWG: silently drop forbidden request headers the caller tried to set.
-    // The cookie headers are only forbidden when fetch owns the cookie jar; with
-    // the `cookie` switch off the caller may set `Cookie`/`Cookie2` directly.
+    // The cookie headers are only forbidden when fetch owns the cookie jar —
+    // i.e. in `fetch_cors_cookie` builds; lean builds leave `Cookie`/`Cookie2`
+    // under the caller's control.
     strip_forbidden_request_headers(&mut header_list, fetch_cookie);
     // Validate header names/values per the Fetch spec. Must run on the JS
     // thread so a violation rejects the returned promise with a `TypeError`
@@ -1195,7 +1194,7 @@ fn fetch_impl(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
         referrer_ctx,
         replayable: stream_body.is_none(),
         before_hop: make_before_hop_hook(preflight),
-        // Per-runtime CORS switch: with it off the transport's cors-mode rules
+        // Feature-gated CORS: in lean builds the transport's cors-mode rules
         // (per-hop Origin recomputation, opaque-origin rule) never apply.
         cors_mode: fetch_cors && mode == "cors",
         cors_tainted,
@@ -1463,8 +1462,9 @@ pub(crate) fn init_fetch(ctx: &mut ScopedContext, mut global: Object) -> Result<
     let func = ctx.create_native_function(Callback::Func(js_fetch), "fetch", 1, 0)?;
 
     // Runtime-level switches as accessor properties on the `fetch` function
-    // object (not per-request). The getters/setters read/write
-    // `AikeRuntimeState`.
+    // object (not per-request). The getter/setter reads/writes
+    // `AikeRuntimeState`. (Browser CORS/cookie semantics have no switch: they
+    // are the compile-time `fetch_cors_cookie` decision.)
     {
         let mut func = func;
 
@@ -1489,45 +1489,6 @@ pub(crate) fn init_fetch(ctx: &mut ScopedContext, mut global: Object) -> Result<
             insecure_set.into(),
             zuqe::JS_PROP_C_W_E,
         )?;
-
-        // `fetch.cors` / `fetch.cookie` — only when the browser machinery was
-        // compiled in.
-        #[cfg(feature = "fetch_browser")]
-        {
-            let cors_atom = zuqe::Atom::intern_static(ctx, "cors")?;
-            let cors_get =
-                ctx.create_native_function(Callback::Func(js_fetch_cors_get), "get cors", 0, 0)?;
-            let cors_set =
-                ctx.create_native_function(Callback::Func(js_fetch_cors_set), "set cors", 1, 0)?;
-            func.define_property_getset(
-                ctx,
-                cors_atom,
-                cors_get.into(),
-                cors_set.into(),
-                zuqe::JS_PROP_C_W_E,
-            )?;
-
-            let cookie_atom = zuqe::Atom::intern_static(ctx, "cookie")?;
-            let cookie_get = ctx.create_native_function(
-                Callback::Func(js_fetch_cookie_get),
-                "get cookie",
-                0,
-                0,
-            )?;
-            let cookie_set = ctx.create_native_function(
-                Callback::Func(js_fetch_cookie_set),
-                "set cookie",
-                1,
-                0,
-            )?;
-            func.define_property_getset(
-                ctx,
-                cookie_atom,
-                cookie_get.into(),
-                cookie_set.into(),
-                zuqe::JS_PROP_C_W_E,
-            )?;
-        }
     }
 
     global.define_property_value_str(ctx, "fetch", func.into(), zuqe::JS_PROP_C_W_E)?;
@@ -1547,40 +1508,6 @@ pub(crate) fn init_fetch(ctx: &mut ScopedContext, mut global: Object) -> Result<
     }
 
     Ok(())
-}
-
-/// `fetch.cors` getter — whether this runtime enforces CORS.
-#[cfg(feature = "fetch_browser")]
-fn js_fetch_cors_get(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
-    Ok(JSValue::from(AikeRuntimeState::of(ctx).fetch_cors))
-}
-
-/// `fetch.cors` setter — strict boolean.
-#[cfg(feature = "fetch_browser")]
-fn js_fetch_cors_set(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let b = match cc.arg(0).as_bool() {
-        Some(b) => b,
-        None => return Err(ctx.throw_type_error("`fetch.cors` must be a boolean")),
-    };
-    AikeRuntimeState::of(ctx).fetch_cors = b;
-    Ok(JSValue::UNDEFINED)
-}
-
-/// `fetch.cookie` getter — whether this runtime's `fetch` auto-uses the jar.
-#[cfg(feature = "fetch_browser")]
-fn js_fetch_cookie_get(ctx: &mut ScopedContext, _cc: CallContext) -> JSResult {
-    Ok(JSValue::from(AikeRuntimeState::of(ctx).fetch_cookie))
-}
-
-/// `fetch.cookie` setter — strict boolean.
-#[cfg(feature = "fetch_browser")]
-fn js_fetch_cookie_set(ctx: &mut ScopedContext, cc: CallContext) -> JSResult {
-    let b = match cc.arg(0).as_bool() {
-        Some(b) => b,
-        None => return Err(ctx.throw_type_error("`fetch.cookie` must be a boolean")),
-    };
-    AikeRuntimeState::of(ctx).fetch_cookie = b;
-    Ok(JSValue::UNDEFINED)
 }
 
 /// `fetch.allowInsecureTLS` getter — whether TLS validation is skipped.
@@ -1785,9 +1712,9 @@ fn split_on_commas(value: &str) -> Vec<String> {
 /// headers are injected (Accept / Accept-Language are not forbidden, so they
 /// survive). The transport layer adds its own Content-Length / Host later.
 ///
-/// `strip_cookies` controls the cookie headers: when fetch owns the cookie jar
-/// (`cookie` switch on) `Cookie`/`Cookie2` are forbidden and dropped; otherwise
-/// the caller may set them directly.
+/// `strip_cookies` controls the cookie headers: in `fetch_cors_cookie` builds
+/// fetch owns the jar so `Cookie`/`Cookie2` are forbidden and dropped; lean
+/// builds leave them under the caller's control.
 fn strip_forbidden_request_headers(h: &mut HeaderList, strip_cookies: bool) {
     let drop: Vec<String> = h
         .to_vec()

@@ -8,7 +8,9 @@
 // (import.meta.url)。file:// 脚本的 origin 是 opaque，按规范会 SecurityError，
 // 因此这里用 Aike.evalModule(code, baseUrl) 在非 opaque 的 http(s) 基址下运行。
 //
-// 运行：aike -m tests/whatwg/cookie_store.js
+// 运行：需 `fetch_cors_cookie` 构建（cookieStore 仅存在于该 feature 下）：
+//   cargo build --features fetch_cors_cookie
+//   aike -m tests/whatwg/cookie_store.js
 
 import { HttpServer } from "http";
 
@@ -29,7 +31,9 @@ globalThis.check = function check(label, ok, detail) {
 // `cookieStore` exists only when the browser machinery was compiled in.
 const HAS_FEATURE = typeof cookieStore !== "undefined";
 if (!HAS_FEATURE) {
-  console.log("SKIP: this build has no `fetch_browser` feature (no cookieStore)");
+  console.log(
+    "SKIP: this build has no `fetch_browser` feature (no cookieStore)",
+  );
   console.log("RESULT: PASS (skipped)");
 }
 
@@ -127,9 +131,6 @@ server
   .get("/echo", (req, res) => res.end(req.headers["cookie"] ?? ""));
 
 const INTEGRATION_TEST = `
-  // fetch only auto-uses the jar when its cookie switch is on.
-  fetch.cookie = true;
-
   // fetch stores a cookie → cookieStore sees it
   await fetch("${BASE}/set");
   const all = await cookieStore.getAll();
@@ -157,6 +158,11 @@ async function main() {
   server.listen({ port: PORT, host: "127.0.0.1", cors: false });
   await new Promise((r) => setTimeout(r, 200));
   try {
+    // `fetch_cors_cookie` builds enforce CORS and use the jar by definition;
+    // pin the client origin to the server so the requests below are
+    // same-origin (no ACAO needed, credentials flow).
+    globalThis.__wptClientOrigin = BASE;
+    globalThis.__wptClientUrl = `${BASE}/`;
     await Aike.evalModule(INTEGRATION_TEST, `${BASE}/`);
   } finally {
     await server.shutdown();

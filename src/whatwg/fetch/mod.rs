@@ -11,7 +11,7 @@
 //! pipeline (`fetch_impl`) and the Fetch-spec request-header policy it applies.
 //! `cors` holds the browser-security layer (the WHATWG CORS protocol +
 //! mode/tainting decisions) and `origin` the client ("document") origin
-//! resolution; both are gated by the `fetch_browser` feature — server builds
+//! resolution; both are gated by the `fetch_cors_cookie` feature — server builds
 //! compile them down to constant pass-through stubs. `referrer` is the referrer
 //! algorithm and `integrity` Subresource Integrity.
 //!

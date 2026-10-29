@@ -515,19 +515,11 @@ declare function fetch(
 ): Promise<Response>;
 
 /**
- * Runtime-level switches on `fetch` itself (aike extension, not per-request).
- * Only present when the browser machinery was compiled in (`fetch_browser`).
- * Both default to `false` (plain HTTP client).
+ * Runtime-level switch on `fetch` itself (aike extension, not per-request).
+ * Browser CORS/cookie semantics have no switch — they follow the compile-time
+ * `fetch_cors_cookie` feature (off by default; WPT builds enable it).
  */
 declare namespace fetch {
-  /** Whether this runtime's `fetch()` enforces CORS. */
-  let cors: boolean;
-  /**
-   * Whether this runtime's `fetch()` automatically uses the shared cookie jar
-   * (and strips caller `Cookie` headers). `cookieStore` stays available either
-   * way; this only controls the automatic fetch integration.
-   */
-  let cookie: boolean;
   /**
    * Whether this runtime's `fetch()` skips TLS certificate
    * validation. A test/dev escape hatch for self-signed servers; default off.
@@ -852,6 +844,8 @@ type CookieList = CookieListItem[];
 /**
  * WHATWG `CookieStore`: asynchronous cookie access. Operates on the same
  * cookie store as `fetch()`.
+ *
+ * Only present in `fetch_cors_cookie` builds (off in the default lean build).
  *
  * aike has no `Document`; the "current URL" is the running script/module URL
  * (`import.meta.url`). A `file://` script has an opaque origin, so the methods

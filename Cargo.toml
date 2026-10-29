@@ -21,15 +21,18 @@ typescript = [
 mimalloc = ["dep:mimalloc"]
 # for DeepEval
 enable_eval_log = []
-# WHATWG fetch: enables security semantics: cross-origin detection, CORS
-# response checks, OPTIONS preflight, Origin/Sec-Fetch-* headers, and the
-# per-runtime `fetch.cors`/`fetch.cookie` switches. Off (or switches off) =
-# fetch() is a plain HTTP client; the API itself is always present.
-fetch_browser = []
+# WHATWG fetch: browser security semantics — CORS protocol (preflight, ACAO
+# checks, response-header filtering), Origin/Sec-Fetch-* headers, and the
+# shared-cookie-jar integration behind `credentials`/`cookieStore`. Off = the
+# machinery is not compiled at all and fetch() is a plain HTTP client (the API
+# itself is always present). On = the semantics are always enforced; there is
+# no runtime switch. WPT / browser-compat testing requires this feature.
+# Server builds should leave it off (not in `default`).
+fetch_cors_cookie = []
 # WHATWG fetch: HTTP cache + `caches` / `CacheStorage` globals
 fetch_cache = []
 
-default = ["typescript", "fetch_browser", "mimalloc"]
+default = ["typescript", "mimalloc"]
 
 [profile.release]
 panic = "abort"

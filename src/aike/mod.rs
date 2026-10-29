@@ -88,14 +88,6 @@ pub(crate) struct AikeRuntimeState {
     /// I/O handle read subscriptions and pump channel (`PUMPS` stays global).
     pub(crate) io: class_io_handle::IoState,
 
-    /// Per-runtime fetch behaviour switches (`fetch.cors` / `fetch.cookie`):
-    /// whether `fetch()` enforces CORS, and whether it automatically uses the
-    /// shared cookie jar. Both default off (plain HTTP client). Only meaningful
-    /// in builds that compiled the browser machinery in (`fetch_browser`).
-    #[cfg(feature = "fetch_browser")]
-    pub(crate) fetch_cors: bool,
-    #[cfg(feature = "fetch_browser")]
-    pub(crate) fetch_cookie: bool,
     /// Whether `fetch()` skips TLS certificate validation
     /// (`fetch.allowInsecureTLS`). Default off.
     pub(crate) fetch_allow_insecure_tls: bool,
@@ -148,10 +140,6 @@ impl AikeRuntimeState {
             channel_streams: crate::whatwg::stream::ChannelStreamState::new(),
             tee_streams: crate::whatwg::stream::TeeStreamState::new(),
             io: Default::default(),
-            #[cfg(feature = "fetch_browser")]
-            fetch_cors: false,
-            #[cfg(feature = "fetch_browser")]
-            fetch_cookie: false,
             fetch_allow_insecure_tls: false,
             cjs: Default::default(),
         }

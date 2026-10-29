@@ -218,7 +218,7 @@ impl SharedCookieJar {
     }
 
     /// Run `f` with read access to the underlying store (Cookie Store API).
-    #[cfg(feature = "fetch_browser")]
+    #[cfg(feature = "fetch_cors_cookie")]
     pub(crate) fn with_store<R>(&self, f: impl FnOnce(&cookie_store::CookieStore) -> R) -> R {
         f(&self.store.read().unwrap())
     }

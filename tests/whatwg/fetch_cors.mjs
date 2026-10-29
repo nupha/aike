@@ -2,13 +2,14 @@
 //
 // Runs a battery of fetches against a deliberately CORS-hostile server and
 // prints one `PROBE <name>: <outcome>` line per probe. Requires the
-// `fetch_browser` feature (the machinery must be compiled in) and turns CORS
-// enforcement on for this runtime via `fetch.cors = true`.
+// `fetch_cors_cookie` feature (CORS enforcement is on by definition in such
+// builds — there is no runtime switch).
 //
 // The server is aike's own `HttpServer` started with `listen({ cors: false })`,
 // so it attaches no permissive CORS layer and every `Access-Control-*` header
 // below is one the test set deliberately.
 //
+// Build: cargo build --features fetch_cors_cookie
 // Run: aike -m tests/whatwg/fetch_cors.mjs
 
 import { HttpServer } from "http";
@@ -23,9 +24,6 @@ const CLIENT_ORIGIN = "http://client.test:8080";
 globalThis.self = {
   location: { origin: CLIENT_ORIGIN, href: `${CLIENT_ORIGIN}/doc.html` },
 };
-
-// Enable CORS enforcement for this runtime (default is off).
-fetch.cors = true;
 
 const svr = new HttpServer();
 
@@ -132,7 +130,9 @@ async function probe(name, url, init) {
   try {
     const r = await fetch(url, init);
     const body = await r.text();
-    console.log(`PROBE ${name}: OK status=${r.status} type=${r.type} body="${body}"`);
+    console.log(
+      `PROBE ${name}: OK status=${r.status} type=${r.type} body="${body}"`,
+    );
   } catch (e) {
     console.log(`PROBE ${name}: REJECTED ${e.message}`);
   }
@@ -170,7 +170,9 @@ await probe("get-unsafe-header", `${BASE}/no-acao`, {
 // in Access-Control-Expose-Headers.
 const exposed = await fetch(`${BASE}/expose`);
 console.log(`PROBE expose-x-secret: ${exposed.headers.get("x-secret")}`);
-console.log(`PROBE expose-content-type: ${exposed.headers.get("content-type")}`);
+console.log(
+  `PROBE expose-content-type: ${exposed.headers.get("content-type")}`,
+);
 
 console.log(`PROBE server-hits: ${JSON.stringify(hits)}`);
 

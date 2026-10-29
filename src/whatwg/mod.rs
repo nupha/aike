@@ -9,7 +9,7 @@ pub mod blob;
 #[cfg(feature = "fetch_cache")]
 pub(crate) mod cache_storage;
 pub mod console;
-#[cfg(feature = "fetch_browser")]
+#[cfg(feature = "fetch_cors_cookie")]
 pub mod cookie_store;
 pub mod crypto;
 pub mod dom;
@@ -54,7 +54,7 @@ pub(crate) fn init_whatwg(ctx: &mut ScopedContext, mut global: Object) -> Result
         crypto::subtle::JSCryptoSubtle::class_id(),
         crypto::JSCryptoKey::class_id(),
     ])?;
-    #[cfg(feature = "fetch_browser")]
+    #[cfg(feature = "fetch_cors_cookie")]
     ctx.use_classes(&[cookie_store::JSCookieStore::class_id()])?;
 
     console::init_console(ctx, &mut global)?;
@@ -67,7 +67,7 @@ pub(crate) fn init_whatwg(ctx: &mut ScopedContext, mut global: Object) -> Result
     base64::init_encoding(ctx, global)?;
     structured_clone::init_structured_clone(ctx, global)?;
     crypto::init_crypto(ctx, global)?;
-    #[cfg(feature = "fetch_browser")]
+    #[cfg(feature = "fetch_cors_cookie")]
     cookie_store::install_cookie_store(ctx, global)?;
 
     Ok(())
